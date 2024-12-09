@@ -23,9 +23,6 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 
 from nflows.transforms import made as made_module
-import neural_nets
-import flows
-import pyro_flows
 from bed.grid import Grid
 
 from astropy.cosmology import Planck18
@@ -365,7 +362,7 @@ if __name__ == '__main__':
         "flow_type": 'MAF_RQS',
         "design_grid": 50,
         "n_transforms": 10,
-        "steps": 25000,
+        "steps": 250,
         "lr": 1e-4,
         "gamma": 0.8,
         "n_particles": 101,
