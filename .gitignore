@@ -1,0 +1,12 @@
+__pycache__/
+sine/model_testing.ipynb
+poisson/model_testing.ipynb
+nflows_testing.ipynb
+.ipynb_checkpoints
+*.png
+.conda/
+*.onnx
+*.txt
+*.npy
+*.pt
+num_tracers/mlruns/*
