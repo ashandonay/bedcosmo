@@ -10,3 +10,4 @@ nflows_testing.ipynb
 *.npy
 *.pt
 */mlruns/*
+.DS_store
