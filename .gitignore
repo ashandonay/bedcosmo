@@ -9,4 +9,4 @@ nflows_testing.ipynb
 *.txt
 *.npy
 *.pt
-num_tracers/mlruns/*
+*/mlruns/*
