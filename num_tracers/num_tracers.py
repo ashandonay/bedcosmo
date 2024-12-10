@@ -1,4 +1,13 @@
-class bed_cosmology:
+import torch
+import numpy as np
+import pyro
+from pyro import distributions as dist
+from astropy.cosmology import Planck18
+from astropy import constants
+
+device = torch.device("cuda:0") if torch.cuda.is_available() else "cpu"
+
+class NumTracers:
 
     def __init__(self, priors, true_n_ratios, obs_labels, z_eff, sigma_D_H, sigma_D_M=None, device=device):
         self.priors = priors

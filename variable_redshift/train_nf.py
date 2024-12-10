@@ -34,6 +34,7 @@ import mlflow.pytorch
 from tqdm import trange
 
 import zuko
+from util import *
 
 device = torch.device("cuda:0") if torch.cuda.is_available() else "cpu"
 #device = "cpu"
@@ -119,14 +120,6 @@ class bed_cosmology:
                 return pyro.sample("D_H", dist.Normal(D_H_mean, self.sigma_D_H).to_event(1)), pyro.sample("D_M", dist.Normal(D_M_mean, self.sigma_D_M).to_event(1))
             else:
                 return pyro.sample("D_H", dist.Normal(D_H_mean, self.sigma_D_H).to_event(1))
-
-def auto_seed(seed):
-    if seed >= 0:
-        pyro.set_rng_seed(seed)
-    else:
-        seed = torch.randint(0, 2**32 - 1, (1,)).item()
-        pyro.set_rng_seed(seed)
-    return seed
 
 def single_run(
     train_args,
