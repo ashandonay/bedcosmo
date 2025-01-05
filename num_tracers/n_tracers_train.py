@@ -10,7 +10,6 @@ import torch.nn as nn
 import numpy as np
 import pandas as pd
 from scipy.stats import norm
-from scipy.integrate import quad, cumulative_trapezoid, trapezoid
 from urllib.request import urlopen
 
 import pyro
@@ -98,8 +97,12 @@ def single_run(
     wa_mean = torch.tensor(0.0).to(train_args["device"])
     wa_std = torch.tensor(0.2).to(train_args["device"])
 
-    low = Planck18.Om0 - 5*Om_std
-    high = Planck18.Om0 + 5*Om_std
+    #low = Planck18.Om0 - kwargs["sigma_multi"]*Om_std
+    #high = Planck18.Om0 + kwargs["sigma_multi"]*Om_std
+    #low = Planck18.Om0 - kwargs["Om_scope"]
+    #high = Planck18.Om0 + kwargs["Om_scope"]
+    low = 0.0
+    high = 1.0
     Om_range = torch.tensor([low, high], device=train_args["device"])
     print(f'Om range: {Om_range}')
     w0_range = torch.tensor([-3.0, 1.0], device=train_args["device"])
@@ -108,11 +111,11 @@ def single_run(
     ############################################### Priors ###############################################
     if train_args["cosmology"] == 'Om':
         params = ["Om"]
-        grid_params = Grid(Om=np.linspace(*Om_range.cpu().numpy(), kwargs["params_grid"]))
-        #priors = {'Om': dist.Uniform(*Om_range)}
-        #grid_prior = TopHat(grid_params.Om)
-        priors = {'Om': dist.Normal(Om_mean, Om_std)}
-        grid_prior = Gaussian(grid_params.Om, Planck18.Om0, kwargs["Om_sigma"])
+        grid_params = Grid(Om=np.linspace(*Om_range.cpu().numpy(), kwargs["params_grid"])[:-1])
+        priors = {'Om': dist.Uniform(*Om_range)}
+        grid_prior = TopHat(grid_params.Om)
+        #priors = {'Om': dist.Normal(Om_mean, Om_std)}
+        #grid_prior = Gaussian(grid_params.Om, Planck18.Om0, kwargs["Om_sigma"])
     elif train_args["cosmology"] == 'w':
         params = ["Om", "w0"]
         priors = {'Om': dist.Uniform(*Om_range), 'w0': dist.Uniform(*w0_range)}
@@ -140,51 +143,16 @@ def single_run(
 
     num_tracers = NumTracers(priors, true_n_ratios, observation_labels, z_eff, sigma_D_H, sigma_D_M, device=train_args["device"])
 
-
-    ############################################### Features ###############################################
-    if train_args["cosmology"] == 'Om':
-        range_params = Grid(Om=np.linspace(*Om_range.cpu().numpy(), 1000))
-    elif train_args["cosmology"] == 'w':
-        range_params = Grid(Om=np.linspace(*Om_range.cpu().numpy(), 500), 
-            w0=np.linspace(-3, 1, 500))
-    elif train_args["cosmology"] == 'w0wa':
-        range_params = Grid(Om=np.linspace(*Om_range.cpu().numpy(), 300), 
-            w0=np.linspace(-3, 1, 300), 
-            wa=np.linspace(-3, 2, 300))
-    parameters = { }
-    for key in range_params.names:
-        parameters[key] = torch.tensor(getattr(range_params, key), device=train_args["device"])
-    if train_args["include_D_M"]:
-        features_dict = {}
-        for i in range(len(train_args["tracers"])):
-            D_H_mean = num_tracers.D_H_func(z_eff[i], **parameters)
-            print('D_H_' + train_args["tracers"][i].split()[0] + ' range:', D_H_mean.cpu().numpy().min(), D_H_mean.cpu().numpy().max() + 2)
-            features_dict['D_H_' + train_args["tracers"][i].split()[0]] = np.linspace(D_H_mean.cpu().numpy().min(), D_H_mean.cpu().numpy().max() + 2, kwargs["features_grid"])
-        for i in range(len(train_args["tracers"])):
-            z_array = z_eff[i].unsqueeze(-1) * torch.linspace(0, 1, 100, device=train_args["device"]).view(1, -1)
-            z = z_array.expand((len(range_params.names)-1)*[1] + [-1, -1])
-            D_M_mean = num_tracers.D_M_func(z, **parameters)
-            print('D_M_' + train_args["tracers"][i].split()[0] + ' range:', D_M_mean.cpu().numpy().min(), D_M_mean.cpu().numpy().max() + 2)
-            features_dict['D_M_' + train_args["tracers"][i].split()[0]] = np.linspace(D_M_mean.cpu().numpy().min(), D_M_mean.cpu().numpy().max() + 2, kwargs["features_grid"])
-    else:
-        features_dict = {}
-        for i in range(len(train_args["tracers"])):
-            D_H_mean = num_tracers.D_H_func(z_eff[i], **parameters)
-            print('D_H_' + train_args["tracers"][i].split()[0] + ' range:', D_H_mean.cpu().numpy().min(), D_H_mean.cpu().numpy().max() + 2)
-            features_dict['D_H_' + train_args["tracers"][i].split()[0]] = np.linspace(D_H_mean.cpu().numpy().min(), D_H_mean.cpu().numpy().max() + 2, kwargs["features_grid"])
-    grid_features = Grid(**features_dict)
-    del range_params, parameters, features_dict
-
     ############################################### Designs ###############################################
     base = 5.0
     designs_dict = {}
     for i in range(len(train_args["tracers"])):
-        #designs_dict['N_' + train_args["tracers"][i].split()[0]] = np.arange(0.0, 0.3, 0.05)
-        designs_dict['N_' + train_args["tracers"][i].split()[0]] = np.arange(
-            np.round(true_n_ratios[i].cpu().numpy() - train_args["design_scope"], train_args["design_precision"]), 
-            np.round(true_n_ratios[i].cpu().numpy() + train_args["design_scope"], train_args["design_precision"]), 
-            np.power(base, -train_args["design_precision"])
-            )
+        designs_dict['N_' + train_args["tracers"][i].split()[0]] = np.arange(0.1, 1.0, 0.1)
+        #designs_dict['N_' + train_args["tracers"][i].split()[0]] = np.arange(
+        #    np.round(true_n_ratios[i].cpu().numpy() - train_args["design_scope"], train_args["design_precision"]), 
+        #    np.round(true_n_ratios[i].cpu().numpy() + train_args["design_scope"], train_args["design_precision"]), 
+        #    np.power(base, -train_args["design_precision"])
+        #    )
     grid_designs = Grid(**designs_dict, constraint=lambda **kwargs: np.abs(sum(kwargs.values()) - 1.0) < np.power(base, -(train_args["design_precision"] + 1)))
     del designs_dict
     print("Grid designs shape:", grid_designs.shape)
@@ -216,12 +184,50 @@ def single_run(
     if len(params) == 1:
         axs = [axs]
     for i, p in enumerate(params):
-        prior_samples = priors[p].sample((10000,))
-        axs[i].hist(prior_samples.cpu().numpy(), bins=50, density=True)
+        prob = torch.exp(priors[p].log_prob(torch.linspace(*Om_range, kwargs["params_grid"], device=device)))[:-1]
+        prob_norm = prob/torch.sum(prob)
+        axs[i].plot(np.linspace(*Om_range.cpu().numpy(), kwargs["params_grid"])[:-1], prob_norm.cpu().numpy(), label="Prior", color="tab:blue", alpha=0.5)
+        #axs[i].plot(getattr(grid_params, p).squeeze(), grid_prior.squeeze(), label="Grid Prior", color="tab:orange", alpha=0.5)
         axs[i].set_title(p)
-    plt.savefig(f"mlruns/{ml_info.experiment_id}/{ml_info.run_id}/pyro_prior.png")
+    plt.tight_layout()
+    plt.savefig(f"mlruns/{ml_info.experiment_id}/{ml_info.run_id}/prior.png")
 
     if kwargs["brute_force"]:
+
+        ############################################### Features ###############################################
+        if train_args["cosmology"] == 'Om':
+            range_params = Grid(Om=np.linspace(*Om_range.cpu().numpy(), 1000))
+        elif train_args["cosmology"] == 'w':
+            range_params = Grid(Om=np.linspace(*Om_range.cpu().numpy(), 500), 
+                w0=np.linspace(-3, 1, 500))
+        elif train_args["cosmology"] == 'w0wa':
+            range_params = Grid(Om=np.linspace(*Om_range.cpu().numpy(), 200), 
+                w0=np.linspace(-3, 1, 200), 
+                wa=np.linspace(-3, 2, 200))
+        parameters = { }
+        for key in range_params.names:
+            parameters[key] = torch.tensor(getattr(range_params, key), device=train_args["device"])
+        if train_args["include_D_M"]:
+            features_dict = {}
+            for i in range(len(train_args["tracers"])):
+                D_H_mean = num_tracers.D_H_func(z_eff[i], **parameters)
+                print('D_H_' + train_args["tracers"][i].split()[0] + ' range:', D_H_mean.cpu().numpy().min(), D_H_mean.cpu().numpy().max() + 2)
+                features_dict['D_H_' + train_args["tracers"][i].split()[0]] = np.linspace(D_H_mean.cpu().numpy().min(), D_H_mean.cpu().numpy().max() + 2, kwargs["features_grid"])
+            for i in range(len(train_args["tracers"])):
+                z_array = z_eff[i].unsqueeze(-1) * torch.linspace(0, 1, 100, device=train_args["device"]).view(1, -1)
+                z = z_array.expand((len(range_params.names)-1)*[1] + [-1, -1])
+                D_M_mean = num_tracers.D_M_func(z, **parameters)
+                print('D_M_' + train_args["tracers"][i].split()[0] + ' range:', D_M_mean.cpu().numpy().min(), D_M_mean.cpu().numpy().max() + 2)
+                features_dict['D_M_' + train_args["tracers"][i].split()[0]] = np.linspace(D_M_mean.cpu().numpy().min(), D_M_mean.cpu().numpy().max() + 2, kwargs["features_grid"])
+        else:
+            features_dict = {}
+            for i in range(len(train_args["tracers"])):
+                D_H_mean = num_tracers.D_H_func(z_eff[i], **parameters)
+                print('D_H_' + train_args["tracers"][i].split()[0] + ' range:', D_H_mean.cpu().numpy().min(), D_H_mean.cpu().numpy().max() + 2)
+                features_dict['D_H_' + train_args["tracers"][i].split()[0]] = np.linspace(D_H_mean.cpu().numpy().min(), D_H_mean.cpu().numpy().max() + 2, kwargs["features_grid"])
+        grid_features = Grid(**features_dict)
+        del range_params, parameters, features_dict
+
         print("Calculating brute force EIG...")
         designer = ExperimentDesigner(grid_params, grid_features, grid_designs, num_tracers.unnorm_lfunc, mem=190000)
         designer.calculateEIG(grid_prior)
@@ -398,6 +404,19 @@ def single_run(
                                             condition_design=train_args["condition_design"])
         eigs_bits = eigs.cpu().detach().numpy()/np.log(2)
         ax2.plot(eigs_bits, label=f'NF step {train_args["steps"]}')
+
+        with torch.no_grad():
+            agg_loss, nominal_eig = posterior_loss(design=true_n_ratios.unsqueeze(0),
+                                            model=num_tracers.pyro_model,
+                                            guide=posterior_flow,
+                                            num_particles=train_args["eval_particles"],
+                                            observation_labels=observation_labels,
+                                            target_labels=target_labels,
+                                            evaluation=True,
+                                            nflow=True,
+                                            condition_design=train_args["condition_design"])
+        nominal_eig_bits = nominal_eig.cpu().detach().numpy()/np.log(2)
+        ax2.axhline(y=nominal_eig_bits, color='r', linestyle='--', label='Nominal EIG')
         if kwargs["brute_force"]:
             ax2.plot(brute_force_EIG.squeeze(), label='Brute Force', color='black')
         ax2.set_xlabel("Design Index")
@@ -407,22 +426,45 @@ def single_run(
         plt.savefig(f"mlruns/{ml_info.experiment_id}/{ml_info.run_id}/training.png")
 
         # make a corner plot of the posterior
-        # assuming default params associated with data to condition the posterior
+        # assuming fiducial params associated with data to condition the posterior
+        fid_parameters = { }
+        for key in priors.keys():
+            if key == 'Om':
+                fid_parameters[key] = torch.tensor(Planck18.Om0, device=train_args["device"])
+            elif key == 'w0':
+                fid_parameters[key] = torch.tensor(-1.0, device=train_args["device"])
+            elif key == 'wa':
+                fid_parameters[key] = torch.tensor(0.0, device=train_args["device"])
+        context_n_ratios = []
+        fid_DH_mean = []
+        for i in range(len(train_args["tracers"])):
+            context_n_ratios.append(true_n_ratios[i].cpu().numpy().item())
+            fid_DH_mean.append(num_tracers.D_H_func(z_eff[i], **fid_parameters).cpu().numpy().squeeze().item())
+        if train_args["include_D_M"]:
+            fid_DM_mean = []
+            for i in range(len(train_args["tracers"])):
+                z_array = z_eff[i].unsqueeze(-1) * torch.linspace(0, 1, 100, device=train_args["device"]).view(1, -1)
+                z = z_array.expand((len(priors.keys())-1)*[1] + [-1, -1])
+                fid_DM_mean.append(num_tracers.D_M_func(z, **fid_parameters).cpu().numpy().squeeze().item())
+
+
         if train_args["condition_design"]:
-            if context_dim == 4:
-                context = torch.tensor([500, 500, 19.993, 8.620], device=train_args["device"])
-            elif context_dim == 6:
-                context = torch.tensor([500, 500, 19.993, 8.620, 15.0, 38.0], device=train_args["device"])
+            context = context_n_ratios + fid_DH_mean
+            if train_args["include_D_M"]:
+                context += fid_DM_mean
         else:
-            context = torch.tensor([19.993, 8.620], device=train_args["device"])
-        #posterior_samples = posterior_flow(context).sample((20000,)).squeeze().cpu().detach().numpy()
-        #figure = corner.corner(posterior_samples, labels=target_labels, show_titles=True, title_fmt=".2f", 
-        #                   title_kwargs={"fontsize": 12}, ranges=[0.99]*len(target_labels))
-        #plt.savefig(f"mlruns/{ml_info.experiment_id}/{ml_info.run_id}/posterior.png")
+            context = fid_DH_mean
+        mlflow.log_param("post_context", context)
+        context = torch.tensor(context, device=train_args["device"])
+        posterior_samples = posterior_flow(context).sample((20000,)).squeeze().cpu().detach().numpy()
+        figure = corner.corner(posterior_samples, labels=target_labels, show_titles=True, title_fmt=".2f", 
+                           title_kwargs={"fontsize": 12}, ranges=[0.99]*len(target_labels))
+        plt.savefig(f"mlruns/{ml_info.experiment_id}/{ml_info.run_id}/posterior.png")
 
         # save eigs at the end
         np.save(f"mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/design_eigs.npy", designs.squeeze().cpu().detach().numpy())
         np.save(f"mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/eigs.npy", eigs_bits)
+        np.save(f"mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/nominal_eig.npy", nominal_eig_bits)
         mlflow.log_artifact(f"mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/eigs.npy")
 
         checkpoint_path = f"mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/nf_checkpoint.pt"
@@ -435,44 +477,46 @@ def single_run(
 
 if __name__ == '__main__':
 
-    #for s in np.array([0.01, 0.03, 0.05])*np.sqrt(12)/2:
-    for l in [0.01, 0.03, 0.05]:
-        process = psutil.Process(os.getpid())
-        # Clear GPU cache
-        torch.cuda.empty_cache()
-        # Trigger garbage collection for CPU
-        gc.collect()
-        print(f"Memory before run: {process.memory_info().rss / 1024**2} MB")
-        train_args = {
-            "seed": 1,
-            "cosmology": "Om", # Om, w, w0wa
-            "tracers": ["LRG2", "Lya QSO"], # "LRG1, "LRG2", "LRG3 ELG1", "ELG2", "Lya QSO"
-            "include_D_M": False,
-            "flow_type": 'NAF',
-            "design_precision": 2,
-            "design_scope": 0.2,
-            "n_transforms": 5,
-            "steps": 7000,
-            "lr": 5e-3,
-            "gamma": 0.8,
-            "n_particles": 101,
-            "eval_particles": 10000,
-            "train_verbose": True, 
-            "condition_design": True,
-            "device": device
-            }   
-        single_run(
-            train_args,
-            str(len(train_args["tracers"])) + "_tracers_sigma",
-            signal=8,
-            hidden=32,
-            Om_low=0.0,
-            Om_sigma=l,
-            params_grid=500,
-            features_grid=400,
-            multiplier=1.0,
-            brute_force=True,
-            nf_model=True
-            )
-        mlflow.end_run()
-                
+    #for lr in [1e-2, 5e-3, 3e-3, 1e-3, 5e-4]:
+    #for s in [0.01, 0.015, 0.02, 0.025, 0.03, 0.04, 0.05]:
+    #for lr in [1e-2, 5e-3, 3e-3, 1e-3, 5e-4]:
+    process = psutil.Process(os.getpid())
+    # Clear GPU cache
+    torch.cuda.empty_cache()
+    # Trigger garbage collection for CPU
+    gc.collect()
+    print(f"Memory before run: {process.memory_info().rss / 1024**2} MB")
+    train_args = {
+        "seed": 1,
+        "cosmology": "w0wa", # Om, w, w0wa
+        "tracers": ["LRG1", "LRG2", "LRG3 ELG1", "ELG2", "Lya QSO"],
+        "include_D_M": True,
+        "flow_type": 'NAF',
+        "design_precision": 2,
+        "design_scope": 0.2,
+        "n_transforms": 5,
+        "steps": 20000,
+        "lr": lr,
+        "gamma": 0.8,
+        "n_particles": 51,
+        "eval_particles": 5000,
+        "train_verbose": True, 
+        "condition_design": True,
+        "device": device
+        }   
+    single_run(
+        train_args,
+        str(len(train_args["tracers"])) + "_tracers_3D",
+        signal=8,
+        hidden=32,
+        Om_scope=0.01, #s*np.sqrt(12)/2,
+        Om_sigma=0.01,
+        sigma_multi=4,
+        params_grid=1000,
+        features_grid=1000,
+        multiplier=1.0,
+        brute_force=False,
+        nf_model=True
+        )
+    mlflow.end_run()
+            
