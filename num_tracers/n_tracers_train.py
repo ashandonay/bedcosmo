@@ -56,44 +56,31 @@ def single_run(
     checkpoint_path=None,
     **kwargs,
 ):
+    pyro.clear_param_store()
+    seed = auto_seed(train_args["seed"])
 
-    desi_data = pd.read_csv('/home/ashandonay/bed/desi_data.csv')
-    sigmas = []
-    z_eff = []
-    true_n_vals = []
-    for t in train_args["tracers"]:
-        D_H_std = desi_data.loc[(desi_data['tracer'] == t) & (desi_data['quantity'] == 'DH_over_rs'), "std"].values[0]
-        D_M_std = desi_data.loc[(desi_data['tracer'] == t) & (desi_data['quantity'] == 'DM_over_rs'), "std"].values[0]
-        z = desi_data.loc[desi_data['tracer'] == t, "z"].values[0]
-        sigmas.append(D_H_std * kwargs["multiplier"])
-        if train_args["include_D_M"]:
-            sigmas.append(D_M_std * kwargs["multiplier"])
-        z_eff.append(z)
-        true_n_vals.append(desi_data.loc[desi_data['tracer'] == t, "num"].values[0])
-    
-    sigmas = torch.tensor(sigmas, device=train_args["device"])
-    z_eff = torch.tensor(z_eff, device=train_args["device"])
-    true_n_vals = torch.tensor(true_n_vals, device=train_args["device"])
-    true_n_ratios = true_n_vals/true_n_vals.sum()
+    mlflow.set_experiment(mlflow_experiment_name)
+    # log params in train_args
+    for key, value in train_args.items():
+        mlflow.log_param(key, value)
+    # log params in kwargs
+    for key, value in kwargs.items():
+        mlflow.log_param(key, value)
+    ml_info = mlflow.active_run().info
 
-    print(f'tracers: {train_args["tracers"]}\n'
-        f'z_eff: {z_eff}\n'
-        f'sigmas: {sigmas}\n'
-        f'true_n_ratios: {true_n_ratios}')
+    desi_df = pd.read_csv('/home/ashandonay/bed/desi_data.csv')
+    desi_cov = np.load('/home/ashandonay/bed/desi_cov.npy')
+    # select only the rows corresponding to the tracers
+    desi_data = desi_df[desi_df['tracer'].isin(train_args["tracers"])]
+    nominal_cov = desi_cov[np.ix_(desi_data.index, desi_data.index)]
 
     Om_mean = torch.tensor(Planck18.Om0).to(train_args["device"])
-    Om_std = torch.tensor(kwargs["Om_sigma"]).to(train_args["device"])
+    Om_std = torch.tensor(0.01).to(train_args["device"])
     w0_mean = torch.tensor(-1.0).to(train_args["device"])
     w0_std = torch.tensor(0.2).to(train_args["device"])
     wa_mean = torch.tensor(0.0).to(train_args["device"])
     wa_std = torch.tensor(0.2).to(train_args["device"])
 
-    #low = Planck18.Om0 - kwargs["sigma_multi"]*Om_std
-    #high = Planck18.Om0 + kwargs["sigma_multi"]*Om_std
-    #low = Planck18.Om0 - kwargs["Om_scope"]
-    #high = Planck18.Om0 + kwargs["Om_scope"]
-    low = 0.0
-    high = 1.0
     Om_range = torch.tensor([0.0, 1.0], device=train_args["device"])
     w0_range = torch.tensor([-3.0, 1.0], device=train_args["device"])
     wa_range = torch.tensor([-3.0, 2.0], device=train_args["device"])
@@ -128,22 +115,34 @@ def single_run(
     observation_labels = ["y"]
     target_labels = list(priors.keys())
     print(f'Cosmology: {train_args["cosmology"]}')
+    print(f'Tracers: {train_args["tracers"]}')
     print(f'Observation Labels: {observation_labels}')
     print(f'Target Labels: {target_labels}')
 
-    num_tracers = NumTracers(priors, true_n_ratios, observation_labels, z_eff, sigmas, include_D_M=train_args["include_D_M"], device=train_args["device"])
+    num_tracers = NumTracers(
+        desi_data, 
+        nominal_cov,
+        priors, 
+        observation_labels, 
+        eff=kwargs["eff"], 
+        include_D_M=train_args["include_D_M"], 
+        device=train_args["device"]
+        )
 
     ############################################### Designs ###############################################
-    base = 5.0
     designs_dict = {}
+    print(np.arange(
+            train_args["design_low"], 
+            train_args["design_high"] + train_args["design_step"], 
+            train_args["design_step"]
+            ))
     for i in range(len(train_args["tracers"])):
-        designs_dict['N_' + train_args["tracers"][i].split()[0]] = np.arange(0.1, 1.0, 0.1)
-        #designs_dict['N_' + train_args["tracers"][i].split()[0]] = np.arange(
-        #    np.round(true_n_ratios[i].cpu().numpy() - train_args["design_scope"], train_args["design_precision"]), 
-        #    np.round(true_n_ratios[i].cpu().numpy() + train_args["design_scope"], train_args["design_precision"]), 
-        #    np.power(base, -train_args["design_precision"])
-        #    )
-    grid_designs = Grid(**designs_dict, constraint=lambda **kwargs: np.abs(sum(kwargs.values()) - 1.0) < np.power(base, -(train_args["design_precision"] + 1)))
+        designs_dict['N_' + train_args["tracers"][i].split()[0]] = np.arange(
+            train_args["design_low"], 
+            train_args["design_high"] + train_args["design_step"], 
+            train_args["design_step"]
+            )
+    grid_designs = Grid(**designs_dict, constraint=lambda **kwargs: sum(kwargs.values()) == 1.0)
     del designs_dict
     print("Grid designs shape:", grid_designs.shape)
     
@@ -151,19 +150,7 @@ def single_run(
     for n in grid_designs.names[1:]:
         designs = torch.cat((designs, torch.tensor(getattr(grid_designs, n).squeeze(), device=device).unsqueeze(1)), dim=1)
 
-    pyro.clear_param_store()
-    seed = auto_seed(train_args["seed"])
-
-    mlflow.set_experiment(mlflow_experiment_name)
-    # log params in train_args
-    for key, value in train_args.items():
-        mlflow.log_param(key, value)
-
-    # log params in kwargs
-    for key, value in kwargs.items():
-        mlflow.log_param(key, value)
-    ml_info = mlflow.active_run().info
-    print("MLFlow Run Info:", ml_info.experiment_id + "/" + ml_info.run_id)
+    np.save(f"mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/designs.npy", designs.squeeze().cpu().detach().numpy())
 
     # plot priors
     #plt.figure()
@@ -218,11 +205,14 @@ def single_run(
         del range_params, parameters, features_dict
 
         print("Calculating brute force EIG...")
+        print("Features shape:", grid_features.shape)
+        print("Designs shape:", grid_designs.shape)
+        print("Params shape:", grid_params.shape)
         designer = ExperimentDesigner(grid_params, grid_features, grid_designs, num_tracers.unnorm_lfunc, mem=190000)
         designer.calculateEIG(grid_prior)
         brute_force_EIG = designer.EIG
         designer.describe()
-        np.save(f"mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/designs.npy", np.array([getattr(grid_designs, name) for name in grid_designs.names]).squeeze())
+        np.save(f"mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/brute_force_designs.npy", np.array([getattr(grid_designs, name) for name in grid_designs.names]).squeeze())
         np.save(f"mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/brute_force_eigs.npy", brute_force_EIG)
 
         plt.figure()
@@ -325,6 +315,7 @@ def single_run(
         pyro.set_rng_seed(0)
         verbose_shapes = train_args["train_verbose"]
         history = []
+        print("MLFlow Run Info:", ml_info.experiment_id + "/" + ml_info.run_id)
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
         total_steps = train_args["steps"]
         plot_steps = [int(0.25*total_steps), int(0.5*total_steps), int(0.75*total_steps)]
@@ -395,7 +386,7 @@ def single_run(
         ax2.plot(eigs_bits, label=f'NF step {train_args["steps"]}')
 
         with torch.no_grad():
-            agg_loss, nominal_eig = posterior_loss(design=true_n_ratios.unsqueeze(0),
+            agg_loss, nominal_eig = posterior_loss(design=num_tracers.nominal_n_ratios.unsqueeze(0),
                                             model=num_tracers.pyro_model,
                                             guide=posterior_flow,
                                             num_particles=train_args["eval_particles"],
@@ -405,7 +396,7 @@ def single_run(
                                             nflow=True,
                                             condition_design=train_args["condition_design"])
         nominal_eig_bits = nominal_eig.cpu().detach().numpy()/np.log(2)
-        ax2.axhline(y=nominal_eig_bits, color='r', linestyle='--', label='Nominal EIG')
+        ax2.axhline(y=nominal_eig_bits, color='black', linestyle='--', label='Nominal EIG')
         if kwargs["brute_force"]:
             ax2.plot(brute_force_EIG.squeeze(), label='Brute Force', color='black')
         ax2.set_xlabel("Design Index")
@@ -413,57 +404,6 @@ def single_run(
         ax2.legend()
         plt.tight_layout()
         plt.savefig(f"mlruns/{ml_info.experiment_id}/{ml_info.run_id}/training.png")
-
-        # make a corner plot of the posterior
-        # assuming fiducial params associated with data to condition the posterior
-        fid_parameters = { }
-        for key in priors.keys():
-            if key == 'Om':
-                fid_parameters[key] = torch.tensor(Planck18.Om0, device=train_args["device"])
-            elif key == 'w0':
-                fid_parameters[key] = torch.tensor(-1.0, device=train_args["device"])
-            elif key == 'wa':
-                fid_parameters[key] = torch.tensor(0.0, device=train_args["device"])
-        context_n_ratios = []
-        fid_mean = torch.zeros(len(train_args["tracers"]) if not train_args["include_D_M"] else 2*len(train_args["tracers"]), device=train_args["device"])
-        fid_mean[::2] = num_tracers.D_H_func(z_eff, **fid_parameters)
-        if train_args["include_D_M"]:
-            z_array = z_eff.unsqueeze(-1) * torch.linspace(0, 1, 100, device=train_args["device"]).view(1, -1)
-            z = z_array.expand((len(priors.keys())-1)*[1] + [-1, -1])
-            fid_mean[1::2] = num_tracers.D_M_func(z, **fid_parameters)
-
-        if train_args["condition_design"]:
-            nominal_context = torch.concat((true_n_ratios, fid_mean), dim=0)
-        else:
-            nominal_context = fid_mean
-        mlflow.log_param("nominal_post_context", nominal_context.tolist())
-        nominal_samples = posterior_flow(nominal_context).sample((100000,)).squeeze().cpu().detach().numpy()
-        fig = corner.corner(nominal_samples, labels=target_labels, show_titles=True, title_fmt=".2f", 
-                            title_kwargs={"fontsize": 12}, levels=(0.68, 0.95, 0.99), 
-                            bins=bins, plot_datapoints=False, plot_density=False, smooth=1.0, 
-                            range=[0.9999]*len(target_labels), label='Nominal')
-        plt.savefig(f"mlruns/{ml_info.experiment_id}/{ml_info.run_id}/nominal_posterior.png")
-
-        if train_args["condition_design"]:
-            optimal_ratios = designs[np.argmax(eigs_bits)]
-            optimal_context = torch.concat((optimal_ratios, fid_mean), dim=0)
-        else:
-            optimal_context = fid_mean
-        print("Optimal design:", optimal_ratios)
-        mlflow.log_param("optimal_post_context", optimal_context.tolist())
-        optimal_samples = posterior_flow(optimal_context).sample((100000,)).squeeze().cpu().detach().numpy()
-        figure = corner.corner(optimal_samples, labels=target_labels, show_titles=True, title_fmt=".2f", 
-                            title_kwargs={"fontsize": 12}, levels=(0.68, 0.95, 0.99),
-                            bins=bins, plot_datapoints=False, plot_density=False, smooth=1.0, 
-                            range=[0.9999]*len(target_labels), label='Nominal')
-        plt.savefig(f"mlruns/{ml_info.experiment_id}/{ml_info.run_id}/optimal_posterior.png")
-
-        # save eigs at the end
-        np.save(f"mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/design_eigs.npy", designs.squeeze().cpu().detach().numpy())
-        np.save(f"mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/eigs.npy", eigs_bits)
-        np.save(f"mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/nominal_eig.npy", nominal_eig_bits)
-        mlflow.log_artifact(f"mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/eigs.npy")
-
         checkpoint_path = f"mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/nf_checkpoint.pt"
         save_checkpoint(posterior_flow, optimizer, checkpoint_path)
 
@@ -477,43 +417,42 @@ if __name__ == '__main__':
     #for lr in [1e-2, 5e-3, 3e-3, 1e-3, 5e-4]:
     #for s in [0.01, 0.015, 0.02, 0.025, 0.03, 0.04, 0.05]:
     #for lr in [1e-2, 5e-3, 3e-3, 1e-3, 5e-4]:
-    process = psutil.Process(os.getpid())
-    # Clear GPU cache
-    torch.cuda.empty_cache()
-    # Trigger garbage collection for CPU
-    gc.collect()
-    print(f"Memory before run: {process.memory_info().rss / 1024**2} MB")
-    train_args = {
-        "seed": 1,
-        "cosmology": "w0wa", # Om, w, w0wa
-        "tracers": ["LRG1", "LRG2", "LRG3+ELG1", "ELG2", "Lya QSO"],
-        "include_D_M": True,
-        "flow_type": 'NAF',
-        "design_precision": 2,
-        "design_scope": 0.2,
-        "n_transforms": 5,
-        "steps": 20000,
-        "lr": 1e-2,
-        "gamma": 0.8,
-        "n_particles": 101,
-        "eval_particles": 3000,
-        "train_verbose": True, 
-        "condition_design": True,
-        "device": device
-        }   
-    single_run(
-        train_args,
-        str(len(train_args["tracers"])) + "_tracers_3D",
-        signal=8,
-        hidden=32,
-        Om_scope=0.01, #s*np.sqrt(12)/2,
-        Om_sigma=0.01,
-        sigma_multi=4,
-        params_grid=1000,
-        features_grid=1000,
-        multiplier=1.0,
-        brute_force=False,
-        nf_model=True
-        )
-    mlflow.end_run()
-            
+    for e in [True, False]:
+        process = psutil.Process(os.getpid())
+        # Clear GPU cache
+        torch.cuda.empty_cache()
+        # Trigger garbage collection for CPU
+        gc.collect()
+        print(f"Memory before run: {process.memory_info().rss / 1024**2} MB")
+        train_args = {
+            "seed": 1,
+            "cosmology": "w0wa", # Om, w, w0wa
+            "tracers": ["LRG1", "LRG2", "LRG3+ELG1", "ELG2", "Lya QSO"],
+            "include_D_M": True,
+            "flow_type": 'NAF',
+            "design_low": 0.05,
+            "design_high": 0.25,
+            "design_step": 0.05,
+            "n_transforms": 5,
+            "steps": 25000,
+            "lr": 1e-2,
+            "gamma": 0.8,
+            "n_particles": 25,
+            "eval_particles": 200,
+            "train_verbose": True, 
+            "condition_design": True,
+            "device": device
+            }   
+        single_run(
+            train_args,
+            str(len(train_args["tracers"])) + "_tracers_efficiency",
+            signal=8,
+            hidden=32,
+            eff=e,
+            params_grid=100,
+            features_grid=200,
+            brute_force=False,
+            nf_model=True
+            )
+        mlflow.end_run()
+                
