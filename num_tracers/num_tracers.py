@@ -28,13 +28,13 @@ class NumTracers:
 
         self.sigmas = torch.tensor(desi_data["std"].tolist(), device=device)
         self.z_eff = torch.tensor(desi_data["z"][::2].tolist(), device=device)
-        nominal_num = torch.tensor(desi_data["num"].tolist(), device=device)
-        N_tot = (nominal_num[::2]/self.efficiency[::2]).sum()
-        self.nominal_n_ratios = nominal_num[::2]/N_tot
+        obs_num = torch.tensor(desi_data["num"].tolist(), device=device)
+        N_tot = (obs_num[::2]/self.efficiency[::2]).sum()
+        self.obs_n_ratios = obs_num[::2]/N_tot
         print(f'z_eff: {self.z_eff}\n'
             f'sigmas: {self.sigmas}\n'
             f'efficiency: {self.efficiency}\n'
-            f'nominal_n_ratios: {self.nominal_n_ratios}')
+            f'Obs ratios: {self.obs_n_ratios}')
     
     def D_H_func(self, z, Om, w0=None, wa=None):
         if self.cosmo_params == {'Om'}:
@@ -87,12 +87,12 @@ class NumTracers:
 
             z = self.z_eff.reshape((len(self.cosmo_params)-1)*[1] + [-1])
             means[:, :, 1::2] = self.D_H_func(z, **parameters)
-            rescaled_sigmas[:, :, 1::2] = self.sigmas[1::2] * torch.sqrt((self.efficiency[1::2]*tracers_ratio)/self.nominal_n_ratios)
+            rescaled_sigmas[:, :, 1::2] = self.sigmas[1::2] * torch.sqrt((self.efficiency[1::2]*tracers_ratio)/self.obs_n_ratios)
             if self.include_D_M:
                 z_array = self.z_eff.unsqueeze(-1) * torch.linspace(0, 1, 100, device=self.device).view(1, -1)
                 z = z_array.expand((len(self.cosmo_params)-1)*[1] + [-1, -1])
                 means[:, :, ::2] = self.D_M_func(z, **parameters).cpu()
-                rescaled_sigmas[:, :, ::2] = self.sigmas[::2] * torch.sqrt((self.efficiency[::2]*tracers_ratio)/self.nominal_n_ratios)
+                rescaled_sigmas[:, :, ::2] = self.sigmas[::2] * torch.sqrt((self.efficiency[::2]*tracers_ratio)/self.obs_n_ratios)
 
             # extract correlation matrix from DESI covariance matrix
             self.corr_matrix = torch.tensor(self.nominal_cov/np.sqrt(np.outer(np.diag(self.nominal_cov), np.diag(self.nominal_cov))), device=self.device)
@@ -116,7 +116,7 @@ class NumTracers:
             z = self.z_eff[i].reshape((len(self.cosmo_params)-1)*[1] + [-1])
             D_H_mean = self.D_H_func(z, **parameters)
             D_H_diff = getattr(features, features.names[i]) - D_H_mean.cpu().numpy()
-            D_H_sigma = self.sigmas[1::2].cpu().numpy()[i] * np.sqrt((self.efficiency[1::2].cpu().numpy()[i]*getattr(designs, designs.names[i]))/self.nominal_n_ratios[i].cpu().numpy())
+            D_H_sigma = self.sigmas[1::2].cpu().numpy()[i] * np.sqrt((self.efficiency[1::2].cpu().numpy()[i]*getattr(designs, designs.names[i]))/self.obs_n_ratios[i].cpu().numpy())
             likelihood = np.exp(-0.5 * (D_H_diff / D_H_sigma) ** 2) * likelihood
             
             if self.include_D_M:
@@ -124,7 +124,7 @@ class NumTracers:
                 z = z_array.expand((len(self.cosmo_params)-1)*[1] + [-1, -1])
                 D_M_mean = self.D_M_func(z, **parameters)
                 D_M_diff = getattr(features, features.names[i+len(self.z_eff)]) - D_M_mean.cpu().numpy()
-                D_M_sigma = self.sigmas[::2].cpu().numpy()[i] * np.sqrt((self.efficiency[::2].cpu().numpy()[i]*getattr(designs, designs.names[i]))/self.nominal_n_ratios[i].cpu().numpy())
+                D_M_sigma = self.sigmas[::2].cpu().numpy()[i] * np.sqrt((self.efficiency[::2].cpu().numpy()[i]*getattr(designs, designs.names[i]))/self.obs_n_ratios[i].cpu().numpy())
                 likelihood = np.exp(-0.5 * (D_M_diff / D_M_sigma) ** 2) * likelihood
 
         return likelihood
