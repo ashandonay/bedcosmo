@@ -131,11 +131,6 @@ def single_run(
 
     ############################################### Designs ###############################################
     designs_dict = {}
-    print(np.arange(
-            train_args["design_low"], 
-            train_args["design_high"] + train_args["design_step"], 
-            train_args["design_step"]
-            ))
     for i in range(len(train_args["tracers"])):
         designs_dict['N_' + train_args["tracers"][i].split()[0]] = np.arange(
             train_args["design_low"], 
@@ -372,6 +367,9 @@ def single_run(
         ax1.set_ylabel("Loss")
         ax1.set_yscale('log')
 
+        nominal_n_ratios = num_tracers.obs_n_ratios/num_tracers.efficiency[::2]
+        print("Nominal ratios:", nominal_n_ratios)
+
         with torch.no_grad():
             agg_loss, eigs = posterior_loss(design=designs,
                                             model=num_tracers.pyro_model,
@@ -386,7 +384,7 @@ def single_run(
         ax2.plot(eigs_bits, label=f'NF step {train_args["steps"]}')
 
         with torch.no_grad():
-            agg_loss, nominal_eig = posterior_loss(design=num_tracers.nominal_n_ratios.unsqueeze(0),
+            agg_loss, nominal_eig = posterior_loss(design=nominal_n_ratios.unsqueeze(0),
                                             model=num_tracers.pyro_model,
                                             guide=posterior_flow,
                                             num_particles=train_args["eval_particles"],
@@ -417,42 +415,40 @@ if __name__ == '__main__':
     #for lr in [1e-2, 5e-3, 3e-3, 1e-3, 5e-4]:
     #for s in [0.01, 0.015, 0.02, 0.025, 0.03, 0.04, 0.05]:
     #for lr in [1e-2, 5e-3, 3e-3, 1e-3, 5e-4]:
-    for e in [True, False]:
-        process = psutil.Process(os.getpid())
-        # Clear GPU cache
-        torch.cuda.empty_cache()
-        # Trigger garbage collection for CPU
-        gc.collect()
-        print(f"Memory before run: {process.memory_info().rss / 1024**2} MB")
-        train_args = {
-            "seed": 1,
-            "cosmology": "w0wa", # Om, w, w0wa
-            "tracers": ["LRG1", "LRG2", "LRG3+ELG1", "ELG2", "Lya QSO"],
-            "include_D_M": True,
-            "flow_type": 'NAF',
-            "design_low": 0.05,
-            "design_high": 0.25,
-            "design_step": 0.05,
-            "n_transforms": 5,
-            "steps": 25000,
-            "lr": 1e-2,
-            "gamma": 0.8,
-            "n_particles": 25,
-            "eval_particles": 200,
-            "train_verbose": True, 
-            "condition_design": True,
-            "device": device
-            }   
-        single_run(
-            train_args,
-            str(len(train_args["tracers"])) + "_tracers_efficiency",
-            signal=8,
-            hidden=32,
-            eff=e,
-            params_grid=100,
-            features_grid=200,
-            brute_force=False,
-            nf_model=True
-            )
-        mlflow.end_run()
-                
+    process = psutil.Process(os.getpid())
+    # Clear GPU cache
+    torch.cuda.empty_cache()
+    # Trigger garbage collection for CPU
+    gc.collect()
+    print(f"Memory before run: {process.memory_info().rss / 1024**2} MB")
+    train_args = {
+        "seed": 1,
+        "cosmology": "w0wa", # Om, w, w0wa
+        "tracers": ["LRG1", "LRG2", "LRG3+ELG1", "ELG2", "Lya QSO"],
+        "include_D_M": True,
+        "flow_type": 'NAF',
+        "design_low": 0.10,
+        "design_high": 0.40,
+        "design_step": 0.05,
+        "n_transforms": 5,
+        "steps": 20000,
+        "lr": 1e-2,
+        "gamma": 0.8,
+        "n_particles": 101,
+        "eval_particles": 200,
+        "train_verbose": True, 
+        "condition_design": True,
+        "device": device
+        }   
+    single_run(
+        train_args,
+        str(len(train_args["tracers"])) + "_tracers_efficiency",
+        signal=8,
+        hidden=32,
+        eff=True,
+        params_grid=100,
+        features_grid=200,
+        brute_force=False,
+        nf_model=True
+        )
+    mlflow.end_run()

@@ -247,8 +247,6 @@ def single_run(run_id, **kwargs):
             input_dim = len(target_labels)
             context_dim = 3 * len(tracers) if eval(run.data.params["include_D_M"]) else 2 * len(tracers)
             hidden = int(run.data.params["hidden"])
-            print(f'Input Dim: {input_dim}\n'
-                f'Context Dim: {context_dim}\n')
 
             posterior_flow = zuko.flows.NAF(
                         features=input_dim, 
@@ -263,37 +261,48 @@ def single_run(run_id, **kwargs):
             posterior_flow.to("cuda:0")
             posterior_flow.eval()
 
+            nominal_n_ratios = num_tracers.obs_n_ratios/num_tracers.efficiency[::2]
+            print("Nominal ratios:", nominal_n_ratios)
             plt.figure()
-            with torch.no_grad():
-                agg_loss, eigs = posterior_loss(design=designs,
-                                                model=num_tracers.pyro_model,
-                                                guide=posterior_flow,
-                                                num_particles=kwargs["eval_particles"],
-                                                observation_labels=observation_labels,
-                                                target_labels=target_labels,
-                                                evaluation=True,
-                                                nflow=True,
-                                                condition_design=eval(run.data.params["condition_design"]))
-            eigs_bits = eigs.cpu().detach().numpy()/np.log(2)
-            plt.plot(eigs_bits, label=f'NF step {run.data.params["steps"]}')
+            colors = sns.color_palette("Set1", kwargs["num_evals"])
+            for n in range(kwargs["num_evals"]):
+                with torch.no_grad():
+                    agg_loss, eigs = posterior_loss(design=designs,
+                                                    model=num_tracers.pyro_model,
+                                                    guide=posterior_flow,
+                                                    num_particles=kwargs["eval_particles"],
+                                                    observation_labels=observation_labels,
+                                                    target_labels=target_labels,
+                                                    evaluation=True,
+                                                    nflow=True,
+                                                    condition_design=eval(run.data.params["condition_design"]))
+                eigs_bits = eigs.cpu().detach().numpy()/np.log(2)
+                plt.plot(eigs_bits, label=f'NF step {run.data.params["steps"]}', color=colors[n])
 
-            with torch.no_grad():
-                agg_loss, nominal_eig = posterior_loss(design=num_tracers.nominal_n_ratios.unsqueeze(0),
-                                                model=num_tracers.pyro_model,
-                                                guide=posterior_flow,
-                                                num_particles=kwargs["eval_particles"],
-                                                observation_labels=observation_labels,
-                                                target_labels=target_labels,
-                                                evaluation=True,
-                                                nflow=True,
-                                                condition_design=eval(run.data.params["condition_design"]))
-            nominal_eig_bits = nominal_eig.cpu().detach().numpy()/np.log(2)
-            plt.axhline(y=nominal_eig_bits, color='black', linestyle='--', label='Nominal EIG')
+                with torch.no_grad():
+                    agg_loss, nominal_eig = posterior_loss(design=nominal_n_ratios.unsqueeze(0),
+                                                    model=num_tracers.pyro_model,
+                                                    guide=posterior_flow,
+                                                    num_particles=kwargs["eval_particles"],
+                                                    observation_labels=observation_labels,
+                                                    target_labels=target_labels,
+                                                    evaluation=True,
+                                                    nflow=True,
+                                                    condition_design=eval(run.data.params["condition_design"]))
+                nominal_eig_bits = nominal_eig.cpu().detach().numpy()/np.log(2)
+                plt.axhline(y=nominal_eig_bits, linestyle='--', label='Nominal EIG', color=colors[n])
             if eval(run.data.params["brute_force"]):
                 plt.plot(brute_force_EIG.squeeze(), label='Brute Force', color='black')
             plt.xlabel("Design Index")
             plt.ylabel("EIG")
-            plt.legend()
+            # Get the existing handles and labels
+            handles, labels = plt.gca().get_legend_handles_labels()
+            # Choose which items you want to include (e.g., the first and third)
+            handles_to_show = [handles[0], handles[1]]
+            labels_to_show = [labels[0], labels[1]]
+            # Create a legend with only the selected items
+            plt.legend(handles_to_show, labels_to_show)
+            plt.title(f"{kwargs['num_evals']} EIG evals with {kwargs['eval_particles']} samples")  
             plt.tight_layout()
             plt.savefig(f"mlruns/{ml_info.experiment_id}/{ml_info.run_id}/evaluation.png")
 
@@ -308,7 +317,7 @@ def single_run(run_id, **kwargs):
             nominal_samples = marginalize_posterior(
                 num_tracers,
                 posterior_flow, 
-                num_tracers.nominal_n_ratios,
+                nominal_n_ratios,
                 num_param_samples=param_samples,
                 num_data_samples=data_samples
                 ).cpu().detach().numpy()
@@ -345,8 +354,9 @@ if __name__ == '__main__':
     gc.collect()
     print(f"Memory before run: {process.memory_info().rss / 1024**2} MB")
     single_run(
-        '371080c86b804889b0bb8cd13c81770b',
-        eval_particles=2000,
+        '64f16e5fb03d46629f2a2d53a28adcea',
+        eval_particles=4000,
+        num_evals=3,
         )
     mlflow.end_run()
             
