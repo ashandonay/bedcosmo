@@ -72,7 +72,7 @@ def marginalize_posterior(num_tracers, posterior_flow, ratios, num_param_samples
 
     return marginal_samples
 
-def run_eval(run_id, exp, **kwargs):
+def run_eval(eval_args, run_id, exp, **kwargs):
 
     if exp is not None:
         exp_id = client.get_experiment_by_name(exp).experiment_id
@@ -102,36 +102,38 @@ def run_eval(run_id, exp, **kwargs):
             wa_mean = torch.tensor(0.0).to(run.data.params["device"])
             wa_std = torch.tensor(0.2).to(run.data.params["device"])
 
-            Om_range = torch.tensor([0.0, 1.0], device=run.data.params["device"])
+            Om_range = torch.tensor([0.01, 0.99], device=run.data.params["device"])
             w0_range = torch.tensor([-3.0, 1.0], device=run.data.params["device"])
             wa_range = torch.tensor([-3.0, 2.0], device=run.data.params["device"])
 
             ############################################### Priors ###############################################
             if run.data.params["cosmology"] == 'Om':
-                params = {"Om": Om_range}
-                grid_params = Grid(Om=np.linspace(*Om_range.cpu().numpy(), eval(run.data.params["params_grid"]))[:-1])
                 priors = {'Om': dist.Uniform(*Om_range)}
-                grid_prior = TopHat(grid_params.Om)
-                #priors = {'Om': dist.Normal(Om_mean, Om_std)}
+                if eval_args["brute_force"]:
+                    grid_params = Grid(
+                        Om=np.linspace(*Om_range.cpu().numpy(), eval_args["params_grid"])[:-1]
+                        )
+                    grid_prior = TopHat(grid_params.Om)
                 #grid_prior = Gaussian(grid_params.Om, Planck18.Om0, run.data.params["Om_sigma"])
             elif run.data.params["cosmology"] == 'w':
-                params = {"Om": Om_range, "w0": w0_range}
                 priors = {'Om': dist.Uniform(*Om_range), 'w0': dist.Uniform(*w0_range)}
-                #priors = {'Om': dist.Normal(Om_mean, Om_std), 'w0': dist.Normal(w0_mean, w0_std)}
-                grid_params = Grid(Om=np.linspace(*Om_range.cpu().numpy(), eval(run.data.params["params_grid"])), 
-                    w0=np.linspace(-3, 1, eval(run.data.params["params_grid"])))
-                grid_prior = TopHat(grid_params.Om) * TopHat(grid_params.w0)
+                if eval_args["brute_force"]:
+                    grid_params = Grid(
+                        Om=np.linspace(*Om_range.cpu().numpy(), eval_args["params_grid"]), 
+                        w0=np.linspace(-3, 1, eval_args["params_grid"])
+                        )
+                    grid_prior = TopHat(grid_params.Om) * TopHat(grid_params.w0)
                 #grid_prior = Gaussian(grid_params.Om, Planck18.Om0, run.data.params["Om_sigma"]) * TopHat(grid_params.w0)
             elif run.data.params["cosmology"] == 'w0wa':
-                params = {"Om": Om_range, "w0": w0_range, "wa": wa_range}
                 priors = {'Om': dist.Uniform(*Om_range), 'w0': dist.Uniform(*w0_range), 'wa': dist.Uniform(*wa_range)}
-                #priors = {'Om': dist.Uniform(*Om_range), 'w0': dist.Uniform(*w0_range), 'wa': dist.Uniform(*wa_range)}
-                grid_params = Grid(Om=np.linspace(*Om_range.cpu().numpy(), eval(run.data.params["params_grid"])), 
-                    w0=np.linspace(-3, 1, eval(run.data.params["params_grid"])), 
-                    wa=np.linspace(-3, 2, eval(run.data.params["params_grid"])))
-                grid_prior = TopHat(grid_params.Om) * TopHat(grid_params.w0) * TopHat(grid_params.wa)
+                if eval_args["brute_force"]:
+                    grid_params = Grid(
+                        Om=np.linspace(*Om_range.cpu().numpy(), eval_args["params_grid"]), 
+                        w0=np.linspace(-3, 1, eval_args["params_grid"]), 
+                        wa=np.linspace(-3, 2, eval_args["params_grid"])
+                        )
+                    grid_prior = TopHat(grid_params.Om) * TopHat(grid_params.w0) * TopHat(grid_params.wa)
                 #grid_prior = Gaussian(grid_params.Om, Planck18.Om0, run.data.params["Om_sigma"]) * TopHat(grid_params.w0) * TopHat(grid_params.wa)
-            grid_params.normalize(grid_prior);
 
             observation_labels = ["y"]
             target_labels = list(priors.keys())
@@ -168,11 +170,12 @@ def run_eval(run_id, exp, **kwargs):
             for n in grid_designs.names[1:]:
                 designs = torch.cat((designs, torch.tensor(getattr(grid_designs, n).squeeze(), device=device).unsqueeze(1)), dim=1)
 
-            bins = [50]*len(target_labels)
             levels = (0.68, 0.95)
             hist_range = [0.997]*len(target_labels)
-            if eval(run.data.params["brute_force"]):
-                ############################################### Features ###############################################
+
+            if eval_args["brute_force"]:
+                grid_params.normalize(grid_prior);
+                print("Calculating brute force EIG...")
                 if run.data.params["cosmology"] == 'Om':
                     range_params = Grid(Om=np.linspace(*Om_range.cpu().numpy(), 1000))
                 elif run.data.params["cosmology"] == 'w':
@@ -188,40 +191,32 @@ def run_eval(run_id, exp, **kwargs):
                 if eval(run.data.params["include_D_M"]):
                     features_dict = {}
                     for i in range(len(tracers)):
-                        D_H_mean = num_tracers.D_H_func(z_eff[i], **parameters)
+                        D_H_mean = num_tracers.D_H_func(num_tracers.z_eff[i], **parameters)
                         print('D_H_' + tracers[i].split()[0] + ' range:', D_H_mean.cpu().numpy().min(), D_H_mean.cpu().numpy().max() + 2)
-                        features_dict['D_H_' + tracers[i].split()[0]] = np.linspace(D_H_mean.cpu().numpy().min(), D_H_mean.cpu().numpy().max() + 2, eval(run.data.params["features_grid"]))
+                        features_dict['D_H_' + tracers[i].split()[0]] = np.linspace(D_H_mean.cpu().numpy().min(), D_H_mean.cpu().numpy().max() + 2, eval_args["features_grid"])
                     for i in range(len(run.data.params["tracers"])):
-                        z_array = z_eff[i].unsqueeze(-1) * torch.linspace(0, 1, 100, device=run.data.params["device"]).view(1, -1)
+                        z_array = num_tracers.z_eff[i].unsqueeze(-1) * torch.linspace(0, 1, 100, device=run.data.params["device"]).view(1, -1)
                         z = z_array.expand((len(range_params.names)-1)*[1] + [-1, -1])
                         D_M_mean = num_tracers.D_M_func(z, **parameters)
                         print('D_M_' + tracers[i].split()[0] + ' range:', D_M_mean.cpu().numpy().min(), D_M_mean.cpu().numpy().max() + 2)
-                        features_dict['D_M_' + tracers[i].split()[0]] = np.linspace(D_M_mean.cpu().numpy().min(), D_M_mean.cpu().numpy().max() + 2, eval(run.data.params["features_grid"]))
+                        features_dict['D_M_' + tracers[i].split()[0]] = np.linspace(D_M_mean.cpu().numpy().min(), D_M_mean.cpu().numpy().max() + 2, eval_args["features_grid"])
                 else:
                     features_dict = {}
                     for i in range(len(tracers)):
-                        D_H_mean = num_tracers.D_H_func(z_eff[i], **parameters)
+                        D_H_mean = num_tracers.D_H_func(num_tracers.z_eff[i], **parameters)
                         print('D_H_' + tracers[i].split()[0] + ' range:', D_H_mean.cpu().numpy().min(), D_H_mean.cpu().numpy().max() + 2)
-                        features_dict['D_H_' + tracers[i].split()[0]] = np.linspace(D_H_mean.cpu().numpy().min(), D_H_mean.cpu().numpy().max() + 2, eval(run.data.params["features_grid"]))
+                        features_dict['D_H_' + tracers[i].split()[0]] = np.linspace(D_H_mean.cpu().numpy().min(), D_H_mean.cpu().numpy().max() + 2, eval_args["features_grid"])
                 grid_features = Grid(**features_dict)
                 del range_params, parameters, features_dict
 
                 print("Calculating brute force EIG...")
                 designer = ExperimentDesigner(grid_params, grid_features, grid_designs, num_tracers.unnorm_lfunc, mem=190000)
-                designer.calculateEIG(grid_prior)
+                optimal_brute_force = designer.calculateEIG(grid_prior)
+                optimal_brute_force = torch.tensor(list(optimal_brute_force.values()), device=device)
                 brute_force_EIG = designer.EIG
-
-                posterior = designer.get_posterior()
-                print("posterior shape:", posterior.shape)
-                # sum over all features
-                marginalized_post = np.sum(posterior, axis=(0, 1))
-                # normalize
-                marginalized_post /= np.sum(marginalized_post)
-                plt.figure()
-                plt.plot(grid_params.Om, marginalized_post[brute_force_EIG.argmax()].squeeze())
-                plt.xlabel("Om")
-                plt.ylabel("p(Om)")
-                plt.savefig(f"mlruns/{exp_id}/{run_id}/brute_force_posterior.png")
+                print("Optimal brute force design:", optimal_brute_force)
+                np.save(f"mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/brute_force_designs.npy", np.array([getattr(grid_designs, name) for name in grid_designs.names]).squeeze())
+                np.save(f"mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/brute_force_eigs.npy", brute_force_EIG)
 
                 plt.figure()
                 if len(grid_designs.expand(designer.EIG).shape) > 2:
@@ -247,12 +242,7 @@ def run_eval(run_id, exp, **kwargs):
                     plt.tight_layout()
                     plt.savefig(f"mlruns/{ml_info.experiment_id}/{ml_info.run_id}/brute_force.png")
 
-                pyro.set_rng_seed(0)
-                verbose_shapes = run.data.params["train_verbose"]
-                history = []
-
-            if eval(run.data.params["nf_model"]):
-
+            if eval_args["nf_model"]:
                 input_dim = len(target_labels)
                 context_dim = 3 * len(tracers) if eval(run.data.params["include_D_M"]) else 2 * len(tracers)
                 hidden = int(run.data.params["hidden"])
@@ -273,13 +263,13 @@ def run_eval(run_id, exp, **kwargs):
                 nominal_n_ratios = num_tracers.obs_n_ratios/num_tracers.efficiency[::2]
                 print("Nominal ratios:", nominal_n_ratios)
                 plt.figure()
-                colors = sns.color_palette("Set1", kwargs["num_evals"])
-                for n in range(kwargs["num_evals"]):
+                colors = sns.color_palette("Set1", eval_args["num_evals"])
+                for n in range(eval_args["num_evals"]):
                     with torch.no_grad():
                         agg_loss, eigs = posterior_loss(design=designs,
                                                         model=num_tracers.pyro_model,
                                                         guide=posterior_flow,
-                                                        num_particles=kwargs["eval_particles"],
+                                                        num_particles=eval_args["eval_particles"],
                                                         observation_labels=observation_labels,
                                                         target_labels=target_labels,
                                                         evaluation=True,
@@ -292,7 +282,7 @@ def run_eval(run_id, exp, **kwargs):
                         agg_loss, nominal_eig = posterior_loss(design=nominal_n_ratios.unsqueeze(0),
                                                         model=num_tracers.pyro_model,
                                                         guide=posterior_flow,
-                                                        num_particles=kwargs["eval_particles"],
+                                                        num_particles=eval_args["eval_particles"],
                                                         observation_labels=observation_labels,
                                                         target_labels=target_labels,
                                                         evaluation=True,
@@ -300,7 +290,7 @@ def run_eval(run_id, exp, **kwargs):
                                                         condition_design=eval(run.data.params["condition_design"]))
                     nominal_eig_bits = nominal_eig.cpu().detach().numpy()/np.log(2)
                     plt.axhline(y=nominal_eig_bits, linestyle='--', label='Nominal EIG', color=colors[n])
-                if eval(run.data.params["brute_force"]):
+                if eval_args["brute_force"]:
                     plt.plot(brute_force_EIG.squeeze(), label='Brute Force', color='black')
                 plt.xlabel("Design Index")
                 plt.ylabel("EIG")
@@ -311,46 +301,75 @@ def run_eval(run_id, exp, **kwargs):
                 labels_to_show = [labels[0], labels[1]]
                 # Create a legend with only the selected items
                 plt.legend(handles_to_show, labels_to_show)
-                plt.title(f"{kwargs['num_evals']} EIG evals with {kwargs['eval_particles']} samples")  
+                plt.title(f"{eval_args['num_evals']} EIG eval(s) with {eval_args['eval_particles']} samples")  
                 plt.tight_layout()
                 plt.savefig(f"mlruns/{ml_info.experiment_id}/{ml_info.run_id}/evaluation.png")
 
                 # save eigs at the end
-                np.save(f"mlruns/{exp_id}/{run_id}/artifacts/eigs.npy", eigs_bits)
-                np.save(f"mlruns/{exp_id}/{run_id}/artifacts/nominal_eig.npy", nominal_eig_bits)
+                np.save(f"mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/eigs.npy", eigs_bits)
+                np.save(f"mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/nominal_eig.npy", nominal_eig_bits)
                 mlflow.log_artifact(f"mlruns/{exp_id}/{run_id}/artifacts/eigs.npy")
 
                 optimal_n_ratios = designs[torch.argmax(eigs)]
-                param_samples = 100
-                data_samples = 100
-                nominal_samples = marginalize_posterior(
-                    num_tracers,
-                    posterior_flow, 
-                    nominal_n_ratios,
-                    num_param_samples=param_samples,
-                    num_data_samples=data_samples
-                    ).cpu().detach().numpy()
-                optimal_samples = marginalize_posterior(
-                    num_tracers,
-                    posterior_flow, 
-                    optimal_n_ratios,
-                    num_param_samples=param_samples,
-                    num_data_samples=data_samples
-                ).cpu().detach().numpy()
+                central_vals = num_tracers.central_val if eval(run.data.params["include_D_M"]) else num_tracers.central_val[1::2]
+                optimal_context = torch.cat([optimal_n_ratios, central_vals], dim=-1)
+                optimal_samples = posterior_flow(optimal_context).sample((eval_args["post_samples"],)).cpu().numpy()
 
-                fig = corner.corner(nominal_samples, labels=target_labels, show_titles=True, title_fmt=".2f", 
-                                    title_kwargs={"fontsize": 12}, levels=levels, 
+                nominal_context = torch.cat([nominal_n_ratios, central_vals], dim=-1)
+                nominal_samples = posterior_flow(nominal_context).sample((eval_args["post_samples"],)).cpu().numpy()
+
+                #nominal_samples = num_tracers.sample_flow(nominal_n_ratios, posterior_flow).cpu().numpy()
+                #optimal_samples = num_tracers.sample_flow(optimal_n_ratios, posterior_flow).cpu().numpy()
+                if len(target_labels) == 1:
+                    plt.figure()
+                    # get min and max of the samples
+                    min_val = min([nominal_samples.min(), optimal_samples.min()])
+                    max_val = max([nominal_samples.max(), optimal_samples.max()])
+                    if eval_args["brute_force"]:
+                        min_val = min([min_val, brute_force_samples.min()])
+                        max_val = max([max_val, brute_force_samples.max()])
+                    bins = np.linspace(min_val, max_val, 50)
+                    plt.hist(nominal_samples, bins=bins, color='tab:blue', alpha=0.5, label='Nominal', density=True)
+                    plt.hist(optimal_samples, bins=bins, color='tab:orange', alpha=0.5, label='Optimal', density=True)
+                    if eval_args["brute_force"]:
+                        brute_force_nominal_samples = num_tracers.brute_force_posterior(nominal_n_ratios, designer, grid_params, num_param_samples=eval_args["post_samples"]).cpu().numpy()
+                        brute_force_optimal_samples = num_tracers.brute_force_posterior(optimal_n_ratios, designer, grid_params, num_param_samples=eval_args["post_samples"]).cpu().numpy()
+                        plt.hist(brute_force_nominal_samples, bins=bins, color='tab:green', alpha=0.5, label='Brute Force', density=True)
+                    plt.xlabel(target_labels[0])
+                    plt.ylabel("Frequency")
+                    plt.legend()
+                else:
+                    legend_labels = []
+                    bins = [30]*len(target_labels)
+                    post_fig = corner.corner(nominal_samples, labels=target_labels, show_titles=False, title_fmt=".2f", 
+                                        title_kwargs={"fontsize": 12}, levels=levels, 
+                                        bins=bins, plot_datapoints=False, plot_density=False, smooth=1.0, 
+                                        fill_contours=False, color='tab:blue', range=hist_range)
+                    legend_labels.append(plt.Line2D([0], [0], color="tab:blue", lw=1, label="NF (Nominal)"))
+                    corner.corner(optimal_samples, labels=target_labels, show_titles=False, title_fmt=".2f", 
+                                    title_kwargs={"fontsize": 12}, levels=levels, fig=post_fig,
                                     bins=bins, plot_datapoints=False, plot_density=False, smooth=1.0, 
-                                    range=hist_range, label='Nominal')
-                plt.savefig(f"mlruns/{exp_id}/{run_id}/nominal_posterior.png")
+                                    fill_contours=False, color='tab:orange', range=hist_range)
+                    legend_labels.append(plt.Line2D([0], [0], color="tab:orange", lw=1, label="NF (Optimal)"))
+                    if eval_args["brute_force"]:
+                        brute_force_nominal_samples = num_tracers.brute_force_posterior(nominal_n_ratios, designer, grid_params, num_param_samples=eval_args["post_samples"]).cpu().numpy()
+                        brute_force_optimal_samples = num_tracers.brute_force_posterior(optimal_n_ratios, designer, grid_params, num_param_samples=eval_args["post_samples"]).cpu().numpy()
+                        #brute_force_samples = num_tracers.sample_brute_force(optimal_brute_force, grid_designs, grid_features, grid_params, designer).cpu().numpy()
+                        corner.corner(brute_force_nominal_samples, labels=target_labels, show_titles=False, title_fmt=".2f", 
+                                        title_kwargs={"fontsize": 12}, levels=levels, fig=post_fig,
+                                        bins=bins, plot_datapoints=False, plot_density=False, smooth=1.0, 
+                                        fill_contours=False, color='tab:blue', range=hist_range, hist_kwargs={"linestyle": 'dashed'}, contour_kwargs={"linestyles": 'dashed'})
+                        legend_labels.append(plt.Line2D([0], [0], color="tab:blue", lw=1, label="Brute Force (Nominal)", linestyle='dashed'))
+                        corner.corner(brute_force_optimal_samples, labels=target_labels, show_titles=False, title_fmt=".2f", 
+                                        title_kwargs={"fontsize": 12}, levels=levels, fig=post_fig,
+                                        bins=bins, plot_datapoints=False, plot_density=False, smooth=1.0, 
+                                        fill_contours=False, color='tab:orange', range=hist_range, hist_kwargs={"linestyle": 'dashed'}, contour_kwargs={"linestyles": 'dashed'})
+                        legend_labels.append(plt.Line2D([0], [0], color="tab:orange", lw=1, label="Brute Force (Optimal)", linestyle='dashed'))
 
-                figure = corner.corner(optimal_samples, labels=target_labels, show_titles=True, title_fmt=".2f", 
-                                    title_kwargs={"fontsize": 12}, levels=levels,
-                                    bins=bins, plot_datapoints=False, plot_density=False, smooth=1.0, 
-                                    range=hist_range, label='Nominal')
-                plt.savefig(f"mlruns/{exp_id}/{run_id}/optimal_posterior.png")
+                plt.legend(handles=legend_labels)
+                plt.savefig(f"mlruns/{exp_id}/{run_id}/posterior.png")
 
-                plt.close('all')
+        plt.close('all')
 
 if __name__ == '__main__':
 
@@ -360,11 +379,20 @@ if __name__ == '__main__':
     # Trigger garbage collection for CPU
     gc.collect()
     print(f"Memory before run: {process.memory_info().rss / 1024**2} MB")
+    eval_args = {
+        "nf_model": True,
+        "brute_force": False,
+        "post_samples": 50000,
+        "eval_particles": 4000,
+        "num_evals": 3,
+        "params_grid": 100,
+        "features_grid": 100,
+        "mem": 200000,
+    }
     run_eval(
-        run_id=None,
-        exp='5_tracers_hidden',
-        eval_particles=4000,
-        num_evals=1,
+        eval_args,
+        run_id='c57a5d01fd5e49189b95a09d6e215d16',
+        exp=None,
         )
     mlflow.end_run()
             
