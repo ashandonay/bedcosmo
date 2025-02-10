@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 from scipy.stats import norm
 from urllib.request import urlopen
+import json
 
 import pyro
 from pyro import poutine
@@ -19,6 +20,8 @@ from pyro_oed_src import posterior_loss
 from pyro.contrib.util import lexpand, rexpand
 
 import matplotlib.pyplot as plt
+import matplotlib.gridspec as gridspec
+from mpl_toolkits.axes_grid1 import make_axes_locatable
 import seaborn as sns
 import corner
 
@@ -45,14 +48,6 @@ import gc
 from num_tracers import NumTracers
 from util import *
 
-client = MlflowClient()
-
-device = torch.device("cuda:0") if torch.cuda.is_available() else "cpu"
-print(f'Using device: {device}.')
-
-#set default dtype
-torch.set_default_dtype(torch.float64)
-
 def marginalize_posterior(num_tracers, posterior_flow, ratios, num_param_samples=1000, num_data_samples=100):
 
     marginal_samples = []
@@ -73,7 +68,7 @@ def marginalize_posterior(num_tracers, posterior_flow, ratios, num_param_samples
     return marginal_samples
 
 def run_eval(eval_args, run_id, exp, **kwargs):
-
+    client = MlflowClient()
     if exp is not None:
         exp_id = client.get_experiment_by_name(exp).experiment_id
         run_ids = [run.info.run_id for run in client.search_runs(exp_id)]
@@ -90,24 +85,27 @@ def run_eval(eval_args, run_id, exp, **kwargs):
             ml_info = mlflow.active_run().info
             print("MLFlow Run Info:", ml_info.experiment_id + "/" + ml_info.run_id)
 
-            tracers = eval(run.data.params["tracers"])
+            #tracers = eval(run.data.params["tracers"])
             desi_df = pd.read_csv('/home/ashandonay/bed/desi_data.csv')
-            desi_cov = np.load('/home/ashandonay/bed/desi_cov.npy')
+            desi_tracers = pd.read_csv('/home/ashandonay/bed/desi_tracers.csv')
+            nominal_cov = np.load('/home/ashandonay/bed/desi_cov.npy')
             # select only the rows corresponding to the tracers
-            desi_data = desi_df[desi_df['tracer'].isin(tracers)]
-            nominal_cov = desi_cov[np.ix_(desi_data.index, desi_data.index)]
+            #desi_data = desi_df[desi_df['tracer'].isin(tracers)]
+            #nominal_cov = desi_cov[np.ix_(desi_data.index, desi_data.index)]
 
-            w0_mean = torch.tensor(-1.0).to(run.data.params["device"])
-            w0_std = torch.tensor(0.2).to(run.data.params["device"])
-            wa_mean = torch.tensor(0.0).to(run.data.params["device"])
-            wa_std = torch.tensor(0.2).to(run.data.params["device"])
+            w0_mean = torch.tensor(-1.0).to(eval_args["device"])
+            w0_std = torch.tensor(0.2).to(eval_args["device"])
+            wa_mean = torch.tensor(0.0).to(eval_args["device"])
+            wa_std = torch.tensor(0.2).to(eval_args["device"])
 
-            Om_range = torch.tensor([0.01, 0.99], device=run.data.params["device"])
-            w0_range = torch.tensor([-3.0, 1.0], device=run.data.params["device"])
-            wa_range = torch.tensor([-3.0, 2.0], device=run.data.params["device"])
+            Om_range = torch.tensor([0.01, 0.99], device=eval_args["device"])
+            w0_range = torch.tensor([-3.0, 1.0], device=eval_args["device"])
+            wa_range = torch.tensor([-3.0, 2.0], device=eval_args["device"])
+            hrdrag_range = torch.tensor([0.01, 1.0], device=eval_args["device"])
 
             ############################################### Priors ###############################################
             if run.data.params["cosmology"] == 'Om':
+                latex_labels = [r'$\Omega_m$']
                 priors = {'Om': dist.Uniform(*Om_range)}
                 if eval_args["brute_force"]:
                     grid_params = Grid(
@@ -116,59 +114,76 @@ def run_eval(eval_args, run_id, exp, **kwargs):
                     grid_prior = TopHat(grid_params.Om)
                 #grid_prior = Gaussian(grid_params.Om, Planck18.Om0, run.data.params["Om_sigma"])
             elif run.data.params["cosmology"] == 'w':
+                latex_labels = [r'$\Omega_m$', r'$w_0$']
                 priors = {'Om': dist.Uniform(*Om_range), 'w0': dist.Uniform(*w0_range)}
                 if eval_args["brute_force"]:
                     grid_params = Grid(
                         Om=np.linspace(*Om_range.cpu().numpy(), eval_args["params_grid"]), 
-                        w0=np.linspace(-3, 1, eval_args["params_grid"])
+                        w0=np.linspace(*w0_range.cpu().numpy(), eval_args["params_grid"])
                         )
                     grid_prior = TopHat(grid_params.Om) * TopHat(grid_params.w0)
                 #grid_prior = Gaussian(grid_params.Om, Planck18.Om0, run.data.params["Om_sigma"]) * TopHat(grid_params.w0)
             elif run.data.params["cosmology"] == 'w0wa':
+                latex_labels = [r'$\Omega_m$', r'$w_0$', r'$w_a$']
                 priors = {'Om': dist.Uniform(*Om_range), 'w0': dist.Uniform(*w0_range), 'wa': dist.Uniform(*wa_range)}
                 if eval_args["brute_force"]:
                     grid_params = Grid(
                         Om=np.linspace(*Om_range.cpu().numpy(), eval_args["params_grid"]), 
-                        w0=np.linspace(-3, 1, eval_args["params_grid"]), 
-                        wa=np.linspace(-3, 2, eval_args["params_grid"])
+                        w0=np.linspace(*w0_range.cpu().numpy(), eval_args["params_grid"]), 
+                        wa=np.linspace(*wa_range.cpu().numpy(), eval_args["params_grid"])
                         )
                     grid_prior = TopHat(grid_params.Om) * TopHat(grid_params.w0) * TopHat(grid_params.wa)
                 #grid_prior = Gaussian(grid_params.Om, Planck18.Om0, run.data.params["Om_sigma"]) * TopHat(grid_params.w0) * TopHat(grid_params.wa)
+            elif run.data.params["cosmology"] == 'w0wah':
+                latex_labels = [r'$\Omega_m$', r'$w_0$', r'$w_a$', r'$H_0r_d$']
+                priors = {'Om': dist.Uniform(*Om_range), 'w0': dist.Uniform(*w0_range), 'wa': dist.Uniform(*wa_range), 'hrdrag': dist.Uniform(*hrdrag_range)}
+                if eval_args["brute_force"]:
+                    grid_params = Grid(
+                        Om=np.linspace(*Om_range.cpu().numpy(), eval_args["params_grid"]), 
+                        w0=np.linspace(*w0_range.cpu().numpy(), eval_args["params_grid"]), 
+                        wa=np.linspace(*wa_range.cpu().numpy(), eval_args["params_grid"]),
+                        hrdrag=np.linspace(*hrdrag_range.cpu().numpy(), eval_args["params_grid"])
+                        )
+                    grid_prior = TopHat(grid_params.Om) * TopHat(grid_params.w0) * TopHat(grid_params.wa) * TopHat(grid_params.hrdrag)
 
             observation_labels = ["y"]
+            with open(mlflow.artifacts.download_artifacts(run_id=ml_info.run_id, artifact_path="classes.json")) as f:
+                classes = json.load(f)
+
             target_labels = list(priors.keys())
+            print(f"Classes: {classes}")
             print(f'Cosmology: {run.data.params["cosmology"]}')
-            print(f'Tracers: {run.data.params["tracers"]}')
             print(f'Observation Labels: {observation_labels}')
             print(f'Target Labels: {target_labels}')
 
             num_tracers = NumTracers(
-                desi_data, 
+                desi_df, 
+                desi_tracers,
                 nominal_cov,
                 priors, 
                 observation_labels, 
+                eval_args["device"],
                 eff=eval(run.data.params["eff"]), 
-                include_D_M=eval(run.data.params["include_D_M"]), 
-                device=run.data.params["device"]
+                include_D_M=eval(run.data.params["include_D_M"])
                 )
 
             ############################################### Designs ###############################################
 
             designs_dict = {}
-            for i in range(len(tracers)):
-                designs_dict['N_' + tracers[i].split()[0]] = np.arange(
+            for c, u in classes.items():
+                designs_dict['N_' + c] = np.arange(
                     eval(run.data.params["design_low"]), 
-                    eval(run.data.params["design_high"]) + eval(run.data.params["design_step"]), 
+                    u + eval(run.data.params["design_step"]), 
                     eval(run.data.params["design_step"])
                     )
-
-            grid_designs = Grid(**designs_dict, constraint=lambda **kwargs: sum(kwargs.values()) == 1.0)
+            tol = 1e-3
+            grid_designs = Grid(**designs_dict, constraint=lambda **kwargs: abs(sum(kwargs.values()) - 1.0) < tol)
             del designs_dict
             print("Grid designs shape:", grid_designs.shape)
             
-            designs = torch.tensor(getattr(grid_designs, grid_designs.names[0]).squeeze(), device=device).unsqueeze(1)
+            designs = torch.tensor(getattr(grid_designs, grid_designs.names[0]).squeeze(), device=eval_args["device"]).unsqueeze(1)
             for n in grid_designs.names[1:]:
-                designs = torch.cat((designs, torch.tensor(getattr(grid_designs, n).squeeze(), device=device).unsqueeze(1)), dim=1)
+                designs = torch.cat((designs, torch.tensor(getattr(grid_designs, n).squeeze(), device=eval_args["device"]).unsqueeze(1)), dim=1)
 
             levels = (0.68, 0.95)
             hist_range = [0.997]*len(target_labels)
@@ -187,7 +202,7 @@ def run_eval(eval_args, run_id, exp, **kwargs):
                         wa=np.linspace(-3, 2, 200))
                 parameters = { }
                 for key in range_params.names:
-                    parameters[key] = torch.tensor(getattr(range_params, key), device=run.data.params["device"])
+                    parameters[key] = torch.tensor(getattr(range_params, key), device=eval_args["device"])
                 if eval(run.data.params["include_D_M"]):
                     features_dict = {}
                     for i in range(len(tracers)):
@@ -195,7 +210,7 @@ def run_eval(eval_args, run_id, exp, **kwargs):
                         print('D_H_' + tracers[i].split()[0] + ' range:', D_H_mean.cpu().numpy().min(), D_H_mean.cpu().numpy().max() + 2)
                         features_dict['D_H_' + tracers[i].split()[0]] = np.linspace(D_H_mean.cpu().numpy().min(), D_H_mean.cpu().numpy().max() + 2, eval_args["features_grid"])
                     for i in range(len(run.data.params["tracers"])):
-                        z_array = num_tracers.z_eff[i].unsqueeze(-1) * torch.linspace(0, 1, 100, device=run.data.params["device"]).view(1, -1)
+                        z_array = num_tracers.z_eff[i].unsqueeze(-1) * torch.linspace(0, 1, 100, device=eval_args["device"]).view(1, -1)
                         z = z_array.expand((len(range_params.names)-1)*[1] + [-1, -1])
                         D_M_mean = num_tracers.D_M_func(z, **parameters)
                         print('D_M_' + tracers[i].split()[0] + ' range:', D_M_mean.cpu().numpy().min(), D_M_mean.cpu().numpy().max() + 2)
@@ -209,10 +224,9 @@ def run_eval(eval_args, run_id, exp, **kwargs):
                 grid_features = Grid(**features_dict)
                 del range_params, parameters, features_dict
 
-                print("Calculating brute force EIG...")
                 designer = ExperimentDesigner(grid_params, grid_features, grid_designs, num_tracers.unnorm_lfunc, mem=190000)
                 optimal_brute_force = designer.calculateEIG(grid_prior)
-                optimal_brute_force = torch.tensor(list(optimal_brute_force.values()), device=device)
+                optimal_brute_force = torch.tensor(list(optimal_brute_force.values()), device=eval_args["device"])
                 brute_force_EIG = designer.EIG
                 print("Optimal brute force design:", optimal_brute_force)
                 np.save(f"mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/brute_force_designs.npy", np.array([getattr(grid_designs, name) for name in grid_designs.names]).squeeze())
@@ -244,7 +258,7 @@ def run_eval(eval_args, run_id, exp, **kwargs):
 
             if eval_args["nf_model"]:
                 input_dim = len(target_labels)
-                context_dim = 3 * len(tracers) if eval(run.data.params["include_D_M"]) else 2 * len(tracers)
+                context_dim = len(classes.keys()) + 10 if run.data.params["include_D_M"] else len(classes.keys()) + 5
                 hidden = int(run.data.params["hidden"])
 
                 posterior_flow = zuko.flows.NAF(
@@ -253,17 +267,22 @@ def run_eval(eval_args, run_id, exp, **kwargs):
                             transforms=int(run.data.params["n_transforms"]),
                             signal=int(run.data.params["signal"]),
                             hidden_features=(hidden, 2*hidden, 2*hidden),
-                        ).to("cuda:0")
+                        ).to(eval_args["device"])
 
-                checkpoint = torch.load(f'mlruns/{exp_id}/{run_id}/artifacts/nf_checkpoint.pt', map_location="cuda:0")
+                checkpoint = torch.load(f'mlruns/{exp_id}/{run_id}/artifacts/nf_checkpoint.pt', map_location=eval_args["device"])
                 posterior_flow.load_state_dict(checkpoint['model_state_dict'], strict=True)
-                posterior_flow.to("cuda:0")
+                posterior_flow.to(eval_args["device"])
                 posterior_flow.eval()
 
-                nominal_n_ratios = num_tracers.obs_n_ratios/num_tracers.efficiency[::2]
-                print("Nominal ratios:", nominal_n_ratios)
+                # get the nominal design by the observed amount of tracers per class assuming default numbers from desi_df
+                nominal_design = torch.tensor(desi_tracers.groupby('class').sum()['observed'].reindex(classes.keys()).values, device=device)
+                print("Nominal design:", nominal_design)
+                np.save(f"mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/nominal_design.npy", nominal_design.cpu().numpy())
+                mlflow.log_artifact(f"mlruns/{exp_id}/{ml_info.run_id}/artifacts/nominal_design.npy")
+
                 plt.figure()
-                colors = sns.color_palette("Set1", eval_args["num_evals"])
+                eigs_batch = []
+                nominal_eig_batch = []
                 for n in range(eval_args["num_evals"]):
                     with torch.no_grad():
                         agg_loss, eigs = posterior_loss(design=designs,
@@ -276,10 +295,11 @@ def run_eval(eval_args, run_id, exp, **kwargs):
                                                         nflow=True,
                                                         condition_design=eval(run.data.params["condition_design"]))
                     eigs_bits = eigs.cpu().detach().numpy()/np.log(2)
-                    plt.plot(eigs_bits, label=f'NF step {run.data.params["steps"]}', color=colors[n])
+                    eigs_batch.append(eigs_bits)
+                    plt.plot(eigs_bits, label=f'NF step {run.data.params["steps"]}', color="tab:blue", alpha=0.4)
 
                     with torch.no_grad():
-                        agg_loss, nominal_eig = posterior_loss(design=nominal_n_ratios.unsqueeze(0),
+                        agg_loss, nominal_eig = posterior_loss(design=nominal_design.unsqueeze(0),
                                                         model=num_tracers.pyro_model,
                                                         guide=posterior_flow,
                                                         num_particles=eval_args["eval_particles"],
@@ -289,37 +309,119 @@ def run_eval(eval_args, run_id, exp, **kwargs):
                                                         nflow=True,
                                                         condition_design=eval(run.data.params["condition_design"]))
                     nominal_eig_bits = nominal_eig.cpu().detach().numpy()/np.log(2)
-                    plt.axhline(y=nominal_eig_bits, linestyle='--', label='Nominal EIG', color=colors[n])
+                    nominal_eig_batch.append(nominal_eig_bits)
+                    plt.axhline(y=nominal_eig_bits, linestyle='--', label='Nominal EIG', color="black", alpha=0.4)
                 if eval_args["brute_force"]:
                     plt.plot(brute_force_EIG.squeeze(), label='Brute Force', color='black')
                 plt.xlabel("Design Index")
                 plt.ylabel("EIG")
+                eigs_batch = np.array(eigs_batch)
+                nominal_eig_batch = np.array(nominal_eig_batch)
+                # avg over the number of evaluations
+                eig_avg = torch.tensor(np.mean(eigs_batch, axis=0), device=eval_args["device"])
+                eig_std = torch.tensor(np.std(eigs_batch, axis=0), device=eval_args["device"])
+                eig_se = eig_std/np.sqrt(eval_args["num_evals"])
+                avg_nominal_eig = np.mean(nominal_eig_batch, axis=0)
+                plt.plot(eig_avg.cpu().numpy(), label='Avg EIG', color='tab:blue', lw=2)
+                plt.axhline(y=avg_nominal_eig, linestyle='--', label='Avg Nominal EIG', color='black', lw=2)
                 # Get the existing handles and labels
                 handles, labels = plt.gca().get_legend_handles_labels()
                 # Choose which items you want to include (e.g., the first and third)
-                handles_to_show = [handles[0], handles[1]]
-                labels_to_show = [labels[0], labels[1]]
+                handles_to_show = [handles[-2], handles[-1]]
+                labels_to_show = [labels[-2], labels[-1]]
                 # Create a legend with only the selected items
                 plt.legend(handles_to_show, labels_to_show)
                 plt.title(f"{eval_args['num_evals']} EIG eval(s) with {eval_args['eval_particles']} samples")  
                 plt.tight_layout()
+                plt.savefig(f"mlruns/{ml_info.experiment_id}/{ml_info.run_id}/eigs.png")
+                # save eigs at the end
+                np.save(f"mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/eigs.npy", eig_avg.cpu().numpy())
+                np.save(f"mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/nominal_eig.npy", avg_nominal_eig)
+                mlflow.log_artifact(f"mlruns/{exp_id}/{run_id}/artifacts/eigs.npy")
+                if eval_args["brute_force"]:
+                    bf_optimal_design = designs[np.argmax(brute_force_EIG)]
+                    print("Optimal design (BF):", bf_optimal_design)
+                    np.save(f"mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/bf_optimal_design.npy", bf_optimal_design.cpu().numpy())
+                    mlflow.log_artifact(f"mlruns/{exp_id}/{run_id}/artifacts/bf_optimal_design.npy")
+                nf_optimal_design = designs[torch.argmax(eig_avg)]
+                print("Optimal design (NF):", nf_optimal_design)
+                np.save(f"mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/nf_optimal_design.npy", nf_optimal_design.cpu().numpy())
+                mlflow.log_artifact(f"mlruns/{exp_id}/{run_id}/artifacts/nf_optimal_design.npy")
+
+                sorted_eig_idx = torch.argsort(eig_avg, descending=True)
+                sorted_eig = eig_avg[sorted_eig_idx]
+                sorted_se = eig_se[sorted_eig_idx]
+                sorted_design = designs[sorted_eig_idx]
+                fig = plt.figure(figsize=(20, 6))  # Increase figure height as needed
+                gs = gridspec.GridSpec(3, 1, height_ratios=[0.6, 0.2, 0.4], width_ratios=[1])
+                ax0 = fig.add_subplot(gs[0, 0])
+                ax1 = fig.add_subplot(gs[1, 0])
+                ax2 = fig.add_subplot(gs[2, 0])
+                ax0.fill_between(
+                    range(len(sorted_eig)), 
+                    (sorted_eig-sorted_se).cpu().numpy(), 
+                    (sorted_eig+sorted_se).cpu().numpy(), 
+                    color="tab:blue", 
+                    alpha=0.2)
+                ax0.plot(sorted_eig.cpu().numpy(), color="tab:blue", label="NF Model")
+                if eval_args["brute_force"]:
+                    plt.plot(brute_force_EIG.squeeze()[sorted_eig_idx.cpu().numpy()], label='Brute Force', color='tab:blue', linestyle='--')
+                ax0.set_xlim(0, len(sorted_eig))
+                ax0.axhline(avg_nominal_eig, color='black', linestyle='--', label="Nominal EIG")
+                ax0.set_ylabel("Expected Information Gain [bits]")
+                ax0.set_xticks([])
+                ax0.legend()
+                im = ax1.imshow(sorted_design.T.cpu().numpy(), aspect='auto', cmap='viridis')
+                ax1.set_xlabel("Design Index")
+                ax1.set_yticks(np.arange(len(classes.keys())), classes.keys())
+
+                correlations = np.array([np.corrcoef(designs[:, i].cpu().numpy(), eig_avg.cpu().numpy())[0, 1] for i in range(designs.shape[1])])
+                im2 = ax2.imshow(correlations.reshape(1, -1))
+                ax2.set_xticks(np.arange(len(correlations)))
+                ax2.set_xticklabels(classes.keys())
+                ax2.set_yticks([])
+                # Create divider for existing axes instance
+                divider = make_axes_locatable(ax2)
+                # Add axes below for colorbar with 20% height of main plot and padding
+                cax = divider.append_axes("bottom", size="10%", pad=0.3)
+                # Create colorbar in the new axes
+                plt.colorbar(im2, cax=cax, orientation='horizontal', label='Correlation Coefficient')
                 plt.savefig(f"mlruns/{ml_info.experiment_id}/{ml_info.run_id}/evaluation.png")
 
-                # save eigs at the end
-                np.save(f"mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/eigs.npy", eigs_bits)
-                np.save(f"mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/nominal_eig.npy", nominal_eig_bits)
-                mlflow.log_artifact(f"mlruns/{exp_id}/{run_id}/artifacts/eigs.npy")
+                tot = (desi_df["num"][::2]/desi_df["efficiency"][::2]).sum()
+                values1 = tot*nominal_design.squeeze().cpu().numpy()  # Values for the first set of bars
+                values2 = tot*nf_optimal_design.squeeze().cpu().numpy()  # Values for the second set of bars
 
-                optimal_n_ratios = designs[torch.argmax(eigs)]
+                # Set the positions for the bars
+                x = np.arange(len(classes.keys()))  # the label locations
+                width = 0.2 # the width of the bars
+
+                # Create the bar chart
+                fig, ax = plt.subplots(figsize=(14, 7))
+                bars1 = ax.bar(x - width/2, values1, width, label='Nominal Design', color="black")
+                bars2 = ax.bar(x + width/2, values2, width, label='Optimal Design', color='tab:blue')
+                ax.set_xlabel('Tracers')
+                ax.set_ylabel('Num Tracers')
+                ax.set_xticks(x)
+                ax.set_xticklabels(classes.keys())
+                ax.legend()
+                plt.suptitle("Five Tracer Design (LRG1, LRG2, LRG3+ELG1, ELG2, and Lya QSO)", fontsize=16)
+                plt.tight_layout()
+                plt.savefig(f"mlruns/{ml_info.experiment_id}/{ml_info.run_id}/design_comparison.png")
+
+                ############################################### Plot Posterior ###############################################
                 central_vals = num_tracers.central_val if eval(run.data.params["include_D_M"]) else num_tracers.central_val[1::2]
-                optimal_context = torch.cat([optimal_n_ratios, central_vals], dim=-1)
+                optimal_context = torch.cat([nf_optimal_design, central_vals], dim=-1)
                 optimal_samples = posterior_flow(optimal_context).sample((eval_args["post_samples"],)).cpu().numpy()
-
-                nominal_context = torch.cat([nominal_n_ratios, central_vals], dim=-1)
+                if run.data.params["cosmology"] == 'w0wah':
+                    optimal_samples[:, 3] *= 100000
+                nominal_context = torch.cat([nominal_design, central_vals], dim=-1)
                 nominal_samples = posterior_flow(nominal_context).sample((eval_args["post_samples"],)).cpu().numpy()
+                if run.data.params["cosmology"] == 'w0wah':
+                    nominal_samples[:, 3] *= 100000
 
-                #nominal_samples = num_tracers.sample_flow(nominal_n_ratios, posterior_flow).cpu().numpy()
-                #optimal_samples = num_tracers.sample_flow(optimal_n_ratios, posterior_flow).cpu().numpy()
+                #nominal_samples = num_tracers.sample_flow(nominal_design, posterior_flow).cpu().numpy()
+                #optimal_samples = num_tracers.sample_flow(nf_optimal_design, posterior_flow).cpu().numpy()
                 if len(target_labels) == 1:
                     plt.figure()
                     # get min and max of the samples
@@ -332,8 +434,8 @@ def run_eval(eval_args, run_id, exp, **kwargs):
                     plt.hist(nominal_samples, bins=bins, color='tab:blue', alpha=0.5, label='Nominal', density=True)
                     plt.hist(optimal_samples, bins=bins, color='tab:orange', alpha=0.5, label='Optimal', density=True)
                     if eval_args["brute_force"]:
-                        brute_force_nominal_samples = num_tracers.brute_force_posterior(nominal_n_ratios, designer, grid_params, num_param_samples=eval_args["post_samples"]).cpu().numpy()
-                        brute_force_optimal_samples = num_tracers.brute_force_posterior(optimal_n_ratios, designer, grid_params, num_param_samples=eval_args["post_samples"]).cpu().numpy()
+                        brute_force_nominal_samples = num_tracers.brute_force_posterior(nominal_design, designer, grid_params, num_param_samples=eval_args["post_samples"]).cpu().numpy()
+                        brute_force_optimal_samples = num_tracers.brute_force_posterior(bf_optimal_design, designer, grid_params, num_param_samples=eval_args["post_samples"]).cpu().numpy()
                         plt.hist(brute_force_nominal_samples, bins=bins, color='tab:green', alpha=0.5, label='Brute Force', density=True)
                     plt.xlabel(target_labels[0])
                     plt.ylabel("Frequency")
@@ -341,37 +443,43 @@ def run_eval(eval_args, run_id, exp, **kwargs):
                 else:
                     legend_labels = []
                     bins = [30]*len(target_labels)
-                    post_fig = corner.corner(nominal_samples, labels=target_labels, show_titles=False, title_fmt=".2f", 
+                    post_fig = corner.corner(nominal_samples, labels=latex_labels, show_titles=False, title_fmt=".2f", 
                                         title_kwargs={"fontsize": 12}, levels=levels, 
                                         bins=bins, plot_datapoints=False, plot_density=False, smooth=1.0, 
-                                        fill_contours=False, color='tab:blue', range=hist_range)
-                    legend_labels.append(plt.Line2D([0], [0], color="tab:blue", lw=1, label="NF (Nominal)"))
-                    corner.corner(optimal_samples, labels=target_labels, show_titles=False, title_fmt=".2f", 
+                                        fill_contours=False, color='black', range=hist_range)
+                    legend_labels.append(plt.Line2D([0], [0], color="black", lw=1, label="NF (Nominal)"))
+                    corner.corner(optimal_samples, labels=latex_labels, show_titles=False, title_fmt=".2f", 
                                     title_kwargs={"fontsize": 12}, levels=levels, fig=post_fig,
                                     bins=bins, plot_datapoints=False, plot_density=False, smooth=1.0, 
-                                    fill_contours=False, color='tab:orange', range=hist_range)
-                    legend_labels.append(plt.Line2D([0], [0], color="tab:orange", lw=1, label="NF (Optimal)"))
+                                    fill_contours=False, color='tab:blue', range=hist_range)
+                    legend_labels.append(plt.Line2D([0], [0], color="tab:blue", lw=1, label="NF (Optimal)"))
                     if eval_args["brute_force"]:
-                        brute_force_nominal_samples = num_tracers.brute_force_posterior(nominal_n_ratios, designer, grid_params, num_param_samples=eval_args["post_samples"]).cpu().numpy()
-                        brute_force_optimal_samples = num_tracers.brute_force_posterior(optimal_n_ratios, designer, grid_params, num_param_samples=eval_args["post_samples"]).cpu().numpy()
+                        brute_force_nominal_samples = num_tracers.brute_force_posterior(nominal_design, designer, grid_params, num_param_samples=eval_args["post_samples"]).cpu().numpy()
+                        brute_force_optimal_samples = num_tracers.brute_force_posterior(nf_optimal_design, designer, grid_params, num_param_samples=eval_args["post_samples"]).cpu().numpy()
                         #brute_force_samples = num_tracers.sample_brute_force(optimal_brute_force, grid_designs, grid_features, grid_params, designer).cpu().numpy()
-                        corner.corner(brute_force_nominal_samples, labels=target_labels, show_titles=False, title_fmt=".2f", 
+                        corner.corner(brute_force_nominal_samples, labels=latex_labels, show_titles=False, title_fmt=".2f", 
+                                        title_kwargs={"fontsize": 12}, levels=levels, fig=post_fig,
+                                        bins=bins, plot_datapoints=False, plot_density=False, smooth=1.0, 
+                                        fill_contours=False, color='black', range=hist_range, hist_kwargs={"linestyle": 'dashed'}, contour_kwargs={"linestyles": 'dashed'})
+                        legend_labels.append(plt.Line2D([0], [0], color="black", lw=1, label="Brute Force (Nominal)", linestyle='dashed'))
+                        corner.corner(brute_force_optimal_samples, labels=latex_labels, show_titles=False, title_fmt=".2f", 
                                         title_kwargs={"fontsize": 12}, levels=levels, fig=post_fig,
                                         bins=bins, plot_datapoints=False, plot_density=False, smooth=1.0, 
                                         fill_contours=False, color='tab:blue', range=hist_range, hist_kwargs={"linestyle": 'dashed'}, contour_kwargs={"linestyles": 'dashed'})
-                        legend_labels.append(plt.Line2D([0], [0], color="tab:blue", lw=1, label="Brute Force (Nominal)", linestyle='dashed'))
-                        corner.corner(brute_force_optimal_samples, labels=target_labels, show_titles=False, title_fmt=".2f", 
-                                        title_kwargs={"fontsize": 12}, levels=levels, fig=post_fig,
-                                        bins=bins, plot_datapoints=False, plot_density=False, smooth=1.0, 
-                                        fill_contours=False, color='tab:orange', range=hist_range, hist_kwargs={"linestyle": 'dashed'}, contour_kwargs={"linestyles": 'dashed'})
-                        legend_labels.append(plt.Line2D([0], [0], color="tab:orange", lw=1, label="Brute Force (Optimal)", linestyle='dashed'))
+                        legend_labels.append(plt.Line2D([0], [0], color="tab:blue", lw=1, label="Brute Force (Optimal)", linestyle='dashed'))
 
                 plt.legend(handles=legend_labels)
-                plt.savefig(f"mlruns/{exp_id}/{run_id}/posterior.png")
+                plt.savefig(f"mlruns/{exp_id}/{ml_info.run_id}/posterior.png")
 
         plt.close('all')
 
 if __name__ == '__main__':
+
+    device = torch.device("cuda:0") if torch.cuda.is_available() else "cpu"
+    print(f'Using device: {device}.')
+
+    #set default dtype
+    torch.set_default_dtype(torch.float64)
 
     process = psutil.Process(os.getpid())
     # Clear GPU cache
@@ -384,14 +492,15 @@ if __name__ == '__main__':
         "brute_force": False,
         "post_samples": 50000,
         "eval_particles": 4000,
-        "num_evals": 3,
-        "params_grid": 100,
-        "features_grid": 100,
+        "num_evals": 8,
+        "params_grid": 80,
+        "features_grid": 145,
         "mem": 200000,
+        "device": device,
     }
     run_eval(
         eval_args,
-        run_id='c57a5d01fd5e49189b95a09d6e215d16',
+        run_id='ffd32e39dee24b7dbe626803f36c2e6f',
         exp=None,
         )
     mlflow.end_run()

@@ -44,12 +44,6 @@ import gc
 from num_tracers import NumTracers
 from util import *
 
-device = torch.device("cuda:0") if torch.cuda.is_available() else "cpu"
-print(f'Using device: {device}.')
-
-#set default dtype
-torch.set_default_dtype(torch.float64)
-
 def single_run(
     train_args,
     mlflow_experiment_name,
@@ -69,10 +63,13 @@ def single_run(
     ml_info = mlflow.active_run().info
 
     desi_df = pd.read_csv('/home/ashandonay/bed/desi_data.csv')
-    desi_cov = np.load('/home/ashandonay/bed/desi_cov.npy')
+    desi_tracers = pd.read_csv('/home/ashandonay/bed/desi_tracers.csv')
+    nominal_cov = np.load('/home/ashandonay/bed/desi_cov.npy')
     # select only the rows corresponding to the tracers
-    desi_data = desi_df[desi_df['tracer'].isin(train_args["tracers"])]
-    nominal_cov = desi_cov[np.ix_(desi_data.index, desi_data.index)]
+    
+
+    #desi_data = desi_df[desi_df['tracer'].isin(train_args["tracers"])]
+    #nominal_cov = desi_cov[np.ix_(desi_data.index, desi_data.index)]
 
     ############################################### Priors ###############################################
     
@@ -86,6 +83,7 @@ def single_run(
     Om_range = torch.tensor([0.01, 0.99], device=train_args["device"])
     w0_range = torch.tensor([-3.0, 1.0], device=train_args["device"])
     wa_range = torch.tensor([-3.0, 2.0], device=train_args["device"])
+    hrdrag_range = torch.tensor([0.01, 1.0], device=train_args["device"])
 
     if train_args["cosmology"] == 'Om':
         priors = {'Om': dist.Uniform(*Om_range)}
@@ -95,16 +93,21 @@ def single_run(
         #priors = {'Om': dist.Normal(Om_mean, Om_std), 'w0': dist.Normal(w0_mean, w0_std)}
     elif train_args["cosmology"] == 'w0wa':
         priors = {'Om': dist.Uniform(*Om_range), 'w0': dist.Uniform(*w0_range), 'wa': dist.Uniform(*wa_range)}
+    elif train_args["cosmology"] == 'w0wah':
+        priors = {'Om': dist.Uniform(*Om_range), 'w0': dist.Uniform(*w0_range), 'wa': dist.Uniform(*wa_range), 'hrdrag': dist.Uniform(*hrdrag_range)}
 
     observation_labels = ["y"]
+    classes = {"LRG": 0.5, "ELG": 0.5, "QSO": 0.5}
+    mlflow.log_dict(classes, "classes.json")
     target_labels = list(priors.keys())
-    print(f'Cosmology: {train_args["cosmology"]}')
-    print(f'Tracers: {train_args["tracers"]}')
-    print(f'Observation Labels: {observation_labels}')
-    print(f'Target Labels: {target_labels}')
+    print(f"Classes: {classes}\n"
+        f"Cosmology: {train_args['cosmology']}\n"
+        f"Observation labels: {observation_labels}\n"
+        f"Target labels: {target_labels}")
 
     num_tracers = NumTracers(
-        desi_data, 
+        desi_df,
+        desi_tracers,
         nominal_cov,
         priors, 
         observation_labels, 
@@ -115,13 +118,14 @@ def single_run(
 
     ############################################### Designs ###############################################
     designs_dict = {}
-    for i in range(len(train_args["tracers"])):
-        designs_dict['N_' + train_args["tracers"][i].split()[0]] = np.arange(
+    for c, u in classes.items():
+        designs_dict['N_' + c] = np.arange(
             train_args["design_low"], 
-            train_args["design_high"] + train_args["design_step"], 
+            u + train_args["design_step"], 
             train_args["design_step"]
             )
-    grid_designs = Grid(**designs_dict, constraint=lambda **kwargs: sum(kwargs.values()) == 1.0)
+    tol = 1e-3
+    grid_designs = Grid(**designs_dict, constraint=lambda **kwargs: abs(sum(kwargs.values()) - 1.0) < tol)
     del designs_dict
     
     designs = torch.tensor(getattr(grid_designs, grid_designs.names[0]).squeeze(), device=device).unsqueeze(1)
@@ -146,7 +150,7 @@ def single_run(
 
     print("Calculating normalizing flow EIG...")
     input_dim = len(target_labels)
-    context_dim = 3 * len(train_args["tracers"]) if train_args["include_D_M"] else 2 * len(train_args["tracers"])
+    context_dim = len(classes.keys()) + 10 if train_args["include_D_M"] else len(classes.keys()) + 5
     print(f'Input dim: {input_dim}, Context dim: {context_dim}')
     if train_args["flow_type"] == "NSF":
         posterior_flow = zuko.flows.NSF(
@@ -276,8 +280,8 @@ def single_run(
     ax1.set_ylabel("Loss")
     ax1.set_yscale('log')
 
-    nominal_n_ratios = num_tracers.obs_n_ratios/num_tracers.efficiency[::2]
-    print("Nominal ratios:", nominal_n_ratios)
+    nominal_design = torch.tensor(desi_tracers.groupby('class').sum()['observed'].reindex(classes.keys()).values, device=device)
+    print("Nominal design:", nominal_design)
 
     with torch.no_grad():
         agg_loss, eigs = posterior_loss(design=designs,
@@ -293,7 +297,7 @@ def single_run(
     ax2.plot(eigs_bits, label=f'NF step {train_args["steps"]}')
 
     with torch.no_grad():
-        agg_loss, nominal_eig = posterior_loss(design=nominal_n_ratios.unsqueeze(0),
+        agg_loss, nominal_eig = posterior_loss(design=nominal_design.unsqueeze(0),
                                         model=num_tracers.pyro_model,
                                         guide=posterior_flow,
                                         num_particles=train_args["eval_particles"],
@@ -319,6 +323,11 @@ def single_run(
 
 if __name__ == '__main__':
 
+    device = torch.device("cuda:0") if torch.cuda.is_available() else "cpu"
+    print(f'Using device: {device}.')
+    #set default dtype
+    torch.set_default_dtype(torch.float64)
+
     process = psutil.Process(os.getpid())
     # Clear GPU cache
     torch.cuda.empty_cache()
@@ -327,18 +336,17 @@ if __name__ == '__main__':
     print(f"Memory before run: {process.memory_info().rss / 1024**2} MB")
     train_args = {
         "seed": 1,
-        "cosmology": "w0wa", # Om, w, w0wa
-        "tracers": ["LRG1", "LRG2", "LRG3+ELG1", "ELG2", "Lya QSO"],
+        "cosmology": "w0wah", # Om, w, w0wa, w0wah
+        #"tracers": ["LRG1", "LRG2", "LRG3+ELG1", "ELG2", "Lya QSO"],
         "include_D_M": True,
         "flow_type": 'NAF',
-        "design_low": 0.10,
-        "design_high": 0.40,
-        "design_step": 0.05,
-        "n_transforms": 5,
-        "steps": 40000,
+        "design_low": 0.02,
+        "design_step": 0.02,
+        "n_transforms": 8,
+        "steps": 25000,
         "lr": 1e-2,
         "gamma": 0.85,
-        "n_particles": 81,
+        "n_particles": 61,
         "eval_particles": 200,
         "verbose": False, 
         "condition_design": True,
@@ -346,7 +354,7 @@ if __name__ == '__main__':
         }   
     single_run(
         train_args,
-        str(train_args["cosmology"]) + str(len(train_args["tracers"])) + "tracers",
+        str(train_args["cosmology"]),
         signal=8,
         hidden=64,
         eff=True,
