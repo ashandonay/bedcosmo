@@ -52,6 +52,7 @@ def single_run(
 ):
     pyro.clear_param_store()
     seed = auto_seed(train_args["seed"])
+    data_path = train_args["data_path"]
 
     mlflow.set_experiment(mlflow_experiment_name)
     # log params in train_args
@@ -62,9 +63,10 @@ def single_run(
         mlflow.log_param(key, value)
     ml_info = mlflow.active_run().info
 
-    desi_df = pd.read_csv('/home/ashandonay/bed/desi_data.csv')
-    desi_tracers = pd.read_csv('/home/ashandonay/bed/desi_tracers.csv')
-    nominal_cov = np.load('/home/ashandonay/bed/desi_cov.npy')
+    desi_df = pd.read_csv(data_path + 'desi_data.csv')
+    desi_tracers = pd.read_csv(data_path + 'desi_tracers.csv')
+    nominal_cov = np.load(data_path + 'desi_cov.npy')
+    cosmo_model = train_args["cosmo_model"]
     # select only the rows corresponding to the tracers
     
 
@@ -81,39 +83,42 @@ def single_run(
     wa_std = torch.tensor(0.2).to(train_args["device"])
 
     Om_range = torch.tensor([0.01, 0.99], device=train_args["device"])
+    Ok_range = torch.tensor([-0.3, 0.3], device=train_args["device"])
     w0_range = torch.tensor([-3.0, 1.0], device=train_args["device"])
     wa_range = torch.tensor([-3.0, 2.0], device=train_args["device"])
     hrdrag_range = torch.tensor([0.01, 1.0], device=train_args["device"])
 
-    if train_args["cosmology"] == 'Om':
-        priors = {'Om': dist.Uniform(*Om_range)}
-        #priors = {'Om': dist.Normal(Om_mean, Om_std)}
-    elif train_args["cosmology"] == 'w':
-        priors = {'Om': dist.Uniform(*Om_range), 'w0': dist.Uniform(*w0_range)}
-        #priors = {'Om': dist.Normal(Om_mean, Om_std), 'w0': dist.Normal(w0_mean, w0_std)}
-    elif train_args["cosmology"] == 'w0wa':
-        priors = {'Om': dist.Uniform(*Om_range), 'w0': dist.Uniform(*w0_range), 'wa': dist.Uniform(*wa_range)}
-    elif train_args["cosmology"] == 'w0wah':
+    if cosmo_model == 'base':
+        priors = {'Om': dist.Uniform(*Om_range), 'hrdrag': dist.Uniform(*hrdrag_range)}
+    elif cosmo_model == 'base_omegak':
+        priors = {'Om': dist.Uniform(*Om_range), 'Ok': dist.Uniform(*Ok_range), 'hrdrag': dist.Uniform(*hrdrag_range)}
+    elif cosmo_model == 'base_w':
+        priors = {'Om': dist.Uniform(*Om_range), 'w0': dist.Uniform(*w0_range), 'hrdrag': dist.Uniform(*hrdrag_range)}
+    elif cosmo_model == 'base_w_wa':
         priors = {'Om': dist.Uniform(*Om_range), 'w0': dist.Uniform(*w0_range), 'wa': dist.Uniform(*wa_range), 'hrdrag': dist.Uniform(*hrdrag_range)}
 
     observation_labels = ["y"]
-    classes = {"LRG": 0.5, "ELG": 0.5, "QSO": 0.5}
+    total_observations = 6565626
+    #classes = kwargs['classes']
+    classes = (desi_tracers.groupby('class').sum()['targets'].reindex(["LRG", "ELG", "QSO"]) / total_observations).to_dict()
     mlflow.log_dict(classes, "classes.json")
     target_labels = list(priors.keys())
     print(f"Classes: {classes}\n"
-        f"Cosmology: {train_args['cosmology']}\n"
+        f"Cosmology: {cosmo_model}\n"
         f"Observation labels: {observation_labels}\n"
         f"Target labels: {target_labels}")
 
     num_tracers = NumTracers(
         desi_df,
         desi_tracers,
+        priors,
+        cosmo_model,
+        observation_labels,
         nominal_cov,
-        priors, 
-        observation_labels, 
         eff=kwargs["eff"], 
         include_D_M=train_args["include_D_M"], 
-        device=train_args["device"]
+        device=train_args["device"],
+        verbose=True
         )
 
     ############################################### Designs ###############################################
@@ -131,7 +136,6 @@ def single_run(
     designs = torch.tensor(getattr(grid_designs, grid_designs.names[0]).squeeze(), device=device).unsqueeze(1)
     for n in grid_designs.names[1:]:
         designs = torch.cat((designs, torch.tensor(getattr(grid_designs, n).squeeze(), device=device).unsqueeze(1)), dim=1)
-
     print("Designs shape:", designs.shape)
     np.save(f"mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/designs.npy", designs.squeeze().cpu().detach().numpy())
 
@@ -151,64 +155,19 @@ def single_run(
     print("Calculating normalizing flow EIG...")
     input_dim = len(target_labels)
     context_dim = len(classes.keys()) + 10 if train_args["include_D_M"] else len(classes.keys()) + 5
+    n_transforms = train_args["n_transforms"]
+    hidden_features = ((train_args["hidden"],) + (2*train_args["hidden"],) * (train_args["num_layers"] - 1))
     print(f'Input dim: {input_dim}, Context dim: {context_dim}')
-    if train_args["flow_type"] == "NSF":
-        posterior_flow = zuko.flows.NSF(
-            features=input_dim, 
-            context=context_dim, 
-            transforms=train_args["n_transforms"], 
-            bins=10,
-            hidden_features=(kwargs["hidden"], 2*kwargs["hidden"], 2*kwargs["hidden"])
-        ).to(train_args["device"])
-        optimizer = torch.optim.Adam(posterior_flow.parameters(), lr=train_args["lr"])
-    elif train_args["flow_type"] == "NAF":
-        posterior_flow = zuko.flows.NAF(
-            features=input_dim, 
-            context=context_dim, 
-            transforms=train_args["n_transforms"],
-            signal=kwargs["signal"],
-            hidden_features=(kwargs["hidden"], 2*kwargs["hidden"], 2*kwargs["hidden"])
-        ).to(train_args["device"])
-        optimizer = torch.optim.Adam(posterior_flow.parameters(), lr=train_args["lr"])
-    elif train_args["flow_type"] == "MAF":
-        posterior_flow = zuko.flows.MAF(
-            features=input_dim, 
-            context=context_dim, 
-            transforms=train_args["n_transforms"],
-            hidden_features=(kwargs["hidden"], 2*kwargs["hidden"], 2*kwargs["hidden"])
-        ).to(train_args["device"])
-        optimizer = torch.optim.Adam(posterior_flow.parameters(), lr=train_args["lr"])
-    elif train_args["flow_type"] == "MAF_Affine":
-        posterior_flow = zuko.flows.MAF(
-            features=input_dim, 
-            context=context_dim, 
-            transforms=train_args["n_transforms"],
-            univariate=zuko.transforms.MonotonicAffineTransform,
-            hidden_features=(kwargs["hidden"], 2*kwargs["hidden"], 2*kwargs["hidden"])  
-        ).to(train_args["device"])
-        optimizer = torch.optim.Adam(posterior_flow.parameters(), lr=train_args["lr"])
-    elif train_args["flow_type"] == "MAF_RQS":
-        posterior_flow = zuko.flows.MAF(
-            features=input_dim, 
-            context=context_dim, 
-            transforms=train_args["n_transforms"],
-            univariate=zuko.transforms.MonotonicRQSTransform,
-            shapes = ([kwargs["shape"]], [kwargs["shape"]], [kwargs["shape"]-1]),
-            hidden_features=(kwargs["hidden"], 2*kwargs["hidden"], 2*kwargs["hidden"]),  
-        ).to(train_args["device"])
-        optimizer = torch.optim.Adam(posterior_flow.parameters(), lr=train_args["lr"])
-    elif train_args["flow_type"] == "affine_coupling":
-        posterior_flow, transforms = pyro_flows.affine_coupling_flow(train_args["n_transforms"], input_dim, context_dim, [32, 32], train_args["device"])
-        modules = torch.nn.ModuleList(transforms)
-        optimizer = torch.optim.Adam(modules.parameters(), lr=train_args["lr"])
-    elif train_args["flow_type"] == "GF":
-        posterior_flow = zuko.flows.GF(
-            features=input_dim, 
-            context=context_dim, 
-            transforms=train_args["n_transforms"]
-        ).to(train_args["device"])
-        optimizer = torch.optim.Adam(posterior_flow.parameters(), lr=train_args["lr"])
-
+    print(f'Hidden features: {hidden_features}')
+    posterior_flow = init_nf(
+        train_args["flow_type"],
+        input_dim, 
+        context_dim, 
+        n_transforms, 
+        train_args["device"], 
+        hidden_features=hidden_features
+        )
+    optimizer = torch.optim.Adam(posterior_flow.parameters(), lr=train_args["lr"])
     if checkpoint_path is not None:
         # Load the checkpoint
         checkpoint = torch.load(checkpoint_path, map_location=device)
@@ -256,6 +215,7 @@ def single_run(
                                                 target_labels=target_labels,
                                                 evaluation=True,
                                                 nflow=True,
+                                                analytic_prior=False,
                                                 condition_design=train_args["condition_design"])
             eigs_bits = eigs.cpu().detach().numpy()/np.log(2)
             ax2.plot(eigs_bits, label=f'step {step}')
@@ -264,12 +224,11 @@ def single_run(
             mlflow.log_metric("loss", loss.mean().item(), step=step)
             mlflow.log_metric("agg_loss", agg_loss.item(), step=step)
             num_steps_range.set_description("Loss: {:.3f} ".format(loss.mean().item()))
-            # Clear unused variables and cache
-            del agg_loss, loss
-            gc.collect()
-            torch.cuda.empty_cache()
-        if step % 1000 == 0:
+        if step % train_args["gamma_freq"] == 0 and step > 0:
             scheduler.step()
+        if step % 5000 == 0 and step > 0:
+            checkpoint_path = f"mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/nf_checkpoint_{step}.pt"
+            save_checkpoint(posterior_flow, optimizer, checkpoint_path)
 
     stacked_history = torch.stack(history)
     history_array = stacked_history.cpu().detach().numpy()
@@ -292,6 +251,7 @@ def single_run(
                                         target_labels=target_labels,
                                         evaluation=True,
                                         nflow=True,
+                                        analytic_prior=False,
                                         condition_design=train_args["condition_design"])
     eigs_bits = eigs.cpu().detach().numpy()/np.log(2)
     ax2.plot(eigs_bits, label=f'NF step {train_args["steps"]}')
@@ -305,6 +265,7 @@ def single_run(
                                         target_labels=target_labels,
                                         evaluation=True,
                                         nflow=True,
+                                        analytic_prior=False,
                                         condition_design=train_args["condition_design"])
     nominal_eig_bits = nominal_eig.cpu().detach().numpy()/np.log(2)
     ax2.axhline(y=nominal_eig_bits, color='black', linestyle='--', label='Nominal EIG')
@@ -313,7 +274,7 @@ def single_run(
     ax2.legend()
     plt.tight_layout()
     plt.savefig(f"mlruns/{ml_info.experiment_id}/{ml_info.run_id}/training.png")
-    checkpoint_path = f"mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/nf_checkpoint.pt"
+    checkpoint_path = f"mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/nf_checkpoint_last.pt"
     save_checkpoint(posterior_flow, optimizer, checkpoint_path)
 
     plt.close('all')
@@ -322,7 +283,6 @@ def single_run(
 
 
 if __name__ == '__main__':
-
     device = torch.device("cuda:0") if torch.cuda.is_available() else "cpu"
     print(f'Using device: {device}.')
     #set default dtype
@@ -336,17 +296,20 @@ if __name__ == '__main__':
     print(f"Memory before run: {process.memory_info().rss / 1024**2} MB")
     train_args = {
         "seed": 1,
-        "cosmology": "w0wah", # Om, w, w0wa, w0wah
-        #"tracers": ["LRG1", "LRG2", "LRG3+ELG1", "ELG2", "Lya QSO"],
+        "data_path": '/home/ashandonay/data/tracers_v1/',
+        "cosmo_model": 'base_omegak',
         "include_D_M": True,
         "flow_type": 'NAF',
-        "design_low": 0.02,
-        "design_step": 0.02,
-        "n_transforms": 8,
+        "design_low": 0.05,
+        "design_step": 0.05,
+        "n_transforms": 2,
+        "num_layers": 4,
+        "hidden": 16,
         "steps": 25000,
         "lr": 1e-2,
         "gamma": 0.85,
-        "n_particles": 61,
+        "gamma_freq": 500,
+        "n_particles": 100,
         "eval_particles": 200,
         "verbose": False, 
         "condition_design": True,
@@ -354,9 +317,8 @@ if __name__ == '__main__':
         }   
     single_run(
         train_args,
-        str(train_args["cosmology"]),
-        signal=8,
-        hidden=64,
+        f"{train_args['cosmo_model']}_{train_args['flow_type']}",
+        signal=16,
         eff=True,
         )
     mlflow.end_run()

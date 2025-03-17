@@ -1,7 +1,7 @@
 import torch
 import pyro
 import mlflow
-
+import zuko
 
 def auto_seed(seed):
     if seed >= 0:
@@ -32,4 +32,61 @@ def save_checkpoint(model, optimizer, filepath):
     }
     torch.save(checkpoint, filepath)
     mlflow.log_artifact(filepath)  # Logs the checkpoint to mlflow
-    print(f"Checkpoint saved at {filepath}")
+
+def init_nf(flow_type, input_dim, context_dim, n_transforms, device, **kwargs):
+    if flow_type == "NSF":
+        posterior_flow = zuko.flows.NSF(
+            features=input_dim, 
+            context=context_dim, 
+            transforms=n_transforms, 
+            bins=10,
+            **kwargs
+        ).to(device)
+    elif flow_type == "NAF":
+        posterior_flow = zuko.flows.NAF(
+            features=input_dim, 
+            context=context_dim, 
+            transforms=n_transforms,
+            network={**kwargs}
+        ).to(device)
+    elif flow_type == "MAF":
+        posterior_flow = zuko.flows.MAF(
+            features=input_dim, 
+            context=context_dim, 
+            transforms=n_transforms,
+            **kwargs
+        ).to(device)
+    elif flow_type == "MAF_Affine":
+        posterior_flow = zuko.flows.MAF(
+            features=input_dim, 
+            context=context_dim, 
+            transforms=n_transforms,
+            univariate=zuko.transforms.MonotonicAffineTransform,
+            **kwargs
+        ).to(device)
+    elif flow_type == "MAF_RQS":
+        posterior_flow = zuko.flows.MAF(
+            features=input_dim, 
+            context=context_dim, 
+            transforms=n_transforms,
+            univariate=zuko.transforms.MonotonicRQSTransform,
+            shapes = ([kwargs["shape"]], [kwargs["shape"]], [kwargs["shape"]-1]),
+            **kwargs
+        ).to(device)
+    elif flow_type == "NICE":
+        posterior_flow = zuko.flows.NICE(
+            features=input_dim, 
+            context=context_dim, 
+            transforms=n_transforms,
+            **kwargs
+        ).to(device)
+    elif flow_type == "affine_coupling":
+        posterior_flow, transforms = pyro_flows.affine_coupling_flow(n_transforms, input_dim, context_dim, [32, 32], device)
+        modules = torch.nn.ModuleList(transforms)
+    elif flow_type == "GF":
+        posterior_flow = zuko.flows.GF(
+            features=input_dim, 
+            context=context_dim, 
+            transforms=n_transforms
+        ).to(device)
+    return posterior_flow

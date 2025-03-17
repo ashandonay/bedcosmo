@@ -9,5 +9,6 @@ nflows_testing.ipynb
 *.txt
 *.npy
 *.pt
-*/mlruns/*
+**/mlruns
+**/notebooks
 .DS_store

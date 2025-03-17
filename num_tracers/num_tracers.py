@@ -7,16 +7,18 @@ from astropy.cosmology import Planck18
 from astropy import constants
 from scipy.integrate import trapezoid
 from bed.grid import GridStack
+from bed.grid import Grid
+import matplotlib.pyplot as plt
 
 class NumTracers:
 
-    def __init__(self, desi_data, desi_tracers, nominal_cov, priors, obs_labels, device, eff=True, include_D_M=False):
-        self.priors = priors
+    def __init__(self, desi_data, desi_tracers, priors, cosmo_model, obs_labels, nominal_cov, device, eff=True, include_D_M=False, verbose=False):
         self.desi_tracers = desi_tracers
+        self.priors = priors
         self.cosmo_params = set(priors.keys())
+        self.cosmo_model = cosmo_model
         self.obs_labels = obs_labels
         self.rdrag = 149.77
-        self.hrdrag = Planck18.h*self.rdrag
         self.c = constants.c.to('km/s').value
         self.nominal_cov = nominal_cov
         self.corr_matrix = torch.tensor(self.nominal_cov/np.sqrt(np.outer(np.diag(self.nominal_cov), np.diag(self.nominal_cov))), device=device)
@@ -31,91 +33,163 @@ class NumTracers:
         self.sigmas = torch.tensor(desi_data["std"].tolist(), device=device)
         self.central_val = torch.tensor(desi_data["value_at_z"].tolist(), device=device)
         self.z_eff = torch.tensor(desi_data["z"].tolist()[::2], device=device)
-        passed_num = torch.tensor(desi_data["num"].tolist()[::2], device=device)
+        passed_num = torch.tensor(desi_data["passed"].tolist()[::2], device=device)
         # use nominal efficiency to calculate the nominal passed ratio
-        self.nominal_tot = (passed_num/self.efficiency).sum()
+        self.nominal_tot = (desi_data[::2]["observed"]).sum()
         self.nominal_passed_ratio = passed_num/self.nominal_tot
-        print(f"z_eff: {self.z_eff}\n",
-            f"sigmas: {self.sigmas}\n",
-            f"nominal_passed: {self.nominal_passed_ratio}")
+        if verbose:
+            print(f"z_eff: {self.z_eff}\n",
+                f"sigmas: {self.sigmas}\n",
+                f"nominal_passed: {self.nominal_passed_ratio}")
 
     def calc_passed(self, class_ratio):
-        assert class_ratio.shape[-1] == 3, "class_ratio should have 3 columns (LRG, ELG, QSO)"
-        obs_ratio = torch.zeros((class_ratio.shape[0], class_ratio.shape[1], 5), device=self.device)
+        if type(class_ratio) == torch.Tensor:
+            assert class_ratio.shape[-1] == 3, "class_ratio should have 3 columns (LRG, ELG, QSO)"
+            obs_ratio = torch.zeros((class_ratio.shape[0], class_ratio.shape[1], 5), device=self.device)
 
-        LRGs = self.desi_tracers.loc[self.desi_tracers["class"] == "LRG"]["observed"]
-        LRG_dist = class_ratio[..., 0].unsqueeze(-1) * torch.tensor((LRGs / LRGs.sum()).values, device=self.device).unsqueeze(0)
-        obs_ratio[..., 0:2] = LRG_dist[..., 0:2]
-        ELGs = self.desi_tracers.loc[self.desi_tracers["class"] == "ELG"]["observed"]
-        ELG_dist = class_ratio[..., 1].unsqueeze(-1) * torch.tensor((ELGs / ELGs.sum()).values, device=self.device).unsqueeze(0)
-        # add the last value in LRG_dist to the first value in ELG_dist to get LRG3+ELG1
-        obs_ratio[..., 2] = (LRG_dist[..., 2] + ELG_dist[..., 0])
-        obs_ratio[..., 3] = ELG_dist[..., 1]
+            # multiply each class ratio by the observed fraction in each tracer bin
+            LRGs = self.desi_tracers.loc[self.desi_tracers["class"] == "LRG"]["observed"]
+            LRG_dist = class_ratio[..., 0].unsqueeze(-1) * torch.tensor((LRGs / LRGs.sum()).values, device=self.device).unsqueeze(0)
+            obs_ratio[..., 0:2] = LRG_dist[..., 0:2]
+            ELGs = self.desi_tracers.loc[self.desi_tracers["class"] == "ELG"]["observed"]
+            ELG_dist = class_ratio[..., 1].unsqueeze(-1) * torch.tensor((ELGs / ELGs.sum()).values, device=self.device).unsqueeze(0)
+            # add the last value in LRG_dist to the first value in ELG_dist to get LRG3+ELG1
+            obs_ratio[..., 2] = (LRG_dist[..., 2] + ELG_dist[..., 0])
+            obs_ratio[..., 3] = ELG_dist[..., 1]
 
-        QSOs = self.desi_tracers.loc[self.desi_tracers["class"] == "QSO"]["observed"]
-        QSO_dist = class_ratio[..., 2].unsqueeze(-1) * torch.tensor((QSOs / QSOs.sum()).values, device=self.device).unsqueeze(0)
-        obs_ratio[..., 4] = QSO_dist[..., 0]
+            QSOs = self.desi_tracers.loc[self.desi_tracers["class"] == "QSO"]["observed"]
+            QSO_dist = class_ratio[..., 2].unsqueeze(-1) * torch.tensor((QSOs / QSOs.sum()).values, device=self.device).unsqueeze(0)
+            obs_ratio[..., 4] = QSO_dist[..., 0]
 
-        efficiency = torch.stack([
-            torch.tensor(self.desi_tracers.loc[self.desi_tracers["tracer"] == "LRG1", "efficiency"].values[0], device=self.device).expand_as(LRG_dist[..., 0]),
-            torch.tensor(self.desi_tracers.loc[self.desi_tracers["tracer"] == "LRG2", "efficiency"].values[0], device=self.device).expand_as(LRG_dist[..., 1]),
-            (LRG_dist[..., 2] / (LRG_dist[..., 2] + ELG_dist[..., 0])) * self.desi_tracers.loc[self.desi_tracers["tracer"] == "LRG3", "efficiency"].values[0] + (ELG_dist[..., 0] / (LRG_dist[..., 2] + ELG_dist[..., 0])) * self.desi_tracers.loc[self.desi_tracers["tracer"] == "ELG1", "efficiency"].values[0],
-            torch.tensor(self.desi_tracers.loc[self.desi_tracers["tracer"] == "ELG2", "efficiency"].values[0], device=self.device).expand_as(ELG_dist[..., 1]),
-            torch.tensor(self.desi_tracers.loc[self.desi_tracers["tracer"] == "Lya QSO", "efficiency"].values[0], device=self.device).expand_as(QSO_dist[..., 0])
-        ], dim=-1)
+            efficiency = torch.stack([
+                torch.tensor(self.desi_tracers.loc[self.desi_tracers["tracer"] == "LRG1", "efficiency"].values[0], device=self.device).expand_as(LRG_dist[..., 0]),
+                torch.tensor(self.desi_tracers.loc[self.desi_tracers["tracer"] == "LRG2", "efficiency"].values[0], device=self.device).expand_as(LRG_dist[..., 1]),
+                (LRG_dist[..., 2] / (LRG_dist[..., 2] + ELG_dist[..., 0])) * self.desi_tracers.loc[self.desi_tracers["tracer"] == "LRG3", "efficiency"].values[0] + (ELG_dist[..., 0] / (LRG_dist[..., 2] + ELG_dist[..., 0])) * self.desi_tracers.loc[self.desi_tracers["tracer"] == "ELG1", "efficiency"].values[0],
+                torch.tensor(self.desi_tracers.loc[self.desi_tracers["tracer"] == "ELG2", "efficiency"].values[0], device=self.device).expand_as(ELG_dist[..., 1]),
+                torch.tensor(self.desi_tracers.loc[self.desi_tracers["tracer"] == "Lya QSO", "efficiency"].values[0], device=self.device).expand_as(QSO_dist[..., 0])
+            ], dim=-1)
 
-        # scale obs_ratio by efficiency to get the number of passed objects
-        passed_ratio = obs_ratio*efficiency
+            # scale obs_ratio by efficiency to get the number of passed objects
+            passed_ratio = obs_ratio*efficiency
 
-        return passed_ratio
+            return passed_ratio
+        elif type(class_ratio) == Grid:
+            obs_ratio = np.zeros((5,) + len(class_ratio.shape)*(1,))
+            print('obs_ratio', obs_ratio.shape)
 
-    def D_H_func(self, z, Om, w0=None, wa=None, hrdrag=None):
-        if self.cosmo_params == {'Om'}:
-            return (self.c/(100*self.hrdrag)) * 1 / torch.sqrt(Om.cpu() * (1+z.cpu())**3 + (1-Om.cpu())).cpu()
-
-        elif self.cosmo_params == {'Om', 'w0'}:
-            return (self.c/(100*self.hrdrag)) * 1 / torch.sqrt(Om.cpu() * (1+z.cpu())**3 + (1-Om.cpu()) * (1+z.cpu())**(3*(1+w0.cpu()))).cpu()
-
-        elif self.cosmo_params == {'Om', 'w0', 'wa'}:
-            return (self.c/(100*self.hrdrag)) * 1 / torch.sqrt(Om.cpu() * (1+z.cpu())**3 + (1-Om.cpu()) * (1+z.cpu())**(3*(1+(w0.cpu()+wa.cpu()*(z.cpu()/(1+z.cpu())))))).cpu()
-        
-        elif self.cosmo_params == {'Om', 'w0', 'wa', 'hrdrag'}:
-            return (self.c/(100000*hrdrag.cpu())) * 1 / torch.sqrt(Om.cpu() * (1+z.cpu())**3 + (1-Om.cpu()) * (1+z.cpu())**(3*(1+(w0.cpu()+wa.cpu()*(z.cpu()/(1+z.cpu())))))).cpu()
+            LRGs = self.desi_tracers.loc[self.desi_tracers["class"] == "LRG"]["observed"]
+            LRG_dist = (class_ratio.N_LRG * np.array((LRGs / LRGs.sum()).values)).squeeze()
             
-        else:
-            raise ValueError(f"Unsupported cosmology model: {self.cosmo.name}")
+            obs_ratio[0:2, ...] = LRG_dist[0:2]
 
-    def D_M_func(self, z, Om, w0=None, wa=None, hrdrag=None):
-        if self.cosmo_params == {'Om'}:
-            result = (self.c/(100*self.hrdrag)) * trapezoid(
+            ELGs = self.desi_tracers.loc[self.desi_tracers["class"] == "ELG"]["observed"]
+            ELG_dist = (class_ratio.N_ELG * np.array((ELGs / ELGs.sum()).values)).squeeze()
+            obs_ratio[..., 2] = (LRG_dist[..., 2] + ELG_dist[..., 0])
+            obs_ratio[..., 3] = ELG_dist[..., 1]
+
+            QSOs = self.desi_tracers.loc[self.desi_tracers["class"] == "QSO"]["observed"]
+            QSO_dist = (class_ratio.N_QSO * np.array((QSOs / QSOs.sum()).values)).squeeze()
+            obs_ratio[..., 4] = QSO_dist[..., 0]
+
+            efficiency = np.stack([
+                np.array(self.desi_tracers.loc[self.desi_tracers["tracer"] == "LRG1", "efficiency"].values[0]),
+                np.array(self.desi_tracers.loc[self.desi_tracers["tracer"] == "LRG2", "efficiency"].values[0]),
+                (LRG_dist[..., 2] / (LRG_dist[..., 2] + ELG_dist[..., 0])) * self.desi_tracers.loc[self.desi_tracers["tracer"] == "LRG3", "efficiency"].values[0] + (ELG_dist[..., 0] / (LRG_dist[..., 2] + ELG_dist[..., 0])) * self.desi_tracers.loc[self.desi_tracers["tracer"] == "ELG1", "efficiency"].values[0],
+                np.array(self.desi_tracers.loc[self.desi_tracers["tracer"] == "ELG2", "efficiency"].values[0]),
+                np.array(self.desi_tracers.loc[self.desi_tracers["tracer"] == "Lya QSO", "efficiency"].values[0])
+            ], axis=-1)
+
+            print('efficiency', efficiency.shape)
+            passed_ratio = obs_ratio*efficiency
+
+            return passed_ratio
+
+
+    def D_H_func(self, z, Om, Ok=None, w0=None, wa=None, hrdrag=None):
+        """
+        Hubble distance
+        """
+        if self.cosmo_model == 'base':
+            return (self.c/(100000*hrdrag.cpu())) * 1 / torch.sqrt(
+                Om.cpu() * (1+z.cpu())**3 + (1-Om.cpu())).cpu()
+        
+        elif self.cosmo_model == 'base_omegak':
+            return (self.c/(100000*hrdrag.cpu())) * 1 / torch.sqrt(
+                Om.cpu() * (1+z.cpu())**3 + Ok.cpu() * (1+z.cpu())**2 + (1 - Om.cpu() - Ok.cpu())).cpu()
+
+        elif self.cosmo_model == 'base_w':
+            return (self.c/(100000*hrdrag.cpu())) * 1 / torch.sqrt(
+                Om.cpu() * (1+z.cpu())**3 + (1-Om.cpu()) * (1+z.cpu())**(3*(1+w0.cpu()))).cpu()
+        
+        elif self.cosmo_model == 'base_w_wa':
+            return (self.c/(100000*hrdrag.cpu())) * 1 / torch.sqrt(
+                Om.cpu() * (1+z.cpu())**3 + (1 - Om.cpu()) * (1 + z.cpu())**(3 * (1 + w0.cpu() + wa.cpu())) * torch.exp(
+                    -3 * wa.cpu() * (z.cpu() / (1 + z.cpu())))).cpu()
+
+    def D_M_func(self, z, Om, Ok=None, w0=None, wa=None, hrdrag=None):
+        """
+        Transverse comoving distance
+        """
+        if self.cosmo_model == 'base':
+            result = (self.c/(100000*hrdrag.cpu())) * trapezoid(
                 (1 / torch.sqrt(Om.unsqueeze(-1).cpu() * (1 + z.cpu())**3 + (1 - Om.unsqueeze(-1).cpu()))).cpu(), 
                 z.cpu(), 
                 axis=-1)
-            return torch.tensor(result).to(self.device)
+            return result.to(self.device)
 
-        elif self.cosmo_params == {'Om', 'w0'}:
-            result = (self.c/(100*self.hrdrag)) * trapezoid(
+        elif self.cosmo_model == 'base_omegak':
+            # write a piecewise function that calculates the transverse comoving distance using sinh and sin based on the individual samples of Ok
+            output_shape = Om.shape[:2] + (z.shape[2],)
+            result = torch.zeros(output_shape, device=self.device).flatten(0, 1)
+            Ok = Ok.flatten(0, 1)
+            Om = Om.flatten(0, 1)
+            hrdrag = hrdrag.flatten(0, 1)
+            z = z.flatten(0, 1)
+
+
+            neg_mask = Ok.flatten() < 0 # Ok < 0
+            if neg_mask.any():
+                result[neg_mask, :] = ((self.c/(100000*hrdrag[neg_mask].cpu())/torch.sqrt(-Ok[neg_mask].cpu())) * torch.sin(
+                    torch.sqrt(-Ok[neg_mask].cpu()) * trapezoid(
+                        (1 / torch.sqrt(Om[neg_mask].unsqueeze(-1).cpu() * (1 + z.cpu())**3 + Ok[neg_mask].unsqueeze(-1).cpu() * (1 + z.cpu())**2 + (1 - Om[neg_mask].unsqueeze(-1).cpu() - Ok[neg_mask].unsqueeze(-1).cpu()))).cpu(),
+                        z.cpu(),
+                        axis=-1
+                    )
+                )).to(self.device)
+
+            pos_mask = Ok.flatten() > 0 # Ok > 0
+            if pos_mask.any():
+                result[pos_mask, :] = ((self.c/(100000*hrdrag[pos_mask].cpu())/torch.sqrt(Ok[pos_mask].cpu())) * torch.sinh(
+                    torch.sqrt(Ok[pos_mask].cpu()) * trapezoid(
+                        (1 / torch.sqrt(Om[pos_mask].unsqueeze(-1).cpu() * (1 + z.cpu())**3 + Ok[pos_mask].unsqueeze(-1).cpu() * (1 + z.cpu())**2 + (1 - Om[pos_mask].unsqueeze(-1).cpu() - Ok[pos_mask].unsqueeze(-1).cpu()))).cpu(),
+                        z.cpu(),
+                        axis=-1
+                    )
+                )).to(self.device)
+
+            zero_mask = Ok.flatten() == 0 # Ok = 0
+            if zero_mask.any():
+                result[zero_mask, :] = ((self.c/(100000*hrdrag[zero_mask].cpu())) * trapezoid(
+                    (1 / torch.sqrt(Om[zero_mask].unsqueeze(-1).cpu() * (1 + z.cpu())**3 + (1 - Om[zero_mask].unsqueeze(-1).cpu()))).cpu(),
+                    z.cpu(),
+                    axis=-1
+                )).to(self.device)
+
+            return result.reshape(output_shape)
+
+        elif self.cosmo_model == 'base_w':
+            result = (self.c/(100000*hrdrag.cpu())) * trapezoid(
                 (1 / torch.sqrt(Om.unsqueeze(-1).cpu() * (1 + z.cpu())**3 + (1 - Om.unsqueeze(-1).cpu()) * (1 + z.cpu())**(3 * (1 + w0.unsqueeze(-1).cpu())))).cpu(), 
                 z.cpu(), 
                 axis=-1)
-            return torch.tensor(result).to(self.device)
-
-        elif self.cosmo_params == {'Om', 'w0', 'wa'}:
-            result = (self.c/(100*self.hrdrag)) * trapezoid(
-                (1 / torch.sqrt(Om.unsqueeze(-1).cpu() * (1 + z.cpu())**3 + (1 - Om.unsqueeze(-1).cpu()) * (1 + z.cpu())**(3 * (1 + (w0.unsqueeze(-1).cpu() + wa.unsqueeze(-1).cpu() * (z.cpu() / (1 + z.cpu()))))))).cpu(), 
-                z.cpu(), 
-                axis=-1)
-            return torch.tensor(result).to(self.device)
+            return result.to(self.device)
         
-        elif self.cosmo_params == {'Om', 'w0', 'wa', 'hrdrag'}:
+        elif self.cosmo_model == 'base_w_wa':
             result = (self.c/(100000*hrdrag.cpu())) * trapezoid(
-                (1 / torch.sqrt(Om.unsqueeze(-1).cpu() * (1 + z.cpu())**3 + (1 - Om.unsqueeze(-1).cpu()) * (1 + z.cpu())**(3 * (1 + (w0.unsqueeze(-1).cpu() + wa.unsqueeze(-1).cpu() * (z.cpu() / (1 + z.cpu()))))))).cpu(), 
+                (1 / torch.sqrt(Om.unsqueeze(-1).cpu() * (1 + z.cpu())**3 + (1 - Om.unsqueeze(-1).cpu()) * (1 + z.cpu())**(3 * (1 + w0.unsqueeze(-1).cpu() + wa.unsqueeze(-1).cpu())) * torch.exp(-3 * wa.unsqueeze(-1).cpu() * (z.cpu() / (1 + z.cpu()))))).cpu(), 
                 z.cpu(), 
                 axis=-1)
             return result.to(self.device)
-            
-        else:
-            raise ValueError(f"Unsupported cosmology model: {self.cosmo.name}")
 
     def sample_flow(self, tracer_ratio, posterior_flow, num_data_samples=100, num_param_samples=1000):
 
@@ -222,27 +296,73 @@ class NumTracers:
             param_samples.append(param_mesh[tuple(indices[i])])
         return torch.tensor(np.array(param_samples), device=self.device)
 
-    def pyro_model(self, tracer_ratio):
+    def sample_valid_parameters(self, samples_shape):
+        parameters = {}
+        # draw samples from priors with the correct shape
+        for k, v in self.priors.items():
+            if isinstance(v, dist.Distribution):
+                parameters[k] = v.sample((samples_shape[0], samples_shape[1]))  # No unsqueeze
+            else:
+                parameters[k] = v
+        # check constraint (w0 + wa) < 0 and re-sample if necessary
+        if "w0" in parameters and "wa" in parameters:
+            # Compute the constraint for each sample
+            constraint_satisfied = (parameters["w0"] + parameters["wa"]) < 0
+            invalid_indices = ~constraint_satisfied
 
+            # re-sample until all invalid samples are replaced
+
+            while invalid_indices.any():
+                for i in range(invalid_indices.shape[0]):
+                    row_invalid = invalid_indices[i]  # shape: (samples_shape[1],)
+                    invalid_count = row_invalid.sum().item()
+                    if invalid_count > 0:
+                        # replace only the invalid samples in row i
+                        parameters["w0"][i, row_invalid] = self.priors["w0"].sample((invalid_count,))
+                        parameters["wa"][i, row_invalid] = self.priors["wa"].sample((invalid_count,))
+                # re-check the constraint after replacement
+                constraint_satisfied = (parameters["w0"] + parameters["wa"]) < 0
+                invalid_indices = ~constraint_satisfied
+        
+        if "Ok" in parameters:
+            # Compute the constraint for each sample
+            constraint_satisfied = ((parameters["Om"] + parameters["Ok"]) < 1) & ((parameters["Om"] + parameters["Ok"]) > 0)
+            invalid_indices = ~constraint_satisfied
+
+            # re-sample until all invalid samples are replaced
+
+            while invalid_indices.any():
+                for i in range(invalid_indices.shape[0]):
+                    row_invalid = invalid_indices[i]
+                    invalid_count = row_invalid.sum().item()
+                    if invalid_count > 0:
+                        parameters["Om"][i, row_invalid] = self.priors["Om"].sample((invalid_count,))
+                        parameters["Ok"][i, row_invalid] = self.priors["Ok"].sample((invalid_count,))
+                constraint_satisfied = ((parameters["Om"] + parameters["Ok"]) < 1) & ((parameters["Om"] + parameters["Ok"]) > 0)
+                invalid_indices = ~constraint_satisfied
+
+        return parameters
+
+    def pyro_model(self, tracer_ratio):
         passed_ratio = self.calc_passed(tracer_ratio)
+        constrained_parameters = self.sample_valid_parameters(passed_ratio.shape[:-1])
         with pyro.plate_stack("plate", passed_ratio.shape[:-1]):
+            # register samples in the trace using pyro.sample
             parameters = {}
-            for i, (k, v) in enumerate(self.priors.items()):
-                if isinstance(v, dist.Distribution):
-                    parameters[k] = pyro.sample(k, v).unsqueeze(-1)
-                else:
-                    parameters[k] = v
+            for k, v in constrained_parameters.items():
+                # use dist.Delta to fix the value of each parameter
+                parameters[k] = pyro.sample(k, dist.Delta(v)).unsqueeze(-1)
             means = torch.zeros(passed_ratio.shape[:-1] + (self.sigmas.shape[-1],), device=self.device)
             rescaled_sigmas = torch.zeros(passed_ratio.shape[:-1] + (self.sigmas.shape[-1],), device=self.device)
 
             z = self.z_eff.reshape(2*[1] + [-1])
             means[:, :, 1::2] = self.D_H_func(z, **parameters)
-            rescaled_sigmas[:, :, 1::2] = self.sigmas[1::2] * torch.sqrt(passed_ratio/self.nominal_passed_ratio)
+            rescaled_sigmas[:, :, 1::2] = self.sigmas[1::2] * torch.sqrt(self.nominal_passed_ratio/passed_ratio)
             if self.include_D_M:
                 z_array = self.z_eff.unsqueeze(-1) * torch.linspace(0, 1, 100, device=self.device).view(1, -1)
                 z = z_array.expand(2*[1] + [-1, -1])
                 means[:, :, ::2] = self.D_M_func(z, **parameters).cpu()
-                rescaled_sigmas[:, :, ::2] = self.sigmas[::2] * torch.sqrt(passed_ratio/self.nominal_passed_ratio)
+                rescaled_sigmas[:, :, ::2] = self.sigmas[::2] * torch.sqrt(self.nominal_passed_ratio/passed_ratio)
 
             # extract correlation matrix from DESI covariance matrix
             if self.include_D_M:
@@ -261,11 +381,16 @@ class NumTracers:
         for key in params.names:
             parameters[key] = torch.tensor(getattr(params, key), device=self.device)
         likelihood = 1
+        print(designs.shape)
+        passed_ratio = self.calc_passed(designs)
+        print(passed_ratio.shape)
+        print(self.nominal_passed_ratio[0].cpu().numpy())
         for i in range(len(self.z_eff)):
             z = self.z_eff[i].reshape((len(self.cosmo_params)-1)*[1] + [-1])
             D_H_mean = self.D_H_func(z, **parameters)
             D_H_diff = getattr(features, features.names[i]) - D_H_mean.cpu().numpy()
-            D_H_sigma = self.sigmas[1::2].cpu().numpy()[i] * np.sqrt((self.efficiency[1::2].cpu().numpy()[i]*getattr(designs, designs.names[i]))/self.nominal_passed_ratio[i].cpu().numpy())
+            print(getattr(designs, designs.names[i]).shape)
+            D_H_sigma = self.sigmas[1::2].cpu().numpy()[i] * np.sqrt(self.nominal_passed_ratio[i].cpu().numpy()/passed_ratio[i])
             likelihood = np.exp(-0.5 * (D_H_diff / D_H_sigma) ** 2) * likelihood
             
             if self.include_D_M:
@@ -273,7 +398,7 @@ class NumTracers:
                 z = z_array.expand((len(self.cosmo_params)-1)*[1] + [-1, -1])
                 D_M_mean = self.D_M_func(z, **parameters)
                 D_M_diff = getattr(features, features.names[i+len(self.z_eff)]) - D_M_mean.cpu().numpy()
-                D_M_sigma = self.sigmas[::2].cpu().numpy()[i] * np.sqrt((self.efficiency[::2].cpu().numpy()[i]*getattr(designs, designs.names[i]))/self.nominal_passed_ratio[i].cpu().numpy())
+                D_M_sigma = self.sigmas[::2].cpu().numpy()[i] * np.sqrt(self.nominal_passed_ratio[i].cpu().numpy()/passed_ratio[i])
                 likelihood = np.exp(-0.5 * (D_M_diff / D_M_sigma) ** 2) * likelihood
 
         return likelihood
