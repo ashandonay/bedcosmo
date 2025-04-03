@@ -8,22 +8,21 @@ from astropy import constants
 from scipy.integrate import trapezoid
 from bed.grid import GridStack
 from bed.grid import Grid
-import matplotlib.pyplot as plt
 
 class NumTracers:
 
-    def __init__(self, desi_data, desi_tracers, priors, cosmo_model, obs_labels, nominal_cov, device, eff=True, include_D_M=False, verbose=False):
+    def __init__(self, desi_data, desi_tracers, cosmo_model, nominal_cov, device="cuda:0", eff=True, include_D_M=False, verbose=False):
         self.desi_tracers = desi_tracers
-        self.priors = priors
-        self.cosmo_params = set(priors.keys())
         self.cosmo_model = cosmo_model
-        self.obs_labels = obs_labels
+        self.nominal_cov = nominal_cov
+        self.device = device
+        self.get_priors() # initialize the priors
+        self.cosmo_params = set(self.priors.keys())
         self.rdrag = 149.77
         self.c = constants.c.to('km/s').value
-        self.nominal_cov = nominal_cov
         self.corr_matrix = torch.tensor(self.nominal_cov/np.sqrt(np.outer(np.diag(self.nominal_cov), np.diag(self.nominal_cov))), device=device)
         self.include_D_M = include_D_M
-        self.device = device
+
 
         if eff:
             self.efficiency = torch.tensor(desi_data["efficiency"].tolist()[::2], device=device)
@@ -42,6 +41,30 @@ class NumTracers:
                 f"sigmas: {self.sigmas}\n",
                 f"nominal_passed: {self.nominal_passed_ratio}")
 
+
+    def get_priors(self):
+        Om_range = torch.tensor([0.01, 0.99], device=self.device)
+        Ok_range = torch.tensor([-0.3, 0.3], device=self.device)
+        w0_range = torch.tensor([-3.0, 1.0], device=self.device)
+        wa_range = torch.tensor([-3.0, 2.0], device=self.device)
+        hrdrag_range = torch.tensor([0.01, 1.0], device=self.device)
+
+        if self.cosmo_model == 'base':
+            self.priors = {'Om': dist.Uniform(*Om_range), 'hrdrag': dist.Uniform(*hrdrag_range)}
+            self.latex_labels = ['\Omega_m', 'H_0r_d']
+        elif self.cosmo_model == 'base_omegak':
+            self.priors = {'Om': dist.Uniform(*Om_range), 'Ok': dist.Uniform(*Ok_range), 'hrdrag': dist.Uniform(*hrdrag_range)}
+            self.latex_labels = ['\Omega_m', '\Omega_k', 'H_0r_d']
+        elif self.cosmo_model == 'base_w':
+            self.priors = {'Om': dist.Uniform(*Om_range), 'w0': dist.Uniform(*w0_range), 'hrdrag': dist.Uniform(*hrdrag_range)}
+            self.latex_labels = ['\Omega_m', 'w_0', 'H_0r_d']
+        elif self.cosmo_model == 'base_w_wa':
+            self.priors = {'Om': dist.Uniform(*Om_range), 'w0': dist.Uniform(*w0_range), 'wa': dist.Uniform(*wa_range), 'hrdrag': dist.Uniform(*hrdrag_range)}
+            self.latex_labels = ['\Omega_m', 'w_0', 'w_a', 'H_0r_d']
+        elif self.cosmo_model == 'base_omegak_w_wa':
+            self.priors = {'Om': dist.Uniform(*Om_range), 'Ok': dist.Uniform(*Ok_range), 'w0': dist.Uniform(*w0_range), 'wa': dist.Uniform(*wa_range), 'hrdrag': dist.Uniform(*hrdrag_range)}
+            self.latex_labels = ['\Omega_m', '\Omega_k', 'w_0', 'w_a', 'H_0r_d']
+            
     def calc_passed(self, class_ratio):
         if type(class_ratio) == torch.Tensor:
             assert class_ratio.shape[-1] == 3, "class_ratio should have 3 columns (LRG, ELG, QSO)"
@@ -111,47 +134,69 @@ class NumTracers:
         """
         if self.cosmo_model == 'base':
             return (self.c/(100000*hrdrag.cpu())) * 1 / torch.sqrt(
-                Om.cpu() * (1+z.cpu())**3 + (1-Om.cpu())).cpu()
+                Om.cpu() * (1+z.cpu())**3 + 
+                (1-Om.cpu())
+                ).cpu()
         
         elif self.cosmo_model == 'base_omegak':
             return (self.c/(100000*hrdrag.cpu())) * 1 / torch.sqrt(
-                Om.cpu() * (1+z.cpu())**3 + Ok.cpu() * (1+z.cpu())**2 + (1 - Om.cpu() - Ok.cpu())).cpu()
+                Om.cpu() * (1+z.cpu())**3 + 
+                Ok.cpu() * (1+z.cpu())**2 + 
+                (1 - Om.cpu() - Ok.cpu())
+                ).cpu()
 
         elif self.cosmo_model == 'base_w':
             return (self.c/(100000*hrdrag.cpu())) * 1 / torch.sqrt(
-                Om.cpu() * (1+z.cpu())**3 + (1-Om.cpu()) * (1+z.cpu())**(3*(1+w0.cpu()))).cpu()
+                Om.cpu() * (1+z.cpu())**3 + 
+                (1-Om.cpu()) * (1+z.cpu())**(3*(1+w0.cpu()))
+                ).cpu()
         
         elif self.cosmo_model == 'base_w_wa':
             return (self.c/(100000*hrdrag.cpu())) * 1 / torch.sqrt(
-                Om.cpu() * (1+z.cpu())**3 + (1 - Om.cpu()) * (1 + z.cpu())**(3 * (1 + w0.cpu() + wa.cpu())) * torch.exp(
-                    -3 * wa.cpu() * (z.cpu() / (1 + z.cpu())))).cpu()
+                Om.cpu() * (1+z.cpu())**3 + 
+                (1 - Om.cpu()) * (1 + z.cpu())**(3 * (1 + w0.cpu() + wa.cpu())) * torch.exp(-3 * wa.cpu() * (z.cpu() / (1 + z.cpu())))
+                ).cpu()
+        
+        elif self.cosmo_model == 'base_omegak_w_wa':
+            return (self.c/(100000*hrdrag.cpu())) * 1 / torch.sqrt(
+                Om.cpu() * (1+z.cpu())**3 + Ok.cpu() * (1+z.cpu())**2 + 
+                (1 - Om.cpu() - Ok.cpu()) * (1 + z.cpu())**(3 * (1 + w0.cpu() + wa.cpu())) * torch.exp(-3 * wa.cpu() * (z.cpu() / (1 + z.cpu())))
+                ).cpu()
 
     def D_M_func(self, z, Om, Ok=None, w0=None, wa=None, hrdrag=None):
         """
         Transverse comoving distance
         """
         if self.cosmo_model == 'base':
+            # calculates the transverse comoving distance for a lambdaCDM cosmology 
             result = (self.c/(100000*hrdrag.cpu())) * trapezoid(
-                (1 / torch.sqrt(Om.unsqueeze(-1).cpu() * (1 + z.cpu())**3 + (1 - Om.unsqueeze(-1).cpu()))).cpu(), 
+                (1 / torch.sqrt(
+                    Om.unsqueeze(-1).cpu() * (1 + z.cpu())**3 + 
+                    (1 - Om.unsqueeze(-1).cpu())
+                    )).cpu(), 
                 z.cpu(), 
                 axis=-1)
             return result.to(self.device)
 
         elif self.cosmo_model == 'base_omegak':
-            # write a piecewise function that calculates the transverse comoving distance using sinh and sin based on the individual samples of Ok
+            # piecewise function that calculates the transverse comoving distance for a constant dark energy density cosmology 
+            # using sinh and sin based on the samples of Ok
             output_shape = Om.shape[:2] + (z.shape[2],)
             result = torch.zeros(output_shape, device=self.device).flatten(0, 1)
-            Ok = Ok.flatten(0, 1)
             Om = Om.flatten(0, 1)
+            Ok = Ok.flatten(0, 1)
             hrdrag = hrdrag.flatten(0, 1)
             z = z.flatten(0, 1)
-
 
             neg_mask = Ok.flatten() < 0 # Ok < 0
             if neg_mask.any():
                 result[neg_mask, :] = ((self.c/(100000*hrdrag[neg_mask].cpu())/torch.sqrt(-Ok[neg_mask].cpu())) * torch.sin(
                     torch.sqrt(-Ok[neg_mask].cpu()) * trapezoid(
-                        (1 / torch.sqrt(Om[neg_mask].unsqueeze(-1).cpu() * (1 + z.cpu())**3 + Ok[neg_mask].unsqueeze(-1).cpu() * (1 + z.cpu())**2 + (1 - Om[neg_mask].unsqueeze(-1).cpu() - Ok[neg_mask].unsqueeze(-1).cpu()))).cpu(),
+                        (1 / torch.sqrt(
+                            Om[neg_mask].unsqueeze(-1).cpu() * (1 + z.cpu())**3 + 
+                            Ok[neg_mask].unsqueeze(-1).cpu() * (1 + z.cpu())**2 + 
+                            (1 - Om[neg_mask].unsqueeze(-1).cpu() - Ok[neg_mask].unsqueeze(-1).cpu())
+                        )).cpu(),
                         z.cpu(),
                         axis=-1
                     )
@@ -161,7 +206,11 @@ class NumTracers:
             if pos_mask.any():
                 result[pos_mask, :] = ((self.c/(100000*hrdrag[pos_mask].cpu())/torch.sqrt(Ok[pos_mask].cpu())) * torch.sinh(
                     torch.sqrt(Ok[pos_mask].cpu()) * trapezoid(
-                        (1 / torch.sqrt(Om[pos_mask].unsqueeze(-1).cpu() * (1 + z.cpu())**3 + Ok[pos_mask].unsqueeze(-1).cpu() * (1 + z.cpu())**2 + (1 - Om[pos_mask].unsqueeze(-1).cpu() - Ok[pos_mask].unsqueeze(-1).cpu()))).cpu(),
+                        (1 / torch.sqrt(
+                            Om[pos_mask].unsqueeze(-1).cpu() * (1 + z.cpu())**3 + 
+                            Ok[pos_mask].unsqueeze(-1).cpu() * (1 + z.cpu())**2 + 
+                            (1 - Om[pos_mask].unsqueeze(-1).cpu() - Ok[pos_mask].unsqueeze(-1).cpu())
+                        )).cpu(),
                         z.cpu(),
                         axis=-1
                     )
@@ -170,7 +219,10 @@ class NumTracers:
             zero_mask = Ok.flatten() == 0 # Ok = 0
             if zero_mask.any():
                 result[zero_mask, :] = ((self.c/(100000*hrdrag[zero_mask].cpu())) * trapezoid(
-                    (1 / torch.sqrt(Om[zero_mask].unsqueeze(-1).cpu() * (1 + z.cpu())**3 + (1 - Om[zero_mask].unsqueeze(-1).cpu()))).cpu(),
+                    (1 / torch.sqrt(
+                        Om[zero_mask].unsqueeze(-1).cpu() * (1 + z.cpu())**3 + 
+                        (1 - Om[zero_mask].unsqueeze(-1).cpu())
+                    )).cpu(),
                     z.cpu(),
                     axis=-1
                 )).to(self.device)
@@ -179,17 +231,84 @@ class NumTracers:
 
         elif self.cosmo_model == 'base_w':
             result = (self.c/(100000*hrdrag.cpu())) * trapezoid(
-                (1 / torch.sqrt(Om.unsqueeze(-1).cpu() * (1 + z.cpu())**3 + (1 - Om.unsqueeze(-1).cpu()) * (1 + z.cpu())**(3 * (1 + w0.unsqueeze(-1).cpu())))).cpu(), 
+                (1 / torch.sqrt(
+                    Om.unsqueeze(-1).cpu() * (1 + z.cpu())**3 + 
+                    (1 - Om.unsqueeze(-1).cpu()) * (1 + z.cpu())**(3 * (1 + w0.unsqueeze(-1).cpu()))
+                )).cpu(), 
                 z.cpu(), 
                 axis=-1)
             return result.to(self.device)
         
         elif self.cosmo_model == 'base_w_wa':
             result = (self.c/(100000*hrdrag.cpu())) * trapezoid(
-                (1 / torch.sqrt(Om.unsqueeze(-1).cpu() * (1 + z.cpu())**3 + (1 - Om.unsqueeze(-1).cpu()) * (1 + z.cpu())**(3 * (1 + w0.unsqueeze(-1).cpu() + wa.unsqueeze(-1).cpu())) * torch.exp(-3 * wa.unsqueeze(-1).cpu() * (z.cpu() / (1 + z.cpu()))))).cpu(), 
+                (1 / torch.sqrt(
+                    Om.unsqueeze(-1).cpu() * (1 + z.cpu())**3 + 
+                    (1 - Om.unsqueeze(-1).cpu()) * (1 + z.cpu())**(3 * (1 + w0.unsqueeze(-1).cpu() + wa.unsqueeze(-1).cpu())) * 
+                    torch.exp(-3 * wa.unsqueeze(-1).cpu() * (z.cpu() / (1 + z.cpu())))
+                    )).cpu(), 
                 z.cpu(), 
                 axis=-1)
             return result.to(self.device)
+        
+        elif self.cosmo_model == 'base_omegak_w_wa':
+            # piecewise function that calculates the transverse comoving distance for a w0 and wa cosmology 
+            # using sinh and sin based on the samples of Ok 
+            output_shape = Om.shape[:2] + (z.shape[2],)
+            result = torch.zeros(output_shape, device=self.device).flatten(0, 1)
+            Om = Om.flatten(0, 1)
+            Ok = Ok.flatten(0, 1)
+            w0 = w0.flatten(0, 1)
+            wa = wa.flatten(0, 1)
+            hrdrag = hrdrag.flatten(0, 1)
+            z = z.flatten(0, 1)
+
+            neg_mask = Ok.flatten() < 0 # Ok < 0
+            if neg_mask.any():
+                result[neg_mask, :] = ((self.c/(100000*hrdrag[neg_mask].cpu())/torch.sqrt(-Ok[neg_mask].cpu())) * torch.sin(
+                    torch.sqrt(-Ok[neg_mask].cpu()) * trapezoid(
+                        (1 / torch.sqrt(
+                            Om[neg_mask].unsqueeze(-1).cpu() * (1 + z.cpu())**3 + 
+                            Ok[neg_mask].unsqueeze(-1).cpu() * (1 + z.cpu())**2 + 
+                            (1 - Om[neg_mask].unsqueeze(-1).cpu() - Ok[neg_mask].unsqueeze(-1).cpu()) * 
+                            (1 + z.cpu())**(3 * (1 + w0[neg_mask].unsqueeze(-1).cpu() + wa[neg_mask].unsqueeze(-1).cpu())) * 
+                            torch.exp(-3 * wa[neg_mask].unsqueeze(-1).cpu() * (z.cpu() / (1 + z.cpu())))
+                        )).cpu(),
+                        z.cpu(),
+                        axis=-1
+                    )
+                )).to(self.device)
+
+            pos_mask = Ok.flatten() > 0 # Ok > 0
+            if pos_mask.any():
+                result[pos_mask, :] = ((self.c/(100000*hrdrag[pos_mask].cpu())/torch.sqrt(Ok[pos_mask].cpu())) * torch.sinh(
+                    torch.sqrt(Ok[pos_mask].cpu()) * trapezoid(
+                        (1 / torch.sqrt(
+                            Om[pos_mask].unsqueeze(-1).cpu() * (1 + z.cpu())**3 + 
+                            Ok[pos_mask].unsqueeze(-1).cpu() * (1 + z.cpu())**2 + 
+                            (1 - Om[pos_mask].unsqueeze(-1).cpu() - Ok[pos_mask].unsqueeze(-1).cpu()) * 
+                            (1 + z.cpu())**(3 * (1 + w0[pos_mask].unsqueeze(-1).cpu() + wa[pos_mask].unsqueeze(-1).cpu())) * 
+                            torch.exp(-3 * wa[pos_mask].unsqueeze(-1).cpu() * (z.cpu() / (1 + z.cpu())))
+                        )).cpu(),
+                        z.cpu(),
+                        axis=-1
+                    )
+                )).to(self.device)
+
+            zero_mask = Ok.flatten() == 0 # Ok = 0
+            if zero_mask.any():
+                result[zero_mask, :] = ((self.c/(100000*hrdrag[zero_mask].cpu())) * trapezoid(
+                    (1 / torch.sqrt(
+                        Om[zero_mask].unsqueeze(-1).cpu() * (1 + z.cpu())**3 + 
+                        (1 - Om[zero_mask].unsqueeze(-1).cpu()) *
+                        (1 + z.cpu())**(3 * (1 + w0[zero_mask].unsqueeze(-1).cpu() + wa[zero_mask].unsqueeze(-1).cpu())) * 
+                        torch.exp(-3 * wa[zero_mask].unsqueeze(-1).cpu() * (z.cpu() / (1 + z.cpu())))
+                    )).cpu(),
+                    z.cpu(),
+                    axis=-1
+                )).to(self.device)
+
+            return result.reshape(output_shape)
+
 
     def sample_flow(self, tracer_ratio, posterior_flow, num_data_samples=100, num_param_samples=1000):
 
@@ -311,7 +430,6 @@ class NumTracers:
             invalid_indices = ~constraint_satisfied
 
             # re-sample until all invalid samples are replaced
-
             while invalid_indices.any():
                 for i in range(invalid_indices.shape[0]):
                     row_invalid = invalid_indices[i]  # shape: (samples_shape[1],)
@@ -330,7 +448,6 @@ class NumTracers:
             invalid_indices = ~constraint_satisfied
 
             # re-sample until all invalid samples are replaced
-
             while invalid_indices.any():
                 for i in range(invalid_indices.shape[0]):
                     row_invalid = invalid_indices[i]

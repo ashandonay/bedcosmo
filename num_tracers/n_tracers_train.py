@@ -43,18 +43,28 @@ import os
 import gc
 from num_tracers import NumTracers
 from util import *
+import json
 
 def single_run(
+    cosmo_model,
     train_args,
     mlflow_experiment_name,
+    device="cuda:0",
     checkpoint_path=None,
     **kwargs,
 ):
+    
+    # Clear GPU cache
+    torch.cuda.empty_cache()
+    # Trigger garbage collection for CPU
+    gc.collect()
+    print(f"Memory before run: {process.memory_info().rss / 1024**2} MB")
     pyro.clear_param_store()
-    seed = auto_seed(train_args["seed"])
+
     data_path = train_args["data_path"]
 
     mlflow.set_experiment(mlflow_experiment_name)
+    mlflow.log_param("cosmo_model", cosmo_model)
     # log params in train_args
     for key, value in train_args.items():
         mlflow.log_param(key, value)
@@ -66,7 +76,6 @@ def single_run(
     desi_df = pd.read_csv(data_path + 'desi_data.csv')
     desi_tracers = pd.read_csv(data_path + 'desi_tracers.csv')
     nominal_cov = np.load(data_path + 'desi_cov.npy')
-    cosmo_model = train_args["cosmo_model"]
     # select only the rows corresponding to the tracers
     
 
@@ -74,78 +83,80 @@ def single_run(
     #nominal_cov = desi_cov[np.ix_(desi_data.index, desi_data.index)]
 
     ############################################### Priors ###############################################
-    
-    Om_mean = torch.tensor(Planck18.Om0).to(train_args["device"])
-    Om_std = torch.tensor(0.01).to(train_args["device"])
-    w0_mean = torch.tensor(-1.0).to(train_args["device"])
-    w0_std = torch.tensor(0.2).to(train_args["device"])
-    wa_mean = torch.tensor(0.0).to(train_args["device"])
-    wa_std = torch.tensor(0.2).to(train_args["device"])
 
-    Om_range = torch.tensor([0.01, 0.99], device=train_args["device"])
-    Ok_range = torch.tensor([-0.3, 0.3], device=train_args["device"])
-    w0_range = torch.tensor([-3.0, 1.0], device=train_args["device"])
-    wa_range = torch.tensor([-3.0, 2.0], device=train_args["device"])
-    hrdrag_range = torch.tensor([0.01, 1.0], device=train_args["device"])
-
-    if cosmo_model == 'base':
-        priors = {'Om': dist.Uniform(*Om_range), 'hrdrag': dist.Uniform(*hrdrag_range)}
-    elif cosmo_model == 'base_omegak':
-        priors = {'Om': dist.Uniform(*Om_range), 'Ok': dist.Uniform(*Ok_range), 'hrdrag': dist.Uniform(*hrdrag_range)}
-    elif cosmo_model == 'base_w':
-        priors = {'Om': dist.Uniform(*Om_range), 'w0': dist.Uniform(*w0_range), 'hrdrag': dist.Uniform(*hrdrag_range)}
-    elif cosmo_model == 'base_w_wa':
-        priors = {'Om': dist.Uniform(*Om_range), 'w0': dist.Uniform(*w0_range), 'wa': dist.Uniform(*wa_range), 'hrdrag': dist.Uniform(*hrdrag_range)}
-
-    observation_labels = ["y"]
     total_observations = 6565626
     #classes = kwargs['classes']
     classes = (desi_tracers.groupby('class').sum()['targets'].reindex(["LRG", "ELG", "QSO"]) / total_observations).to_dict()
     mlflow.log_dict(classes, "classes.json")
-    target_labels = list(priors.keys())
-    print(f"Classes: {classes}\n"
-        f"Cosmology: {cosmo_model}\n"
-        f"Observation labels: {observation_labels}\n"
-        f"Target labels: {target_labels}")
 
     num_tracers = NumTracers(
         desi_df,
         desi_tracers,
-        priors,
         cosmo_model,
-        observation_labels,
         nominal_cov,
         eff=kwargs["eff"], 
         include_D_M=train_args["include_D_M"], 
-        device=train_args["device"],
+        device=device,
         verbose=True
         )
+    
+    target_labels = list(num_tracers.cosmo_params)
+    print(f"Classes: {classes}\n"
+        f"Cosmology: {cosmo_model}\n"
+        f"Target labels: {target_labels}")
 
     ############################################### Designs ###############################################
-    designs_dict = {}
-    for c, u in classes.items():
-        designs_dict['N_' + c] = np.arange(
-            train_args["design_low"], 
-            u + train_args["design_step"], 
-            train_args["design_step"]
-            )
-    tol = 1e-3
-    grid_designs = Grid(**designs_dict, constraint=lambda **kwargs: abs(sum(kwargs.values()) - 1.0) < tol)
-    del designs_dict
-    
-    designs = torch.tensor(getattr(grid_designs, grid_designs.names[0]).squeeze(), device=device).unsqueeze(1)
-    for n in grid_designs.names[1:]:
-        designs = torch.cat((designs, torch.tensor(getattr(grid_designs, n).squeeze(), device=device).unsqueeze(1)), dim=1)
+    # if fixed design:
+    if kwargs["fixed_design"]:
+        # Get nominal design from observed tracer counts
+        nominal_design = torch.tensor(desi_tracers.groupby('class').sum()['observed'].reindex(classes.keys()).values, device=device)
+        
+        # Create grid with nominal design values
+        grid_designs = Grid(
+            N_LRG=nominal_design[0].cpu().numpy(), 
+            N_ELG=nominal_design[1].cpu().numpy(), 
+            N_QSO=nominal_design[2].cpu().numpy()
+        )
+
+        # Convert grid to tensor format
+        designs = torch.tensor(getattr(grid_designs, grid_designs.names[0]).squeeze(), device=device).unsqueeze(0)
+        for name in grid_designs.names[1:]:
+            design_tensor = torch.tensor(getattr(grid_designs, name).squeeze(), device=device).unsqueeze(0)
+            designs = torch.cat((designs, design_tensor), dim=0)
+        designs = designs.unsqueeze(0)
+
+    else:
+        # Create design grid with specified step size
+        designs_dict = {
+            f'N_{class_name}': np.arange(
+                train_args["design_low"],
+                class_frac + train_args["design_step"], 
+                train_args["design_step"]
+            ) for class_name, class_frac in classes.items()
+        }
+
+        # Create constrained grid ensuring designs sum to 1
+        tol = 1e-3
+        grid_designs = Grid(
+            **designs_dict, 
+            constraint=lambda **kwargs: abs(sum(kwargs.values()) - 1.0) < tol
+        )
+
+        # Convert to tensor format
+        designs = torch.tensor(getattr(grid_designs, grid_designs.names[0]).squeeze(), device=device).unsqueeze(1)
+        for name in grid_designs.names[1:]:
+            design_tensor = torch.tensor(getattr(grid_designs, name).squeeze(), device=device).unsqueeze(1)
+            designs = torch.cat((designs, design_tensor), dim=1)
     print("Designs shape:", designs.shape)
     np.save(f"mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/designs.npy", designs.squeeze().cpu().detach().numpy())
 
-    fig, axs = plt.subplots(ncols=len(priors.keys()), nrows=1, figsize=(5*len(priors.keys()), 5))
-    if len(priors.keys()) == 1:
+    fig, axs = plt.subplots(ncols=len(target_labels), nrows=1, figsize=(5*len(target_labels), 5))
+    if len(target_labels) == 1:
         axs = [axs]
-    for i, p in enumerate(priors.keys()):
-        support = priors[p].support
+    for i, p in enumerate(target_labels):
+        support = num_tracers.priors[p].support
         eval_pts = torch.linspace(support.lower_bound, support.upper_bound, 200, device=device)
-        prob = torch.exp(priors[p].log_prob(eval_pts))[:-1]
+        prob = torch.exp(num_tracers.priors[p].log_prob(eval_pts))[:-1]
         prob_norm = prob/torch.sum(prob)
         axs[i].plot(eval_pts.cpu().numpy()[:-1], prob_norm.cpu().numpy(), label="Prior", color="tab:blue", alpha=0.5)
         axs[i].set_title(p)
@@ -164,9 +175,22 @@ def single_run(
         input_dim, 
         context_dim, 
         n_transforms, 
-        train_args["device"], 
+        device,
+        seed=train_args["nf_seed"],
         hidden_features=hidden_features
         )
+    # test sample from the flow
+    with torch.no_grad():
+        nominal_design = torch.tensor(desi_tracers.groupby('class').sum()['observed'].reindex(classes.keys()).values, device=device)
+        central_vals = num_tracers.central_val if train_args["include_D_M"] else num_tracers.central_val[1::2]
+        nominal_context = torch.cat([nominal_design, central_vals], dim=-1)
+        samples = posterior_flow(nominal_context).sample((100,)).cpu().numpy()
+        plt.figure()
+        plt.plot(samples[:, 0], samples[:, 1], 'o', alpha=0.5)
+        plt.savefig("init_samples.png")
+
+    seed = auto_seed(train_args["pyro_seed"])
+    print(f"Seed: {seed}")
     optimizer = torch.optim.Adam(posterior_flow.parameters(), lr=train_args["lr"])
     if checkpoint_path is not None:
         # Load the checkpoint
@@ -178,15 +202,13 @@ def single_run(
 
     mlflow.log_param("lr", train_args["lr"])
     mlflow.log_param("gamma", train_args["gamma"])
-
-    pyro.set_rng_seed(0)
+    mlflow.log_param("gamma_freq", train_args["gamma_freq"])
     verbose_shapes = train_args["verbose"]
     history = []
     print("MLFlow Run Info:", ml_info.experiment_id + "/" + ml_info.run_id)
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
     total_steps = train_args["steps"]
     plot_steps = [int(0.25*total_steps), int(0.5*total_steps), int(0.75*total_steps)]
-    num_eval_samples = 5000 # number of samples to evaluate the EIG
     num_steps_range = trange(0, train_args["steps"], desc="Loss: 0.000 ")
     for step in num_steps_range:
         optimizer.zero_grad() #  clear gradients from previous step
@@ -194,7 +216,7 @@ def single_run(
                                         model=num_tracers.pyro_model,
                                         guide=posterior_flow,
                                         num_particles=train_args["n_particles"],
-                                        observation_labels=observation_labels,
+                                        observation_labels=["y"],
                                         target_labels=target_labels,
                                         evaluation=False,
                                         nflow=True,
@@ -211,7 +233,7 @@ def single_run(
                                                 model=num_tracers.pyro_model,
                                                 guide=posterior_flow,
                                                 num_particles=train_args["eval_particles"],
-                                                observation_labels=observation_labels,
+                                                observation_labels=["y"],
                                                 target_labels=target_labels,
                                                 evaluation=True,
                                                 nflow=True,
@@ -219,8 +241,12 @@ def single_run(
                                                 condition_design=train_args["condition_design"])
             eigs_bits = eigs.cpu().detach().numpy()/np.log(2)
             ax2.plot(eigs_bits, label=f'step {step}')
-        history.append(loss)
+        history.append(loss.cpu().detach().item())
+
         if step % 25 == 0:
+            # log the current learning rate
+            for param_group in optimizer.param_groups:
+                mlflow.log_metric("lr", param_group['lr'], step=step)
             mlflow.log_metric("loss", loss.mean().item(), step=step)
             mlflow.log_metric("agg_loss", agg_loss.item(), step=step)
             num_steps_range.set_description("Loss: {:.3f} ".format(loss.mean().item()))
@@ -230,11 +256,15 @@ def single_run(
             checkpoint_path = f"mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/nf_checkpoint_{step}.pt"
             save_checkpoint(posterior_flow, optimizer, checkpoint_path)
 
-    stacked_history = torch.stack(history)
-    history_array = stacked_history.cpu().detach().numpy()
-    loss_history = history_array.sum(axis=1)/history_array.shape[-1]
-    min_loss = loss_history.min()
-    ax1.plot(loss_history+abs(min_loss))
+        # Track memory usage
+        cpu_memory = process.memory_info().rss / 1024**2  # Convert to MB
+        mlflow.log_metric("cpu_memory_usage", cpu_memory, step=step)
+        if torch.cuda.is_available():
+            gpu_memory = torch.cuda.memory_allocated() / 1024**2  # Convert to MB
+            mlflow.log_metric("gpu_memory_usage", gpu_memory, step=step)
+
+    stacked_history = torch.tensor(history)
+    ax1.plot(stacked_history - stacked_history.min())
     ax1.set_xlabel("Training Steps")
     ax1.set_ylabel("Loss")
     ax1.set_yscale('log')
@@ -247,7 +277,7 @@ def single_run(
                                         model=num_tracers.pyro_model,
                                         guide=posterior_flow,
                                         num_particles=train_args["eval_particles"],
-                                        observation_labels=observation_labels,
+                                        observation_labels=["y"],
                                         target_labels=target_labels,
                                         evaluation=True,
                                         nflow=True,
@@ -261,7 +291,7 @@ def single_run(
                                         model=num_tracers.pyro_model,
                                         guide=posterior_flow,
                                         num_particles=train_args["eval_particles"],
-                                        observation_labels=observation_labels,
+                                        observation_labels=["y"],
                                         target_labels=target_labels,
                                         evaluation=True,
                                         nflow=True,
@@ -283,42 +313,31 @@ def single_run(
 
 
 if __name__ == '__main__':
-    device = torch.device("cuda:0") if torch.cuda.is_available() else "cpu"
-    print(f'Using device: {device}.')
+
     #set default dtype
     torch.set_default_dtype(torch.float64)
-
+    with open('train_args.json', 'r') as f:
+        train_args_dict = json.load(f)
     process = psutil.Process(os.getpid())
-    # Clear GPU cache
-    torch.cuda.empty_cache()
-    # Trigger garbage collection for CPU
-    gc.collect()
-    print(f"Memory before run: {process.memory_info().rss / 1024**2} MB")
-    train_args = {
-        "seed": 1,
-        "data_path": '/home/ashandonay/data/tracers_v1/',
-        "cosmo_model": 'base_omegak',
-        "include_D_M": True,
-        "flow_type": 'NAF',
-        "design_low": 0.05,
-        "design_step": 0.05,
-        "n_transforms": 2,
-        "num_layers": 4,
-        "hidden": 16,
-        "steps": 25000,
-        "lr": 1e-2,
-        "gamma": 0.85,
-        "gamma_freq": 500,
-        "n_particles": 100,
-        "eval_particles": 200,
-        "verbose": False, 
-        "condition_design": True,
-        "device": device
-        }   
-    single_run(
-        train_args,
-        f"{train_args['cosmo_model']}_{train_args['flow_type']}",
-        signal=16,
-        eff=True,
-        )
-    mlflow.end_run()
+
+    device = torch.device("cuda:0") if torch.cuda.is_available() else "cpu"
+
+    for n in [100, 1000, 10000, 20000]:
+        for seed in [2,3]:
+            cosmo_model = 'base'
+            train_args = train_args_dict[cosmo_model]
+            train_args['n_particles'] = n
+            train_args['steps'] = 300000
+            train_args['pyro_seed'] = seed
+            print(f'Using device: {device}.')
+            single_run(
+                cosmo_model,
+                train_args,
+                f"{cosmo_model}_{train_args['flow_type']}_particles_fixed",
+                device=device,
+                signal=16,
+                fixed_design=True,
+                eff=True,
+                )
+            mlflow.end_run()
+

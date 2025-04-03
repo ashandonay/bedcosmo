@@ -48,10 +48,9 @@ import psutil
 import os
 import gc
 from num_tracers import NumTracers
+from plotting import *
 from util import *
 
-getdist_2D_width_inch = 5
-getdist_2D_ratio = 1 / 1.2
 
 def marginalize_posterior(num_tracers, posterior_flow, ratios, num_param_samples=1000, num_data_samples=100):
 
@@ -153,25 +152,33 @@ def run_eval(eval_args, run_id, exp, device, **kwargs):
                         hrdrag=np.linspace(*hrdrag_range.cpu().numpy(), eval_args["params_grid"])
                         )
                     grid_prior = TopHat(grid_params.Om) * TopHat(grid_params.w0) * TopHat(grid_params.wa) * TopHat(grid_params.hrdrag)
+            elif cosmo_model == 'base_omegak_w_wa':
+                latex_labels = ['\Omega_m', '\Omega_k', 'w_0', 'w_a', 'H_0r_d']
+                priors = {'Om': dist.Uniform(*Om_range), 'Ok': dist.Uniform(*Ok_range), 'w0': dist.Uniform(*w0_range), 'wa': dist.Uniform(*wa_range), 'hrdrag': dist.Uniform(*hrdrag_range)}
+                if eval_args["brute_force"]:
+                    grid_params = Grid(
+                        Om=np.linspace(*Om_range.cpu().numpy(), eval_args["params_grid"]), 
+                        Ok=np.linspace(*Ok_range.cpu().numpy(), eval_args["params_grid"]), 
+                        w0=np.linspace(*w0_range.cpu().numpy(), eval_args["params_grid"]), 
+                        wa=np.linspace(*wa_range.cpu().numpy(), eval_args["params_grid"]), 
+                        hrdrag=np.linspace(*hrdrag_range.cpu().numpy(), eval_args["params_grid"])
+                        )
+                    grid_prior = TopHat(grid_params.Om) * TopHat(grid_params.Ok) * TopHat(grid_params.w0) * TopHat(grid_params.wa) * TopHat(grid_params.hrdrag)
 
-            observation_labels = ["y"]
             with open(mlflow.artifacts.download_artifacts(run_id=ml_info.run_id, artifact_path="classes.json")) as f:
                 classes = json.load(f)
 
             target_labels = list(priors.keys())
             print(f"Classes: {classes}")
             print(f'Cosmology: {cosmo_model}')
-            print(f'Observation Labels: {observation_labels}')
             print(f'Target Labels: {target_labels}')
 
             num_tracers = NumTracers(
                 desi_df, 
                 desi_tracers,
-                priors,
                 cosmo_model,
-                observation_labels,
                 nominal_cov,
-                device,
+                device=device,
                 eff=eval(run.data.params["eff"]), 
                 include_D_M=eval(run.data.params["include_D_M"]),
                 verbose=True
@@ -281,7 +288,8 @@ def run_eval(eval_args, run_id, exp, device, **kwargs):
                     input_dim, 
                     context_dim, 
                     n_transforms, 
-                    device, 
+                    device,
+                    seed=eval(run.data.params["nf_seed"]),
                     hidden_features=hidden_features
                     )
                 print(f"Loading NF model from {run_id}...")
@@ -289,6 +297,9 @@ def run_eval(eval_args, run_id, exp, device, **kwargs):
                 posterior_flow.load_state_dict(checkpoint['model_state_dict'], strict=True)
                 posterior_flow.to(device)
                 posterior_flow.eval()
+                
+                # fix the seed for reproducibility
+                seed = auto_seed(eval(run.data.params["pyro_seed"]))
 
                 # get the nominal design by the observed amount of tracers per class assuming default numbers from desi_df
                 nominal_design = torch.tensor(desi_tracers.groupby('class').sum()['observed'].reindex(classes.keys()).values, device=device)
@@ -305,7 +316,7 @@ def run_eval(eval_args, run_id, exp, device, **kwargs):
                                                         model=num_tracers.pyro_model,
                                                         guide=posterior_flow,
                                                         num_particles=eval_args["eval_particles"],
-                                                        observation_labels=observation_labels,
+                                                        observation_labels=["y"],
                                                         target_labels=target_labels,
                                                         evaluation=True,
                                                         nflow=True,
@@ -320,7 +331,7 @@ def run_eval(eval_args, run_id, exp, device, **kwargs):
                                                         model=num_tracers.pyro_model,
                                                         guide=posterior_flow,
                                                         num_particles=eval_args["eval_particles"],
-                                                        observation_labels=observation_labels,
+                                                        observation_labels=["y"],
                                                         target_labels=target_labels,
                                                         evaluation=True,
                                                         nflow=True,
@@ -446,17 +457,12 @@ def run_eval(eval_args, run_id, exp, device, **kwargs):
 
                 g = plots.getSubplotPlotter()
                 if not eval_args["brute_force"]:
-                    g.triangle_plot(
+                    plot_samples = [nominal_samples_gd, optimal_samples_gd]
+                    g = plot_posterior(
                         [nominal_samples_gd, optimal_samples_gd],
-                        filled=False, 
-                        colors=['black', 'tab:blue'], 
-                        legend_labels=['Nominal', 'Optimal'], 
-                        legend_loc='upper right',
-                        show_samples=True,
-                        diag1d_kwargs={
-                            'colors': ['black', 'tab:blue'],
-                            'normalized': True,
-                        }
+                        ['black', 'tab:blue'],
+                        legend_labels=['Nominal', 'Optimal'],
+                        show_scatter=True
                     )
                 else:
                     brute_force_nominal_samples = num_tracers.brute_force_posterior(nominal_design, designer, grid_params, num_param_samples=eval_args["post_samples"]).cpu().numpy()
@@ -522,8 +528,8 @@ if __name__ == '__main__':
     }
     run_eval(
         eval_args,
-        run_id='9060ea8e96124e299658e41889afefc6',
-        exp=None,
+        run_id=None,
+        exp='base_NAF_particles_fixed',
         device=device
         )
     mlflow.end_run()
