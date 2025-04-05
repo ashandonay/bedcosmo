@@ -100,7 +100,7 @@ def single_run(
         verbose=True
         )
     
-    target_labels = list(num_tracers.cosmo_params)
+    target_labels = num_tracers.cosmo_params
     print(f"Classes: {classes}\n"
         f"Cosmology: {cosmo_model}\n"
         f"Target labels: {target_labels}")

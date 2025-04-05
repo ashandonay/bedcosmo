@@ -17,7 +17,7 @@ class NumTracers:
         self.nominal_cov = nominal_cov
         self.device = device
         self.get_priors() # initialize the priors
-        self.cosmo_params = set(self.priors.keys())
+        self.cosmo_params = list(self.priors.keys())
         self.rdrag = 149.77
         self.c = constants.c.to('km/s').value
         self.corr_matrix = torch.tensor(self.nominal_cov/np.sqrt(np.outer(np.diag(self.nominal_cov), np.diag(self.nominal_cov))), device=device)
