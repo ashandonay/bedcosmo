@@ -99,7 +99,7 @@ def plot_posterior(samples, colors, legend_labels=None, show_scatter=False):
     return g
 
 def plot_run(run_id, eval_args, show_scatter=False):
-    samples = run_eval(run_id, eval_args)
+    samples = run_eval(run_id, eval_args, device=eval_args["device"])
     g = plot_posterior(samples, ["tab:blue"], show_scatter=show_scatter)
     plt.show()
 
@@ -117,7 +117,7 @@ def plot_exp_steps(exp_name, plot_steps, eval_args, show_scatter=False):
         # For each step, collect samples from all runs
         step_samples = []
         for j, run_id in enumerate(run_ids):
-            samples = run_eval(run_id, eval_args, step=step)
+            samples = run_eval(run_id, eval_args, step=step, device=eval_args["device"])
             all_samples.append(samples)
             step_samples.append(samples)
             
@@ -242,7 +242,7 @@ def compare_exp(exp_name, group_by_var, eval_args, show_scatter=False, excluded_
         
         samples = []
         for run_id in run_ids:
-            run_samples = run_eval(run_id, eval_args)
+            run_samples = run_eval(run_id, eval_args, device=eval_args["device"])
             samples.append(run_samples)
         
         all_samples += samples
