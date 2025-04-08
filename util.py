@@ -58,7 +58,7 @@ def save_checkpoint(model, optimizer, filepath):
     torch.save(checkpoint, filepath)
     mlflow.log_artifact(filepath)  # Logs the checkpoint to mlflow
 
-def init_nf(flow_type, input_dim, context_dim, n_transforms, device, seed=None, **kwargs):
+def init_nf(flow_type, input_dim, context_dim, n_transforms, hidden_size=None, n_layers=None, device="cuda:0", seed=None, verbose=False, **kwargs):
     # Set seeds first, before any model initialization
     if seed is not None:
         torch.manual_seed(seed)
@@ -71,6 +71,9 @@ def init_nf(flow_type, input_dim, context_dim, n_transforms, device, seed=None, 
             torch.backends.cudnn.deterministic = True
             torch.backends.cudnn.benchmark = False
 
+    if hidden_size is not None and verbose:
+        print(f'Hidden features: {(hidden_size,) * n_layers}')
+
     # Initialize the flow model
     if flow_type == "NSF":
         posterior_flow = zuko.flows.NSF(
@@ -78,6 +81,7 @@ def init_nf(flow_type, input_dim, context_dim, n_transforms, device, seed=None, 
             context=context_dim, 
             transforms=n_transforms, 
             bins=10,
+            hidden_features=((hidden_size,) * n_layers),
             **kwargs
         ).to(device)
     elif flow_type == "NAF":
@@ -85,13 +89,14 @@ def init_nf(flow_type, input_dim, context_dim, n_transforms, device, seed=None, 
             features=input_dim, 
             context=context_dim, 
             transforms=n_transforms,
-            network={**kwargs}
+            network={"hidden_features": ((hidden_size,) * n_layers)} #(hidden_size,) + (2*hidden_size,) * (n_layers - 1)} 
         ).to(device)
     elif flow_type == "MAF":
         posterior_flow = zuko.flows.MAF(
             features=input_dim, 
             context=context_dim, 
             transforms=n_transforms,
+            hidden_features=((hidden_size,) * n_layers),
             **kwargs
         ).to(device)
     elif flow_type == "MAF_Affine":
@@ -156,18 +161,16 @@ def run_eval(run_id, eval_args, step='last', device='cuda:0'):
 
         input_dim = len(num_tracers.cosmo_params)
         context_dim = len(classes.keys()) + 10 if eval(run.data.params["include_D_M"]) else len(classes.keys()) + 5
-        n_transforms = eval(run.data.params["n_transforms"])
-        hidden_features = (eval(run.data.params["hidden"]),) + (2*eval(run.data.params["hidden"]),) * (eval(run.data.params["num_layers"]) - 1)
-        n_transforms = eval(run.data.params["n_transforms"])
-
         # Initialize model without seed (since we're loading state dict)
         posterior_flow = init_nf(
             run.data.params["flow_type"],
             input_dim, 
             context_dim, 
-            n_transforms, 
-            device, 
-            hidden_features=hidden_features
+            eval(run.data.params["n_transforms"]),
+            eval(run.data.params["hidden"]),
+            eval(run.data.params["num_layers"]),
+            device,
+            seed=eval(run.data.params["nf_seed"])
             )
         
         checkpoint = torch.load(f'../mlruns/{exp_id}/{run_id}/artifacts/nf_checkpoint_{step}.pt', map_location=eval_args["device"])
@@ -186,8 +189,47 @@ def run_eval(run_id, eval_args, step='last', device='cuda:0'):
 
         nominal_samples = posterior_flow(nominal_context).sample((eval_args["post_samples"],)).cpu().numpy()
         nominal_samples[:, -1] *= 100000
-        
+
+        #entropy = calc_entropy(nominal_design, posterior_flow, num_tracers, eval_args["post_samples"])
+        """
+        _, loss = posterior_loss(
+            nominal_design.unsqueeze(0),
+            num_tracers.pyro_model,
+            posterior_flow,
+            eval_args["post_samples"],
+            observation_labels=["y"],
+            target_labels=num_tracers.cosmo_params,
+            evaluation=False,
+            nflow=True,
+            condition_design=True,
+            verbose_shapes=False
+            )
+        print(f"Loss: {loss.cpu().item()}")
+        """
+
         # Temporarily redirect stdout to suppress GetDist messages
         with contextlib.redirect_stdout(io.StringIO()):
             samples = getdist.MCSamples(samples=nominal_samples, names=num_tracers.cosmo_params, labels=num_tracers.latex_labels, settings={'ignore_rows': 0.0})
     return samples
+
+def calc_entropy(design, posterior_flow, num_tracers, num_samples):
+    # sample values of y from num_tracers.pyro_model
+    expanded_design = lexpand(design.unsqueeze(0), num_samples)
+    y = num_tracers.pyro_model(expanded_design)
+    nominal_context = torch.cat([expanded_design, y], dim=-1)
+    passed_ratio = num_tracers.calc_passed(expanded_design)
+    constrained_parameters = num_tracers.sample_valid_parameters(passed_ratio.shape[:-1])
+    with pyro.plate_stack("plate", passed_ratio.shape[:-1]):
+        # register samples in the trace using pyro.sample
+        parameters = {}
+        for k, v in constrained_parameters.items():
+            # use dist.Delta to fix the value of each parameter
+            parameters[k] = pyro.sample(k, dist.Delta(v)).unsqueeze(-1)
+    evaluate_samples = torch.cat([parameters[k].unsqueeze(dim=-1) for k in num_tracers.cosmo_params], dim=-1)
+    flattened_samples = torch.flatten(evaluate_samples, start_dim=0, end_dim=len(expanded_design.shape[:-1])-1)
+    samples = posterior_flow(nominal_context).log_prob(flattened_samples)
+    # calculate entropy of samples
+    _, entropy = _safe_mean_terms(samples)
+    return entropy
+
+
