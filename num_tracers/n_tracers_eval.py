@@ -279,18 +279,17 @@ def run_eval(eval_args, run_id, exp, device, **kwargs):
             if eval_args["nf_model"]:
                 input_dim = len(target_labels)
                 context_dim = len(classes.keys()) + 10 if eval(run.data.params["include_D_M"]) else len(classes.keys()) + 5
-                hidden = int(run.data.params["hidden"])
-                hidden_features = (eval(run.data.params["hidden"]),) + (2*eval(run.data.params["hidden"]),) * (eval(run.data.params["num_layers"]) - 1)
-                n_transforms = eval(run.data.params["n_transforms"])
 
                 posterior_flow = init_nf(
                     run.data.params["flow_type"],
                     input_dim, 
                     context_dim, 
-                    n_transforms, 
+                    eval(run.data.params["n_transforms"]),
+                    eval(run.data.params["hidden"]),
+                    eval(run.data.params["num_layers"]),
                     device,
                     seed=eval(run.data.params["nf_seed"]),
-                    hidden_features=hidden_features
+                    verbose=True
                     )
                 print(f"Loading NF model from {run_id}...")
                 checkpoint = torch.load(f'mlruns/{exp_id}/{run_id}/artifacts/nf_checkpoint_last.pt', map_location=device)
@@ -528,8 +527,8 @@ if __name__ == '__main__':
     }
     run_eval(
         eval_args,
-        run_id=None,
-        exp='base_NAF_particles_fixed',
+        run_id='417f32078fb944438eac82dc9cc0919c',
+        exp=None,
         device=device
         )
     mlflow.end_run()

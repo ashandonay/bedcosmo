@@ -166,18 +166,17 @@ def single_run(
     print("Calculating normalizing flow EIG...")
     input_dim = len(target_labels)
     context_dim = len(classes.keys()) + 10 if train_args["include_D_M"] else len(classes.keys()) + 5
-    n_transforms = train_args["n_transforms"]
-    hidden_features = ((train_args["hidden"],) + (2*train_args["hidden"],) * (train_args["num_layers"] - 1))
     print(f'Input dim: {input_dim}, Context dim: {context_dim}')
-    print(f'Hidden features: {hidden_features}')
     posterior_flow = init_nf(
         train_args["flow_type"],
         input_dim, 
-        context_dim, 
-        n_transforms, 
+        context_dim,
+        train_args["n_transforms"],
+        train_args["hidden"],
+        train_args["num_layers"],
         device,
         seed=train_args["nf_seed"],
-        hidden_features=hidden_features
+        verbose=True
         )
     # test sample from the flow
     with torch.no_grad():
@@ -320,24 +319,23 @@ if __name__ == '__main__':
         train_args_dict = json.load(f)
     process = psutil.Process(os.getpid())
 
-    device = torch.device("cuda:0") if torch.cuda.is_available() else "cpu"
+    device = torch.device("cuda:1") if torch.cuda.is_available() else "cpu"
 
-    for n in [100, 1000, 10000, 20000]:
-        for seed in [2,3]:
-            cosmo_model = 'base'
-            train_args = train_args_dict[cosmo_model]
-            train_args['n_particles'] = n
-            train_args['steps'] = 300000
-            train_args['pyro_seed'] = seed
-            print(f'Using device: {device}.')
-            single_run(
-                cosmo_model,
-                train_args,
-                f"{cosmo_model}_{train_args['flow_type']}_particles_fixed",
-                device=device,
-                signal=16,
-                fixed_design=True,
-                eff=True,
-                )
-            mlflow.end_run()
+    for h in [64, 512]:
+        cosmo_model = 'base'
+        train_args = train_args_dict[cosmo_model]
+        train_args['num_layers'] = 2
+        train_args['hidden'] = h
+        print(f'Using device: {device}.')
+        single_run(
+            cosmo_model,
+            train_args,
+            f"{cosmo_model}_{train_args['flow_type']}_hidden_fixed",
+            device=device,
+            signal=16,
+            fixed_design=True,
+            eff=True,
+            )
+        mlflow.end_run()
+
 
