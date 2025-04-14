@@ -133,6 +133,7 @@ dependencies:
       - nvidia-cudnn-cu12==9.1.0.70
       - nvidia-nccl-cu12==2.20.5
       - portalocker==2.10.1
+      - psutil==5.9.8
       - py-bobyqa==1.4.1
       - pyro-ppl==1.8.6
       - speclite==0.20
