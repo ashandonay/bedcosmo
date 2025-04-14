@@ -2,7 +2,7 @@
     "base": {
         "pyro_seed": 1,
         "nf_seed": 1,
-        "data_path": "/home/ashandonay/data/tracers_v1/",
+        "data_path": "/data/tracers_v1/",
         "flow_type": "NAF",
         "design_low": 0.05,
         "design_step": 0.05,
@@ -22,7 +22,7 @@
     "base_omegak": {
         "pyro_seed": 1,
         "nf_seed": 1,
-        "data_path": "/home/ashandonay/data/tracers_v1/",
+        "data_path": "/data/tracers_v1/",
         "flow_type": "NAF",
         "design_low": 0.05,
         "design_step": 0.05,
@@ -42,7 +42,7 @@
     "base_w_wa": {
         "pyro_seed": 1,
         "nf_seed": 1,
-        "data_path": "/home/ashandonay/data/tracers_v1/",
+        "data_path": "/data/tracers_v1/",
         "flow_type": "NAF",
         "design_low": 0.05,
         "design_step": 0.05,
@@ -62,7 +62,7 @@
     "base_omegak_w_wa": {
         "pyro_seed": 1,
         "nf_seed": 1,
-        "data_path": "/home/ashandonay/data/tracers_v1/",
+        "data_path": "/data/tracers_v1/",
         "flow_type": "NAF",
         "design_low": 0.05,
         "design_step": 0.05,

@@ -30,9 +30,9 @@ from bed.grid import Grid
 from astropy.cosmology import Planck18
 from astropy import constants
 
-home_dir = os.environ["HOME"]
 import mlflow
 import mlflow.pytorch
+home_dir = os.environ["HOME"]
 mlflow.set_tracking_uri(home_dir + "/bed/BED_cosmo/num_tracers/mlruns")
 from tqdm import trange
 
@@ -61,7 +61,7 @@ def single_run(
     print(f"Memory before run: {process.memory_info().rss / 1024**2} MB")
     pyro.clear_param_store()
 
-    data_path = train_args["data_path"]
+    data_path = home_dir + train_args["data_path"]
 
     mlflow.set_experiment(mlflow_experiment_name)
     mlflow.log_param("cosmo_model", cosmo_model)
