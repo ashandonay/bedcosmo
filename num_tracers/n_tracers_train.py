@@ -186,7 +186,7 @@ def single_run(
         samples = posterior_flow(nominal_context).sample((100,)).cpu().numpy()
         plt.figure()
         plt.plot(samples[:, 0], samples[:, 1], 'o', alpha=0.5)
-        plt.savefig("init_samples.png")
+        plt.savefig(f"{home_dir}/bed/BED_cosmo/num_tracers/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/init_samples.png")
 
     seed = auto_seed(train_args["pyro_seed"])
     print(f"Seed: {seed}")
@@ -208,7 +208,9 @@ def single_run(
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
     total_steps = train_args["steps"]
     plot_steps = [int(0.25*total_steps), int(0.5*total_steps), int(0.75*total_steps)]
-    num_steps_range = trange(0, train_args["steps"], desc="Loss: 0.000 ")
+    # Disable tqdm progress bar if output is not a TTY
+    is_tty = sys.stdout.isatty()
+    num_steps_range = trange(0, train_args["steps"], desc="Loss: 0.000 ", disable=not is_tty)
     best_loss = float('inf')
     os.makedirs(f"{home_dir}/bed/BED_cosmo/num_tracers/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/best_loss", exist_ok=True)
     os.makedirs(f"{home_dir}/bed/BED_cosmo/num_tracers/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/checkpoints", exist_ok=True)
@@ -259,7 +261,11 @@ def single_run(
                 mlflow.log_metric("lr", param_group['lr'], step=step)
             mlflow.log_metric("loss", loss.mean().item(), step=step)
             mlflow.log_metric("agg_loss", agg_loss.item(), step=step)
-            num_steps_range.set_description("Loss: {:.3f} ".format(loss.mean().item()))
+            # Only update description if running in a TTY
+            if is_tty:
+                num_steps_range.set_description("Loss: {:.3f} ".format(loss.mean().item()))
+            else:
+                print(f"Step {step}, Loss: {loss.mean().item()}")
         if step % train_args["gamma_freq"] == 0 and step > 0:
             scheduler.step()
         if step % 5000 == 0 and step > 0:
