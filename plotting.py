@@ -272,7 +272,7 @@ def compare_training(exp_name=None, run_ids=None, var=None, excluded_runs=[], co
         eval_args = {"device": "cpu"}
     
     # Get run IDs either from experiment name or directly from input
-    if run_ids is None and exp_name is not None:
+    if exp_name is not None:
         exp_id = client.get_experiment_by_name(exp_name).experiment_id
         run_ids = [run.info.run_id for run in client.search_runs(exp_id) if run.info.run_id not in excluded_runs]
     elif run_ids is not None:
@@ -372,7 +372,6 @@ def compare_training(exp_name=None, run_ids=None, var=None, excluded_runs=[], co
             for s in checkpoints: # Iterate through selected checkpoints
                 if s < 1000:
                     continue
-                print(f"Run {run_id}: Calculating area for regular checkpoint: {s}")
                 try:
                     samples = run_eval(run_id, eval_args=eval_args, device=eval_args["device"], step=s, cosmo_exp=cosmo_exp)
                     area_list = get_contour_area([samples], 'Om', 'hrdrag', 0.68) # Assuming params
@@ -407,10 +406,9 @@ def compare_training(exp_name=None, run_ids=None, var=None, excluded_runs=[], co
                 for f in checkpoint_files 
                 if f.startswith('nf_checkpoint_') and f.endswith('.pt')
             ])
-            for s in checkpoints[::10]: # Iterate through selected checkpoints
+            for s in checkpoints: # Iterate through selected checkpoints
                 if s < 1000:
                     continue
-                print(f"Run {run_id}: Calculating area for best loss checkpoint: {s}")
                 try:
                     best_loss_samples = run_eval(run_id, eval_args=eval_args, device=eval_args["device"], step=s, best=True, cosmo_exp=cosmo_exp)
                     area_list = get_contour_area([best_loss_samples], 'Om', 'hrdrag', 0.68) # Assuming params
@@ -427,6 +425,8 @@ def compare_training(exp_name=None, run_ids=None, var=None, excluded_runs=[], co
                 area_plot_label_best = f"{base_label} (Area, Best)"
                 # Use another unique variable name
                 line_area_best, = ax2.plot(best_steps, best_areas, alpha=1.0, linestyle='-.', label=area_plot_label_best, color=colors[i % len(colors)], zorder=5, linewidth=2)
+                # plot a star at the best last step
+                ax2.plot(best_steps[-1], best_areas[-1], 'k*', markersize=5, zorder=10, color=colors[i % len(colors)])
                 lines.append(line_area_best) # Append the correct line object
                 labels.append(area_plot_label_best)
 
@@ -689,11 +689,19 @@ def compare_contours(run_ids, param1, param2, eval_args, steps='best', level=0.6
 
 if __name__ == "__main__":
 
-    eval_args = {"post_samples": 30000, "device": "cuda:1", "eval_seed": 1}
-    run_ids = ['80b0f669e754456fbeb3df13acae577d', '00848c1ecca047099a8e51da7a270624', 'cdd0fd6ef3794892a5ef7de83c74aa77', 'd6f947aa8611474dac987f0029a91651']
+    eval_args = {"post_samples": 30000, "device": "cuda:0", "eval_seed": 1}
     compare_training(
         exp_name='base_NAF_pyro_fixed', 
-        run_ids=run_ids, 
+        var='pyro_seed', 
+        eval_args=eval_args,
+        log_scale=False,
+        show_best=True,
+        show_checkpoints=True,
+        cosmo_exp='num_tracers'
+    )
+
+    compare_training(
+        exp_name='base_NAF_pyro0_fixed', 
         var='pyro_seed', 
         eval_args=eval_args,
         log_scale=False,
