@@ -330,7 +330,7 @@ if __name__ == '__main__':
         train_args_dict = json.load(f)
     process = psutil.Process(os.getpid())
 
-    device = torch.device("cuda:1") if torch.cuda.is_available() else "cpu"
+    device = torch.device("cuda:0") if torch.cuda.is_available() else "cpu"
 
     cosmo_model = 'base'
     train_args = train_args_dict[cosmo_model]
