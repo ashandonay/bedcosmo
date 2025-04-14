@@ -1,8 +1,10 @@
-
 import os
 import sys
-parent_dir_abs = os.path.abspath(os.pardir)
-sys.path.insert(0, parent_dir_abs) 
+# Get the directory containing the current script
+script_dir = os.path.dirname(os.path.abspath(__file__))
+# Get the parent directory ('BED_cosmo/') and add it to the Python path
+parent_dir_abs = os.path.abspath(os.path.join(script_dir, os.pardir))
+sys.path.insert(0, parent_dir_abs)
 
 import torch
 import torch.nn as nn
@@ -32,11 +34,7 @@ import mlflow
 import mlflow.pytorch
 from tqdm import trange
 
-import zuko
-
-from bed.grid import Grid, TopHat, CosineBump, Gaussian
-from bed.design import ExperimentDesigner
-from bed.plot import cornerPlot
+from bed.grid import Grid
 
 import psutil
 import os
@@ -326,27 +324,24 @@ if __name__ == '__main__':
 
     #set default dtype
     torch.set_default_dtype(torch.float64)
-    with open('train_args.json', 'r') as f:
+    with open(os.path.join(os.path.dirname(__file__), 'train_args.json'), 'r') as f:
         train_args_dict = json.load(f)
     process = psutil.Process(os.getpid())
 
     device = torch.device("cuda:1") if torch.cuda.is_available() else "cpu"
 
-    for s in [1,2,3,4]:
-        cosmo_model = 'base'
-        train_args = train_args_dict[cosmo_model]
-        train_args['pyro_seed'] = s
-        train_args['n_particles'] = 50000
-        print(f'Using device: {device}.')
-        single_run(
-            cosmo_model,
-            train_args,
-            f"{cosmo_model}_{train_args['flow_type']}_pyro1_fixed",
-            device=device,
-            signal=16,
-            fixed_design=True,
-            eff=True,
-            )
-        mlflow.end_run()
+    cosmo_model = 'base'
+    train_args = train_args_dict[cosmo_model]
+    print(f'Using device: {device}.')
+    single_run(
+        cosmo_model,
+        train_args,
+        f"{cosmo_model}_{train_args['flow_type']}_fixed",
+        device=device,
+        signal=16,
+        fixed_design=True,
+        eff=True,
+        )
+    mlflow.end_run()
 
 
