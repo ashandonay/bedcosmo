@@ -30,10 +30,10 @@ from bed.grid import Grid
 from astropy.cosmology import Planck18
 from astropy import constants
 
-base_dir = "/home/ashandonay/bed/BED_cosmo/"
+home_dir = os.environ["HOME"]
 import mlflow
 import mlflow.pytorch
-mlflow.set_tracking_uri(base_dir + "num_tracers/mlruns")
+mlflow.set_tracking_uri(home_dir + "/bed/BED_cosmo/num_tracers/mlruns")
 from tqdm import trange
 
 from bed.grid import Grid
@@ -148,7 +148,7 @@ def single_run(
             design_tensor = torch.tensor(getattr(grid_designs, name).squeeze(), device=device).unsqueeze(1)
             designs = torch.cat((designs, design_tensor), dim=1)
     print("Designs shape:", designs.shape)
-    np.save(f"{base_dir}/num_tracers/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/designs.npy", designs.squeeze().cpu().detach().numpy())
+    np.save(f"{home_dir}/bed/BED_cosmo/num_tracers/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/designs.npy", designs.squeeze().cpu().detach().numpy())
 
     fig, axs = plt.subplots(ncols=len(target_labels), nrows=1, figsize=(5*len(target_labels), 5))
     if len(target_labels) == 1:
@@ -161,7 +161,7 @@ def single_run(
         axs[i].plot(eval_pts.cpu().numpy()[:-1], prob_norm.cpu().numpy(), label="Prior", color="tab:blue", alpha=0.5)
         axs[i].set_title(p)
     plt.tight_layout()
-    plt.savefig(f"{base_dir}/num_tracers/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/prior.png")
+    plt.savefig(f"{home_dir}/bed/BED_cosmo/num_tracers/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/prior.png")
 
     print("Calculating normalizing flow EIG...")
     input_dim = len(target_labels)
@@ -210,8 +210,8 @@ def single_run(
     plot_steps = [int(0.25*total_steps), int(0.5*total_steps), int(0.75*total_steps)]
     num_steps_range = trange(0, train_args["steps"], desc="Loss: 0.000 ")
     best_loss = float('inf')
-    os.makedirs(f"{base_dir}/num_tracers/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/best_loss", exist_ok=True)
-    os.makedirs(f"{base_dir}/num_tracers/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/checkpoints", exist_ok=True)
+    os.makedirs(f"{home_dir}/bed/BED_cosmo/num_tracers/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/best_loss", exist_ok=True)
+    os.makedirs(f"{home_dir}/bed/BED_cosmo/num_tracers/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/checkpoints", exist_ok=True)
     for step in num_steps_range:
         optimizer.zero_grad() #  clear gradients from previous step
         agg_loss, loss = posterior_loss(design=designs,
@@ -247,9 +247,9 @@ def single_run(
         if loss.cpu().detach().item() < best_loss:
             best_loss = loss.cpu().detach().item()
             # save the checkpoint
-            checkpoint_path = f"{base_dir}/num_tracers/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/best_loss/nf_checkpoint_{step}.pt"
+            checkpoint_path = f"{home_dir}/bed/BED_cosmo/num_tracers/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/best_loss/nf_checkpoint_{step}.pt"
             save_checkpoint(posterior_flow, optimizer, checkpoint_path, artifact_path="best_loss")
-            checkpoint_path = f"{base_dir}/num_tracers/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/checkpoints/nf_checkpoint_best.pt"
+            checkpoint_path = f"{home_dir}/bed/BED_cosmo/num_tracers/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/checkpoints/nf_checkpoint_best.pt"
             save_checkpoint(posterior_flow, optimizer, checkpoint_path, artifact_path="checkpoints")
         mlflow.log_metric("best_loss", best_loss, step=step)
 
@@ -263,7 +263,7 @@ def single_run(
         if step % train_args["gamma_freq"] == 0 and step > 0:
             scheduler.step()
         if step % 5000 == 0 and step > 0:
-            checkpoint_path = f"{base_dir}/num_tracers/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/checkpoints/nf_checkpoint_{step}.pt"
+            checkpoint_path = f"{home_dir}/bed/BED_cosmo/num_tracers/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/checkpoints/nf_checkpoint_{step}.pt"
             save_checkpoint(posterior_flow, optimizer, checkpoint_path, artifact_path="checkpoints")
 
         # Track memory usage
@@ -313,8 +313,8 @@ def single_run(
     ax2.set_ylabel("EIG")
     ax2.legend()
     plt.tight_layout()
-    plt.savefig(f"{base_dir}/num_tracers/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/training.png")
-    checkpoint_path = f"{base_dir}/num_tracers/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/checkpoints/nf_checkpoint_last.pt"
+    plt.savefig(f"{home_dir}/bed/BED_cosmo/num_tracers/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/training.png")
+    checkpoint_path = f"{home_dir}/bed/BED_cosmo/num_tracers/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/checkpoints/nf_checkpoint_last.pt"
     save_checkpoint(posterior_flow, optimizer, checkpoint_path)
 
     plt.close('all')
