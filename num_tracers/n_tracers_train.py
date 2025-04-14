@@ -209,6 +209,9 @@ def single_run(
     total_steps = train_args["steps"]
     plot_steps = [int(0.25*total_steps), int(0.5*total_steps), int(0.75*total_steps)]
     num_steps_range = trange(0, train_args["steps"], desc="Loss: 0.000 ")
+    best_loss = float('inf')
+    os.makedirs(f"mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/best_loss", exist_ok=True)
+    os.makedirs(f"mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/checkpoints", exist_ok=True)
     for step in num_steps_range:
         optimizer.zero_grad() #  clear gradients from previous step
         agg_loss, loss = posterior_loss(design=designs,
@@ -241,6 +244,14 @@ def single_run(
             eigs_bits = eigs.cpu().detach().numpy()/np.log(2)
             ax2.plot(eigs_bits, label=f'step {step}')
         history.append(loss.cpu().detach().item())
+        if loss.cpu().detach().item() < best_loss:
+            best_loss = loss.cpu().detach().item()
+            # save the checkpoint
+            checkpoint_path = f"mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/best_loss/nf_checkpoint_{step}.pt"
+            save_checkpoint(posterior_flow, optimizer, checkpoint_path, artifact_path="best_loss")
+            checkpoint_path = f"mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/checkpoints/nf_checkpoint_best.pt"
+            save_checkpoint(posterior_flow, optimizer, checkpoint_path, artifact_path="checkpoints")
+        mlflow.log_metric("best_loss", best_loss, step=step)
 
         if step % 25 == 0:
             # log the current learning rate
@@ -252,8 +263,8 @@ def single_run(
         if step % train_args["gamma_freq"] == 0 and step > 0:
             scheduler.step()
         if step % 5000 == 0 and step > 0:
-            checkpoint_path = f"mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/nf_checkpoint_{step}.pt"
-            save_checkpoint(posterior_flow, optimizer, checkpoint_path)
+            checkpoint_path = f"mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/checkpoints/nf_checkpoint_{step}.pt"
+            save_checkpoint(posterior_flow, optimizer, checkpoint_path, artifact_path="checkpoints")
 
         # Track memory usage
         cpu_memory = process.memory_info().rss / 1024**2  # Convert to MB
@@ -303,7 +314,7 @@ def single_run(
     ax2.legend()
     plt.tight_layout()
     plt.savefig(f"mlruns/{ml_info.experiment_id}/{ml_info.run_id}/training.png")
-    checkpoint_path = f"mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/nf_checkpoint_last.pt"
+    checkpoint_path = f"mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/checkpoints/nf_checkpoint_last.pt"
     save_checkpoint(posterior_flow, optimizer, checkpoint_path)
 
     plt.close('all')
@@ -321,16 +332,16 @@ if __name__ == '__main__':
 
     device = torch.device("cuda:1") if torch.cuda.is_available() else "cpu"
 
-    for h in [64, 512]:
+    for s in [1,2,3,4]:
         cosmo_model = 'base'
         train_args = train_args_dict[cosmo_model]
-        train_args['num_layers'] = 2
-        train_args['hidden'] = h
+        train_args['pyro_seed'] = s
+        train_args['n_particles'] = 50000
         print(f'Using device: {device}.')
         single_run(
             cosmo_model,
             train_args,
-            f"{cosmo_model}_{train_args['flow_type']}_hidden_fixed",
+            f"{cosmo_model}_{train_args['flow_type']}_pyro1_fixed",
             device=device,
             signal=16,
             fixed_design=True,

@@ -11,4 +11,5 @@ nflows_testing.ipynb
 *.pt
 **/mlruns
 **/notebooks
+**/plots
 .DS_store

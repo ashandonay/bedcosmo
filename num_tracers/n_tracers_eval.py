@@ -292,7 +292,7 @@ def run_eval(eval_args, run_id, exp, device, **kwargs):
                     verbose=True
                     )
                 print(f"Loading NF model from {run_id}...")
-                checkpoint = torch.load(f'mlruns/{exp_id}/{run_id}/artifacts/nf_checkpoint_last.pt', map_location=device)
+                checkpoint = torch.load(f'mlruns/{exp_id}/{run_id}/artifacts/checkpoints/nf_checkpoint_best.pt', map_location=device)
                 posterior_flow.load_state_dict(checkpoint['model_state_dict'], strict=True)
                 posterior_flow.to(device)
                 posterior_flow.eval()
@@ -527,8 +527,8 @@ if __name__ == '__main__':
     }
     run_eval(
         eval_args,
-        run_id='417f32078fb944438eac82dc9cc0919c',
-        exp=None,
+        run_id=None,
+        exp='base_NAF_pyro_fixed',
         device=device
         )
     mlflow.end_run()

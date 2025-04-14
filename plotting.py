@@ -1,6 +1,18 @@
+import sys
 import os
+parent_dir = os.path.abspath(os.path.join(os.getcwd(), os.pardir))
+if parent_dir not in sys.path:
+    sys.path.insert(0, parent_dir)
+
+base_dir = '/home/ashandonay/bed/BED_cosmo'
+if base_dir not in sys.path:
+    sys.path.insert(0, base_dir)
+
+sys.path.insert(0, os.path.join(base_dir, 'num_tracers'))
+
 import mlflow
 from mlflow.tracking import MlflowClient
+mlflow.set_tracking_uri("file:/home/ashandonay/bed/BED_cosmo/num_tracers/mlruns")
 import getdist
 import numpy as np
 from getdist import plots
@@ -11,6 +23,7 @@ from matplotlib.lines import Line2D
 from matplotlib.path import Path
 from scipy.spatial import ConvexHull
 import matplotlib.colors
+import warnings
 
 
 def plot_posterior(samples, colors, legend_labels=None, show_scatter=False):
@@ -100,7 +113,7 @@ def plot_posterior(samples, colors, legend_labels=None, show_scatter=False):
     return g
 
 def plot_run(run_id, eval_args, show_scatter=False):
-    samples = run_eval(run_id, eval_args, device=eval_args["device"])
+    samples = run_eval(run_id, eval_args, device=eval_args["device"], exp='num_tracers')
     g = plot_posterior(samples, ["tab:blue"], show_scatter=show_scatter)
     plt.show()
 
@@ -114,7 +127,7 @@ def plot_run_steps(run_id, plot_steps, eval_args, show_scatter=False):
     color_list = []
 
     for i, step in enumerate(plot_steps):
-        samples = run_eval(run_id, eval_args, step=step, device=eval_args["device"])
+        samples = run_eval(run_id, eval_args, step=step, device=eval_args["device"], exp='num_tracers')
         all_samples.append(samples)
         
         # Assign a unique color for each step
@@ -135,6 +148,8 @@ def plot_run_steps(run_id, plot_steps, eval_args, show_scatter=False):
     for i, step_label in enumerate(plot_steps):
         if step_label == 'last':
             step_label = client.get_run(run_id).data.params['steps']
+        elif step_label == 'best':
+            step_label = 'Best Loss'
         else:
             step_label = str(step_label)
         custom_legend.append(
@@ -158,7 +173,7 @@ def plot_exp_steps(exp_name, plot_steps, eval_args, show_scatter=False):
         # For each step, collect samples from all runs
         step_samples = []
         for j, run_id in enumerate(run_ids):
-            samples = run_eval(run_id, eval_args, step=step, device=eval_args["device"])
+            samples = run_eval(run_id, eval_args, step=step, device=eval_args["device"], exp='num_tracers')
             all_samples.append(samples)
             step_samples.append(samples)
             
@@ -225,7 +240,7 @@ def compare_runs_posterior(exp_name, filter_string, eval_args, show_scatter=Fals
     colors = [prop_cycle.by_key()['color'][i % len(prop_cycle.by_key()['color'])] for i in range(len(run_ids))]
     
     for run_id in run_ids:
-        samples = run_eval(run_id, eval_args, device=eval_args["device"])
+        samples = run_eval(run_id, eval_args, device=eval_args["device"], exp='num_tracers')
         all_samples.append(samples) 
         
     # Use run IDs as labels for clarity
@@ -234,107 +249,223 @@ def compare_runs_posterior(exp_name, filter_string, eval_args, show_scatter=Fals
     plt.tight_layout(rect=[0, 0.03, 1, 0.95]) # Adjust layout to prevent title overlap
     plt.show()
 
-def compare_exp_training(exp_name, var, excluded_runs=[]):
-    client = MlflowClient()
-    exp_id = client.get_experiment_by_name(exp_name).experiment_id
-    run_ids = [run.info.run_id for run in client.search_runs(exp_id) if run.info.run_id not in excluded_runs]
+def compare_training(exp_name=None, run_ids=None, var=None, excluded_runs=[], cosmo_exp='num_tracers', log_scale=False, show_best=False, show_checkpoints=False, base_dir='.', eval_args=None):
+    """
+    Compares training loss and posterior contour area evolution for multiple MLflow runs
+    on a single plot with two y-axes. Can take either an experiment name or a list of run IDs.
 
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
+    Args:
+        exp_name (str, optional): Name of the MLflow experiment. If provided, all runs in this experiment will be used.
+        run_ids (list, optional): List of specific MLflow run IDs to compare. If provided, exp_name is ignored.
+        var (str or list): Parameter(s) from MLflow run params to include in the label.
+        excluded_runs (list): List of run IDs to exclude.
+        exp (str): Experiment name or ID (if needed for path).
+        log_scale (bool): If True, use log scale for the loss y-axis.
+        show_best (bool): If True, also plot contour area for best loss checkpoints.
+        base_dir (str): Base directory for MLflow runs (if not default).
+        eval_args (dict, optional): Arguments for the run_eval function. If None, defaults to {"device": "cpu"}.
+    """
+    client = MlflowClient()
     
+    # Set default eval_args if not provided
+    if eval_args is None:
+        eval_args = {"device": "cpu"}
+    
+    # Get run IDs either from experiment name or directly from input
+    if run_ids is None and exp_name is not None:
+        exp_id = client.get_experiment_by_name(exp_name).experiment_id
+        run_ids = [run.info.run_id for run in client.search_runs(exp_id) if run.info.run_id not in excluded_runs]
+    elif run_ids is not None:
+        # If run_ids is provided, filter out excluded runs
+        run_ids = [run_id for run_id in run_ids if run_id not in excluded_runs]
+        # Try to get experiment ID from the first run
+        if run_ids:
+            exp_id = client.get_run(run_ids[0]).info.experiment_id
+        else:
+            print("No valid run IDs provided.")
+            return
+    else:
+        print("Either exp_name or run_ids must be provided.")
+        return
+    
+    if not run_ids:
+        print("No runs found to process.")
+        return
+
+    # Create a figure and a primary axes (for loss)
+    fig, ax1 = plt.subplots(figsize=(10, 7))
+
+    # Create a secondary axes sharing the same x-axis (for contour area)
+    ax2 = ax1.twinx()
+
     # Convert var to list if it's a single variable
     vars_list = var if isinstance(var, list) else [var]
-    
-    # Sort runs based on the first variable if it's numeric
-    if type(eval(client.get_run(run_ids[0]).data.params[vars_list[0]])) is float or type(eval(client.get_run(run_ids[0]).data.params[vars_list[0]])) is int:
-        run_ids = sorted(run_ids, key=lambda x: float(client.get_run(x).data.params[vars_list[0]]))
-    
-    colors = plt.cm.viridis(np.linspace(0, 1, len(run_ids)))
-    losses = []
-    steps = []
-    
-    for i, run_id in enumerate(run_ids):
-        loss_history = client.get_metric_history(run_id, 'loss')
-        loss = [metric.value for metric in loss_history]
-        # append losses to one list
-        losses.append(loss)
-        eigs = np.load(f"../mlruns/{exp_id}/{run_id}/artifacts/eigs.npy")
-        ax2.plot(eigs, alpha=0.7, linestyle='--', color=colors[i])
-        if os.path.exists(f"../mlruns/{exp_id}/{run_id}/artifacts/brute_force_eigs.npy"):
-            brute_force_eigs = np.load(f"../mlruns/{exp_id}/{run_id}/artifacts/brute_force_eigs.npy")
-            ax2.plot(brute_force_eigs, color=colors[i])
-    
-    loss_min = np.array(losses).min()
-    
-    for i, run_id in enumerate(run_ids):
-        loss_history = client.get_metric_history(run_id, 'loss')
-        loss = np.array([metric.value for metric in loss_history])
-        steps = len(loss)
-        
-        # Create label with all variables
-        label_parts = []
-        for v in vars_list:
-            param_value = client.get_run(run_id).data.params[v]
-            label_parts.append(f"{v}={param_value}")
-        
-        label = ", ".join(label_parts)
-        
-        ax1.plot(np.arange(steps)*25, loss-loss_min, alpha=0.5, color=colors[i], label=label)
 
-    ax1.set_xlabel("Training Step")
-    ax1.set_ylabel("Loss")
-    ax1.set_yscale('log')
-    ax2.set_xlabel("Design Index")
-    ax2.set_ylabel("Expected Information Gain [bits]")
-    ax1.legend()
-    plt.show()
-
-def compare_runs_training(run_ids, var):
-
-    client = MlflowClient()
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
-    
-    # Convert var to list if it's a single variable
-    vars_list = var if isinstance(var, list) else [var]
-    
     colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
-    losses = []
-    loss_mins = []
-    steps = []
-    
-    for i, run_id in enumerate(run_ids):
-        exp_id = client.get_run(run_id).info.experiment_id
+    lines = [] # To store lines for the combined legend
+    labels = [] # To store labels for the combined legend
+
+    min_loss_overall = float('inf') # Keep track of min loss across all runs
+
+    # First pass to get all losses and determine min loss for scaling
+    all_losses = {}
+    all_steps_count = {}
+    for run_id in run_ids:
         loss_history = client.get_metric_history(run_id, 'loss')
-        loss = [metric.value for metric in loss_history]
-        steps.append(len(loss))
-        loss_mins.append(np.array(loss).min())
-        losses.append(loss)
-        eigs = np.load(f"../mlruns/{exp_id}/{run_id}/artifacts/eigs.npy")
-        ax2.plot(eigs, alpha=0.7, linestyle='--', color=colors[i])
-        if os.path.exists(f"../mlruns/{exp_id}/{run_id}/artifacts/brute_force_eigs.npy"):
-            brute_force_eigs = np.load(f"../mlruns/{exp_id}/{run_id}/artifacts/brute_force_eigs.npy")
-            ax2.plot(brute_force_eigs, color=colors[i])
-    
-    mins = np.array(loss_mins)
-    losses = np.array(losses)
-    
+        # Filter out potential NaN/inf values from loss history
+        loss = [metric.value for metric in loss_history if np.isfinite(metric.value)]
+        if not loss: # Skip run if no valid loss points
+             print(f"Warning: No valid loss points found for run {run_id}. Skipping.")
+             continue
+        all_steps_count[run_id] = len(loss)
+        all_losses[run_id] = loss
+        current_min_loss = np.min(loss)
+        if current_min_loss < min_loss_overall:
+            min_loss_overall = current_min_loss
+
+    # Second pass to plot data
     for i, run_id in enumerate(run_ids):
+        if run_id not in all_losses: # Skip if run had no valid loss points
+            continue
+            
+        losses = all_losses[run_id]
+        steps = all_steps_count[run_id]
+        training_steps_axis = np.arange(steps) * 25 # Assuming steps logged every 25 iterations
         
         # Create label with all variables
         label_parts = []
         for v in vars_list:
-            param_value = client.get_run(run_id).data.params[v]
-            label_parts.append(f"{v}={param_value}")
+            try:
+                param_value = client.get_run(run_id).data.params[v]
+                label_parts.append(f"{v}={param_value}")
+            except:
+                print(f"Warning: Parameter {v} not found for run {run_id}")
+                
+        base_label = ", ".join(label_parts)
         
-        label = ", ".join(label_parts)
+        # --- Plot Loss on ax1 ---
+        loss_plot_label = f"{base_label} (Loss)"
+        if log_scale:
+            line_loss, = ax1.plot(training_steps_axis, losses - min_loss_overall * 1.1, alpha=0.7, color=colors[i % len(colors)], label=loss_plot_label)
+        else:
+            line_loss, = ax1.plot(training_steps_axis, losses, alpha=0.7, color=colors[i % len(colors)], label=loss_plot_label)
+        lines.append(line_loss)
+        labels.append(loss_plot_label)
         
-        ax1.plot(np.arange(steps[i])*25, losses[i]-mins[i], alpha=0.5, color=colors[i], label=label)
+        if show_checkpoints:
+            # --- Plot Contour Area (Regular Checkpoints) on ax2 ---
+            checkpoint_areas = []
+            steps_list = []
+            checkpoint_dir = f'{base_dir}/{cosmo_exp}/mlruns/{exp_id}/{run_id}/artifacts/checkpoints/'
+            try:
+                checkpoint_files = os.listdir(checkpoint_dir)
+            except FileNotFoundError:
+                print(f"Warning: Checkpoint directory not found for run {run_id}: {checkpoint_dir}")
+                checkpoint_files = []
+                
+            checkpoints = sorted([
+                int(f.split('_')[-1].split('.')[0]) 
+                for f in checkpoint_files 
+                if f.startswith('nf_checkpoint_') and f.endswith('.pt') and not f.endswith('last.pt') and not f.endswith('best.pt')
+            ])
+            
+            for s in checkpoints: # Iterate through selected checkpoints
+                if s < 1000:
+                    continue
+                print(f"Run {run_id}: Calculating area for regular checkpoint: {s}")
+                try:
+                    samples = run_eval(run_id, eval_args=eval_args, device=eval_args["device"], step=s, cosmo_exp=cosmo_exp)
+                    area_list = get_contour_area([samples], 'Om', 'hrdrag', 0.68) # Assuming params
+                    if area_list and np.isfinite(area_list[0]):
+                        checkpoint_areas.append(area_list[0])
+                        steps_list.append(s)
+                    else:
+                        print(f"Warning: Invalid area for run {run_id}, regular step {s}. Skipping point.")
+                except Exception as e:
+                    print(f"Error getting area for run {run_id}, regular step {s}: {e}")
 
+            if steps_list: # Only plot if we have valid points
+                area_plot_label = f"{base_label} (Area, Regular)"
+                # Use a unique variable name here
+                line_area_reg, = ax2.plot(steps_list, checkpoint_areas, alpha=0.7, color=colors[i % len(colors)], linestyle='--', label=area_plot_label)
+                lines.append(line_area_reg) # Append the correct line object
+                labels.append(area_plot_label)
+
+        # --- Plot Contour Area (Best Loss Checkpoints) on ax2 ---
+        if show_best:
+            best_areas = []
+            best_steps = []
+            checkpoint_dir = f'{base_dir}/{cosmo_exp}/mlruns/{exp_id}/{run_id}/artifacts/best_loss/'
+            try:
+                checkpoint_files = os.listdir(checkpoint_dir)
+            except FileNotFoundError:
+                print(f"Warning: Best loss checkpoint directory not found for run {run_id}: {checkpoint_dir}")
+                checkpoint_files = []
+
+            checkpoints = sorted([
+                int(f.split('_')[-1].split('.')[0]) 
+                for f in checkpoint_files 
+                if f.startswith('nf_checkpoint_') and f.endswith('.pt')
+            ])
+            for s in checkpoints[::10]: # Iterate through selected checkpoints
+                if s < 1000:
+                    continue
+                print(f"Run {run_id}: Calculating area for best loss checkpoint: {s}")
+                try:
+                    best_loss_samples = run_eval(run_id, eval_args=eval_args, device=eval_args["device"], step=s, best=True, cosmo_exp=cosmo_exp)
+                    area_list = get_contour_area([best_loss_samples], 'Om', 'hrdrag', 0.68) # Assuming params
+                    if area_list and np.isfinite(area_list[0]):
+                        best_areas.append(area_list[0])
+                        best_steps.append(s)
+                    else:
+                         print(f"Warning: Invalid area for run {run_id}, best step {s}. Skipping point.")
+                except Exception as e:
+                     print(f"Error getting area for run {run_id}, best step {s}: {e}")
+            
+            # Now plot all collected best points after the loop
+            if best_steps: # Only plot if we have valid points
+                area_plot_label_best = f"{base_label} (Area, Best)"
+                # Use another unique variable name
+                line_area_best, = ax2.plot(best_steps, best_areas, alpha=1.0, linestyle='-.', label=area_plot_label_best, color=colors[i % len(colors)], zorder=5, linewidth=2)
+                lines.append(line_area_best) # Append the correct line object
+                labels.append(area_plot_label_best)
+
+    # --- Final Plot Configuration ---
     ax1.set_xlabel("Training Step")
+
+    # Configure ax1 (Loss)
     ax1.set_ylabel("Loss")
-    ax1.set_yscale('log')
-    ax2.set_xlabel("Design Index")
-    ax2.set_ylabel("Expected Information Gain [bits]")
-    ax1.legend()
+    ax1.tick_params(axis='y')
+    if log_scale:
+        ax1.set_yscale('log')
+        ax2.set_yscale('log')
+    else:
+        # Adjust ylim slightly to give padding, avoid setting bottom exactly at min_loss_overall if not log
+         pad = (np.max([max(all_losses[run_id]) for run_id in all_losses]) - min_loss_overall * 1.1) * 0.05 if all_losses else 1
+         ax1.set_ylim(min_loss_overall - np.abs(min_loss_overall) * 0.1, 1)
+         ax2.set_ylim(min(checkpoint_areas + best_areas) - np.abs(min(checkpoint_areas + best_areas)) * 0.5, 50)
+
+    # Configure ax2 (Contour Area)
+    ax2.set_ylabel("Posterior Contour Area")
+    ax2.tick_params(axis='y')
+
+    # Combined Legend
+    # Place legend outside the plot area to avoid overlap
+    ax1.legend(lines, labels, loc='upper center', bbox_to_anchor=(0.5, -0.1), fancybox=True, shadow=True, ncol=max(1, len(run_ids)))
+
+    fig.tight_layout(rect=[0, 0.03, 1, 0.95]) # Adjust layout to prevent title/legend overlap
+    
+    # Set title based on what was provided
+    if exp_name:
+        plt.title(f"Training Loss and Posterior Area Evolution - {exp_name}")
+        os.makedirs(f"{base_dir}/{cosmo_exp}/mlruns/{exp_id}/plots", exist_ok=True)
+        save_path = f"{base_dir}/{cosmo_exp}/mlruns/{exp_id}/plots/compare_training.png"
+    else:
+        plt.title("Training Loss and Posterior Area Evolution")
+        save_path = f"{base_dir}/{cosmo_exp}/plots/compare_training.png"
+    
+    plt.savefig(save_path)
+    print(f"Saved plot to {save_path}")
     plt.show()
 
 def compare_exp_posterior(exp_name, group_by_var, eval_args, show_scatter=False, excluded_runs=[]):
@@ -422,13 +553,22 @@ def get_contour_area(samples, param1, param2, level=0.68):
     samples = [samples] if type(samples) != list else samples
     areas = []
 
+    # Create a temporary figure that won't be shown
+    temp_fig, temp_ax = plt.subplots()
     for sample in samples:
         density = sample.get2DDensity(param1, param2)
         contour_level = density.getContourLevels([level])[0]
         
-        # Plot in original space
-        cs = plt.contour(density.x, density.y, density.P, 
-                         levels=[contour_level])
+        # Plot contour on the temporary axes
+        cs = temp_ax.contour(density.x, density.y, density.P, 
+                           levels=[contour_level])
+        
+        # Check if any contours were found at this level
+        if not cs.collections or not cs.collections[0].get_paths():
+            warnings.warn(f"No contour found for level {level}. Assigning area 0.")
+            areas.append(0.0)
+            continue # Skip to the next sample if no path found
+
         paths = cs.collections[0].get_paths()
         total_area = 0.0
         
@@ -439,14 +579,15 @@ def get_contour_area(samples, param1, param2, level=0.68):
             # Calculate areas using Shoelace formula
             area_norm = 0.5 * np.abs(np.dot(x, np.roll(y, 1)) - np.dot(y, np.roll(x, 1)))
             
-            total_area = area_norm
+            total_area = area_norm # Assuming only one closed contour contributes significantly
         
         areas.append(total_area)
         
-    plt.close("all")
+    # Close only the temporary figure
+    plt.close(temp_fig) 
     return areas
 
-def compare_contours(run_ids, param1, param2, eval_args, steps='last', level=0.68, show_grid=False):
+def compare_contours(run_ids, param1, param2, eval_args, steps='best', level=0.68, show_grid=False):
     samples = []
     run_ids = [run_ids] if type(run_ids) != list else run_ids
     steps = [steps] if type(steps) != list else steps
@@ -545,3 +686,18 @@ def compare_contours(run_ids, param1, param2, eval_args, steps='last', level=0.6
     
     plt.tight_layout()
     plt.show()
+
+if __name__ == "__main__":
+
+    eval_args = {"post_samples": 30000, "device": "cuda:1", "eval_seed": 1}
+    run_ids = ['80b0f669e754456fbeb3df13acae577d', '00848c1ecca047099a8e51da7a270624', 'cdd0fd6ef3794892a5ef7de83c74aa77', 'd6f947aa8611474dac987f0029a91651']
+    compare_training(
+        exp_name='base_NAF_pyro_fixed', 
+        run_ids=run_ids, 
+        var='pyro_seed', 
+        eval_args=eval_args,
+        log_scale=False,
+        show_best=True,
+        show_checkpoints=True,
+        cosmo_exp='num_tracers'
+    )

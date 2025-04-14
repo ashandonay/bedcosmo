@@ -18,6 +18,8 @@ from pyro.contrib.util import lexpand
 
 torch.set_default_dtype(torch.float64)
 
+base_dir = '/home/ashandonay/bed/BED_cosmo'
+
 def auto_seed(seed):
     if seed < 0:
         seed = torch.randint(0, 2**32 - 1, (1,)).item()
@@ -40,7 +42,7 @@ def print_memory_usage(process, step):
     mem_info = process.memory_info()
     print(f"Step {step}: Memory Usage: {mem_info.rss / 1024**2:.2f} MB")
 
-def save_checkpoint(model, optimizer, filepath):
+def save_checkpoint(model, optimizer, filepath, artifact_path=None):
     """
     Saves the training checkpoint.
 
@@ -56,7 +58,7 @@ def save_checkpoint(model, optimizer, filepath):
         'optimizer_state_dict': optimizer.state_dict()
     }
     torch.save(checkpoint, filepath)
-    mlflow.log_artifact(filepath)  # Logs the checkpoint to mlflow
+    mlflow.log_artifact(filepath, artifact_path=artifact_path)  # Logs the checkpoint to mlflow
 
 def init_nf(flow_type, input_dim, context_dim, n_transforms, hidden_size=None, n_layers=None, device="cuda:0", seed=None, verbose=False, **kwargs):
     # Set seeds first, before any model initialization
@@ -89,7 +91,7 @@ def init_nf(flow_type, input_dim, context_dim, n_transforms, hidden_size=None, n
             features=input_dim, 
             context=context_dim, 
             transforms=n_transforms,
-            network={"hidden_features": ((hidden_size,) * n_layers)} #(hidden_size,) + (2*hidden_size,) * (n_layers - 1)} 
+            network={"hidden_features": ((hidden_size,) * n_layers)} # (hidden_size,) + (2*hidden_size,) * (n_layers - 1)} 
         ).to(device)
     elif flow_type == "MAF":
         posterior_flow = zuko.flows.MAF(
@@ -131,7 +133,7 @@ def init_nf(flow_type, input_dim, context_dim, n_transforms, hidden_size=None, n
         ).to(device)
     return posterior_flow
 
-def run_eval(run_id, eval_args, step='last', device='cuda:0'):
+def run_eval(run_id, eval_args, step='best', device='cuda:0', cosmo_exp='num_tracers', best=False):
     client = MlflowClient()
     run = client.get_run(run_id)
     exp_id = run.info.experiment_id
@@ -172,8 +174,11 @@ def run_eval(run_id, eval_args, step='last', device='cuda:0'):
             device,
             seed=eval(run.data.params["nf_seed"])
             )
-        
-        checkpoint = torch.load(f'../mlruns/{exp_id}/{run_id}/artifacts/nf_checkpoint_{step}.pt', map_location=eval_args["device"])
+
+        if best:
+            checkpoint = torch.load(f'{base_dir}/{cosmo_exp}/mlruns/{exp_id}/{run_id}/artifacts/best_loss/nf_checkpoint_{step}.pt', map_location=eval_args["device"])
+        else:
+            checkpoint = torch.load(f'{base_dir}/{cosmo_exp}/mlruns/{exp_id}/{run_id}/artifacts/checkpoints/nf_checkpoint_{step}.pt', map_location=eval_args["device"])
         posterior_flow.load_state_dict(checkpoint['model_state_dict'], strict=True)
         posterior_flow.to(eval_args["device"])
         posterior_flow.eval()
