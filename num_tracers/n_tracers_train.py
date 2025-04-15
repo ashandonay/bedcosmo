@@ -344,11 +344,13 @@ if __name__ == '__main__':
     # --- Argument Parsing --- 
     cosmo_model_default = 'base' 
     default_args = train_args_dict[cosmo_model_default]
+    default_exp_name = f"{cosmo_model_default}_{default_args['flow_type']}"
 
     parser = argparse.ArgumentParser(description="Run Number Tracers Training")
 
     # Add arguments dynamically based on the default config file
     parser.add_argument('--cosmo_model', type=str, default=cosmo_model_default, help='Cosmological model set to use from train_args.json')
+    parser.add_argument('--exp_name', type=str, default=default_exp_name, help='Experiment name')
     for key, value in default_args.items():
         arg_type = type(value)
         if isinstance(value, bool):
@@ -387,7 +389,7 @@ if __name__ == '__main__':
     single_run(
         cosmo_model=cosmo_model,
         train_args=train_args,
-        mlflow_experiment_name=f"{cosmo_model}_{train_args['flow_type']}_fixed",
+        mlflow_experiment_name=args.exp_name,
         device=device,
         signal=16, # Example of hardcoded kwargs, consider making them args too if needed
         fixed_design=True,
