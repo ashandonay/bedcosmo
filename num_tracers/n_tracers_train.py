@@ -44,6 +44,7 @@ import gc
 from num_tracers import NumTracers
 from util import *
 import json
+import argparse
 
 def single_run(
     cosmo_model,
@@ -334,24 +335,64 @@ if __name__ == '__main__':
 
     #set default dtype
     torch.set_default_dtype(torch.float64)
-    with open(os.path.join(os.path.dirname(__file__), 'train_args.json'), 'r') as f:
+
+    # --- Load Default Config --- 
+    config_path = os.path.join(os.path.dirname(__file__), 'train_args.json')
+    with open(config_path, 'r') as f:
         train_args_dict = json.load(f)
+
+    # --- Argument Parsing --- 
+    cosmo_model_default = 'base' 
+    default_args = train_args_dict[cosmo_model_default]
+
+    parser = argparse.ArgumentParser(description="Run Number Tracers Training")
+
+    # Add arguments dynamically based on the default config file
+    parser.add_argument('--cosmo_model', type=str, default=cosmo_model_default, help='Cosmological model set to use from train_args.json')
+    for key, value in default_args.items():
+        arg_type = type(value)
+        if isinstance(value, bool):
+            parser.add_argument(f'--{key}', action='store_true', help=f'Enable {key}')
+            # Set default explicitly for bools, action handles the logic
+            parser.set_defaults(**{key: value})
+        elif isinstance(value, (int, float, str)):
+             parser.add_argument(f'--{key}', type=arg_type, default=None, help=f'Override {key} (default: {value})')
+        else:
+            print(f"Warning: Argument type for key '{key}' not explicitly handled ({arg_type}). Treating as string.")
+            parser.add_argument(f'--{key}', type=str, default=None, help=f'Override {key} (default: {value})')
+
+    args = parser.parse_args()
+    cosmo_model = args.cosmo_model
+
+    # --- Prepare Final Config --- 
+    train_args = train_args_dict[cosmo_model].copy() # Start with defaults for the chosen model
+
+    # Override defaults with any provided command-line arguments
+    args_dict = vars(args)
+    for key, value in args_dict.items():
+        if key != 'cosmo_model' and value is not None and key in train_args:
+            if isinstance(train_args[key], bool) and isinstance(value, bool):
+                train_args[key] = value
+            elif not isinstance(train_args[key], bool):
+                print(f"Overriding '{key}': {train_args[key]} -> {value}")
+                train_args[key] = value
+
+    # --- Setup & Run --- 
     process = psutil.Process(os.getpid())
-
     device = torch.device("cuda:0") if torch.cuda.is_available() else "cpu"
-
-    cosmo_model = 'base'
-    train_args = train_args_dict[cosmo_model]
     print(f'Using device: {device}.')
+    print(f"Running with parameters for cosmo_model='{cosmo_model}':")
+    print(json.dumps(train_args, indent=2))
+
     single_run(
-        cosmo_model,
-        train_args,
-        f"{cosmo_model}_{train_args['flow_type']}_fixed",
+        cosmo_model=cosmo_model,
+        train_args=train_args,
+        mlflow_experiment_name=f"{cosmo_model}_{train_args['flow_type']}_fixed",
         device=device,
-        signal=16,
+        signal=16, # Example of hardcoded kwargs, consider making them args too if needed
         fixed_design=True,
         eff=True,
-        )
+    )
     mlflow.end_run()
 
 
