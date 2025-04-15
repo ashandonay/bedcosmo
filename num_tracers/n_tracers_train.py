@@ -227,6 +227,8 @@ def single_run(
                                         condition_design=train_args["condition_design"],
                                         verbose_shapes=verbose_shapes)
         agg_loss.backward()
+        # Clip gradients to prevent large jumps
+        torch.nn.utils.clip_grad_norm_(posterior_flow.parameters(), max_norm=1.0)
         optimizer.step()
 
         if step == 0:
