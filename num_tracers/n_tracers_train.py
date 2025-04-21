@@ -23,6 +23,7 @@ from pyro.contrib.util import lexpand, rexpand
 import matplotlib.pyplot as plt
 import seaborn as sns
 import corner
+import getdist
 
 from nflows.transforms import made as made_module
 from bed.grid import Grid
@@ -45,6 +46,7 @@ from num_tracers import NumTracers
 from util import *
 import json
 import argparse
+from plotting import get_contour_area
 
 def single_run(
     cosmo_model,
@@ -179,11 +181,11 @@ def single_run(
         seed=train_args["nf_seed"],
         verbose=True
         )
+    nominal_design = torch.tensor(desi_tracers.groupby('class').sum()['observed'].reindex(classes.keys()).values, device=device)
+    central_vals = num_tracers.central_val if train_args["include_D_M"] else num_tracers.central_val[1::2]
+    nominal_context = torch.cat([nominal_design, central_vals], dim=-1)
     # test sample from the flow
     with torch.no_grad():
-        nominal_design = torch.tensor(desi_tracers.groupby('class').sum()['observed'].reindex(classes.keys()).values, device=device)
-        central_vals = num_tracers.central_val if train_args["include_D_M"] else num_tracers.central_val[1::2]
-        nominal_context = torch.cat([nominal_design, central_vals], dim=-1)
         samples = posterior_flow(nominal_context).sample((100,)).cpu().numpy()
         plt.figure()
         plt.plot(samples[:, 0], samples[:, 1], 'o', alpha=0.5)
@@ -213,7 +215,7 @@ def single_run(
     is_tty = sys.stdout.isatty()
     num_steps_range = trange(0, train_args["steps"], desc="Loss: 0.000 ", disable=not is_tty)
     best_loss = float('inf')
-    os.makedirs(f"{home_dir}/bed/BED_cosmo/num_tracers/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/best_loss", exist_ok=True)
+    best_area = float('inf')
     os.makedirs(f"{home_dir}/bed/BED_cosmo/num_tracers/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/checkpoints", exist_ok=True)
     for step in num_steps_range:
         optimizer.zero_grad() #  clear gradients from previous step
@@ -252,21 +254,39 @@ def single_run(
         if loss.cpu().detach().item() < best_loss:
             best_loss = loss.cpu().detach().item()
             # save the checkpoint
-            checkpoint_path = f"{home_dir}/bed/BED_cosmo/num_tracers/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/best_loss/nf_checkpoint_{step}.pt"
-            save_checkpoint(posterior_flow, optimizer, checkpoint_path, artifact_path="best_loss")
-            checkpoint_path = f"{home_dir}/bed/BED_cosmo/num_tracers/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/checkpoints/nf_checkpoint_best.pt"
+            checkpoint_path = f"{home_dir}/bed/BED_cosmo/num_tracers/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/checkpoints/nf_loss_checkpoint_{step}.pt"
             save_checkpoint(posterior_flow, optimizer, checkpoint_path, artifact_path="checkpoints")
-        mlflow.log_metric("best_loss", best_loss, step=step)
+            checkpoint_path = f"{home_dir}/bed/BED_cosmo/num_tracers/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/checkpoints/nf_checkpoint_best_loss.pt"
+            save_checkpoint(posterior_flow, optimizer, checkpoint_path, artifact_path="checkpoints")
+            mlflow.log_metric("best_loss", best_loss, step=step)
 
-        if step % 25 == 0:
-            # log the current learning rate
-            for param_group in optimizer.param_groups:
-                mlflow.log_metric("lr", param_group['lr'], step=step)
-            mlflow.log_metric("loss", loss.mean().item(), step=step)
-            mlflow.log_metric("agg_loss", agg_loss.item(), step=step)
+        # log learning rate and loss
+        for param_group in optimizer.param_groups:
+            mlflow.log_metric("lr", param_group['lr'], step=step)
+        mlflow.log_metric("loss", loss.mean().item(), step=step)
+        mlflow.log_metric("agg_loss", agg_loss.item(), step=step)
+        if step % 100 == 0 and step > 99:
+            nominal_samples = posterior_flow(nominal_context).sample((30000,)).cpu().numpy()
+            with contextlib.redirect_stdout(io.StringIO()):
+                nominal_samples_gd = getdist.MCSamples(samples=nominal_samples, names=target_labels, labels=num_tracers.latex_labels)
+            untransformed_area = get_contour_area(nominal_samples_gd, 'Om', 'hrdrag', 0.68)[0]
+            mlflow.log_metric("untransformed_area", untransformed_area, step=step)
+            nominal_samples[:, -1] *= 100000
+            with contextlib.redirect_stdout(io.StringIO()):
+                nominal_samples_gd = getdist.MCSamples(samples=nominal_samples, names=target_labels, labels=num_tracers.latex_labels)
+            nominal_area = get_contour_area(nominal_samples_gd, 'Om', 'hrdrag', 0.68)[0]
+            mlflow.log_metric("nominal_area", nominal_area, step=step)
+            if nominal_area < best_area:
+                best_area = nominal_area
+                mlflow.log_metric("best_nominal_area", best_area, step=step)
+                # save the checkpoint
+                checkpoint_path = f"{home_dir}/bed/BED_cosmo/num_tracers/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/checkpoints/nf_area_checkpoint_{step}.pt"
+                save_checkpoint(posterior_flow, optimizer, checkpoint_path, artifact_path="checkpoints")
+                checkpoint_path = f"{home_dir}/bed/BED_cosmo/num_tracers/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/checkpoints/nf_checkpoint_best_area.pt"
+                save_checkpoint(posterior_flow, optimizer, checkpoint_path, artifact_path="checkpoints")
             # Only update description if running in a TTY
             if is_tty:
-                num_steps_range.set_description("Loss: {:.3f} ".format(loss.mean().item()))
+                num_steps_range.set_description("Loss: {:.3f}, Area: {:.3f}".format(loss.mean().item(), nominal_area))
             else:
                 print(f"Step {step}, Loss: {loss.mean().item()}")
         if step % train_args["gamma_freq"] == 0 and step > 0:
@@ -381,20 +401,23 @@ if __name__ == '__main__':
 
     # --- Setup & Run --- 
     process = psutil.Process(os.getpid())
-    device = torch.device("cuda:0") if torch.cuda.is_available() else "cpu"
+    device = torch.device("cuda:1") if torch.cuda.is_available() else "cpu"
     print(f'Using device: {device}.')
     print(f"Running with parameters for cosmo_model='{cosmo_model}':")
     print(json.dumps(train_args, indent=2))
 
-    single_run(
-        cosmo_model=cosmo_model,
-        train_args=train_args,
-        mlflow_experiment_name=args.exp_name,
-        device=device,
-        signal=16, # Example of hardcoded kwargs, consider making them args too if needed
-        fixed_design=True,
-        eff=True,
-    )
-    mlflow.end_run()
+    for particles in [10000, 1000, 100]:
+        train_args["steps"] = 300000
+        train_args["n_particles"] = particles
+        single_run(
+            cosmo_model=cosmo_model,
+            train_args=train_args,
+            mlflow_experiment_name=args.exp_name,
+            device=device,
+            signal=16, # Example of hardcoded kwargs, consider making them args too if needed
+            fixed_design=True,
+            eff=True,
+        )
+        mlflow.end_run()
 
 

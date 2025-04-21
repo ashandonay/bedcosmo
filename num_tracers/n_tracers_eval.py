@@ -50,7 +50,7 @@ import psutil
 import os
 import gc
 from num_tracers import NumTracers
-from plotting import *
+from plotting import plot_posterior
 from util import *
 
 
@@ -451,18 +451,21 @@ def run_eval(eval_args, run_id, exp, device, **kwargs):
                 nominal_samples[:, -1] *= 100000
                 optimal_samples_gd = getdist.MCSamples(samples=optimal_samples, names=target_labels, labels=latex_labels)
                 nominal_samples_gd = getdist.MCSamples(samples=nominal_samples, names=target_labels, labels=latex_labels)
+                desi_samples = np.load(f"{home_dir}/data/mcmc_samples/{run.data.params['cosmo_model']}.npy")
+                desi_samples_gd = getdist.MCSamples(samples=desi_samples, names=target_labels, labels=latex_labels)
                 np.save(f"{home_dir}/bed/BED_cosmo/num_tracers/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/optimal_samples.npy", optimal_samples)
                 np.save(f"{home_dir}/bed/BED_cosmo/num_tracers/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/nominal_samples.npy", nominal_samples)
+                np.save(f"{home_dir}/bed/BED_cosmo/num_tracers/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/desi_samples.npy", desi_samples)
                 mlflow.log_artifact(f"{home_dir}/bed/BED_cosmo/num_tracers/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/optimal_samples.npy")
                 mlflow.log_artifact(f"{home_dir}/bed/BED_cosmo/num_tracers/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/nominal_samples.npy")
+                mlflow.log_artifact(f"{home_dir}/bed/BED_cosmo/num_tracers/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/desi_samples.npy")
 
                 g = plots.getSubplotPlotter()
                 if not eval_args["brute_force"]:
-                    plot_samples = [nominal_samples_gd, optimal_samples_gd]
                     g = plot_posterior(
-                        [nominal_samples_gd, optimal_samples_gd],
-                        ['black', 'tab:blue'],
-                        legend_labels=['Nominal', 'Optimal'],
+                        [desi_samples_gd, nominal_samples_gd, optimal_samples_gd],
+                        ['black', 'tab:blue', 'tab:orange'],
+                        legend_labels=['DESI', 'Nominal', 'Optimal'],
                         show_scatter=True
                     )
                 else:
@@ -530,7 +533,7 @@ if __name__ == '__main__':
     run_eval(
         eval_args,
         run_id=None,
-        exp='base_NAF_pyro_fixed',
+        exp='base_NAF_gamma2_fixed',
         device=device
         )
     mlflow.end_run()

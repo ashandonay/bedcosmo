@@ -1,3 +1,5 @@
+import sys
+import os
 import torch
 import pyro
 import mlflow
@@ -18,7 +20,10 @@ from pyro.contrib.util import lexpand
 
 torch.set_default_dtype(torch.float64)
 
-base_dir = '/home/ashandonay/bed/BED_cosmo'
+home_dir = os.environ["HOME"]
+if home_dir + "/bed/BED_cosmo" not in sys.path:
+    sys.path.insert(0, home_dir + "/bed/BED_cosmo")
+sys.path.insert(0, home_dir + "/bed/BED_cosmo/num_tracers")
 
 def auto_seed(seed):
     if seed < 0:
@@ -133,7 +138,7 @@ def init_nf(flow_type, input_dim, context_dim, n_transforms, hidden_size=None, n
         ).to(device)
     return posterior_flow
 
-def run_eval(run_id, eval_args, step='best', device='cuda:0', cosmo_exp='num_tracers', best=False):
+def run_eval(run_id, eval_args, step='best_loss', device='cuda:0', cosmo_exp='num_tracers', best=False):
     client = MlflowClient()
     run = client.get_run(run_id)
     exp_id = run.info.experiment_id
@@ -142,12 +147,12 @@ def run_eval(run_id, eval_args, step='best', device='cuda:0', cosmo_exp='num_tra
         ml_info = mlflow.active_run().info
 
         #tracers = eval(run.data.params["tracers"])
-        data_path = run.data.params["data_path"]
+        data_path = home_dir + run.data.params["data_path"]
         desi_df = pd.read_csv(data_path + 'desi_data.csv')
         desi_tracers = pd.read_csv(data_path + 'desi_tracers.csv')
         nominal_cov = np.load(data_path + 'desi_cov.npy')
         cosmo_model = run.data.params["cosmo_model"]
-
+        
         with open(mlflow.artifacts.download_artifacts(run_id=ml_info.run_id, artifact_path="classes.json")) as f:
             classes = json.load(f)
 
@@ -176,9 +181,9 @@ def run_eval(run_id, eval_args, step='best', device='cuda:0', cosmo_exp='num_tra
             )
 
         if best:
-            checkpoint = torch.load(f'{base_dir}/{cosmo_exp}/mlruns/{exp_id}/{run_id}/artifacts/best_loss/nf_checkpoint_{step}.pt', map_location=eval_args["device"])
+            checkpoint = torch.load(f'{home_dir}/bed/BED_cosmo/{cosmo_exp}/mlruns/{exp_id}/{run_id}/artifacts/best_loss/nf_checkpoint_{step}.pt', map_location=eval_args["device"])
         else:
-            checkpoint = torch.load(f'{base_dir}/{cosmo_exp}/mlruns/{exp_id}/{run_id}/artifacts/checkpoints/nf_checkpoint_{step}.pt', map_location=eval_args["device"])
+            checkpoint = torch.load(f'{home_dir}/bed/BED_cosmo/{cosmo_exp}/mlruns/{exp_id}/{run_id}/artifacts/checkpoints/nf_checkpoint_{step}.pt', map_location=eval_args["device"])
         posterior_flow.load_state_dict(checkpoint['model_state_dict'], strict=True)
         posterior_flow.to(eval_args["device"])
         posterior_flow.eval()
@@ -237,4 +242,23 @@ def calc_entropy(design, posterior_flow, num_tracers, num_samples):
     _, entropy = _safe_mean_terms(samples)
     return entropy
 
-
+def get_desi_samples(cosmo_model):
+    desi_samples = np.load(f"{home_dir}/data/mcmc_samples/{cosmo_model}.npy")
+    if cosmo_model == 'base':
+        target_labels = ['Om', 'hrdrag']
+        latex_labels = ['\Omega_m', 'H_0r_d']
+    elif cosmo_model == 'base_omegak':
+        target_labels = ['Om', 'Ok', 'hrdrag']
+        latex_labels = ['\Omega_m', '\Omega_k', 'H_0r_d']
+    elif cosmo_model == 'base_w':
+        target_labels = ['Om', 'w0', 'hrdrag']
+        latex_labels = ['\Omega_m', 'w_0', 'H_0r_d']
+    elif cosmo_model == 'base_w_wa':
+        target_labels = ['Om', 'w0', 'wa', 'hrdrag']
+        latex_labels = ['\Omega_m', 'w_0', 'w_a', 'H_0r_d']
+    elif cosmo_model == 'base_omegak_w_wa':
+        target_labels = ['Om', 'Ok', 'w0', 'wa', 'hrdrag']
+        latex_labels = ['\Omega_m', '\Omega_k', 'w_0', 'w_a', 'H_0r_d']
+    with contextlib.redirect_stdout(io.StringIO()):
+        desi_samples_gd = getdist.MCSamples(samples=desi_samples, names=target_labels, labels=latex_labels)
+    return desi_samples_gd

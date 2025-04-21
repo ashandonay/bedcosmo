@@ -119,7 +119,7 @@ dependencies:
   - zstd=1.5.2
   - pip:
       - aniso8601==9.0.1
-      - bayesdesign==0.4.0
+      - bayesdesign==0.5.0
       - bs4==0.0.2
       - cobaya==3.5.4
       - corner==2.2.1
