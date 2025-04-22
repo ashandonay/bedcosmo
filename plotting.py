@@ -348,9 +348,9 @@ def compare_training(
         areas = []
 
         # --- Plot Nominal area on ax2 ---
-        if area_step_freq % 25 != 0:
-            raise ValueError("area_step_freq must be a factor of 25")
-        nominal_area = all_nominal_areas[run_id][::area_step_freq//25]
+        if area_step_freq % 100 != 0:
+            raise ValueError("area_step_freq must be a factor of 100")
+        nominal_area = all_nominal_areas[run_id][::area_step_freq//100]
         area_steps = np.arange(len(nominal_area)) * area_step_freq # recorded every 25th step
         line_nominal_area, = ax2.plot(area_steps, nominal_area, alpha=1.0, zorder=5, linewidth=2, color=colors[i % len(colors)], label='Nominal Area')
         lines.append(line_nominal_area)

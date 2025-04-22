@@ -6,9 +6,6 @@
         "flow_type": "NAF",
         "design_low": 0.05,
         "design_step": 0.05,
-        "n_transforms": 2,
-        "num_layers": 2,
-        "hidden": 256,
         "steps": 100000,
         "lr": 1e-2,
         "gamma": 0.95,
@@ -17,7 +14,11 @@
         "eval_particles": 200,
         "verbose": false, 
         "include_D_M": true,
-        "condition_design": true
+        "condition_design": true,
+        "n_transforms": 2,
+        "hidden_size": 256,
+        "n_layers": 2,
+        "signal": 16
         },
     "base_omegak": {
         "pyro_seed": 1,
@@ -26,9 +27,6 @@
         "flow_type": "NAF",
         "design_low": 0.05,
         "design_step": 0.05,
-        "n_transforms": 2,
-        "num_layers": 4,
-        "hidden": 64,
         "steps": 20000,
         "lr": 1e-2,
         "gamma": 0.85,
@@ -37,7 +35,11 @@
         "eval_particles": 200,
         "verbose": false, 
         "include_D_M": true,
-        "condition_design": true
+        "condition_design": true,
+        "n_transforms": 2,
+        "hidden_size": 64,
+        "n_layers": 4,
+        "signal": 16
         },
     "base_w_wa": {
         "pyro_seed": 1,
@@ -46,9 +48,6 @@
         "flow_type": "NAF",
         "design_low": 0.05,
         "design_step": 0.05,
-        "n_transforms": 2,
-        "num_layers": 4,
-        "hidden": 64,
         "steps": 25000,
         "lr": 1e-2,
         "gamma": 0.85,
@@ -57,7 +56,11 @@
         "eval_particles": 200,
         "verbose": false, 
         "include_D_M": true,
-        "condition_design": true
+        "condition_design": true,
+        "n_transforms": 2,
+        "hidden_size": 64,
+        "n_layers": 4,
+        "signal": 16
     },
     "base_omegak_w_wa": {
         "pyro_seed": 1,
@@ -66,9 +69,6 @@
         "flow_type": "NAF",
         "design_low": 0.05,
         "design_step": 0.05,
-        "n_transforms": 3,
-        "num_layers": 4,
-        "hidden": 64,
         "steps": 30000,
         "lr": 1e-2,
         "gamma": 0.85,
@@ -77,6 +77,10 @@
         "eval_particles": 500,
         "verbose": false, 
         "include_D_M": true,
-        "condition_design": true
+        "condition_design": true,
+        "n_transforms": 4,
+        "hidden_size": 64,
+        "n_layers": 4,
+        "signal": 16
     }
 }

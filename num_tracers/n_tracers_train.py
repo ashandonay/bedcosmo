@@ -50,7 +50,7 @@ from plotting import get_contour_area
 
 def single_run(
     cosmo_model,
-    train_args,
+    run_args,
     mlflow_experiment_name,
     device="cuda:0",
     checkpoint_path=None,
@@ -63,13 +63,13 @@ def single_run(
     gc.collect()
     print(f"Memory before run: {process.memory_info().rss / 1024**2} MB")
     pyro.clear_param_store()
-
-    data_path = home_dir + train_args["data_path"]
+    print(json.dumps(run_args, indent=2))
+    data_path = home_dir + run_args["data_path"]
 
     mlflow.set_experiment(mlflow_experiment_name)
     mlflow.log_param("cosmo_model", cosmo_model)
-    # log params in train_args
-    for key, value in train_args.items():
+    # log params in run_args
+    for key, value in run_args.items():
         mlflow.log_param(key, value)
     # log params in kwargs
     for key, value in kwargs.items():
@@ -82,7 +82,7 @@ def single_run(
     # select only the rows corresponding to the tracers
     
 
-    #desi_data = desi_df[desi_df['tracer'].isin(train_args["tracers"])]
+    #desi_data = desi_df[desi_df['tracer'].isin(run_args["tracers"])]
     #nominal_cov = desi_cov[np.ix_(desi_data.index, desi_data.index)]
 
     ############################################### Priors ###############################################
@@ -97,8 +97,7 @@ def single_run(
         desi_tracers,
         cosmo_model,
         nominal_cov,
-        eff=kwargs["eff"], 
-        include_D_M=train_args["include_D_M"], 
+        include_D_M=run_args["include_D_M"], 
         device=device,
         verbose=True
         )
@@ -132,9 +131,9 @@ def single_run(
         # Create design grid with specified step size
         designs_dict = {
             f'N_{class_name}': np.arange(
-                train_args["design_low"],
-                class_frac + train_args["design_step"], 
-                train_args["design_step"]
+                run_args["design_low"],
+                class_frac + run_args["design_step"], 
+                run_args["design_step"]
             ) for class_name, class_frac in classes.items()
         }
 
@@ -168,21 +167,20 @@ def single_run(
 
     print("Calculating normalizing flow EIG...")
     input_dim = len(target_labels)
-    context_dim = len(classes.keys()) + 10 if train_args["include_D_M"] else len(classes.keys()) + 5
+    context_dim = len(classes.keys()) + 10 if run_args["include_D_M"] else len(classes.keys()) + 5
     print(f'Input dim: {input_dim}, Context dim: {context_dim}')
+
     posterior_flow = init_nf(
-        train_args["flow_type"],
+        run_args["flow_type"],
         input_dim, 
         context_dim,
-        train_args["n_transforms"],
-        train_args["hidden"],
-        train_args["num_layers"],
+        run_args,
         device,
-        seed=train_args["nf_seed"],
+        seed=run_args["nf_seed"],
         verbose=True
         )
     nominal_design = torch.tensor(desi_tracers.groupby('class').sum()['observed'].reindex(classes.keys()).values, device=device)
-    central_vals = num_tracers.central_val if train_args["include_D_M"] else num_tracers.central_val[1::2]
+    central_vals = num_tracers.central_val if run_args["include_D_M"] else num_tracers.central_val[1::2]
     nominal_context = torch.cat([nominal_design, central_vals], dim=-1)
     # test sample from the flow
     with torch.no_grad():
@@ -191,29 +189,29 @@ def single_run(
         plt.plot(samples[:, 0], samples[:, 1], 'o', alpha=0.5)
         plt.savefig(f"{home_dir}/bed/BED_cosmo/num_tracers/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/init_samples.png")
 
-    seed = auto_seed(train_args["pyro_seed"])
+    seed = auto_seed(run_args["pyro_seed"])
     print(f"Seed: {seed}")
-    optimizer = torch.optim.Adam(posterior_flow.parameters(), lr=train_args["lr"])
+    optimizer = torch.optim.Adam(posterior_flow.parameters(), lr=run_args["lr"])
     if checkpoint_path is not None:
         # Load the checkpoint
         checkpoint = torch.load(checkpoint_path, map_location=device)
         posterior_flow.load_state_dict(checkpoint['model_state_dict'])
-        optimizer = torch.optim.Adam(posterior_flow.parameters(), lr=train_args["lr"])
+        optimizer = torch.optim.Adam(posterior_flow.parameters(), lr=run_args["lr"])
         print(f"Checkpoint loaded from {checkpoint_path}")
-    scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=train_args["gamma"])
+    scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=run_args["gamma"])
 
-    mlflow.log_param("lr", train_args["lr"])
-    mlflow.log_param("gamma", train_args["gamma"])
-    mlflow.log_param("gamma_freq", train_args["gamma_freq"])
-    verbose_shapes = train_args["verbose"]
+    mlflow.log_param("lr", run_args["lr"])
+    mlflow.log_param("gamma", run_args["gamma"])
+    mlflow.log_param("gamma_freq", run_args["gamma_freq"])
+    verbose_shapes = run_args["verbose"]
     history = []
     print("MLFlow Run Info:", ml_info.experiment_id + "/" + ml_info.run_id)
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
-    total_steps = train_args["steps"]
+    total_steps = run_args["steps"]
     plot_steps = [int(0.25*total_steps), int(0.5*total_steps), int(0.75*total_steps)]
     # Disable tqdm progress bar if output is not a TTY
     is_tty = sys.stdout.isatty()
-    num_steps_range = trange(0, train_args["steps"], desc="Loss: 0.000 ", disable=not is_tty)
+    num_steps_range = trange(0, run_args["steps"], desc="Loss: 0.000 ", disable=not is_tty)
     best_loss = float('inf')
     best_area = float('inf')
     os.makedirs(f"{home_dir}/bed/BED_cosmo/num_tracers/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/checkpoints", exist_ok=True)
@@ -222,12 +220,12 @@ def single_run(
         agg_loss, loss = posterior_loss(design=designs,
                                         model=num_tracers.pyro_model,
                                         guide=posterior_flow,
-                                        num_particles=train_args["n_particles"],
+                                        num_particles=run_args["n_particles"],
                                         observation_labels=["y"],
                                         target_labels=target_labels,
                                         evaluation=False,
                                         nflow=True,
-                                        condition_design=train_args["condition_design"],
+                                        condition_design=run_args["condition_design"],
                                         verbose_shapes=verbose_shapes)
         agg_loss.backward()
         # Clip gradients to prevent large jumps
@@ -241,17 +239,17 @@ def single_run(
                 agg_loss, eigs = posterior_loss(design=designs,
                                                 model=num_tracers.pyro_model,
                                                 guide=posterior_flow,
-                                                num_particles=train_args["eval_particles"],
+                                                num_particles=run_args["eval_particles"],
                                                 observation_labels=["y"],
                                                 target_labels=target_labels,
                                                 evaluation=True,
                                                 nflow=True,
                                                 analytic_prior=False,
-                                                condition_design=train_args["condition_design"])
+                                                condition_design=run_args["condition_design"])
             eigs_bits = eigs.cpu().detach().numpy()/np.log(2)
             ax2.plot(eigs_bits, label=f'step {step}')
         history.append(loss.cpu().detach().item())
-        if loss.cpu().detach().item() < best_loss:
+        if loss.cpu().detach().item() < best_loss and step > 999:
             best_loss = loss.cpu().detach().item()
             # save the checkpoint
             checkpoint_path = f"{home_dir}/bed/BED_cosmo/num_tracers/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/checkpoints/nf_loss_checkpoint_{step}.pt"
@@ -265,31 +263,30 @@ def single_run(
             mlflow.log_metric("lr", param_group['lr'], step=step)
         mlflow.log_metric("loss", loss.mean().item(), step=step)
         mlflow.log_metric("agg_loss", agg_loss.item(), step=step)
-        if step % 100 == 0 and step > 99:
-            nominal_samples = posterior_flow(nominal_context).sample((30000,)).cpu().numpy()
-            with contextlib.redirect_stdout(io.StringIO()):
-                nominal_samples_gd = getdist.MCSamples(samples=nominal_samples, names=target_labels, labels=num_tracers.latex_labels)
-            untransformed_area = get_contour_area(nominal_samples_gd, 'Om', 'hrdrag', 0.68)[0]
-            mlflow.log_metric("untransformed_area", untransformed_area, step=step)
-            nominal_samples[:, -1] *= 100000
-            with contextlib.redirect_stdout(io.StringIO()):
-                nominal_samples_gd = getdist.MCSamples(samples=nominal_samples, names=target_labels, labels=num_tracers.latex_labels)
-            nominal_area = get_contour_area(nominal_samples_gd, 'Om', 'hrdrag', 0.68)[0]
-            mlflow.log_metric("nominal_area", nominal_area, step=step)
-            if nominal_area < best_area:
-                best_area = nominal_area
-                mlflow.log_metric("best_nominal_area", best_area, step=step)
-                # save the checkpoint
-                checkpoint_path = f"{home_dir}/bed/BED_cosmo/num_tracers/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/checkpoints/nf_area_checkpoint_{step}.pt"
-                save_checkpoint(posterior_flow, optimizer, checkpoint_path, artifact_path="checkpoints")
-                checkpoint_path = f"{home_dir}/bed/BED_cosmo/num_tracers/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/checkpoints/nf_checkpoint_best_area.pt"
-                save_checkpoint(posterior_flow, optimizer, checkpoint_path, artifact_path="checkpoints")
+        if step % 100 == 0:
+            if step > 999:
+                nominal_samples = posterior_flow(nominal_context).sample((30000,)).cpu().numpy()
+                nominal_samples[:, -1] *= 100000
+                with contextlib.redirect_stdout(io.StringIO()):
+                    nominal_samples_gd = getdist.MCSamples(samples=nominal_samples, names=target_labels, labels=num_tracers.latex_labels)
+                nominal_area = get_contour_area(nominal_samples_gd, 'Om', 'hrdrag', 0.68)[0]
+                mlflow.log_metric("nominal_area", nominal_area, step=step)
+                if nominal_area < best_area:
+                    best_area = nominal_area
+                    mlflow.log_metric("best_nominal_area", best_area, step=step)
+                    # save the checkpoint
+                    checkpoint_path = f"{home_dir}/bed/BED_cosmo/num_tracers/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/checkpoints/nf_area_checkpoint_{step}.pt"
+                    save_checkpoint(posterior_flow, optimizer, checkpoint_path, artifact_path="checkpoints")
+                    checkpoint_path = f"{home_dir}/bed/BED_cosmo/num_tracers/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/checkpoints/nf_checkpoint_best_area.pt"
+                    save_checkpoint(posterior_flow, optimizer, checkpoint_path, artifact_path="checkpoints")
+            else:
+                nominal_area = np.nan
             # Only update description if running in a TTY
             if is_tty:
                 num_steps_range.set_description("Loss: {:.3f}, Area: {:.3f}".format(loss.mean().item(), nominal_area))
             else:
                 print(f"Step {step}, Loss: {loss.mean().item()}")
-        if step % train_args["gamma_freq"] == 0 and step > 0:
+        if step % run_args["gamma_freq"] == 0 and step > 0:
             scheduler.step()
         if step % 5000 == 0 and step > 0:
             checkpoint_path = f"{home_dir}/bed/BED_cosmo/num_tracers/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/checkpoints/nf_checkpoint_{step}.pt"
@@ -315,27 +312,27 @@ def single_run(
         agg_loss, eigs = posterior_loss(design=designs,
                                         model=num_tracers.pyro_model,
                                         guide=posterior_flow,
-                                        num_particles=train_args["eval_particles"],
+                                        num_particles=run_args["eval_particles"],
                                         observation_labels=["y"],
                                         target_labels=target_labels,
                                         evaluation=True,
                                         nflow=True,
                                         analytic_prior=False,
-                                        condition_design=train_args["condition_design"])
+                                        condition_design=run_args["condition_design"])
     eigs_bits = eigs.cpu().detach().numpy()/np.log(2)
-    ax2.plot(eigs_bits, label=f'NF step {train_args["steps"]}')
+    ax2.plot(eigs_bits, label=f'NF step {run_args["steps"]}')
 
     with torch.no_grad():
         agg_loss, nominal_eig = posterior_loss(design=nominal_design.unsqueeze(0),
                                         model=num_tracers.pyro_model,
                                         guide=posterior_flow,
-                                        num_particles=train_args["eval_particles"],
+                                        num_particles=run_args["eval_particles"],
                                         observation_labels=["y"],
                                         target_labels=target_labels,
                                         evaluation=True,
                                         nflow=True,
                                         analytic_prior=False,
-                                        condition_design=train_args["condition_design"])
+                                        condition_design=run_args["condition_design"])
     nominal_eig_bits = nominal_eig.cpu().detach().numpy()/np.log(2)
     ax2.axhline(y=nominal_eig_bits, color='black', linestyle='--', label='Nominal EIG')
     ax2.set_xlabel("Design Index")
@@ -357,19 +354,20 @@ if __name__ == '__main__':
     torch.set_default_dtype(torch.float64)
 
     # --- Load Default Config --- 
-    config_path = os.path.join(os.path.dirname(__file__), 'train_args.json')
+    config_path = os.path.join(os.path.dirname(__file__), 'run_args.json')
     with open(config_path, 'r') as f:
-        train_args_dict = json.load(f)
+        run_args_dict = json.load(f)
 
     # --- Argument Parsing --- 
     cosmo_model_default = 'base' 
-    default_args = train_args_dict[cosmo_model_default]
+    default_args = run_args_dict[cosmo_model_default]
     default_exp_name = f"{cosmo_model_default}_{default_args['flow_type']}"
 
     parser = argparse.ArgumentParser(description="Run Number Tracers Training")
 
     # Add arguments dynamically based on the default config file
-    parser.add_argument('--cosmo_model', type=str, default=cosmo_model_default, help='Cosmological model set to use from train_args.json')
+    parser.add_argument('--cosmo_model', type=str, default=cosmo_model_default, help='Cosmological model set to use from run_args.json')
+    parser.add_argument('--device', type=str, default='cuda:0', help='Device to use for training')
     parser.add_argument('--exp_name', type=str, default=default_exp_name, help='Experiment name')
     for key, value in default_args.items():
         arg_type = type(value)
@@ -385,39 +383,34 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
     cosmo_model = args.cosmo_model
+    device = args.device
 
     # --- Prepare Final Config --- 
-    train_args = train_args_dict[cosmo_model].copy() # Start with defaults for the chosen model
+    run_args = run_args_dict[cosmo_model].copy() # Start with defaults for the chosen model
 
     # Override defaults with any provided command-line arguments
     args_dict = vars(args)
     for key, value in args_dict.items():
-        if key != 'cosmo_model' and value is not None and key in train_args:
-            if isinstance(train_args[key], bool) and isinstance(value, bool):
-                train_args[key] = value
-            elif not isinstance(train_args[key], bool):
-                print(f"Overriding '{key}': {train_args[key]} -> {value}")
-                train_args[key] = value
+        if key != 'cosmo_model' and value is not None and key in run_args:
+            if isinstance(run_args[key], bool) and isinstance(value, bool):
+                run_args[key] = value
+            elif not isinstance(run_args[key], bool):
+                print(f"Overriding '{key}': {run_args[key]} -> {value}")
+                run_args[key] = value
 
     # --- Setup & Run --- 
     process = psutil.Process(os.getpid())
-    device = torch.device("cuda:1") if torch.cuda.is_available() else "cpu"
+    device = torch.device(device) if torch.cuda.is_available() else "cpu"
     print(f'Using device: {device}.')
     print(f"Running with parameters for cosmo_model='{cosmo_model}':")
-    print(json.dumps(train_args, indent=2))
 
-    for particles in [10000, 1000, 100]:
-        train_args["steps"] = 300000
-        train_args["n_particles"] = particles
-        single_run(
-            cosmo_model=cosmo_model,
-            train_args=train_args,
-            mlflow_experiment_name=args.exp_name,
-            device=device,
-            signal=16, # Example of hardcoded kwargs, consider making them args too if needed
-            fixed_design=True,
-            eff=True,
-        )
-        mlflow.end_run()
+    single_run(
+        cosmo_model=cosmo_model,
+        run_args=run_args,
+        mlflow_experiment_name=args.exp_name,
+        device=device,
+        fixed_design=True,
+    )
+    mlflow.end_run()
 
 

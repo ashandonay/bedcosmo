@@ -91,21 +91,12 @@ def run_eval(eval_args, run_id, exp, device, **kwargs):
             ml_info = mlflow.active_run().info
             print("MLFlow Run Info:", ml_info.experiment_id + "/" + ml_info.run_id)
 
-            #tracers = eval(run.data.params["tracers"])
-            data_path = home_dir + run.data.params["data_path"]
+            run_args = parse_mlflow_params(run.data.params)
+            data_path = home_dir + run_args["data_path"]
             desi_df = pd.read_csv(data_path + 'desi_data.csv')
             desi_tracers = pd.read_csv(data_path + 'desi_tracers.csv')
             nominal_cov = np.load(data_path + 'desi_cov.npy')
-            cosmo_model = run.data.params["cosmo_model"]
-
-            # select only the rows corresponding to the tracers
-            #desi_data = desi_df[desi_df['tracer'].isin(tracers)]
-            #nominal_cov = desi_cov[np.ix_(desi_data.index, desi_data.index)]
-
-            w0_mean = torch.tensor(-1.0).to(device)
-            w0_std = torch.tensor(0.2).to(device)
-            wa_mean = torch.tensor(0.0).to(device)
-            wa_std = torch.tensor(0.2).to(device)
+            cosmo_model = run_args["cosmo_model"]
 
             Om_range = torch.tensor([0.01, 0.99], device=device)
             Ok_range = torch.tensor([-0.3, 0.3], device=device)
@@ -180,9 +171,8 @@ def run_eval(eval_args, run_id, exp, device, **kwargs):
                 desi_tracers,
                 cosmo_model,
                 nominal_cov,
-                device=device,
-                eff=eval(run.data.params["eff"]), 
-                include_D_M=eval(run.data.params["include_D_M"]),
+                device=device, 
+                include_D_M=run_args["include_D_M"],
                 verbose=True
                 )
 
@@ -191,9 +181,9 @@ def run_eval(eval_args, run_id, exp, device, **kwargs):
             designs_dict = {}
             for c, u in classes.items():
                 designs_dict['N_' + c] = np.arange(
-                    eval(run.data.params["design_low"]), 
-                    u + eval(run.data.params["design_step"]), 
-                    eval(run.data.params["design_step"])
+                    run_args["design_low"], 
+                    u + run_args["design_step"], 
+                    run_args["design_step"]
                     )
             tol = 1e-3
             grid_designs = Grid(**designs_dict, constraint=lambda **kwargs: abs(sum(kwargs.values()) - 1.0) < tol)
@@ -223,7 +213,7 @@ def run_eval(eval_args, run_id, exp, device, **kwargs):
                 for key in range_params.names:
                     parameters[key] = torch.tensor(getattr(range_params, key), device=device)
                 tracers = desi_df.tracer[::2].to_list()
-                if eval(run.data.params["include_D_M"]):
+                if run_args["include_D_M"]:
                     features_dict = {}
                     for i in range(len(tracers)):
                         D_H_mean = num_tracers.D_H_func(num_tracers.z_eff[i], **parameters)
@@ -280,17 +270,15 @@ def run_eval(eval_args, run_id, exp, device, **kwargs):
 
             if eval_args["nf_model"]:
                 input_dim = len(target_labels)
-                context_dim = len(classes.keys()) + 10 if eval(run.data.params["include_D_M"]) else len(classes.keys()) + 5
+                context_dim = len(classes.keys()) + 10 if run_args["include_D_M"] else len(classes.keys()) + 5
 
                 posterior_flow = init_nf(
-                    run.data.params["flow_type"],
+                    run_args["flow_type"],
                     input_dim, 
                     context_dim, 
-                    eval(run.data.params["n_transforms"]),
-                    eval(run.data.params["hidden"]),
-                    eval(run.data.params["num_layers"]),
+                    run_args,
                     device,
-                    seed=eval(run.data.params["nf_seed"]),
+                    seed=run_args["nf_seed"],
                     verbose=True
                     )
                 print(f"Loading NF model from {run_id}...")
@@ -300,7 +288,7 @@ def run_eval(eval_args, run_id, exp, device, **kwargs):
                 posterior_flow.eval()
                 
                 # fix the seed for reproducibility
-                seed = auto_seed(eval(run.data.params["pyro_seed"]))
+                seed = auto_seed(run_args["pyro_seed"])
 
                 # get the nominal design by the observed amount of tracers per class assuming default numbers from desi_df
                 nominal_design = torch.tensor(desi_tracers.groupby('class').sum()['observed'].reindex(classes.keys()).values, device=device)
@@ -322,10 +310,10 @@ def run_eval(eval_args, run_id, exp, device, **kwargs):
                                                         evaluation=True,
                                                         nflow=True,
                                                         analytic_prior=False,
-                                                        condition_design=eval(run.data.params["condition_design"]))
+                                                        condition_design=run_args["condition_design"])
                     eigs_bits = eigs.cpu().detach().numpy()/np.log(2)
                     eigs_batch.append(eigs_bits)
-                    plt.plot(eigs_bits, label=f'NF step {run.data.params["steps"]}', color="tab:blue", alpha=0.4)
+                    plt.plot(eigs_bits, label=f'NF step {run_args["steps"]}', color="tab:blue", alpha=0.4)
 
                     with torch.no_grad():
                         agg_loss, nominal_eig = posterior_loss(design=nominal_design.unsqueeze(0),
@@ -337,7 +325,7 @@ def run_eval(eval_args, run_id, exp, device, **kwargs):
                                                         evaluation=True,
                                                         nflow=True,
                                                         analytic_prior=False,
-                                                        condition_design=eval(run.data.params["condition_design"]))
+                                                        condition_design=run_args["condition_design"])
                     nominal_eig_bits = nominal_eig.cpu().detach().numpy()/np.log(2)
                     nominal_eig_batch.append(nominal_eig_bits)
                     plt.axhline(y=nominal_eig_bits, linestyle='--', label='Nominal EIG', color="black", alpha=0.4)
@@ -440,7 +428,7 @@ def run_eval(eval_args, run_id, exp, device, **kwargs):
                 plt.savefig(f"{home_dir}/bed/BED_cosmo/num_tracers/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/design_comparison.png")
 
                 ############################################### Plot Posterior ###############################################
-                central_vals = num_tracers.central_val if eval(run.data.params["include_D_M"]) else num_tracers.central_val[1::2]
+                central_vals = num_tracers.central_val if run_args["include_D_M"] else num_tracers.central_val[1::2]
                 optimal_context = torch.cat([nf_optimal_design, central_vals], dim=-1)
                 nominal_context = torch.cat([nominal_design, central_vals], dim=-1)
                 print(f"Optimal context: {optimal_context} \nNominal context: {nominal_context}")
@@ -451,7 +439,7 @@ def run_eval(eval_args, run_id, exp, device, **kwargs):
                 nominal_samples[:, -1] *= 100000
                 optimal_samples_gd = getdist.MCSamples(samples=optimal_samples, names=target_labels, labels=latex_labels)
                 nominal_samples_gd = getdist.MCSamples(samples=nominal_samples, names=target_labels, labels=latex_labels)
-                desi_samples = np.load(f"{home_dir}/data/mcmc_samples/{run.data.params['cosmo_model']}.npy")
+                desi_samples = np.load(f"{home_dir}/data/mcmc_samples/{run_args['cosmo_model']}.npy")
                 desi_samples_gd = getdist.MCSamples(samples=desi_samples, names=target_labels, labels=latex_labels)
                 np.save(f"{home_dir}/bed/BED_cosmo/num_tracers/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/optimal_samples.npy", optimal_samples)
                 np.save(f"{home_dir}/bed/BED_cosmo/num_tracers/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/nominal_samples.npy", nominal_samples)

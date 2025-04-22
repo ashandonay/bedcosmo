@@ -11,7 +11,7 @@ from bed.grid import Grid
 
 class NumTracers:
 
-    def __init__(self, desi_data, desi_tracers, cosmo_model, nominal_cov, device="cuda:0", eff=True, include_D_M=False, verbose=False):
+    def __init__(self, desi_data, desi_tracers, cosmo_model, nominal_cov, device="cuda:0", include_D_M=False, verbose=False):
         self.desi_tracers = desi_tracers
         self.cosmo_model = cosmo_model
         self.nominal_cov = nominal_cov
@@ -22,13 +22,7 @@ class NumTracers:
         self.c = constants.c.to('km/s').value
         self.corr_matrix = torch.tensor(self.nominal_cov/np.sqrt(np.outer(np.diag(self.nominal_cov), np.diag(self.nominal_cov))), device=device)
         self.include_D_M = include_D_M
-
-
-        if eff:
-            self.efficiency = torch.tensor(desi_data["efficiency"].tolist()[::2], device=device)
-        else:
-            self.efficiency = torch.ones(5, device=device)
-
+        self.efficiency = torch.tensor(desi_data["efficiency"].tolist()[::2], device=device)
         self.sigmas = torch.tensor(desi_data["std"].tolist(), device=device)
         self.central_val = torch.tensor(desi_data["value_at_z"].tolist(), device=device)
         self.z_eff = torch.tensor(desi_data["z"].tolist()[::2], device=device)

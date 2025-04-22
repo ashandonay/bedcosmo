@@ -65,7 +65,7 @@ def save_checkpoint(model, optimizer, filepath, artifact_path=None):
     torch.save(checkpoint, filepath)
     mlflow.log_artifact(filepath, artifact_path=artifact_path)  # Logs the checkpoint to mlflow
 
-def init_nf(flow_type, input_dim, context_dim, n_transforms, hidden_size=None, n_layers=None, device="cuda:0", seed=None, verbose=False, **kwargs):
+def init_nf(flow_type, input_dim, context_dim, run_args, device="cuda:0", seed=None, verbose=False, **kwargs):
     # Set seeds first, before any model initialization
     if seed is not None:
         torch.manual_seed(seed)
@@ -78,39 +78,40 @@ def init_nf(flow_type, input_dim, context_dim, n_transforms, hidden_size=None, n
             torch.backends.cudnn.deterministic = True
             torch.backends.cudnn.benchmark = False
 
-    if hidden_size is not None and verbose:
-        print(f'Hidden features: {(hidden_size,) * n_layers}')
+    if run_args["hidden_size"] is not None and verbose:
+        print(f'Hidden features: {(run_args["hidden_size"],) * run_args["n_layers"]}')
 
     # Initialize the flow model
     if flow_type == "NSF":
         posterior_flow = zuko.flows.NSF(
             features=input_dim, 
             context=context_dim, 
-            transforms=n_transforms, 
-            bins=10,
-            hidden_features=((hidden_size,) * n_layers),
+            transforms=run_args["n_transforms"], 
+            bins=run_args["bins"],
+            hidden_features=((run_args["hidden_size"],) * run_args["n_layers"]),
             **kwargs
         ).to(device)
     elif flow_type == "NAF":
         posterior_flow = zuko.flows.NAF(
             features=input_dim, 
             context=context_dim, 
-            transforms=n_transforms,
-            network={"hidden_features": ((hidden_size,) * n_layers)} # (hidden_size,) + (2*hidden_size,) * (n_layers - 1)} 
+            transforms=run_args["n_transforms"],
+            signal=run_args["signal"],
+            network={"hidden_features": ((run_args["hidden_size"],) * run_args["n_layers"])} # (hidden_size,) + (2*hidden_size,) * (n_layers - 1)} 
         ).to(device)
     elif flow_type == "MAF":
         posterior_flow = zuko.flows.MAF(
             features=input_dim, 
             context=context_dim, 
-            transforms=n_transforms,
-            hidden_features=((hidden_size,) * n_layers),
+            transforms=run_args["n_transforms"],
+            hidden_features=((run_args["hidden_size"],) * run_args["n_layers"]),
             **kwargs
         ).to(device)
     elif flow_type == "MAF_Affine":
         posterior_flow = zuko.flows.MAF(
             features=input_dim, 
             context=context_dim, 
-            transforms=n_transforms,
+            transforms=run_args["n_transforms"],
             univariate=zuko.transforms.MonotonicAffineTransform,
             **kwargs
         ).to(device)
@@ -118,27 +119,27 @@ def init_nf(flow_type, input_dim, context_dim, n_transforms, hidden_size=None, n
         posterior_flow = zuko.flows.MAF(
             features=input_dim, 
             context=context_dim, 
-            transforms=n_transforms,
+            transforms=run_args["n_transforms"],
             univariate=zuko.transforms.MonotonicRQSTransform,
-            shapes = ([kwargs["shape"]], [kwargs["shape"]], [kwargs["shape"]-1]),
+            shapes = ([run_args["shape"]], [run_args["shape"]], [run_args["shape"]-1]),
             **kwargs
         ).to(device)
     elif flow_type == "NICE":
         posterior_flow = zuko.flows.NICE(
             features=input_dim, 
             context=context_dim, 
-            transforms=n_transforms,
+            transforms=run_args["n_transforms"],
             **kwargs
         ).to(device)
     elif flow_type == "GF":
         posterior_flow = zuko.flows.GF(
             features=input_dim, 
             context=context_dim, 
-            transforms=n_transforms
+            transforms=run_args["n_transforms"]
         ).to(device)
     return posterior_flow
 
-def run_eval(run_id, eval_args, step='best_loss', device='cuda:0', cosmo_exp='num_tracers', best=False):
+def run_eval(run_id, eval_args, step='best_loss', device='cuda:0', cosmo_exp='num_tracers'):
     client = MlflowClient()
     run = client.get_run(run_id)
     exp_id = run.info.experiment_id
@@ -162,26 +163,31 @@ def run_eval(run_id, eval_args, step='best_loss', device='cuda:0', cosmo_exp='nu
             cosmo_model,
             nominal_cov,
             device=eval_args["device"],
-            eff=eval(run.data.params["eff"]), 
             include_D_M=eval(run.data.params["include_D_M"])
             )
 
         input_dim = len(num_tracers.cosmo_params)
         context_dim = len(classes.keys()) + 10 if eval(run.data.params["include_D_M"]) else len(classes.keys()) + 5
         # Initialize model without seed (since we're loading state dict)
+        run_args = parse_mlflow_params(run.data.params)
         posterior_flow = init_nf(
             run.data.params["flow_type"],
             input_dim, 
-            context_dim, 
-            eval(run.data.params["n_transforms"]),
-            eval(run.data.params["hidden"]),
-            eval(run.data.params["num_layers"]),
+            context_dim,
+            run_args,
             device,
             seed=eval(run.data.params["nf_seed"])
             )
-
-        if best:
-            checkpoint = torch.load(f'{home_dir}/bed/BED_cosmo/{cosmo_exp}/mlruns/{exp_id}/{run_id}/artifacts/best_loss/nf_checkpoint_{step}.pt', map_location=eval_args["device"])
+        # get the area checkpoints, loss checkpoints, and regular checkpoints from the file names of {home_dir}/bed/BED_cosmo/{cosmo_exp}/mlruns/{exp_id}/{run_id}/artifacts/checkpoints/
+        area_checkpoints = [f.split('_')[-1].split('.')[0] for f in os.listdir(f'{home_dir}/bed/BED_cosmo/{cosmo_exp}/mlruns/{exp_id}/{run_id}/artifacts/checkpoints/') if f.startswith('nf_area_checkpoint_') and f.endswith('.pt')]
+        loss_checkpoints = [f.split('_')[-1].split('.')[0] for f in os.listdir(f'{home_dir}/bed/BED_cosmo/{cosmo_exp}/mlruns/{exp_id}/{run_id}/artifacts/checkpoints/') if f.startswith('nf_loss_checkpoint_') and f.endswith('.pt')]
+        regular_checkpoints = [f.split('_')[-1].split('.')[0] for f in os.listdir(f'{home_dir}/bed/BED_cosmo/{cosmo_exp}/mlruns/{exp_id}/{run_id}/artifacts/checkpoints/') if f.startswith('nf_checkpoint_') and f.endswith('.pt')]
+        if step not in area_checkpoints and step not in loss_checkpoints and step not in regular_checkpoints and step != 'best_loss' and step != 'best_area':
+            raise ValueError(f"Step {step} not found in checkpoints")
+        if step in area_checkpoints:
+            checkpoint = torch.load(f'{home_dir}/bed/BED_cosmo/{cosmo_exp}/mlruns/{exp_id}/{run_id}/artifacts/checkpoints/nf_area_checkpoint_{step}.pt', map_location=eval_args["device"])
+        elif step in loss_checkpoints:
+            checkpoint = torch.load(f'{home_dir}/bed/BED_cosmo/{cosmo_exp}/mlruns/{exp_id}/{run_id}/artifacts/checkpoints/nf_loss_checkpoint_{step}.pt', map_location=eval_args["device"])
         else:
             checkpoint = torch.load(f'{home_dir}/bed/BED_cosmo/{cosmo_exp}/mlruns/{exp_id}/{run_id}/artifacts/checkpoints/nf_checkpoint_{step}.pt', map_location=eval_args["device"])
         posterior_flow.load_state_dict(checkpoint['model_state_dict'], strict=True)
@@ -262,3 +268,50 @@ def get_desi_samples(cosmo_model):
     with contextlib.redirect_stdout(io.StringIO()):
         desi_samples_gd = getdist.MCSamples(samples=desi_samples, names=target_labels, labels=latex_labels)
     return desi_samples_gd
+
+def parse_mlflow_params(params_dict):
+    """
+    Safely parses a dictionary of MLflow parameters (string values)
+    into their likely Python types (int, float, bool, str).
+    """
+    parsed_params = {}
+    for key, value_str in params_dict.items():
+        # 1. Try Boolean
+        if value_str.lower() == 'true':
+            parsed_params[key] = True
+            continue
+        if value_str.lower() == 'false':
+            parsed_params[key] = False
+            continue
+
+        # 2. Try Integer
+        try:
+            parsed_params[key] = int(value_str)
+            continue
+        except ValueError:
+            pass # Not an integer
+
+        # 3. Try Float
+        try:
+            parsed_params[key] = float(value_str)
+            continue
+        except ValueError:
+            pass # Not a float
+
+        # 4. Try JSON object/list (optional, if you store complex params)
+        # This handles cases where a param might be a stringified list/dict
+        try:
+            # Be cautious if params could contain very complex/nested JSON
+            parsed_value = json.loads(value_str)
+            # Only accept if it results in a list or dict (or other simple JSON types)
+            if isinstance(parsed_value, (dict, list)):
+                 parsed_params[key] = parsed_value
+                 continue
+            # else: fall through to treat as plain string if it's just a JSON string like "\"hello\""
+        except json.JSONDecodeError:
+            pass # Not valid JSON
+
+        # 5. Keep as String (Fallback)
+        parsed_params[key] = value_str # Keep original string if no conversion worked
+
+    return parsed_params
