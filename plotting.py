@@ -5,6 +5,7 @@ parent_dir = os.path.abspath(os.path.join(os.getcwd(), os.pardir))
 if parent_dir not in sys.path:
     sys.path.insert(0, parent_dir)
 
+storage_path = os.environ["SCRATCH"] + "/bed/BED_cosmo/num_tracers/mlruns"
 home_dir = os.environ["HOME"]
 if home_dir + "/bed/BED_cosmo" not in sys.path:
     sys.path.insert(0, home_dir + "/bed/BED_cosmo")
@@ -12,7 +13,7 @@ sys.path.insert(0, home_dir + "/bed/BED_cosmo/num_tracers")
 
 import mlflow
 from mlflow.tracking import MlflowClient
-mlflow.set_tracking_uri(home_dir + "/bed/BED_cosmo/num_tracers/mlruns")
+mlflow.set_tracking_uri(storage_path)
 import getdist
 import numpy as np
 from getdist import plots
@@ -308,9 +309,6 @@ def compare_training(
         loss = [metric.value for metric in loss_history if np.isfinite(metric.value)]
         nominal_area = client.get_metric_history(run_id, 'nominal_area')
         nominal_area = [metric.value for metric in nominal_area if np.isfinite(metric.value)]
-        if not loss: # Skip run if no valid loss points
-             print(f"Warning: No valid loss points found for run {run_id}. Skipping.")
-             continue
         all_losses[run_id] = loss
         all_nominal_areas[run_id] = nominal_area
         current_min_loss = np.min(loss)
@@ -358,20 +356,18 @@ def compare_training(
         areas.append(nominal_area)
 
         if show_best:
-            best_area = client.get_metric_history(run_id, 'best_area')
+            best_area = client.get_metric_history(run_id, 'best_nominal_area')
             best_areas = [metric.value for metric in best_area if np.isfinite(metric.value)]
             best_steps = [metric.step for metric in best_area if np.isfinite(metric.value)]
             if not best_areas: # Skip run if no valid loss points
-                print(f"Warning: No valid loss points found for run {run_id}. Skipping.")
+                print(f"Warning: No valid best areas found for run {run_id}. Skipping.")
                 continue
-            
-            area_plot_label_best = f"{base_label} (Area, Best)"
             # Use another unique variable name
-            line_area_best, = ax2.plot(best_steps, best_areas, alpha=1.0, linestyle='-.', label=area_plot_label_best, color=colors[i % len(colors)], zorder=5, linewidth=2)
+            line_area_best, = ax2.plot(best_steps, best_areas, alpha=1.0, linestyle='-.', label='Best Area', color=colors[i % len(colors)], zorder=5, linewidth=2)
             # plot a star at the best last step
             ax2.plot(best_steps[-1], best_areas[-1], '*', markersize=8, zorder=10, color=colors[i % len(colors)])
             lines.append(line_area_best) # Append the correct line object
-            labels.append(area_plot_label_best)
+            labels.append('Best Area')
             areas.append(best_areas[-1])
 
     # --- Final Plot Configuration ---
@@ -392,13 +388,25 @@ def compare_training(
     ax2.set_ylabel("Posterior Contour Area")
     ax2.tick_params(axis='y')
 
-    # Combined Legend
-    # Place legend outside the plot area to avoid overlap
-    # Use a fixed number of columns (e.g., 3) to prevent excessively wide legends
-    ax1.legend(lines, labels, loc='upper center', bbox_to_anchor=(0.5, -0.15), ncol=3)
+    # Determine legend font size based on number of runs
+    num_runs = len(run_ids)
+    if num_runs > 6: # Adjust this threshold as needed
+        legend_fontsize = 'x-small' # Or specify point size, e.g., 8
+    elif num_runs > 4:
+        legend_fontsize = 'small'   # Or specify point size, e.g., 9
+    else:
+        legend_fontsize = 'medium'  # Or specify point size, e.g., 10
 
-    # Adjust bottom margin slightly more to accommodate potentially taller legend
-    fig.tight_layout(rect=[0, 0.05, 1, 0.95]) # Adjust layout to prevent title/legend overlap
+    # Combined Legend - Placed below the plot, columns match runs, adjusted font size
+    ax1.legend(lines, labels, loc='upper center', 
+               bbox_to_anchor=(0.5, -0.15), # Adjust y-anchor for spacing
+               ncol=num_runs, 
+               fontsize=legend_fontsize)
+
+    # Adjust layout to make room for the legend below the plot
+    # Increase bottom margin; adjust the value (0.0 to 1.0) as needed
+    plt.subplots_adjust(bottom=0.25) 
+    # fig.tight_layout(rect=[0, 0.1, 1, 0.95]) # Alternative using tight_layout rect
     
     # Set title based on what was provided
     if exp_name:
@@ -764,6 +772,77 @@ def compare_contours(run_ids, param1, param2, eval_args, steps='best', level=0.6
     ax.legend(handles=legend_elements, loc='upper right')
     
     plt.tight_layout()
+    plt.show()
+    
+def loss_area_plot(exp_name, var_name, step_interval=1000, excluded_runs=[]):
+    client = MlflowClient()
+    exp_id = client.get_experiment_by_name(exp_name).experiment_id
+    run_ids = [run.info.run_id for run in client.search_runs(exp_id) if run.info.run_id not in excluded_runs]
+    all_run_losses = []
+    all_run_areas = []
+    vars = []
+    # Sort runs by the specified parameter value
+    run_ids = sorted(run_ids, key=lambda x: float(client.get_run(x).data.params[var_name]))
+    print(f"Processing runs: {run_ids}")
+    if step_interval % 100 != 0:
+        raise ValueError("step_interval must be a multiple of 100")
+    for run_id in run_ids:
+        print(f"Fetching data for run: {run_id}")
+        var_value = client.get_run(run_id).data.params[var_name]
+        vars.append(var_value)
+
+        # Fetch metric histories
+        loss_history = client.get_metric_history(run_id, 'loss')
+        nominal_area_history = client.get_metric_history(run_id, 'nominal_area')
+
+        # Create a dictionary for quick loss lookup by step
+        loss_dict = {metric.step: metric.value for metric in loss_history if np.isfinite(metric.value)}
+
+        sampled_losses = []
+        sampled_areas = []
+
+        # Iterate through nominal area history and pair with loss at the same step
+        for area_metric in nominal_area_history:
+            step = area_metric.step
+            area_value = area_metric.value
+
+            # Check if step is multiple of 100 and area is valid
+            if step % step_interval == 0 and np.isfinite(area_value):
+                # Check if a loss exists for this exact step
+                if step in loss_dict:
+                    sampled_losses.append(loss_dict[step])
+                    sampled_areas.append(area_value)
+                else:
+                    print(f"Warning: Loss not found for step {step} in run {run_id}. Skipping point.")
+
+        if not sampled_losses:
+             print(f"Warning: No valid paired loss/area points found for run {run_id} at 100-step intervals.")
+             # Add empty lists to maintain alignment, or handle as needed
+             all_run_losses.append([])
+             all_run_areas.append([])
+             continue
+
+        all_run_losses.append(sampled_losses)
+        all_run_areas.append(sampled_areas)
+
+    plt.figure(figsize=(14, 8)) # Add figure creation
+
+    # Plot the results
+    for i in range(len(run_ids)):
+        if not all_run_losses[i]: # Skip if no data for this run
+             continue
+        # Normalize loss for plotting (optional, based on your previous code)
+        plot_losses = np.array(all_run_losses[i])
+        plot_losses_normalized = plot_losses - np.min(plot_losses)
+        plt.scatter(plot_losses_normalized, all_run_areas[i], label=f'{var_name}={vars[i]}', alpha=0.7)
+    plt.axhline(y=5.214, color='black', linestyle='--', label='DESI 68% Contour')
+    plt.xscale('log')
+    plt.yscale('log')
+    plt.xlabel("Normalized Loss (Loss - Min Loss)")
+    plt.ylabel("Nominal Area")
+    plt.title(f"Loss vs. Nominal Area (Sampled every {step_interval} steps)")
+    plt.legend()
+    plt.grid(True)
     plt.show()
 
 if __name__ == "__main__":

@@ -20,6 +20,7 @@ from pyro.contrib.util import lexpand
 
 torch.set_default_dtype(torch.float64)
 
+storage_path = os.environ["SCRATCH"] + "/bed/BED_cosmo/num_tracers/mlruns"
 home_dir = os.environ["HOME"]
 if home_dir + "/bed/BED_cosmo" not in sys.path:
     sys.path.insert(0, home_dir + "/bed/BED_cosmo")
@@ -47,21 +48,37 @@ def print_memory_usage(process, step):
     mem_info = process.memory_info()
     print(f"Step {step}: Memory Usage: {mem_info.rss / 1024**2:.2f} MB")
 
-def save_checkpoint(model, optimizer, filepath, artifact_path=None):
+def save_checkpoint(model, optimizer, filepath, step=None, artifact_path=None):
     """
     Saves the training checkpoint.
 
     Args:
         model (torch.nn.Module): The PyTorch model to save.
         optimizer (torch.optim.Optimizer): The optimizer used during training.
-        epoch (int): Current epoch number.
-        loss (float): Current loss value.
         filepath (str): Path to save the checkpoint.
+        step (int, optional): Current training step.
+        best_loss (float, optional): Best loss value seen so far.
+        best_area (float, optional): Best area value seen so far.
+        history (list, optional): Training loss history.
+        artifact_path (str, optional): Path to log the artifact to in MLflow.
     """
     checkpoint = {
         'model_state_dict': model.state_dict(),
         'optimizer_state_dict': optimizer.state_dict()
     }
+    
+    if step is not None:
+        checkpoint['step'] = step
+
+    # Save RNG states correctly
+    checkpoint['rng_state'] = {
+        'python': random.getstate(),
+        'numpy': np.random.get_state(),
+        'torch': torch.get_rng_state(),
+        'pyro': pyro.get_param_store().get_state(),
+        'cuda': [state for state in torch.cuda.get_rng_state_all()] if torch.cuda.is_available() else None
+    }
+    
     torch.save(checkpoint, filepath)
     mlflow.log_artifact(filepath, artifact_path=artifact_path)  # Logs the checkpoint to mlflow
 
