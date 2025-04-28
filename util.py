@@ -204,11 +204,11 @@ def run_eval(run_id, eval_args, step='best_loss', device='cuda:0', cosmo_exp='nu
         if step not in area_checkpoints and step not in loss_checkpoints and step not in regular_checkpoints and step != 'best_loss' and step != 'best_area':
             raise ValueError(f"Step {step} not found in checkpoints")
         if step in area_checkpoints:
-            checkpoint = torch.load(f'{storage_path}/mlruns/{exp_id}/{run_id}/artifacts/checkpoints/nf_area_checkpoint_{step}.pt', map_location=eval_args["device"], weights_only=True)
+            checkpoint = torch.load(f'{storage_path}/mlruns/{exp_id}/{run_id}/artifacts/checkpoints/nf_area_checkpoint_{step}.pt', map_location=eval_args["device"])
         elif step in loss_checkpoints:
-            checkpoint = torch.load(f'{storage_path}/mlruns/{exp_id}/{run_id}/artifacts/checkpoints/nf_loss_checkpoint_{step}.pt', map_location=eval_args["device"], weights_only=True)
+            checkpoint = torch.load(f'{storage_path}/mlruns/{exp_id}/{run_id}/artifacts/checkpoints/nf_loss_checkpoint_{step}.pt', map_location=eval_args["device"])
         else:
-            checkpoint = torch.load(f'{storage_path}/mlruns/{exp_id}/{run_id}/artifacts/checkpoints/nf_checkpoint_{step}.pt', map_location=eval_args["device"], weights_only=True)
+            checkpoint = torch.load(f'{storage_path}/mlruns/{exp_id}/{run_id}/artifacts/checkpoints/nf_checkpoint_{step}.pt', map_location=eval_args["device"])
         posterior_flow.load_state_dict(checkpoint['model_state_dict'], strict=True)
         posterior_flow.to(eval_args["device"])
         posterior_flow.eval()
