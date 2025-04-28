@@ -20,7 +20,6 @@ from pyro.contrib.util import lexpand
 
 torch.set_default_dtype(torch.float64)
 
-storage_path = os.environ["SCRATCH"] + "/bed/BED_cosmo/num_tracers/mlruns"
 home_dir = os.environ["HOME"]
 if home_dir + "/bed/BED_cosmo" not in sys.path:
     sys.path.insert(0, home_dir + "/bed/BED_cosmo")
@@ -79,8 +78,9 @@ def save_checkpoint(model, optimizer, filepath, step=None, artifact_path=None):
         'cuda': [state for state in torch.cuda.get_rng_state_all()] if torch.cuda.is_available() else None
     }
     
+    # Log the checkpoint to mlflow
     torch.save(checkpoint, filepath)
-    mlflow.log_artifact(filepath, artifact_path=artifact_path)  # Logs the checkpoint to mlflow
+    mlflow.log_artifact(filepath, artifact_path=artifact_path)
 
 def init_nf(flow_type, input_dim, context_dim, run_args, device="cuda:0", seed=None, verbose=False, **kwargs):
     # Set seeds first, before any model initialization
@@ -157,6 +157,9 @@ def init_nf(flow_type, input_dim, context_dim, run_args, device="cuda:0", seed=N
     return posterior_flow
 
 def run_eval(run_id, eval_args, step='best_loss', device='cuda:0', cosmo_exp='num_tracers'):
+
+    storage_path = os.environ["SCRATCH"] + f"/bed/BED_cosmo/{cosmo_exp}"
+    mlflow.set_tracking_uri(storage_path + "/mlruns")
     client = MlflowClient()
     run = client.get_run(run_id)
     exp_id = run.info.experiment_id
@@ -195,18 +198,17 @@ def run_eval(run_id, eval_args, step='best_loss', device='cuda:0', cosmo_exp='nu
             device,
             seed=eval(run.data.params["nf_seed"])
             )
-        # get the area checkpoints, loss checkpoints, and regular checkpoints from the file names of {home_dir}/bed/BED_cosmo/{cosmo_exp}/mlruns/{exp_id}/{run_id}/artifacts/checkpoints/
-        area_checkpoints = [f.split('_')[-1].split('.')[0] for f in os.listdir(f'{home_dir}/bed/BED_cosmo/{cosmo_exp}/mlruns/{exp_id}/{run_id}/artifacts/checkpoints/') if f.startswith('nf_area_checkpoint_') and f.endswith('.pt')]
-        loss_checkpoints = [f.split('_')[-1].split('.')[0] for f in os.listdir(f'{home_dir}/bed/BED_cosmo/{cosmo_exp}/mlruns/{exp_id}/{run_id}/artifacts/checkpoints/') if f.startswith('nf_loss_checkpoint_') and f.endswith('.pt')]
-        regular_checkpoints = [f.split('_')[-1].split('.')[0] for f in os.listdir(f'{home_dir}/bed/BED_cosmo/{cosmo_exp}/mlruns/{exp_id}/{run_id}/artifacts/checkpoints/') if f.startswith('nf_checkpoint_') and f.endswith('.pt')]
+        area_checkpoints = [f.split('_')[-1].split('.')[0] for f in os.listdir(f'{storage_path}/mlruns/{exp_id}/{run_id}/artifacts/checkpoints/') if f.startswith('nf_area_checkpoint_') and f.endswith('.pt')]
+        loss_checkpoints = [f.split('_')[-1].split('.')[0] for f in os.listdir(f'{storage_path}/mlruns/{exp_id}/{run_id}/artifacts/checkpoints/') if f.startswith('nf_loss_checkpoint_') and f.endswith('.pt')]
+        regular_checkpoints = [f.split('_')[-1].split('.')[0] for f in os.listdir(f'{storage_path}/mlruns/{exp_id}/{run_id}/artifacts/checkpoints/') if f.startswith('nf_checkpoint_') and f.endswith('.pt')]
         if step not in area_checkpoints and step not in loss_checkpoints and step not in regular_checkpoints and step != 'best_loss' and step != 'best_area':
             raise ValueError(f"Step {step} not found in checkpoints")
         if step in area_checkpoints:
-            checkpoint = torch.load(f'{home_dir}/bed/BED_cosmo/{cosmo_exp}/mlruns/{exp_id}/{run_id}/artifacts/checkpoints/nf_area_checkpoint_{step}.pt', map_location=eval_args["device"])
+            checkpoint = torch.load(f'{storage_path}/mlruns/{exp_id}/{run_id}/artifacts/checkpoints/nf_area_checkpoint_{step}.pt', map_location=eval_args["device"])
         elif step in loss_checkpoints:
-            checkpoint = torch.load(f'{home_dir}/bed/BED_cosmo/{cosmo_exp}/mlruns/{exp_id}/{run_id}/artifacts/checkpoints/nf_loss_checkpoint_{step}.pt', map_location=eval_args["device"])
+            checkpoint = torch.load(f'{storage_path}/mlruns/{exp_id}/{run_id}/artifacts/checkpoints/nf_loss_checkpoint_{step}.pt', map_location=eval_args["device"])
         else:
-            checkpoint = torch.load(f'{home_dir}/bed/BED_cosmo/{cosmo_exp}/mlruns/{exp_id}/{run_id}/artifacts/checkpoints/nf_checkpoint_{step}.pt', map_location=eval_args["device"])
+            checkpoint = torch.load(f'{storage_path}/mlruns/{exp_id}/{run_id}/artifacts/checkpoints/nf_checkpoint_{step}.pt', map_location=eval_args["device"])
         posterior_flow.load_state_dict(checkpoint['model_state_dict'], strict=True)
         posterior_flow.to(eval_args["device"])
         posterior_flow.eval()

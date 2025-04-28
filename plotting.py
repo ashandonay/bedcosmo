@@ -5,7 +5,6 @@ parent_dir = os.path.abspath(os.path.join(os.getcwd(), os.pardir))
 if parent_dir not in sys.path:
     sys.path.insert(0, parent_dir)
 
-storage_path = os.environ["SCRATCH"] + "/bed/BED_cosmo/num_tracers/mlruns"
 home_dir = os.environ["HOME"]
 if home_dir + "/bed/BED_cosmo" not in sys.path:
     sys.path.insert(0, home_dir + "/bed/BED_cosmo")
@@ -13,7 +12,6 @@ sys.path.insert(0, home_dir + "/bed/BED_cosmo/num_tracers")
 
 import mlflow
 from mlflow.tracking import MlflowClient
-mlflow.set_tracking_uri(storage_path)
 import getdist
 import numpy as np
 from getdist import plots
@@ -25,6 +23,7 @@ from scipy.spatial import ConvexHull
 import matplotlib.colors
 import warnings
 import contextlib
+from datetime import datetime
 
 
 def plot_posterior(samples, colors, legend_labels=None, show_scatter=False, line_style='-'):
@@ -134,7 +133,7 @@ def posterior_steps(run_id, steps, eval_args, show_best=False, cosmo_exp='num_tr
         cosmo_exp (str): Name of the cosmology experiment.
     """
     client = MlflowClient()
-    
+    storage_path = os.environ["SCRATCH"] + f"/bed/BED_cosmo/{cosmo_exp}"
 
     exp_id = client.get_run(run_id).info.experiment_id
     
@@ -145,7 +144,7 @@ def posterior_steps(run_id, steps, eval_args, show_best=False, cosmo_exp='num_tr
     color_list = []
 
     if show_best:
-        checkpoint_dir = f'{home_dir}/bed/BED_cosmo/{cosmo_exp}/mlruns/{exp_id}/{run_id}/artifacts/best_loss/'
+        checkpoint_dir = f'{storage_path}/mlruns/{exp_id}/{run_id}/artifacts/best_loss/'
         try:
             checkpoint_files = os.listdir(checkpoint_dir)
         except FileNotFoundError:
@@ -170,7 +169,7 @@ def posterior_steps(run_id, steps, eval_args, show_best=False, cosmo_exp='num_tr
         
         g = plot_posterior(all_samples, color_list)
     else:
-        checkpoint_dir = f'{home_dir}/bed/BED_cosmo/{cosmo_exp}/mlruns/{exp_id}/{run_id}/artifacts/checkpoints/'
+        checkpoint_dir = f'{storage_path}/mlruns/{exp_id}/{run_id}/artifacts/checkpoints/'
         try:
             checkpoint_files = os.listdir(checkpoint_dir)
         except FileNotFoundError:
@@ -221,12 +220,14 @@ def posterior_steps(run_id, steps, eval_args, show_best=False, cosmo_exp='num_tr
         )
 
     g.fig.legend(handles=custom_legend, loc='upper right', bbox_to_anchor=(1, 0.99))
-    plt.show()
+    storage_path = os.environ["SCRATCH"] + f"/bed/BED_cosmo/{cosmo_exp}"
+    save_path = f"{storage_path}/mlruns/{exp_id}/{run_id}/artifacts/plots/posterior_steps_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+    show_figure(save_path)
 
 
-def compare_training(
+def plot_training(
         exp_name=None, 
-        run_ids=None, 
+        run_id=None, 
         var=None, 
         excluded_runs=[], 
         cosmo_exp='num_tracers', 
@@ -242,7 +243,7 @@ def compare_training(
 
     Args:
         exp_name (str, optional): Name of the MLflow experiment. If provided, all runs in this experiment will be used.
-        run_ids (list, optional): List of specific MLflow run IDs to compare. If provided, exp_name is ignored.
+        run_id (str or list, optional): Individual or list of specific MLflow run IDs to compare. If provided, exp_name is ignored.
         var (str or list): Parameter(s) from MLflow run params to include in the label.
         excluded_runs (list): List of run IDs to exclude.
         exp (str): Experiment name or ID (if needed for path).
@@ -251,6 +252,7 @@ def compare_training(
         eval_args (dict, optional): Arguments for the run_eval function. If None, defaults to {"device": "cpu"}.
     """
     client = MlflowClient()
+    storage_path = os.environ["SCRATCH"] + f"/bed/BED_cosmo/{cosmo_exp}"
     
     # Set default eval_args if not provided
     if eval_args is None:
@@ -260,15 +262,9 @@ def compare_training(
     if exp_name is not None:
         exp_id = client.get_experiment_by_name(exp_name).experiment_id
         run_ids = [run.info.run_id for run in client.search_runs(exp_id) if run.info.run_id not in excluded_runs]
-    elif run_ids is not None:
-        # If run_ids is provided, filter out excluded runs
-        run_ids = [run_id for run_id in run_ids if run_id not in excluded_runs]
-        # Try to get experiment ID from the first run
-        if run_ids:
-            exp_id = client.get_run(run_ids[0]).info.experiment_id
-        else:
-            print("No valid run IDs provided.")
-            return
+    elif run_id is not None:
+        # make run_ids into a list if it's not already
+        run_ids = [run_id] if isinstance(run_id, str) else run_id
     else:
         print("Either exp_name or run_ids must be provided.")
         return
@@ -411,23 +407,18 @@ def compare_training(
     # Set title based on what was provided
     if exp_name:
         plt.title(f"Training Loss and Posterior Area Evolution - {exp_name}")
-        os.makedirs(f"{home_dir}/bed/BED_cosmo/{cosmo_exp}/mlruns/{exp_id}/plots", exist_ok=True)
-        save_path = f"{home_dir}/bed/BED_cosmo/{cosmo_exp}/mlruns/{exp_id}/plots/compare_training.png"
+        os.makedirs(f"{storage_path}/mlruns/{exp_id}/plots", exist_ok=True)
+        save_path = f"{storage_path}/mlruns/{exp_id}/plots/training_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+    elif len(run_ids) == 1:
+        plt.title("Training Loss and Posterior Area Evolution")
+        exp_id = client.get_run(run_ids[0]).info.experiment_id
+        os.makedirs(f"{storage_path}/mlruns/{exp_id}/{run_id}/artifacts/plots", exist_ok=True)
+        save_path = f"{storage_path}/mlruns/{exp_id}/{run_id}/artifacts/plots/training_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
     else:
         plt.title("Training Loss and Posterior Area Evolution")
-        save_path = f"{home_dir}/bed/BED_cosmo/{cosmo_exp}/plots/compare_training.png"
-    
-    # Check if running in a TTY, otherwise assume interactive (like notebook) and show
-    try:
-        is_tty = os.isatty(sys.stdout.fileno())
-    except (io.UnsupportedOperation, AttributeError):
-        is_tty = False # Treat as non-TTY if fileno() fails (e.g., in notebooks)
-
-    if is_tty:
-        plt.savefig(save_path)
-        print(f"Saved plot to {save_path}")
-    else:
-        plt.show()
+        os.makedirs(f"{storage_path}/plots", exist_ok=True)
+        save_path = f"{storage_path}/plots/training_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+    show_figure(save_path)
 
 def compare_posterior(
         exp_name=None, 
@@ -634,7 +625,13 @@ def compare_posterior(
         g.fig.suptitle(title, y=1.03)
     
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])  # Adjust layout to prevent title overlap
-    plt.show()
+    storage_path = os.environ["SCRATCH"] + f"/bed/BED_cosmo/{cosmo_exp}"
+    if exp_name:
+        os.makedirs(f"{storage_path}/mlruns/{exp_id}/plots", exist_ok=True)
+        save_path = f"{storage_path}/mlruns/{exp_id}/plots/posterior_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+    else:
+        save_path = f"{storage_path}/plots/posterior_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+    show_figure(save_path)
 
 def get_contour_area(samples, param1, param2, level=0.68):
     samples = [samples] if type(samples) != list else samples
@@ -774,7 +771,7 @@ def compare_contours(run_ids, param1, param2, eval_args, steps='best', level=0.6
     plt.tight_layout()
     plt.show()
     
-def loss_area_plot(exp_name, var_name, step_interval=1000, excluded_runs=[]):
+def loss_area_plot(exp_name, var_name, step_interval=1000, excluded_runs=[], cosmo_exp='num_tracers'):
     client = MlflowClient()
     exp_id = client.get_experiment_by_name(exp_name).experiment_id
     run_ids = [run.info.run_id for run in client.search_runs(exp_id) if run.info.run_id not in excluded_runs]
@@ -843,12 +840,27 @@ def loss_area_plot(exp_name, var_name, step_interval=1000, excluded_runs=[]):
     plt.title(f"Loss vs. Nominal Area (Sampled every {step_interval} steps)")
     plt.legend()
     plt.grid(True)
-    plt.show()
+    storage_path = os.environ["SCRATCH"] + f"/bed/BED_cosmo/{cosmo_exp}"
+    os.makedirs(f"{storage_path}/mlruns/{exp_id}/plots", exist_ok=True)
+    save_path = f"{storage_path}/mlruns/{exp_id}/plots/loss_area_plot_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+    show_figure(save_path)
+
+def show_figure(save_path):
+    # Check if running in a TTY, otherwise assume interactive (like notebook) and show
+    try:
+        is_tty = os.isatty(sys.stdout.fileno())
+    except (io.UnsupportedOperation, AttributeError):
+        is_tty = False # Treat as non-TTY if fileno() fails (e.g., in notebooks)
+
+    plt.savefig(save_path)
+    print(f"Saved plot to {save_path}")
+    if not is_tty:
+        plt.show()
 
 if __name__ == "__main__":
 
     eval_args = {"post_samples": 30000, "device": "cuda:1", "eval_seed": 1}
-    compare_training(
+    plot_training(
         exp_name='base_NAF_gamma_fixed', 
         var='pyro_seed', 
         eval_args=eval_args,

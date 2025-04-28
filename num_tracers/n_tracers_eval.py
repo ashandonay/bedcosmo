@@ -72,8 +72,8 @@ def marginalize_posterior(num_tracers, posterior_flow, ratios, num_param_samples
     return marginal_samples
 
 def run_eval(eval_args, run_id, exp, device, **kwargs):
-    storage_path = os.environ["SCRATCH"] + "/bed/BED_cosmo/num_tracers/mlruns"
-    mlflow.set_tracking_uri(storage_path)
+    storage_path = os.environ["SCRATCH"] + "/bed/BED_cosmo/num_tracers"
+    mlflow.set_tracking_uri(storage_path + "/mlruns")
     client = MlflowClient()
     if exp is not None:
         exp_id = client.get_experiment_by_name(exp).experiment_id
@@ -239,10 +239,10 @@ def run_eval(eval_args, run_id, exp, device, **kwargs):
                 optimal_brute_force = torch.tensor(list(optimal_brute_force.values()), device=device)
                 brute_force_EIG = designer.EIG
                 print("Optimal brute force design:", optimal_brute_force)
-                np.save(f"{storage_path}/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/brute_force_designs.npy", np.array([getattr(grid_designs, name) for name in grid_designs.names]).squeeze())
-                np.save(f"{storage_path}/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/brute_force_eigs.npy", brute_force_EIG)
-                mlflow.log_artifact(f"{storage_path}/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/brute_force_designs.npy")
-                mlflow.log_artifact(f"{storage_path}/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/brute_force_eigs.npy")
+                np.save(f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/brute_force_designs.npy", np.array([getattr(grid_designs, name) for name in grid_designs.names]).squeeze())
+                np.save(f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/brute_force_eigs.npy", brute_force_EIG)
+                mlflow.log_artifact(f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/brute_force_designs.npy")
+                mlflow.log_artifact(f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/brute_force_eigs.npy")
 
                 plt.figure()
                 if len(grid_designs.expand(designer.EIG).shape) > 2:
@@ -253,7 +253,7 @@ def run_eval(eval_args, run_id, exp, device, **kwargs):
                     plt.ylabel(grid_designs.names[1])
                     plt.colorbar(label="EIG [bits]")
                     plt.tight_layout()
-                    plt.savefig(f"{storage_path}/{ml_info.experiment_id}/{ml_info.run_id}/brute_force.png")
+                    plt.savefig(f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/plots/brute_force.png")
                 else:
                     fig, ax = plt.subplots(1, 2, figsize=(14, 6))
                     ax[0].plot(getattr(grid_designs, grid_designs.names[0]).squeeze(), brute_force_EIG.squeeze())
@@ -266,7 +266,7 @@ def run_eval(eval_args, run_id, exp, device, **kwargs):
                     # set colorbar
                     plt.colorbar(I, label="EIG [bits]", ax=ax[1])
                     plt.tight_layout()
-                    plt.savefig(f"{storage_path}/{ml_info.experiment_id}/{ml_info.run_id}/brute_force.png")
+                    plt.savefig(f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/plots/brute_force.png")
 
             if eval_args["nf_model"]:
                 input_dim = len(target_labels)
@@ -282,7 +282,7 @@ def run_eval(eval_args, run_id, exp, device, **kwargs):
                     verbose=True
                     )
                 print(f"Loading NF model from {run_id}...")
-                checkpoint = torch.load(f'{storage_path}/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/checkpoints/nf_checkpoint_best_loss.pt', map_location=device)
+                checkpoint = torch.load(f'{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/checkpoints/nf_checkpoint_best_loss.pt', map_location=device)
                 posterior_flow.load_state_dict(checkpoint['model_state_dict'], strict=True)
                 posterior_flow.to(device)
                 posterior_flow.eval()
@@ -293,8 +293,8 @@ def run_eval(eval_args, run_id, exp, device, **kwargs):
                 # get the nominal design by the observed amount of tracers per class assuming default numbers from desi_df
                 nominal_design = torch.tensor(desi_tracers.groupby('class').sum()['observed'].reindex(classes.keys()).values, device=device)
                 print("Nominal design:", nominal_design)
-                np.save(f"{storage_path}/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/nominal_design.npy", nominal_design.cpu().numpy())
-                mlflow.log_artifact(f"{storage_path}/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/nominal_design.npy")
+                np.save(f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/nominal_design.npy", nominal_design.cpu().numpy())
+                mlflow.log_artifact(f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/nominal_design.npy")
 
                 plt.figure()
                 eigs_batch = []
@@ -351,20 +351,20 @@ def run_eval(eval_args, run_id, exp, device, **kwargs):
                 plt.legend(handles_to_show, labels_to_show)
                 plt.title(f"{eval_args['num_evals']} EIG eval(s) with {eval_args['eval_particles']} samples")  
                 plt.tight_layout()
-                plt.savefig(f"{storage_path}/{ml_info.experiment_id}/{ml_info.run_id}/eigs.png")
+                plt.savefig(f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/plots/eigs.png")
                 # save eigs at the end
-                np.save(f"{storage_path}/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/eigs.npy", eig_avg.cpu().numpy())
-                np.save(f"{storage_path}/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/nominal_eig.npy", avg_nominal_eig)
-                mlflow.log_artifact(f"{storage_path}/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/eigs.npy")
+                np.save(f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/eigs.npy", eig_avg.cpu().numpy())
+                np.save(f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/nominal_eig.npy", avg_nominal_eig)
+                mlflow.log_artifact(f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/eigs.npy")
                 if eval_args["brute_force"]:
                     bf_optimal_design = designs[np.argmax(brute_force_EIG)]
                     print("Optimal design (BF):", bf_optimal_design)
-                    np.save(f"{storage_path}/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/bf_optimal_design.npy", bf_optimal_design.cpu().numpy())
-                    mlflow.log_artifact(f"{storage_path}/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/bf_optimal_design.npy")
+                    np.save(f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/bf_optimal_design.npy", bf_optimal_design.cpu().numpy())
+                    mlflow.log_artifact(f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/bf_optimal_design.npy")
                 nf_optimal_design = designs[torch.argmax(eig_avg)]
                 print("Optimal design (NF):", nf_optimal_design)
-                np.save(f"{storage_path}/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/nf_optimal_design.npy", nf_optimal_design.cpu().numpy())
-                mlflow.log_artifact(f"{storage_path}/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/nf_optimal_design.npy")
+                np.save(f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/nf_optimal_design.npy", nf_optimal_design.cpu().numpy())
+                mlflow.log_artifact(f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/nf_optimal_design.npy")
 
                 sorted_eig_idx = torch.argsort(eig_avg, descending=True)
                 sorted_eig = eig_avg[sorted_eig_idx]
@@ -404,7 +404,7 @@ def run_eval(eval_args, run_id, exp, device, **kwargs):
                 cax = divider.append_axes("bottom", size="10%", pad=0.3)
                 # Create colorbar in the new axes
                 plt.colorbar(im2, cax=cax, orientation='horizontal', label='Correlation Coefficient')
-                plt.savefig(f"{storage_path}/{ml_info.experiment_id}/{ml_info.run_id}/evaluation.png")
+                plt.savefig(f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/plots/evaluation.png")
 
                 #tot = (desi_df[::2]["observed"]).sum()
                 values1 = nominal_design.squeeze().cpu().numpy()  # Values for the first set of bars
@@ -425,7 +425,7 @@ def run_eval(eval_args, run_id, exp, device, **kwargs):
                 ax.legend()
                 plt.suptitle("Five Tracer Design (LRG1, LRG2, LRG3+ELG1, ELG2, and Lya QSO)", fontsize=16)
                 plt.tight_layout()
-                plt.savefig(f"{storage_path}/{ml_info.experiment_id}/{ml_info.run_id}/design_comparison.png")
+                plt.savefig(f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/plots/design_comparison.png")
 
                 ############################################### Plot Posterior ###############################################
                 central_vals = num_tracers.central_val if run_args["include_D_M"] else num_tracers.central_val[1::2]
@@ -441,12 +441,12 @@ def run_eval(eval_args, run_id, exp, device, **kwargs):
                 nominal_samples_gd = getdist.MCSamples(samples=nominal_samples, names=target_labels, labels=latex_labels)
                 desi_samples = np.load(f"{home_dir}/data/mcmc_samples/{run_args['cosmo_model']}.npy")
                 desi_samples_gd = getdist.MCSamples(samples=desi_samples, names=target_labels, labels=latex_labels)
-                np.save(f"{storage_path}/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/optimal_samples.npy", optimal_samples)
-                np.save(f"{storage_path}/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/nominal_samples.npy", nominal_samples)
-                np.save(f"{storage_path}/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/desi_samples.npy", desi_samples)
-                mlflow.log_artifact(f"{storage_path}/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/optimal_samples.npy")
-                mlflow.log_artifact(f"{storage_path}/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/nominal_samples.npy")
-                mlflow.log_artifact(f"{storage_path}/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/desi_samples.npy")
+                np.save(f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/optimal_samples.npy", optimal_samples)
+                np.save(f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/nominal_samples.npy", nominal_samples)
+                np.save(f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/desi_samples.npy", desi_samples)
+                mlflow.log_artifact(f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/optimal_samples.npy")
+                mlflow.log_artifact(f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/nominal_samples.npy")
+                mlflow.log_artifact(f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/desi_samples.npy")
 
                 g = plots.getSubplotPlotter()
                 if not eval_args["brute_force"]:
@@ -489,14 +489,14 @@ def run_eval(eval_args, run_id, exp, device, **kwargs):
                                     fill_contours=False, color='tab:blue', range=hist_range, hist_kwargs={"linestyle": 'dashed'}, contour_kwargs={"linestyles": 'dashed'})
                     legend_labels.append(plt.Line2D([0], [0], color="tab:blue", lw=1, label="Brute Force (Optimal)", linestyle='dashed'))
 
-                g.export(f"{storage_path}/{ml_info.experiment_id}/{ml_info.run_id}/posterior.png")
+                g.export(f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/plots/posterior.png")
 
         plt.close('all')
         print("Eval", ml_info.experiment_id + "/" + ml_info.run_id, "completed.")
 
 if __name__ == '__main__':
 
-    device = torch.device("cuda:0") if torch.cuda.is_available() else "cpu"
+    device = torch.device("cuda:1") if torch.cuda.is_available() else "cpu"
     print(f'Using device: {device}.')
 
     #set default dtype
@@ -520,8 +520,8 @@ if __name__ == '__main__':
     }
     run_eval(
         eval_args,
-        run_id='c20afbc8d24a4aaba141cca94d401588',
-        exp=None,
+        run_id=None,
+        exp='base_NAF_particles4_fixed',
         device=device
         )
     mlflow.end_run()

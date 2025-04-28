@@ -66,9 +66,9 @@ def single_run(
     pyro.clear_param_store()
     print(json.dumps(run_args, indent=2))
     print(f"Running with parameters for cosmo_model='{cosmo_model}':")
-    storage_path = os.environ["SCRATCH"] + "/bed/BED_cosmo/num_tracers/mlruns"
+    storage_path = os.environ["SCRATCH"] + "/bed/BED_cosmo/num_tracers"
     home_dir = os.environ["HOME"]
-    mlflow.set_tracking_uri(storage_path)
+    mlflow.set_tracking_uri(storage_path + "/mlruns")
 
     if resume_run_id:
         client = mlflow.MlflowClient()
@@ -91,7 +91,7 @@ def single_run(
         closest_idx = np.argmin(np.abs(best_loss_steps - resume_step))
         best_loss = best_losses[closest_idx].value if best_loss_steps[closest_idx] < resume_step else best_losses[closest_idx - 1].value
         print(f"Starting at best loss: {best_loss} at step {best_loss_steps[closest_idx]}")
-        checkpoint_files = os.listdir(f"{storage_path}/{exp_id}/{resume_run_id}/artifacts/checkpoints")
+        checkpoint_files = os.listdir(f"{storage_path}/mlruns/{exp_id}/{resume_run_id}/artifacts/checkpoints")
         checkpoint_steps = sorted([
             int(f.split('_')[-1].split('.')[0]) 
             for f in checkpoint_files 
@@ -109,7 +109,7 @@ def single_run(
         history = history[:start_step]
         # get the checkpoint file name for the start step
         # find the file with start_step in the name
-        checkpoint_dir = f"{storage_path}/{exp_id}/{resume_run_id}/artifacts/checkpoints"
+        checkpoint_dir = f"{storage_path}/mlruns/{exp_id}/{resume_run_id}/artifacts/checkpoints"
         checkpoint_file = [f for f in os.listdir(checkpoint_dir) if f.startswith('nf_') and f.endswith('.pt') and f.split('_')[-1].split('.')[0] == str(start_step)][0]
         checkpoint_path = f"{checkpoint_dir}/{checkpoint_file}"
         print(f"Resuming MLflow run: {resume_run_id}")
@@ -131,6 +131,8 @@ def single_run(
             mlflow.log_param(key, value)
     
     ml_info = mlflow.active_run().info
+    os.makedirs(f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/checkpoints", exist_ok=True)
+    os.makedirs(f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/plots", exist_ok=True)
 
     desi_df = pd.read_csv(home_dir + run_args["data_path"] + 'desi_data.csv')
     desi_tracers = pd.read_csv(home_dir + run_args["data_path"] + 'desi_tracers.csv')
@@ -206,7 +208,7 @@ def single_run(
             design_tensor = torch.tensor(getattr(grid_designs, name).squeeze(), device=device).unsqueeze(1)
             designs = torch.cat((designs, design_tensor), dim=1)
     print("Designs shape:", designs.shape)
-    np.save(f"{storage_path}/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/designs.npy", designs.squeeze().cpu().detach().numpy())
+    np.save(f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/designs.npy", designs.squeeze().cpu().detach().numpy())
 
     # Only create prior plot if not resuming
     if not resume_run_id:
@@ -221,7 +223,7 @@ def single_run(
             axs[i].plot(eval_pts.cpu().numpy()[:-1], prob_norm.cpu().numpy(), label="Prior", color="tab:blue", alpha=0.5)
             axs[i].set_title(p)
         plt.tight_layout()
-        plt.savefig(f"{storage_path}/{ml_info.experiment_id}/{ml_info.run_id}/prior.png")
+        plt.savefig(f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/plots/prior.png")
 
     print("Calculating normalizing flow EIG...")
     input_dim = len(target_labels)
@@ -269,7 +271,7 @@ def single_run(
             samples = posterior_flow(nominal_context).sample((1000,)).cpu().numpy()
             plt.figure()
             plt.plot(samples[:, 0], samples[:, 1], 'o', alpha=0.5)
-            plt.savefig(f"{storage_path}/{ml_info.experiment_id}/{ml_info.run_id}/init_samples.png")
+            plt.savefig(f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/plots/init_samples.png")
 
         seed = auto_seed(run_args["pyro_seed"])
         print(f"Seed: {seed}")
@@ -289,7 +291,6 @@ def single_run(
     # Disable tqdm progress bar if output is not a TTY
     is_tty = sys.stdout.isatty()
     num_steps_range = trange(start_step, run_args["steps"], desc="Loss: 0.000 ", disable=not is_tty)
-    os.makedirs(f"{storage_path}/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/checkpoints", exist_ok=True)
     for step in num_steps_range:
         optimizer.zero_grad() #  clear gradients from previous step
         agg_loss, loss = posterior_loss(design=designs,
@@ -327,9 +328,9 @@ def single_run(
         if torch.mean(loss).cpu().detach().item() < best_loss and step > 99:
             best_loss = torch.mean(loss).cpu().detach().item()
             # save the checkpoint
-            checkpoint_path = f"{storage_path}/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/checkpoints/nf_loss_checkpoint_{step}.pt"
+            checkpoint_path = f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/checkpoints/nf_loss_checkpoint_{step}.pt"
             save_checkpoint(posterior_flow, optimizer, checkpoint_path, step=step, artifact_path="checkpoints")
-            checkpoint_path = f"{storage_path}/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/checkpoints/nf_checkpoint_best_loss.pt"
+            checkpoint_path = f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/checkpoints/nf_checkpoint_best_loss.pt"
             save_checkpoint(posterior_flow, optimizer, checkpoint_path, step=step, artifact_path="checkpoints")
             mlflow.log_metric("best_loss", best_loss, step=step)
 
@@ -350,9 +351,9 @@ def single_run(
                     best_nominal_area = nominal_area
                     mlflow.log_metric("best_nominal_area", best_nominal_area, step=step)
                     # save the checkpoint
-                    checkpoint_path = f"{storage_path}/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/checkpoints/nf_area_checkpoint_{step}.pt"
+                    checkpoint_path = f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/checkpoints/nf_area_checkpoint_{step}.pt"
                     save_checkpoint(posterior_flow, optimizer, checkpoint_path, step=step, artifact_path="checkpoints")
-                    checkpoint_path = f"{storage_path}/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/checkpoints/nf_checkpoint_best_nominal_area.pt"
+                    checkpoint_path = f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/checkpoints/nf_checkpoint_best_nominal_area.pt"
                     save_checkpoint(posterior_flow, optimizer, checkpoint_path, step=step, artifact_path="checkpoints")
             else:
                 nominal_area = np.nan
@@ -364,7 +365,7 @@ def single_run(
         if step % run_args["gamma_freq"] == 0 and step > 0:
             scheduler.step()
         if step % 5000 == 0 and step > 0:
-            checkpoint_path = f"{storage_path}/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/checkpoints/nf_checkpoint_{step}.pt"
+            checkpoint_path = f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/checkpoints/nf_checkpoint_{step}.pt"
             save_checkpoint(posterior_flow, optimizer, checkpoint_path, step=step, artifact_path="checkpoints")
 
         # Track memory usage
@@ -414,8 +415,8 @@ def single_run(
     ax2.set_ylabel("EIG")
     ax2.legend()
     plt.tight_layout()
-    plt.savefig(f"{storage_path}/{ml_info.experiment_id}/{ml_info.run_id}/training.png")
-    checkpoint_path = f"{storage_path}/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/checkpoints/nf_checkpoint_last.pt"
+    plt.savefig(f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/plots/training.png")
+    checkpoint_path = f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/checkpoints/nf_checkpoint_last.pt"
     save_checkpoint(posterior_flow, optimizer, checkpoint_path, step=run_args["steps"], artifact_path="checkpoints")
 
     plt.close('all')
@@ -490,7 +491,7 @@ if __name__ == '__main__':
         run_args=run_args,
         mlflow_experiment_name=args.exp_name,
         device=device,
-        fixed_design=False,
+        fixed_design=True,
         resume_run_id=resume_run_id,
         resume_step=resume_step,
     )
