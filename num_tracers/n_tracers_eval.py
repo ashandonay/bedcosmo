@@ -454,7 +454,7 @@ def run_eval(eval_args, run_id, exp, device, **kwargs):
                         [desi_samples_gd, nominal_samples_gd, optimal_samples_gd],
                         ['black', 'tab:blue', 'tab:orange'],
                         legend_labels=['DESI', 'Nominal', 'Optimal'],
-                        show_scatter=True
+                        show_scatter=False
                     )
                 else:
                     brute_force_nominal_samples = num_tracers.brute_force_posterior(nominal_design, designer, grid_params, num_param_samples=eval_args["post_samples"]).cpu().numpy()
@@ -496,7 +496,7 @@ def run_eval(eval_args, run_id, exp, device, **kwargs):
 
 if __name__ == '__main__':
 
-    device = torch.device("cuda:1") if torch.cuda.is_available() else "cpu"
+    device = torch.device("cuda:0") if torch.cuda.is_available() else "cpu"
     print(f'Using device: {device}.')
 
     #set default dtype
@@ -520,8 +520,8 @@ if __name__ == '__main__':
     }
     run_eval(
         eval_args,
-        run_id=None,
-        exp='base_NAF_particles4_fixed',
+        run_id='8021a06dd2694e6aa1db6697aed89653',
+        exp=None,
         device=device
         )
     mlflow.end_run()

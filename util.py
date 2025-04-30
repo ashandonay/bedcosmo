@@ -198,10 +198,10 @@ def run_eval(run_id, eval_args, step='best_loss', device='cuda:0', cosmo_exp='nu
             device,
             seed=eval(run.data.params["nf_seed"])
             )
-        area_checkpoints = [f.split('_')[-1].split('.')[0] for f in os.listdir(f'{storage_path}/mlruns/{exp_id}/{run_id}/artifacts/checkpoints/') if f.startswith('nf_area_checkpoint_') and f.endswith('.pt')]
-        loss_checkpoints = [f.split('_')[-1].split('.')[0] for f in os.listdir(f'{storage_path}/mlruns/{exp_id}/{run_id}/artifacts/checkpoints/') if f.startswith('nf_loss_checkpoint_') and f.endswith('.pt')]
-        regular_checkpoints = [f.split('_')[-1].split('.')[0] for f in os.listdir(f'{storage_path}/mlruns/{exp_id}/{run_id}/artifacts/checkpoints/') if f.startswith('nf_checkpoint_') and f.endswith('.pt')]
-        if step not in area_checkpoints and step not in loss_checkpoints and step not in regular_checkpoints and step != 'best_loss' and step != 'best_area':
+        area_checkpoints = [int(f.split('_')[-1].split('.')[0]) for f in os.listdir(f'{storage_path}/mlruns/{exp_id}/{run_id}/artifacts/checkpoints/') if f.startswith('nf_area_checkpoint_') and f.endswith('.pt')]
+        loss_checkpoints = [int(f.split('_')[-1].split('.')[0]) for f in os.listdir(f'{storage_path}/mlruns/{exp_id}/{run_id}/artifacts/checkpoints/') if f.startswith('nf_loss_checkpoint_') and f.endswith('.pt')]
+        regular_checkpoints = [int(f.split('_')[-1].split('.')[0]) for f in os.listdir(f'{storage_path}/mlruns/{exp_id}/{run_id}/artifacts/checkpoints/') if f.startswith('nf_checkpoint_') and f.endswith('.pt') and not f.endswith('last.pt') and not f.endswith('loss.pt') and not f.endswith('area.pt')]
+        if step not in area_checkpoints and step not in loss_checkpoints and step not in regular_checkpoints and step != 'best_loss' and step != 'best_nominal_area':
             raise ValueError(f"Step {step} not found in checkpoints")
         if step in area_checkpoints:
             checkpoint = torch.load(f'{storage_path}/mlruns/{exp_id}/{run_id}/artifacts/checkpoints/nf_area_checkpoint_{step}.pt', map_location=eval_args["device"])

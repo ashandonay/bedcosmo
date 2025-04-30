@@ -117,7 +117,7 @@ def plot_run(run_id, eval_args, show_scatter=False):
     g = plot_posterior(samples, ["tab:blue"], show_scatter=show_scatter)
     plt.show()
 
-def posterior_steps(run_id, steps, eval_args, show_best=False, cosmo_exp='num_tracers'):
+def posterior_steps(run_id, steps, eval_args, type='all', cosmo_exp='num_tracers'):
     """
     Plots posterior distributions at different training steps for either a single run, 
     multiple specific runs, or all runs in an experiment.
@@ -133,6 +133,7 @@ def posterior_steps(run_id, steps, eval_args, show_best=False, cosmo_exp='num_tr
         cosmo_exp (str): Name of the cosmology experiment.
     """
     client = MlflowClient()
+    run = client.get_run(run_id)
     storage_path = os.environ["SCRATCH"] + f"/bed/BED_cosmo/{cosmo_exp}"
 
     exp_id = client.get_run(run_id).info.experiment_id
@@ -143,59 +144,57 @@ def posterior_steps(run_id, steps, eval_args, show_best=False, cosmo_exp='num_tr
     all_areas = []
     color_list = []
 
-    if show_best:
-        checkpoint_dir = f'{storage_path}/mlruns/{exp_id}/{run_id}/artifacts/best_loss/'
-        try:
-            checkpoint_files = os.listdir(checkpoint_dir)
-        except FileNotFoundError:
-            print(f"Warning: Best loss checkpoint directory not found for run {run_id}: {checkpoint_dir}")
-            checkpoint_files = []
+    checkpoint_dir = f'{storage_path}/mlruns/{exp_id}/{run_id}/artifacts/checkpoints/'
+    checkpoint_files = os.listdir(checkpoint_dir)
+    if type == 'all':
+        checkpoints = sorted([
+            int(f.split('_')[-1].split('.')[0]) 
+            for f in checkpoint_files 
+            if f.startswith('nf_') and f.endswith('.pt') and not f.endswith('last.pt') and not f.endswith('loss.pt') and not f.endswith('area.pt')
+        ])
+    elif type == 'area':
+        checkpoints = sorted([
+            int(f.split('_')[-1].split('.')[0]) 
+            for f in checkpoint_files 
+            if f.startswith('nf_area')
+        ])
+    elif type == 'loss':
+        checkpoints = sorted([
+            int(f.split('_')[-1].split('.')[0]) 
+            for f in checkpoint_files 
+            if f.startswith('nf_loss')
+        ])
+    # get the checkpoints closest to the steps
+    plot_checkpoints = [checkpoints[np.argmin(np.abs(np.array(checkpoints) - step))] for step in steps if step != 'best_loss' and step != 'best_nominal_area']
+    # check for duplicates in plot_checkpoints and replace them with the next checkpoint index 
+    for i, step in enumerate(plot_checkpoints):
+        if step in plot_checkpoints[:i]:
+            if np.argmin(np.abs(np.array(checkpoints) - steps[i])) + 1 < len(checkpoints):
+                plot_checkpoints[i] = checkpoints[np.argmin(np.abs(np.array(checkpoints) - steps[i])) + 1]
+            else:
+                print(f"Warning: No next checkpoint found for step {steps[i]}")
+                plot_checkpoints.pop(i)
+    # remove any steps before 1000
+    plot_checkpoints = [step for step in plot_checkpoints if step > 1000]
+    # add best_loss and best_nominal_area to the plot_checkpoints if requested
+    if 'best_loss' in steps:
+        plot_checkpoints.append('best_loss')
+    if 'best_nominal_area' in steps:
+        plot_checkpoints.append('best_nominal_area')
 
-        checkpoints = sorted([
-            int(f.split('_')[-1].split('.')[0]) 
-            for f in checkpoint_files 
-            if f.startswith('nf_checkpoint_') and f.endswith('.pt')
-        ])
-        # get the checkpoints closest to the steps
-        plot_checkpoints = [checkpoints[np.argmin(np.abs(np.array(checkpoints) - step))] for step in steps]
-        # remove any steps before 1000
-        plot_checkpoints = [step for step in plot_checkpoints if step > 1000]
-        for i, step in enumerate(plot_checkpoints):
-            samples = run_eval(run_id, eval_args, step=step, best=True, device=eval_args["device"], cosmo_exp=cosmo_exp)
-            all_samples.append(samples)
-            color_list.append(colors[i % len(colors)])
-            area = get_contour_area(samples, 'Om', 'hrdrag', 0.68)[0]
-            all_areas.append(area)
-        
-        g = plot_posterior(all_samples, color_list)
-    else:
-        checkpoint_dir = f'{storage_path}/mlruns/{exp_id}/{run_id}/artifacts/checkpoints/'
-        try:
-            checkpoint_files = os.listdir(checkpoint_dir)
-        except FileNotFoundError:
-            print(f"Warning: Checkpoint directory not found for run {run_id}: {checkpoint_dir}")
-            checkpoint_files = []
-            
-        checkpoints = sorted([
-            int(f.split('_')[-1].split('.')[0]) 
-            for f in checkpoint_files 
-            if f.startswith('nf_checkpoint_') and f.endswith('.pt') and not f.endswith('last.pt') and not f.endswith('best.pt')
-        ])
-        plot_checkpoints = [checkpoints[np.argmin(np.abs(np.array(checkpoints) - step))] for step in steps]
-        for i, step in enumerate(plot_checkpoints):
-            samples = run_eval(run_id, eval_args, step=step, device=eval_args["device"], cosmo_exp=cosmo_exp)
-            all_samples.append(samples)
-            
-            # Assign color based on step (same step = same color)
-            color = colors[i % len(colors)]
-            color_list.append(color)
-            
-            # Calculate 68% contour area for this run at this step
-            area = get_contour_area(samples, 'Om', 'hrdrag', 0.68)[0]
-            all_areas.append(area)
-        
-        g = plot_posterior(all_samples, color_list)
-    
+    for i, step in enumerate(plot_checkpoints):
+        samples = run_eval(run_id, eval_args, step=step, device=eval_args["device"], cosmo_exp=cosmo_exp)
+        all_samples.append(samples)
+        color_list.append(colors[i % len(colors)])
+        area = get_contour_area(samples, 'Om', 'hrdrag', 0.68)[0]
+        all_areas.append(area)
+
+    desi_samples_gd = get_desi_samples(run.data.params['cosmo_model'])
+    desi_area = get_contour_area([desi_samples_gd], 'Om', 'hrdrag', 0.68)[0]
+    all_samples.append(desi_samples_gd)
+    color_list.append('black')  
+    all_areas.append(desi_area)
+    g = plot_posterior(all_samples, color_list)
     # Remove existing legends if any
     if g.fig.legends:
         for legend in g.fig.legends:
@@ -218,7 +217,10 @@ def posterior_steps(run_id, steps, eval_args, show_best=False, cosmo_exp='num_tr
             Line2D([0], [0], color=colors[i % len(colors)], 
                     label=f'Step {step_label}, 68% Area: {area:.2f}')
         )
-
+    custom_legend.append(
+        Line2D([0], [0], color='black', 
+            label=f'DESI, Area (68% Contour): {desi_area:.3f}')
+    )
     g.fig.legend(handles=custom_legend, loc='upper right', bbox_to_anchor=(1, 0.99))
     storage_path = os.environ["SCRATCH"] + f"/bed/BED_cosmo/{cosmo_exp}"
     save_path = f"{storage_path}/mlruns/{exp_id}/{run_id}/artifacts/plots/posterior_steps_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
@@ -777,7 +779,7 @@ def loss_area_plot(exp_name, var_name, step_interval=1000, excluded_runs=[], cos
     run_ids = [run.info.run_id for run in client.search_runs(exp_id) if run.info.run_id not in excluded_runs]
     all_run_losses = []
     all_run_areas = []
-    vars = []
+    vars_values = [] # Renamed from vars to avoid conflict with built-in
     # Sort runs by the specified parameter value
     run_ids = sorted(run_ids, key=lambda x: float(client.get_run(x).data.params[var_name]))
     print(f"Processing runs: {run_ids}")
@@ -786,7 +788,7 @@ def loss_area_plot(exp_name, var_name, step_interval=1000, excluded_runs=[], cos
     for run_id in run_ids:
         print(f"Fetching data for run: {run_id}")
         var_value = client.get_run(run_id).data.params[var_name]
-        vars.append(var_value)
+        vars_values.append(var_value)
 
         # Fetch metric histories
         loss_history = client.get_metric_history(run_id, 'loss')
@@ -813,7 +815,7 @@ def loss_area_plot(exp_name, var_name, step_interval=1000, excluded_runs=[], cos
                     print(f"Warning: Loss not found for step {step} in run {run_id}. Skipping point.")
 
         if not sampled_losses:
-             print(f"Warning: No valid paired loss/area points found for run {run_id} at 100-step intervals.")
+             print(f"Warning: No valid paired loss/area points found for run {run_id} at {step_interval}-step intervals.")
              # Add empty lists to maintain alignment, or handle as needed
              all_run_losses.append([])
              all_run_areas.append([])
@@ -823,27 +825,77 @@ def loss_area_plot(exp_name, var_name, step_interval=1000, excluded_runs=[], cos
         all_run_areas.append(sampled_areas)
 
     plt.figure(figsize=(14, 8)) # Add figure creation
+    ax = plt.gca() # Get current axes
+
+    prop_cycle = plt.rcParams['axes.prop_cycle']
+    colors = prop_cycle.by_key()['color']
 
     # Plot the results
     for i in range(len(run_ids)):
         if not all_run_losses[i]: # Skip if no data for this run
              continue
-        # Normalize loss for plotting (optional, based on your previous code)
-        plot_losses = np.array(all_run_losses[i])
-        plot_losses_normalized = plot_losses - np.min(plot_losses)
-        plt.scatter(plot_losses_normalized, all_run_areas[i], label=f'{var_name}={vars[i]}', alpha=0.7)
-    plt.axhline(y=5.214, color='black', linestyle='--', label='DESI 68% Contour')
-    plt.xscale('log')
-    plt.yscale('log')
-    plt.xlabel("Normalized Loss (Loss - Min Loss)")
-    plt.ylabel("Nominal Area")
-    plt.title(f"Loss vs. Nominal Area (Sampled every {step_interval} steps)")
-    plt.legend()
-    plt.grid(True)
+
+        losses = np.array(all_run_losses[i])
+        areas = np.array(all_run_areas[i])
+
+        # Find indices of minimum loss and minimum area
+        min_loss_idx = np.argmin(losses)
+        min_area_idx = np.argmin(areas)
+
+        # Normalize loss for plotting
+        losses_normalized = losses - np.min(losses) * 1.005
+
+        # Get color for this run
+        color = colors[i % len(colors)]
+
+        # Plot all points for this run
+        ax.scatter(losses_normalized, areas, label=f'{var_name}={vars_values[i]}', alpha=0.6, color=color, marker='o', s=30)
+
+        # Highlight the minimum loss point
+        ax.scatter(losses_normalized[min_loss_idx], areas[min_loss_idx],
+                   marker='*', color=color, s=80, alpha=0.9, edgecolors='black', zorder=3) # No label here
+
+        # Highlight the minimum area point
+        ax.scatter(losses_normalized[min_area_idx], areas[min_area_idx],
+                   marker='P', color=color, s=80, alpha=0.9, edgecolors='black', zorder=3) # No label here, 'P' is plus sign
+
+    # Add DESI line
+    ax.axhline(y=5.214, color='black', linestyle='--', label='DESI 68% Contour')
+
+    # Configure plot
+    ax.set_xscale('log')
+    ax.set_yscale('log')
+    ax.set_xlabel("Normalized Loss (Loss - Min Loss)")
+    ax.set_ylabel("Nominal Area")
+    ax.set_title(f"Loss vs. Nominal Area (Sampled every {step_interval} steps)")
+
+    # Create custom legend
+    handles, labels = ax.get_legend_handles_labels()
+
+    # Add custom handles for the markers
+    min_loss_legend = Line2D([0], [0], marker='*', color='w', label='Best Loss',
+                             markerfacecolor='grey', markersize=12, markeredgecolor='black')
+    min_area_legend = Line2D([0], [0], marker='P', color='w', label='Best Area',
+                             markerfacecolor='grey', markersize=10, markeredgecolor='black') # 'P' marker
+
+    handles.extend([min_loss_legend, min_area_legend])
+
+    ax.legend(handles=handles)
+    ax.grid(True, which="both", ls="--", alpha=0.5) # Add grid for log scale
+
+    # Save the plot
     storage_path = os.environ["SCRATCH"] + f"/bed/BED_cosmo/{cosmo_exp}"
     os.makedirs(f"{storage_path}/mlruns/{exp_id}/plots", exist_ok=True)
     save_path = f"{storage_path}/mlruns/{exp_id}/plots/loss_area_plot_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
     show_figure(save_path)
+
+def plot_lr_schedule(initial_lr, gamma, gamma_freq, steps=100000):
+    steps = np.arange(0, steps, 1)
+    lr = initial_lr * gamma ** (steps / gamma_freq)
+    legend_label = f'initial_lr={initial_lr}, gamma={gamma}, gamma_freq={gamma_freq}'
+    plt.plot(steps, lr, label=legend_label)
+
+    return lr[-1]
 
 def show_figure(save_path):
     # Check if running in a TTY, otherwise assume interactive (like notebook) and show

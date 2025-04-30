@@ -64,7 +64,6 @@ def single_run(
     gc.collect()
     print(f"Memory before run: {process.memory_info().rss / 1024**2} MB")
     pyro.clear_param_store()
-    print(json.dumps(run_args, indent=2))
     print(f"Running with parameters for cosmo_model='{cosmo_model}':")
     storage_path = os.environ["SCRATCH"] + "/bed/BED_cosmo/num_tracers"
     home_dir = os.environ["HOME"]
@@ -129,7 +128,8 @@ def single_run(
         # log params in kwargs
         for key, value in kwargs.items():
             mlflow.log_param(key, value)
-    
+
+    print(json.dumps(run_args, indent=2))
     ml_info = mlflow.active_run().info
     os.makedirs(f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/checkpoints", exist_ok=True)
     os.makedirs(f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/plots", exist_ok=True)
@@ -250,8 +250,8 @@ def single_run(
     if resume_run_id:
         # Load the checkpoint
         checkpoint = torch.load(checkpoint_path, map_location=device)
+        print(checkpoint['optimizer_state_dict']['param_groups'][0]['lr'])
         posterior_flow.load_state_dict(checkpoint['model_state_dict'])
-        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         print(f"Checkpoint loaded from {checkpoint_path}")
         print(f"Resuming from step {start_step}")
         
@@ -265,6 +265,14 @@ def single_run(
             if torch.cuda.is_available() and rng_state['cuda'] is not None:
                 torch.cuda.set_rng_state_all([state.cpu() for state in rng_state['cuda']])
             print("RNG states restored from checkpoint")
+
+        scheduler = torch.optim.lr_scheduler.ExponentialLR(
+            optimizer,
+            gamma=run_args["gamma"]
+        )
+
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        scheduler.last_epoch = (start_step // run_args["gamma_freq"]) - 1
     else:
         # test sample from the flow
         with torch.no_grad():
@@ -275,13 +283,12 @@ def single_run(
 
         seed = auto_seed(run_args["pyro_seed"])
         print(f"Seed: {seed}")
-    scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=run_args["gamma"])
-    
-    # Apply scheduler steps to match current step if resuming
-    if start_step > 0:
-        scheduler_steps = start_step // run_args["gamma_freq"]
-        for _ in range(scheduler_steps):
-            scheduler.step()
+
+        # Initialize scheduler normally for new runs
+        scheduler = torch.optim.lr_scheduler.ExponentialLR(
+            optimizer, 
+            gamma=run_args["gamma"]
+        )
 
     verbose_shapes = run_args["verbose"]
     print("MLFlow Run Info:", ml_info.experiment_id + "/" + ml_info.run_id)
@@ -491,7 +498,7 @@ if __name__ == '__main__':
         run_args=run_args,
         mlflow_experiment_name=args.exp_name,
         device=device,
-        fixed_design=True,
+        fixed_design=False,
         resume_run_id=resume_run_id,
         resume_step=resume_step,
     )
