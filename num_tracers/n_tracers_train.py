@@ -46,15 +46,16 @@ import json
 import argparse
 import io
 import contextlib
-from plotting import get_contour_area
+from plotting import get_contour_area, plot_training, plot_eig_steps
 
 def single_run(
     cosmo_model,
     run_args,
     mlflow_experiment_name,
     device="cuda:0",
-    resume_run_id=None,
+    resume_id=None,
     resume_step=None,
+    add_steps=0,
     **kwargs,
 ):
     print(mlflow_experiment_name)
@@ -69,28 +70,30 @@ def single_run(
     home_dir = os.environ["HOME"]
     mlflow.set_tracking_uri(storage_path + "/mlruns")
 
-    if resume_run_id:
+    if resume_id:
         client = mlflow.MlflowClient()
         if resume_step is None:
             raise ValueError("resume_step must be provided when resuming a run")
         # get the exp name from the run id
-        mlflow_experiment_name = mlflow.get_experiment(mlflow.get_run(resume_run_id).info.experiment_id).name
-        exp_id = mlflow.get_run(resume_run_id).info.experiment_id
-        cosmo_model = mlflow.get_run(resume_run_id).data.params["cosmo_model"]
-        run_args = parse_mlflow_params(mlflow.get_run(resume_run_id).data.params)
-        best_nominal_areas = client.get_metric_history(resume_run_id, 'best_nominal_area')
+        mlflow_experiment_name = mlflow.get_experiment(mlflow.get_run(resume_id).info.experiment_id).name
+        exp_id = mlflow.get_run(resume_id).info.experiment_id
+        cosmo_model = mlflow.get_run(resume_id).data.params["cosmo_model"]
+        run_args = parse_mlflow_params(mlflow.get_run(resume_id).data.params)
+        if add_steps:
+            run_args["steps"] += add_steps
+        best_nominal_areas = client.get_metric_history(resume_id, 'best_nominal_area')
         best_nominal_area_steps = np.array([metric.step for metric in best_nominal_areas])
         # get the best area from a step prior to the resume step
         closest_idx = np.argmin(np.abs(best_nominal_area_steps - resume_step))
         best_nominal_area = best_nominal_areas[closest_idx].value if best_nominal_area_steps[closest_idx] < resume_step else best_nominal_areas[closest_idx - 1].value
         print(f"Starting at best nominal area: {best_nominal_area} at step {best_nominal_area_steps[closest_idx]}")
-        best_losses = client.get_metric_history(resume_run_id, 'best_loss')
+        best_losses = client.get_metric_history(resume_id, 'best_loss')
         best_loss_steps = np.array([metric.step for metric in best_losses])
         # get the best loss from a step prior to the resume step
         closest_idx = np.argmin(np.abs(best_loss_steps - resume_step))
         best_loss = best_losses[closest_idx].value if best_loss_steps[closest_idx] < resume_step else best_losses[closest_idx - 1].value
         print(f"Starting at best loss: {best_loss} at step {best_loss_steps[closest_idx]}")
-        checkpoint_files = os.listdir(f"{storage_path}/mlruns/{exp_id}/{resume_run_id}/artifacts/checkpoints")
+        checkpoint_files = os.listdir(f"{storage_path}/mlruns/{exp_id}/{resume_id}/artifacts/checkpoints")
         checkpoint_steps = sorted([
             int(f.split('_')[-1].split('.')[0]) 
             for f in checkpoint_files 
@@ -103,17 +106,17 @@ def single_run(
         # get the checkpoint prior to the resume step
         closest_idx = np.argmin(np.abs(np.array(checkpoint_steps) - resume_step))
         start_step = checkpoint_steps[closest_idx] if checkpoint_steps[closest_idx] < resume_step else checkpoint_steps[closest_idx - 1]
-        history = client.get_metric_history(resume_run_id, 'loss')
+        history = client.get_metric_history(resume_id, 'loss')
         history = [metric.value for metric in history]
         history = history[:start_step]
         # get the checkpoint file name for the start step
         # find the file with start_step in the name
-        checkpoint_dir = f"{storage_path}/mlruns/{exp_id}/{resume_run_id}/artifacts/checkpoints"
+        checkpoint_dir = f"{storage_path}/mlruns/{exp_id}/{resume_id}/artifacts/checkpoints"
         checkpoint_file = [f for f in os.listdir(checkpoint_dir) if f.startswith('nf_') and f.endswith('.pt') and f.split('_')[-1].split('.')[0] == str(start_step)][0]
         checkpoint_path = f"{checkpoint_dir}/{checkpoint_file}"
-        print(f"Resuming MLflow run: {resume_run_id}")
+        print(f"Resuming MLflow run: {resume_id}")
         mlflow.set_experiment(mlflow_experiment_name)
-        mlflow.start_run(run_id=resume_run_id)
+        mlflow.start_run(run_id=resume_id)
     else:
         start_step = 0
         best_loss = float('inf')
@@ -208,10 +211,11 @@ def single_run(
             design_tensor = torch.tensor(getattr(grid_designs, name).squeeze(), device=device).unsqueeze(1)
             designs = torch.cat((designs, design_tensor), dim=1)
     print("Designs shape:", designs.shape)
-    np.save(f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/designs.npy", designs.squeeze().cpu().detach().numpy())
+    np.save(f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/designs.npy", designs.cpu().detach().numpy())
+    mlflow.log_artifact(f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/designs.npy")
 
     # Only create prior plot if not resuming
-    if not resume_run_id:
+    if not resume_id:
         fig, axs = plt.subplots(ncols=len(target_labels), nrows=1, figsize=(5*len(target_labels), 5))
         if len(target_labels) == 1:
             axs = [axs]
@@ -245,9 +249,10 @@ def single_run(
     
     # Initialize optimizer
     optimizer = torch.optim.Adam(posterior_flow.parameters(), lr=run_args["lr"])
+    scheduler = init_scheduler(optimizer, run_args)
     
     # Load checkpoint if specified
-    if resume_run_id:
+    if resume_id:
         # Load the checkpoint
         checkpoint = torch.load(checkpoint_path, map_location=device)
         print(checkpoint['optimizer_state_dict']['param_groups'][0]['lr'])
@@ -266,13 +271,11 @@ def single_run(
                 torch.cuda.set_rng_state_all([state.cpu() for state in rng_state['cuda']])
             print("RNG states restored from checkpoint")
 
-        scheduler = torch.optim.lr_scheduler.ExponentialLR(
-            optimizer,
-            gamma=run_args["gamma"]
-        )
-
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        scheduler.last_epoch = (start_step // run_args["gamma_freq"]) - 1
+        if run_args["scheduler_type"] == "exponential":
+            scheduler.last_epoch = (start_step // run_args["step_freq"]) - 1
+        else:
+            scheduler.last_epoch = start_step - 1
     else:
         # test sample from the flow
         with torch.no_grad():
@@ -284,17 +287,8 @@ def single_run(
         seed = auto_seed(run_args["pyro_seed"])
         print(f"Seed: {seed}")
 
-        # Initialize scheduler normally for new runs
-        scheduler = torch.optim.lr_scheduler.ExponentialLR(
-            optimizer, 
-            gamma=run_args["gamma"]
-        )
-
     verbose_shapes = run_args["verbose"]
     print("MLFlow Run Info:", ml_info.experiment_id + "/" + ml_info.run_id)
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
-    total_steps = run_args["steps"]
-    plot_steps = [int(0.25*total_steps), int(0.5*total_steps), int(0.75*total_steps)]
     # Disable tqdm progress bar if output is not a TTY
     is_tty = sys.stdout.isatty()
     num_steps_range = trange(start_step, run_args["steps"], desc="Loss: 0.000 ", disable=not is_tty)
@@ -315,23 +309,9 @@ def single_run(
         torch.nn.utils.clip_grad_norm_(posterior_flow.parameters(), max_norm=1.0)
         optimizer.step()
 
+        history.append(torch.mean(loss).cpu().detach().item())
         if step == 0:
             verbose_shapes = False
-        if step in plot_steps:
-            with torch.no_grad():
-                agg_loss, eigs = posterior_loss(design=designs,
-                                                model=num_tracers.pyro_model,
-                                                guide=posterior_flow,
-                                                num_particles=run_args["eval_particles"],
-                                                observation_labels=["y"],
-                                                target_labels=target_labels,
-                                                evaluation=True,
-                                                nflow=True,
-                                                analytic_prior=False,
-                                                condition_design=run_args["condition_design"])
-            eigs_bits = eigs.cpu().detach().numpy()/np.log(2)
-            ax2.plot(eigs_bits, label=f'step {step}')
-        history.append(torch.mean(loss).cpu().detach().item())
         if torch.mean(loss).cpu().detach().item() < best_loss and step > 99:
             best_loss = torch.mean(loss).cpu().detach().item()
             # save the checkpoint
@@ -369,67 +349,35 @@ def single_run(
                 num_steps_range.set_description("Loss: {:.3f}, Area: {:.3f}".format(loss.mean().item(), nominal_area))
             else:
                 print(f"Step {step}, Loss: {loss.mean().item()}")
-        if step % run_args["gamma_freq"] == 0 and step > 0:
+        if step % run_args["step_freq"] == 0 and step > 0:
             scheduler.step()
         if step % 5000 == 0 and step > 0:
             checkpoint_path = f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/checkpoints/nf_checkpoint_{step}.pt"
             save_checkpoint(posterior_flow, optimizer, checkpoint_path, step=step, artifact_path="checkpoints")
 
-        # Track memory usage
-        cpu_memory = process.memory_info().rss / 1024**2  # Convert to MB
-        mlflow.log_metric("cpu_memory_usage", cpu_memory, step=step)
-        if torch.cuda.is_available():
-            gpu_memory = torch.cuda.memory_allocated() / 1024**2  # Convert to MB
-            mlflow.log_metric("gpu_memory_usage", gpu_memory, step=step)
+        log_usage_metrics(device, process, step)
 
-    stacked_history = torch.tensor(history)
-    ax1.plot(stacked_history - stacked_history.min())
-    ax1.set_xlabel("Training Steps")
-    ax1.set_ylabel("Loss")
-    ax1.set_yscale('log')
-
-    nominal_design = torch.tensor(desi_tracers.groupby('class').sum()['observed'].reindex(classes.keys()).values, device=device)
-    print("Nominal design:", nominal_design)
-
-    with torch.no_grad():
-        agg_loss, eigs = posterior_loss(design=designs,
-                                        model=num_tracers.pyro_model,
-                                        guide=posterior_flow,
-                                        num_particles=run_args["eval_particles"],
-                                        observation_labels=["y"],
-                                        target_labels=target_labels,
-                                        evaluation=True,
-                                        nflow=True,
-                                        analytic_prior=False,
-                                        condition_design=run_args["condition_design"])
-    eigs_bits = eigs.cpu().detach().numpy()/np.log(2)
-    ax2.plot(eigs_bits, label=f'NF step {run_args["steps"]}')
-
-    with torch.no_grad():
-        agg_loss, nominal_eig = posterior_loss(design=nominal_design.unsqueeze(0),
-                                        model=num_tracers.pyro_model,
-                                        guide=posterior_flow,
-                                        num_particles=run_args["eval_particles"],
-                                        observation_labels=["y"],
-                                        target_labels=target_labels,
-                                        evaluation=True,
-                                        nflow=True,
-                                        analytic_prior=False,
-                                        condition_design=run_args["condition_design"])
-    nominal_eig_bits = nominal_eig.cpu().detach().numpy()/np.log(2)
-    ax2.axhline(y=nominal_eig_bits, color='black', linestyle='--', label='Nominal EIG')
-    ax2.set_xlabel("Design Index")
-    ax2.set_ylabel("EIG")
-    ax2.legend()
-    plt.tight_layout()
-    plt.savefig(f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/plots/training.png")
     checkpoint_path = f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/checkpoints/nf_checkpoint_last.pt"
     save_checkpoint(posterior_flow, optimizer, checkpoint_path, step=run_args["steps"], artifact_path="checkpoints")
-
+    eval_args = {"n_samples": 3000, "device": device, "eval_seed": 1}
+    plot_training(
+        run_id=ml_info.run_id,
+        var=None, 
+        eval_args=eval_args, 
+        log_scale=True, 
+        loss_step_freq=25, 
+        area_step_freq=100, 
+        show_best=False
+        )
+    plot_eig_steps(
+        run_id=ml_info.run_id,
+        steps=[500, 'last'],
+        eval_args=eval_args,
+        cosmo_exp='num_tracers'
+        )
+    
     plt.close('all')
     print("Run", ml_info.experiment_id + "/" + ml_info.run_id, "completed.")
-
-
 
 if __name__ == '__main__':
 
@@ -454,9 +402,10 @@ if __name__ == '__main__':
     parser.add_argument('--exp_name', type=str, default=default_exp_name, help='Experiment name')
     
     # Add arguments for resuming from a checkpoint
-    parser.add_argument('--run_id', type=str, default=None, help='MLflow run ID to resume training from')
+    parser.add_argument('--resume_id', type=str, default=None, help='MLflow run ID to resume training from')
     parser.add_argument('--resume_step', type=int, default=None, help='Step to resume training from')
-    
+    parser.add_argument('--add_steps', type=int, default=0, help='Number of steps to add to the training')
+
     for key, value in default_args.items():
         arg_type = type(value)
         if isinstance(value, bool):
@@ -472,8 +421,6 @@ if __name__ == '__main__':
     args = parser.parse_args()
     cosmo_model = args.cosmo_model
     device = args.device
-    resume_run_id = args.run_id
-    resume_step = args.resume_step
 
     # --- Prepare Final Config --- 
     run_args = run_args_dict[cosmo_model].copy() # Start with defaults for the chosen model
@@ -499,8 +446,9 @@ if __name__ == '__main__':
         mlflow_experiment_name=args.exp_name,
         device=device,
         fixed_design=False,
-        resume_run_id=resume_run_id,
-        resume_step=resume_step,
+        resume_id=args.resume_id,
+        resume_step=args.resume_step,
+        add_steps=args.add_steps
     )
     mlflow.end_run()
 

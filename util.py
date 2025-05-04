@@ -17,6 +17,7 @@ import contextlib
 import io
 import matplotlib.pyplot as plt
 from pyro.contrib.util import lexpand
+import subprocess
 
 torch.set_default_dtype(torch.float64)
 
@@ -156,8 +157,87 @@ def init_nf(flow_type, input_dim, context_dim, run_args, device="cuda:0", seed=N
         ).to(device)
     return posterior_flow
 
-def run_eval(run_id, eval_args, step='best_loss', device='cuda:0', cosmo_exp='num_tracers'):
+def init_scheduler(optimizer, run_args):
+    # Setup
+    steps_per_cycle = run_args["steps"] // run_args["n_cycles"]
+    gamma = run_args["gamma"]
+    min_lr = run_args["min_lr"]
+    initial_lr = run_args["lr"]
 
+    if run_args["scheduler_type"] == "cosine":
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, 
+            T_max=run_args["steps"],
+            eta_min=min_lr
+            )
+    elif run_args["scheduler_type"] == "exponential":
+        scheduler = torch.optim.lr_scheduler.ExponentialLR(
+            optimizer, 
+            gamma=gamma
+            )
+    elif run_args["scheduler_type"] == "lambda":
+        def lr_lambda(step):
+            cycle = step // steps_per_cycle
+            cycle_progress = (step % steps_per_cycle) / steps_per_cycle
+            # Decaying peak
+            peak = initial_lr * (gamma ** cycle)
+            # Cosine decay within cycle
+            cosine = 0.5 * (1 + np.cos(np.pi * cycle_progress))
+            lr = min_lr + (peak - min_lr) * cosine
+            return lr / initial_lr  # LambdaLR expects a multiplier of the initial LR
+        scheduler = torch.optim.lr_scheduler.LambdaLR(
+            optimizer, 
+            lr_lambda
+            )
+    else:
+        raise ValueError(f"Unknown scheduler_type: {run_args['scheduler_type']}")
+    return scheduler
+
+def run_eval(run_id, eval_args, step='best_loss', cosmo_exp='num_tracers'):
+    storage_path = os.environ["SCRATCH"] + f"/bed/BED_cosmo/{cosmo_exp}"
+    mlflow.set_tracking_uri(storage_path + "/mlruns")
+    client = MlflowClient()
+    run = client.get_run(run_id)
+    num_tracers, posterior_flow = load_model(run_id, step, eval_args, cosmo_exp)
+
+    with open(mlflow.artifacts.download_artifacts(run_id=run_id, artifact_path="classes.json")) as f:
+        classes = json.load(f)
+
+    nominal_design = torch.tensor(num_tracers.desi_tracers.groupby('class').sum()['observed'].reindex(classes.keys()).values, device=eval_args["device"], dtype=torch.float64)
+    central_vals = num_tracers.central_val if eval(run.data.params["include_D_M"]) else num_tracers.central_val[1::2]
+    nominal_context = torch.cat([nominal_design, central_vals], dim=-1)
+
+    # set random seed
+    np.random.seed(eval_args["eval_seed"])
+    torch.manual_seed(eval_args["eval_seed"])
+    torch.cuda.manual_seed(eval_args["eval_seed"])
+
+    nominal_samples = posterior_flow(nominal_context).sample((eval_args["n_samples"],)).cpu().numpy()
+    nominal_samples[:, -1] *= 100000
+
+    #entropy = calc_entropy(nominal_design, posterior_flow, num_tracers, eval_args["n_samples"])
+    """
+    _, loss = posterior_loss(
+        nominal_design.unsqueeze(0),
+        num_tracers.pyro_model,
+        posterior_flow,
+        eval_args["n_samples"],
+        observation_labels=["y"],
+        target_labels=num_tracers.cosmo_params,
+        evaluation=False,
+        nflow=True,
+        condition_design=True,
+        verbose_shapes=False
+        )
+    print(f"Loss: {loss.cpu().item()}")
+    """
+
+    # Temporarily redirect stdout to suppress GetDist messages
+    with contextlib.redirect_stdout(io.StringIO()):
+        samples = getdist.MCSamples(samples=nominal_samples, names=num_tracers.cosmo_params, labels=num_tracers.latex_labels, settings={'ignore_rows': 0.0})
+    return samples
+
+def load_model(run_id, step, eval_args, cosmo_exp='num_tracers'):
     storage_path = os.environ["SCRATCH"] + f"/bed/BED_cosmo/{cosmo_exp}"
     mlflow.set_tracking_uri(storage_path + "/mlruns")
     client = MlflowClient()
@@ -195,13 +275,13 @@ def run_eval(run_id, eval_args, step='best_loss', device='cuda:0', cosmo_exp='nu
             input_dim, 
             context_dim,
             run_args,
-            device,
+            eval_args["device"],
             seed=eval(run.data.params["nf_seed"])
             )
         area_checkpoints = [int(f.split('_')[-1].split('.')[0]) for f in os.listdir(f'{storage_path}/mlruns/{exp_id}/{run_id}/artifacts/checkpoints/') if f.startswith('nf_area_checkpoint_') and f.endswith('.pt')]
         loss_checkpoints = [int(f.split('_')[-1].split('.')[0]) for f in os.listdir(f'{storage_path}/mlruns/{exp_id}/{run_id}/artifacts/checkpoints/') if f.startswith('nf_loss_checkpoint_') and f.endswith('.pt')]
         regular_checkpoints = [int(f.split('_')[-1].split('.')[0]) for f in os.listdir(f'{storage_path}/mlruns/{exp_id}/{run_id}/artifacts/checkpoints/') if f.startswith('nf_checkpoint_') and f.endswith('.pt') and not f.endswith('last.pt') and not f.endswith('loss.pt') and not f.endswith('area.pt')]
-        if step not in area_checkpoints and step not in loss_checkpoints and step not in regular_checkpoints and step != 'best_loss' and step != 'best_nominal_area':
+        if step not in area_checkpoints and step not in loss_checkpoints and step not in regular_checkpoints and step != 'best_loss' and step != 'best_nominal_area' and step != 'last':
             raise ValueError(f"Step {step} not found in checkpoints")
         if step in area_checkpoints:
             checkpoint = torch.load(f'{storage_path}/mlruns/{exp_id}/{run_id}/artifacts/checkpoints/nf_area_checkpoint_{step}.pt', map_location=eval_args["device"])
@@ -212,40 +292,7 @@ def run_eval(run_id, eval_args, step='best_loss', device='cuda:0', cosmo_exp='nu
         posterior_flow.load_state_dict(checkpoint['model_state_dict'], strict=True)
         posterior_flow.to(eval_args["device"])
         posterior_flow.eval()
-
-        nominal_design = torch.tensor(desi_tracers.groupby('class').sum()['observed'].reindex(classes.keys()).values, device=device, dtype=torch.float64)
-        central_vals = num_tracers.central_val if eval(run.data.params["include_D_M"]) else num_tracers.central_val[1::2]
-        nominal_context = torch.cat([nominal_design, central_vals], dim=-1)
-
-        # set random seed
-        np.random.seed(eval_args["eval_seed"])
-        torch.manual_seed(eval_args["eval_seed"])
-        torch.cuda.manual_seed(eval_args["eval_seed"])
-
-        nominal_samples = posterior_flow(nominal_context).sample((eval_args["post_samples"],)).cpu().numpy()
-        nominal_samples[:, -1] *= 100000
-
-        #entropy = calc_entropy(nominal_design, posterior_flow, num_tracers, eval_args["post_samples"])
-        """
-        _, loss = posterior_loss(
-            nominal_design.unsqueeze(0),
-            num_tracers.pyro_model,
-            posterior_flow,
-            eval_args["post_samples"],
-            observation_labels=["y"],
-            target_labels=num_tracers.cosmo_params,
-            evaluation=False,
-            nflow=True,
-            condition_design=True,
-            verbose_shapes=False
-            )
-        print(f"Loss: {loss.cpu().item()}")
-        """
-
-        # Temporarily redirect stdout to suppress GetDist messages
-        with contextlib.redirect_stdout(io.StringIO()):
-            samples = getdist.MCSamples(samples=nominal_samples, names=num_tracers.cosmo_params, labels=num_tracers.latex_labels, settings={'ignore_rows': 0.0})
-    return samples
+        return num_tracers, posterior_flow
 
 def calc_entropy(design, posterior_flow, num_tracers, num_samples):
     # sample values of y from num_tracers.pyro_model
@@ -334,3 +381,92 @@ def parse_mlflow_params(params_dict):
         parsed_params[key] = value_str # Keep original string if no conversion worked
 
     return parsed_params
+
+def get_checkpoints(steps, checkpoint_files, type='all', cosmo_exp='num_tracers', verbose=False):
+    if type == 'all':
+        checkpoints = sorted([
+            int(f.split('_')[-1].split('.')[0]) 
+            for f in checkpoint_files 
+            if f.startswith('nf_') and f.endswith('.pt') and not f.endswith('last.pt') and not f.endswith('loss.pt') and not f.endswith('area.pt')
+        ])
+    elif type == 'area':
+        checkpoints = sorted([
+            int(f.split('_')[-1].split('.')[0]) 
+            for f in checkpoint_files 
+            if f.startswith('nf_area')
+        ])
+    elif type == 'loss':
+        checkpoints = sorted([
+            int(f.split('_')[-1].split('.')[0]) 
+            for f in checkpoint_files 
+            if f.startswith('nf_loss')
+        ])
+    # print stpes not found in checkpoints
+    steps_not_found = [step for step in steps if step not in checkpoints]
+    if verbose:
+        print(f"Steps not found in checkpoints: {steps_not_found}")
+    # get the checkpoints closest to the steps
+    plot_checkpoints = [
+        checkpoints[np.argmin(np.abs(np.array(checkpoints) - step))]
+        for step in steps if step not in ['best_loss', 'best_nominal_area', 'last']
+    ]
+
+    # check for duplicates in plot_checkpoints and replace them with the next checkpoint index 
+    for i, step in enumerate(plot_checkpoints):
+        if step in plot_checkpoints[:i]:
+            if np.argmin(np.abs(np.array(checkpoints) - steps[i])) + 1 < len(checkpoints):
+                plot_checkpoints[i] = checkpoints[np.argmin(np.abs(np.array(checkpoints) - steps[i])) + 1]
+            else:
+                print(f"Warning: No next checkpoint found for step {steps[i]}")
+                plot_checkpoints.pop(i)
+
+    # add best_loss and best_nominal_area to the plot_checkpoints if requested
+    if 'best_loss' in steps:
+        plot_checkpoints.append('best_loss')
+    if 'best_nominal_area' in steps:
+        plot_checkpoints.append('best_nominal_area')
+    if 'last' in steps:
+        plot_checkpoints.append('last')
+
+    return plot_checkpoints
+
+def get_gpu_utilization(gpu_index=0):
+    try:
+        output = subprocess.check_output(
+            ["nvidia-smi", "--query-gpu=utilization.gpu,memory.used", "--format=csv,noheader,nounits"],
+            encoding='utf-8'
+        )
+        lines = output.strip().splitlines()
+        if gpu_index < len(lines):
+            util_str, mem_str = lines[gpu_index].strip().split(", ")
+            return int(util_str), int(mem_str)
+        else:
+            raise IndexError(f"GPU index {gpu_index} out of range (only {len(lines)} GPUs found).")
+    except Exception as e:
+        print(f"GPU stat collection failed: {e}")
+        return None, None
+    
+def log_usage_metrics(device, process, step):
+    cpu_memory = process.memory_info().rss / 1024**2  # Convert to MB
+    mlflow.log_metric("cpu_memory_usage", cpu_memory, step=step)
+    
+    gpu_index = device.index
+    gpu_util, gpu_mem = get_gpu_utilization(gpu_index)
+    if gpu_util is not None:
+        # % of time GPU was active -- useful for detecting idle GPU time (e.g., dataloader bottlenecks)
+        mlflow.log_metric("gpu_util", gpu_util, step=step)
+        # total memory usage of the GPU in MB from nvidia-smi
+        mlflow.log_metric("gpu_memory_total_usage", gpu_mem * 1024**2 / 1000000, step=step)
+
+    if torch.cuda.is_available():
+        # Ensure we're on the correct device
+        with torch.cuda.device(device):
+            # PyTorch-allocated memory on the GPU
+            gpu_memory = torch.cuda.memory_allocated(device) / 1024**2  # Convert to MB
+            mlflow.log_metric("gpu_memory_torch_usage", gpu_memory, step=step)
+            # PyTorch-reserved memory on the GPU
+            gpu_reserved = torch.cuda.memory_reserved(device) / 1024**2  # MB
+            mlflow.log_metric("gpu_memory_torch_reserved", gpu_reserved, step=step)
+            # PyTorch-peak memory allocated on the GPU
+            gpu_peak_memory = torch.cuda.max_memory_allocated(device) / 1024**2  # MB
+            mlflow.log_metric("gpu_memory_torch_peak", gpu_peak_memory, step=step)
