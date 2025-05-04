@@ -450,7 +450,7 @@ def log_usage_metrics(device, process, step):
     cpu_memory = process.memory_info().rss / 1024**2  # Convert to MB
     mlflow.log_metric("cpu_memory_usage", cpu_memory, step=step)
     
-    gpu_index = device.index
+    gpu_index = device.index if device.index is not None else 0
     gpu_util, gpu_mem = get_gpu_utilization(gpu_index)
     if gpu_util is not None:
         # % of time GPU was active -- useful for detecting idle GPU time (e.g., dataloader bottlenecks)
