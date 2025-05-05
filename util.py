@@ -176,7 +176,7 @@ def init_scheduler(optimizer, run_args):
             optimizer, 
             start_factor=1.0, 
             end_factor=final_lr / initial_lr, 
-            total_iters=run_args["steps"]
+            total_iters=run_args["steps"] - 1
             )
     elif run_args["scheduler_type"] == "exponential":
         # calculate gamma from initial and final lr

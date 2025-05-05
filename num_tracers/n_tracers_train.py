@@ -349,7 +349,7 @@ def single_run(
                 num_steps_range.set_description("Loss: {:.3f}, Area: {:.3f}".format(loss.mean().item(), nominal_area))
             else:
                 print(f"Step {step}, Loss: {loss.mean().item()}, Area: {nominal_area}")
-        if step % run_args["step_freq"] == 0 and step > 0:
+        if step % run_args["step_freq"] == 0:
             scheduler.step()
         if step % 5000 == 0 and step > 0:
             checkpoint_path = f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/checkpoints/nf_checkpoint_{step}.pt"
