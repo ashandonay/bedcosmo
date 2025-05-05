@@ -295,7 +295,7 @@ def plot_training(
                 print(f"Warning: Could not fetch params for run {run_id} for sorting: {e}")
                 return tuple(float('inf') for _ in vars_list) # Sort problematic runs last
 
-        run_ids = sorted(run_ids, key=get_sort_key)
+        run_ids = sorted(run_ids, key=get_sort_key, reverse=True)
 
     # --- Data Fetching ---
     all_metrics = {}
@@ -477,7 +477,7 @@ def plot_training(
     for cm in cosmo_models:
         desi_samples_gd = get_desi_samples(cm)
         desi_area = get_contour_area([desi_samples_gd], 'Om', 'hrdrag', 0.68)[0]
-        ax2.axhline(desi_area, color='black', linestyle='--', label=f'DESI ({cm}), Area: {desi_area:.3f}')
+        ax2.axhline(desi_area, color='black', linestyle='--', label=f'DESI ({cm}), Area: {desi_area:.3f}', alpha=0.5)
     # --- Final Plot Configuration ---
 
     # Determine legend font size based on number of runs
