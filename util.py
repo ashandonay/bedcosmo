@@ -160,7 +160,6 @@ def init_nf(flow_type, input_dim, context_dim, run_args, device="cuda:0", seed=N
 def init_scheduler(optimizer, run_args):
     # Setup
     steps_per_cycle = run_args["steps"] // run_args["n_cycles"]
-    gamma = run_args["gamma"]
     initial_lr = run_args["initial_lr"]
     final_lr = run_args["final_lr"]
     print(f"Initial LR: {initial_lr}, Final LR: {final_lr}")
@@ -172,13 +171,16 @@ def init_scheduler(optimizer, run_args):
             eta_min=final_lr
             )
     elif run_args["scheduler_type"] == "linear":
+        # factor is the number we multiply the initial lr by to get the final lr at each step
         scheduler = torch.optim.lr_scheduler.LinearLR(
             optimizer, 
-            start_factor=initial_lr, 
-            end_factor=final_lr, 
+            start_factor=1.0, 
+            end_factor=final_lr / initial_lr, 
             total_iters=run_args["steps"]
             )
     elif run_args["scheduler_type"] == "exponential":
+        # calculate gamma from initial and final lr
+        gamma = (final_lr / initial_lr) ** (1 / run_args["steps"])
         scheduler = torch.optim.lr_scheduler.ExponentialLR(
             optimizer, 
             gamma=gamma
