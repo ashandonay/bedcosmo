@@ -295,7 +295,7 @@ def plot_training(
                 print(f"Warning: Could not fetch params for run {run_id} for sorting: {e}")
                 return tuple(float('inf') for _ in vars_list) # Sort problematic runs last
 
-        run_ids = sorted(run_ids, key=get_sort_key, reverse=True)
+        run_ids = sorted(run_ids, key=get_sort_key)
 
     # --- Data Fetching ---
     all_metrics = {}
@@ -648,7 +648,18 @@ def compare_posterior(
         
         # Sort the groups
         def sort_key(group_tuple):
-            return tuple(float(x) if x.replace('.', '', 1).isdigit() else x for x in group_tuple)
+            try:
+                # Convert each value to float if possible, otherwise keep as string
+                key_tuple = []
+                for val in group_tuple:
+                    try:
+                        key_tuple.append(float(val))
+                    except ValueError:
+                        key_tuple.append(val)
+                return tuple(key_tuple)
+            except Exception as e:
+                print(f"Warning: Could not convert group values for sorting: {e}")
+                return tuple(float('inf') for _ in group_tuple)  # Sort problematic groups last
         
         try:
             sorted_groups = sorted(grouped_runs.keys(), key=sort_key)
