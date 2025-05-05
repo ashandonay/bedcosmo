@@ -29,9 +29,24 @@ from pyro_oed_src import posterior_loss
 import json
 
 
-def plot_posterior(samples, colors, legend_labels=None, show_scatter=False, line_style='-'):
+def plot_posterior(samples, colors, legend_labels=None, show_scatter=False, line_style='-', levels=[0.68, 0.95]):
+    """
+    Plots posterior distributions using GetDist triangle plots.
+
+    Args:
+        samples (list): List of GetDist MCSamples objects.
+        colors (list): List of colors for each sample.
+        legend_labels (list, optional): List of legend labels for each sample.
+        show_scatter (bool): If True, show scatter/histograms on the 1D/2D plots.
+        line_style (str): Line style for contours.
+        levels (float or list, optional): Contour levels to use (e.g., 0.68 or [0.68, 0.95]).
+            If a single float is provided, it is converted to a list.
+            If None, the default GetDist settings are used.
+    Returns:
+        g: GetDist plotter object with the generated triangle plot.
+    """
     g = plots.get_subplot_plotter(width_inch=7)
-    
+
     if type(samples) != list:
         samples = [samples]
     if type(colors) != list:
@@ -41,8 +56,19 @@ def plot_posterior(samples, colors, legend_labels=None, show_scatter=False, line
 
     # Add more line styles to handle all samples
     g.settings.line_styles = [line_style] * len(samples)
-    
-    # First create the triangle plot with default settings
+
+    # Prepare contour_args with custom levels if provided
+    contour_args = {'ls': line_style}
+
+    # Set contour levels if provided
+    if levels is not None:
+        if isinstance(levels, float):
+            levels = [levels]
+        for sample in samples:
+            sample.updateSettings({'contours': levels})
+        g.settings.num_plot_contours = len(levels)
+
+    # Create triangle plot
     g.triangle_plot(
         samples,
         colors=colors,
@@ -54,54 +80,36 @@ def plot_posterior(samples, colors, legend_labels=None, show_scatter=False, line
             'normalized': True,
             'linestyle': line_style
         },
-        contour_args={
-            'ls': line_style
-        }
+        contour_args=contour_args
     )
-    
-    # Get parameter names for the first root (assuming all samples have same parameters)
+
     param_names = g.param_names_for_root(samples[0])
     param_name_list = [p.name for p in param_names.names]
-    
+
     if show_scatter:
-        # Add histograms to diagonal plots without clearing
         for i, param in enumerate(param_name_list):
             if i < len(g.subplots) and i < len(g.subplots[i]):
-                ax = g.subplots[i][i]  # Diagonal subplot
-                
-                # Get the current y limits to restore later
+                ax = g.subplots[i][i]
                 current_ylim = ax.get_ylim()
-                
-                # Iterate through each sample and add histogram
                 for k, sample in enumerate(samples):
-                    # Get parameter values using the string name
                     param_index = sample.paramNames.list().index(param)
-                    
                     if param_index is not None:
                         values = sample.samples[:, param_index]
-                        
-                        # Plot histogram with reduced alpha to not obscure the density curve
-                        ax.hist(values, bins=30, alpha=0.5, color=colors[k], 
-                               density=True, histtype='stepfilled', zorder=1)  # Lower zorder to keep behind the line
-                
-                # Restore original y limits to match the density curve
+                        ax.hist(values, bins=30, alpha=0.5, color=colors[k],
+                                density=True, histtype='stepfilled', zorder=1)
                 ax.set_ylim(current_ylim)
-        
-        # Add scatter plots to lower triangle
-        # Generate all combinations of parameters for scatter plots
-        param_combinations = []
-        for i in range(len(param_name_list)):
-            for j in range(i+1, len(param_name_list)):
-                param_combinations.append((param_name_list[i], param_name_list[j]))
-        
-        # Add scatter plots for each parameter combination
+
+        param_combinations = [
+            (param_name_list[i], param_name_list[j])
+            for i in range(len(param_name_list))
+            for j in range(i+1, len(param_name_list))
+        ]
+
         for param_x, param_y in param_combinations:
-            # Find the corresponding subplot
             for i in range(len(g.subplots)):
                 for j in range(i):
                     if param_name_list[i] == param_y and param_name_list[j] == param_x:
                         ax = g.subplots[i][j]
-                        # Add scatter for each sample set
                         for k, sample in enumerate(samples):
                             g.add_2d_scatter(
                                 sample,
@@ -112,7 +120,7 @@ def plot_posterior(samples, colors, legend_labels=None, show_scatter=False, line
                                 scatter_size=1,
                                 alpha=0.8,
                             )
-    
+
     return g
 
 def plot_run(run_id, eval_args, show_scatter=False):
@@ -120,7 +128,7 @@ def plot_run(run_id, eval_args, show_scatter=False):
     g = plot_posterior(samples, ["tab:blue"], show_scatter=show_scatter)
     plt.show()
 
-def posterior_steps(run_id, steps, eval_args, type='all', cosmo_exp='num_tracers'):
+def posterior_steps(run_id, steps, eval_args, level=0.68,   type='all', cosmo_exp='num_tracers'):
     """
     Plots posterior distributions at different training steps for either a single run, 
     multiple specific runs, or all runs in an experiment.
@@ -155,15 +163,15 @@ def posterior_steps(run_id, steps, eval_args, type='all', cosmo_exp='num_tracers
         samples = run_eval(run_id, eval_args, step=step, cosmo_exp=cosmo_exp)
         all_samples.append(samples)
         color_list.append(colors[i % len(colors)])
-        area = get_contour_area(samples, 'Om', 'hrdrag', 0.68)[0]
+        area = get_contour_area(samples, 'Om', 'hrdrag', level)[0]
         all_areas.append(area)
 
     desi_samples_gd = get_desi_samples(run.data.params['cosmo_model'])
-    desi_area = get_contour_area([desi_samples_gd], 'Om', 'hrdrag', 0.68)[0]
+    desi_area = get_contour_area([desi_samples_gd], 'Om', 'hrdrag', level)[0]
     all_samples.append(desi_samples_gd)
     color_list.append('black')  
     all_areas.append(desi_area)
-    g = plot_posterior(all_samples, color_list)
+    g = plot_posterior(all_samples, color_list, levels=[level])
     # Remove existing legends if any
     if g.fig.legends:
         for legend in g.fig.legends:
@@ -567,7 +575,8 @@ def compare_posterior(
         filter_string=None, 
         eval_args=None, 
         show_scatter=False, 
-        excluded_runs=[], 
+        excluded_runs=[],
+        level=0.68,
         cosmo_exp='num_tracers', 
         step='best_loss'
         ):
@@ -685,7 +694,7 @@ def compare_posterior(
             for run_id in group_run_ids:
                 samples = run_eval(run_id, eval_args, step=step, cosmo_exp=cosmo_exp)
                 group_samples.append(samples)
-                area = get_contour_area([samples], 'Om', 'hrdrag', 0.68)[0]
+                area = get_contour_area([samples], 'Om', 'hrdrag', level)[0]
                 group_areas.append(area)
                 
             # Calculate average area for the legend
@@ -698,12 +707,12 @@ def compare_posterior(
             print(f"Representative sample run id for group {', '.join([f'{vars_list[j]}={val}' for j, val in enumerate(group_key)])}: {group_run_ids[representative_idx]}")
 
         desi_samples_gd = get_desi_samples(run.data.params['cosmo_model'])
-        desi_area = get_contour_area([desi_samples_gd], 'Om', 'hrdrag', 0.68)[0]
+        desi_area = get_contour_area([desi_samples_gd], 'Om', 'hrdrag', level)[0]
 
         representative_samples.append(desi_samples_gd)
         colors.append('black')  
         # Plot only the representative samples
-        g = plot_posterior(representative_samples, colors, show_scatter=show_scatter)
+        g = plot_posterior(representative_samples, colors, show_scatter=show_scatter, levels=[level])
 
         # Create custom legend
         if g.fig.legends:  # Check if a legend exists
@@ -769,7 +778,7 @@ def compare_posterior(
         all_samples.append(desi_samples_gd)
         colors.append('black')
         labels.append('DESI')
-        g = plot_posterior(all_samples, colors, show_scatter=show_scatter, legend_labels=labels)
+        g = plot_posterior(all_samples, colors, show_scatter=show_scatter, legend_labels=labels, levels=[level])
         title = f'Posterior comparison for {exp_name}' if exp_name else 'Posterior comparison'
         if filter_string:
             title += f' (filter: {filter_string})'
