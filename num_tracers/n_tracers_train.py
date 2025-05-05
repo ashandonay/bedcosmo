@@ -248,7 +248,7 @@ def single_run(
     nominal_context = torch.cat([nominal_design, central_vals], dim=-1)
     
     # Initialize optimizer
-    optimizer = torch.optim.Adam(posterior_flow.parameters(), lr=run_args["lr"])
+    optimizer = torch.optim.Adam(posterior_flow.parameters(), lr=run_args["initial_lr"])
     scheduler = init_scheduler(optimizer, run_args)
     
     # Load checkpoint if specified
@@ -348,7 +348,7 @@ def single_run(
             if is_tty:
                 num_steps_range.set_description("Loss: {:.3f}, Area: {:.3f}".format(loss.mean().item(), nominal_area))
             else:
-                print(f"Step {step}, Loss: {loss.mean().item()}")
+                print(f"Step {step}, Loss: {loss.mean().item()}, Area: {nominal_area}")
         if step % run_args["step_freq"] == 0 and step > 0:
             scheduler.step()
         if step % 5000 == 0 and step > 0:
@@ -445,7 +445,7 @@ if __name__ == '__main__':
         run_args=run_args,
         mlflow_experiment_name=args.exp_name,
         device=device,
-        fixed_design=False,
+        fixed_design=True,
         resume_id=args.resume_id,
         resume_step=args.resume_step,
         add_steps=args.add_steps

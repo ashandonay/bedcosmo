@@ -380,7 +380,6 @@ def plot_training(
             run_params = client.get_run(run_id_iter).data.params
         except Exception as e:
             print(f"Warning: Could not fetch params for run {run_id_iter} for label: {e}")
-
         for v in vars_list:
             param_value = run_params.get(v, "N/A")
             label_parts.append(f"{v}={param_value}")
@@ -424,7 +423,6 @@ def plot_training(
                 line_nom_area, = ax2.plot(plot_nom_area_steps_filtered, plot_nom_area_values_filtered, alpha=0.9, linewidth=1.5, color=color, label=base_label)
             else:
                  line_nom_area, = ax2.plot(plot_nom_area_steps, plot_nom_area_values, alpha=0.9, linewidth=1.5, color=color, label=base_label)
-
 
         # --- Plot Best Area (ax2) ---
         if show_best:
@@ -474,6 +472,12 @@ def plot_training(
             else:
                 ax3.plot(plot_lr_steps, plot_lr_values, alpha=0.8, color=color, label=base_label)
 
+    # get only unique cosmo models
+    cosmo_models = list(set([client.get_run(run_id).data.params['cosmo_model'] for run_id in run_ids]))
+    for cm in cosmo_models:
+        desi_samples_gd = get_desi_samples(cm)
+        desi_area = get_contour_area([desi_samples_gd], 'Om', 'hrdrag', 0.68)[0]
+        ax2.axhline(desi_area, color='black', linestyle='--', label=f'DESI ({cm}), Area: {desi_area:.3f}')
     # --- Final Plot Configuration ---
 
     # Determine legend font size based on number of runs
@@ -486,12 +490,12 @@ def plot_training(
     # Configure ax1 (Loss)
     ax1.set_ylabel("Loss")
     ax1.tick_params(axis='y')
-    ax1.legend(loc='best', fontsize=legend_fontsize, title="Runs")
     ax1.grid(True, axis='y', linestyle='--', alpha=0.6)
 
     # Configure ax2 (Contour Area)
     ax2.set_ylabel("Posterior Contour Area")
     ax2.tick_params(axis='y')
+    ax2.legend(loc='best', fontsize=legend_fontsize, title="Runs")
     ax2.grid(True, axis='y', linestyle='--', alpha=0.6)
 
     # Configure ax3 (Learning Rate)
@@ -515,17 +519,17 @@ def plot_training(
         elif np.isfinite(min_loss_overall): # Handle constant loss case
              ax1.set_ylim(min_loss_overall - 0.5, min_loss_overall + 0.5) # Example padding
 
-        if max_lr_overall > min_lr_overall :
-             lr_pad = (max_lr_overall - min_lr_overall) * 0.05
-             ax2.set_ylim(min_lr_overall - lr_pad, max_lr_overall + lr_pad)
-        elif np.isfinite(min_lr_overall): # Handle constant LR case
-             ax2.set_ylim(min_lr_overall * 0.9, min_lr_overall * 1.1) # Relative padding
-
         if max_area_overall > min_area_overall:
             area_pad = (max_area_overall - min_area_overall) * 0.05
-            ax3.set_ylim(min_area_overall - area_pad, max_area_overall + area_pad)
+            ax2.set_ylim(min_area_overall - area_pad, max_area_overall + area_pad)
         elif np.isfinite(min_area_overall): # Handle constant area case
-             ax3.set_ylim(min_area_overall - 0.5, min_area_overall + 0.5) # Example padding
+             ax2.set_ylim(min_area_overall - 0.5, min_area_overall + 0.5) # Example padding
+
+        if max_lr_overall > min_lr_overall :
+             lr_pad = (max_lr_overall - min_lr_overall) * 0.05
+             ax3.set_ylim(min_lr_overall - lr_pad, max_lr_overall + lr_pad)
+        elif np.isfinite(min_lr_overall): # Handle constant LR case
+             ax3.set_ylim(min_lr_overall * 0.9, min_lr_overall * 1.1) # Relative padding
 
 
     # Adjust layout
@@ -549,9 +553,7 @@ def plot_training(
         # Fallback save location if experiment context is lost or multiple non-experiment runs
         save_dir = f"{storage_path}/plots"
         os.makedirs(save_dir, exist_ok=True)
-        # Try to create a somewhat unique name if multiple run_ids without experiment
-        run_ids_str = "_".join(run_ids[:3]) + ('_etc' if len(run_ids) > 3 else '')
-        save_path = f"{save_dir}/training_compare_{run_ids_str}_{timestamp}.png"
+        save_path = f"{save_dir}/training_comparison_{timestamp}.png"
 
 
     os.makedirs(save_dir, exist_ok=True) # Ensure directory exists before saving

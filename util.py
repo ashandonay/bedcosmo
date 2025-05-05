@@ -161,14 +161,22 @@ def init_scheduler(optimizer, run_args):
     # Setup
     steps_per_cycle = run_args["steps"] // run_args["n_cycles"]
     gamma = run_args["gamma"]
-    min_lr = run_args["min_lr"]
-    initial_lr = run_args["lr"]
+    initial_lr = run_args["initial_lr"]
+    final_lr = run_args["final_lr"]
+    print(f"Initial LR: {initial_lr}, Final LR: {final_lr}")
 
     if run_args["scheduler_type"] == "cosine":
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
             optimizer, 
             T_max=run_args["steps"],
-            eta_min=min_lr
+            eta_min=final_lr
+            )
+    elif run_args["scheduler_type"] == "linear":
+        scheduler = torch.optim.lr_scheduler.LinearLR(
+            optimizer, 
+            start_factor=initial_lr, 
+            end_factor=final_lr, 
+            total_iters=run_args["steps"]
             )
     elif run_args["scheduler_type"] == "exponential":
         scheduler = torch.optim.lr_scheduler.ExponentialLR(
@@ -183,7 +191,7 @@ def init_scheduler(optimizer, run_args):
             peak = initial_lr * (gamma ** cycle)
             # Cosine decay within cycle
             cosine = 0.5 * (1 + np.cos(np.pi * cycle_progress))
-            lr = min_lr + (peak - min_lr) * cosine
+            lr = final_lr + (peak - final_lr) * cosine
             return lr / initial_lr  # LambdaLR expects a multiplier of the initial LR
         scheduler = torch.optim.lr_scheduler.LambdaLR(
             optimizer, 
