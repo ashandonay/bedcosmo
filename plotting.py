@@ -54,6 +54,18 @@ def plot_posterior(samples, colors, legend_labels=None, show_scatter=False, line
     if type(legend_labels) != list and legend_labels is not None:
         legend_labels = [legend_labels]
 
+    # Convert colors to proper format
+    def convert_color(c):
+        if isinstance(c, np.ndarray):
+            # Convert RGBA array to hex color string
+            return matplotlib.colors.to_hex(c)
+        elif isinstance(c, str):
+            return c
+        else:
+            return str(c)
+
+    colors = [convert_color(c) for c in colors]
+
     # Add more line styles to handle all samples
     g.settings.line_styles = [line_style] * len(samples)
 
@@ -128,7 +140,7 @@ def plot_run(run_id, eval_args, show_scatter=False):
     g = plot_posterior(samples, ["tab:blue"], show_scatter=show_scatter)
     plt.show()
 
-def posterior_steps(run_id, steps, eval_args, level=0.68,   type='all', cosmo_exp='num_tracers'):
+def posterior_steps(run_id, steps, eval_args, level=0.68, type='all', cosmo_exp='num_tracers'):
     """
     Plots posterior distributions at different training steps for either a single run, 
     multiple specific runs, or all runs in an experiment.
@@ -149,7 +161,7 @@ def posterior_steps(run_id, steps, eval_args, level=0.68,   type='all', cosmo_ex
 
     exp_id = client.get_run(run_id).info.experiment_id
     
-    colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
+    colors = plt.cm.viridis_r(np.linspace(0, 1, len(steps)))
     
     all_samples = []
     all_areas = []
@@ -192,11 +204,11 @@ def posterior_steps(run_id, steps, eval_args, level=0.68,   type='all', cosmo_ex
         
         custom_legend.append(
             Line2D([0], [0], color=colors[i % len(colors)], 
-                    label=f'Step {step_label}, 68% Area: {area:.2f}')
+                    label=f'Step {step_label}, {int(level*100)}% Area: {area:.2f}')
         )
     custom_legend.append(
         Line2D([0], [0], color='black', 
-            label=f'DESI, Area (68% Contour): {desi_area:.3f}')
+            label=f'DESI, Area ({int(level*100)}% Contour): {desi_area:.3f}')
     )
     g.fig.legend(handles=custom_legend, loc='upper right', bbox_to_anchor=(1, 0.99))
     save_path = f"{storage_path}/mlruns/{exp_id}/{run_id}/artifacts/plots/posterior_steps_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
@@ -210,7 +222,6 @@ def plot_training(
         cosmo_exp='num_tracers',
         log_scale=False,
         show_best=False,
-        eval_args=None, # eval_args is not used in this function currently
         loss_step_freq=25,
         area_step_freq=100,
         lr_step_freq=1 # Plot LR more frequently if needed
@@ -231,7 +242,6 @@ def plot_training(
         cosmo_exp (str): Experiment name or ID (if needed for path).
         log_scale (bool): If True, use log scale for the y-axes (Loss, LR, Area). Loss values <= 0 will be omitted in log scale.
         show_best (bool): If True, also plot contour area for best loss checkpoints on the bottom plot.
-        eval_args (dict, optional): Not currently used in this plotting function.
         loss_step_freq (int): Sampling frequency for plotting loss points.
         area_step_freq (int): Sampling frequency for plotting nominal area points (must be multiple of 100).
         lr_step_freq (int): Sampling frequency for plotting learning rate points.
@@ -728,16 +738,16 @@ def compare_posterior(
             if std_areas[i] > 0:
                 custom_legend.append(
                     Line2D([0], [0], color=group_color, 
-                        label=f'{group_label}, Area (68% Contour): {avg_areas[i]:.3f}, Std: {std_areas[i]:.3f}')
+                        label=f'{group_label}, Area ({int(level*100)}% Contour): {avg_areas[i]:.3f}, Std: {std_areas[i]:.3f}')
                 )
             else:
                 custom_legend.append(
                     Line2D([0], [0], color=group_color, 
-                        label=f'{group_label}, Area (68% Contour): {avg_areas[i]:.3f}')
+                        label=f'{group_label}, Area ({int(level*100)}% Contour): {avg_areas[i]:.3f}')
                 )
         custom_legend.append(
             Line2D([0], [0], color='black', 
-                label=f'DESI, Area (68% Contour): {desi_area:.3f}')
+                label=f'DESI, Area ({int(level*100)}% Contour): {desi_area:.3f}')
         )
         g.fig.legend(handles=custom_legend, loc='upper right', bbox_to_anchor=(1, 0.99))
         

@@ -359,16 +359,15 @@ def single_run(
 
     checkpoint_path = f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/checkpoints/nf_checkpoint_last.pt"
     save_checkpoint(posterior_flow, optimizer, checkpoint_path, step=run_args["steps"], artifact_path="checkpoints")
-    eval_args = {"n_samples": 3000, "device": device, "eval_seed": 1}
     plot_training(
         run_id=ml_info.run_id,
         var=None, 
-        eval_args=eval_args, 
         log_scale=True, 
-        loss_step_freq=25, 
+        loss_step_freq=10, 
         area_step_freq=100, 
         show_best=False
         )
+    eval_args = {"n_samples": 3000, "device": device, "eval_seed": 1}
     plot_eig_steps(
         run_id=ml_info.run_id,
         steps=[500, 'last'],
@@ -378,6 +377,7 @@ def single_run(
     
     plt.close('all')
     print("Run", ml_info.experiment_id + "/" + ml_info.run_id, "completed.")
+    mlflow.end_run()
 
 if __name__ == '__main__':
 
@@ -428,7 +428,7 @@ if __name__ == '__main__':
     # Override defaults with any provided command-line arguments
     args_dict = vars(args)
     for key, value in args_dict.items():
-        if key not in ['cosmo_model', 'run_id', 'resume_step'] and value is not None and key in run_args:
+        if key not in ['cosmo_model', 'resume_id', 'resume_step', 'add_steps'] and value is not None and key in run_args:
             if isinstance(run_args[key], bool) and isinstance(value, bool):
                 run_args[key] = value
             elif not isinstance(run_args[key], bool):
@@ -450,6 +450,5 @@ if __name__ == '__main__':
         resume_step=args.resume_step,
         add_steps=args.add_steps
     )
-    mlflow.end_run()
 
 
