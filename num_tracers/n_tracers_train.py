@@ -367,13 +367,14 @@ def single_run(
         area_step_freq=100, 
         show_best=False
         )
-    eval_args = {"n_samples": 3000, "device": device, "eval_seed": 1}
-    plot_eig_steps(
-        run_id=ml_info.run_id,
-        steps=[500, 'last'],
-        eval_args=eval_args,
-        cosmo_exp='num_tracers'
-        )
+    if not kwargs["fixed_design"]:
+        eval_args = {"n_samples": 3000, "device": device, "eval_seed": 1}
+        plot_eig_steps(
+            run_id=ml_info.run_id,
+            steps=[500, 'last'],
+            eval_args=eval_args,
+            cosmo_exp='num_tracers'
+            )
     
     plt.close('all')
     print("Run", ml_info.experiment_id + "/" + ml_info.run_id, "completed.")
