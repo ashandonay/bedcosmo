@@ -1141,7 +1141,6 @@ if __name__ == "__main__":
     plot_training(
         exp_name='base_NAF_gamma_fixed', 
         var='pyro_seed', 
-        eval_args=eval_args,
         log_scale=True,
         show_best=True,
         show_checkpoints=False,
