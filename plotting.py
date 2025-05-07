@@ -27,6 +27,7 @@ import torch
 from datetime import datetime
 from pyro_oed_src import posterior_loss
 import json
+from IPython.display import display
 
 
 def plot_posterior(samples, colors, legend_labels=None, show_scatter=False, line_style='-', levels=[0.68, 0.95]):
@@ -1070,12 +1071,18 @@ def show_figure(save_path):
     try:
         is_tty = os.isatty(sys.stdout.fileno())
     except (io.UnsupportedOperation, AttributeError):
-        is_tty = False # Treat as non-TTY if fileno() fails (e.g., in notebooks)
+        is_tty = False  # Treat as non-TTY if fileno() fails (e.g., in notebooks)
 
     plt.savefig(save_path)
     print(f"Saved plot to {save_path}")
+    
     if not is_tty:
-        plt.show()
+        try:
+            display(plt.gcf())
+        except:
+            plt.show()
+    else:
+        plt.close()
 
 def plot_eig_steps(run_id, steps, eval_args, cosmo_exp='num_tracers', verbose=False):
     client = MlflowClient()
