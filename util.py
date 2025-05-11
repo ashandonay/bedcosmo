@@ -48,7 +48,7 @@ def print_memory_usage(process, step):
     mem_info = process.memory_info()
     print(f"Step {step}: Memory Usage: {mem_info.rss / 1024**2:.2f} MB")
 
-def save_checkpoint(model, optimizer, filepath, step=None, artifact_path=None):
+def save_checkpoint(model, optimizer, filepath, step=None, artifact_path=None, scheduler=None):
     """
     Saves the training checkpoint.
 
@@ -66,6 +66,8 @@ def save_checkpoint(model, optimizer, filepath, step=None, artifact_path=None):
         'model_state_dict': model.state_dict(),
         'optimizer_state_dict': optimizer.state_dict()
     }
+    if scheduler is not None:
+        checkpoint['scheduler_state_dict'] = scheduler.state_dict()
     
     if step is not None:
         checkpoint['step'] = step
@@ -457,26 +459,32 @@ def get_gpu_utilization(gpu_index=0):
         return None, None
     
 def log_usage_metrics(device, process, step):
-    cpu_memory = process.memory_info().rss / 1024**2  # Convert to MB
+    cpu_memory = process.memory_info().rss / 1024**2  # MB
     mlflow.log_metric("cpu_memory_usage", cpu_memory, step=step)
-    
-    gpu_index = device.index if device.index is not None else 0
+
+    # CPU utilization (percent)
+    cpu_percent = process.cpu_percent(interval=0)  # short interval for up-to-date value
+    mlflow.log_metric("cpu_percent", cpu_percent, step=step)
+
+    # Disk I/O (per process)
+    try:
+        io_counters = process.io_counters()
+        mlflow.log_metric("io_read_bytes", io_counters.read_bytes, step=step)
+        mlflow.log_metric("io_write_bytes", io_counters.write_bytes, step=step)
+    except Exception as e:
+        print(f"Could not log process I/O: {e}")
+
+    gpu_index = device.index if hasattr(device, 'index') and device.index is not None else 0
     gpu_util, gpu_mem = get_gpu_utilization(gpu_index)
     if gpu_util is not None:
-        # % of time GPU was active -- useful for detecting idle GPU time (e.g., dataloader bottlenecks)
         mlflow.log_metric("gpu_util", gpu_util, step=step)
-        # total memory usage of the GPU in MB from nvidia-smi
         mlflow.log_metric("gpu_memory_total_usage", gpu_mem * 1024**2 / 1000000, step=step)
 
     if torch.cuda.is_available():
-        # Ensure we're on the correct device
         with torch.cuda.device(device):
-            # PyTorch-allocated memory on the GPU
-            gpu_memory = torch.cuda.memory_allocated(device) / 1024**2  # Convert to MB
+            gpu_memory = torch.cuda.memory_allocated(device) / 1024**2
             mlflow.log_metric("gpu_memory_torch_usage", gpu_memory, step=step)
-            # PyTorch-reserved memory on the GPU
-            gpu_reserved = torch.cuda.memory_reserved(device) / 1024**2  # MB
+            gpu_reserved = torch.cuda.memory_reserved(device) / 1024**2
             mlflow.log_metric("gpu_memory_torch_reserved", gpu_reserved, step=step)
-            # PyTorch-peak memory allocated on the GPU
-            gpu_peak_memory = torch.cuda.max_memory_allocated(device) / 1024**2  # MB
+            gpu_peak_memory = torch.cuda.max_memory_allocated(device) / 1024**2
             mlflow.log_metric("gpu_memory_torch_peak", gpu_peak_memory, step=step)

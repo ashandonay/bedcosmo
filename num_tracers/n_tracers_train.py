@@ -56,6 +56,7 @@ def single_run(
     resume_id=None,
     resume_step=None,
     add_steps=0,
+    profile=False,
     **kwargs,
 ):
     print(mlflow_experiment_name)
@@ -81,12 +82,13 @@ def single_run(
         run_args = parse_mlflow_params(mlflow.get_run(resume_id).data.params)
         if add_steps:
             run_args["steps"] += add_steps
-        best_nominal_areas = client.get_metric_history(resume_id, 'best_nominal_area')
-        best_nominal_area_steps = np.array([metric.step for metric in best_nominal_areas])
-        # get the best area from a step prior to the resume step
-        closest_idx = np.argmin(np.abs(best_nominal_area_steps - resume_step))
-        best_nominal_area = best_nominal_areas[closest_idx].value if best_nominal_area_steps[closest_idx] < resume_step else best_nominal_areas[closest_idx - 1].value
-        print(f"Starting at best nominal area: {best_nominal_area} at step {best_nominal_area_steps[closest_idx]}")
+        if run_args["log_nominal_area"]:
+            best_nominal_areas = client.get_metric_history(resume_id, 'best_nominal_area')
+            best_nominal_area_steps = np.array([metric.step for metric in best_nominal_areas])
+            # get the best area from a step prior to the resume step
+            closest_idx = np.argmin(np.abs(best_nominal_area_steps - resume_step))
+            best_nominal_area = best_nominal_areas[closest_idx].value if best_nominal_area_steps[closest_idx] < resume_step else best_nominal_areas[closest_idx - 1].value
+            print(f"Starting at best nominal area: {best_nominal_area} at step {best_nominal_area_steps[closest_idx]}")
         best_losses = client.get_metric_history(resume_id, 'best_loss')
         best_loss_steps = np.array([metric.step for metric in best_losses])
         # get the best loss from a step prior to the resume step
@@ -113,6 +115,7 @@ def single_run(
         # find the file with start_step in the name
         checkpoint_dir = f"{storage_path}/mlruns/{exp_id}/{resume_id}/artifacts/checkpoints"
         checkpoint_file = [f for f in os.listdir(checkpoint_dir) if f.startswith('nf_') and f.endswith('.pt') and f.split('_')[-1].split('.')[0] == str(start_step)][0]
+        start_step += 1
         checkpoint_path = f"{checkpoint_dir}/{checkpoint_file}"
         print(f"Resuming MLflow run: {resume_id}")
         mlflow.set_experiment(mlflow_experiment_name)
@@ -272,10 +275,10 @@ def single_run(
             print("RNG states restored from checkpoint")
 
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        if run_args["scheduler_type"] == "exponential":
-            scheduler.last_epoch = (start_step // run_args["step_freq"]) - 1
-        else:
-            scheduler.last_epoch = start_step - 1
+        if 'scheduler_state_dict' in checkpoint:
+            print("Loading scheduler state dict")
+            print(checkpoint['scheduler_state_dict'])
+            scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
     else:
         # test sample from the flow
         with torch.no_grad():
@@ -291,6 +294,75 @@ def single_run(
     print("MLFlow Run Info:", ml_info.experiment_id + "/" + ml_info.run_id)
     # Disable tqdm progress bar if output is not a TTY
     is_tty = sys.stdout.isatty()
+    profiler_log_dir = f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/profiler_log"
+
+    if profile:
+        try:
+            print("Starting basic profiling...")
+            os.makedirs(profiler_log_dir, exist_ok=True)
+            with torch.profiler.profile(
+                activities=[
+                    torch.profiler.ProfilerActivity.CPU,
+                    torch.profiler.ProfilerActivity.CUDA,
+                ],
+                schedule=torch.profiler.schedule(wait=0, warmup=1, active=3, repeat=1),
+                on_trace_ready=torch.profiler.tensorboard_trace_handler(profiler_log_dir),
+                record_shapes=False,  # Disable shape recording
+                profile_memory=False,  # Disable memory profiling
+                with_stack=False,     # Disable stack traces
+                with_flops=False      # Disable FLOPS calculation
+            ) as prof:
+                for step in range(4):
+                    try:
+                        print(f"Profiling step {step}")
+                        optimizer.zero_grad()
+                        agg_loss, loss = posterior_loss(
+                            design=designs,
+                            model=num_tracers.pyro_model,
+                            guide=posterior_flow,
+                            num_particles=run_args["n_particles"],
+                            observation_labels=["y"],
+                            target_labels=target_labels,
+                            evaluation=False,
+                            nflow=True,
+                            condition_design=run_args["condition_design"],
+                            verbose_shapes=False  # Disable verbose shapes
+                        )
+                        agg_loss.backward()
+                        optimizer.step()
+                        prof.step()
+                    except Exception as e:
+                        print(f"Error in profiling step {step}: {str(e)}")
+                        continue
+                
+                # Print a basic summary to console
+                print("\n=== Basic Profiler Results ===\n")
+                print(prof.key_averages().table(
+                    sort_by="cuda_time_total",
+                    row_limit=20
+                ))
+                
+                # Save basic summary
+                summary_path = f"{profiler_log_dir}/profiler_summary.txt"
+                with open(summary_path, 'w') as f:
+                    f.write("=== Basic Profiler Results ===\n\n")
+                    f.write(prof.key_averages().table(
+                        sort_by="cuda_time_total",
+                        row_limit=20
+                    ))
+                
+                mlflow.log_artifact(summary_path, "profiler_log")
+            
+            print("\nBasic profiling complete. Data saved to TensorBoard format.")
+            print("Exiting after profiling. To run training, set profile=False")
+            return  # Exit after profiling
+            
+        except Exception as e:
+            print(f"Error during profiling: {str(e)}")
+            print("Profiling failed. Exiting.")
+            return  # Exit if profiling fails
+
+    # Main training loop starts here
     num_steps_range = trange(start_step, run_args["steps"], desc="Loss: 0.000 ", disable=not is_tty)
     for step in num_steps_range:
         optimizer.zero_grad() #  clear gradients from previous step
@@ -310,15 +382,15 @@ def single_run(
         optimizer.step()
 
         history.append(torch.mean(loss).cpu().detach().item())
-        if step == 0:
+        if step > 0:
             verbose_shapes = False
         if torch.mean(loss).cpu().detach().item() < best_loss and step > 99:
             best_loss = torch.mean(loss).cpu().detach().item()
             # save the checkpoint
             checkpoint_path = f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/checkpoints/nf_loss_checkpoint_{step}.pt"
-            save_checkpoint(posterior_flow, optimizer, checkpoint_path, step=step, artifact_path="checkpoints")
+            save_checkpoint(posterior_flow, optimizer, checkpoint_path, step=step, artifact_path="checkpoints", scheduler=scheduler)
             checkpoint_path = f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/checkpoints/nf_checkpoint_best_loss.pt"
-            save_checkpoint(posterior_flow, optimizer, checkpoint_path, step=step, artifact_path="checkpoints")
+            save_checkpoint(posterior_flow, optimizer, checkpoint_path, step=step, artifact_path="checkpoints", scheduler=scheduler)
             mlflow.log_metric("best_loss", best_loss, step=step)
 
         # log learning rate and loss
@@ -327,7 +399,7 @@ def single_run(
         mlflow.log_metric("loss", loss.mean().item(), step=step)
         mlflow.log_metric("agg_loss", agg_loss.item(), step=step)
         if step % 100 == 0:
-            if step > 99:
+            if step > 99 and kwargs["log_nominal_area"]:
                 nominal_samples = posterior_flow(nominal_context).sample((30000,)).cpu().numpy()
                 nominal_samples[:, -1] *= 100000
                 with contextlib.redirect_stdout(io.StringIO()):
@@ -339,26 +411,26 @@ def single_run(
                     mlflow.log_metric("best_nominal_area", best_nominal_area, step=step)
                     # save the checkpoint
                     checkpoint_path = f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/checkpoints/nf_area_checkpoint_{step}.pt"
-                    save_checkpoint(posterior_flow, optimizer, checkpoint_path, step=step, artifact_path="checkpoints")
+                    save_checkpoint(posterior_flow, optimizer, checkpoint_path, step=step, artifact_path="checkpoints", scheduler=scheduler)
                     checkpoint_path = f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/checkpoints/nf_checkpoint_best_nominal_area.pt"
-                    save_checkpoint(posterior_flow, optimizer, checkpoint_path, step=step, artifact_path="checkpoints")
+                    save_checkpoint(posterior_flow, optimizer, checkpoint_path, step=step, artifact_path="checkpoints", scheduler=scheduler)
             else:
                 nominal_area = np.nan
             # Only update description if running in a TTY
             if is_tty:
-                num_steps_range.set_description("Loss: {:.3f}, Area: {:.3f}".format(loss.mean().item(), nominal_area))
+                num_steps_range.set_description(f"Loss: {loss.mean().item():.3f}") if not kwargs["log_nominal_area"] else num_steps_range.set_description(f"Loss: {loss.mean().item():.3f}, Area: {nominal_area:.3f}")
             else:
-                print(f"Step {step}, Loss: {loss.mean().item()}, Area: {nominal_area}")
+                print(f"Step {step}, Loss: {loss.mean().item():.3f}") if not kwargs["log_nominal_area"] else print(f"Step {step}, Loss: {loss.mean().item():.3f}, Area: {nominal_area:.3f}")
         if step % run_args["step_freq"] == 0:
             scheduler.step()
         if step % 5000 == 0 and step > 0:
             checkpoint_path = f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/checkpoints/nf_checkpoint_{step}.pt"
-            save_checkpoint(posterior_flow, optimizer, checkpoint_path, step=step, artifact_path="checkpoints")
+            save_checkpoint(posterior_flow, optimizer, checkpoint_path, step=step, artifact_path="checkpoints", scheduler=scheduler)
 
         log_usage_metrics(device, process, step)
 
     checkpoint_path = f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/checkpoints/nf_checkpoint_last.pt"
-    save_checkpoint(posterior_flow, optimizer, checkpoint_path, step=run_args["steps"], artifact_path="checkpoints")
+    save_checkpoint(posterior_flow, optimizer, checkpoint_path, step=run_args["steps"], artifact_path="checkpoints", scheduler=scheduler)
     plot_training(
         run_id=ml_info.run_id,
         var=None, 
@@ -405,7 +477,7 @@ if __name__ == '__main__':
     # Add arguments for resuming from a checkpoint
     parser.add_argument('--resume_id', type=str, default=None, help='MLflow run ID to resume training from')
     parser.add_argument('--resume_step', type=int, default=None, help='Step to resume training from')
-    parser.add_argument('--add_steps', type=int, default=0, help='Number of steps to add to the training')
+    parser.add_argument('--add_steps', type=int, default=None, help='Number of steps to add to the training')
 
     for key, value in default_args.items():
         arg_type = type(value)
@@ -447,9 +519,11 @@ if __name__ == '__main__':
         mlflow_experiment_name=args.exp_name,
         device=device,
         fixed_design=True,
+        log_nominal_area=True,
         resume_id=args.resume_id,
         resume_step=args.resume_step,
-        add_steps=args.add_steps
+        add_steps=args.add_steps,
+        profile=False
     )
 
 
