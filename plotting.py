@@ -93,7 +93,8 @@ def plot_posterior(samples, colors, legend_labels=None, show_scatter=False, line
             'normalized': True,
             'linestyle': line_style
         },
-        contour_args=contour_args
+        contour_args=contour_args,
+        show=False
     )
 
     param_names = g.param_names_for_root(samples[0])
@@ -589,7 +590,7 @@ def compare_posterior(
         excluded_runs=[],
         level=0.68,
         cosmo_exp='num_tracers', 
-        step='best_loss'
+        step='loss_best'
         ):
     """Compares posterior distributions across multiple runs.
     
@@ -1071,7 +1072,7 @@ def show_figure(save_path):
     try:
         is_tty = os.isatty(sys.stdout.fileno())
     except (io.UnsupportedOperation, AttributeError):
-        is_tty = False  # Treat as non-TTY if fileno() fails (e.g., in notebooks)
+        is_tty = False
 
     plt.savefig(save_path)
     print(f"Saved plot to {save_path}")

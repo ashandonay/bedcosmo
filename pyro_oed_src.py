@@ -190,6 +190,39 @@ def _vnmc_eig_loss(model, guide, observation_labels, target_labels, contrastive=
     
     return loss_fn
 
+def nf_loss(context, guide, samples, verbose_shapes=False):
+    """
+    Computes the negative log-probability loss for a normalizing flow model given pre-sampled data.
+
+    Parameters:
+    - context: The design tensor (batch of designs).
+    - guide: The normalizing flow guide model (e.g., a Pyro or zuko flow).
+    - samples: Pre-sampled parameter values (theta).
+    - verbose_shapes: Whether to print tensor shapes for debugging (default: False).
+
+    Returns:
+    - agg_loss: Aggregated loss over all samples.
+    - loss: Per-sample loss, reshaped to match the original design batch.
+    """
+    # Flatten samples and contexts for normalizing flow input
+    flattened_samples = samples.view(-1, samples.shape[-1])
+    flattened_context = context.view(-1, context.shape[-1])
+
+    if verbose_shapes:
+        print(f"Context shape: {context.shape}")
+        print(f"Samples shape: {samples.shape}")
+        print(f"Flattened samples shape: {flattened_samples.shape}")
+        print(f"Flattened context shape: {flattened_context.shape}")
+
+    # Compute the negative log-probability
+    neg_log_prob = -guide(flattened_context).log_prob(flattened_samples)
+    neg_log_prob = neg_log_prob.view(-1, 1).mean(dim=-1)
+
+    # Compute the aggregate loss
+    agg_loss, loss = _safe_mean_terms(neg_log_prob)
+
+    return agg_loss, loss
+
 def posterior_loss(design, model, guide, num_particles, observation_labels, target_labels, 
                    nflow=False, verbose_shapes=False, evaluation=False, analytic_prior=True, condition_design=True, context=True):
     # num_particles = num_samples

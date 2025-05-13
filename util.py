@@ -18,6 +18,7 @@ import io
 import matplotlib.pyplot as plt
 from pyro.contrib.util import lexpand
 import subprocess
+from torch.nn.parallel import DistributedDataParallel as DDP
 
 torch.set_default_dtype(torch.float64)
 
@@ -57,13 +58,19 @@ def save_checkpoint(model, optimizer, filepath, step=None, artifact_path=None, s
         optimizer (torch.optim.Optimizer): The optimizer used during training.
         filepath (str): Path to save the checkpoint.
         step (int, optional): Current training step.
-        best_loss (float, optional): Best loss value seen so far.
-        best_area (float, optional): Best area value seen so far.
+        loss_best (float, optional): Best loss value seen so far.
+        nominal_area_best (float, optional): Best area value seen so far.
         history (list, optional): Training loss history.
         artifact_path (str, optional): Path to log the artifact to in MLflow.
     """
+    # Get the state dict from the model, handling DDP wrapper if present
+    if hasattr(model, 'module'):
+        model_state_dict = model.module.state_dict()
+    else:
+        model_state_dict = model.state_dict()
+
     checkpoint = {
-        'model_state_dict': model.state_dict(),
+        'model_state_dict': model_state_dict,
         'optimizer_state_dict': optimizer.state_dict()
     }
     if scheduler is not None:
@@ -85,7 +92,7 @@ def save_checkpoint(model, optimizer, filepath, step=None, artifact_path=None, s
     torch.save(checkpoint, filepath)
     mlflow.log_artifact(filepath, artifact_path=artifact_path)
 
-def init_nf(flow_type, input_dim, context_dim, run_args, device="cuda:0", seed=None, verbose=False, **kwargs):
+def init_nf(flow_type, input_dim, context_dim, run_args, device="cuda:0", seed=None, verbose=False, local_rank=None, **kwargs):
     # Set seeds first, before any model initialization
     if seed is not None:
         torch.manual_seed(seed)
@@ -98,7 +105,7 @@ def init_nf(flow_type, input_dim, context_dim, run_args, device="cuda:0", seed=N
             torch.backends.cudnn.deterministic = True
             torch.backends.cudnn.benchmark = False
 
-    if run_args["hidden_size"] is not None and verbose:
+    if run_args["hidden_size"] is not None and local_rank is not None and local_rank == 0 and verbose:
         print(f'Hidden features: {(run_args["hidden_size"],) * run_args["n_layers"]}')
 
     # Initialize the flow model
@@ -110,15 +117,15 @@ def init_nf(flow_type, input_dim, context_dim, run_args, device="cuda:0", seed=N
             bins=run_args["bins"],
             hidden_features=((run_args["hidden_size"],) * run_args["n_layers"]),
             **kwargs
-        ).to(device)
+        )
     elif flow_type == "NAF":
         posterior_flow = zuko.flows.NAF(
             features=input_dim, 
             context=context_dim, 
             transforms=run_args["n_transforms"],
             signal=run_args["signal"],
-            network={"hidden_features": ((run_args["hidden_size"],) * run_args["n_layers"])} # (hidden_size,) + (2*hidden_size,) * (n_layers - 1)} 
-        ).to(device)
+            network={"hidden_features": ((run_args["hidden_size"],) * run_args["n_layers"])}
+        )
     elif flow_type == "MAF":
         posterior_flow = zuko.flows.MAF(
             features=input_dim, 
@@ -126,7 +133,7 @@ def init_nf(flow_type, input_dim, context_dim, run_args, device="cuda:0", seed=N
             transforms=run_args["n_transforms"],
             hidden_features=((run_args["hidden_size"],) * run_args["n_layers"]),
             **kwargs
-        ).to(device)
+        )
     elif flow_type == "MAF_Affine":
         posterior_flow = zuko.flows.MAF(
             features=input_dim, 
@@ -134,29 +141,39 @@ def init_nf(flow_type, input_dim, context_dim, run_args, device="cuda:0", seed=N
             transforms=run_args["n_transforms"],
             univariate=zuko.transforms.MonotonicAffineTransform,
             **kwargs
-        ).to(device)
+        )
     elif flow_type == "MAF_RQS":
         posterior_flow = zuko.flows.MAF(
             features=input_dim, 
             context=context_dim, 
             transforms=run_args["n_transforms"],
             univariate=zuko.transforms.MonotonicRQSTransform,
-            shapes = ([run_args["shape"]], [run_args["shape"]], [run_args["shape"]-1]),
+            shapes=([run_args["shape"]], [run_args["shape"]], [run_args["shape"]-1]),
             **kwargs
-        ).to(device)
+        )
     elif flow_type == "NICE":
         posterior_flow = zuko.flows.NICE(
             features=input_dim, 
             context=context_dim, 
             transforms=run_args["n_transforms"],
             **kwargs
-        ).to(device)
+        )
     elif flow_type == "GF":
         posterior_flow = zuko.flows.GF(
             features=input_dim, 
             context=context_dim, 
             transforms=run_args["n_transforms"]
-        ).to(device)
+        )
+    else:
+        raise ValueError(f"Unknown flow type: {flow_type}")
+
+    # Move to the correct device
+    posterior_flow.to(device)
+
+    # Wrap in DDP if using distributed training
+    if local_rank is not None:
+        posterior_flow = DDP(posterior_flow, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=False)
+
     return posterior_flow
 
 def init_scheduler(optimizer, run_args):
@@ -164,7 +181,6 @@ def init_scheduler(optimizer, run_args):
     steps_per_cycle = run_args["steps"] // run_args["n_cycles"]
     initial_lr = run_args["initial_lr"]
     final_lr = run_args["final_lr"]
-    print(f"Initial LR: {initial_lr}, Final LR: {final_lr}")
 
     if run_args["scheduler_type"] == "cosine":
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
@@ -290,18 +306,33 @@ def load_model(run_id, step, eval_args, cosmo_exp='num_tracers'):
             eval_args["device"],
             seed=eval(run.data.params["nf_seed"])
             )
-        area_checkpoints = [int(f.split('_')[-1].split('.')[0]) for f in os.listdir(f'{storage_path}/mlruns/{exp_id}/{run_id}/artifacts/checkpoints/') if f.startswith('nf_area_checkpoint_') and f.endswith('.pt')]
-        loss_checkpoints = [int(f.split('_')[-1].split('.')[0]) for f in os.listdir(f'{storage_path}/mlruns/{exp_id}/{run_id}/artifacts/checkpoints/') if f.startswith('nf_loss_checkpoint_') and f.endswith('.pt')]
-        regular_checkpoints = [int(f.split('_')[-1].split('.')[0]) for f in os.listdir(f'{storage_path}/mlruns/{exp_id}/{run_id}/artifacts/checkpoints/') if f.startswith('nf_checkpoint_') and f.endswith('.pt') and not f.endswith('last.pt') and not f.endswith('loss.pt') and not f.endswith('area.pt')]
-        if step not in area_checkpoints and step not in loss_checkpoints and step not in regular_checkpoints and step != 'best_loss' and step != 'best_nominal_area' and step != 'last':
+        area_checkpoints = [int(f.split('_')[-1].split('.')[0]) for f in os.listdir(f'{storage_path}/mlruns/{exp_id}/{run_id}/artifacts/checkpoints/') if f.startswith('checkpoint_nominal_area_') and f.endswith('.pt') and 'best' not in f]
+        loss_checkpoints = [int(f.split('_')[-1].split('.')[0]) for f in os.listdir(f'{storage_path}/mlruns/{exp_id}/{run_id}/artifacts/checkpoints/') if f.startswith('checkpoint_loss_') and f.endswith('.pt') and 'best' not in f]
+        regular_checkpoints = [int(f.split('_')[-1].split('.')[0]) for f in os.listdir(f'{storage_path}/mlruns/{exp_id}/{run_id}/artifacts/checkpoints/') if f.startswith('checkpoint_') and f.endswith('.pt') and not f.endswith('last.pt') and 'loss' not in f and 'area' not in f]
+        if step not in area_checkpoints and step not in loss_checkpoints and step not in regular_checkpoints and step != 'loss_best' and step != 'best_nominal_area' and step != 'last':
             raise ValueError(f"Step {step} not found in checkpoints")
         if step in area_checkpoints:
-            checkpoint = torch.load(f'{storage_path}/mlruns/{exp_id}/{run_id}/artifacts/checkpoints/nf_area_checkpoint_{step}.pt', map_location=eval_args["device"])
+            checkpoint = torch.load(f'{storage_path}/mlruns/{exp_id}/{run_id}/artifacts/checkpoints/checkpoint_area_{step}.pt', map_location=eval_args["device"])
         elif step in loss_checkpoints:
-            checkpoint = torch.load(f'{storage_path}/mlruns/{exp_id}/{run_id}/artifacts/checkpoints/nf_loss_checkpoint_{step}.pt', map_location=eval_args["device"])
+            checkpoint = torch.load(f'{storage_path}/mlruns/{exp_id}/{run_id}/artifacts/checkpoints/checkpoint_loss_{step}.pt', map_location=eval_args["device"])
         else:
-            checkpoint = torch.load(f'{storage_path}/mlruns/{exp_id}/{run_id}/artifacts/checkpoints/nf_checkpoint_{step}.pt', map_location=eval_args["device"])
-        posterior_flow.load_state_dict(checkpoint['model_state_dict'], strict=True)
+            checkpoint = torch.load(f'{storage_path}/mlruns/{exp_id}/{run_id}/artifacts/checkpoints/checkpoint_{step}.pt', map_location=eval_args["device"])
+        
+        # Get the state dict and handle module prefixes
+        state_dict = checkpoint['model_state_dict']
+        
+        # Remove module prefixes if they exist
+        new_state_dict = {}
+        for k, v in state_dict.items():
+            # Remove 'module.' prefixes
+            if k.startswith('module.'):
+                k = k[7:]  # Remove 'module.'
+            if k.startswith('module.'):  # Handle double module prefix
+                k = k[7:]  # Remove second 'module.'
+            new_state_dict[k] = v
+            
+        # Load the cleaned state dict
+        posterior_flow.load_state_dict(new_state_dict, strict=True)
         posterior_flow.to(eval_args["device"])
         posterior_flow.eval()
         return num_tracers, posterior_flow
@@ -420,7 +451,7 @@ def get_checkpoints(steps, checkpoint_files, type='all', cosmo_exp='num_tracers'
     # get the checkpoints closest to the steps
     plot_checkpoints = [
         checkpoints[np.argmin(np.abs(np.array(checkpoints) - step))]
-        for step in steps if step not in ['best_loss', 'best_nominal_area', 'last']
+        for step in steps if step not in ['loss_best', 'nominal_area_best', 'last']
     ]
 
     # check for duplicates in plot_checkpoints and replace them with the next checkpoint index 
@@ -432,11 +463,11 @@ def get_checkpoints(steps, checkpoint_files, type='all', cosmo_exp='num_tracers'
                 print(f"Warning: No next checkpoint found for step {steps[i]}")
                 plot_checkpoints.pop(i)
 
-    # add best_loss and best_nominal_area to the plot_checkpoints if requested
-    if 'best_loss' in steps:
-        plot_checkpoints.append('best_loss')
-    if 'best_nominal_area' in steps:
-        plot_checkpoints.append('best_nominal_area')
+    # add loss_best and nominal_area_best to the plot_checkpoints if requested
+    if 'loss_best' in steps:
+        plot_checkpoints.append('loss_best')
+    if 'nominal_area_best' in steps:
+        plot_checkpoints.append('nominal_area_best')
     if 'last' in steps:
         plot_checkpoints.append('last')
 
