@@ -507,10 +507,9 @@ def single_run(
     best_nominal_area = float('inf')
     global_nominal_area = np.nan
 
+    # Initialize pbar as None by default
     if is_tty and local_rank == 0:
-        num_steps_range = tqdm(range(step, steps), desc="Training Progress", position=0, leave=True, disable=False)
-    else:
-        num_steps_range = range(step, steps)
+        pbar = tqdm(total=steps - step, desc="Training Progress", position=0, leave=True)
 
     while step < steps:
         for context, samples in dataloader:
@@ -586,6 +585,14 @@ def single_run(
             if local_rank == 0:
                 mlflow.log_metric("loss", global_loss, step=step)
                 mlflow.log_metric("agg_loss", global_agg_loss, step=step)
+                if is_tty:
+                    pbar.update(1)
+                    if kwargs["log_nominal_area"]:
+                        pbar.set_description(f"Loss: {loss.mean().item():.3f}, Area: {global_nominal_area:.3f}")
+                    else:
+                        pbar.set_description(f"Loss: {loss.mean().item():.3f}")
+                else:
+                    print(f"Step {step}, Loss: {loss.mean().item():.3f}") if not kwargs["log_nominal_area"] else print(f"Step {step}, Loss: {loss.mean().item():.3f}, Area: {global_nominal_area:.3f}")
 
             if step % 100 == 0:
                 if step > 99 and kwargs["log_nominal_area"]:
@@ -619,12 +626,6 @@ def single_run(
                         checkpoint_path = f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/checkpoints/checkpoint_nominal_area_best.pt"
                         save_checkpoint(posterior_flow, optimizer, checkpoint_path, step=step, artifact_path="checkpoints", scheduler=scheduler)
 
-                    if is_tty:
-                        num_steps_range.set_description(f"Loss: {loss.mean().item():.3f}") if not kwargs["log_nominal_area"] else num_steps_range.set_description(f"Loss: {loss.mean().item():.3f}, Area: {global_nominal_area:.3f}")
-                        num_steps_range.update(1)
-                    else:
-                        print(f"Step {step}, Loss: {loss.mean().item():.3f}") if not kwargs["log_nominal_area"] else print(f"Step {step}, Loss: {loss.mean().item():.3f}, Area: {global_nominal_area:.3f}")
-
             # Synchronize across ranks before scheduler step
             tdist.barrier()
             # Update scheduler every step_freq steps
@@ -640,8 +641,8 @@ def single_run(
                 break
 
     # Ensure progress bar closes cleanly
-    if is_tty and local_rank == 0:
-        num_steps_range.close()
+    if local_rank == 0 and pbar is not None:
+        pbar.close()
 
     checkpoint_path = f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/checkpoints/checkpoint_last.pt"
     # Only save checkpoint and plot on rank 0
