@@ -224,7 +224,7 @@ def plot_training(
         cosmo_exp='num_tracers',
         log_scale=False,
         show_best=False,
-        loss_step_freq=25,
+        loss_step_freq=10,
         area_step_freq=100,
         lr_step_freq=1 # Plot LR more frequently if needed
         ):
@@ -400,10 +400,16 @@ def plot_training(
             run_params = client.get_run(run_id_iter).data.params
         except Exception as e:
             print(f"Warning: Could not fetch params for run {run_id_iter} for label: {e}")
-        for v in vars_list:
-            param_value = run_params.get(v, "N/A")
-            label_parts.append(f"{v}={param_value}")
-        base_label = ", ".join(label_parts) if label_parts else f"Run {i+1}"
+        
+        if var is None:
+            # When var is None, use run_id as label
+            base_label = run_id_iter
+        else:
+            # Existing behavior for when var is specified
+            for v in vars_list:
+                param_value = run_params.get(v, "N/A")
+                label_parts.append(f"{v}={param_value}")
+            base_label = ", ".join(label_parts) if label_parts else f"Run {i+1}"
 
         # --- Plot Loss (ax1) ---
         loss_data = metrics['loss']
@@ -515,7 +521,9 @@ def plot_training(
     # Configure ax2 (Contour Area)
     ax2.set_ylabel("Posterior Contour Area")
     ax2.tick_params(axis='y')
-    ax2.legend(loc='best', fontsize=legend_fontsize, title="Runs")
+    # Only show legend if var is specified or there are multiple runs
+    if var is not None or num_runs > 1:
+        ax2.legend(loc='best', fontsize=legend_fontsize, title="Runs")
     ax2.grid(True, axis='y', linestyle='--', alpha=0.6)
 
     # Configure ax3 (Learning Rate)
