@@ -159,6 +159,7 @@ def posterior_steps(run_id, steps, eval_args, level=0.68, type='all', cosmo_exp=
     """
     client = MlflowClient()
     run = client.get_run(run_id)
+    run_args = parse_mlflow_params(run.data.params)
     storage_path = os.environ["SCRATCH"] + f"/bed/BED_cosmo/{cosmo_exp}"
 
     exp_id = client.get_run(run_id).info.experiment_id
@@ -171,7 +172,7 @@ def posterior_steps(run_id, steps, eval_args, level=0.68, type='all', cosmo_exp=
 
     checkpoint_dir = f'{storage_path}/mlruns/{exp_id}/{run_id}/artifacts/checkpoints/'
     checkpoint_files = os.listdir(checkpoint_dir)
-    plot_checkpoints = get_checkpoints(steps, checkpoint_files, type, cosmo_exp, verbose=False)
+    plot_checkpoints = get_checkpoints(run_id, steps, checkpoint_files, type, cosmo_exp, verbose=False)
 
     for i, step in enumerate(plot_checkpoints):
         samples = run_eval(run_id, eval_args, step=step, cosmo_exp=cosmo_exp)
@@ -195,11 +196,12 @@ def posterior_steps(run_id, steps, eval_args, level=0.68, type='all', cosmo_exp=
     custom_legend = []
     # If we have a single run, show each step with its area
     for i, step in enumerate(plot_checkpoints):
-        step_label = step
         if step == 'last':
-            step_label = client.get_run(run_id).data.params['steps']
+            step_label = run_args["steps"]
         elif step == 'best':
             step_label = 'Best Loss'
+        else:
+            step_label = step
         
         # Get the area for this step (first run's area from the tuple)
         area = all_areas[i]
@@ -1107,6 +1109,7 @@ def plot_eig_steps(run_id, steps, eval_args, cosmo_exp='num_tracers', verbose=Fa
         classes = json.load(f)
     checkpoint_files = os.listdir(f"{storage_path}/mlruns/{exp_id}/{run_id}/artifacts/checkpoints")
     checkpoint_steps = get_checkpoints(
+        run_id,
         steps, 
         checkpoint_files,
         type='all', 

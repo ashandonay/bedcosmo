@@ -221,7 +221,7 @@ def init_scheduler(optimizer, run_args):
         raise ValueError(f"Unknown scheduler_type: {run_args['scheduler_type']}")
     return scheduler
 
-def run_eval(run_id, eval_args, step='best_loss', cosmo_exp='num_tracers'):
+def run_eval(run_id, eval_args, step='loss_best', cosmo_exp='num_tracers'):
     storage_path = os.environ["SCRATCH"] + f"/bed/BED_cosmo/{cosmo_exp}"
     mlflow.set_tracking_uri(storage_path + "/mlruns")
     client = MlflowClient()
@@ -306,13 +306,15 @@ def load_model(run_id, step, eval_args, cosmo_exp='num_tracers'):
             eval_args["device"],
             seed=eval(run.data.params["nf_seed"])
             )
+        if step == run_args["steps"]:
+            step = 'last'
         area_checkpoints = [int(f.split('_')[-1].split('.')[0]) for f in os.listdir(f'{storage_path}/mlruns/{exp_id}/{run_id}/artifacts/checkpoints/') if f.startswith('checkpoint_nominal_area_') and f.endswith('.pt') and 'best' not in f]
         loss_checkpoints = [int(f.split('_')[-1].split('.')[0]) for f in os.listdir(f'{storage_path}/mlruns/{exp_id}/{run_id}/artifacts/checkpoints/') if f.startswith('checkpoint_loss_') and f.endswith('.pt') and 'best' not in f]
         regular_checkpoints = [int(f.split('_')[-1].split('.')[0]) for f in os.listdir(f'{storage_path}/mlruns/{exp_id}/{run_id}/artifacts/checkpoints/') if f.startswith('checkpoint_') and f.endswith('.pt') and not f.endswith('last.pt') and 'loss' not in f and 'area' not in f]
-        if step not in area_checkpoints and step not in loss_checkpoints and step not in regular_checkpoints and step != 'loss_best' and step != 'best_nominal_area' and step != 'last':
+        if step not in area_checkpoints and step not in loss_checkpoints and step not in regular_checkpoints and step != 'loss_best' and step != 'nominal_area_best' and step != 'last':
             raise ValueError(f"Step {step} not found in checkpoints")
         if step in area_checkpoints:
-            checkpoint = torch.load(f'{storage_path}/mlruns/{exp_id}/{run_id}/artifacts/checkpoints/checkpoint_area_{step}.pt', map_location=eval_args["device"])
+            checkpoint = torch.load(f'{storage_path}/mlruns/{exp_id}/{run_id}/artifacts/checkpoints/checkpoint_nominal_area_{step}.pt', map_location=eval_args["device"])
         elif step in loss_checkpoints:
             checkpoint = torch.load(f'{storage_path}/mlruns/{exp_id}/{run_id}/artifacts/checkpoints/checkpoint_loss_{step}.pt', map_location=eval_args["device"])
         else:
@@ -425,24 +427,30 @@ def parse_mlflow_params(params_dict):
 
     return parsed_params
 
-def get_checkpoints(steps, checkpoint_files, type='all', cosmo_exp='num_tracers', verbose=False):
+def get_checkpoints(run_id, steps, checkpoint_files, type='all', cosmo_exp='num_tracers', verbose=False):
+    storage_path = os.environ["SCRATCH"] + f"/bed/BED_cosmo/{cosmo_exp}"
+    mlflow.set_tracking_uri(storage_path + "/mlruns")
+    client = MlflowClient()
+    run = client.get_run(run_id)
+    run_args = parse_mlflow_params(run.data.params)
+    steps = [step if step != run_args["steps"] else 'last' for step in steps]
     if type == 'all':
         checkpoints = sorted([
             int(f.split('_')[-1].split('.')[0]) 
             for f in checkpoint_files 
-            if f.startswith('nf_') and f.endswith('.pt') and not f.endswith('last.pt') and not f.endswith('loss.pt') and not f.endswith('area.pt')
+            if f.endswith('.pt') and not f.endswith('last.pt') and not f.endswith('best.pt')
         ])
     elif type == 'area':
         checkpoints = sorted([
             int(f.split('_')[-1].split('.')[0]) 
             for f in checkpoint_files 
-            if f.startswith('nf_area')
+            if f.startswith('checkpoint_nominal_area_')
         ])
     elif type == 'loss':
         checkpoints = sorted([
             int(f.split('_')[-1].split('.')[0]) 
             for f in checkpoint_files 
-            if f.startswith('nf_loss')
+            if f.startswith('checkpoint_loss_')
         ])
     # print stpes not found in checkpoints
     steps_not_found = [step for step in steps if step not in checkpoints]
