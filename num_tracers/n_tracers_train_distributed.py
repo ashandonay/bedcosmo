@@ -163,6 +163,7 @@ def single_run(
             mlflow_experiment_name = exp_name
             cosmo_model = run_info.data.params["cosmo_model"]
             run_args = parse_mlflow_params(run_info.data.params)
+            print(json.dumps(run_args, indent=2))
             if add_steps:
                 run_args["steps"] += add_steps
             best_nominal_areas = client.get_metric_history(resume_id, 'best_nominal_area')
@@ -210,6 +211,7 @@ def single_run(
             run_id_list = [resume_id]
             exp_name_list = [exp_name]
         else:
+            print(json.dumps(run_args, indent=2))
             mlflow.set_experiment(mlflow_experiment_name)
             mlflow.start_run()
             # Log parameters for a new run
@@ -312,7 +314,7 @@ def single_run(
 
     ############################################### Designs ###############################################
     # if fixed design:
-    if kwargs["fixed_design"]:
+    if run_args["nominal_design"]:
         # Get nominal design from observed tracer counts
         nominal_design = torch.tensor(desi_tracers.groupby('class').sum()['observed'].reindex(classes.keys()).values, device=f"cuda:{local_rank}")
         
@@ -480,7 +482,6 @@ def single_run(
     is_tty = sys.stdout.isatty()
     # Set n_particles per GPU, which will also be the batch size
     n_particles_per_gpu = run_args.get("n_particles", 1024)
-    batch_size_per_gpu = n_particles_per_gpu
 
     dataloader = get_dataloader(
         num_tracers=num_tracers,
@@ -645,7 +646,7 @@ def single_run(
             area_step_freq=100,
             show_best=False
         )
-        if not kwargs["fixed_design"]:
+        if not run_args["nominal_design"]:
             eval_args = {"n_samples": 3000, "device": f"cuda:{local_rank}", "eval_seed": 1}
             plot_eig_steps(
                 run_id=ml_info.run_id,
@@ -688,7 +689,7 @@ if __name__ == '__main__':
     parser.add_argument('--cosmo_model', type=str, default=cosmo_model_default, help='Cosmological model set to use from run_args.json')
     parser.add_argument('--device', type=str, default='cuda:0', help='Device to use for training')
     parser.add_argument('--exp_name', type=str, default=default_exp_name, help='Experiment name')
-    
+
     # Add arguments for resuming from a checkpoint
     parser.add_argument('--resume_id', type=str, default=None, help='MLflow run ID to resume training from')
     parser.add_argument('--resume_step', type=int, default=None, help='Step to resume training from')
@@ -701,7 +702,7 @@ if __name__ == '__main__':
             # Set default explicitly for bools, action handles the logic
             parser.set_defaults(**{key: value})
         elif isinstance(value, (int, float, str)):
-             parser.add_argument(f'--{key}', type=arg_type, default=None, help=f'Override {key} (default: {value})')
+            parser.add_argument(f'--{key}', type=arg_type, default=None, help=f'Override {key} (default: {value})')
         else:
             print(f"Warning: Argument type for key '{key}' not explicitly handled ({arg_type}). Treating as string.")
             parser.add_argument(f'--{key}', type=str, default=None, help=f'Override {key} (default: {value})')
@@ -732,8 +733,7 @@ if __name__ == '__main__':
         run_args=run_args,
         mlflow_experiment_name=args.exp_name,
         device=device,
-        fixed_design=True,
-        log_nominal_area=True,
+        log_nominal_area=False,
         resume_id=args.resume_id,
         resume_step=args.resume_step,
         add_steps=args.add_steps
