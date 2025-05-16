@@ -10,8 +10,7 @@ import torch
 import torch.nn as nn
 import torch.distributed as tdist
 from torch.nn.parallel import DistributedDataParallel as DDP
-# Add DataLoader and DistributedSampler imports
-from torch.utils.data import Dataset, DataLoader, DistributedSampler
+from torch.utils.data import Dataset, DataLoader
 import torch.multiprocessing as mp
 
 import numpy as np
@@ -69,12 +68,6 @@ class FlowLikelihoodDataset(Dataset):
 
         # Generate samples from the NumTracers pyro model
         with torch.no_grad():
-            # Set different RNG seeds for each rank to ensure independent samples
-            rank = int(os.environ.get("LOCAL_RANK", 0))
-            base_seed = 42  # Or use the pyro_seed from run_args
-            torch.manual_seed(base_seed + rank)
-            pyro.set_rng_seed(base_seed + rank)
-
             # Generate the samples directly on the GPU
             trace = poutine.trace(self.num_tracers.pyro_model).get_trace(expanded_design)
             y_dict = {l: trace.nodes[l]["value"].to(self.device) for l in self.observation_labels}
@@ -112,7 +105,7 @@ def get_dataloader(num_tracers, designs, n_particles_per_gpu, observation_labels
         batch_size=batch_size,
         shuffle=False,
         num_workers=num_workers,
-        pin_memory=False
+        pin_memory=False,
     )
     return dataloader
 
@@ -472,7 +465,7 @@ def single_run(
         # Synchronize all ranks after loading checkpoint
         tdist.barrier()
     else:
-        seed = auto_seed(run_args["pyro_seed"])
+        seed = auto_seed(base_seed=run_args["pyro_seed"], local_rank=local_rank)
         # test sample from the flow (only on rank 0)
         if local_rank == 0:
             with torch.no_grad():

@@ -27,23 +27,24 @@ if home_dir + "/bed/BED_cosmo" not in sys.path:
     sys.path.insert(0, home_dir + "/bed/BED_cosmo")
 sys.path.insert(0, home_dir + "/bed/BED_cosmo/num_tracers")
 
-def auto_seed(seed):
-    if seed < 0:
-        seed = torch.randint(0, 2**32 - 1, (1,)).item()
+def auto_seed(base_seed=0, local_rank=0):
+    if base_seed < 0:
+        base_seed = torch.randint(0, 2**32 - 1, (1,)).item()
     
+    global_seed = base_seed + local_rank
     # Set all relevant seeds
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
+    random.seed(global_seed)
+    np.random.seed(global_seed)
+    torch.manual_seed(global_seed)
     if torch.cuda.is_available():
-        torch.cuda.manual_seed(seed)
-        torch.cuda.manual_seed_all(seed)
+        torch.cuda.manual_seed(global_seed)
+        torch.cuda.manual_seed_all(global_seed)
         # For completely deterministic results
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
     
-    pyro.set_rng_seed(seed)
-    return seed
+    pyro.set_rng_seed(global_seed)
+    return global_seed
 
 def print_memory_usage(process, step):
     mem_info = process.memory_info()
