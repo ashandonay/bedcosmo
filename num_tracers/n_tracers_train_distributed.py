@@ -564,16 +564,6 @@ def single_run(
             mlflow.log_metric(f"agg_loss_rank_{local_rank}", agg_loss.item(), step=step)
             mlflow.log_metric(f"memory_usage_MB_rank_{local_rank}", memory_usage, step=step)
 
-            # Save the checkpoint and log the best loss on rank 0
-            if local_rank == 0 and step > 99:
-                if global_loss < best_loss:
-                    best_loss = global_loss
-                checkpoint_path = f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/checkpoints/checkpoint_loss_{step}.pt"
-                save_checkpoint(posterior_flow, optimizer, checkpoint_path, step=step, artifact_path="checkpoints", scheduler=scheduler)
-                checkpoint_path = f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/checkpoints/checkpoint_loss_best.pt"
-                save_checkpoint(posterior_flow, optimizer, checkpoint_path, step=step, artifact_path="checkpoints", scheduler=scheduler)
-                mlflow.log_metric("best_loss", best_loss, step=step)
-
             # Update progress bar or print status
             if local_rank == 0:
                 mlflow.log_metric("loss", global_loss, step=step)
@@ -587,9 +577,9 @@ def single_run(
                 else:
                     print(f"Step {step}, Loss: {loss.mean().item():.3f}") if not kwargs["log_nominal_area"] else print(f"Step {step}, Loss: {loss.mean().item():.3f}, Area: {global_nominal_area:.3f}")
 
-            if step % 100 == 0:
-                if step > 99 and kwargs["log_nominal_area"]:
-                    nominal_samples = posterior_flow(nominal_context).sample((3000,)).cpu().numpy()
+            if step % 100 == 0 and step != 0:
+                if kwargs["log_nominal_area"]:
+                    nominal_samples = posterior_flow(nominal_context).sample((5000,)).cpu().numpy()
                     nominal_samples[:, -1] *= 100000
                     with contextlib.redirect_stdout(io.StringIO()):
                         nominal_samples_gd = getdist.MCSamples(samples=nominal_samples, names=target_labels, labels=num_tracers.latex_labels)
@@ -605,9 +595,15 @@ def single_run(
                 # Log the global nominal area on rank 0
                 if local_rank == 0:
                     mlflow.log_metric("nominal_area", global_nominal_area, step=step)
-
-                    # Save checkpoint if the global nominal area is the best so far
-                    if global_nominal_area < best_nominal_area:
+                    if global_loss < best_loss:
+                        best_loss = global_loss
+                        checkpoint_path = f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/checkpoints/checkpoint_loss_{step}.pt"
+                        save_checkpoint(posterior_flow, optimizer, checkpoint_path, step=step, artifact_path="checkpoints", scheduler=scheduler)
+                        checkpoint_path = f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/checkpoints/checkpoint_loss_best.pt"
+                        save_checkpoint(posterior_flow, optimizer, checkpoint_path, step=step, artifact_path="checkpoints", scheduler=scheduler)
+                        mlflow.log_metric("best_loss", best_loss, step=step)
+                    elif global_nominal_area < best_nominal_area:
+                        # Save checkpoint if the global nominal area is the best so far
                         best_nominal_area = global_nominal_area
                         mlflow.log_metric("best_nominal_area", best_nominal_area, step=step)
 
