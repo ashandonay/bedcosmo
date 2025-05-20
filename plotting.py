@@ -235,7 +235,7 @@ def plot_training(
     for multiple MLflow runs using three vertically stacked subplots sharing the x-axis.
     Top plot: Loss.
     Middle plot: Learning Rate.
-    Bottom plot: Posterior Contour Area.
+    Bottom plot: Posterior Contour Area (only if log_nominal_area is True in run args).
     Can take either an experiment name or a list of run IDs.
 
     Args:
@@ -262,23 +262,19 @@ def plot_training(
                 return
             exp_id = exp.experiment_id
             run_infos = client.search_runs(exp_id)
-            # Filter runs based on status (e.g., only FINISHED) if desired
-            # run_infos = [r for r in run_infos if r.info.status == 'FINISHED']
             run_ids = [run.info.run_id for run in run_infos if run.info.run_id not in excluded_runs]
         except Exception as e:
             print(f"Error fetching runs for experiment '{exp_name}': {e}")
             return
     elif run_id is not None:
         run_ids = [run_id] if isinstance(run_id, str) else run_id
-        # Filter out excluded runs
         run_ids = [rid for rid in run_ids if rid not in excluded_runs]
-        # Try to get experiment ID from the first valid run if needed for saving later
         if run_ids:
             try:
                 exp_id = client.get_run(run_ids[0]).info.experiment_id
             except Exception as e:
                 print(f"Warning: Could not determine experiment ID from run {run_ids[0]}: {e}")
-                exp_id = None # Fallback
+                exp_id = None
         else:
             exp_id = None
     else:
@@ -293,29 +289,23 @@ def plot_training(
     vars_list = var if isinstance(var, list) else [var] if var is not None else []
 
     if vars_list:
-        # Sort runs based on the values of the specified parameters
         def get_sort_key(run_id):
             try:
                 run = client.get_run(run_id)
-                # Handle potential missing parameters gracefully
                 key_tuple = []
                 for v in vars_list:
                     param_val_str = run.data.params.get(v)
                     if param_val_str is not None:
                         try:
-                            # Attempt conversion to float for numerical sorting
                             key_tuple.append(float(param_val_str))
                         except ValueError:
-                            # If conversion fails, treat as string
                             key_tuple.append(param_val_str)
                     else:
-                        # Assign a value that sorts missing params last
                         key_tuple.append(float('inf'))
                 return tuple(key_tuple)
-
             except Exception as e:
                 print(f"Warning: Could not fetch params for run {run_id} for sorting: {e}")
-                return tuple(float('inf') for _ in vars_list) # Sort problematic runs last
+                return tuple(float('inf') for _ in vars_list)
 
         run_ids = sorted(run_ids, key=get_sort_key)
 
@@ -329,13 +319,28 @@ def plot_training(
     max_area_overall = float('-inf')
 
     valid_run_ids = []
-    for run_id_iter in run_ids: # Use different variable name to avoid confusion with outer scope run_id if it was a single string
+    show_area_plot = False  # Flag to determine if we should show area plot
+
+    for run_id_iter in run_ids:
         try:
+            run = client.get_run(run_id_iter)
+            run_args = run.data.params
+            
+            # Check if we should show area plot based on run args
+            if run_args.get('log_nominal_area', 'False').lower() == 'true':
+                show_area_plot = True
+
             # Fetch metrics
             loss_hist = client.get_metric_history(run_id_iter, 'loss')
             lr_hist = client.get_metric_history(run_id_iter, 'lr')
-            nom_area_hist = client.get_metric_history(run_id_iter, 'nominal_area')
-            best_area_hist = client.get_metric_history(run_id_iter, 'best_nominal_area') if show_best else []
+            
+            # Only fetch area metrics if we're showing the area plot
+            if show_area_plot:
+                nom_area_hist = client.get_metric_history(run_id_iter, 'nominal_area')
+                best_area_hist = client.get_metric_history(run_id_iter, 'best_nominal_area') if show_best else []
+            else:
+                nom_area_hist = []
+                best_area_hist = []
 
             # Process and filter NaNs/Infs
             loss = [(m.step, m.value) for m in loss_hist if np.isfinite(m.value)]
@@ -353,9 +358,9 @@ def plot_training(
                 'nominal_area': nom_area,
                 'best_area': best_area
             }
-            valid_run_ids.append(run_id_iter) # Add to list of runs we can actually plot
+            valid_run_ids.append(run_id_iter)
 
-            # Update overall min/max for axis scaling (only from valid points)
+            # Update overall min/max for axis scaling
             run_losses = [v for s, v in loss]
             run_lrs = [v for s, v in lr]
             run_nom_areas = [v for s, v in nom_area]
@@ -370,7 +375,7 @@ def plot_training(
             if run_nom_areas:
                 min_area_overall = min(min_area_overall, np.min(run_nom_areas))
                 max_area_overall = max(max_area_overall, np.max(run_nom_areas))
-            if run_best_areas: # Only update if show_best is True and data exists
+            if run_best_areas:
                 min_area_overall = min(min_area_overall, np.min(run_best_areas))
                 max_area_overall = max(max_area_overall, np.max(run_best_areas))
 
@@ -382,11 +387,15 @@ def plot_training(
         print("No runs with valid data to plot.")
         return
 
-    run_ids = valid_run_ids # Use only the runs we successfully processed
+    run_ids = valid_run_ids
 
     # --- Plotting Setup ---
-    # Create figure with three subplots, sharing x-axis
-    fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(14, 12), sharex=True)
+    # Create figure with appropriate number of subplots based on whether we show area plot
+    if show_area_plot:
+        fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(14, 12), sharex=True)
+    else:
+        fig, (ax1, ax3) = plt.subplots(2, 1, figsize=(14, 8), sharex=True)
+        ax2 = None  # No area plot
 
     colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
 
@@ -404,10 +413,8 @@ def plot_training(
             print(f"Warning: Could not fetch params for run {run_id_iter} for label: {e}")
         
         if var is None:
-            # When var is None, use run_id as label
             base_label = run_id_iter
         else:
-            # Existing behavior for when var is specified
             for v in vars_list:
                 param_value = run_params.get(v, "N/A")
                 label_parts.append(f"{v}={param_value}")
@@ -500,12 +507,6 @@ def plot_training(
             else:
                 ax3.plot(plot_lr_steps, plot_lr_values, alpha=0.8, color=color, label=base_label)
 
-    # get only unique cosmo models
-    cosmo_models = list(set([client.get_run(run_id).data.params['cosmo_model'] for run_id in run_ids]))
-    for cm in cosmo_models:
-        desi_samples_gd = get_desi_samples(cm)
-        desi_area = get_contour_area([desi_samples_gd], 'Om', 'hrdrag', 0.68)[0]
-        ax2.axhline(desi_area, color='black', linestyle='--', label=f'DESI ({cm}), Area: {desi_area:.3f}', alpha=0.5)
     # --- Final Plot Configuration ---
 
     # Determine legend font size based on number of runs
@@ -520,13 +521,20 @@ def plot_training(
     ax1.tick_params(axis='y')
     ax1.grid(True, axis='y', linestyle='--', alpha=0.6)
 
-    # Configure ax2 (Contour Area)
-    ax2.set_ylabel("Posterior Contour Area")
-    ax2.tick_params(axis='y')
-    # Only show legend if var is specified or there are multiple runs
-    if var is not None or num_runs > 1:
-        ax2.legend(loc='best', fontsize=legend_fontsize, title="Runs")
-    ax2.grid(True, axis='y', linestyle='--', alpha=0.6)
+    if show_area_plot:
+        # get only unique cosmo models
+        cosmo_models = list(set([client.get_run(run_id).data.params['cosmo_model'] for run_id in run_ids]))
+        for cm in cosmo_models:
+            desi_samples_gd = get_desi_samples(cm)
+            desi_area = get_contour_area([desi_samples_gd], 'Om', 'hrdrag', 0.68)[0]
+            ax2.axhline(desi_area, color='black', linestyle='--', label=f'DESI ({cm}), Area: {desi_area:.3f}', alpha=0.5)
+        # Configure ax2 (Contour Area)
+        ax2.set_ylabel("Posterior Contour Area")
+        ax2.tick_params(axis='y')
+        # Only show legend if var is specified or there are multiple runs
+        if var is not None or num_runs > 1:
+            ax2.legend(loc='best', fontsize=legend_fontsize, title="Runs")
+        ax2.grid(True, axis='y', linestyle='--', alpha=0.6)
 
     # Configure ax3 (Learning Rate)
     ax3.set_xlabel("Training Step")
@@ -538,7 +546,8 @@ def plot_training(
     # Apply log scale if requested
     if log_scale:
         ax1.set_yscale('log')
-        ax2.set_yscale('log')
+        if show_area_plot:
+            ax2.set_yscale('log')
         ax3.set_yscale('log')
         # Limits are automatically handled by matplotlib for log scale based on filtered data
     else:
@@ -549,11 +558,12 @@ def plot_training(
         elif np.isfinite(min_loss_overall): # Handle constant loss case
              ax1.set_ylim(min_loss_overall - 0.5, min_loss_overall + 0.5) # Example padding
 
-        if max_area_overall > min_area_overall:
-            area_pad = (max_area_overall - min_area_overall) * 0.05
-            ax2.set_ylim(min_area_overall - area_pad, max_area_overall + area_pad)
-        elif np.isfinite(min_area_overall): # Handle constant area case
-             ax2.set_ylim(min_area_overall - 0.5, min_area_overall + 0.5) # Example padding
+        if show_area_plot:
+            if max_area_overall > min_area_overall:
+                area_pad = (max_area_overall - min_area_overall) * 0.05
+                ax2.set_ylim(min_area_overall - area_pad, max_area_overall + area_pad)
+            elif np.isfinite(min_area_overall): # Handle constant area case
+                ax2.set_ylim(min_area_overall - 0.5, min_area_overall + 0.5) # Example padding
 
         if max_lr_overall > min_lr_overall :
              lr_pad = (max_lr_overall - min_lr_overall) * 0.05
