@@ -1,11 +1,16 @@
 
 import os
 import sys
-parent_dir_abs = os.path.abspath(os.pardir)
-sys.path.insert(0, parent_dir_abs) 
+# Get the directory containing the current script
+script_dir = os.path.dirname(os.path.abspath(__file__))
+# Get the parent directory ('BED_cosmo/') and add it to the Python path
+parent_dir_abs = os.path.abspath(os.path.join(script_dir, os.pardir))
+sys.path.insert(0, parent_dir_abs)
 
 import torch
 import torch.nn as nn
+import torch.distributed as tdist
+from torch.nn.parallel import DistributedDataParallel as DDP
 
 import numpy as np
 import pandas as pd
@@ -73,6 +78,9 @@ def marginalize_posterior(num_tracers, posterior_flow, ratios, num_param_samples
 
 def run_eval(eval_args, run_id, exp, device, **kwargs):
     storage_path = os.environ["SCRATCH"] + "/bed/BED_cosmo/num_tracers"
+
+    global_rank, local_rank, effective_device_id, pytorch_device_idx = init_training_env(tdist, device)
+
     mlflow.set_tracking_uri(storage_path + "/mlruns")
     client = MlflowClient()
     if exp is not None:
@@ -281,9 +289,24 @@ def run_eval(eval_args, run_id, exp, device, **kwargs):
                     seed=run_args["nf_seed"],
                     verbose=True
                     )
+                posterior_flow = DDP(posterior_flow, device_ids=[0], output_device=0, find_unused_parameters=False)
                 print(f"Loading NF model from {run_id}...")
-                checkpoint = torch.load(f'{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/checkpoints/nf_checkpoint_best_loss.pt', map_location=device)
-                posterior_flow.load_state_dict(checkpoint['model_state_dict'], strict=True)
+                checkpoint = torch.load(f'{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/checkpoints/checkpoint_last.pt', map_location=device)
+
+                # Load model state dict
+                state_dict = checkpoint['model_state_dict']
+                # Remove module prefixes if they exist
+                new_state_dict = {}
+                for k, v in state_dict.items():
+                    # Remove 'module.' prefixes
+                    if k.startswith('module.'):
+                        k = k[7:]  # Remove 'module.'
+                    if k.startswith('module.'):  # Handle double module prefix
+                        k = k[7:]  # Remove second 'module.'
+                    new_state_dict[k] = v
+                
+                # Load the cleaned state dict
+                posterior_flow.module.load_state_dict(new_state_dict, strict=True)
                 posterior_flow.to(device)
                 posterior_flow.eval()
                 
@@ -520,7 +543,7 @@ if __name__ == '__main__':
     }
     run_eval(
         eval_args,
-        run_id='debaab9ac8474b4a915947aa945d1b70',
+        run_id="13d1c666527e4da79791d1c89290dcdf",
         exp=None,
         device=device
         )

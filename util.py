@@ -19,6 +19,7 @@ import matplotlib.pyplot as plt
 from pyro.contrib.util import lexpand
 import subprocess
 from torch.nn.parallel import DistributedDataParallel as DDP
+import datetime
 
 torch.set_default_dtype(torch.float64)
 
@@ -27,11 +28,11 @@ if home_dir + "/bed/BED_cosmo" not in sys.path:
     sys.path.insert(0, home_dir + "/bed/BED_cosmo")
 sys.path.insert(0, home_dir + "/bed/BED_cosmo/num_tracers")
 
-def auto_seed(base_seed=0, local_rank=0):
+def auto_seed(base_seed=0, rank=0):
     if base_seed < 0:
         base_seed = torch.randint(0, 2**32 - 1, (1,)).item()
     
-    global_seed = base_seed + local_rank
+    global_seed = base_seed + rank
     # Set all relevant seeds
     random.seed(global_seed)
     np.random.seed(global_seed)
@@ -92,6 +93,54 @@ def save_checkpoint(model, optimizer, filepath, step=None, artifact_path=None, s
     # Log the checkpoint to mlflow
     torch.save(checkpoint, filepath)
     mlflow.log_artifact(filepath, artifact_path=artifact_path)
+
+def init_training_env(tdist, device):
+        # DDP initialization
+    if "LOCAL_RANK" in os.environ and torch.cuda.is_available():
+        local_rank = int(os.environ["LOCAL_RANK"]) # SLURM's local rank
+        global_rank = int(os.environ["RANK"])
+        
+        # When CUDA_VISIBLE_DEVICES isolates one GPU, PyTorch sees it as device 0.
+        pytorch_device_idx = int(os.environ["LOCAL_RANK"])  # The only GPU visible to this process
+        effective_device_id = pytorch_device_idx
+        torch.cuda.set_device(pytorch_device_idx)
+        
+        tdist.init_process_group(
+            backend="nccl",
+            init_method="env://",
+            world_size=int(os.environ["WORLD_SIZE"]),
+            rank=global_rank,
+            timeout=datetime.timedelta(seconds=180)  # Increased timeout
+        )
+        print(f"Process group initialized for rank {global_rank}")
+
+    else: # Not DDP
+        local_rank = 0 # Placeholder, not a DDP local rank
+        global_rank = 0
+        print("Running without DDP (single-node, single-GPU/CPU)")
+        if torch.cuda.is_available():
+            parsed_id_from_arg = 0 # Default to 0 for non-DDP CUDA
+            if isinstance(device, str) and device.startswith("cuda:") and ":" in device.split(":"):
+                try:
+                    parsed_id_from_arg = int(device.split(':')[1])
+                    if not (0 <= parsed_id_from_arg < torch.cuda.device_count()):
+                        print(f"Warning: Parsed device ID {parsed_id_from_arg} from '{device}' is invalid. Defaulting to 0.")
+                        parsed_id_from_arg = 0
+                except (IndexError, ValueError):
+                    print(f"Warning: Could not parse device ID from '{device}'. Defaulting to 0.")
+                    parsed_id_from_arg = 0
+            elif isinstance(device, int):
+                 if 0 <= device < torch.cuda.device_count():
+                     parsed_id_from_arg = device
+                 else:
+                     print(f"Warning: Integer device ID {device} is invalid. Defaulting to 0.")
+                     parsed_id_from_arg = 0
+            
+            effective_device_id = parsed_id_from_arg
+            torch.cuda.set_device(effective_device_id)
+        else:
+            effective_device_id = -1 # Indicates CPU
+    return global_rank, local_rank, effective_device_id, pytorch_device_idx
 
 def init_nf(flow_type, input_dim, context_dim, run_args, device="cuda:0", seed=None, verbose=False, local_rank=None, **kwargs):
     # Set seeds first, before any model initialization
@@ -489,6 +538,7 @@ def get_gpu_utilization(gpu_index=0):
             encoding='utf-8'
         )
         lines = output.strip().splitlines()
+
         if gpu_index < len(lines):
             util_str, mem_str = lines[gpu_index].strip().split(", ")
             return int(util_str), int(mem_str)
@@ -498,33 +548,84 @@ def get_gpu_utilization(gpu_index=0):
         print(f"GPU stat collection failed: {e}")
         return None, None
     
-def log_usage_metrics(device, process, step):
+def log_usage_metrics(device_str, process, step, global_rank=0): # Renamed device to device_str for clarity
     cpu_memory = process.memory_info().rss / 1024**2  # MB
-    mlflow.log_metric("cpu_memory_usage", cpu_memory, step=step)
+    mlflow.log_metric("cpu_memory_usage_" + str(global_rank), cpu_memory, step=step)
 
     # CPU utilization (percent)
     cpu_percent = process.cpu_percent(interval=0)  # short interval for up-to-date value
-    mlflow.log_metric("cpu_percent", cpu_percent, step=step)
+    mlflow.log_metric("cpu_percent_" + str(global_rank), cpu_percent, step=step)
 
     # Disk I/O (per process)
     try:
         io_counters = process.io_counters()
-        mlflow.log_metric("io_read_bytes", io_counters.read_bytes, step=step)
-        mlflow.log_metric("io_write_bytes", io_counters.write_bytes, step=step)
-    except Exception as e:
-        print(f"Could not log process I/O: {e}")
+        mlflow.log_metric("io_read_bytes_" + str(global_rank), io_counters.read_bytes, step=step)
+        mlflow.log_metric("io_write_bytes_" + str(global_rank), io_counters.write_bytes, step=step)
+    except (NotImplementedError, AttributeError) as e: # Handle systems where io_counters might not be available
+        print(f"Rank {global_rank}: Could not log process I/O: {e}")
 
-    gpu_index = device.index if hasattr(device, 'index') and device.index is not None else 0
-    gpu_util, gpu_mem = get_gpu_utilization(gpu_index)
-    if gpu_util is not None:
-        mlflow.log_metric("gpu_util", gpu_util, step=step)
-        mlflow.log_metric("gpu_memory_total_usage", gpu_mem * 1024**2 / 1000000, step=step)
-
+    # GPU metrics from nvidia-smi
     if torch.cuda.is_available():
-        with torch.cuda.device(device):
-            gpu_memory = torch.cuda.memory_allocated(device) / 1024**2
-            mlflow.log_metric("gpu_memory_torch_usage", gpu_memory, step=step)
-            gpu_reserved = torch.cuda.memory_reserved(device) / 1024**2
-            mlflow.log_metric("gpu_memory_torch_reserved", gpu_reserved, step=step)
-            gpu_peak_memory = torch.cuda.max_memory_allocated(device) / 1024**2
-            mlflow.log_metric("gpu_memory_torch_peak", gpu_peak_memory, step=step)
+        physical_gpu_id_for_nvidia_smi = None
+        if isinstance(device_str, str) and device_str.startswith("cuda:"):
+            try:
+                logical_idx = int(device_str.split(':')[1])
+
+                cuda_visible_devices_env = os.environ.get("CUDA_VISIBLE_DEVICES")
+                if cuda_visible_devices_env:
+                    # Filter out non-integer values and handle empty strings if any
+                    visible_physical_ids_str = [s.strip() for s in cuda_visible_devices_env.split(',') if s.strip()]
+                    visible_physical_ids = []
+                    for s_id in visible_physical_ids_str:
+                        try:
+                            visible_physical_ids.append(int(s_id))
+                        except ValueError:
+                            print(f"Rank {global_rank}: Warning: Non-integer value '{s_id}' in CUDA_VISIBLE_DEVICES='{cuda_visible_devices_env}'. Skipping.")
+                    
+                    if not visible_physical_ids and cuda_visible_devices_env: # If parsing resulted in empty list but env var was set
+                         print(f"Rank {global_rank}: Warning: CUDA_VISIBLE_DEVICES='{cuda_visible_devices_env}' parsed to no valid IDs. Assuming logical index {logical_idx} as physical.")
+                         physical_gpu_id_for_nvidia_smi = logical_idx
+                    elif 0 <= logical_idx < len(visible_physical_ids):
+                        physical_gpu_id_for_nvidia_smi = visible_physical_ids[logical_idx]
+                    else:
+                        print(f"Rank {global_rank}: Logical index {logical_idx} is out of bounds for parsed CUDA_VISIBLE_DEVICES physical IDs {visible_physical_ids}. Defaulting to logical index as physical.")
+                        physical_gpu_id_for_nvidia_smi = logical_idx # Fallback
+                else:
+                    # CUDA_VISIBLE_DEVICES not set, logical index is the physical index
+                    physical_gpu_id_for_nvidia_smi = logical_idx
+            except Exception as e:
+                print(f"Rank {global_rank}: Error determining physical GPU ID for nvidia-smi from device string '{device_str}': {e}. Attempting with 0.")
+                physical_gpu_id_for_nvidia_smi = 0 # Fallback to 0
+        
+        elif device_str == "cpu":
+            pass # No GPU to query with nvidia-smi
+        else:
+            # This case implies device_str is not "cuda:X" or "cpu"
+            print(f"Rank {global_rank}: Unexpected device string '{device_str}' for nvidia-smi. If CUDA is available, attempting with GPU 0.")
+            physical_gpu_id_for_nvidia_smi = 0 # Default to 0 if CUDA is available but device_str is unusual
+
+        if physical_gpu_id_for_nvidia_smi is not None:
+            gpu_util, gpu_mem_mb = get_gpu_utilization(gpu_index=physical_gpu_id_for_nvidia_smi)
+            if gpu_util is not None:
+                mlflow.log_metric("gpu_util_nvidia_smi_percent_" + str(global_rank), gpu_util, step=step)
+            if gpu_mem_mb is not None: # gpu_mem_mb is in MiB
+                mlflow.log_metric("gpu_memory_nvidia_smi_used_MB_" + str(global_rank), gpu_mem_mb, step=step)
+
+    # GPU metrics from PyTorch (uses the device_str like "cuda:0" directly)
+    if torch.cuda.is_available() and isinstance(device_str, str) and device_str.startswith("cuda:"):
+        try:
+            # PyTorch functions below accept "cuda:X" string or torch.device object
+            gpu_memory_allocated_mb = torch.cuda.memory_allocated(device_str) / 1024**2
+            mlflow.log_metric("gpu_memory_torch_allocated_MB_" + str(global_rank), gpu_memory_allocated_mb, step=step)
+            
+            gpu_memory_reserved_mb = torch.cuda.memory_reserved(device_str) / 1024**2
+            mlflow.log_metric("gpu_memory_torch_reserved_MB_" + str(global_rank), gpu_memory_reserved_mb, step=step)
+            
+            # torch.cuda.reset_peak_memory_stats(device_str) # Optional: reset if you want peak per step
+            gpu_max_memory_allocated_mb = torch.cuda.max_memory_allocated(device_str) / 1024**2
+            mlflow.log_metric("gpu_memory_torch_max_allocated_MB_" + str(global_rank), gpu_max_memory_allocated_mb, step=step)
+        except Exception as e:
+            print(f"Rank {global_rank}: Error logging PyTorch CUDA memory metrics for device '{device_str}': {e}")
+    elif device_str == "cpu" and global_rank == 0: # Log only once for CPU info or if relevant
+        # print(f"Rank {global_rank}: Process is on CPU. No PyTorch GPU memory metrics to log.")
+        pass
