@@ -614,18 +614,25 @@ def log_usage_metrics(device_str, process, step, global_rank=0): # Renamed devic
     # GPU metrics from PyTorch (uses the device_str like "cuda:0" directly)
     if torch.cuda.is_available() and isinstance(device_str, str) and device_str.startswith("cuda:"):
         try:
-            # PyTorch functions below accept "cuda:X" string or torch.device object
+            torch.cuda.reset_peak_memory_stats(device_str)
+            
             gpu_memory_allocated_mb = torch.cuda.memory_allocated(device_str) / 1024**2
             mlflow.log_metric("gpu_memory_torch_allocated_MB_" + str(global_rank), gpu_memory_allocated_mb, step=step)
             
             gpu_memory_reserved_mb = torch.cuda.memory_reserved(device_str) / 1024**2
             mlflow.log_metric("gpu_memory_torch_reserved_MB_" + str(global_rank), gpu_memory_reserved_mb, step=step)
             
-            # torch.cuda.reset_peak_memory_stats(device_str) # Optional: reset if you want peak per step
             gpu_max_memory_allocated_mb = torch.cuda.max_memory_allocated(device_str) / 1024**2
             mlflow.log_metric("gpu_memory_torch_max_allocated_MB_" + str(global_rank), gpu_max_memory_allocated_mb, step=step)
+
+            # Calculate and log GPU memory capacity utilization (memory occupancy)
+            total_gpu_memory_bytes = torch.cuda.get_device_properties(device_str).total_memory
+            if total_gpu_memory_bytes > 0:
+                gpu_memory_capacity_utilization = (torch.cuda.memory_allocated(device_str) / total_gpu_memory_bytes)
+                mlflow.log_metric("gpu_memory_capacity_utilization_" + str(global_rank), gpu_memory_capacity_utilization, step=step)
+            
         except Exception as e:
             print(f"Rank {global_rank}: Error logging PyTorch CUDA memory metrics for device '{device_str}': {e}")
     elif device_str == "cpu" and global_rank == 0: # Log only once for CPU info or if relevant
-        # print(f"Rank {global_rank}: Process is on CPU. No PyTorch GPU memory metrics to log.")
+        print(f"Rank {global_rank}: Process is on CPU. No PyTorch GPU memory metrics to log.")
         pass

@@ -508,7 +508,7 @@ def single_run(
         # Synchronize all ranks after loading checkpoint
         tdist.barrier()
     else:
-        seed = auto_seed(base_seed=run_args["pyro_seed"], local_rank=global_rank)
+        seed = auto_seed(base_seed=run_args["pyro_seed"], rank=global_rank)
         # test sample from the flow (only on rank 0)
         with torch.no_grad():
             samples = posterior_flow.module(nominal_context).sample((1000,)).cpu().numpy()
@@ -679,7 +679,6 @@ def single_run(
             # Log metrics for each rank
             mlflow.log_metric(f"loss_rank_{global_rank}", loss.mean().item(), step=step)
             mlflow.log_metric(f"agg_loss_rank_{global_rank}", agg_loss.item(), step=step)
-            mlflow.log_metric(f"memory_usage_MB_rank_{global_rank}", memory_usage, step=step)
 
             # Update progress bar or print status
             if global_rank == 0:
@@ -763,7 +762,7 @@ def single_run(
                 for param_group in optimizer.param_groups:
                     mlflow.log_metric("lr", param_group['lr'], step=step)
 
-            #log_usage_metrics(current_pytorch_device, process, step, global_rank)
+            log_usage_metrics(current_pytorch_device, process, step, global_rank)
             step += 1
             if step >= steps:
                 break
