@@ -271,6 +271,160 @@ def init_scheduler(optimizer, run_args):
         raise ValueError(f"Unknown scheduler_type: {run_args['scheduler_type']}")
     return scheduler
 
+def init_run(tdist, global_rank, current_pytorch_device, storage_path, mlflow_experiment_name, cosmo_model, run_args, kwargs, resume_id=None, resume_step=None, add_steps=0):
+        """Initialize MLflow run settings and broadcast to all ranks."""
+        
+        if global_rank == 0:
+            if resume_id:
+                # Resume existing run
+                client = mlflow.MlflowClient()
+                run_info = client.get_run(resume_id)
+                exp_id = run_info.info.experiment_id
+                exp_name = mlflow.get_experiment(exp_id).name
+                
+                mlflow.set_experiment(experiment_id=exp_id)
+                mlflow.start_run(run_id=resume_id)
+                
+                if resume_step is None:
+                    raise ValueError("resume_step must be provided when resuming a run")
+                
+                # Update run parameters
+                mlflow_experiment_name = exp_name
+                cosmo_model = run_info.data.params["cosmo_model"]
+                run_args = parse_mlflow_params(run_info.data.params)
+                if add_steps:
+                    run_args["steps"] += add_steps
+                
+                n_devices = tdist.get_world_size() if "LOCAL_RANK" in os.environ else 1
+                if run_args["n_particles"] != n_devices * run_args["n_particles_per_device"]:
+                    raise ValueError(f"n_particles ({run_args['n_particles']}) must be equal to n_devices * n_particles_per_device ({n_devices * run_args['n_particles_per_device']})")
+                
+                # Get metrics from previous run
+                best_nominal_area, best_loss, start_step = _get_resume_metrics(
+                    client, resume_id, resume_step, storage_path, exp_id
+                )
+
+                # Prepare tensors for broadcasting
+                tensors = _prepare_broadcast_tensors(
+                    exp_id, start_step, best_loss, best_nominal_area, 
+                    current_pytorch_device, resume_id, exp_name
+                )
+            else:
+                # Start new run
+                mlflow.set_experiment(mlflow_experiment_name)
+                mlflow.start_run()
+                
+                n_devices = tdist.get_world_size() if "LOCAL_RANK" in os.environ else 1
+                # Log parameters
+                mlflow.log_param("cosmo_model", cosmo_model)
+                for key, value in run_args.items():
+                    mlflow.log_param(key, value)
+                for key, value in kwargs.items():
+                    mlflow.log_param(key, value)
+                mlflow.log_param("n_devices", n_devices)
+                mlflow.log_param("n_particles", n_devices * run_args["n_particles_per_device"])
+                
+                # Initialize metrics
+                start_step = 0
+                best_loss = np.nan
+                best_nominal_area = np.nan
+                
+                
+                # Create artifact directories
+                os.makedirs(f"{storage_path}/mlruns/{mlflow.active_run().info.experiment_id}/{mlflow.active_run().info.run_id}/artifacts/checkpoints", exist_ok=True)
+                os.makedirs(f"{storage_path}/mlruns/{mlflow.active_run().info.experiment_id}/{mlflow.active_run().info.run_id}/artifacts/plots", exist_ok=True)
+                
+                # Prepare tensors for broadcasting
+                tensors = _prepare_broadcast_tensors(
+                    mlflow.active_run().info.experiment_id, start_step, 
+                    best_loss, best_nominal_area, current_pytorch_device,
+                    mlflow.active_run().info.run_id, mlflow_experiment_name
+                )
+            print(f"Running with parameters for cosmo_model='{cosmo_model}':")
+            print(json.dumps(run_args, indent=2))
+        else:
+            # Initialize tensors on other ranks
+            tensors = {
+                'exp_id': torch.zeros(1, dtype=torch.long, device=current_pytorch_device),
+                'start_step': torch.zeros(1, dtype=torch.long, device=current_pytorch_device),
+                'best_loss': torch.zeros(1, dtype=torch.float64, device=current_pytorch_device),
+                'best_nominal_area': torch.zeros(1, dtype=torch.float64, device=current_pytorch_device),
+                'run_id': [None],
+                'exp_name': [None]
+                }
+        
+        _broadcast_variables(tensors, global_rank, run_args, tdist)
+
+        # Set up MLflow for non-zero ranks
+        if global_rank != 0:
+            mlflow.set_experiment(experiment_id=str(tensors['exp_id'].item()))
+            mlflow.start_run(run_id=tensors['run_id'][0], nested=True)
+        
+        # Create ml_info object
+        ml_info = type('mlinfo', (), {})()
+        ml_info.experiment_id = str(tensors['exp_id'].item())
+        ml_info.run_id = tensors['run_id'][0]
+
+        # All ranks join the same run
+        if resume_id:
+            mlflow.start_run(run_id=resume_id, nested=True)
+        else:
+            mlflow.start_run(run_id=ml_info.run_id, nested=True)
+
+        return ml_info, tensors['start_step'].item(), tensors['best_loss'].item(), tensors['best_nominal_area'].item()
+
+def _broadcast_variables(tensors, global_rank, run_args,tdist):
+
+    # Broadcast tensors from rank 0 to all ranks
+    tdist.barrier()
+    tdist.broadcast(tensors['exp_id'], src=0)
+    tdist.broadcast(tensors['start_step'], src=0)
+    tdist.broadcast(tensors['best_loss'], src=0)
+    tdist.broadcast(tensors['best_nominal_area'], src=0)
+    tdist.broadcast_object_list(tensors['run_id'], src=0)
+    tdist.broadcast_object_list(tensors['exp_name'], src=0)
+
+def _get_resume_metrics(client, resume_id, resume_step, storage_path, exp_id):
+    """Get metrics from previous run for resuming."""
+    best_nominal_areas = client.get_metric_history(resume_id, 'best_nominal_area')
+    best_nominal_area_steps = np.array([metric.step for metric in best_nominal_areas])
+    if len(best_nominal_area_steps) > 0:
+        closest_idx = np.argmin(np.abs(best_nominal_area_steps - resume_step))
+        best_nominal_area = best_nominal_areas[closest_idx].value if best_nominal_area_steps[closest_idx] < resume_step else best_nominal_areas[closest_idx - 1].value
+    else:
+        best_nominal_area = np.nan
+    
+    best_losses = client.get_metric_history(resume_id, 'best_loss')
+    best_loss_steps = np.array([metric.step for metric in best_losses])
+    closest_idx = np.argmin(np.abs(best_loss_steps - resume_step))
+    best_loss = best_losses[closest_idx].value if best_loss_steps[closest_idx] < resume_step else best_losses[closest_idx - 1].value
+    
+    checkpoint_files = os.listdir(f"{storage_path}/mlruns/{exp_id}/{resume_id}/artifacts/checkpoints")
+    checkpoint_steps = sorted([
+        int(f.split('_')[-1].split('.')[0]) 
+        for f in checkpoint_files 
+        if f.startswith('checkpoint_') 
+        and f.endswith('.pt') 
+        and not f.endswith('_loss_best.pt') 
+        and not f.endswith('_nominal_area_best.pt') 
+        and not f.endswith('_last.pt')
+    ])
+    closest_idx = np.argmin(np.abs(np.array(checkpoint_steps) - resume_step))
+    start_step = checkpoint_steps[closest_idx] if checkpoint_steps[closest_idx] < resume_step else checkpoint_steps[closest_idx - 1]
+    
+    return best_nominal_area, best_loss, start_step
+
+def _prepare_broadcast_tensors(exp_id, start_step, best_loss, best_nominal_area, device, run_id, exp_name):
+    """Prepare tensors for broadcasting."""
+    return {
+        'exp_id': torch.tensor([int(exp_id)], dtype=torch.long, device=device),
+        'start_step': torch.tensor([start_step], dtype=torch.long, device=device),
+        'best_loss': torch.tensor([best_loss], dtype=torch.float64, device=device),
+        'best_nominal_area': torch.tensor([best_nominal_area], dtype=torch.float64, device=device),
+        'run_id': [run_id],
+        'exp_name': [exp_name]
+    }
+
 def run_eval(run_id, eval_args, step='loss_best', cosmo_exp='num_tracers'):
     storage_path = os.environ["SCRATCH"] + f"/bed/BED_cosmo/{cosmo_exp}"
     mlflow.set_tracking_uri(storage_path + "/mlruns")
@@ -559,8 +713,13 @@ def log_usage_metrics(device_str, process, step, global_rank=0): # Renamed devic
     # Disk I/O (per process)
     try:
         io_counters = process.io_counters()
-        mlflow.log_metric("io_read_bytes_" + str(global_rank), io_counters.read_bytes, step=step)
-        mlflow.log_metric("io_write_bytes_" + str(global_rank), io_counters.write_bytes, step=step)
+        # Convert to MB and update metric name
+        io_read_mb = io_counters.read_bytes / (1024**2)
+        mlflow.log_metric("io_read_" + str(global_rank), io_read_mb, step=step)
+        
+        # Convert to MB and update metric name
+        io_write_mb = io_counters.write_bytes / (1024**2)
+        mlflow.log_metric("io_write_" + str(global_rank), io_write_mb, step=step)
     except (NotImplementedError, AttributeError) as e: # Handle systems where io_counters might not be available
         print(f"Rank {global_rank}: Could not log process I/O: {e}")
 
@@ -609,28 +768,32 @@ def log_usage_metrics(device_str, process, step, global_rank=0): # Renamed devic
             if gpu_util is not None:
                 mlflow.log_metric("gpu_util_nvidia_smi_percent_" + str(global_rank), gpu_util, step=step)
             if gpu_mem_mb is not None: # gpu_mem_mb is in MiB
-                mlflow.log_metric("gpu_memory_nvidia_smi_used_MB_" + str(global_rank), gpu_mem_mb, step=step)
+                mlflow.log_metric("gpu_memory_nvidia_smi_used_" + str(global_rank), gpu_mem_mb, step=step)
 
     # GPU metrics from PyTorch (uses the device_str like "cuda:0" directly)
     if torch.cuda.is_available() and isinstance(device_str, str) and device_str.startswith("cuda:"):
         try:
-            torch.cuda.reset_peak_memory_stats(device_str)
-            
+            # Log current allocated memory
             gpu_memory_allocated_mb = torch.cuda.memory_allocated(device_str) / 1024**2
-            mlflow.log_metric("gpu_memory_torch_allocated_MB_" + str(global_rank), gpu_memory_allocated_mb, step=step)
+            mlflow.log_metric("gpu_memory_torch_allocated_" + str(global_rank), gpu_memory_allocated_mb, step=step)
             
+            # Log current reserved memory
             gpu_memory_reserved_mb = torch.cuda.memory_reserved(device_str) / 1024**2
-            mlflow.log_metric("gpu_memory_torch_reserved_MB_" + str(global_rank), gpu_memory_reserved_mb, step=step)
+            mlflow.log_metric("gpu_memory_torch_reserved_" + str(global_rank), gpu_memory_reserved_mb, step=step)
             
+            # Log max memory allocated since last reset
             gpu_max_memory_allocated_mb = torch.cuda.max_memory_allocated(device_str) / 1024**2
-            mlflow.log_metric("gpu_memory_torch_max_allocated_MB_" + str(global_rank), gpu_max_memory_allocated_mb, step=step)
+            mlflow.log_metric("gpu_memory_torch_max_allocated_" + str(global_rank), gpu_max_memory_allocated_mb, step=step)
 
             # Calculate and log GPU memory capacity utilization (memory occupancy)
             total_gpu_memory_bytes = torch.cuda.get_device_properties(device_str).total_memory
             if total_gpu_memory_bytes > 0:
-                gpu_memory_capacity_utilization = (torch.cuda.memory_allocated(device_str) / total_gpu_memory_bytes)
+                max_allocated_bytes = torch.cuda.max_memory_allocated(device_str) 
+                gpu_memory_capacity_utilization = (max_allocated_bytes / total_gpu_memory_bytes) * 100
                 mlflow.log_metric("gpu_memory_capacity_utilization_" + str(global_rank), gpu_memory_capacity_utilization, step=step)
             
+            torch.cuda.reset_peak_memory_stats(device_str) 
+
         except Exception as e:
             print(f"Rank {global_rank}: Error logging PyTorch CUDA memory metrics for device '{device_str}': {e}")
     elif device_str == "cpu" and global_rank == 0: # Log only once for CPU info or if relevant

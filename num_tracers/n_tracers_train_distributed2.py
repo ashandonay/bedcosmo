@@ -51,11 +51,11 @@ import contextlib
 from plotting import get_contour_area, plot_training, plot_eig_steps
 
 class FlowLikelihoodDataset(Dataset):
-    def __init__(self, num_tracers, designs, n_particles_per_gpu, observation_labels, target_labels, device="cuda"):
+    def __init__(self, num_tracers, designs, n_particles_per_device, observation_labels, target_labels, device="cuda"):
         self.num_tracers = num_tracers
         # Move designs to GPU for faster sampling
         self.designs = designs.to(device)
-        self.n_particles_per_gpu = n_particles_per_gpu
+        self.n_particles_per_device = n_particles_per_device
         self.device = device
         self.observation_labels = observation_labels
         self.target_labels = target_labels
@@ -66,7 +66,7 @@ class FlowLikelihoodDataset(Dataset):
 
     def __getitem__(self, idx):
         # Dynamically expand the designs on each access
-        expanded_design = lexpand(self.designs, self.n_particles_per_gpu).to(self.device)
+        expanded_design = lexpand(self.designs, self.n_particles_per_device).to(self.device)
 
         # Generate samples from the NumTracers pyro model
         with torch.no_grad():
@@ -90,12 +90,12 @@ class FlowLikelihoodDataset(Dataset):
         return condition_input, samples
 
 # Helper function for DataLoader with DistributedSampler
-def get_dataloader(num_tracers, designs, n_particles_per_gpu, observation_labels, target_labels, batch_size, pytorch_device_idx_for_ddp, num_workers=0, world_size=None):
+def get_dataloader(num_tracers, designs, n_particles_per_device, observation_labels, target_labels, batch_size, pytorch_device_idx_for_ddp, num_workers=0, world_size=None):
     # Create dataset with designs on GPU
     dataset = FlowLikelihoodDataset(
         num_tracers=num_tracers,
         designs=designs.to(f"cuda:{pytorch_device_idx_for_ddp}"),
-        n_particles_per_gpu=n_particles_per_gpu,
+        n_particles_per_device=n_particles_per_device,
         observation_labels=observation_labels,
         target_labels=target_labels,
         device=f"cuda:{pytorch_device_idx_for_ddp}"
@@ -123,155 +123,35 @@ def single_run(
     **kwargs,
 ):
 
-    print(mlflow_experiment_name)
     global_rank, local_rank, effective_device_id, pytorch_device_idx = init_training_env(tdist, device)
 
     # Clear GPU cache
     torch.cuda.empty_cache()
+    process = psutil.Process()
     # Trigger garbage collection for CPU
     gc.collect()
-    process = psutil.Process(os.getpid())
-    print(f"Memory before run: {process.memory_info().rss / 1024**2} MB")
     pyro.clear_param_store()
-    print(f"Running with parameters for cosmo_model='{cosmo_model}':")
     storage_path = os.environ["SCRATCH"] + "/bed/BED_cosmo/num_tracers"
     home_dir = os.environ["HOME"]
     mlflow.set_tracking_uri(storage_path + "/mlruns")
     
     # Initialize MLflow experiment and run info on rank 0
     current_pytorch_device = f"cuda:{pytorch_device_idx}" if "LOCAL_RANK" in os.environ and torch.cuda.is_available() else (f"cuda:{effective_device_id}" if effective_device_id != -1 else "cpu")
+    # get total number of devices used
 
-    if global_rank == 0:  # Use global rank 0 for MLflow initialization
-        if resume_id:
-            # First get the experiment info from the run we want to resume
-            client = mlflow.MlflowClient()
-            run_info = client.get_run(resume_id)
-            exp_id = run_info.info.experiment_id
-            exp_name = mlflow.get_experiment(exp_id).name
-            
-            # Set the experiment before starting the run
-            mlflow.set_experiment(experiment_id=exp_id)
-            mlflow.start_run(run_id=resume_id)
-            
-            if resume_step is None:
-                raise ValueError("resume_step must be provided when resuming a run")
-            
-            # get the exp name from the run id
-            mlflow_experiment_name = exp_name
-            cosmo_model = run_info.data.params["cosmo_model"]
-            run_args = parse_mlflow_params(run_info.data.params)
-            print(json.dumps(run_args, indent=2))
-            if add_steps:
-                run_args["steps"] += add_steps
-            best_nominal_areas = client.get_metric_history(resume_id, 'best_nominal_area')
-            best_nominal_area_steps = np.array([metric.step for metric in best_nominal_areas])
-            # get the best area from a step prior to the resume step
-            closest_idx = np.argmin(np.abs(best_nominal_area_steps - resume_step))
-            best_nominal_area = best_nominal_areas[closest_idx].value if best_nominal_area_steps[closest_idx] < resume_step else best_nominal_areas[closest_idx - 1].value
-            print(f"Starting at best nominal area: {best_nominal_area} at step {best_nominal_area_steps[closest_idx]}")
-            best_losses = client.get_metric_history(resume_id, 'best_loss')
-            best_loss_steps = np.array([metric.step for metric in best_losses])
-            # get the best loss from a step prior to the resume step
-            closest_idx = np.argmin(np.abs(best_loss_steps - resume_step))
-            best_loss = best_losses[closest_idx].value if best_loss_steps[closest_idx] < resume_step else best_losses[closest_idx - 1].value
-            print(f"Starting at best loss: {best_loss} at step {best_loss_steps[closest_idx]}")
-            checkpoint_files = os.listdir(f"{storage_path}/mlruns/{exp_id}/{resume_id}/artifacts/checkpoints")
-            checkpoint_steps = sorted([
-                int(f.split('_')[-1].split('.')[0]) 
-                for f in checkpoint_files 
-                if f.startswith('checkpoint_') 
-                and f.endswith('.pt') 
-                and not f.endswith('_loss_best.pt') 
-                and not f.endswith('_nominal_area_best.pt') 
-                and not f.endswith('_last.pt')
-            ])
-            # get the checkpoint prior to the resume step
-            closest_idx = np.argmin(np.abs(np.array(checkpoint_steps) - resume_step))
-            start_step = checkpoint_steps[closest_idx] if checkpoint_steps[closest_idx] < resume_step else checkpoint_steps[closest_idx - 1]
-            history = client.get_metric_history(resume_id, 'loss')
-            history = [metric.value for metric in history]
-            history = history[:start_step]
-            # get the checkpoint file name for the start step
-            checkpoint_dir = f"{storage_path}/mlruns/{exp_id}/{resume_id}/artifacts/checkpoints"
-            checkpoint_file = [f for f in os.listdir(checkpoint_dir) if f.startswith('checkpoint_') and f.endswith('.pt') and f.split('_')[-1].split('.')[0] == str(start_step)][0]
-            start_step += 1
-            checkpoint_path = f"{checkpoint_dir}/{checkpoint_file}"
-            print(f"Resuming MLflow run: {resume_id}")
-            
-            # Convert numeric values to tensors for broadcasting
-            exp_id_tensor = torch.tensor([int(exp_id)], dtype=torch.long, device=current_pytorch_device)
-            start_step_tensor = torch.tensor([start_step], dtype=torch.long, device=current_pytorch_device)
-            best_loss_tensor = torch.tensor([best_loss], dtype=torch.float64, device=current_pytorch_device)
-            best_nominal_area_tensor = torch.tensor([best_nominal_area], dtype=torch.float64, device=current_pytorch_device)
-            
-            # Store run_id as a string in a list for broadcasting
-            run_id_list = [resume_id]
-            exp_name_list = [exp_name]
-        else:
-            print(json.dumps(run_args, indent=2))
-            mlflow.set_experiment(mlflow_experiment_name)
-            mlflow.start_run()
-            # Log parameters for a new run
-            mlflow.log_param("cosmo_model", cosmo_model)
-            # log params in run_args
-            for key, value in run_args.items():
-                mlflow.log_param(key, value)
-            # log params in kwargs
-            for key, value in kwargs.items():
-                mlflow.log_param(key, value)
-            start_step = 0
-            best_loss = float('inf')
-            best_nominal_area = float('inf')
-            history = []
-            
-            # Create directories for artifacts
-            os.makedirs(f"{storage_path}/mlruns/{mlflow.active_run().info.experiment_id}/{mlflow.active_run().info.run_id}/artifacts/checkpoints", exist_ok=True)
-            os.makedirs(f"{storage_path}/mlruns/{mlflow.active_run().info.experiment_id}/{mlflow.active_run().info.run_id}/artifacts/plots", exist_ok=True)
-            
-            # Convert numeric values to tensors for broadcasting
-            exp_id_tensor = torch.tensor([int(mlflow.active_run().info.experiment_id)], dtype=torch.long, device=current_pytorch_device)
-            start_step_tensor = torch.tensor([start_step], dtype=torch.long, device=current_pytorch_device)
-            best_loss_tensor = torch.tensor([best_loss], dtype=torch.float64, device=current_pytorch_device)
-            best_nominal_area_tensor = torch.tensor([best_nominal_area], dtype=torch.float64, device=current_pytorch_device)
-            
-            # Store run_id as a string in a list for broadcasting
-            run_id_list = [mlflow.active_run().info.run_id]
-            exp_name_list = [mlflow_experiment_name]
-    else:
-        # Initialize tensors on other ranks
-        exp_id_tensor = torch.zeros(1, dtype=torch.long, device=current_pytorch_device)
-        start_step_tensor = torch.zeros(1, dtype=torch.long, device=current_pytorch_device)
-        best_loss_tensor = torch.zeros(1, dtype=torch.float64, device=current_pytorch_device)
-        best_nominal_area_tensor = torch.zeros(1, dtype=torch.float64, device=current_pytorch_device)
-        run_id_list = [None]  # Initialize empty list for run_id
-        exp_name_list = [None]  # Initialize empty list for exp_name
-
-    # Synchronize all ranks before broadcasting
-    tdist.barrier()
-
-    # Broadcast all tensors and lists from global rank 0
-    tdist.broadcast(exp_id_tensor, src=0)
-    tdist.broadcast(start_step_tensor, src=0)
-    tdist.broadcast(best_loss_tensor, src=0)
-    tdist.broadcast(best_nominal_area_tensor, src=0)
-    tdist.broadcast_object_list(run_id_list, src=0)
-    tdist.broadcast_object_list(exp_name_list, src=0)
-    
-    # Set up MLflow for all ranks
-    if global_rank != 0:  # Use global rank check instead of local rank
-        mlflow.set_experiment(experiment_id=str(exp_id_tensor.item()))
-        mlflow.start_run(run_id=run_id_list[0], nested=True)
-    
-    # Create ml_info object on all ranks with the same values
-    ml_info = type('mlinfo', (), {})()
-    ml_info.experiment_id = str(exp_id_tensor.item())
-    ml_info.run_id = run_id_list[0]
-    
-    # Set resume-related variables on all ranks
-    start_step = start_step_tensor.item()
-    best_loss = best_loss_tensor.item()
-    best_nominal_area = best_nominal_area_tensor.item()
-    history = []  # History is not critical for other ranks
+    ml_info, start_step, best_loss, best_nominal_area = init_run(
+        tdist, 
+        global_rank, 
+        current_pytorch_device, 
+        storage_path, 
+        mlflow_experiment_name, 
+        cosmo_model, 
+        run_args, 
+        kwargs, 
+        resume_id=resume_id, 
+        resume_step=resume_step, 
+        add_steps=add_steps
+        )
 
     # Broadcast run_args from rank 0 to ensure consistency, especially for 'steps' when resuming with add_steps
     if global_rank == 0:
@@ -299,9 +179,6 @@ def single_run(
     nominal_cov = np.load(home_dir + run_args["data_path"] + 'desi_cov.npy')
     # select only the rows corresponding to the tracers
     
-
-    #desi_data = desi_df[desi_df['tracer'].isin(run_args["tracers"])]
-    #nominal_cov = desi_cov[np.ix_(desi_data.index, desi_data.index)]
 
     ############################################### Priors ###############################################
 
@@ -386,11 +263,12 @@ def single_run(
     context_dim = len(classes.keys()) + 10 if run_args["include_D_M"] else len(classes.keys()) + 5
     if global_rank == 0:
         print("MLFlow Run Info:", ml_info.experiment_id + "/" + ml_info.run_id)
-        np.save(f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/designs.npy", designs.cpu().detach().numpy())
-        mlflow.log_artifact(f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/designs.npy")
+        print(f"Using {run_args['n_devices']} devices with {run_args['n_particles']} total particles.")
         print("Designs shape:", designs.shape)
         print("Calculating normalizing flow EIG...")
         print(f'Input dim: {input_dim}, Context dim: {context_dim}')
+        np.save(f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/designs.npy", designs.cpu().detach().numpy())
+        mlflow.log_artifact(f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/designs.npy")
 
     posterior_flow = init_nf(
         run_args["flow_type"],
@@ -406,7 +284,6 @@ def single_run(
     if "LOCAL_RANK" in os.environ and torch.cuda.is_available():
         ddp_device_spec = [pytorch_device_idx] 
         ddp_output_device_spec = pytorch_device_idx
-        print(f"Rank {global_rank}: Determined DDP device_ids: {ddp_device_spec}, output_device: {ddp_output_device_spec}")
     else:
         ddp_device_spec = [effective_device_id] if effective_device_id != -1 else None
         ddp_output_device_spec = effective_device_id if effective_device_id != -1 else None
@@ -433,6 +310,9 @@ def single_run(
     
     # Load checkpoint if specified
     if resume_id:
+        checkpoint_dir = f"{storage_path}/mlruns/{ml_info.experiment_id}/{resume_id}/artifacts/checkpoints"
+        checkpoint_file = [f for f in os.listdir(checkpoint_dir) if f.startswith('checkpoint_') and f.endswith('.pt') and f.split('_')[-1].split('.')[0] == str(start_step)][0]
+        checkpoint_path = f"{checkpoint_dir}/{checkpoint_file}"
         # Broadcast checkpoint path to all ranks
         if global_rank == 0: # Check global_rank
             # Convert checkpoint path to bytes and create tensor
@@ -495,15 +375,6 @@ def single_run(
         # Load scheduler state if it exists
         if 'scheduler_state_dict' in checkpoint:
             scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
-            # Advance scheduler to be correct for the start_step.
-            # This ensures the LR used in the first optimizer.step() of resumed training
-            # corresponds to the current 'start_step'.
-            if global_rank == 0: # Scheduler step should ideally be optimizer-dependent and handled carefully in DDP
-                                # However, usually scheduler.step() is called on all ranks or rank 0
-                                # and LRs are then implicitly synced or part of optimizer state.
-                                # Assuming scheduler.step() here primarily updates LRs in optimizer.
-                print(f"Rank {global_rank}: Advancing scheduler state after loading checkpoint for start_step {start_step}")
-            scheduler.step()
 
         # Synchronize all ranks after loading checkpoint
         tdist.barrier()
@@ -521,12 +392,12 @@ def single_run(
     # Disable tqdm progress bar if output is not a TTY
     is_tty = sys.stdout.isatty()
     # Set n_particles per GPU, which will also be the batch size
-    n_particles_per_gpu = run_args.get("n_particles", 1024)
+    n_particles_per_device = run_args.get("n_particles_per_device", 1024)
 
     dataloader = get_dataloader(
         num_tracers=num_tracers,
         designs=designs.cpu(),
-        n_particles_per_gpu=n_particles_per_gpu,
+        n_particles_per_device=n_particles_per_device,
         observation_labels=["y"],
         target_labels=target_labels,
         batch_size=1,
@@ -672,10 +543,6 @@ def single_run(
             # Synchronize gradients across processes
             tdist.barrier()
 
-            # Log memory usage
-            process = psutil.Process()
-            memory_usage = process.memory_info().rss / 1024**2
-
             # Log metrics for each rank
             mlflow.log_metric(f"loss_rank_{global_rank}", loss.mean().item(), step=step)
             mlflow.log_metric(f"agg_loss_rank_{global_rank}", agg_loss.item(), step=step)
@@ -686,15 +553,15 @@ def single_run(
                 mlflow.log_metric("agg_loss", global_agg_loss, step=step)
                 if is_tty:
                     pbar.update(1)
-                    if kwargs["log_nominal_area"]:
+                    if run_args["log_nominal_area"]:
                         pbar.set_description(f"Loss: {loss.mean().item():.3f}, Area: {global_nominal_area:.3f}")
                     else:
                         pbar.set_description(f"Loss: {loss.mean().item():.3f}")
                 else:
-                    print(f"Step {step}, Loss: {loss.mean().item():.3f}") if not kwargs["log_nominal_area"] else print(f"Step {step}, Loss: {loss.mean().item():.3f}, Area: {global_nominal_area:.3f}")
+                    print(f"Step {step}, Loss: {loss.mean().item():.3f}") if not run_args["log_nominal_area"] else print(f"Step {step}, Loss: {loss.mean().item():.3f}, Area: {global_nominal_area:.3f}")
 
             if step % 100 == 0 and step != 0:
-                if kwargs["log_nominal_area"]:
+                if run_args["log_nominal_area"]:
                     nominal_samples = posterior_flow(nominal_context).sample((5000,)).cpu().numpy()
                     nominal_samples[:, -1] *= 100000
                     # Capture getdist output only on rank 0 to avoid clutter, ensure getdist is available
@@ -732,25 +599,27 @@ def single_run(
                 # Log the global nominal area on rank 0
                 if global_rank == 0:
                     mlflow.log_metric("nominal_area", global_nominal_area, step=step)
+                    checkpoint_saved = False
                     if global_loss < best_loss:
                         best_loss = global_loss
+                        checkpoint_saved = True
                         checkpoint_path = f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/checkpoints/checkpoint_loss_{step}.pt"
-                        save_checkpoint(posterior_flow, optimizer, checkpoint_path, step=step, artifact_path="checkpoints", scheduler=scheduler)
+                        save_checkpoint(posterior_flow.module, optimizer, checkpoint_path, step=step, artifact_path="checkpoints", scheduler=scheduler)
                         checkpoint_path = f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/checkpoints/checkpoint_loss_best.pt"
-                        save_checkpoint(posterior_flow, optimizer, checkpoint_path, step=step, artifact_path="checkpoints", scheduler=scheduler)
+                        save_checkpoint(posterior_flow.module, optimizer, checkpoint_path, step=step, artifact_path="checkpoints", scheduler=scheduler)
                         mlflow.log_metric("best_loss", best_loss, step=step)
-                    elif global_nominal_area < best_nominal_area:
+                    if global_nominal_area < best_nominal_area:
                         # Save checkpoint if the global nominal area is the best so far
                         best_nominal_area = global_nominal_area
                         mlflow.log_metric("best_nominal_area", best_nominal_area, step=step)
+                        if not checkpoint_saved:
+                            # Save the best nominal area checkpoint
+                            checkpoint_path = f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/checkpoints/checkpoint_nominal_area_{step}.pt"
+                            save_checkpoint(posterior_flow.module, optimizer, checkpoint_path, step=step, artifact_path="checkpoints", scheduler=scheduler)
 
-                        # Save the best nominal area checkpoint
-                        checkpoint_path = f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/checkpoints/checkpoint_nominal_area_{step}.pt"
-                        save_checkpoint(posterior_flow, optimizer, checkpoint_path, step=step, artifact_path="checkpoints", scheduler=scheduler)
-
-                        # Save the final best area checkpoint
-                        checkpoint_path = f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/checkpoints/checkpoint_nominal_area_best.pt"
-                        save_checkpoint(posterior_flow, optimizer, checkpoint_path, step=step, artifact_path="checkpoints", scheduler=scheduler)
+                            # Save the final best area checkpoint
+                            checkpoint_path = f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/checkpoints/checkpoint_nominal_area_best.pt"
+                            save_checkpoint(posterior_flow.module, optimizer, checkpoint_path, step=step, artifact_path="checkpoints", scheduler=scheduler)
 
             # Synchronize across ranks before scheduler step
             tdist.barrier()
@@ -796,8 +665,6 @@ def single_run(
         print("Run", ml_info.experiment_id + "/" + ml_info.run_id, "completed.")
     # Final memory logging
     if "LOCAL_RANK" in os.environ:
-        if global_rank == 0:
-            print(f"Rank {global_rank} | Final Memory: {process.memory_info().rss / 1024**2:.2f} MB")
         # Synchronize all ranks before ending MLflow runs
         tdist.barrier()
         # End MLflow run for all ranks
@@ -902,7 +769,6 @@ if __name__ == '__main__':
         run_args=run_args,
         mlflow_experiment_name=args.exp_name,
         device=script_level_device_str, # Pass the determined device string
-        log_nominal_area=True,
         resume_id=args.resume_id,
         resume_step=args.resume_step,
         add_steps=args.add_steps,
