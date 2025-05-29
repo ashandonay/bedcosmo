@@ -194,15 +194,13 @@ def single_run(
         desi_tracers,
         cosmo_model,
         nominal_cov,
+        rank=global_rank,
         include_D_M=run_args["include_D_M"], 
         device=current_pytorch_device,
         verbose=True
         )
     
     target_labels = num_tracers.cosmo_params
-    print(f"Classes: {classes}\n"
-        f"Cosmology: {cosmo_model}\n"
-        f"Target labels: {target_labels}")
 
     ############################################### Designs ###############################################
     # if fixed design:
@@ -267,6 +265,9 @@ def single_run(
         print("Designs shape:", designs.shape)
         print("Calculating normalizing flow EIG...")
         print(f'Input dim: {input_dim}, Context dim: {context_dim}')
+        print(f"Classes: {classes}\n"
+            f"Cosmology: {cosmo_model}\n"
+            f"Target labels: {target_labels}")
         np.save(f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/designs.npy", designs.cpu().detach().numpy())
         mlflow.log_artifact(f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/designs.npy")
 
@@ -376,7 +377,6 @@ def single_run(
             plt.figure()
             plt.plot(samples.squeeze()[:, 0], samples.squeeze()[:, 1], 'o', alpha=0.5)
             plt.savefig(f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/plots/init_samples_rank_{global_rank}.png")
-        print(f"Seed: {seed}")
 
     verbose_shapes = run_args["verbose"]
     # Disable tqdm progress bar if output is not a TTY
@@ -442,7 +442,7 @@ def single_run(
                     samples = samples.to(current_pytorch_device)
                     
                     temp_verbose_shapes = run_args["verbose"] if profile_step == 0 else False
-                    agg_loss, loss = nf_loss(context, posterior_flow.module, samples, verbose_shapes=temp_verbose_shapes)
+                    agg_loss, loss = nf_loss(context, posterior_flow.module, samples, rank=global_rank, verbose_shapes=temp_verbose_shapes)
                     
                     # No need for global loss aggregation during profiling, focus on per-rank
                     agg_loss.backward()
@@ -494,7 +494,7 @@ def single_run(
             if step > 0:
                 verbose_shapes = False
             # Compute the loss using nf_loss
-            agg_loss, loss = nf_loss(context, posterior_flow.module, samples, verbose_shapes=verbose_shapes)
+            agg_loss, loss = nf_loss(context, posterior_flow.module, samples, rank=global_rank, verbose_shapes=verbose_shapes)
 
             # Aggregate global loss and agg_loss across all ranks
             global_loss_tensor = torch.tensor(loss.mean().item(), device=current_pytorch_device)

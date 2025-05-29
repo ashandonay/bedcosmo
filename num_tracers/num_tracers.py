@@ -11,7 +11,7 @@ from bed.grid import Grid
 
 class NumTracers:
 
-    def __init__(self, desi_data, desi_tracers, cosmo_model, nominal_cov, device="cuda:0", include_D_M=False, verbose=False):
+    def __init__(self, desi_data, desi_tracers, cosmo_model, nominal_cov, rank=0, device="cuda:0", include_D_M=False, verbose=False):
         self.desi_tracers = desi_tracers
         self.cosmo_model = cosmo_model
         self.nominal_cov = nominal_cov
@@ -30,7 +30,7 @@ class NumTracers:
         # use nominal efficiency to calculate the nominal passed ratio
         self.nominal_tot = (desi_data[::2]["observed"]).sum()
         self.nominal_passed_ratio = passed_num/self.nominal_tot
-        if verbose:
+        if verbose and rank == 0:
             print(f"z_eff: {self.z_eff}\n",
                 f"sigmas: {self.sigmas}\n",
                 f"nominal_passed: {self.nominal_passed_ratio}")

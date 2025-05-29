@@ -190,7 +190,7 @@ def _vnmc_eig_loss(model, guide, observation_labels, target_labels, contrastive=
     
     return loss_fn
 
-def nf_loss(context, guide, samples, verbose_shapes=False):
+def nf_loss(context, guide, samples, rank=0, verbose_shapes=False):
     """
     Computes the negative log-probability loss for a normalizing flow model given pre-sampled data.
 
@@ -198,6 +198,7 @@ def nf_loss(context, guide, samples, verbose_shapes=False):
     - context: The design tensor (batch of designs).
     - guide: The normalizing flow guide model (e.g., a Pyro or zuko flow).
     - samples: Pre-sampled parameter values (theta).
+    - rank: The rank of the current process.
     - verbose_shapes: Whether to print tensor shapes for debugging (default: False).
 
     Returns:
@@ -208,7 +209,7 @@ def nf_loss(context, guide, samples, verbose_shapes=False):
     flattened_samples = samples.view(-1, samples.shape[-1])
     flattened_context = context.view(-1, context.shape[-1])
 
-    if verbose_shapes:
+    if verbose_shapes and rank == 0:
         print(f"Context shape: {context.shape}")
         print(f"Samples shape: {samples.shape}")
         print(f"Flattened samples shape: {flattened_samples.shape}")
