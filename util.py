@@ -314,15 +314,16 @@ def init_run(tdist, global_rank, current_pytorch_device, storage_path, mlflow_ex
                 mlflow.set_experiment(mlflow_experiment_name)
                 mlflow.start_run()
                 
-                n_devices = tdist.get_world_size() if "LOCAL_RANK" in os.environ else 1
+                # Set n_devices and n_particles using the world size and n_particles_per_device
+                run_args["n_devices"] = tdist.get_world_size() if "LOCAL_RANK" in os.environ else 1
+                run_args["n_particles"] = run_args["n_devices"] * run_args["n_particles_per_device"]
+
                 # Log parameters
                 mlflow.log_param("cosmo_model", cosmo_model)
                 for key, value in run_args.items():
                     mlflow.log_param(key, value)
                 for key, value in kwargs.items():
                     mlflow.log_param(key, value)
-                mlflow.log_param("n_devices", n_devices)
-                mlflow.log_param("n_particles", n_devices * run_args["n_particles_per_device"])
                 
                 # Initialize metrics
                 start_step = 0
@@ -371,7 +372,7 @@ def init_run(tdist, global_rank, current_pytorch_device, storage_path, mlflow_ex
         else:
             mlflow.start_run(run_id=ml_info.run_id, nested=True)
 
-        return ml_info, tensors['start_step'].item(), tensors['best_loss'].item(), tensors['best_nominal_area'].item()
+        return ml_info, run_args, tensors['start_step'].item(), tensors['best_loss'].item(), tensors['best_nominal_area'].item()
 
 def _broadcast_variables(tensors, global_rank, run_args,tdist):
 
