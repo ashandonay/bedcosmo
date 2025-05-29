@@ -139,7 +139,7 @@ def single_run(
     current_pytorch_device = f"cuda:{pytorch_device_idx}" if "LOCAL_RANK" in os.environ and torch.cuda.is_available() else (f"cuda:{effective_device_id}" if effective_device_id != -1 else "cpu")
     # get total number of devices used
 
-    ml_info, start_step, best_loss, best_nominal_area = init_run(
+    ml_info, run_args, start_step, best_loss, best_nominal_area = init_run(
         tdist, 
         global_rank, 
         current_pytorch_device, 
@@ -287,19 +287,14 @@ def single_run(
     else:
         ddp_device_spec = [effective_device_id] if effective_device_id != -1 else None
         ddp_output_device_spec = effective_device_id if effective_device_id != -1 else None
-        print(f"Rank {global_rank}: Determined Non-DDP device_ids: {ddp_device_spec}, output_device: {ddp_output_device_spec}")
 
-    print(f"Rank {global_rank}: About to wrap with DDP. current_pytorch_device_for_DDP_wrapper: {current_pytorch_device}, torch.cuda.current_device() before DDP: {torch.cuda.current_device()}, posterior_flow device: {next(posterior_flow.parameters()).device}")
     # Check if model is already on a CUDA device if CUDA is available
     if torch.cuda.is_available():
         model_device = next(posterior_flow.parameters()).device
-        print(f"Rank {global_rank}: Model initial device: {model_device}")
         if model_device.type == 'cpu' and ddp_device_spec is not None and ddp_device_spec[0] is not None and isinstance(ddp_device_spec[0], int) :
-            print(f"Rank {global_rank}: Explicitly moving model to cuda:{ddp_device_spec[0]}")
             posterior_flow.to(f"cuda:{ddp_device_spec[0]}")
     
     posterior_flow = DDP(posterior_flow, device_ids=ddp_device_spec, output_device=ddp_output_device_spec, find_unused_parameters=False)
-    print(f"Rank {global_rank}: Wrapped with DDP. posterior_flow is now on device: {next(posterior_flow.parameters()).device}")
     
     central_vals = num_tracers.central_val if run_args["include_D_M"] else num_tracers.central_val[1::2]
     nominal_context = torch.cat([nominal_design, central_vals], dim=-1)
@@ -343,15 +338,10 @@ def single_run(
         
         # Load model state dict
         state_dict = checkpoint['model_state_dict']
-        # Remove module prefixes if they exist
-        new_state_dict = {}
-        for k, v in state_dict.items():
-            if k.startswith('module.module.'):
-                k = k[7:]  # Remove one module prefix
-            new_state_dict[k] = v
         
-        # Load the cleaned state dict
-        posterior_flow.module.load_state_dict(new_state_dict, strict=True)
+        # Load the state_dict directly into the innermost base model
+        # (since posterior_flow is DDP(DDP(base_model)) and state_dict has bare keys)
+        posterior_flow.module.module.load_state_dict(state_dict, strict=True)
         
         if global_rank == 0:
             print(f"Checkpoint loaded from {checkpoint_path}")
@@ -522,25 +512,29 @@ def single_run(
 
             # Optimizer step
             optimizer.step()
-
-            # Before optimizer step, verify model consistency across ranks
+            
+            # Post-optimizer consistency check
             if tdist.get_world_size() > 1:
-                # Gather all parameter tensors from each rank
-                for name, param in posterior_flow.module.named_parameters():
-                    # Only check parameters that require gradients
-                    if param.requires_grad:
-                        # Sum the parameters across all ranks
-                        param_tensor = param.data.clone()
-                        tdist.all_reduce(param_tensor, op=torch.distributed.ReduceOp.SUM)
-                        
-                        # Compute the average by dividing by the world size
-                        param_avg = param_tensor / tdist.get_world_size()
-                        # Check for consistency
-                        if not torch.allclose(param.data, param_avg, rtol=1e-5, atol=1e-8):
-                            print(f"Rank {global_rank} | Parameter '{name}' is not consistent across ranks!")
-                            print(f"Local value: {param.data.mean().item()}, Global average: {param_avg.mean().item()}")
-
-            # Synchronize gradients across processes
+                name, param = next(posterior_flow.module.named_parameters())
+                if param.requires_grad:
+                    # Each rank needs its local data for comparison
+                    local_param_data = param.data.clone() 
+                    
+                    # Prepare a tensor for all_reduce
+                    tensor_to_reduce = local_param_data.clone()
+                    tdist.all_reduce(tensor_to_reduce, op=torch.distributed.ReduceOp.SUM)
+                    
+                    # All ranks compute the same average
+                    param_avg = tensor_to_reduce / tdist.get_world_size()
+                    
+                    if global_rank == 0:
+                        # Rank 0 calculates the difference using its local data
+                        max_abs_diff = (local_param_data - param_avg).abs().max().item()
+                        is_consistent = torch.allclose(local_param_data, param_avg, rtol=1e-5, atol=1e-8)
+                        if not is_consistent:
+                            print(f"Rank 0 | Step {step} | Param: '{name}' | Max abs diff: {max_abs_diff:.2e} | Consistent (allclose): {is_consistent}")
+                                
+            # Synchronize all ranks before proceeding
             tdist.barrier()
 
             # Log metrics for each rank
