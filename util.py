@@ -95,7 +95,31 @@ def save_checkpoint(model, optimizer, filepath, step=None, artifact_path=None, s
     mlflow.log_artifact(filepath, artifact_path=artifact_path)
 
 def init_training_env(tdist, device):
-        # DDP initialization
+    # Set PyTorch CPU threads at the beginning of DDP environment initialization.
+    # This helps manage CPU resources used by PyTorch's own operations on CPU.
+    # It's separate from OMP_NUM_THREADS which affects OpenMP-enabled libraries like NumPy/SciPy.
+    try:
+        # Logic based on OMP_NUM_THREADS or a default, with a cap.
+        omp_threads_str = os.environ.get("OMP_NUM_THREADS")
+        num_pytorch_cpu_threads = 0 # Initialize
+        if omp_threads_str:
+            num_pytorch_cpu_threads = int(omp_threads_str)
+            # Cap PyTorch threads if OMP_NUM_THREADS is very large (e.g. > 8)
+            # Adjust this cap as needed. If OMP_NUM_THREADS is already a per-process target for all libs, this might not be needed.
+            if num_pytorch_cpu_threads > 8: 
+                num_pytorch_cpu_threads = 8
+            elif num_pytorch_cpu_threads <= 0:
+                num_pytorch_cpu_threads = 1 # Must be at least 1
+        else:
+            num_pytorch_cpu_threads = 4 # Default if OMP_NUM_THREADS is not set
+        
+        torch.set_num_threads(num_pytorch_cpu_threads)
+        # Logging will be done after rank is determined.
+    except Exception as e:
+        # Using a generic print here as rank might not be available yet for prefixed logging.
+        print(f"Warning: Could not set PyTorch CPU threads during init_training_env: {e}")
+
+    # DDP initialization
     if "LOCAL_RANK" in os.environ and torch.cuda.is_available():
         local_rank = int(os.environ["LOCAL_RANK"]) # SLURM's local rank
         global_rank = int(os.environ["RANK"])
@@ -140,6 +164,20 @@ def init_training_env(tdist, device):
             torch.cuda.set_device(effective_device_id)
         else:
             effective_device_id = -1 # Indicates CPU
+
+    # Log the PyTorch thread count after rank is known
+    # Determine a preliminary rank for logging even before full DDP init, if possible
+    log_rank_prefix = ""
+    if "RANK" in os.environ:
+        log_rank_prefix = f"[Rank {os.environ.get('RANK')}] "
+    elif "SLURM_PROCID" in os.environ:
+        log_rank_prefix = f"[SlurmPROCID {os.environ.get('SLURM_PROCID')}] "
+    
+    try:
+        print(f"{log_rank_prefix}PyTorch CPU threads set to: {torch.get_num_threads()} (within init_training_env)")
+    except Exception as e:
+        print(f"{log_rank_prefix}Warning: Could not get PyTorch CPU thread count: {e}")
+
     return global_rank, local_rank, effective_device_id, pytorch_device_idx
 
 def init_nf(flow_type, input_dim, context_dim, run_args, device="cuda:0", seed=None, verbose=False, local_rank=None, **kwargs):
