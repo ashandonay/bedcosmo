@@ -175,8 +175,14 @@ def init_training_env(tdist, device):
     
     try:
         print(f"{log_rank_prefix}PyTorch CPU threads set to: {torch.get_num_threads()} (within init_training_env)")
+        # Print available CPU cores as seen by this Python process
+        print(f"{log_rank_prefix}os.cpu_count() (cores available to this process): {os.cpu_count()}")
+        # You can also check SLURM_CPUS_PER_TASK if it's set and inherited by the DDP worker
+        slurm_cpus_task = os.environ.get("SLURM_CPUS_PER_TASK")
+        if slurm_cpus_task:
+            print(f"{log_rank_prefix}SLURM_CPUS_PER_TASK (inherited by worker): {slurm_cpus_task}")
     except Exception as e:
-        print(f"{log_rank_prefix}Warning: Could not get PyTorch CPU thread count: {e}")
+        print(f"{log_rank_prefix}Warning: Could not get PyTorch CPU thread count or os.cpu_count(): {e}")
 
     return global_rank, local_rank, effective_device_id, pytorch_device_idx
 
