@@ -258,10 +258,6 @@ def init_nf(flow_type, input_dim, context_dim, run_args, device="cuda:0", seed=N
     # Move to the correct device
     posterior_flow.to(device)
 
-    # Wrap in DDP if using distributed training
-    if local_rank is not None:
-        posterior_flow = DDP(posterior_flow, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=False)
-
     return posterior_flow
 
 def init_scheduler(optimizer, run_args):

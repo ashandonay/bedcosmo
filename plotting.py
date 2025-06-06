@@ -137,8 +137,8 @@ def plot_posterior(samples, colors, legend_labels=None, show_scatter=False, line
 
     return g
 
-def plot_run(run_id, eval_args, show_scatter=False):
-    samples = run_eval(run_id, eval_args, exp='num_tracers')
+def plot_run(run_id, eval_args, show_scatter=False, cosmo_exp='num_tracers'):
+    samples = run_eval(run_id, eval_args, cosmo_exp=cosmo_exp)
     g = plot_posterior(samples, ["tab:blue"], show_scatter=show_scatter)
     plt.show()
 
@@ -838,14 +838,14 @@ def get_contour_area(samples, param1, param2, level=0.68):
         # Plot contour on the temporary axes
         cs = temp_ax.contour(density.x, density.y, density.P, 
                            levels=[contour_level])
+        paths = cs.get_paths()
         
         # Check if any contours were found at this level
-        if not cs.collections or not cs.collections[0].get_paths():
+        if not paths:
             warnings.warn(f"No contour found for level {level}. Assigning area 0.")
             areas.append(0.0)
             continue # Skip to the next sample if no path found
 
-        paths = cs.collections[0].get_paths()
         total_area = 0.0
         
         for path in paths:
