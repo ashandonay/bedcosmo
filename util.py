@@ -681,7 +681,7 @@ def load_model(run_obj, parsed_run_params, classes_data, step, eval_args, cosmo_
     else: 
         checkpoint_path_to_load = f'{checkpoint_dir}checkpoint_{effective_step}.pt'
     
-    checkpoint = torch.load(checkpoint_path_to_load, map_location=eval_args["device"]) 
+    checkpoint = torch.load(checkpoint_path_to_load, map_location=eval_args["device"], weights_only=False)
     
     state_dict = checkpoint['model_state_dict']
     

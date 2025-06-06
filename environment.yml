@@ -1,4 +1,4 @@
-name: bed-cosmo-env
+name: bed-cosmo
 channels:
   - pytorch
   - defaults
