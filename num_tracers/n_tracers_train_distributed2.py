@@ -26,12 +26,7 @@ from pyro_oed_src import nf_loss, _create_condition_input
 from pyro.contrib.util import lexpand, rexpand
 
 import matplotlib.pyplot as plt
-
-from nflows.transforms import made as made_module
 from bed.grid import Grid
-
-from astropy.cosmology import Planck18
-from astropy import constants
 
 import mlflow
 import mlflow.pytorch
@@ -72,8 +67,10 @@ class FlowLikelihoodDataset(Dataset):
         with torch.no_grad():
             # Generate the samples directly on the GPU
             trace = poutine.trace(self.num_tracers.pyro_model).get_trace(expanded_design)
-            y_dict = {l: trace.nodes[l]["value"].to(self.device) for l in self.observation_labels}
-            theta_dict = {l: trace.nodes[l]["value"].to(self.device) for l in self.target_labels}
+            
+            # Assuming trace values are already on the correct device from the model
+            y_dict = {l: trace.nodes[l]["value"] for l in self.observation_labels}
+            theta_dict = {l: trace.nodes[l]["value"] for l in self.target_labels}
 
             # Extract the target samples (theta)
             samples = torch.cat([theta_dict[k].unsqueeze(dim=-1) for k in self.target_labels], dim=-1)
@@ -487,18 +484,14 @@ def single_run(
         for context, samples in dataloader:
             optimizer.zero_grad()
 
-            # Move data to GPU
-            context = context.to(current_pytorch_device)
-            samples = samples.to(current_pytorch_device)
-
             if step > 0:
                 verbose_shapes = False
             # Compute the loss using nf_loss
             agg_loss, loss = nf_loss(context, posterior_flow.module, samples, rank=global_rank, verbose_shapes=verbose_shapes)
 
             # Aggregate global loss and agg_loss across all ranks
-            global_loss_tensor = torch.tensor(loss.mean().item(), device=current_pytorch_device)
-            global_agg_loss_tensor = torch.tensor(agg_loss.item(), device=current_pytorch_device)
+            global_loss_tensor = loss.mean().detach()
+            global_agg_loss_tensor = agg_loss.detach()
             tdist.all_reduce(global_loss_tensor, op=torch.distributed.ReduceOp.SUM)
             tdist.all_reduce(global_agg_loss_tensor, op=torch.distributed.ReduceOp.SUM)
             global_loss = global_loss_tensor.item() / tdist.get_world_size()
@@ -512,13 +505,17 @@ def single_run(
 
             # Optimizer step
             optimizer.step()
-            
+
             # Post-optimizer consistency check
             if tdist.get_world_size() > 1:
-                name, param = next(posterior_flow.module.named_parameters())
-                if param.requires_grad:
-                    # Each rank needs its local data for comparison
-                    local_param_data = param.data.clone() 
+                with torch.no_grad():
+                    for param in posterior_flow.module.parameters():
+                        tdist.broadcast(param.data, src=0)
+                
+                for name, param in posterior_flow.module.named_parameters():
+                    if param.requires_grad:
+                        # Each rank needs its local data for comparison
+                        local_param_data = param.data.clone() 
                     
                     # Prepare a tensor for all_reduce
                     tensor_to_reduce = local_param_data.clone()
