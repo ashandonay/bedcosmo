@@ -138,32 +138,54 @@ def plot_posterior(samples, colors, legend_labels=None, show_scatter=False, line
     return g
 
 def plot_run(run_id, eval_args, show_scatter=False, cosmo_exp='num_tracers'):
-    samples = run_eval(run_id, eval_args, cosmo_exp=cosmo_exp)
+    run_data_list, _, _ = get_runs_data(run_ids=run_id, parse_params=True)
+    if not run_data_list:
+        print(f"Run {run_id} not found.")
+        return
+    run_data = run_data_list[0]
+    samples = run_eval(run_data['run_obj'], run_data['params'], eval_args, cosmo_exp=cosmo_exp)
     g = plot_posterior(samples, ["tab:blue"], show_scatter=show_scatter)
     plt.show()
 
-def posterior_steps(run_id, steps, eval_args, level=0.68, type='all', cosmo_exp='num_tracers'):
+def posterior_steps(
+        run_id,
+        steps=None,
+        eval_args=None,
+        level=0.68,
+        type='all',
+        cosmo_exp='num_tracers'
+        ):
     """
-    Plots posterior distributions at different training steps for either a single run, 
-    multiple specific runs, or all runs in an experiment.
+    Plots posterior distributions at different training steps for a single run.
     
     Args:
-        exp_name (str, optional): Name of the MLflow experiment. If provided and run_ids is None, 
-                                  all runs in this experiment will be used.
-        run_ids (str or list, optional): Single run ID or list of specific MLflow run IDs to plot. 
-                                        If provided, exp_name is ignored.
-        plot_steps (list): List of steps to plot. Can include 'last' or 'best' as special values.
+        run_id (str): The MLflow run ID to plot.
+        steps (list): List of steps to plot. Can include 'last' or 'best' as special values.
         eval_args (dict): Arguments for run_eval.
+        level (float): Contour level.
         type (str): Type of steps to plot. Can be 'all', 'area', or 'loss'.
         cosmo_exp (str): Name of the cosmology experiment.
     """
-    client = MlflowClient()
-    run = client.get_run(run_id)
-    run_args = parse_mlflow_params(run.data.params)
+    if eval_args is None:
+        eval_args = {"n_samples": 10000, "device": "cuda:0", "eval_seed": 1}
+    if steps is None:
+        steps = ['loss_best', 'last']
+    
+    run_data_list, _, _ = get_runs_data(
+        run_ids=run_id,
+        parse_params=True
+    )
+
+    if not run_data_list:
+        print(f"Run {run_id} not found.")
+        return
+
+    run_data = run_data_list[0]
+    run_args = run_data['params']
+    run_obj = run_data['run_obj']
+    exp_id = run_data['exp_id']
     storage_path = os.environ["SCRATCH"] + f"/bed/BED_cosmo/{cosmo_exp}"
 
-    exp_id = client.get_run(run_id).info.experiment_id
-    
     colors = plt.cm.viridis_r(np.linspace(0, 1, len(steps)))
     
     all_samples = []
@@ -171,17 +193,20 @@ def posterior_steps(run_id, steps, eval_args, level=0.68, type='all', cosmo_exp=
     color_list = []
 
     checkpoint_dir = f'{storage_path}/mlruns/{exp_id}/{run_id}/artifacts/checkpoints/'
+    if not os.path.isdir(checkpoint_dir):
+        print(f"Warning: Checkpoint directory not found for run {run_id}, skipping. Path: {checkpoint_dir}")
+        return
     checkpoint_files = os.listdir(checkpoint_dir)
     plot_checkpoints = get_checkpoints(run_id, steps, checkpoint_files, type, cosmo_exp, verbose=False)
 
     for i, step in enumerate(plot_checkpoints):
-        samples = run_eval(run_id, eval_args, step=step, cosmo_exp=cosmo_exp)
+        samples = run_eval(run_obj, run_args, eval_args, step=step, cosmo_exp=cosmo_exp)
         all_samples.append(samples)
         color_list.append(colors[i % len(colors)])
         area = get_contour_area(samples, 'Om', 'hrdrag', level)[0]
         all_areas.append(area)
 
-    desi_samples_gd = get_desi_samples(run.data.params['cosmo_model'])
+    desi_samples_gd = get_desi_samples(run_args['cosmo_model'])
     desi_area = get_contour_area([desi_samples_gd], 'Om', 'hrdrag', level)[0]
     all_samples.append(desi_samples_gd)
     color_list.append('black')  
@@ -215,6 +240,7 @@ def posterior_steps(run_id, steps, eval_args, level=0.68, type='all', cosmo_exp=
             label=f'DESI, Area ({int(level*100)}% Contour): {desi_area:.3f}')
     )
     g.fig.legend(handles=custom_legend, loc='upper right', bbox_to_anchor=(1, 0.99))
+    g.fig.suptitle(f"Posterior Steps for Run: {run_data['name']} ({run_id[:8]})")
     save_path = f"{storage_path}/mlruns/{exp_id}/{run_id}/artifacts/plots/posterior_steps_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
     show_figure(save_path)
 
@@ -253,14 +279,14 @@ def plot_training(
     client = MlflowClient()
     storage_path = os.environ["SCRATCH"] + f"/bed/BED_cosmo/{cosmo_exp}"
 
-    runs_data_list, experiment_id_for_save_path, _ = get_runs_data(
+    run_data_list, experiment_id_for_save_path, _ = get_runs_data(
         exp_name=exp_name,
         run_ids=run_id,
         excluded_runs=excluded_runs,
         parse_params=False
     )
 
-    if not runs_data_list:
+    if not run_data_list:
         return
 
     # Convert var to list if it's a single variable for sorting
@@ -284,7 +310,7 @@ def plot_training(
                 # Removed print(f"Warning: Could not extract params for sorting run {run_data_item['run_id']}: {e}")
                 return tuple(float('inf') for _ in vars_list)
 
-        runs_data_list = sorted(runs_data_list, key=get_sort_key_from_data)
+        run_data_list = sorted(run_data_list, key=get_sort_key_from_data)
 
     # --- Data Fetching (Metrics) ---
     all_metrics_for_runs = {} # Keyed by run_id
@@ -298,7 +324,7 @@ def plot_training(
     valid_runs_processed_for_metrics = [] # Store run_data_items that had metrics
     show_area_plot = False # Flag to determine if we should show area plot
 
-    for run_data_item in runs_data_list:
+    for run_data_item in run_data_list:
         run_id_iter = run_data_item['run_id']
         run_params = run_data_item['params'] # Use pre-fetched params
 
@@ -635,7 +661,7 @@ def compare_posterior(
     if eval_args is None:
         eval_args = {"n_samples": 10000, "device": "cuda:0", "eval_seed": 1}
 
-    runs_data_list, experiment_id_for_save_path, actual_exp_name_for_title = get_runs_data(
+    run_data_list, experiment_id_for_save_path, actual_exp_name_for_title = get_runs_data(
         exp_name=exp_name,
         run_ids=run_ids,
         excluded_runs=excluded_runs,
@@ -643,13 +669,13 @@ def compare_posterior(
         parse_params=True
     )
 
-    if not runs_data_list:
+    if not run_data_list:
         return
 
     cosmo_model_for_desi = "Unknown" 
     # Use parsed params; parse_mlflow_params keeps string if not convertible, so this is fine
-    if runs_data_list and 'params' in runs_data_list[0] and 'cosmo_model' in runs_data_list[0]['params']:
-        cosmo_model_for_desi = runs_data_list[0]['params']['cosmo_model']
+    if run_data_list and 'params' in run_data_list[0] and 'cosmo_model' in run_data_list[0]['params']:
+        cosmo_model_for_desi = run_data_list[0]['params']['cosmo_model']
     else:
         print("Warning: Could not determine cosmo_model from the first run for DESI plot. Defaulting to 'Unknown'.")
 
@@ -658,7 +684,7 @@ def compare_posterior(
         
         grouped_runs_by_val_tuple = {} 
 
-        for run_data_item in runs_data_list:
+        for run_data_item in run_data_list:
             current_params = run_data_item['params'] # These are now parsed params
             group_values_for_run = []
             is_valid_for_grouping = True
@@ -810,17 +836,17 @@ def compare_posterior(
         g.fig.legend(handles=custom_legend_handles, loc='upper right', bbox_to_anchor=(1, 0.99))
         
         title_vars_str = ', '.join(vars_list)
-        num_total_runs_analyzed = len(runs_data_list)
+        num_total_runs_analyzed = len(run_data_list)
         g.fig.suptitle(f'Posterior comparison grouped by {title_vars_str} ({num_total_runs_analyzed} total runs analyzed)\nStep: {step}', y=1.03)
     
-    else: # Not grouping, plot all runs from runs_data_list
+    else: # Not grouping, plot all runs from run_data_list
         all_samples_to_plot = []
         colors_for_all_runs = []
         labels_for_all_runs = []
         
         prop_cycle_colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
         
-        for i, run_data_item_iter in enumerate(runs_data_list):
+        for i, run_data_item_iter in enumerate(run_data_list):
             # current_run_id = run_data_item_iter['run_id'] # No longer needed for run_eval fallback
             current_params = run_data_item_iter['params'] # Already parsed
             current_run_obj = run_data_item_iter['run_obj'] 
@@ -870,8 +896,8 @@ def compare_posterior(
 
     if exp_name and experiment_id_for_save_path:
         save_dir = f"{storage_path_base}/mlruns/{experiment_id_for_save_path}/plots"
-    elif not exp_name and run_ids and len(runs_data_list) == 1 and experiment_id_for_save_path:
-        single_run_id_for_path = runs_data_list[0]['run_id']
+    elif not exp_name and run_ids and len(run_data_list) == 1 and experiment_id_for_save_path:
+        single_run_id_for_path = run_data_list[0]['run_id']
         save_dir = f"{storage_path_base}/mlruns/{experiment_id_for_save_path}/{single_run_id_for_path}/artifacts/plots"
         filename_prefix = f"posterior_step_{step}"
 
@@ -1170,19 +1196,48 @@ def show_figure(save_path):
     else:
         plt.close()
 
-def plot_eig_steps(run_id, steps, eval_args, cosmo_exp='num_tracers', verbose=False):
-    client = MlflowClient()
+def eig_steps(
+    run_id,
+    steps=None,
+    eval_args=None,
+    cosmo_exp='num_tracers',
+    verbose=False
+):
+    if eval_args is None:
+        eval_args = {"n_samples": 1000, "device": "cuda:0", "eval_seed": 1}
+    if steps is None:
+        steps = ['loss_best', 'last']
+
+    run_data_list, _, _ = get_runs_data(
+        run_ids=run_id,
+        parse_params=True
+    )
+    if not run_data_list:
+        print(f"Run {run_id} not found.")
+        return
+    
+    run_data = run_data_list[0]
+    run_args = run_data['params']
+    run_obj = run_data['run_obj']
+    exp_id = run_data['exp_id']
     storage_path = os.environ["SCRATCH"] + f"/bed/BED_cosmo/{cosmo_exp}"
-    run = client.get_run(run_id)
-    exp_id = run.info.experiment_id
-    run_args = parse_mlflow_params(run.data.params)
-    # Load designs directly using np.load on the downloaded path
-    designs_path = mlflow.artifacts.download_artifacts(run_id=run_id, artifact_path="designs.npy")
-    designs = np.load(designs_path)
-    designs = torch.tensor(designs, device=eval_args["device"])
-    with open(mlflow.artifacts.download_artifacts(run_id=run_id, artifact_path="classes.json")) as f:
-        classes = json.load(f)
-    checkpoint_files = os.listdir(f"{storage_path}/mlruns/{exp_id}/{run_id}/artifacts/checkpoints")
+
+    # Load designs
+    try:
+        designs_path = mlflow.artifacts.download_artifacts(run_id=run_id, artifact_path="designs.npy")
+        designs = np.load(designs_path)
+        designs = torch.tensor(designs, device=eval_args["device"])
+        with open(mlflow.artifacts.download_artifacts(run_id=run_id, artifact_path="classes.json")) as f:
+            classes = json.load(f)
+    except Exception as e:
+        print(f"Failed to load designs.npy or classes.json for run {run_id}: {e}. Skipping.")
+        return
+
+    checkpoint_dir = f"{storage_path}/mlruns/{exp_id}/{run_id}/artifacts/checkpoints"
+    if not os.path.isdir(checkpoint_dir):
+        print(f"Warning: Checkpoint directory not found for run {run_id}, skipping. Path: {checkpoint_dir}")
+        return
+    checkpoint_files = os.listdir(checkpoint_dir)
     checkpoint_steps = get_checkpoints(
         run_id,
         steps, 
@@ -1190,13 +1245,33 @@ def plot_eig_steps(run_id, steps, eval_args, cosmo_exp='num_tracers', verbose=Fa
         type='all', 
         cosmo_exp=cosmo_exp, 
         verbose=verbose
-        )
+    )
     plt.figure(figsize=(10, 6))
     # load in model at steps
+    num_tracers = None
     for s in checkpoint_steps:
-        num_tracers, posterior_flow = load_model(run_id, s, eval_args, cosmo_exp)
+        try:
+            num_tracers, posterior_flow = load_model(run_obj, run_args, classes, s, eval_args, cosmo_exp)
+            with torch.no_grad():
+                _, eigs = posterior_loss(design=designs,
+                                                model=num_tracers.pyro_model,
+                                                guide=posterior_flow,
+                                                num_particles=eval_args["n_samples"],
+                                                observation_labels=["y"],
+                                                target_labels=num_tracers.cosmo_params,
+                                                evaluation=True,
+                                                nflow=True,
+                                                analytic_prior=False,
+                                                condition_design=run_args["condition_design"])
+            eigs_bits = eigs.cpu().detach().numpy()/np.log(2)
+            plt.plot(eigs_bits, label=f'Step {s}')
+        except Exception as e:
+            print(f"Failed to process step {s} for run {run_id}: {e}")
+
+    if num_tracers:
+        nominal_design = torch.tensor(num_tracers.desi_tracers.groupby('class').sum()['observed'].reindex(classes.keys()).values, device=eval_args["device"])
         with torch.no_grad():
-            _, eigs = posterior_loss(design=designs,
+            _, nominal_eig = posterior_loss(design=nominal_design.unsqueeze(0),
                                             model=num_tracers.pyro_model,
                                             guide=posterior_flow,
                                             num_particles=eval_args["n_samples"],
@@ -1206,28 +1281,16 @@ def plot_eig_steps(run_id, steps, eval_args, cosmo_exp='num_tracers', verbose=Fa
                                             nflow=True,
                                             analytic_prior=False,
                                             condition_design=run_args["condition_design"])
-        eigs_bits = eigs.cpu().detach().numpy()/np.log(2)
-        plt.plot(eigs_bits, label=f'Step {s}')
+        nominal_eig_bits = nominal_eig.cpu().detach().numpy()/np.log(2)
+        plt.axhline(y=nominal_eig_bits, color='black', linestyle='--', label='Nominal EIG')
 
-    nominal_design = torch.tensor(num_tracers.desi_tracers.groupby('class').sum()['observed'].reindex(classes.keys()).values, device=eval_args["device"])
-    with torch.no_grad():
-        _, nominal_eig = posterior_loss(design=nominal_design.unsqueeze(0),
-                                        model=num_tracers.pyro_model,
-                                        guide=posterior_flow,
-                                        num_particles=eval_args["n_samples"],
-                                        observation_labels=["y"],
-                                        target_labels=num_tracers.cosmo_params,
-                                        evaluation=True,
-                                        nflow=True,
-                                        analytic_prior=False,
-                                        condition_design=run_args["condition_design"])
-    nominal_eig_bits = nominal_eig.cpu().detach().numpy()/np.log(2)
-    plt.axhline(y=nominal_eig_bits, color='black', linestyle='--', label='Nominal EIG')
     plt.xlabel("Design Index")
     plt.ylabel("EIG")
     plt.legend()
+    plt.suptitle(f"EIG Steps for Run: {run_data['name']} ({run_id[:8]})")
     plt.tight_layout()
-    show_figure(f"{storage_path}/mlruns/{exp_id}/{run_id}/artifacts/plots/eig_steps.png")
+    save_path = f"{storage_path}/mlruns/{exp_id}/{run_id}/artifacts/plots/eig_steps_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+    show_figure(save_path)
 
 if __name__ == "__main__":
 

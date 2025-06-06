@@ -489,7 +489,7 @@ def get_runs_data(exp_name=None, run_ids=None, excluded_runs=[], filter_string=N
             - str or None: The experiment name for the fetched runs.
     """
     client = MlflowClient()
-    runs_data_list = []
+    run_data_list = []
     experiment_id = None
     actual_exp_name = exp_name
 
@@ -511,7 +511,7 @@ def get_runs_data(exp_name=None, run_ids=None, excluded_runs=[], filter_string=N
             for run_obj in run_infos:
                 if run_obj.info.run_id not in excluded_runs:
                     params = parse_mlflow_params(run_obj.data.params) if parse_params else run_obj.data.params
-                    runs_data_list.append({
+                    run_data_list.append({
                         'run_id': run_obj.info.run_id,
                         'params': params,
                         'run_obj': run_obj,
@@ -543,7 +543,7 @@ def get_runs_data(exp_name=None, run_ids=None, excluded_runs=[], filter_string=N
                             actual_exp_name = "Selected Runs (from run_id)"
 
                 params = parse_mlflow_params(run_obj.data.params) if parse_params else run_obj.data.params
-                runs_data_list.append({
+                run_data_list.append({
                     'run_id': rid,
                     'params': params,
                     'run_obj': run_obj,
@@ -556,11 +556,11 @@ def get_runs_data(exp_name=None, run_ids=None, excluded_runs=[], filter_string=N
         print("Either exp_name or run_ids must be provided.")
         return [], None, None
 
-    if not runs_data_list:
+    if not run_data_list:
         print("No runs found to process.")
         return [], None, None
 
-    return runs_data_list, experiment_id, actual_exp_name
+    return run_data_list, experiment_id, actual_exp_name
 
 
 def run_eval(run_obj, parsed_run_params, eval_args, step='loss_best', cosmo_exp='num_tracers', run_id_for_fallback_only=None):
