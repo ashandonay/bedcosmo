@@ -1,5 +1,7 @@
 import os
 import sys
+import time
+import datetime
 # Get the directory containing the current script
 script_dir = os.path.dirname(os.path.abspath(__file__))
 # Get the parent directory ('BED_cosmo/') and add it to the Python path
@@ -24,12 +26,7 @@ from pyro_oed_src import nf_loss, _create_condition_input
 from pyro.contrib.util import lexpand, rexpand
 
 import matplotlib.pyplot as plt
-
-from nflows.transforms import made as made_module
 from bed.grid import Grid
-
-from astropy.cosmology import Planck18
-from astropy import constants
 
 import mlflow
 import mlflow.pytorch
@@ -46,14 +43,14 @@ import json
 import argparse
 import io
 import contextlib
-from plotting import get_contour_area, plot_training, plot_eig_steps
+from plotting import get_contour_area, plot_training, eig_steps
 
 class FlowLikelihoodDataset(Dataset):
-    def __init__(self, num_tracers, designs, n_particles_per_gpu, observation_labels, target_labels, device="cuda"):
+    def __init__(self, num_tracers, designs, n_particles_per_device, observation_labels, target_labels, device="cuda"):
         self.num_tracers = num_tracers
         # Move designs to GPU for faster sampling
         self.designs = designs.to(device)
-        self.n_particles_per_gpu = n_particles_per_gpu
+        self.n_particles_per_device = n_particles_per_device
         self.device = device
         self.observation_labels = observation_labels
         self.target_labels = target_labels
@@ -64,14 +61,16 @@ class FlowLikelihoodDataset(Dataset):
 
     def __getitem__(self, idx):
         # Dynamically expand the designs on each access
-        expanded_design = lexpand(self.designs, self.n_particles_per_gpu).to(self.device)
+        expanded_design = lexpand(self.designs, self.n_particles_per_device).to(self.device)
 
         # Generate samples from the NumTracers pyro model
         with torch.no_grad():
             # Generate the samples directly on the GPU
             trace = poutine.trace(self.num_tracers.pyro_model).get_trace(expanded_design)
-            y_dict = {l: trace.nodes[l]["value"].to(self.device) for l in self.observation_labels}
-            theta_dict = {l: trace.nodes[l]["value"].to(self.device) for l in self.target_labels}
+            
+            # Assuming trace values are already on the correct device from the model
+            y_dict = {l: trace.nodes[l]["value"] for l in self.observation_labels}
+            theta_dict = {l: trace.nodes[l]["value"] for l in self.target_labels}
 
             # Extract the target samples (theta)
             samples = torch.cat([theta_dict[k].unsqueeze(dim=-1) for k in self.target_labels], dim=-1)
@@ -88,15 +87,15 @@ class FlowLikelihoodDataset(Dataset):
         return condition_input, samples
 
 # Helper function for DataLoader with DistributedSampler
-def get_dataloader(num_tracers, designs, n_particles_per_gpu, observation_labels, target_labels, batch_size, local_rank, num_workers=0, world_size=None):
+def get_dataloader(num_tracers, designs, n_particles_per_device, observation_labels, target_labels, batch_size, pytorch_device_idx_for_ddp, num_workers=0, world_size=None):
     # Create dataset with designs on GPU
     dataset = FlowLikelihoodDataset(
         num_tracers=num_tracers,
-        designs=designs.to(f"cuda:{local_rank}"),
-        n_particles_per_gpu=n_particles_per_gpu,
+        designs=designs.to(f"cuda:{pytorch_device_idx_for_ddp}"),
+        n_particles_per_device=n_particles_per_device,
         observation_labels=observation_labels,
         target_labels=target_labels,
-        device=f"cuda:{local_rank}"
+        device=f"cuda:{pytorch_device_idx_for_ddp}"
     )
     
     # Use regular DataLoader without DistributedSampler
@@ -117,163 +116,55 @@ def single_run(
     resume_id=None,
     resume_step=None,
     add_steps=0,
+    profile=False,
+    restart_path=None,
     **kwargs,
 ):
-    print(mlflow_experiment_name)
+
+    global_rank, local_rank, effective_device_id, pytorch_device_idx = init_training_env(tdist, device)
+
     # Clear GPU cache
     torch.cuda.empty_cache()
+    process = psutil.Process()
     # Trigger garbage collection for CPU
     gc.collect()
-    process = psutil.Process(os.getpid())
-    print(f"Memory before run: {process.memory_info().rss / 1024**2} MB")
     pyro.clear_param_store()
-    print(f"Running with parameters for cosmo_model='{cosmo_model}':")
     storage_path = os.environ["SCRATCH"] + "/bed/BED_cosmo/num_tracers"
     home_dir = os.environ["HOME"]
     mlflow.set_tracking_uri(storage_path + "/mlruns")
-
-    # DDP initialization
-    if "LOCAL_RANK" in os.environ:
-        tdist.init_process_group(backend="nccl")
-        local_rank = int(os.environ["LOCAL_RANK"])
-        torch.cuda.set_device(local_rank)
-    else:
-        local_rank = 0
-
-    # Initialize MLflow for all ranks
-    mlflow.set_tracking_uri(storage_path + "/mlruns")
     
     # Initialize MLflow experiment and run info on rank 0
-    if local_rank == 0:
-        if resume_id:
-            # First get the experiment info from the run we want to resume
-            client = mlflow.MlflowClient()
-            run_info = client.get_run(resume_id)
-            exp_id = run_info.info.experiment_id
-            exp_name = mlflow.get_experiment(exp_id).name
-            
-            # Set the experiment before starting the run
-            mlflow.set_experiment(experiment_id=exp_id)
-            mlflow.start_run(run_id=resume_id)
-            
-            if resume_step is None:
-                raise ValueError("resume_step must be provided when resuming a run")
-            
-            # get the exp name from the run id
-            mlflow_experiment_name = exp_name
-            cosmo_model = run_info.data.params["cosmo_model"]
-            run_args = parse_mlflow_params(run_info.data.params)
-            print(json.dumps(run_args, indent=2))
-            if add_steps:
-                run_args["steps"] += add_steps
-            best_nominal_areas = client.get_metric_history(resume_id, 'best_nominal_area')
-            best_nominal_area_steps = np.array([metric.step for metric in best_nominal_areas])
-            # get the best area from a step prior to the resume step
-            closest_idx = np.argmin(np.abs(best_nominal_area_steps - resume_step))
-            best_nominal_area = best_nominal_areas[closest_idx].value if best_nominal_area_steps[closest_idx] < resume_step else best_nominal_areas[closest_idx - 1].value
-            print(f"Starting at best nominal area: {best_nominal_area} at step {best_nominal_area_steps[closest_idx]}")
-            best_losses = client.get_metric_history(resume_id, 'best_loss')
-            best_loss_steps = np.array([metric.step for metric in best_losses])
-            # get the best loss from a step prior to the resume step
-            closest_idx = np.argmin(np.abs(best_loss_steps - resume_step))
-            best_loss = best_losses[closest_idx].value if best_loss_steps[closest_idx] < resume_step else best_losses[closest_idx - 1].value
-            print(f"Starting at best loss: {best_loss} at step {best_loss_steps[closest_idx]}")
-            checkpoint_files = os.listdir(f"{storage_path}/mlruns/{exp_id}/{resume_id}/artifacts/checkpoints")
-            checkpoint_steps = sorted([
-                int(f.split('_')[-1].split('.')[0]) 
-                for f in checkpoint_files 
-                if f.startswith('checkpoint_') 
-                and f.endswith('.pt') 
-                and not f.endswith('_loss_best.pt') 
-                and not f.endswith('_nominal_area_best.pt') 
-                and not f.endswith('_last.pt')
-            ])
-            # get the checkpoint prior to the resume step
-            closest_idx = np.argmin(np.abs(np.array(checkpoint_steps) - resume_step))
-            start_step = checkpoint_steps[closest_idx] if checkpoint_steps[closest_idx] < resume_step else checkpoint_steps[closest_idx - 1]
-            history = client.get_metric_history(resume_id, 'loss')
-            history = [metric.value for metric in history]
-            history = history[:start_step]
-            # get the checkpoint file name for the start step
-            checkpoint_dir = f"{storage_path}/mlruns/{exp_id}/{resume_id}/artifacts/checkpoints"
-            checkpoint_file = [f for f in os.listdir(checkpoint_dir) if f.startswith('checkpoint_') and f.endswith('.pt') and f.split('_')[-1].split('.')[0] == str(start_step)][0]
-            start_step += 1
-            checkpoint_path = f"{checkpoint_dir}/{checkpoint_file}"
-            print(f"Resuming MLflow run: {resume_id}")
-            
-            # Convert numeric values to tensors for broadcasting
-            exp_id_tensor = torch.tensor([int(exp_id)], dtype=torch.long, device=f"cuda:{local_rank}")
-            start_step_tensor = torch.tensor([start_step], dtype=torch.long, device=f"cuda:{local_rank}")
-            best_loss_tensor = torch.tensor([best_loss], dtype=torch.float64, device=f"cuda:{local_rank}")
-            best_nominal_area_tensor = torch.tensor([best_nominal_area], dtype=torch.float64, device=f"cuda:{local_rank}")
-            
-            # Store run_id as a string in a list for broadcasting
-            run_id_list = [resume_id]
-            exp_name_list = [exp_name]
-        else:
-            print(json.dumps(run_args, indent=2))
-            mlflow.set_experiment(mlflow_experiment_name)
-            mlflow.start_run()
-            # Log parameters for a new run
-            mlflow.log_param("cosmo_model", cosmo_model)
-            # log params in run_args
-            for key, value in run_args.items():
-                mlflow.log_param(key, value)
-            # log params in kwargs
-            for key, value in kwargs.items():
-                mlflow.log_param(key, value)
-            start_step = 0
-            best_loss = float('inf')
-            best_nominal_area = float('inf')
-            history = []
-            
-            # Create directories for artifacts
-            os.makedirs(f"{storage_path}/mlruns/{mlflow.active_run().info.experiment_id}/{mlflow.active_run().info.run_id}/artifacts/checkpoints", exist_ok=True)
-            os.makedirs(f"{storage_path}/mlruns/{mlflow.active_run().info.experiment_id}/{mlflow.active_run().info.run_id}/artifacts/plots", exist_ok=True)
-            
-            # Convert numeric values to tensors for broadcasting
-            exp_id_tensor = torch.tensor([int(mlflow.active_run().info.experiment_id)], dtype=torch.long, device=f"cuda:{local_rank}")
-            start_step_tensor = torch.tensor([start_step], dtype=torch.long, device=f"cuda:{local_rank}")
-            best_loss_tensor = torch.tensor([best_loss], dtype=torch.float64, device=f"cuda:{local_rank}")
-            best_nominal_area_tensor = torch.tensor([best_nominal_area], dtype=torch.float64, device=f"cuda:{local_rank}")
-            
-            # Store run_id as a string in a list for broadcasting
-            run_id_list = [mlflow.active_run().info.run_id]
-            exp_name_list = [mlflow_experiment_name]
-    else:
-        # Initialize tensors on other ranks
-        exp_id_tensor = torch.zeros(1, dtype=torch.long, device=f"cuda:{local_rank}")
-        start_step_tensor = torch.zeros(1, dtype=torch.long, device=f"cuda:{local_rank}")
-        best_loss_tensor = torch.zeros(1, dtype=torch.float64, device=f"cuda:{local_rank}")
-        best_nominal_area_tensor = torch.zeros(1, dtype=torch.float64, device=f"cuda:{local_rank}")
-        run_id_list = [None]  # Initialize empty list for run_id
-        exp_name_list = [None]  # Initialize empty list for exp_name
+    current_pytorch_device = f"cuda:{pytorch_device_idx}" if "LOCAL_RANK" in os.environ and torch.cuda.is_available() else (f"cuda:{effective_device_id}" if effective_device_id != -1 else "cpu")
+    # get total number of devices used
 
-    # Broadcast tensors to all ranks
-    tdist.broadcast(exp_id_tensor, src=0)
-    tdist.broadcast(start_step_tensor, src=0)
-    tdist.broadcast(best_loss_tensor, src=0)
-    tdist.broadcast(best_nominal_area_tensor, src=0)
+    ml_info, run_args, start_step, best_loss, best_nominal_area = init_run(
+        tdist, 
+        global_rank, 
+        current_pytorch_device, 
+        storage_path, 
+        mlflow_experiment_name, 
+        cosmo_model, 
+        run_args, 
+        kwargs, 
+        resume_id=resume_id, 
+        resume_step=resume_step, 
+        add_steps=add_steps
+        )
+
+    # Broadcast run_args from rank 0 to ensure consistency, especially for 'steps' when resuming with add_steps
+    if global_rank == 0:
+        # run_args was already prepared correctly on rank 0 (either new or resumed with add_steps)
+        run_args_list_to_broadcast = [run_args]
+    else:
+        run_args_list_to_broadcast = [None]  # Placeholder for other ranks
+
+    if tdist.is_initialized():
+        tdist.barrier() # Ensure all ranks are ready before broadcasting run_args
     
-    # Broadcast run_id and exp_name lists
-    tdist.broadcast_object_list(run_id_list, src=0)
-    tdist.broadcast_object_list(exp_name_list, src=0)
-    
-    # Set up MLflow for all ranks
-    if local_rank != 0:
-        mlflow.set_experiment(experiment_id=str(exp_id_tensor.item()))
-        mlflow.start_run(run_id=run_id_list[0], nested=True)
-    
-    # Create ml_info object on all ranks with the same values
-    ml_info = type('mlinfo', (), {})()
-    ml_info.experiment_id = str(exp_id_tensor.item())
-    ml_info.run_id = run_id_list[0]
-    
-    # Set resume-related variables on all ranks
-    start_step = start_step_tensor.item()
-    best_loss = best_loss_tensor.item()
-    best_nominal_area = best_nominal_area_tensor.item()
-    history = []  # History is not critical for other ranks
+    tdist.broadcast_object_list(run_args_list_to_broadcast, src=0)
+    run_args = run_args_list_to_broadcast[0] # All ranks now have the definitive run_args
+    if global_rank != 0 and resume_id: # For non-rank 0, if resuming, print the received run_args for verification
+        print(f"Rank {global_rank} received run_args after broadcast: steps = {run_args.get('steps')}")
 
     # All ranks join the same run
     if resume_id:
@@ -287,37 +178,31 @@ def single_run(
     # select only the rows corresponding to the tracers
     
 
-    #desi_data = desi_df[desi_df['tracer'].isin(run_args["tracers"])]
-    #nominal_cov = desi_cov[np.ix_(desi_data.index, desi_data.index)]
-
     ############################################### Priors ###############################################
 
     total_observations = 6565626
     #classes = kwargs['classes']
     classes = (desi_tracers.groupby('class').sum()['targets'].reindex(["LRG", "ELG", "QSO"]) / total_observations).to_dict()
     mlflow.log_dict(classes, "classes.json")
+    # Get nominal design from observed tracer counts
+    nominal_design = torch.tensor(desi_tracers.groupby('class').sum()['observed'].reindex(classes.keys()).values, device=current_pytorch_device)
 
     num_tracers = NumTracers(
         desi_df,
         desi_tracers,
         cosmo_model,
         nominal_cov,
+        rank=global_rank,
         include_D_M=run_args["include_D_M"], 
-        device=f"cuda:{local_rank}",
+        device=current_pytorch_device,
         verbose=True
         )
     
     target_labels = num_tracers.cosmo_params
-    print(f"Classes: {classes}\n"
-        f"Cosmology: {cosmo_model}\n"
-        f"Target labels: {target_labels}")
 
     ############################################### Designs ###############################################
     # if fixed design:
-    if run_args["nominal_design"]:
-        # Get nominal design from observed tracer counts
-        nominal_design = torch.tensor(desi_tracers.groupby('class').sum()['observed'].reindex(classes.keys()).values, device=f"cuda:{local_rank}")
-        
+    if run_args["nominal_design"]:   
         # Create grid with nominal design values
         grid_designs = Grid(
             N_LRG=nominal_design[0].cpu().numpy(), 
@@ -326,9 +211,9 @@ def single_run(
         )
 
         # Convert grid to tensor format
-        designs = torch.tensor(getattr(grid_designs, grid_designs.names[0]).squeeze(), device=f"cuda:{local_rank}").unsqueeze(0)
+        designs = torch.tensor(getattr(grid_designs, grid_designs.names[0]).squeeze(), device=current_pytorch_device).unsqueeze(0)
         for name in grid_designs.names[1:]:
-            design_tensor = torch.tensor(getattr(grid_designs, name).squeeze(), device=f"cuda:{local_rank}").unsqueeze(0)
+            design_tensor = torch.tensor(getattr(grid_designs, name).squeeze(), device=current_pytorch_device).unsqueeze(0)
             designs = torch.cat((designs, design_tensor), dim=0)
         designs = designs.unsqueeze(0)
 
@@ -350,19 +235,19 @@ def single_run(
         )
 
         # Convert to tensor format
-        designs = torch.tensor(getattr(grid_designs, grid_designs.names[0]).squeeze(), device=f"cuda:{local_rank}").unsqueeze(1)
+        designs = torch.tensor(getattr(grid_designs, grid_designs.names[0]).squeeze(), device=current_pytorch_device).unsqueeze(1)
         for name in grid_designs.names[1:]:
-            design_tensor = torch.tensor(getattr(grid_designs, name).squeeze(), device=f"cuda:{local_rank}").unsqueeze(1)
+            design_tensor = torch.tensor(getattr(grid_designs, name).squeeze(), device=current_pytorch_device).unsqueeze(1)
             designs = torch.cat((designs, design_tensor), dim=1)
 
     # Only create prior plot if not resuming and on rank 0
-    if not resume_id and local_rank == 0:
+    if not resume_id and global_rank == 0: # global_rank check
         fig, axs = plt.subplots(ncols=len(target_labels), nrows=1, figsize=(5*len(target_labels), 5))
         if len(target_labels) == 1:
             axs = [axs]
         for i, p in enumerate(target_labels):
             support = num_tracers.priors[p].support
-            eval_pts = torch.linspace(support.lower_bound, support.upper_bound, 200, device=f"cuda:{local_rank}")
+            eval_pts = torch.linspace(support.lower_bound, support.upper_bound, 200, device=current_pytorch_device)
             prob = torch.exp(num_tracers.priors[p].log_prob(eval_pts))[:-1]
             prob_norm = prob/torch.sum(prob)
             axs[i].plot(eval_pts.cpu().numpy()[:-1], prob_norm.cpu().numpy(), label="Prior", color="tab:blue", alpha=0.5)
@@ -372,26 +257,44 @@ def single_run(
 
     input_dim = len(target_labels)
     context_dim = len(classes.keys()) + 10 if run_args["include_D_M"] else len(classes.keys()) + 5
-    if local_rank == 0:
+    if global_rank == 0:
         print("MLFlow Run Info:", ml_info.experiment_id + "/" + ml_info.run_id)
-        np.save(f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/designs.npy", designs.cpu().detach().numpy())
-        mlflow.log_artifact(f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/designs.npy")
+        print(f"Using {run_args['n_devices']} devices with {run_args['n_particles']} total particles.")
         print("Designs shape:", designs.shape)
         print("Calculating normalizing flow EIG...")
         print(f'Input dim: {input_dim}, Context dim: {context_dim}')
+        print(f"Classes: {classes}\n"
+            f"Cosmology: {cosmo_model}\n"
+            f"Target labels: {target_labels}")
+        np.save(f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/designs.npy", designs.cpu().detach().numpy())
+        mlflow.log_artifact(f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/designs.npy")
 
     posterior_flow = init_nf(
         run_args["flow_type"],
         input_dim,
         context_dim,
         run_args,
-        device=f"cuda:{local_rank}" if torch.cuda.is_available() else device,
+        device=current_pytorch_device,
         seed=run_args["nf_seed"],
         verbose=True,
         local_rank=local_rank
     )
-    posterior_flow = DDP(posterior_flow, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=False)
-    nominal_design = torch.tensor(desi_tracers.groupby('class').sum()['observed'].reindex(classes.keys()).values, device=f"cuda:{local_rank}")
+    # For DDP, ensure device_ids and output_device use the pytorch_device_idx (which is 0)
+    if "LOCAL_RANK" in os.environ and torch.cuda.is_available():
+        ddp_device_spec = [pytorch_device_idx] 
+        ddp_output_device_spec = pytorch_device_idx
+    else:
+        ddp_device_spec = [effective_device_id] if effective_device_id != -1 else None
+        ddp_output_device_spec = effective_device_id if effective_device_id != -1 else None
+
+    # Check if model is already on a CUDA device if CUDA is available
+    if torch.cuda.is_available():
+        model_device = next(posterior_flow.parameters()).device
+        if model_device.type == 'cpu' and ddp_device_spec is not None and ddp_device_spec[0] is not None and isinstance(ddp_device_spec[0], int) :
+            posterior_flow.to(f"cuda:{ddp_device_spec[0]}")
+    
+    posterior_flow = DDP(posterior_flow, device_ids=ddp_device_spec, output_device=ddp_output_device_spec, find_unused_parameters=False)
+    
     central_vals = num_tracers.central_val if run_args["include_D_M"] else num_tracers.central_val[1::2]
     nominal_context = torch.cat([nominal_design, central_vals], dim=-1)
     
@@ -401,47 +304,45 @@ def single_run(
     
     # Load checkpoint if specified
     if resume_id:
+        checkpoint_dir = f"{storage_path}/mlruns/{ml_info.experiment_id}/{resume_id}/artifacts/checkpoints"
+        checkpoint_file = [f for f in os.listdir(checkpoint_dir) if f.startswith('checkpoint_') and f.endswith('.pt') and f.split('_')[-1].split('.')[0] == str(start_step)][0]
+        checkpoint_path = f"{checkpoint_dir}/{checkpoint_file}"
         # Broadcast checkpoint path to all ranks
-        if local_rank == 0:
+        if global_rank == 0: # Check global_rank
             # Convert checkpoint path to bytes and create tensor
             checkpoint_path_bytes = checkpoint_path.encode('utf-8')
             checkpoint_path_length = len(checkpoint_path_bytes)
-            checkpoint_path_tensor = torch.tensor([checkpoint_path_length], dtype=torch.long, device=f"cuda:{local_rank}")
-            checkpoint_path_bytes_tensor = torch.tensor(list(checkpoint_path_bytes), dtype=torch.uint8, device=f"cuda:{local_rank}")
+            checkpoint_path_tensor = torch.tensor([checkpoint_path_length], dtype=torch.long, device=current_pytorch_device)
+            checkpoint_path_bytes_tensor = torch.tensor(list(checkpoint_path_bytes), dtype=torch.uint8, device=current_pytorch_device)
         else:
-            checkpoint_path_tensor = torch.zeros(1, dtype=torch.long, device=f"cuda:{local_rank}")
+            checkpoint_path_tensor = torch.zeros(1, dtype=torch.long, device=current_pytorch_device)
             checkpoint_path_bytes_tensor = None
 
         # Broadcast checkpoint path length
         tdist.broadcast(checkpoint_path_tensor, src=0)
         
         # Create tensor for receiving bytes on non-zero ranks
-        if local_rank != 0:
-            checkpoint_path_bytes_tensor = torch.zeros(checkpoint_path_tensor.item(), dtype=torch.uint8, device=f"cuda:{local_rank}")
+        if global_rank != 0: # Check global_rank
+            checkpoint_path_bytes_tensor = torch.zeros(checkpoint_path_tensor.item(), dtype=torch.uint8, device=current_pytorch_device)
         
         # Broadcast checkpoint path bytes
         tdist.broadcast(checkpoint_path_bytes_tensor, src=0)
         
         # Convert bytes back to string
-        if local_rank != 0:
+        if global_rank != 0: # Check global_rank
             checkpoint_path = bytes(checkpoint_path_bytes_tensor.cpu().numpy()).decode('utf-8')
 
         # Load the checkpoint
-        checkpoint = torch.load(checkpoint_path, map_location=f"cuda:{local_rank}")
+        checkpoint = torch.load(checkpoint_path, map_location=current_pytorch_device)
         
         # Load model state dict
         state_dict = checkpoint['model_state_dict']
-        # Remove module prefixes if they exist
-        new_state_dict = {}
-        for k, v in state_dict.items():
-            if k.startswith('module.module.'):
-                k = k[7:]  # Remove one module prefix
-            new_state_dict[k] = v
         
-        # Load the cleaned state dict
-        posterior_flow.module.load_state_dict(new_state_dict, strict=True)
+        # Load the state_dict directly into the innermost base model
+        # (since posterior_flow is DDP(DDP(base_model)) and state_dict has bare keys)
+        posterior_flow.module.load_state_dict(state_dict, strict=True)
         
-        if local_rank == 0:
+        if global_rank == 0:
             print(f"Checkpoint loaded from {checkpoint_path}")
             print(f"Resuming from step {start_step}")
 
@@ -454,7 +355,7 @@ def single_run(
             pyro.get_param_store().set_state(rng_state['pyro'])
             if torch.cuda.is_available() and rng_state['cuda'] is not None:
                 torch.cuda.set_rng_state_all([state.cpu() for state in rng_state['cuda']])
-            if local_rank == 0:
+            if global_rank == 0:
                 print("RNG states restored from checkpoint")
 
         # Load optimizer state
@@ -466,32 +367,45 @@ def single_run(
 
         # Synchronize all ranks after loading checkpoint
         tdist.barrier()
-    else:
-        seed = auto_seed(base_seed=run_args["pyro_seed"], local_rank=local_rank)
+    elif restart_path:
+        seed = auto_seed(base_seed=run_args["pyro_seed"], rank=global_rank)
+        # for starting a new run from a checkpoint
+        checkpoint = torch.load(restart_path, map_location=current_pytorch_device)
+        posterior_flow.module.module.load_state_dict(checkpoint['model_state_dict'], strict=True)
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        if global_rank == 0:
+            print(f"Checkpoint loaded from {restart_path}")
+        tdist.barrier()
         # test sample from the flow (only on rank 0)
-        if local_rank == 0:
-            with torch.no_grad():
-                samples = posterior_flow.module(nominal_context).sample((1000,)).cpu().numpy()
-                plt.figure()
-                plt.plot(samples[:, 0], samples[:, 1], 'o', alpha=0.5)
-                plt.savefig(f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/plots/init_samples.png")
-            print(f"Seed: {seed}")
+        with torch.no_grad():
+            samples = posterior_flow.module(nominal_context).sample((1000,)).cpu().numpy()
+            plt.figure()
+            plt.plot(samples.squeeze()[:, 0], samples.squeeze()[:, 1], 'o', alpha=0.5)
+            plt.savefig(f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/plots/init_samples_rank_{global_rank}.png")
+    else:
+        seed = auto_seed(base_seed=run_args["pyro_seed"], rank=global_rank)
+        # test sample from the flow (only on rank 0)
+        with torch.no_grad():
+            samples = posterior_flow.module(nominal_context).sample((1000,)).cpu().numpy()
+            plt.figure()
+            plt.plot(samples.squeeze()[:, 0], samples.squeeze()[:, 1], 'o', alpha=0.5)
+            plt.savefig(f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/plots/init_samples_rank_{global_rank}.png")
 
     verbose_shapes = run_args["verbose"]
     # Disable tqdm progress bar if output is not a TTY
     is_tty = sys.stdout.isatty()
     # Set n_particles per GPU, which will also be the batch size
-    n_particles_per_gpu = run_args.get("n_particles", 1024)
+    n_particles_per_device = run_args.get("n_particles_per_device", 1024)
 
     dataloader = get_dataloader(
         num_tracers=num_tracers,
         designs=designs.cpu(),
-        n_particles_per_gpu=n_particles_per_gpu,
+        n_particles_per_device=n_particles_per_device,
         observation_labels=["y"],
         target_labels=target_labels,
         batch_size=1,
-        local_rank=local_rank,
-        world_size=tdist.get_world_size()
+        pytorch_device_idx_for_ddp=pytorch_device_idx if "LOCAL_RANK" in os.environ else effective_device_id,
+        world_size=tdist.get_world_size() if "LOCAL_RANK" in os.environ else 1
     )
 
     steps = run_args.get("steps", 1000)
@@ -502,26 +416,98 @@ def single_run(
     global_nominal_area = np.nan
 
     # Initialize pbar as None by default
-    if is_tty and local_rank == 0:
+    if is_tty and global_rank == 0:
         pbar = tqdm(total=steps - step, desc="Training Progress", position=0, leave=True)
+
+    # Profiling block
+    if profile:
+        if global_rank == 0:
+            print("Starting DDP profiling...")
+            profiler_log_dir = f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/profiler_log_rank0"
+            os.makedirs(profiler_log_dir, exist_ok=True)
+            trace_handler = torch.profiler.tensorboard_trace_handler(profiler_log_dir)
+        else:
+            trace_handler = None # Only rank 0 writes traces
+
+        # Define a schedule for profiling
+        prof_schedule = torch.profiler.schedule(wait=1, warmup=1, active=3, repeat=1)
+
+        with torch.profiler.profile(
+            activities=[
+                torch.profiler.ProfilerActivity.CPU,
+                torch.profiler.ProfilerActivity.CUDA,
+            ],
+            schedule=prof_schedule,
+            on_trace_ready=trace_handler,
+            record_shapes=False, # Keep False unless shapes are critical for analysis
+            profile_memory=False, # Keep False unless memory is critical
+            with_stack=False, # Keep False, can be very verbose
+            with_flops=False
+        ) as prof:
+            for profile_step in range(1 + 1 + 3): # wait + warmup + active
+                if global_rank == 0 and profile_step >= 2: # Start describing active steps
+                    print(f"Profiling active step: {profile_step - 2}")
+                
+                # --- Simulate one training step --- 
+                for context, samples in dataloader: # This will iterate once due to batch_size=1 for the dataset
+                    optimizer.zero_grad()
+                    context = context.to(current_pytorch_device)
+                    samples = samples.to(current_pytorch_device)
+                    
+                    temp_verbose_shapes = run_args["verbose"] if profile_step == 0 else False
+                    agg_loss, loss = nf_loss(context, posterior_flow.module, samples, rank=global_rank, verbose_shapes=temp_verbose_shapes)
+                    
+                    # No need for global loss aggregation during profiling, focus on per-rank
+                    agg_loss.backward()
+                    torch.nn.utils.clip_grad_norm_(posterior_flow.parameters(), max_norm=1.0)
+                    optimizer.step()
+                    break # Exit after one batch from dataloader for this profile step
+                # --- End of simulated training step ---
+                
+                prof.step() # Signal profiler that a step is complete
+                tdist.barrier() # Synchronize all ranks after each profile step
+
+            if global_rank == 0:
+                print("\n=== Profiler Results (Rank 0) ===\n")
+                # Sort by self_cuda_time_total for GPU-bound tasks
+                print(prof.key_averages().table(
+                    sort_by="self_cuda_time_total", 
+                    row_limit=20
+                ))
+                summary_path = f"{profiler_log_dir}/profiler_summary_rank0.txt"
+                with open(summary_path, 'w') as f:
+                    f.write("=== Profiler Results (Rank 0) ===\n\n")
+                    f.write(prof.key_averages().table(
+                        sort_by="self_cuda_time_total", 
+                        row_limit=20
+                    ))
+                mlflow.log_artifact(summary_path, "profiler_log_rank0")
+                print(f"Profiling complete. Rank 0 data saved to TensorBoard format in {profiler_log_dir}")            
+            else:
+                # Other ranks can print their summary too if desired, or just confirm completion
+                print(f"\n=== Profiler Results (Rank {global_rank}) ===\n")
+                print(prof.key_averages().table(sort_by="self_cuda_time_total", row_limit=10))
+                print(f"Rank {global_rank} profiling step complete.")
+
+            tdist.barrier() # Ensure all ranks finish printing before exiting
+            if "LOCAL_RANK" in os.environ: # Clean up DDP
+                mlflow.end_run()
+                tdist.destroy_process_group()
+            print("Exiting after profiling.")
+            return # Exit single_run function
 
     while step < steps:
         for context, samples in dataloader:
             optimizer.zero_grad()
 
-            # Move data to GPU
-            context = context.to(f"cuda:{local_rank}")
-            samples = samples.to(f"cuda:{local_rank}")
-
             if step > 0:
                 verbose_shapes = False
-
             # Compute the loss using nf_loss
-            agg_loss, loss = nf_loss(context, posterior_flow.module, samples, verbose_shapes=verbose_shapes)
+            agg_loss, loss = nf_loss(context, posterior_flow.module, samples, rank=global_rank, verbose_shapes=verbose_shapes)
 
             # Aggregate global loss and agg_loss across all ranks
-            global_loss_tensor = torch.tensor(loss.mean().item(), device=f"cuda:{local_rank}")
-            global_agg_loss_tensor = torch.tensor(agg_loss.item(), device=f"cuda:{local_rank}")
+            global_loss_tensor = loss.mean().detach()
+            global_agg_loss_tensor = agg_loss.detach()
             tdist.all_reduce(global_loss_tensor, op=torch.distributed.ReduceOp.SUM)
             tdist.all_reduce(global_agg_loss_tensor, op=torch.distributed.ReduceOp.SUM)
             global_loss = global_loss_tensor.item() / tdist.get_world_size()
@@ -536,107 +522,136 @@ def single_run(
             # Optimizer step
             optimizer.step()
 
-            # Before optimizer step, verify model consistency across ranks
+            # Post-optimizer consistency check
             if tdist.get_world_size() > 1:
-                # Gather all parameter tensors from each rank
+                with torch.no_grad():
+                    for param in posterior_flow.module.parameters():
+                        tdist.broadcast(param.data, src=0)
+                
                 for name, param in posterior_flow.module.named_parameters():
-                    # Only check parameters that require gradients
                     if param.requires_grad:
-                        # Sum the parameters across all ranks
-                        param_tensor = param.data.clone()
-                        tdist.all_reduce(param_tensor, op=torch.distributed.ReduceOp.SUM)
-                        
-                        # Compute the average by dividing by the world size
-                        param_avg = param_tensor / tdist.get_world_size()
-                        # Check for consistency
-                        if not torch.allclose(param.data, param_avg, rtol=1e-5, atol=1e-8):
-                            print(f"Rank {local_rank} | Parameter '{name}' is not consistent across ranks!")
-                            print(f"Local value: {param.data.mean().item()}, Global average: {param_avg.mean().item()}")
-
-            # Synchronize gradients across processes
+                        # Each rank needs its local data for comparison
+                        local_param_data = param.data.clone() 
+                    
+                    # Prepare a tensor for all_reduce
+                    tensor_to_reduce = local_param_data.clone()
+                    tdist.all_reduce(tensor_to_reduce, op=torch.distributed.ReduceOp.SUM)
+                    
+                    # All ranks compute the same average
+                    param_avg = tensor_to_reduce / tdist.get_world_size()
+                    
+                    if global_rank == 0:
+                        # Rank 0 calculates the difference using its local data
+                        max_abs_diff = (local_param_data - param_avg).abs().max().item()
+                        is_consistent = torch.allclose(local_param_data, param_avg, rtol=1e-5, atol=1e-8)
+                        if not is_consistent:
+                            print(f"Rank 0 | Step {step} | Param: '{name}' | Max abs diff: {max_abs_diff:.2e} | Consistent (allclose): {is_consistent}")
+                                
+            # Synchronize all ranks before proceeding
             tdist.barrier()
 
-            # Log memory usage
-            process = psutil.Process()
-            memory_usage = process.memory_info().rss / 1024**2
-
             # Log metrics for each rank
-            mlflow.log_metric(f"loss_rank_{local_rank}", loss.mean().item(), step=step)
-            mlflow.log_metric(f"agg_loss_rank_{local_rank}", agg_loss.item(), step=step)
-            mlflow.log_metric(f"memory_usage_MB_rank_{local_rank}", memory_usage, step=step)
+            mlflow.log_metric(f"loss_rank_{global_rank}", loss.mean().item(), step=step)
+            mlflow.log_metric(f"agg_loss_rank_{global_rank}", agg_loss.item(), step=step)
 
             # Update progress bar or print status
-            if local_rank == 0:
+            if global_rank == 0:
                 mlflow.log_metric("loss", global_loss, step=step)
                 mlflow.log_metric("agg_loss", global_agg_loss, step=step)
                 if is_tty:
                     pbar.update(1)
-                    if kwargs["log_nominal_area"]:
+                    if run_args["log_nominal_area"]:
                         pbar.set_description(f"Loss: {loss.mean().item():.3f}, Area: {global_nominal_area:.3f}")
                     else:
                         pbar.set_description(f"Loss: {loss.mean().item():.3f}")
                 else:
-                    print(f"Step {step}, Loss: {loss.mean().item():.3f}") if not kwargs["log_nominal_area"] else print(f"Step {step}, Loss: {loss.mean().item():.3f}, Area: {global_nominal_area:.3f}")
+                    print(f"Step {step}, Loss: {loss.mean().item():.3f}") if not run_args["log_nominal_area"] else print(f"Step {step}, Loss: {loss.mean().item():.3f}, Area: {global_nominal_area:.3f}")
 
             if step % 100 == 0 and step != 0:
-                if kwargs["log_nominal_area"]:
+                if run_args["log_nominal_area"]:
                     nominal_samples = posterior_flow(nominal_context).sample((5000,)).cpu().numpy()
                     nominal_samples[:, -1] *= 100000
-                    with contextlib.redirect_stdout(io.StringIO()):
-                        nominal_samples_gd = getdist.MCSamples(samples=nominal_samples, names=target_labels, labels=num_tracers.latex_labels)
-
-                    # Calculate the nominal area
-                    local_nominal_area = get_contour_area(nominal_samples_gd, 'Om', 'hrdrag', 0.68)[0]
+                    # Capture getdist output only on rank 0 to avoid clutter, ensure getdist is available
+                    if global_rank == 0: # Check global_rank
+                        try:
+                            import getdist.mcsamples
+                            with contextlib.redirect_stdout(io.StringIO()):
+                                nominal_samples_gd = getdist.mcsamples.MCSamples(samples=nominal_samples, names=target_labels, labels=num_tracers.latex_labels)
+                            local_nominal_area = get_contour_area(nominal_samples_gd, 'Om', 'hrdrag', 0.68)[0]
+                        except ImportError:
+                            print("Rank 0: getdist not installed, cannot calculate nominal area.")
+                            local_nominal_area = float('nan') # Or handle as error
+                        except Exception as e:
+                            print(f"Rank 0: Error during getdist processing: {e}")
+                            local_nominal_area = float('nan')
+                    else: # Other ranks don't compute area directly but need a value for aggregation
+                        local_nominal_area = 0.0 # Or float('nan') if that's better for averaging
 
                     # Aggregate the nominal areas across all ranks
-                    nominal_area_tensor = torch.tensor(local_nominal_area, device=f"cuda:{local_rank}")
+                    nominal_area_tensor = torch.tensor(local_nominal_area, device=current_pytorch_device)
                     tdist.all_reduce(nominal_area_tensor, op=tdist.ReduceOp.SUM)
-                    global_nominal_area = nominal_area_tensor.item() / tdist.get_world_size()
+                    # For area, if only rank 0 computes it, broadcasting might be better than summing zeros.
+                    # Or ensure all ranks compute it if data is available, or rank 0 broadcasts its result.
+                    # Assuming rank 0 computes and then we want that value:
+                    if global_rank == 0:
+                        global_nominal_area_val = local_nominal_area # Rank 0 has the actual value
+                    else:
+                        global_nominal_area_val = nominal_area_tensor.item() # Should be 0 if others sent 0
+
+                    # Broadcast the actual area from rank 0 to all other ranks
+                    area_to_broadcast = torch.tensor([global_nominal_area_val if global_rank == 0 else 0.0], device=current_pytorch_device)
+                    tdist.broadcast(area_to_broadcast, src=0)
+                    global_nominal_area = area_to_broadcast.item()
 
                 # Log the global nominal area on rank 0
-                if local_rank == 0:
+                if global_rank == 0:
                     mlflow.log_metric("nominal_area", global_nominal_area, step=step)
+                    checkpoint_saved = False
                     if global_loss < best_loss:
                         best_loss = global_loss
+                        checkpoint_saved = True
                         checkpoint_path = f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/checkpoints/checkpoint_loss_{step}.pt"
-                        save_checkpoint(posterior_flow, optimizer, checkpoint_path, step=step, artifact_path="checkpoints", scheduler=scheduler)
+                        save_checkpoint(posterior_flow.module, optimizer, checkpoint_path, step=step, artifact_path="checkpoints", scheduler=scheduler)
                         checkpoint_path = f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/checkpoints/checkpoint_loss_best.pt"
-                        save_checkpoint(posterior_flow, optimizer, checkpoint_path, step=step, artifact_path="checkpoints", scheduler=scheduler)
+                        save_checkpoint(posterior_flow.module, optimizer, checkpoint_path, step=step, artifact_path="checkpoints", scheduler=scheduler)
                         mlflow.log_metric("best_loss", best_loss, step=step)
-                    elif global_nominal_area < best_nominal_area:
+                    if global_nominal_area < best_nominal_area:
                         # Save checkpoint if the global nominal area is the best so far
                         best_nominal_area = global_nominal_area
                         mlflow.log_metric("best_nominal_area", best_nominal_area, step=step)
+                        if not checkpoint_saved:
+                            # Save the best nominal area checkpoint
+                            checkpoint_path = f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/checkpoints/checkpoint_nominal_area_{step}.pt"
+                            save_checkpoint(posterior_flow.module, optimizer, checkpoint_path, step=step, artifact_path="checkpoints", scheduler=scheduler)
 
-                        # Save the best nominal area checkpoint
-                        checkpoint_path = f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/checkpoints/checkpoint_nominal_area_{step}.pt"
-                        save_checkpoint(posterior_flow, optimizer, checkpoint_path, step=step, artifact_path="checkpoints", scheduler=scheduler)
-
-                        # Save the final best area checkpoint
-                        checkpoint_path = f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/checkpoints/checkpoint_nominal_area_best.pt"
-                        save_checkpoint(posterior_flow, optimizer, checkpoint_path, step=step, artifact_path="checkpoints", scheduler=scheduler)
+                            # Save the final best area checkpoint
+                            checkpoint_path = f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/checkpoints/checkpoint_nominal_area_best.pt"
+                            save_checkpoint(posterior_flow.module, optimizer, checkpoint_path, step=step, artifact_path="checkpoints", scheduler=scheduler)
 
             # Synchronize across ranks before scheduler step
             tdist.barrier()
-            # Update scheduler every step_freq steps
-            if steps % run_args.get("step_freq", 1) == 0:
-                scheduler.step()
 
-            if local_rank == 0:
+            if global_rank == 0:
                 for param_group in optimizer.param_groups:
                     mlflow.log_metric("lr", param_group['lr'], step=step)
 
+            # Update scheduler every step_freq steps
+            if step % run_args.get("step_freq", 1) == 0:
+                scheduler.step()
+
+
+            log_usage_metrics(current_pytorch_device, process, step, global_rank)
             step += 1
             if step >= steps:
                 break
 
     # Ensure progress bar closes cleanly
-    if local_rank == 0 and pbar is not None:
+    if global_rank == 0 and is_tty:
         pbar.close()
 
-    checkpoint_path = f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/checkpoints/checkpoint_last.pt"
     # Only save checkpoint and plot on rank 0
-    if local_rank == 0:
+    if global_rank == 0:
+        checkpoint_path = f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/checkpoints/checkpoint_last.pt"
         save_checkpoint(posterior_flow.module, optimizer, checkpoint_path, step=run_args.get("steps", 0), artifact_path="checkpoints", scheduler=scheduler)
         plot_training(
             run_id=ml_info.run_id,
@@ -647,8 +662,8 @@ def single_run(
             show_best=False
         )
         if not run_args["nominal_design"]:
-            eval_args = {"n_samples": 3000, "device": f"cuda:{local_rank}", "eval_seed": 1}
-            plot_eig_steps(
+            eval_args = {"n_samples": 3000, "device": current_pytorch_device, "eval_seed": 1}
+            eig_steps(
                 run_id=ml_info.run_id,
                 steps=[500, 'last'],
                 eval_args=eval_args,
@@ -659,8 +674,6 @@ def single_run(
         print("Run", ml_info.experiment_id + "/" + ml_info.run_id, "completed.")
     # Final memory logging
     if "LOCAL_RANK" in os.environ:
-        if local_rank == 0:
-            print(f"Rank {local_rank} | Final Memory: {process.memory_info().rss / 1024**2:.2f} MB")
         # Synchronize all ranks before ending MLflow runs
         tdist.barrier()
         # End MLflow run for all ranks
@@ -694,6 +707,8 @@ if __name__ == '__main__':
     parser.add_argument('--resume_id', type=str, default=None, help='MLflow run ID to resume training from')
     parser.add_argument('--resume_step', type=int, default=None, help='Step to resume training from')
     parser.add_argument('--add_steps', type=int, default=0, help='Number of steps to add to the training')
+    parser.add_argument('--profile', action='store_true', help='Enable profiling for a few steps and then exit.')
+    parser.add_argument('--restart_path', type=str, default=None, help='Path to checkpoint for restarting training')
 
     for key, value in default_args.items():
         arg_type = type(value)
@@ -717,26 +732,56 @@ if __name__ == '__main__':
     # Override defaults with any provided command-line arguments
     args_dict = vars(args)
     for key, value in args_dict.items():
-        if key not in ['cosmo_model', 'resume_id', 'resume_step', 'add_steps'] and value is not None and key in run_args:
+        if key not in ['cosmo_model', 'resume_id', 'resume_step', 'add_steps', 'profile', 'checkpoint_path'] and value is not None and key in run_args:
             if isinstance(run_args[key], bool) and isinstance(value, bool):
                 run_args[key] = value
             elif not isinstance(run_args[key], bool):
-                print(f"Overriding '{key}': {run_args[key]} -> {value}")
+                if os.environ.get('RANK') == 0:
+                    print(f"Overriding '{key}': {run_args[key]} -> {value}")
                 run_args[key] = value
 
     # --- Setup & Run --- 
-    device = torch.device(device) if torch.cuda.is_available() else "cpu"
-    print(f'Using device: {device}.')
+    # Determine device for the main script part, before DDP spawns processes
+    # This initial `device_check` is for the process launching srun, not for the DDP ranks themselves.
+    initial_device_check_cuda = False
+    if torch.cuda.is_available():
+        try:
+            # Check if the device specified in args is valid, otherwise default to cuda:0
+            # The `args.device` is like "cuda:0"
+            if args.device.startswith("cuda:") and ":" in args.device.split(":"):
+                parsed_id = int(args.device.split(':')[1])
+                if 0 <= parsed_id < torch.cuda.device_count():
+                    torch.device(args.device) # Try to create device object
+                    initial_device_check_cuda = True
+                    script_level_device_str = args.device
+                else: # Invalid specific cuda device
+                    script_level_device_str = "cuda:0" # Default to cuda:0
+                    torch.device(script_level_device_str)
+                    initial_device_check_cuda = True
+            else: # Non-specific "cuda" or other
+                 script_level_device_str = "cuda:0" # Default to cuda:0
+                 torch.device(script_level_device_str)
+                 initial_device_check_cuda = True
+        except Exception as e: # Fallback to CPU if any error with CUDA init
+            print(f"Initial CUDA check failed: {e}. Defaulting to CPU for main script context.")
+            initial_device_check_cuda = False
+            script_level_device_str = "cpu"
+    else:
+        script_level_device_str = "cpu"
+
+    print(f'Main script context: Using device string: {script_level_device_str}.')
+    print(f"Rank {os.environ.get('RANK')} (Global) / {os.environ.get('LOCAL_RANK')} (Env Var): In __main__, about to call single_run.")
 
     single_run(
         cosmo_model=cosmo_model,
         run_args=run_args,
         mlflow_experiment_name=args.exp_name,
-        device=device,
-        log_nominal_area=False,
+        device=script_level_device_str, # Pass the determined device string
         resume_id=args.resume_id,
         resume_step=args.resume_step,
-        add_steps=args.add_steps
+        add_steps=args.add_steps,
+        profile=args.profile,
+        restart_path=args.restart_path
     )
 
 
