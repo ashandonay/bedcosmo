@@ -6,7 +6,6 @@ nflows_testing.ipynb
 *.png
 .conda/
 *.onnx
-*.txt
 *.npy
 *.pt
 **/mlruns
