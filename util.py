@@ -106,8 +106,8 @@ def init_training_env(tdist, device):
             num_pytorch_cpu_threads = int(omp_threads_str)
             # Cap PyTorch threads if OMP_NUM_THREADS is very large (e.g. > 8)
             # Adjust this cap as needed. If OMP_NUM_THREADS is already a per-process target for all libs, this might not be needed.
-            if num_pytorch_cpu_threads > 8: 
-                num_pytorch_cpu_threads = 8
+            if num_pytorch_cpu_threads > 32: 
+                num_pytorch_cpu_threads = 32
             elif num_pytorch_cpu_threads <= 0:
                 num_pytorch_cpu_threads = 1 # Must be at least 1
         else:
@@ -186,77 +186,81 @@ def init_training_env(tdist, device):
 
     return global_rank, local_rank, effective_device_id, pytorch_device_idx
 
-def init_nf(flow_type, input_dim, context_dim, run_args, device="cuda:0", seed=None, verbose=False, local_rank=None, **kwargs):
+def init_nf(flow_type, input_dim, context_dim, run_args, device="cuda:0", seed=0, verbose=False, local_rank=None, **kwargs):
     # Set seeds first, before any model initialization
     if seed is not None:
-        torch.manual_seed(seed)
-        random.seed(seed)
-        np.random.seed(seed)
+        # Ensure seed is an integer for all random libraries
+        torch.manual_seed(int(seed))
+        random.seed(int(seed))
+        np.random.seed(int(seed))
         if torch.cuda.is_available():
-            torch.cuda.manual_seed(seed)
-            torch.cuda.manual_seed_all(seed)
-            # For completely deterministic results
+            torch.cuda.manual_seed(int(seed))
+            torch.cuda.manual_seed_all(int(seed))
             torch.backends.cudnn.deterministic = True
             torch.backends.cudnn.benchmark = False
 
-    if run_args["hidden_size"] is not None and local_rank is not None and local_rank == 0 and verbose:
-        print(f'Hidden features: {(run_args["hidden_size"],) * run_args["n_layers"]}')
+    n_layers = int(run_args.get("n_layers", 1))
+    hidden_size = int(run_args.get("hidden_size", 64))
+    n_transforms = int(run_args.get("n_transforms", 5))
 
     # Initialize the flow model
     if flow_type == "NSF":
+        bins_val = int(run_args.get("bins"))
         posterior_flow = zuko.flows.NSF(
             features=input_dim, 
             context=context_dim, 
-            transforms=run_args["n_transforms"], 
-            bins=run_args["bins"],
-            hidden_features=((run_args["hidden_size"],) * run_args["n_layers"]),
+            transforms=n_transforms, 
+            bins=bins_val,
+            hidden_features=((hidden_size,) * n_layers),
             **kwargs
         )
     elif flow_type == "NAF":
+        signal_val = int(run_args.get("signal"))
         posterior_flow = zuko.flows.NAF(
             features=input_dim, 
             context=context_dim, 
-            transforms=run_args["n_transforms"],
-            signal=run_args["signal"],
-            network={"hidden_features": ((run_args["hidden_size"],) * run_args["n_layers"])}
+            transforms=n_transforms,
+            signal=signal_val,
+            network={"hidden_features": ((hidden_size,) * n_layers)}
         )
     elif flow_type == "MAF":
         posterior_flow = zuko.flows.MAF(
             features=input_dim, 
             context=context_dim, 
-            transforms=run_args["n_transforms"],
-            hidden_features=((run_args["hidden_size"],) * run_args["n_layers"]),
+            transforms=n_transforms,
+            hidden_features=((hidden_size,) * n_layers),
             **kwargs
         )
     elif flow_type == "MAF_Affine":
         posterior_flow = zuko.flows.MAF(
             features=input_dim, 
             context=context_dim, 
-            transforms=run_args["n_transforms"],
+            transforms=n_transforms,
             univariate=zuko.transforms.MonotonicAffineTransform,
             **kwargs
         )
     elif flow_type == "MAF_RQS":
+        shape_val = int(run_args.get("shape"))
         posterior_flow = zuko.flows.MAF(
             features=input_dim, 
             context=context_dim, 
-            transforms=run_args["n_transforms"],
+            transforms=n_transforms,
             univariate=zuko.transforms.MonotonicRQSTransform,
-            shapes=([run_args["shape"]], [run_args["shape"]], [run_args["shape"]-1]),
+            shapes=([shape_val], [shape_val], [shape_val-1]),
             **kwargs
         )
     elif flow_type == "NICE":
         posterior_flow = zuko.flows.NICE(
             features=input_dim, 
             context=context_dim, 
-            transforms=run_args["n_transforms"],
+            transforms=n_transforms,
             **kwargs
         )
     elif flow_type == "GF":
         posterior_flow = zuko.flows.GF(
             features=input_dim, 
             context=context_dim, 
-            transforms=run_args["n_transforms"]
+            transforms=n_transforms
         )
     else:
         raise ValueError(f"Unknown flow type: {flow_type}")
@@ -470,123 +474,234 @@ def _prepare_broadcast_tensors(exp_id, start_step, best_loss, best_nominal_area,
         'exp_name': [exp_name]
     }
 
-def run_eval(run_id, eval_args, step='loss_best', cosmo_exp='num_tracers'):
+def get_runs_data(exp_name=None, run_ids=None, excluded_runs=[], filter_string=None, parse_params=False):
+    """
+    Fetches run data from MLflow based on experiment name or run IDs.
+
+    Args:
+        exp_name (str, optional): Name of the MLflow experiment.
+        run_ids (str or list, optional): A single run ID or a list of run IDs.
+        excluded_runs (list, optional): A list of run IDs to exclude from the result.
+        filter_string (str, optional): An MLflow filter string to apply when searching for runs.
+        parse_params (bool): Whether to parse MLflow parameters using `parse_mlflow_params`.
+
+    Returns:
+        tuple: A tuple containing:
+            - list: A list of dictionaries, where each dictionary represents a run and contains
+                    'run_id', 'params', 'run_obj', 'name', and 'exp_id'. Returns empty list on failure.
+            - str or None: The experiment ID for the fetched runs.
+            - str or None: The experiment name for the fetched runs.
+    """
+    client = MlflowClient()
+    runs_data_list = []
+    experiment_id = None
+    actual_exp_name = exp_name
+
+    if exp_name is not None:
+        try:
+            exp = client.get_experiment_by_name(exp_name)
+            if exp is None:
+                print(f"Error: Experiment '{exp_name}' not found.")
+                return [], None, None
+            experiment_id = exp.experiment_id
+            actual_exp_name = exp.name
+            
+            run_infos = client.search_runs(
+                experiment_ids=[experiment_id],
+                filter_string=filter_string if filter_string else "",
+                run_view_type=mlflow.entities.ViewType.ACTIVE_ONLY
+            )
+            
+            for run_obj in run_infos:
+                if run_obj.info.run_id not in excluded_runs:
+                    params = parse_mlflow_params(run_obj.data.params) if parse_params else run_obj.data.params
+                    runs_data_list.append({
+                        'run_id': run_obj.info.run_id,
+                        'params': params,
+                        'run_obj': run_obj,
+                        'name': run_obj.info.run_name,
+                        'exp_id': run_obj.info.experiment_id
+                    })
+        except Exception as e:
+            print(f"Error fetching runs for experiment '{exp_name}': {e}")
+            return [], None, None
+            
+    elif run_ids is not None:
+        run_ids_list = [run_ids] if isinstance(run_ids, str) else run_ids
+        processed_run_ids = [rid for rid in run_ids_list if rid not in excluded_runs]
+        
+        if not processed_run_ids:
+            print("No valid runs to process after exclusion.")
+            return [], None, None
+
+        for rid in processed_run_ids:
+            try:
+                run_obj = client.get_run(rid)
+                if experiment_id is None:
+                    experiment_id = run_obj.info.experiment_id
+                    if actual_exp_name is None:
+                        try:
+                            exp = client.get_experiment(experiment_id)
+                            actual_exp_name = exp.name if exp else "Selected Runs"
+                        except Exception:
+                            actual_exp_name = "Selected Runs (from run_id)"
+
+                params = parse_mlflow_params(run_obj.data.params) if parse_params else run_obj.data.params
+                runs_data_list.append({
+                    'run_id': rid,
+                    'params': params,
+                    'run_obj': run_obj,
+                    'name': run_obj.info.run_name,
+                    'exp_id': run_obj.info.experiment_id
+                })
+            except Exception as e:
+                print(f"Warning: Could not fetch data for run {rid}: {e}. Skipping this run.")
+    else:
+        print("Either exp_name or run_ids must be provided.")
+        return [], None, None
+
+    if not runs_data_list:
+        print("No runs found to process.")
+        return [], None, None
+
+    return runs_data_list, experiment_id, actual_exp_name
+
+
+def run_eval(run_obj, parsed_run_params, eval_args, step='loss_best', cosmo_exp='num_tracers', run_id_for_fallback_only=None):
+    # run_id_for_fallback_only is if run_obj and parsed_run_params are somehow not available from caller
     storage_path = os.environ["SCRATCH"] + f"/bed/BED_cosmo/{cosmo_exp}"
     mlflow.set_tracking_uri(storage_path + "/mlruns")
-    client = MlflowClient()
-    run = client.get_run(run_id)
-    num_tracers, posterior_flow = load_model(run_id, step, eval_args, cosmo_exp)
 
-    with open(mlflow.artifacts.download_artifacts(run_id=run_id, artifact_path="classes.json")) as f:
-        classes = json.load(f)
+    current_run_id = None
 
-    nominal_design = torch.tensor(num_tracers.desi_tracers.groupby('class').sum()['observed'].reindex(classes.keys()).values, device=eval_args["device"], dtype=torch.float64)
-    central_vals = num_tracers.central_val if eval(run.data.params["include_D_M"]) else num_tracers.central_val[1::2]
+    if run_obj:
+        current_run_id = run_obj.info.run_id
+    elif run_id_for_fallback_only:
+        client = MlflowClient() # Initialize client only if needed for fallback
+        run_obj_fallback = client.get_run(run_id_for_fallback_only)
+        current_run_id = run_obj_fallback.info.run_id
+        parsed_run_params = parse_mlflow_params(run_obj_fallback.data.params) 
+        run_obj = run_obj_fallback 
+    else:
+        raise ValueError("run_eval requires either run_obj and parsed_run_params, or a run_id_for_fallback_only")
+
+    # Download classes.json once here
+    classes_json_path = mlflow.artifacts.download_artifacts(run_id=current_run_id, artifact_path="classes.json")
+    with open(classes_json_path) as f:
+        classes_data = json.load(f)
+    
+    # Pass run_obj, parsed_run_params (which should be consistent with run_obj), and classes_data
+    num_tracers, posterior_flow = load_model(run_obj, parsed_run_params, classes_data, step, eval_args, cosmo_exp)
+
+    # Use parsed_run_params which should have 'include_D_M' correctly typed
+    nominal_design = torch.tensor(num_tracers.desi_tracers.groupby('class').sum()['observed'].reindex(classes_data.keys()).values, device=eval_args["device"], dtype=torch.float64)
+    # Ensure include_D_M is a boolean if it comes from parsed_params
+    include_D_M_flag = parsed_run_params.get("include_D_M", False) # Default to False if not found
+    central_vals = num_tracers.central_val if include_D_M_flag else num_tracers.central_val[1::2]
     nominal_context = torch.cat([nominal_design, central_vals], dim=-1)
 
-    # set random seed
     np.random.seed(eval_args["eval_seed"])
     torch.manual_seed(eval_args["eval_seed"])
     torch.cuda.manual_seed(eval_args["eval_seed"])
 
     nominal_samples = posterior_flow(nominal_context).sample((eval_args["n_samples"],)).cpu().numpy()
+    
     nominal_samples[:, -1] *= 100000
 
-    #entropy = calc_entropy(nominal_design, posterior_flow, num_tracers, eval_args["n_samples"])
-    """
-    _, loss = posterior_loss(
-        nominal_design.unsqueeze(0),
-        num_tracers.pyro_model,
-        posterior_flow,
-        eval_args["n_samples"],
-        observation_labels=["y"],
-        target_labels=num_tracers.cosmo_params,
-        evaluation=False,
-        nflow=True,
-        condition_design=True,
-        verbose_shapes=False
-        )
-    print(f"Loss: {loss.cpu().item()}")
-    """
-
-    # Temporarily redirect stdout to suppress GetDist messages
     with contextlib.redirect_stdout(io.StringIO()):
         samples = getdist.MCSamples(samples=nominal_samples, names=num_tracers.cosmo_params, labels=num_tracers.latex_labels, settings={'ignore_rows': 0.0})
     return samples
 
-def load_model(run_id, step, eval_args, cosmo_exp='num_tracers'):
+def load_model(run_obj, parsed_run_params, classes_data, step, eval_args, cosmo_exp='num_tracers'):
+    # Assumes run_obj is the MLflow Run object and parsed_run_params is the output of parse_mlflow_params(run_obj.data.params)
+    # classes_data is the already loaded content of classes.json
     storage_path = os.environ["SCRATCH"] + f"/bed/BED_cosmo/{cosmo_exp}"
-    mlflow.set_tracking_uri(storage_path + "/mlruns")
-    client = MlflowClient()
-    run = client.get_run(run_id)
-    exp_id = run.info.experiment_id
-    with mlflow.start_run(run_id=run_id, nested=True):
-        run = client.get_run(run_id)
-        ml_info = mlflow.active_run().info
 
-        #tracers = eval(run.data.params["tracers"])
-        data_path = home_dir + run.data.params["data_path"]
-        desi_df = pd.read_csv(data_path + 'desi_data.csv')
-        desi_tracers = pd.read_csv(data_path + 'desi_tracers.csv')
-        nominal_cov = np.load(data_path + 'desi_cov.npy')
-        cosmo_model = run.data.params["cosmo_model"]
-        
-        with open(mlflow.artifacts.download_artifacts(run_id=ml_info.run_id, artifact_path="classes.json")) as f:
-            classes = json.load(f)
+    current_run_id = run_obj.info.run_id
+    exp_id = run_obj.info.experiment_id
+    
+    data_path_param = parsed_run_params.get("data_path", "") 
+    data_path = home_dir + data_path_param
+    
+    desi_df = pd.read_csv(data_path + 'desi_data.csv')
+    desi_tracers = pd.read_csv(data_path + 'desi_tracers.csv')
+    nominal_cov = np.load(data_path + 'desi_cov.npy')
 
-        num_tracers = NumTracers(
-            desi_df, 
-            desi_tracers,
-            cosmo_model,
-            nominal_cov,
-            device=eval_args["device"],
-            include_D_M=eval(run.data.params["include_D_M"])
-            )
+    cosmo_model = parsed_run_params.get("cosmo_model", "Unknown")
+    
+    num_tracers = NumTracers(
+        desi_df, 
+        desi_tracers,
+        cosmo_model,
+        nominal_cov,
+        device=eval_args["device"],
+        include_D_M=parsed_run_params.get("include_D_M", False) 
+        )
 
-        input_dim = len(num_tracers.cosmo_params)
-        context_dim = len(classes.keys()) + 10 if eval(run.data.params["include_D_M"]) else len(classes.keys()) + 5
-        # Initialize model without seed (since we're loading state dict)
-        run_args = parse_mlflow_params(run.data.params)
-        posterior_flow = init_nf(
-            run.data.params["flow_type"],
-            input_dim, 
-            context_dim,
-            run_args,
-            eval_args["device"],
-            seed=eval(run.data.params["nf_seed"])
-            )
-        if step == run_args["steps"]:
-            step = 'last'
-        area_checkpoints = [int(f.split('_')[-1].split('.')[0]) for f in os.listdir(f'{storage_path}/mlruns/{exp_id}/{run_id}/artifacts/checkpoints/') if f.startswith('checkpoint_nominal_area_') and f.endswith('.pt') and 'best' not in f]
-        loss_checkpoints = [int(f.split('_')[-1].split('.')[0]) for f in os.listdir(f'{storage_path}/mlruns/{exp_id}/{run_id}/artifacts/checkpoints/') if f.startswith('checkpoint_loss_') and f.endswith('.pt') and 'best' not in f]
-        regular_checkpoints = [int(f.split('_')[-1].split('.')[0]) for f in os.listdir(f'{storage_path}/mlruns/{exp_id}/{run_id}/artifacts/checkpoints/') if f.startswith('checkpoint_') and f.endswith('.pt') and not f.endswith('last.pt') and 'loss' not in f and 'area' not in f]
-        if step not in area_checkpoints and step not in loss_checkpoints and step not in regular_checkpoints and step != 'loss_best' and step != 'nominal_area_best' and step != 'last':
-            raise ValueError(f"Step {step} not found in checkpoints")
-        if step in area_checkpoints:
-            checkpoint = torch.load(f'{storage_path}/mlruns/{exp_id}/{run_id}/artifacts/checkpoints/checkpoint_nominal_area_{step}.pt', map_location=eval_args["device"])
-        elif step in loss_checkpoints:
-            checkpoint = torch.load(f'{storage_path}/mlruns/{exp_id}/{run_id}/artifacts/checkpoints/checkpoint_loss_{step}.pt', map_location=eval_args["device"])
-        else:
-            checkpoint = torch.load(f'{storage_path}/mlruns/{exp_id}/{run_id}/artifacts/checkpoints/checkpoint_{step}.pt', map_location=eval_args["device"])
+    input_dim = len(num_tracers.cosmo_params)
+    context_dim = len(classes_data.keys()) + 10 if parsed_run_params.get("include_D_M", False) else len(classes_data.keys()) + 5
+    
+    nf_seed_from_params = parsed_run_params.get("nf_seed")
+    nf_seed_for_init = None
+    if isinstance(nf_seed_from_params, str):
+        nf_seed_for_init = int(nf_seed_from_params)
+    elif isinstance(nf_seed_from_params, int):
+        nf_seed_for_init = nf_seed_from_params
+    elif nf_seed_from_params is None:
+        pass 
+
+    posterior_flow = init_nf(
+        parsed_run_params.get("flow_type"), 
+        input_dim, 
+        context_dim,
+        parsed_run_params, 
+        eval_args["device"],
+        seed=nf_seed_for_init 
+        )
+
+    effective_step = step
+    if step == parsed_run_params.get("steps"): 
+        effective_step = 'last'
+    
+    checkpoint_dir = f'{storage_path}/mlruns/{exp_id}/{current_run_id}/artifacts/checkpoints/'
+    if not os.path.isdir(checkpoint_dir):
+         print(f"ERROR: Checkpoint directory not found: {checkpoint_dir}")
+         raise FileNotFoundError(f"Checkpoint directory not found: {checkpoint_dir}. Ensure artifacts are downloaded or path is correct.")
+
+    checkpoint_files = os.listdir(checkpoint_dir)
+
+    area_checkpoints = [int(f.split('_')[-1].split('.')[0]) for f in checkpoint_files if f.startswith('checkpoint_nominal_area_') and f.endswith('.pt') and 'best' not in f]
+    loss_checkpoints = [int(f.split('_')[-1].split('.')[0]) for f in checkpoint_files if f.startswith('checkpoint_loss_') and f.endswith('.pt') and 'best' not in f]
+    regular_checkpoints = [int(f.split('_')[-1].split('.')[0]) for f in checkpoint_files if f.startswith('checkpoint_') and f.endswith('.pt') and not f.endswith('last.pt') and 'loss' not in f and 'area' not in f]
+    
+    if effective_step not in area_checkpoints and effective_step not in loss_checkpoints and effective_step not in regular_checkpoints and effective_step != 'loss_best' and effective_step != 'nominal_area_best' and effective_step != 'last':
+        raise ValueError(f"Step {effective_step} (original step: {step}) not found in available checkpoints types: area={area_checkpoints}, loss={loss_checkpoints}, regular={regular_checkpoints}")
+    
+    checkpoint_path_to_load = None
+    if effective_step in area_checkpoints:
+        checkpoint_path_to_load = f'{checkpoint_dir}checkpoint_nominal_area_{effective_step}.pt'
+    elif effective_step in loss_checkpoints:
+        checkpoint_path_to_load = f'{checkpoint_dir}checkpoint_loss_{effective_step}.pt'
+    else: 
+        checkpoint_path_to_load = f'{checkpoint_dir}checkpoint_{effective_step}.pt'
+    
+    checkpoint = torch.load(checkpoint_path_to_load, map_location=eval_args["device"]) 
+    
+    state_dict = checkpoint['model_state_dict']
+    
+    new_state_dict = {}
+    for k, v in state_dict.items():
+        if k.startswith('module.'):
+            k = k[7:] 
+        if k.startswith('module.'): 
+            k = k[7:] 
+        new_state_dict[k] = v
         
-        # Get the state dict and handle module prefixes
-        state_dict = checkpoint['model_state_dict']
-        
-        # Remove module prefixes if they exist
-        new_state_dict = {}
-        for k, v in state_dict.items():
-            # Remove 'module.' prefixes
-            if k.startswith('module.'):
-                k = k[7:]  # Remove 'module.'
-            if k.startswith('module.'):  # Handle double module prefix
-                k = k[7:]  # Remove second 'module.'
-            new_state_dict[k] = v
-            
-        # Load the cleaned state dict
-        posterior_flow.load_state_dict(new_state_dict, strict=True)
-        posterior_flow.to(eval_args["device"])
-        posterior_flow.eval()
-        return num_tracers, posterior_flow
+    posterior_flow.load_state_dict(new_state_dict, strict=True)
+    posterior_flow.to(eval_args["device"])
+    posterior_flow.eval()
+    
+    return num_tracers, posterior_flow
 
 def calc_entropy(design, posterior_flow, num_tracers, num_samples):
     # sample values of y from num_tracers.pyro_model

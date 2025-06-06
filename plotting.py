@@ -253,64 +253,41 @@ def plot_training(
     client = MlflowClient()
     storage_path = os.environ["SCRATCH"] + f"/bed/BED_cosmo/{cosmo_exp}"
 
-    # Get run IDs either from experiment name or directly from input
-    if exp_name is not None:
-        try:
-            exp = client.get_experiment_by_name(exp_name)
-            if exp is None:
-                print(f"Error: Experiment '{exp_name}' not found.")
-                return
-            exp_id = exp.experiment_id
-            run_infos = client.search_runs(exp_id)
-            run_ids = [run.info.run_id for run in run_infos if run.info.run_id not in excluded_runs]
-        except Exception as e:
-            print(f"Error fetching runs for experiment '{exp_name}': {e}")
-            return
-    elif run_id is not None:
-        run_ids = [run_id] if isinstance(run_id, str) else run_id
-        run_ids = [rid for rid in run_ids if rid not in excluded_runs]
-        if run_ids:
-            try:
-                exp_id = client.get_run(run_ids[0]).info.experiment_id
-            except Exception as e:
-                print(f"Warning: Could not determine experiment ID from run {run_ids[0]}: {e}")
-                exp_id = None
-        else:
-            exp_id = None
-    else:
-        print("Either exp_name or run_ids must be provided.")
+    runs_data_list, experiment_id_for_save_path, _ = get_runs_data(
+        exp_name=exp_name,
+        run_ids=run_id,
+        excluded_runs=excluded_runs,
+        parse_params=False
+    )
+
+    if not runs_data_list:
         return
 
-    if not run_ids:
-        print("No runs found to process.")
-        return
-
-    # Convert var to list if it's a single variable
+    # Convert var to list if it's a single variable for sorting
     vars_list = var if isinstance(var, list) else [var] if var is not None else []
 
     if vars_list:
-        def get_sort_key(run_id):
+        def get_sort_key_from_data(run_data_item):
             try:
-                run = client.get_run(run_id)
                 key_tuple = []
-                for v in vars_list:
-                    param_val_str = run.data.params.get(v)
+                for v_key in vars_list:
+                    param_val_str = run_data_item['params'].get(v_key)
                     if param_val_str is not None:
                         try:
                             key_tuple.append(float(param_val_str))
                         except ValueError:
-                            key_tuple.append(param_val_str)
+                            key_tuple.append(param_val_str) # Keep as string if not float
                     else:
-                        key_tuple.append(float('inf'))
+                        key_tuple.append(float('inf')) # Sort runs missing the param last
                 return tuple(key_tuple)
             except Exception as e:
-                print(f"Warning: Could not fetch params for run {run_id} for sorting: {e}")
+                # Removed print(f"Warning: Could not extract params for sorting run {run_data_item['run_id']}: {e}")
                 return tuple(float('inf') for _ in vars_list)
 
-        run_ids = sorted(run_ids, key=get_sort_key)
+        runs_data_list = sorted(runs_data_list, key=get_sort_key_from_data)
 
-    # --- Data Fetching ---
-    all_metrics = {}
+    # --- Data Fetching (Metrics) ---
+    all_metrics_for_runs = {} # Keyed by run_id
     min_loss_overall = float('inf')
     max_loss_overall = float('-inf')
     min_lr_overall = float('inf')
@@ -318,49 +295,49 @@ def plot_training(
     min_area_overall = float('inf')
     max_area_overall = float('-inf')
 
-    valid_run_ids = []
-    show_area_plot = False  # Flag to determine if we should show area plot
+    valid_runs_processed_for_metrics = [] # Store run_data_items that had metrics
+    show_area_plot = False # Flag to determine if we should show area plot
 
-    for run_id_iter in run_ids:
+    for run_data_item in runs_data_list:
+        run_id_iter = run_data_item['run_id']
+        run_params = run_data_item['params'] # Use pre-fetched params
+
         try:
-            run = client.get_run(run_id_iter)
-            run_args = run.data.params
-            
-            # Check if we should show area plot based on run args
-            if run_args.get('log_nominal_area', 'False').lower() == 'true':
+            # Check if we should show area plot based on run args (now run_params)
+            if run_params.get('log_nominal_area', 'False').lower() == 'true':
                 show_area_plot = True
 
             # Fetch metrics
-            loss_hist = client.get_metric_history(run_id_iter, 'loss')
-            lr_hist = client.get_metric_history(run_id_iter, 'lr')
+            loss_hist_raw = client.get_metric_history(run_id_iter, 'loss')
+            lr_hist_raw = client.get_metric_history(run_id_iter, 'lr')
             
-            # Only fetch area metrics if we're showing the area plot
-            if show_area_plot:
-                nom_area_hist = client.get_metric_history(run_id_iter, 'nominal_area')
-                best_area_hist = client.get_metric_history(run_id_iter, 'best_nominal_area') if show_best else []
-            else:
-                nom_area_hist = []
-                best_area_hist = []
+            nom_area_hist_raw = []
+            best_area_hist_raw = []
+            if show_area_plot: # Only fetch if needed
+                nom_area_hist_raw = client.get_metric_history(run_id_iter, 'nominal_area')
+                if show_best:
+                    best_area_hist_raw = client.get_metric_history(run_id_iter, 'best_nominal_area')
 
             # Process and filter NaNs/Infs
-            loss = [(m.step, m.value) for m in loss_hist if np.isfinite(m.value)]
-            lr = [(m.step, m.value) for m in lr_hist if np.isfinite(m.value)]
-            nom_area = [(m.step, m.value) for m in nom_area_hist if np.isfinite(m.value)]
-            best_area = [(m.step, m.value) for m in best_area_hist if np.isfinite(m.value)] if show_best else []
+            loss = [(m.step, m.value) for m in loss_hist_raw if np.isfinite(m.value)]
+            lr = [(m.step, m.value) for m in lr_hist_raw if np.isfinite(m.value)]
+            nom_area = [(m.step, m.value) for m in nom_area_hist_raw if np.isfinite(m.value)]
+            best_area = [(m.step, m.value) for m in best_area_hist_raw if np.isfinite(m.value)] if show_best else []
 
             if not loss:
                 print(f"Warning: No valid loss points found for run {run_id_iter}. Skipping.")
                 continue
 
-            all_metrics[run_id_iter] = {
+            all_metrics_for_runs[run_id_iter] = {
                 'loss': loss,
                 'lr': lr,
                 'nominal_area': nom_area,
-                'best_area': best_area
+                'best_area': best_area,
+                'params': run_params # Keep params associated for easy access during plotting
             }
-            valid_run_ids.append(run_id_iter)
+            valid_runs_processed_for_metrics.append(run_data_item) # Add item itself
 
-            # Update overall min/max for axis scaling
+            # Update overall min/max for axis scaling using processed metrics
             run_losses = [v for s, v in loss]
             run_lrs = [v for s, v in lr]
             run_nom_areas = [v for s, v in nom_area]
@@ -372,53 +349,58 @@ def plot_training(
             if run_lrs:
                 min_lr_overall = min(min_lr_overall, np.min(run_lrs))
                 max_lr_overall = max(max_lr_overall, np.max(run_lrs))
-            if run_nom_areas:
-                min_area_overall = min(min_area_overall, np.min(run_nom_areas))
-                max_area_overall = max(max_area_overall, np.max(run_nom_areas))
-            if run_best_areas:
-                min_area_overall = min(min_area_overall, np.min(run_best_areas))
-                max_area_overall = max(max_area_overall, np.max(run_best_areas))
+            if show_area_plot:
+                if run_nom_areas:
+                    min_area_overall = min(min_area_overall, np.min(run_nom_areas))
+                    max_area_overall = max(max_area_overall, np.max(run_nom_areas))
+                if run_best_areas:
+                    min_area_overall = min(min_area_overall, np.min(run_best_areas))
+                    max_area_overall = max(max_area_overall, np.max(run_best_areas))
 
         except Exception as e:
             print(f"Error processing metrics for run {run_id_iter}: {e}. Skipping.")
             continue
 
-    if not valid_run_ids:
+    if not valid_runs_processed_for_metrics:
         print("No runs with valid data to plot.")
         return
 
-    run_ids = valid_run_ids
-
     # --- Plotting Setup ---
-    # Create figure with appropriate number of subplots based on whether we show area plot
+    # Create figure with appropriate number of subplots
+    num_subplots = 2
     if show_area_plot:
-        fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(14, 12), sharex=True)
-    else:
-        fig, (ax1, ax3) = plt.subplots(2, 1, figsize=(14, 8), sharex=True)
-        ax2 = None  # No area plot
+        num_subplots = 3
+    
+    fig_height = 8 if num_subplots == 2 else 12
+    fig, axes = plt.subplots(num_subplots, 1, figsize=(14, fig_height), sharex=True)
+    
+    ax1 = axes[0]
+    ax_lr = axes[1] # LR plot is always the last (or middle if 3 plots)
+    ax_area = None
+    if show_area_plot:
+        ax_area = axes[1] # Area plot is middle
+        ax_lr = axes[2]   # LR plot becomes the last one
 
     colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
 
     # --- Plotting Data ---
-    for i, run_id_iter in enumerate(run_ids):
-        metrics = all_metrics[run_id_iter]
+    # Iterate over valid_runs_processed_for_metrics to maintain sorted order and use pre-fetched params
+    for i, run_data_item in enumerate(valid_runs_processed_for_metrics):
+        run_id_iter = run_data_item['run_id']
+        run_params = run_data_item['params'] # Already fetched
+        metrics = all_metrics_for_runs[run_id_iter]
         color = colors[i % len(colors)]
 
         # --- Prepare Labels ---
         label_parts = []
-        run_params = {}
-        try:
-            run_params = client.get_run(run_id_iter).data.params
-        except Exception as e:
-            print(f"Warning: Could not fetch params for run {run_id_iter} for label: {e}")
-        
-        if var is None:
-            base_label = run_id_iter
+        if not vars_list: # If var is None or empty, use run_id for label
+            base_label = run_id_iter[:8] # Shortened run_id
         else:
-            for v in vars_list:
-                param_value = run_params.get(v, "N/A")
-                label_parts.append(f"{v}={param_value}")
+            for v_key in vars_list:
+                param_value = run_params.get(v_key, "N/A")
+                label_parts.append(f"{v_key}={param_value}")
             base_label = ", ".join(label_parts) if label_parts else f"Run {i+1}"
+
 
         # --- Plot Loss (ax1) ---
         loss_data = metrics['loss']
@@ -455,9 +437,9 @@ def plot_training(
                 plot_nom_area_values_filtered = plot_nom_area_values[positive_mask]
                 if len(plot_nom_area_values_filtered) < len(plot_nom_area_values):
                      print(f"Warning: Run {run_id_iter} - Omitted {len(plot_nom_area_values) - len(plot_nom_area_values_filtered)} non-positive Nominal Area values for log scale plot.")
-                line_nom_area, = ax2.plot(plot_nom_area_steps_filtered, plot_nom_area_values_filtered, alpha=0.9, linewidth=1.5, color=color, label=base_label)
+                line_nom_area, = ax_area.plot(plot_nom_area_steps_filtered, plot_nom_area_values_filtered, alpha=0.9, linewidth=1.5, color=color, label=base_label)
             else:
-                 line_nom_area, = ax2.plot(plot_nom_area_steps, plot_nom_area_values, alpha=0.9, linewidth=1.5, color=color, label=base_label)
+                 line_nom_area, = ax_area.plot(plot_nom_area_steps, plot_nom_area_values, alpha=0.9, linewidth=1.5, color=color, label=base_label)
 
         # --- Plot Best Area (ax2) ---
         if show_best:
@@ -475,17 +457,17 @@ def plot_training(
                     if len(plot_best_area_values_filtered) < len(plot_best_area_values):
                         print(f"Warning: Run {run_id_iter} - Omitted {len(plot_best_area_values) - len(plot_best_area_values_filtered)} non-positive Best Area values for log scale plot.")
                     # Plot line
-                    line_area_best, = ax2.plot(plot_best_area_steps_filtered, plot_best_area_values_filtered, alpha=1.0, linestyle='-.', linewidth=2, color=color, label=f"{base_label} (Best)")
+                    line_area_best, = ax_area.plot(plot_best_area_steps_filtered, plot_best_area_values_filtered, alpha=1.0, linestyle='-.', linewidth=2, color=color, label=f"{base_label} (Best)")
                     # Plot star at the last *positive* best step if log scale
                     if len(plot_best_area_steps_filtered) > 0:
-                        ax2.plot(plot_best_area_steps_filtered[-1], plot_best_area_values_filtered[-1], '*', markersize=8, zorder=10, color=color)
+                        ax_area.plot(plot_best_area_steps_filtered[-1], plot_best_area_values_filtered[-1], '*', markersize=8, zorder=10, color=color)
 
                 else:
                     # Plot line
-                    line_area_best, = ax2.plot(plot_best_area_steps, plot_best_area_values, alpha=1.0, linestyle='-.', linewidth=2, color=color, label=f"{base_label} (Best)")
+                    line_area_best, = ax_area.plot(plot_best_area_steps, plot_best_area_values, alpha=1.0, linestyle='-.', linewidth=2, color=color, label=f"{base_label} (Best)")
                     # Plot star at the last best step
                     if len(plot_best_area_steps) > 0:
-                        ax2.plot(plot_best_area_steps[-1], plot_best_area_values[-1], '*', markersize=8, zorder=10, color=color)
+                        ax_area.plot(plot_best_area_steps[-1], plot_best_area_values[-1], '*', markersize=8, zorder=10, color=color)
 
         # --- Plot Learning Rate (ax3) ---
         lr_data = metrics['lr']
@@ -503,14 +485,14 @@ def plot_training(
                 plot_lr_values_filtered = plot_lr_values[positive_mask]
                 if len(plot_lr_values_filtered) < len(plot_lr_values):
                      print(f"Warning: Run {run_id_iter} - Omitted {len(plot_lr_values) - len(plot_lr_values_filtered)} non-positive LR values for log scale plot.")
-                ax3.plot(plot_lr_steps_filtered, plot_lr_values_filtered, alpha=0.8, color=color, label=base_label)
+                ax_lr.plot(plot_lr_steps_filtered, plot_lr_values_filtered, alpha=0.8, color=color, label=base_label)
             else:
-                ax3.plot(plot_lr_steps, plot_lr_values, alpha=0.8, color=color, label=base_label)
+                ax_lr.plot(plot_lr_steps, plot_lr_values, alpha=0.8, color=color, label=base_label)
 
     # --- Final Plot Configuration ---
 
     # Determine legend font size based on number of runs
-    num_runs = len(run_ids)
+    num_runs = len(valid_runs_processed_for_metrics)
     if num_runs > 10: legend_fontsize = 'xx-small'
     elif num_runs > 6: legend_fontsize = 'x-small'
     elif num_runs > 4: legend_fontsize = 'small'
@@ -522,33 +504,37 @@ def plot_training(
     ax1.grid(True, axis='y', linestyle='--', alpha=0.6)
 
     if show_area_plot:
-        # get only unique cosmo models
-        cosmo_models = list(set([client.get_run(run_id).data.params['cosmo_model'] for run_id in run_ids]))
+        # get only unique cosmo models from pre-fetched params
+        cosmo_models = list(set([
+            item['params']['cosmo_model'] 
+            for item in valid_runs_processed_for_metrics 
+            if 'params' in item and 'cosmo_model' in item['params']
+        ]))
         for cm in cosmo_models:
             desi_samples_gd = get_desi_samples(cm)
             desi_area = get_contour_area([desi_samples_gd], 'Om', 'hrdrag', 0.68)[0]
-            ax2.axhline(desi_area, color='black', linestyle='--', label=f'DESI ({cm}), Area: {desi_area:.3f}', alpha=0.5)
+            ax_area.axhline(desi_area, color='black', linestyle='--', label=f'DESI ({cm}), Area: {desi_area:.3f}', alpha=0.5)
         # Configure ax2 (Contour Area)
-        ax2.set_ylabel("Posterior Contour Area")
-        ax2.tick_params(axis='y')
+        ax_area.set_ylabel("Posterior Contour Area")
+        ax_area.tick_params(axis='y')
         # Only show legend if var is specified or there are multiple runs
         if var is not None or num_runs > 1:
-            ax2.legend(loc='best', fontsize=legend_fontsize, title="Runs")
-        ax2.grid(True, axis='y', linestyle='--', alpha=0.6)
+            ax_area.legend(loc='best', fontsize=legend_fontsize, title="Runs")
+        ax_area.grid(True, axis='y', linestyle='--', alpha=0.6)
 
     # Configure ax3 (Learning Rate)
-    ax3.set_xlabel("Training Step")
-    ax3.set_ylabel("Learning Rate")
-    ax3.tick_params(axis='y')
-    ax3.grid(True, axis='y', linestyle='--', alpha=0.6)
+    ax_lr.set_xlabel("Training Step")
+    ax_lr.set_ylabel("Learning Rate")
+    ax_lr.tick_params(axis='y')
+    ax_lr.grid(True, axis='y', linestyle='--', alpha=0.6)
 
 
     # Apply log scale if requested
     if log_scale:
         ax1.set_yscale('log')
         if show_area_plot:
-            ax2.set_yscale('log')
-        ax3.set_yscale('log')
+            ax_area.set_yscale('log')
+        ax_lr.set_yscale('log')
         # Limits are automatically handled by matplotlib for log scale based on filtered data
     else:
         # Set linear scale limits with padding only if data range is valid
@@ -561,269 +547,348 @@ def plot_training(
         if show_area_plot:
             if max_area_overall > min_area_overall:
                 area_pad = (max_area_overall - min_area_overall) * 0.05
-                ax2.set_ylim(min_area_overall - area_pad, max_area_overall + area_pad)
+                ax_area.set_ylim(min_area_overall - area_pad, max_area_overall + area_pad)
             elif np.isfinite(min_area_overall): # Handle constant area case
-                ax2.set_ylim(min_area_overall - 0.5, min_area_overall + 0.5) # Example padding
+                ax_area.set_ylim(min_area_overall - 0.5, min_area_overall + 0.5) # Example padding
 
         if max_lr_overall > min_lr_overall :
              lr_pad = (max_lr_overall - min_lr_overall) * 0.05
-             ax3.set_ylim(min_lr_overall - lr_pad, max_lr_overall + lr_pad)
+             ax_lr.set_ylim(min_lr_overall - lr_pad, max_lr_overall + lr_pad)
         elif np.isfinite(min_lr_overall): # Handle constant LR case
-             ax3.set_ylim(min_lr_overall * 0.9, min_lr_overall * 1.1) # Relative padding
+             ax_lr.set_ylim(min_lr_overall * 0.9, min_lr_overall * 1.1) # Relative padding
 
 
     # Adjust layout
     plt.tight_layout(rect=[0, 0, 1, 0.97]) # Add space for title
 
     # --- Title and Saving ---
-    title_suffix = f" - {exp_name}" if exp_name else f" - {len(run_ids)} Runs"
+    title_suffix = f" - {exp_name}" if exp_name else f" - {len(valid_runs_processed_for_metrics)} Runs"
     fig.suptitle(f"Training Evolution{title_suffix}", fontsize=16)
 
     # Determine save path
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    if exp_name and exp_id:
-        save_dir = f"{storage_path}/mlruns/{exp_id}/plots"
-        save_path = f"{save_dir}/training_comparison_{timestamp}.png"
-    elif len(run_ids) == 1 and exp_id:
-        # Use the specific run's artifact location
-        run_id_single = run_ids[0]
-        save_dir = f"{storage_path}/mlruns/{exp_id}/{run_id_single}/artifacts/plots"
-        save_path = f"{save_dir}/training_{timestamp}.png"
-    else:
-        # Fallback save location if experiment context is lost or multiple non-experiment runs
-        save_dir = f"{storage_path}/plots"
-        os.makedirs(save_dir, exist_ok=True)
-        save_path = f"{save_dir}/training_comparison_{timestamp}.png"
+    save_dir = None
+    save_path = None
 
+    final_exp_id_for_path = experiment_id_for_save_path # This was set if exp_name was used
+
+    if exp_name and final_exp_id_for_path:
+        save_dir = f"{storage_path}/mlruns/{final_exp_id_for_path}/plots"
+        save_path = f"{save_dir}/training_comparison_{timestamp}.png"
+    elif len(valid_runs_processed_for_metrics) == 1:
+        # Only one run plotted, and exp_name was NOT provided (so final_exp_id_for_path is None)
+        # Try to get its experiment_id for artifact path
+        single_run_id = valid_runs_processed_for_metrics[0]['run_id']
+        if not final_exp_id_for_path: # Should be None if we are in this elif block's condition
+            try:
+                single_run_data_item = valid_runs_processed_for_metrics[0]
+                if 'run_obj' in single_run_data_item and single_run_data_item['run_obj'] is not None:
+                    final_exp_id_for_path = single_run_data_item['run_obj'].info.experiment_id
+                else:
+                    # Removed print(f"PLOT_TRAINING: Warning: Cached run_obj not found for single run {single_run_id}. Attempting a new get_run call.")
+                    fallback_run_obj = client.get_run(single_run_id)
+                    final_exp_id_for_path = fallback_run_obj.info.experiment_id
+            except Exception as e:
+                print(f"PLOT_TRAINING: Warning: Could not determine experiment ID for run {single_run_id} for save_dir: {e}. Defaulting.")
+        
+        if final_exp_id_for_path:
+            save_dir = f"{storage_path}/mlruns/{final_exp_id_for_path}/{single_run_id}/artifacts/plots"
+        else:
+            save_dir = f"{storage_path}/plots" # Fallback
+        save_path = f"{save_dir}/training_{timestamp}.png"
+    else: # Multiple runs without exp_name, or other fallback
+        save_dir = f"{storage_path}/plots"
+        save_path = f"{save_dir}/training_comparison_{timestamp}.png"
 
     os.makedirs(save_dir, exist_ok=True) # Ensure directory exists before saving
     show_figure(save_path)
     plt.close(fig) # Close the figure after saving/showing
 
 def compare_posterior(
-        exp_name=None, 
-        run_ids=None, 
-        var=None, 
-        filter_string=None, 
-        eval_args=None, 
-        show_scatter=False, 
+        exp_name=None,
+        run_ids=None,
+        var=None,
+        filter_string=None,
+        eval_args=None,
+        show_scatter=False,
         excluded_runs=[],
         level=0.68,
-        cosmo_exp='num_tracers', 
+        cosmo_exp='num_tracers',
         step='loss_best'
         ):
     """Compares posterior distributions across multiple runs.
     
     Args:
-        exp_name (str, optional): Name of the MLflow experiment. Required if run_ids not provided.
-        run_ids (list, optional): List of specific run IDs to compare. If provided, exp_name is used only for grouping.
-        var (str or list, optional): Parameter(s) to group runs by (e.g., 'num_tracers' or ['num_tracers', 'gamma']).
-                                    If provided, runs are grouped by these parameter(s).
-        filter_string (str, optional): MLflow filter string to select runs (e.g., "params.param_name = 'value'").
-        eval_args (dict, optional): Arguments for run_eval. Defaults to {"device": "cpu"}.
-        show_scatter (bool): Whether to show scatter points on the plot.
+        exp_name (str, optional): Name of the MLflow experiment.
+        run_ids (list, optional): List of specific run IDs to compare.
+        var (str or list, optional): Parameter(s) to group runs by.
+        filter_string (str, optional): MLflow filter string.
+        eval_args (dict, optional): Arguments for run_eval.
+        show_scatter (bool): Whether to show scatter points.
         excluded_runs (list): List of run IDs to exclude.
-        cosmo_exp (str): Name of the cosmology experiment folder.
-        step (str or int): Which checkpoint to evaluate ('best', 'last', or specific step number).
+        level (float): Contour level.
+        cosmo_exp (str): Cosmology experiment folder name.
+        step (str or int): Checkpoint to evaluate.
     """
     client = MlflowClient()
     
-    # Set default eval_args if not provided
     if eval_args is None:
         eval_args = {"n_samples": 10000, "device": "cuda:0", "eval_seed": 1}
-    
-    # Get run IDs based on input parameters
-    if run_ids is None:
-        if exp_name is None:
-            raise ValueError("Either exp_name or run_ids must be provided.")
-        
-        exp_id = client.get_experiment_by_name(exp_name).experiment_id
-        
-        if filter_string:
-            print(f"Searching runs with filter: {filter_string}")
-            filtered_runs = client.search_runs(exp_id, filter_string=filter_string)
-            run_ids = [run.info.run_id for run in filtered_runs if run.info.run_id not in excluded_runs]
-        else:
-            run_ids = [run.info.run_id for run in client.search_runs(exp_id) if run.info.run_id not in excluded_runs]
-    else:
-        # Filter out excluded runs
-        run_ids = [run_id for run_id in run_ids if run_id not in excluded_runs]
-        # Try to get experiment ID from the first run if exp_name not provided
-        if exp_name is None and run_ids:
-            exp_id = client.get_run(run_ids[0]).info.experiment_id
-            exp = client.get_experiment(exp_id)
-            exp_name = exp.name if exp else "Unknown Experiment"
-    
-    if not run_ids:
-        print("No runs found to process.")
+
+    runs_data_list, experiment_id_for_save_path, actual_exp_name_for_title = get_runs_data(
+        exp_name=exp_name,
+        run_ids=run_ids,
+        excluded_runs=excluded_runs,
+        filter_string=filter_string,
+        parse_params=True
+    )
+
+    if not runs_data_list:
         return
 
-    print(f"Found {len(run_ids)} runs to analyze.")
-    
-    # If grouping by variable(s)
+    cosmo_model_for_desi = "Unknown" 
+    # Use parsed params; parse_mlflow_params keeps string if not convertible, so this is fine
+    if runs_data_list and 'params' in runs_data_list[0] and 'cosmo_model' in runs_data_list[0]['params']:
+        cosmo_model_for_desi = runs_data_list[0]['params']['cosmo_model']
+    else:
+        print("Warning: Could not determine cosmo_model from the first run for DESI plot. Defaulting to 'Unknown'.")
+
     if var:
-        # Convert var to list if it's a single string
         vars_list = var if isinstance(var, list) else [var]
-        print(f"Grouping runs by {', '.join(vars_list)}")
         
-        # Group runs by the specified variable(s)
-        grouped_runs = {}
-        for run_id in run_ids:
-            run = client.get_run(run_id)
-            
-            # Create a tuple of group values for all variables
-            group_values = []
-            valid_run = True
-            for v in vars_list:
-                if v in run.data.params:
-                    group_values.append(run.data.params[v])
+        grouped_runs_by_val_tuple = {} 
+
+        for run_data_item in runs_data_list:
+            current_params = run_data_item['params'] # These are now parsed params
+            group_values_for_run = []
+            is_valid_for_grouping = True
+            for v_key in vars_list:
+                if v_key in current_params:
+                    group_values_for_run.append(current_params[v_key])
                 else:
-                    valid_run = False
+                    is_valid_for_grouping = False
                     break
             
-            if valid_run:
-                group_key = tuple(group_values)
-                if group_key not in grouped_runs:
-                    grouped_runs[group_key] = []
-                grouped_runs[group_key].append(run_id)
+            if is_valid_for_grouping:
+                group_key_tuple = tuple(group_values_for_run)
+                if group_key_tuple not in grouped_runs_by_val_tuple:
+                    grouped_runs_by_val_tuple[group_key_tuple] = []
+                grouped_runs_by_val_tuple[group_key_tuple].append(run_data_item)
         
-        # Sort the groups
-        def sort_key(group_tuple):
-            try:
-                # Convert each value to float if possible, otherwise keep as string
-                key_tuple = []
-                for val in group_tuple:
-                    try:
-                        key_tuple.append(float(val))
-                    except ValueError:
-                        key_tuple.append(val)
-                return tuple(key_tuple)
-            except Exception as e:
-                print(f"Warning: Could not convert group values for sorting: {e}")
-                return tuple(float('inf') for _ in group_tuple)  # Sort problematic groups last
+        def sort_key_for_group_tuple(group_tuple_key):
+            key_as_num_or_str = []
+            for val_in_tuple in group_tuple_key:
+                try:
+                    # Attempt to convert to float for numeric sorting, otherwise use string
+                    key_as_num_or_str.append(float(val_in_tuple))
+                except (ValueError, TypeError): # TypeError if val_in_tuple is already a non-string number like int
+                    if isinstance(val_in_tuple, (int, float)):
+                        key_as_num_or_str.append(val_in_tuple)
+                    else:
+                        key_as_num_or_str.append(str(val_in_tuple)) 
+            return tuple(key_as_num_or_str)
         
-        try:
-            sorted_groups = sorted(grouped_runs.keys(), key=sort_key)
-        except (ValueError, TypeError):
-            # Fallback to default sorting if numeric conversion fails
-            sorted_groups = sorted(grouped_runs.keys())
+        sorted_group_keys = sorted(grouped_runs_by_val_tuple.keys(), key=sort_key_for_group_tuple)
         
-        # Lists to store representative samples and their colors/areas
-        representative_samples = []
-        colors = []
-        avg_areas = []
-        std_areas = []
+        representative_samples_list = []
+        colors_for_groups = []
+        avg_areas_for_groups = []
+        std_areas_for_groups = []
         
-        # Process each group to find the representative sample
-        for i, group_key in enumerate(sorted_groups):
-            group_run_ids = grouped_runs[group_key]
-            group_color = plt.rcParams['axes.prop_cycle'].by_key()['color'][i % 10]
-            colors.append(group_color)
-            
-            # Collect samples and calculate areas for this group
-            group_samples = []
-            group_areas = []
-            for run_id in group_run_ids:
-                samples = run_eval(run_id, eval_args, step=step, cosmo_exp=cosmo_exp)
-                group_samples.append(samples)
-                area = get_contour_area([samples], 'Om', 'hrdrag', level)[0]
-                group_areas.append(area)
-                
-            # Calculate average area for the legend
-            avg_areas.append(np.mean(group_areas))
-            std_areas.append(np.std(group_areas))
-            
-            # Find the sample closest to the median area
-            representative_idx = np.argmin(np.abs(np.array(group_areas) - np.median(group_areas)))
-            representative_samples.append(group_samples[representative_idx])
-            print(f"Representative sample run id for group {', '.join([f'{vars_list[j]}={val}' for j, val in enumerate(group_key)])}: {group_run_ids[representative_idx]}")
+        prop_cycle_colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
 
-        desi_samples_gd = get_desi_samples(run.data.params['cosmo_model'])
+        for i, group_key_tuple_iter in enumerate(sorted_group_keys):
+            run_data_items_in_group = grouped_runs_by_val_tuple[group_key_tuple_iter]
+            group_color = prop_cycle_colors[i % len(prop_cycle_colors)]
+            colors_for_groups.append(group_color)
+            
+            group_samples_collected = []
+            group_areas_collected = []
+
+            for item_idx, run_data_item_in_group_iter in enumerate(run_data_items_in_group):
+                # current_run_id = run_data_item_in_group_iter['run_id'] # No longer needed for run_eval fallback
+                current_run_obj = run_data_item_in_group_iter['run_obj']
+                current_parsed_params = run_data_item_in_group_iter['params'] # Already parsed
+
+                # Call run_eval with pre-fetched run_obj and parsed_params
+                samples_obj = run_eval(current_run_obj, current_parsed_params, eval_args, step=step, cosmo_exp=cosmo_exp)
+
+                group_samples_collected.append(samples_obj)
+
+                area = get_contour_area([samples_obj], 'Om', 'hrdrag', level)[0]
+
+                group_areas_collected.append(area)
+            
+            if not group_areas_collected: # Or if all areas are NaN, handle this
+                avg_areas_for_groups.append(np.nan)
+                std_areas_for_groups.append(np.nan)
+                # representative_samples_list.append(None) # Add placeholder if needed for consistent list length
+                print(f"Info: No valid areas collected for group {group_key_tuple_iter}. Skipping representative sample.")
+                continue # Skip to next group if no samples/areas
+
+            avg_areas_for_groups.append(np.mean(group_areas_collected))
+            std_areas_for_groups.append(np.std(group_areas_collected))
+            
+            # Ensure group_areas_collected is not all NaNs before finding median/argmin
+            valid_areas_in_group = np.array(group_areas_collected)[~np.isnan(group_areas_collected)]
+            if len(valid_areas_in_group) == 0:
+                representative_samples_list.append(None) # Or handle as error/skip
+                print(f"Warning: All areas are NaN for group {group_key_tuple_iter}. Cannot select representative.")
+                continue
+
+            median_area_for_group = np.median(valid_areas_in_group)
+            
+            closest_area_diff = np.inf
+            representative_idx_in_group = -1
+            for area_idx, area_val in enumerate(group_areas_collected):
+                if not np.isnan(area_val):
+                    diff = np.abs(area_val - median_area_for_group)
+                    if diff < closest_area_diff:
+                        closest_area_diff = diff
+                        representative_idx_in_group = area_idx
+            
+            if representative_idx_in_group != -1:
+                representative_samples_list.append(group_samples_collected[representative_idx_in_group])
+                representative_run_id = run_data_items_in_group[representative_idx_in_group]['run_id']
+                group_desc_for_print = ', '.join([f'{vars_list[j]}={val}' for j, val in enumerate(group_key_tuple_iter)])
+                print(f"Representative sample run id for group {group_desc_for_print}: {representative_run_id}")
+            else:
+                representative_samples_list.append(None) # Should not happen if valid_areas_in_group was > 0
+                print(f"Warning: Could not determine representative sample for group {group_key_tuple_iter}.")
+
+        valid_representative_samples = []
+        valid_colors_for_groups = []
+        for i, s in enumerate(representative_samples_list):
+            if s is not None:
+                valid_representative_samples.append(s)
+                valid_colors_for_groups.append(colors_for_groups[i])
+
+        if not valid_representative_samples: # Check after filtering Nones
+             print("No representative samples found after grouping and filtering. Cannot plot.")
+             return
+
+        desi_samples_gd = get_desi_samples(cosmo_model_for_desi)
         desi_area = get_contour_area([desi_samples_gd], 'Om', 'hrdrag', level)[0]
 
-        representative_samples.append(desi_samples_gd)
-        colors.append('black')  
-        # Plot only the representative samples
-        g = plot_posterior(representative_samples, colors, show_scatter=show_scatter, levels=[level])
+        valid_representative_samples.append(desi_samples_gd)
+        valid_colors_for_groups.append('black')
+        
+        g = plot_posterior(valid_representative_samples, valid_colors_for_groups, show_scatter=show_scatter, levels=[level])
 
-        # Create custom legend
-        if g.fig.legends:  # Check if a legend exists
-            for legend in g.fig.legends:
-                legend.remove()  # Remove all existing legends
+        if g.fig.legends:
+            for legend in g.fig.legends: legend.remove()
 
-        custom_legend = []
-        for i, group_key in enumerate(sorted_groups):
-            group_color = colors[i]
-            # Create a descriptive label for the group
-            group_label = ', '.join([f'{vars_list[j]}={val}' for j, val in enumerate(group_key)])
+        custom_legend_handles = []
+        valid_sample_idx = 0 # To pick color from valid_colors_for_groups
+        for i, group_key_tuple_iter in enumerate(sorted_group_keys):
+            if representative_samples_list[i] is not None: # This group contributed a sample
+                 group_color = valid_colors_for_groups[valid_sample_idx] # Color from the filtered list
+                 group_label_desc = ', '.join([f'{vars_list[j]}={val}' for j, val in enumerate(group_key_tuple_iter)])
             
-            if std_areas[i] > 0:
-                custom_legend.append(
-                    Line2D([0], [0], color=group_color, 
-                        label=f'{group_label}, Area ({int(level*100)}% Contour): {avg_areas[i]:.3f}, Std: {std_areas[i]:.3f}')
-                )
-            else:
-                custom_legend.append(
-                    Line2D([0], [0], color=group_color, 
-                        label=f'{group_label}, Area ({int(level*100)}% Contour): {avg_areas[i]:.3f}')
-                )
-        custom_legend.append(
+                 avg_area_val = avg_areas_for_groups[i] # This should correspond to the i-th group
+                 std_area_val = std_areas_for_groups[i] # This should correspond to the i-th group
+
+                 if not np.isnan(avg_area_val): # Only add legend if area is valid
+                     if std_area_val > 0 and not np.isnan(std_area_val):
+                         custom_legend_handles.append(
+                             Line2D([0], [0], color=group_color, 
+                                    label=f'{group_label_desc}, Area ({int(level*100)}%): {avg_area_val:.3f} ± {std_area_val:.3f}')
+                         )
+                     else:
+                         custom_legend_handles.append(
+                             Line2D([0], [0], color=group_color, 
+                                    label=f'{group_label_desc}, Area ({int(level*100)}%): {avg_area_val:.3f}')
+                         )
+                     valid_sample_idx +=1
+                 else:
+                    print(f"Info: Skipping legend entry for group {group_label_desc} as its avg_area was NaN.")
+
+        custom_legend_handles.append(
             Line2D([0], [0], color='black', 
-                label=f'DESI, Area ({int(level*100)}% Contour): {desi_area:.3f}')
+                   label=f'DESI ({cosmo_model_for_desi}), Area ({int(level*100)}%): {desi_area:.3f}')
         )
-        g.fig.legend(handles=custom_legend, loc='upper right', bbox_to_anchor=(1, 0.99))
+        g.fig.legend(handles=custom_legend_handles, loc='upper right', bbox_to_anchor=(1, 0.99))
         
-        if len(run_ids) > 1:
-            vars_str = ', '.join(vars_list)
-            g.fig.suptitle(f'Posterior comparison grouped by {vars_str} with {len(run_ids)} total runs', y=1.03)
-        else:
-            vars_str = ', '.join(vars_list)
-            g.fig.suptitle(f'Posterior comparison grouped by {vars_str}', y=1.03)
+        title_vars_str = ', '.join(vars_list)
+        num_total_runs_analyzed = len(runs_data_list)
+        g.fig.suptitle(f'Posterior comparison grouped by {title_vars_str} ({num_total_runs_analyzed} total runs analyzed)\nStep: {step}', y=1.03)
     
-    # If not grouping, just plot all runs
-    else:
-        all_samples = []
-        # Ensure colors cycle if there are many runs
-        prop_cycle = plt.rcParams['axes.prop_cycle']
-        colors = [prop_cycle.by_key()['color'][i % len(prop_cycle.by_key()['color'])] for i in range(len(run_ids))]
+    else: # Not grouping, plot all runs from runs_data_list
+        all_samples_to_plot = []
+        colors_for_all_runs = []
+        labels_for_all_runs = []
         
-        # Get labels for the runs
-        labels = []
-        for run_id in run_ids:
-            run = client.get_run(run_id)
-            # Create a descriptive label if possible
-            label_parts = []
-            for param in ['num_tracers', 'num_hidden', 'learning_rate', 'batch_size']:
-                if param in run.data.params:
-                    label_parts.append(f"{param}={run.data.params[param]}")
-            
-            if label_parts:
-                labels.append(", ".join(label_parts))
-            else:
-                labels.append(run_id[:8])  # Use shortened run ID if no params
-            
-            samples = run_eval(run_id, eval_args, step=step, cosmo_exp=cosmo_exp)
-            all_samples.append(samples)
+        prop_cycle_colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
         
-        desi_samples_gd = get_desi_samples(run.data.params['cosmo_model'])
-        desi_area = get_contour_area([desi_samples_gd], 'Om', 'hrdrag', 0.68)[0]
-        all_samples.append(desi_samples_gd)
-        colors.append('black')
-        labels.append('DESI')
-        g = plot_posterior(all_samples, colors, show_scatter=show_scatter, legend_labels=labels, levels=[level])
-        title = f'Posterior comparison for {exp_name}' if exp_name else 'Posterior comparison'
+        for i, run_data_item_iter in enumerate(runs_data_list):
+            # current_run_id = run_data_item_iter['run_id'] # No longer needed for run_eval fallback
+            current_params = run_data_item_iter['params'] # Already parsed
+            current_run_obj = run_data_item_iter['run_obj'] 
+            current_run_name = run_data_item_iter['name']
+            
+            colors_for_all_runs.append(prop_cycle_colors[i % len(prop_cycle_colors)])
+            
+            # Construct label from run name or key parameters
+            label_text = current_run_name if current_run_name else run_data_item_iter['run_id'][:8]
+            labels_for_all_runs.append(label_text)
+            
+            # Call run_eval with pre-fetched run_obj and parsed_params
+            samples_obj = run_eval(current_run_obj, current_params, eval_args, step=step, cosmo_exp=cosmo_exp)
+            all_samples_to_plot.append(samples_obj)
+
+        if not all_samples_to_plot:
+            print("No samples generated for any run. Cannot plot.")
+            return
+
+        desi_samples_gd = get_desi_samples(cosmo_model_for_desi)
+        desi_area_for_label = get_contour_area([desi_samples_gd], 'Om', 'hrdrag', level)[0]
+
+        all_samples_to_plot.append(desi_samples_gd)
+        colors_for_all_runs.append('black')
+        # Use a more informative label for DESI if cosmo_model is known
+        desi_label_text = f'DESI'
+        if cosmo_model_for_desi and cosmo_model_for_desi != "Unknown":
+            desi_label_text += f' ({cosmo_model_for_desi})'
+        if not np.isnan(desi_area_for_label):
+             desi_label_text += f', Area: {desi_area_for_label:.3f}'
+        labels_for_all_runs.append(desi_label_text)
+        
+        g = plot_posterior(all_samples_to_plot, colors_for_all_runs, 
+                           show_scatter=show_scatter, legend_labels=labels_for_all_runs, levels=[level])
+        
+        plot_title_exp_part = actual_exp_name_for_title if actual_exp_name_for_title else "Selected Runs"
+        plot_title = f'Posterior comparison for {plot_title_exp_part}\nStep: {step}'
         if filter_string:
-            title += f' (filter: {filter_string})'
-        g.fig.suptitle(title, y=1.03)
+            plot_title += f' (filter: {filter_string})'
+        g.fig.suptitle(plot_title, y=1.03)
+
+    plt.tight_layout(rect=[0, 0.03, 1, 0.95]) # Adjusted rect to prevent title overlap with legend
+    storage_path_base = os.environ["SCRATCH"] + f"/bed/BED_cosmo/{cosmo_exp}"
     
-    plt.tight_layout(rect=[0, 0.03, 1, 0.95])  # Adjust layout to prevent title overlap
-    storage_path = os.environ["SCRATCH"] + f"/bed/BED_cosmo/{cosmo_exp}"
-    if exp_name:
-        os.makedirs(f"{storage_path}/mlruns/{exp_id}/plots", exist_ok=True)
-        save_path = f"{storage_path}/mlruns/{exp_id}/plots/posterior_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
-    else:
-        save_path = f"{storage_path}/plots/posterior_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
-    show_figure(save_path)
+    save_dir = f"{storage_path_base}/plots"
+    filename_prefix = "posterior_comparison"
+
+    if exp_name and experiment_id_for_save_path:
+        save_dir = f"{storage_path_base}/mlruns/{experiment_id_for_save_path}/plots"
+    elif not exp_name and run_ids and len(runs_data_list) == 1 and experiment_id_for_save_path:
+        single_run_id_for_path = runs_data_list[0]['run_id']
+        save_dir = f"{storage_path_base}/mlruns/{experiment_id_for_save_path}/{single_run_id_for_path}/artifacts/plots"
+        filename_prefix = f"posterior_step_{step}"
+
+    os.makedirs(save_dir, exist_ok=True)
+    save_filename = f"{filename_prefix}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+    final_save_path = os.path.join(save_dir, save_filename)
+    
+    fig_to_close = None
+    if hasattr(g, 'fig'):
+        fig_to_close = g.fig
+    elif plt.get_fignums():
+        fig_to_close = plt.gcf()
+
+    show_figure(final_save_path)
+
+    if fig_to_close and fig_to_close in plt.get_fignums():
+         plt.close(fig_to_close)
 
 def get_contour_area(samples, param1, param2, level=0.68):
     samples = [samples] if type(samples) != list else samples
