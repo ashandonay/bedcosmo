@@ -117,6 +117,7 @@ def single_run(
     resume_step=None,
     add_steps=0,
     profile=False,
+    restart_path=None,
     **kwargs,
 ):
 
@@ -366,6 +367,21 @@ def single_run(
 
         # Synchronize all ranks after loading checkpoint
         tdist.barrier()
+    elif restart_path:
+        seed = auto_seed(base_seed=run_args["pyro_seed"], rank=global_rank)
+        # for starting a new run from a checkpoint
+        checkpoint = torch.load(restart_path, map_location=current_pytorch_device)
+        posterior_flow.module.module.load_state_dict(checkpoint['model_state_dict'], strict=True)
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        if global_rank == 0:
+            print(f"Checkpoint loaded from {restart_path}")
+        tdist.barrier()
+        # test sample from the flow (only on rank 0)
+        with torch.no_grad():
+            samples = posterior_flow.module(nominal_context).sample((1000,)).cpu().numpy()
+            plt.figure()
+            plt.plot(samples.squeeze()[:, 0], samples.squeeze()[:, 1], 'o', alpha=0.5)
+            plt.savefig(f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/plots/init_samples_rank_{global_rank}.png")
     else:
         seed = auto_seed(base_seed=run_args["pyro_seed"], rank=global_rank)
         # test sample from the flow (only on rank 0)
@@ -690,6 +706,7 @@ if __name__ == '__main__':
     parser.add_argument('--resume_step', type=int, default=None, help='Step to resume training from')
     parser.add_argument('--add_steps', type=int, default=0, help='Number of steps to add to the training')
     parser.add_argument('--profile', action='store_true', help='Enable profiling for a few steps and then exit.')
+    parser.add_argument('--restart_path', type=str, default=None, help='Path to checkpoint for restarting training')
 
     for key, value in default_args.items():
         arg_type = type(value)
@@ -713,7 +730,7 @@ if __name__ == '__main__':
     # Override defaults with any provided command-line arguments
     args_dict = vars(args)
     for key, value in args_dict.items():
-        if key not in ['cosmo_model', 'resume_id', 'resume_step', 'add_steps', 'profile'] and value is not None and key in run_args:
+        if key not in ['cosmo_model', 'resume_id', 'resume_step', 'add_steps', 'profile', 'checkpoint_path'] and value is not None and key in run_args:
             if isinstance(run_args[key], bool) and isinstance(value, bool):
                 run_args[key] = value
             elif not isinstance(run_args[key], bool):
@@ -754,7 +771,7 @@ if __name__ == '__main__':
     # === DIAGNOSTIC PRINT: BEFORE CALLING single_run ===
     print(f"Rank {os.environ.get('RANK')} (Global) / {os.environ.get('LOCAL_RANK')} (Env Var): In __main__, about to call single_run.")
     # === END DIAGNOSTIC PRINT ===
-
+    print(f"Restart path: {args.restart_path}")
     single_run(
         cosmo_model=cosmo_model,
         run_args=run_args,
@@ -763,7 +780,8 @@ if __name__ == '__main__':
         resume_id=args.resume_id,
         resume_step=args.resume_step,
         add_steps=args.add_steps,
-        profile=args.profile
+        profile=args.profile,
+        restart_path=args.restart_path
     )
 
 
