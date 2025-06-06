@@ -26,6 +26,7 @@ from pyro.contrib.util import lexpand, rexpand
 
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
+from matplotlib.lines import Line2D
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 import seaborn as sns
 import corner
@@ -53,8 +54,9 @@ import psutil
 import os
 import gc
 from num_tracers import NumTracers
-from plotting import plot_posterior
+from plotting import plot_posterior, get_contour_area
 from util import *
+from datetime import datetime
 
 
 def marginalize_posterior(num_tracers, posterior_flow, ratios, num_param_samples=1000, num_data_samples=100):
@@ -473,12 +475,32 @@ def run_eval(eval_args, run_id, exp, device, **kwargs):
 
                 g = plots.getSubplotPlotter()
                 if not eval_args["brute_force"]:
-                    g = plot_posterior(
-                        [desi_samples_gd, nominal_samples_gd, optimal_samples_gd],
-                        ['black', 'tab:blue', 'tab:orange'],
-                        legend_labels=['DESI', 'Nominal', 'Optimal'],
-                        show_scatter=False
-                    )
+                    level = 0.68
+                    color_list = ['tab:blue', 'tab:orange', 'black']
+                    all_areas = []
+                    all_samples = [nominal_samples_gd, optimal_samples_gd, desi_samples_gd]
+                    legend_labels = ['Nominal', 'Optimal', 'DESI']
+                    nominal_area = get_contour_area(nominal_samples_gd, 'Om', 'hrdrag', level)[0]
+                    all_areas.append(nominal_area)
+                    optimal_area = get_contour_area(optimal_samples_gd, 'Om', 'hrdrag', level)[0]
+                    all_areas.append(optimal_area)
+                    desi_area = get_contour_area([desi_samples_gd], 'Om', 'hrdrag', level)[0]
+                    all_areas.append(desi_area)
+                    g = plot_posterior(all_samples, color_list, levels=[level])
+                    # Remove existing legends if any
+                    if g.fig.legends:
+                        for legend in g.fig.legends:
+                            legend.remove()
+
+                    # Create custom legend
+                    custom_legend = []
+                    for i, area in enumerate(all_areas):
+                        custom_legend.append(
+                            Line2D([0], [0], color=color_list[i], 
+                                    label=f'{legend_labels[i]}, {int(level*100)}% Area: {area:.2f}')
+                        )
+                    g.fig.legend(handles=custom_legend, loc='upper right', bbox_to_anchor=(1, 0.99))
+                    
                 else:
                     brute_force_nominal_samples = num_tracers.brute_force_posterior(nominal_design, designer, grid_params, num_param_samples=eval_args["post_samples"]).cpu().numpy()
                     brute_force_optimal_samples = num_tracers.brute_force_posterior(nf_optimal_design, designer, grid_params, num_param_samples=eval_args["post_samples"]).cpu().numpy()
@@ -512,7 +534,7 @@ def run_eval(eval_args, run_id, exp, device, **kwargs):
                                     fill_contours=False, color='tab:blue', range=hist_range, hist_kwargs={"linestyle": 'dashed'}, contour_kwargs={"linestyles": 'dashed'})
                     legend_labels.append(plt.Line2D([0], [0], color="tab:blue", lw=1, label="Brute Force (Optimal)", linestyle='dashed'))
 
-                g.export(f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/plots/posterior.png")
+                g.export(f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/plots/posterior_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png")
 
         plt.close('all')
         print("Eval", ml_info.experiment_id + "/" + ml_info.run_id, "completed.")
@@ -534,7 +556,7 @@ if __name__ == '__main__':
     eval_args = {
         "nf_model": True,
         "brute_force": False,
-        "post_samples": 200000,
+        "post_samples": 20000,
         "eval_particles": 3000,
         "num_evals": 8,
         "params_grid": 100,
@@ -543,8 +565,8 @@ if __name__ == '__main__':
     }
     run_eval(
         eval_args,
-        run_id="13d1c666527e4da79791d1c89290dcdf",
-        exp=None,
+        run_id=None,
+        exp='base_NAF_designs',
         device=device
         )
     mlflow.end_run()
