@@ -333,7 +333,7 @@ def single_run(
             checkpoint_path = bytes(checkpoint_path_bytes_tensor.cpu().numpy()).decode('utf-8')
 
         # Load the checkpoint
-        checkpoint = torch.load(checkpoint_path, map_location=current_pytorch_device)
+        checkpoint = torch.load(checkpoint_path, map_location=current_pytorch_device, weights_only=False)
         
         # Load model state dict
         state_dict = checkpoint['model_state_dict']
@@ -370,7 +370,7 @@ def single_run(
     elif restart_path:
         seed = auto_seed(base_seed=run_args["pyro_seed"], rank=global_rank)
         # for starting a new run from a checkpoint
-        checkpoint = torch.load(restart_path, map_location=current_pytorch_device)
+        checkpoint = torch.load(restart_path, map_location=current_pytorch_device, weights_only=False)
         posterior_flow.module.module.load_state_dict(checkpoint['model_state_dict'], strict=True)
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         if global_rank == 0:
@@ -783,5 +783,3 @@ if __name__ == '__main__':
         profile=args.profile,
         restart_path=args.restart_path
     )
-
-

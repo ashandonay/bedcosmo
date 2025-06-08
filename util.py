@@ -435,14 +435,14 @@ def _get_resume_metrics(client, resume_id, resume_step, storage_path, exp_id):
     best_nominal_area_steps = np.array([metric.step for metric in best_nominal_areas])
     if len(best_nominal_area_steps) > 0:
         closest_idx = np.argmin(np.abs(best_nominal_area_steps - resume_step))
-        best_nominal_area = best_nominal_areas[closest_idx].value if best_nominal_area_steps[closest_idx] < resume_step else best_nominal_areas[closest_idx - 1].value
+        best_nominal_area = best_nominal_areas[closest_idx].value if best_nominal_area_steps[closest_idx] <= resume_step else best_nominal_areas[closest_idx - 1].value
     else:
         best_nominal_area = np.nan
     
     best_losses = client.get_metric_history(resume_id, 'best_loss')
     best_loss_steps = np.array([metric.step for metric in best_losses])
     closest_idx = np.argmin(np.abs(best_loss_steps - resume_step))
-    best_loss = best_losses[closest_idx].value if best_loss_steps[closest_idx] < resume_step else best_losses[closest_idx - 1].value
+    best_loss = best_losses[closest_idx].value if best_loss_steps[closest_idx] <= resume_step else best_losses[closest_idx - 1].value
     
     checkpoint_files = os.listdir(f"{storage_path}/mlruns/{exp_id}/{resume_id}/artifacts/checkpoints")
     checkpoint_steps = sorted([
@@ -455,7 +455,7 @@ def _get_resume_metrics(client, resume_id, resume_step, storage_path, exp_id):
         and not f.endswith('_last.pt')
     ])
     closest_idx = np.argmin(np.abs(np.array(checkpoint_steps) - resume_step))
-    start_step = checkpoint_steps[closest_idx] if checkpoint_steps[closest_idx] < resume_step else checkpoint_steps[closest_idx - 1]
+    start_step = checkpoint_steps[closest_idx] if checkpoint_steps[closest_idx] <= resume_step else checkpoint_steps[closest_idx - 1]
     
     return best_nominal_area, best_loss, start_step
 
