@@ -49,8 +49,7 @@ srun torchrun \
      --n_particles_per_device 500 \
      --steps 300000 \
      --scheduler_type linear \
-     --final_lr 1e-2 \
-     --initial_lr 1e-4 \
+     --final_lr 0.0001 \
      --verbose
 
 
