@@ -19,7 +19,7 @@ import matplotlib.pyplot as plt
 from pyro.contrib.util import lexpand
 import subprocess
 from torch.nn.parallel import DistributedDataParallel as DDP
-import datetime
+from datetime import datetime, timedelta
 
 torch.set_default_dtype(torch.float64)
 
@@ -134,7 +134,7 @@ def init_training_env(tdist, device):
             init_method="env://",
             world_size=int(os.environ["WORLD_SIZE"]),
             rank=global_rank,
-            timeout=datetime.timedelta(seconds=180)  # Increased timeout
+            timeout=timedelta(seconds=180)  # Increased timeout
         )
         print(f"Process group initialized for rank {global_rank}")
 
@@ -955,3 +955,17 @@ def log_usage_metrics(device_str, process, step, global_rank=0): # Renamed devic
     elif device_str == "cpu" and global_rank == 0: # Log only once for CPU info or if relevant
         print(f"Rank {global_rank}: Process is on CPU. No PyTorch GPU memory metrics to log.")
         pass
+
+def get_runtime(run_id):
+    run = mlflow.get_run(run_id)
+
+    start_ms = run.info.start_time      # epoch ms
+    end_ms   = run.info.end_time        # epoch ms (None until the run is finished)
+
+    if end_ms is None:
+        raise ValueError(f"Run {run_id} is still running or did not record end_time.")
+
+    # Convert epoch-ms → Python datetime
+    start_dt = datetime.fromtimestamp(start_ms / 1_000)
+    end_dt   = datetime.fromtimestamp(end_ms   / 1_000)
+    return end_dt - start_dt

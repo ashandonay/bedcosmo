@@ -679,6 +679,8 @@ def single_run(
         # End MLflow run for all ranks
         mlflow.end_run()
         tdist.destroy_process_group()
+        if global_rank == 0:
+            print("Runtime:", get_runtime(ml_info.run_id))
 
 if __name__ == '__main__':
 
