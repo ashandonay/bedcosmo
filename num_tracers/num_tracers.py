@@ -5,7 +5,7 @@ from pyro import distributions as dist
 from pyro.contrib.util import lexpand
 from astropy.cosmology import Planck18
 from astropy import constants
-from scipy.integrate import trapezoid
+from torch import trapezoid
 from bed.grid import GridStack
 from bed.grid import Grid
 
@@ -127,35 +127,35 @@ class NumTracers:
         Hubble distance
         """
         if self.cosmo_model == 'base':
-            return (self.c/(100000*hrdrag.cpu())) * 1 / torch.sqrt(
-                Om.cpu() * (1+z.cpu())**3 + 
-                (1-Om.cpu())
-                ).cpu()
+            return (self.c/(100000*hrdrag)) * 1 / torch.sqrt(
+                Om * (1+z)**3 + 
+                (1-Om)
+                )
         
         elif self.cosmo_model == 'base_omegak':
-            return (self.c/(100000*hrdrag.cpu())) * 1 / torch.sqrt(
-                Om.cpu() * (1+z.cpu())**3 + 
-                Ok.cpu() * (1+z.cpu())**2 + 
-                (1 - Om.cpu() - Ok.cpu())
-                ).cpu()
+            return (self.c/(100000*hrdrag)) * 1 / torch.sqrt(
+                Om * (1+z)**3 + 
+                Ok * (1+z)**2 + 
+                (1 - Om - Ok)
+                )
 
         elif self.cosmo_model == 'base_w':
-            return (self.c/(100000*hrdrag.cpu())) * 1 / torch.sqrt(
-                Om.cpu() * (1+z.cpu())**3 + 
-                (1-Om.cpu()) * (1+z.cpu())**(3*(1+w0.cpu()))
-                ).cpu()
+            return (self.c/(100000*hrdrag)) * 1 / torch.sqrt(
+                Om * (1+z)**3 + 
+                (1-Om) * (1+z)**(3*(1+w0))
+                )
         
         elif self.cosmo_model == 'base_w_wa':
-            return (self.c/(100000*hrdrag.cpu())) * 1 / torch.sqrt(
-                Om.cpu() * (1+z.cpu())**3 + 
-                (1 - Om.cpu()) * (1 + z.cpu())**(3 * (1 + w0.cpu() + wa.cpu())) * torch.exp(-3 * wa.cpu() * (z.cpu() / (1 + z.cpu())))
-                ).cpu()
+            return (self.c/(100000*hrdrag)) * 1 / torch.sqrt(
+                Om * (1+z)**3 + 
+                (1 - Om) * (1 + z)**(3 * (1 + w0 + wa)) * torch.exp(-3 * wa * (z / (1 + z)))
+                )
         
         elif self.cosmo_model == 'base_omegak_w_wa':
-            return (self.c/(100000*hrdrag.cpu())) * 1 / torch.sqrt(
-                Om.cpu() * (1+z.cpu())**3 + Ok.cpu() * (1+z.cpu())**2 + 
-                (1 - Om.cpu() - Ok.cpu()) * (1 + z.cpu())**(3 * (1 + w0.cpu() + wa.cpu())) * torch.exp(-3 * wa.cpu() * (z.cpu() / (1 + z.cpu())))
-                ).cpu()
+            return (self.c/(100000*hrdrag)) * 1 / torch.sqrt(
+                Om * (1+z)**3 + Ok * (1+z)**2 + 
+                (1 - Om - Ok) * (1 + z)**(3 * (1 + w0 + wa)) * torch.exp(-3 * wa * (z / (1 + z)))
+                )
 
     def D_M_func(self, z, Om, Ok=None, w0=None, wa=None, hrdrag=None):
         """
@@ -163,14 +163,14 @@ class NumTracers:
         """
         if self.cosmo_model == 'base':
             # calculates the transverse comoving distance for a lambdaCDM cosmology 
-            result = (self.c/(100000*hrdrag.cpu())) * trapezoid(
+            result = (self.c/(100000*hrdrag)) * trapezoid(
                 (1 / torch.sqrt(
-                    Om.unsqueeze(-1).cpu() * (1 + z.cpu())**3 + 
-                    (1 - Om.unsqueeze(-1).cpu())
-                    )).cpu(), 
-                z.cpu(), 
+                    Om.unsqueeze(-1) * (1 + z)**3 + 
+                    (1 - Om.unsqueeze(-1))
+                    )), 
+                z, 
                 axis=-1)
-            return result.to(self.device)
+            return result
 
         elif self.cosmo_model == 'base_omegak':
             # piecewise function that calculates the transverse comoving distance for a constant dark energy density cosmology 
@@ -184,65 +184,65 @@ class NumTracers:
 
             neg_mask = Ok.flatten() < 0 # Ok < 0
             if neg_mask.any():
-                result[neg_mask, :] = ((self.c/(100000*hrdrag[neg_mask].cpu())/torch.sqrt(-Ok[neg_mask].cpu())) * torch.sin(
-                    torch.sqrt(-Ok[neg_mask].cpu()) * trapezoid(
+                result[neg_mask, :] = ((self.c/(100000*hrdrag[neg_mask])/torch.sqrt(-Ok[neg_mask])) * torch.sin(
+                    torch.sqrt(-Ok[neg_mask]) * trapezoid(
                         (1 / torch.sqrt(
-                            Om[neg_mask].unsqueeze(-1).cpu() * (1 + z.cpu())**3 + 
-                            Ok[neg_mask].unsqueeze(-1).cpu() * (1 + z.cpu())**2 + 
-                            (1 - Om[neg_mask].unsqueeze(-1).cpu() - Ok[neg_mask].unsqueeze(-1).cpu())
-                        )).cpu(),
-                        z.cpu(),
+                            Om[neg_mask].unsqueeze(-1) * (1 + z)**3 + 
+                            Ok[neg_mask].unsqueeze(-1) * (1 + z)**2 + 
+                            (1 - Om[neg_mask].unsqueeze(-1) - Ok[neg_mask].unsqueeze(-1))
+                        )),
+                        z,
                         axis=-1
                     )
-                )).to(self.device)
+                ))
 
             pos_mask = Ok.flatten() > 0 # Ok > 0
             if pos_mask.any():
-                result[pos_mask, :] = ((self.c/(100000*hrdrag[pos_mask].cpu())/torch.sqrt(Ok[pos_mask].cpu())) * torch.sinh(
-                    torch.sqrt(Ok[pos_mask].cpu()) * trapezoid(
+                result[pos_mask, :] = ((self.c/(100000*hrdrag[pos_mask])/torch.sqrt(Ok[pos_mask])) * torch.sinh(
+                    torch.sqrt(Ok[pos_mask]) * trapezoid(
                         (1 / torch.sqrt(
-                            Om[pos_mask].unsqueeze(-1).cpu() * (1 + z.cpu())**3 + 
-                            Ok[pos_mask].unsqueeze(-1).cpu() * (1 + z.cpu())**2 + 
-                            (1 - Om[pos_mask].unsqueeze(-1).cpu() - Ok[pos_mask].unsqueeze(-1).cpu())
-                        )).cpu(),
-                        z.cpu(),
+                            Om[pos_mask].unsqueeze(-1) * (1 + z)**3 + 
+                            Ok[pos_mask].unsqueeze(-1) * (1 + z)**2 + 
+                            (1 - Om[pos_mask].unsqueeze(-1) - Ok[pos_mask].unsqueeze(-1))
+                        )),
+                        z,
                         axis=-1
                     )
-                )).to(self.device)
+                ))
 
             zero_mask = Ok.flatten() == 0 # Ok = 0
             if zero_mask.any():
-                result[zero_mask, :] = ((self.c/(100000*hrdrag[zero_mask].cpu())) * trapezoid(
+                result[zero_mask, :] = ((self.c/(100000*hrdrag[zero_mask])) * trapezoid(
                     (1 / torch.sqrt(
-                        Om[zero_mask].unsqueeze(-1).cpu() * (1 + z.cpu())**3 + 
-                        (1 - Om[zero_mask].unsqueeze(-1).cpu())
-                    )).cpu(),
-                    z.cpu(),
+                        Om[zero_mask].unsqueeze(-1) * (1 + z)**3 + 
+                        (1 - Om[zero_mask].unsqueeze(-1))
+                    )),
+                    z,
                     axis=-1
-                )).to(self.device)
+                ))
 
             return result.reshape(output_shape)
 
         elif self.cosmo_model == 'base_w':
-            result = (self.c/(100000*hrdrag.cpu())) * trapezoid(
+            result = (self.c/(100000*hrdrag)) * trapezoid(
                 (1 / torch.sqrt(
-                    Om.unsqueeze(-1).cpu() * (1 + z.cpu())**3 + 
-                    (1 - Om.unsqueeze(-1).cpu()) * (1 + z.cpu())**(3 * (1 + w0.unsqueeze(-1).cpu()))
-                )).cpu(), 
-                z.cpu(), 
+                    Om.unsqueeze(-1) * (1 + z)**3 + 
+                    (1 - Om.unsqueeze(-1)) * (1 + z)**(3 * (1 + w0.unsqueeze(-1)))
+                )), 
+                z, 
                 axis=-1)
-            return result.to(self.device)
+            return result
         
         elif self.cosmo_model == 'base_w_wa':
-            result = (self.c/(100000*hrdrag.cpu())) * trapezoid(
+            result = (self.c/(100000*hrdrag)) * trapezoid(
                 (1 / torch.sqrt(
-                    Om.unsqueeze(-1).cpu() * (1 + z.cpu())**3 + 
-                    (1 - Om.unsqueeze(-1).cpu()) * (1 + z.cpu())**(3 * (1 + w0.unsqueeze(-1).cpu() + wa.unsqueeze(-1).cpu())) * 
-                    torch.exp(-3 * wa.unsqueeze(-1).cpu() * (z.cpu() / (1 + z.cpu())))
-                    )).cpu(), 
-                z.cpu(), 
+                    Om.unsqueeze(-1) * (1 + z)**3 + 
+                    (1 - Om.unsqueeze(-1)) * (1 + z)**(3 * (1 + w0.unsqueeze(-1) + wa.unsqueeze(-1))) * 
+                    torch.exp(-3 * wa.unsqueeze(-1) * (z / (1 + z)))
+                    )), 
+                z, 
                 axis=-1)
-            return result.to(self.device)
+            return result
         
         elif self.cosmo_model == 'base_omegak_w_wa':
             # piecewise function that calculates the transverse comoving distance for a w0 and wa cosmology 
@@ -258,48 +258,48 @@ class NumTracers:
 
             neg_mask = Ok.flatten() < 0 # Ok < 0
             if neg_mask.any():
-                result[neg_mask, :] = ((self.c/(100000*hrdrag[neg_mask].cpu())/torch.sqrt(-Ok[neg_mask].cpu())) * torch.sin(
-                    torch.sqrt(-Ok[neg_mask].cpu()) * trapezoid(
+                result[neg_mask, :] = ((self.c/(100000*hrdrag[neg_mask])/torch.sqrt(-Ok[neg_mask])) * torch.sin(
+                    torch.sqrt(-Ok[neg_mask]) * trapezoid(
                         (1 / torch.sqrt(
-                            Om[neg_mask].unsqueeze(-1).cpu() * (1 + z.cpu())**3 + 
-                            Ok[neg_mask].unsqueeze(-1).cpu() * (1 + z.cpu())**2 + 
-                            (1 - Om[neg_mask].unsqueeze(-1).cpu() - Ok[neg_mask].unsqueeze(-1).cpu()) * 
-                            (1 + z.cpu())**(3 * (1 + w0[neg_mask].unsqueeze(-1).cpu() + wa[neg_mask].unsqueeze(-1).cpu())) * 
-                            torch.exp(-3 * wa[neg_mask].unsqueeze(-1).cpu() * (z.cpu() / (1 + z.cpu())))
-                        )).cpu(),
-                        z.cpu(),
+                            Om[neg_mask].unsqueeze(-1) * (1 + z)**3 + 
+                            Ok[neg_mask].unsqueeze(-1) * (1 + z)**2 + 
+                            (1 - Om[neg_mask].unsqueeze(-1) - Ok[neg_mask].unsqueeze(-1)) * 
+                            (1 + z)**(3 * (1 + w0[neg_mask].unsqueeze(-1) + wa[neg_mask].unsqueeze(-1))) * 
+                            torch.exp(-3 * wa[neg_mask].unsqueeze(-1) * (z / (1 + z)))
+                        )),
+                        z,
                         axis=-1
                     )
-                )).to(self.device)
+                ))
 
             pos_mask = Ok.flatten() > 0 # Ok > 0
             if pos_mask.any():
-                result[pos_mask, :] = ((self.c/(100000*hrdrag[pos_mask].cpu())/torch.sqrt(Ok[pos_mask].cpu())) * torch.sinh(
-                    torch.sqrt(Ok[pos_mask].cpu()) * trapezoid(
+                result[pos_mask, :] = ((self.c/(100000*hrdrag[pos_mask])/torch.sqrt(Ok[pos_mask])) * torch.sinh(
+                    torch.sqrt(Ok[pos_mask]) * trapezoid(
                         (1 / torch.sqrt(
-                            Om[pos_mask].unsqueeze(-1).cpu() * (1 + z.cpu())**3 + 
-                            Ok[pos_mask].unsqueeze(-1).cpu() * (1 + z.cpu())**2 + 
-                            (1 - Om[pos_mask].unsqueeze(-1).cpu() - Ok[pos_mask].unsqueeze(-1).cpu()) * 
-                            (1 + z.cpu())**(3 * (1 + w0[pos_mask].unsqueeze(-1).cpu() + wa[pos_mask].unsqueeze(-1).cpu())) * 
-                            torch.exp(-3 * wa[pos_mask].unsqueeze(-1).cpu() * (z.cpu() / (1 + z.cpu())))
-                        )).cpu(),
-                        z.cpu(),
+                            Om[pos_mask].unsqueeze(-1) * (1 + z)**3 + 
+                            Ok[pos_mask].unsqueeze(-1) * (1 + z)**2 + 
+                            (1 - Om[pos_mask].unsqueeze(-1) - Ok[pos_mask].unsqueeze(-1)) * 
+                            (1 + z)**(3 * (1 + w0[pos_mask].unsqueeze(-1) + wa[pos_mask].unsqueeze(-1))) * 
+                            torch.exp(-3 * wa[pos_mask].unsqueeze(-1) * (z / (1 + z)))
+                        )),
+                        z,
                         axis=-1
                     )
-                )).to(self.device)
+                ))
 
             zero_mask = Ok.flatten() == 0 # Ok = 0
             if zero_mask.any():
-                result[zero_mask, :] = ((self.c/(100000*hrdrag[zero_mask].cpu())) * trapezoid(
+                result[zero_mask, :] = ((self.c/(100000*hrdrag[zero_mask])) * trapezoid(
                     (1 / torch.sqrt(
-                        Om[zero_mask].unsqueeze(-1).cpu() * (1 + z.cpu())**3 + 
-                        (1 - Om[zero_mask].unsqueeze(-1).cpu()) *
-                        (1 + z.cpu())**(3 * (1 + w0[zero_mask].unsqueeze(-1).cpu() + wa[zero_mask].unsqueeze(-1).cpu())) * 
-                        torch.exp(-3 * wa[zero_mask].unsqueeze(-1).cpu() * (z.cpu() / (1 + z.cpu())))
-                    )).cpu(),
-                    z.cpu(),
+                        Om[zero_mask].unsqueeze(-1) * (1 + z)**3 + 
+                        (1 - Om[zero_mask].unsqueeze(-1)) *
+                        (1 + z)**(3 * (1 + w0[zero_mask].unsqueeze(-1) + wa[zero_mask].unsqueeze(-1))) * 
+                        torch.exp(-3 * wa[zero_mask].unsqueeze(-1) * (z / (1 + z)))
+                    )),
+                    z,
                     axis=-1
-                )).to(self.device)
+                ))
 
             return result.reshape(output_shape)
 
@@ -472,7 +472,7 @@ class NumTracers:
             if self.include_D_M:
                 z_array = self.z_eff.unsqueeze(-1) * torch.linspace(0, 1, 100, device=self.device).view(1, -1)
                 z = z_array.expand(2*[1] + [-1, -1])
-                means[:, :, ::2] = self.D_M_func(z, **parameters).cpu()
+                means[:, :, ::2] = self.D_M_func(z, **parameters)
                 rescaled_sigmas[:, :, ::2] = self.sigmas[::2] * torch.sqrt(self.nominal_passed_ratio/passed_ratio)
 
             # extract correlation matrix from DESI covariance matrix
