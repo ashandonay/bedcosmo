@@ -522,31 +522,6 @@ def single_run(
             # Optimizer step
             optimizer.step()
 
-            # Post-optimizer consistency check
-            if tdist.get_world_size() > 1:
-                with torch.no_grad():
-                    for param in posterior_flow.module.parameters():
-                        tdist.broadcast(param.data, src=0)
-                
-                for name, param in posterior_flow.module.named_parameters():
-                    if param.requires_grad:
-                        # Each rank needs its local data for comparison
-                        local_param_data = param.data.clone() 
-                    
-                    # Prepare a tensor for all_reduce
-                    tensor_to_reduce = local_param_data.clone()
-                    tdist.all_reduce(tensor_to_reduce, op=torch.distributed.ReduceOp.SUM)
-                    
-                    # All ranks compute the same average
-                    param_avg = tensor_to_reduce / tdist.get_world_size()
-                    
-                    if global_rank == 0:
-                        # Rank 0 calculates the difference using its local data
-                        max_abs_diff = (local_param_data - param_avg).abs().max().item()
-                        is_consistent = torch.allclose(local_param_data, param_avg, rtol=1e-5, atol=1e-8)
-                        if not is_consistent:
-                            print(f"Rank 0 | Step {step} | Param: '{name}' | Max abs diff: {max_abs_diff:.2e} | Consistent (allclose): {is_consistent}")
-                                
             # Synchronize all ranks before proceeding
             tdist.barrier()
 
