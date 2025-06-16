@@ -29,7 +29,6 @@ from pyro_oed_src import posterior_loss
 import json
 from IPython.display import display
 
-
 def plot_posterior(samples, colors, legend_labels=None, show_scatter=False, line_style='-', levels=[0.68, 0.95]):
     """
     Plots posterior distributions using GetDist triangle plots.
@@ -254,7 +253,9 @@ def plot_training(
         show_best=False,
         loss_step_freq=10,
         area_step_freq=100,
-        lr_step_freq=1 # Plot LR more frequently if needed
+        lr_step_freq=1, # Plot LR more frequently if needed
+        show_area=True,
+        show_lr=True
         ):
     """
     Compares training loss, learning rate, and posterior contour area evolution
@@ -275,6 +276,8 @@ def plot_training(
         loss_step_freq (int): Sampling frequency for plotting loss points.
         area_step_freq (int): Sampling frequency for plotting nominal area points (must be multiple of 100).
         lr_step_freq (int): Sampling frequency for plotting learning rate points.
+        show_area (bool): If True, show the area subplot. Default is True.
+        show_lr (bool): If True, show the learning rate subplot. Default is True.
     """
     client = MlflowClient()
     storage_path = os.environ["SCRATCH"] + f"/bed/BED_cosmo/{cosmo_exp}"
@@ -292,28 +295,43 @@ def plot_training(
     # Convert var to list if it's a single variable for sorting
     vars_list = var if isinstance(var, list) else [var] if var is not None else []
 
-    if vars_list:
-        def get_sort_key_from_data(run_data_item):
-            try:
-                key_tuple = []
-                for v_key in vars_list:
-                    param_val_str = run_data_item['params'].get(v_key)
-                    if param_val_str is not None:
-                        try:
-                            key_tuple.append(float(param_val_str))
-                        except ValueError:
-                            key_tuple.append(param_val_str) # Keep as string if not float
-                    else:
-                        key_tuple.append(float('inf')) # Sort runs missing the param last
-                return tuple(key_tuple)
-            except Exception as e:
-                # Removed print(f"Warning: Could not extract params for sorting run {run_data_item['run_id']}: {e}")
-                return tuple(float('inf') for _ in vars_list)
+    # Group runs by their variable values to assign colors
+    grouped_runs = {}
+    for run_data_item in run_data_list:
+        current_params = run_data_item['params']
+        group_key = []
+        is_valid_for_grouping = True
+        
+        for v_key in vars_list:
+            if v_key in current_params:
+                group_key.append(current_params[v_key])
+            else:
+                is_valid_for_grouping = False
+                break
+        
+        if is_valid_for_grouping:
+            group_key_tuple = tuple(group_key)
+            if group_key_tuple not in grouped_runs:
+                grouped_runs[group_key_tuple] = []
+            grouped_runs[group_key_tuple].append(run_data_item)
 
-        run_data_list = sorted(run_data_list, key=get_sort_key_from_data)
+    # Sort group keys for consistent color assignment
+    def sort_key_for_group_tuple(group_tuple_key):
+        key_as_num_or_str = []
+        for val_in_tuple in group_tuple_key:
+            try:
+                key_as_num_or_str.append(float(val_in_tuple))
+            except (ValueError, TypeError):
+                if isinstance(val_in_tuple, (int, float)):
+                    key_as_num_or_str.append(val_in_tuple)
+                else:
+                    key_as_num_or_str.append(str(val_in_tuple))
+        return tuple(key_as_num_or_str)
+
+    sorted_group_keys = sorted(grouped_runs.keys(), key=sort_key_for_group_tuple)
 
     # --- Data Fetching (Metrics) ---
-    all_metrics_for_runs = {} # Keyed by run_id
+    all_metrics_for_runs = {}  # Keyed by run_id
     min_loss_overall = float('inf')
     max_loss_overall = float('-inf')
     min_lr_overall = float('inf')
@@ -321,17 +339,17 @@ def plot_training(
     min_area_overall = float('inf')
     max_area_overall = float('-inf')
 
-    valid_runs_processed_for_metrics = [] # Store run_data_items that had metrics
-    show_area_plot = False # Flag to determine if we should show area plot
+    valid_runs_processed_for_metrics = []
 
     for run_data_item in run_data_list:
         run_id_iter = run_data_item['run_id']
-        run_params = run_data_item['params'] # Use pre-fetched params
+        run_params = run_data_item['params']
 
         try:
-            # Check if we should show area plot based on run args (now run_params)
-            if run_params.get('log_nominal_area', 'False').lower() == 'true':
-                show_area_plot = True
+            if run_params.get('log_nominal_area', 'False').lower() == 'true' and show_area:
+                show_area = True
+            else:
+                show_area = False
 
             # Fetch metrics
             loss_hist_raw = client.get_metric_history(run_id_iter, 'loss')
@@ -339,7 +357,7 @@ def plot_training(
             
             nom_area_hist_raw = []
             best_area_hist_raw = []
-            if show_area_plot: # Only fetch if needed
+            if show_area:
                 nom_area_hist_raw = client.get_metric_history(run_id_iter, 'nominal_area')
                 if show_best:
                     best_area_hist_raw = client.get_metric_history(run_id_iter, 'best_nominal_area')
@@ -359,11 +377,11 @@ def plot_training(
                 'lr': lr,
                 'nominal_area': nom_area,
                 'best_area': best_area,
-                'params': run_params # Keep params associated for easy access during plotting
+                'params': run_params
             }
-            valid_runs_processed_for_metrics.append(run_data_item) # Add item itself
+            valid_runs_processed_for_metrics.append(run_data_item)
 
-            # Update overall min/max for axis scaling using processed metrics
+            # Update overall min/max for axis scaling
             run_losses = [v for s, v in loss]
             run_lrs = [v for s, v in lr]
             run_nom_areas = [v for s, v in nom_area]
@@ -375,7 +393,7 @@ def plot_training(
             if run_lrs:
                 min_lr_overall = min(min_lr_overall, np.min(run_lrs))
                 max_lr_overall = max(max_lr_overall, np.max(run_lrs))
-            if show_area_plot:
+            if show_area:
                 if run_nom_areas:
                     min_area_overall = min(min_area_overall, np.min(run_nom_areas))
                     max_area_overall = max(max_area_overall, np.max(run_nom_areas))
@@ -392,131 +410,169 @@ def plot_training(
         return
 
     # --- Plotting Setup ---
-    # Create figure with appropriate number of subplots
-    num_subplots = 2
-    if show_area_plot:
-        num_subplots = 3
+    # Calculate number of subplots based on what we want to show
+    num_subplots = 1  # Always show loss
+    if show_area:
+        num_subplots += 1
+    if show_lr:
+        num_subplots += 1
     
-    fig_height = 8 if num_subplots == 2 else 12
+    fig_height = 4 * num_subplots  # Adjust height based on number of subplots
     fig, axes = plt.subplots(num_subplots, 1, figsize=(14, fig_height), sharex=True)
     
-    ax1 = axes[0]
-    ax_lr = axes[1] # LR plot is always the last (or middle if 3 plots)
+    # If only one subplot, axes won't be an array
+    if num_subplots == 1:
+        axes = np.array([axes])
+    
+    # Assign axes based on what we're showing
+    current_ax = 0
+    ax1 = axes[current_ax]  # Loss is always first
+    current_ax += 1
+    
     ax_area = None
-    if show_area_plot:
-        ax_area = axes[1] # Area plot is middle
-        ax_lr = axes[2]   # LR plot becomes the last one
+    if show_area:
+        ax_area = axes[current_ax]
+        current_ax += 1
+    
+    ax_lr = None
+    if show_lr:
+        ax_lr = axes[current_ax]
 
     colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
 
+    # Create a mapping of group keys to colors
+    group_colors = {group_key: colors[i % len(colors)] for i, group_key in enumerate(sorted_group_keys)}
+
+    num_runs = len(valid_runs_processed_for_metrics)
+    if num_runs <= 5:
+        base_alpha = 0.8
+    elif num_runs <= 10:
+        base_alpha = 0.6
+    elif num_runs <= 20:
+        base_alpha = 0.4
+    else:
+        base_alpha = 0.3
+
     # --- Plotting Data ---
-    # Iterate over valid_runs_processed_for_metrics to maintain sorted order and use pre-fetched params
-    for i, run_data_item in enumerate(valid_runs_processed_for_metrics):
+    # Track which groups we've already added to the legend
+    legend_entries_added = set()
+
+    for run_data_item in valid_runs_processed_for_metrics:
         run_id_iter = run_data_item['run_id']
-        run_params = run_data_item['params'] # Already fetched
+        run_params = run_data_item['params']
         metrics = all_metrics_for_runs[run_id_iter]
-        color = colors[i % len(colors)]
 
-        # --- Prepare Labels ---
-        label_parts = []
-        if not vars_list: # If var is None or empty, use run_id for label
-            base_label = run_id_iter[:8] # Shortened run_id
+        # Determine group key and color
+        group_key = []
+        is_valid_for_grouping = True
+        for v_key in vars_list:
+            if v_key in run_params:
+                group_key.append(run_params[v_key])
+            else:
+                is_valid_for_grouping = False
+                break
+        
+        if is_valid_for_grouping:
+            group_key_tuple = tuple(group_key)
+            color = group_colors.get(group_key_tuple, 'gray')  # Use gray for ungrouped runs
         else:
-            for v_key in vars_list:
-                param_value = run_params.get(v_key, "N/A")
-                label_parts.append(f"{v_key}={param_value}")
-            base_label = ", ".join(label_parts) if label_parts else f"Run {i+1}"
+            color = 'gray'  # Use gray for runs that don't match grouping criteria
 
+        # Create label from group key
+        label_parts = []
+        for j, v_key in enumerate(vars_list):
+            if v_key in run_params:
+                label_parts.append(f"{v_key}={run_params[v_key]}")
+        base_label = ", ".join(label_parts) if label_parts else run_id_iter[:8]
+
+        # Only add label if this group hasn't been added to legend yet
+        should_add_label = group_key_tuple not in legend_entries_added if is_valid_for_grouping else run_id_iter not in legend_entries_added
+        plot_label = base_label if should_add_label else None
 
         # --- Plot Loss (ax1) ---
         loss_data = metrics['loss']
         if loss_data:
             loss_steps, loss_values = zip(*loss_data)
-            # Apply sampling frequency
             sampled_indices = np.arange(0, len(loss_steps), loss_step_freq)
             plot_loss_steps = np.array(loss_steps)[sampled_indices]
             plot_loss_values = np.array(loss_values)[sampled_indices]
 
-            # Filter non-positive values if log scale is requested for this axis
             if log_scale:
-                ax1.plot(plot_loss_steps, plot_loss_values - min_loss_overall, alpha=0.8, color=color, label=base_label)
+                ax1.plot(plot_loss_steps, plot_loss_values - min_loss_overall, alpha=base_alpha, color=color, label=plot_label)
             else:
-                ax1.plot(plot_loss_steps, plot_loss_values, alpha=0.8, color=color, label=base_label)
+                ax1.plot(plot_loss_steps, plot_loss_values, alpha=base_alpha, color=color, label=plot_label)
 
         # --- Plot Nominal Area (ax2) ---
-        if area_step_freq % 100 != 0:
-            print("Warning: area_step_freq should ideally be a multiple of 100 as nominal_area is logged every 100 steps.")
-        sampling_rate = max(1, area_step_freq // 100) # Sample every 'sampling_rate' points from the metric history
+        if show_area:
+            if area_step_freq % 100 != 0:
+                print("Warning: area_step_freq should ideally be a multiple of 100 as nominal_area is logged every 100 steps.")
+            sampling_rate = max(1, area_step_freq // 100)
 
-        nom_area_data = metrics['nominal_area']
-        if nom_area_data:
-            nom_area_steps, nom_area_values = zip(*nom_area_data)
-            # Apply sampling frequency
-            sampled_indices = np.arange(0, len(nom_area_steps), sampling_rate)
-            plot_nom_area_steps = np.array(nom_area_steps)[sampled_indices]
-            plot_nom_area_values = np.array(nom_area_values)[sampled_indices]
+            nom_area_data = metrics['nominal_area']
+            if nom_area_data:
+                nom_area_steps, nom_area_values = zip(*nom_area_data)
+                sampled_indices = np.arange(0, len(nom_area_steps), sampling_rate)
+                plot_nom_area_steps = np.array(nom_area_steps)[sampled_indices]
+                plot_nom_area_values = np.array(nom_area_values)[sampled_indices]
 
-            # Filter non-positive values if log scale is requested for this axis
-            if log_scale:
-                positive_mask = plot_nom_area_values > 0
-                plot_nom_area_steps_filtered = plot_nom_area_steps[positive_mask]
-                plot_nom_area_values_filtered = plot_nom_area_values[positive_mask]
-                if len(plot_nom_area_values_filtered) < len(plot_nom_area_values):
-                     print(f"Warning: Run {run_id_iter} - Omitted {len(plot_nom_area_values) - len(plot_nom_area_values_filtered)} non-positive Nominal Area values for log scale plot.")
-                line_nom_area, = ax_area.plot(plot_nom_area_steps_filtered, plot_nom_area_values_filtered, alpha=0.9, linewidth=1.5, color=color, label=base_label)
-            else:
-                 line_nom_area, = ax_area.plot(plot_nom_area_steps, plot_nom_area_values, alpha=0.9, linewidth=1.5, color=color, label=base_label)
-
-        # --- Plot Best Area (ax2) ---
-        if show_best:
-            best_area_data = metrics['best_area']
-            if best_area_data:
-                best_steps, best_areas = zip(*best_area_data)
-                plot_best_area_steps = np.array(best_steps)
-                plot_best_area_values = np.array(best_areas)
-
-                # Filter non-positive values if log scale is requested for this axis
                 if log_scale:
-                    positive_mask = plot_best_area_values > 0
-                    plot_best_area_steps_filtered = plot_best_area_steps[positive_mask]
-                    plot_best_area_values_filtered = plot_best_area_values[positive_mask]
-                    if len(plot_best_area_values_filtered) < len(plot_best_area_values):
-                        print(f"Warning: Run {run_id_iter} - Omitted {len(plot_best_area_values) - len(plot_best_area_values_filtered)} non-positive Best Area values for log scale plot.")
-                    # Plot line
-                    line_area_best, = ax_area.plot(plot_best_area_steps_filtered, plot_best_area_values_filtered, alpha=1.0, linestyle='-.', linewidth=2, color=color, label=f"{base_label} (Best)")
-                    # Plot star at the last *positive* best step if log scale
-                    if len(plot_best_area_steps_filtered) > 0:
-                        ax_area.plot(plot_best_area_steps_filtered[-1], plot_best_area_values_filtered[-1], '*', markersize=8, zorder=10, color=color)
-
+                    positive_mask = plot_nom_area_values > 0
+                    plot_nom_area_steps_filtered = plot_nom_area_steps[positive_mask]
+                    plot_nom_area_values_filtered = plot_nom_area_values[positive_mask]
+                    if len(plot_nom_area_values_filtered) < len(plot_nom_area_values):
+                        print(f"Warning: Run {run_id_iter} - Omitted {len(plot_nom_area_values) - len(plot_nom_area_values_filtered)} non-positive Nominal Area values for log scale plot.")
+                    line_nom_area, = ax_area.plot(plot_nom_area_steps_filtered, plot_nom_area_values_filtered, alpha=base_alpha, linewidth=1.5, color=color, label=plot_label)
                 else:
-                    # Plot line
-                    line_area_best, = ax_area.plot(plot_best_area_steps, plot_best_area_values, alpha=1.0, linestyle='-.', linewidth=2, color=color, label=f"{base_label} (Best)")
-                    # Plot star at the last best step
-                    if len(plot_best_area_steps) > 0:
-                        ax_area.plot(plot_best_area_steps[-1], plot_best_area_values[-1], '*', markersize=8, zorder=10, color=color)
+                    line_nom_area, = ax_area.plot(plot_nom_area_steps, plot_nom_area_values, alpha=base_alpha, linewidth=1.5, color=color, label=plot_label)
+
+            # --- Plot Best Area (ax2) ---
+            if show_best:
+                best_area_data = metrics['best_area']
+                if best_area_data:
+                    best_steps, best_areas = zip(*best_area_data)
+                    plot_best_area_steps = np.array(best_steps)
+                    plot_best_area_values = np.array(best_areas)
+
+                    if log_scale:
+                        positive_mask = plot_best_area_values > 0
+                        plot_best_area_steps_filtered = plot_best_area_steps[positive_mask]
+                        plot_best_area_values_filtered = plot_best_area_values[positive_mask]
+                        if len(plot_best_area_values_filtered) < len(plot_best_area_values):
+                            print(f"Warning: Run {run_id_iter} - Omitted {len(plot_best_area_values) - len(plot_best_area_values_filtered)} non-positive Best Area values for log scale plot.")
+                        line_area_best, = ax_area.plot(plot_best_area_steps_filtered, plot_best_area_values_filtered, alpha=base_alpha, linestyle='-.', linewidth=2, color=color, label=f"{plot_label} (Best)" if plot_label else None)
+                        if len(plot_best_area_steps_filtered) > 0:
+                            ax_area.plot(plot_best_area_steps_filtered[-1], plot_best_area_values_filtered[-1], '*', markersize=8, zorder=10, color=color)
+                    else:
+                        line_area_best, = ax_area.plot(plot_best_area_steps, plot_best_area_values, alpha=base_alpha, linestyle='-.', linewidth=2, color=color, label=f"{plot_label} (Best)" if plot_label else None)
+                        if len(plot_best_area_steps) > 0:
+                            ax_area.plot(plot_best_area_steps[-1], plot_best_area_values[-1], '*', markersize=8, zorder=10, color=color)
 
         # --- Plot Learning Rate (ax3) ---
-        lr_data = metrics['lr']
-        if lr_data:
-            lr_steps, lr_values = zip(*lr_data)
-            # Apply sampling frequency
-            sampled_indices = np.arange(0, len(lr_steps), lr_step_freq)
-            plot_lr_steps = np.array(lr_steps)[sampled_indices]
-            plot_lr_values = np.array(lr_values)[sampled_indices]
+        if show_lr:
+            lr_data = metrics['lr']
+            if lr_data:
+                lr_steps, lr_values = zip(*lr_data)
+                sampled_indices = np.arange(0, len(lr_steps), lr_step_freq)
+                plot_lr_steps = np.array(lr_steps)[sampled_indices]
+                plot_lr_values = np.array(lr_values)[sampled_indices]
 
-            # Filter non-positive values if log scale is requested for this axis
-            if log_scale:
-                positive_mask = plot_lr_values > 0
-                plot_lr_steps_filtered = plot_lr_steps[positive_mask]
-                plot_lr_values_filtered = plot_lr_values[positive_mask]
-                if len(plot_lr_values_filtered) < len(plot_lr_values):
-                     print(f"Warning: Run {run_id_iter} - Omitted {len(plot_lr_values) - len(plot_lr_values_filtered)} non-positive LR values for log scale plot.")
-                ax_lr.plot(plot_lr_steps_filtered, plot_lr_values_filtered, alpha=0.8, color=color, label=base_label)
-            else:
-                ax_lr.plot(plot_lr_steps, plot_lr_values, alpha=0.8, color=color, label=base_label)
+                if log_scale:
+                    positive_mask = plot_lr_values > 0
+                    plot_lr_steps_filtered = plot_lr_steps[positive_mask]
+                    plot_lr_values_filtered = plot_lr_values[positive_mask]
+                    if len(plot_lr_values_filtered) < len(plot_lr_values):
+                        print(f"Warning: Run {run_id_iter} - Omitted {len(plot_lr_values) - len(plot_lr_values_filtered)} non-positive LR values for log scale plot.")
+                    ax_lr.plot(plot_lr_steps_filtered, plot_lr_values_filtered, alpha=base_alpha, color=color, label=plot_label)
+                else:
+                    ax_lr.plot(plot_lr_steps, plot_lr_values, alpha=base_alpha, color=color, label=plot_label)
+
+        # Add this group/run to the set of legend entries
+        if is_valid_for_grouping:
+            legend_entries_added.add(group_key_tuple)
+        else:
+            legend_entries_added.add(run_id_iter)
 
     # --- Final Plot Configuration ---
-
     # Determine legend font size based on number of runs
     num_runs = len(valid_runs_processed_for_metrics)
     if num_runs > 10: legend_fontsize = 'xx-small'
@@ -529,11 +585,11 @@ def plot_training(
     ax1.tick_params(axis='y')
     ax1.grid(True, axis='y', linestyle='--', alpha=0.6)
 
-    if show_area_plot:
+    if show_area:
         # get only unique cosmo models from pre-fetched params
         cosmo_models = list(set([
             item['params']['cosmo_model'] 
-            for item in valid_runs_processed_for_metrics 
+            for item in run_data_list 
             if 'params' in item and 'cosmo_model' in item['params']
         ]))
         for cm in cosmo_models:
@@ -549,46 +605,46 @@ def plot_training(
         ax_area.grid(True, axis='y', linestyle='--', alpha=0.6)
 
     # Configure ax3 (Learning Rate)
-    ax_lr.set_xlabel("Training Step")
-    ax_lr.set_ylabel("Learning Rate")
-    ax_lr.tick_params(axis='y')
-    ax_lr.grid(True, axis='y', linestyle='--', alpha=0.6)
-
+    if show_lr:
+        ax_lr.set_xlabel("Training Step")
+        ax_lr.set_ylabel("Learning Rate")
+        ax_lr.tick_params(axis='y')
+        ax_lr.grid(True, axis='y', linestyle='--', alpha=0.6)
 
     # Apply log scale if requested
     if log_scale:
         ax1.set_yscale('log')
-        if show_area_plot:
+        if show_area:
             ax_area.set_yscale('log')
-        ax_lr.set_yscale('log')
-        # Limits are automatically handled by matplotlib for log scale based on filtered data
+        if show_lr:
+            ax_lr.set_yscale('log')
     else:
-        # Set linear scale limits with padding only if data range is valid
+        # Set linear scale limits with padding
         if max_loss_overall > min_loss_overall:
             loss_pad = (max_loss_overall - min_loss_overall) * 0.05
             ax1.set_ylim(min_loss_overall - loss_pad, max_loss_overall + loss_pad)
-        elif np.isfinite(min_loss_overall): # Handle constant loss case
-             ax1.set_ylim(min_loss_overall - 0.5, min_loss_overall + 0.5) # Example padding
+        elif np.isfinite(min_loss_overall):
+            ax1.set_ylim(min_loss_overall - 0.5, min_loss_overall + 0.5)
 
-        if show_area_plot:
+        if show_area:
             if max_area_overall > min_area_overall:
                 area_pad = (max_area_overall - min_area_overall) * 0.05
                 ax_area.set_ylim(min_area_overall - area_pad, max_area_overall + area_pad)
-            elif np.isfinite(min_area_overall): # Handle constant area case
-                ax_area.set_ylim(min_area_overall - 0.5, min_area_overall + 0.5) # Example padding
+            elif np.isfinite(min_area_overall):
+                ax_area.set_ylim(min_area_overall - 0.5, min_area_overall + 0.5)
 
-        if max_lr_overall > min_lr_overall :
-             lr_pad = (max_lr_overall - min_lr_overall) * 0.05
-             ax_lr.set_ylim(min_lr_overall - lr_pad, max_lr_overall + lr_pad)
-        elif np.isfinite(min_lr_overall): # Handle constant LR case
-             ax_lr.set_ylim(min_lr_overall * 0.9, min_lr_overall * 1.1) # Relative padding
-
+        if show_lr:
+            if max_lr_overall > min_lr_overall:
+                lr_pad = (max_lr_overall - min_lr_overall) * 0.05
+                ax_lr.set_ylim(min_lr_overall - lr_pad, max_lr_overall + lr_pad)
+            elif np.isfinite(min_lr_overall):
+                ax_lr.set_ylim(min_lr_overall * 0.9, min_lr_overall * 1.1)
 
     # Adjust layout
-    plt.tight_layout(rect=[0, 0, 1, 0.97]) # Add space for title
+    plt.tight_layout(rect=[0, 0, 1, 0.97])
 
     # --- Title and Saving ---
-    title_suffix = f" - {exp_name}" if exp_name else f" - {len(valid_runs_processed_for_metrics)} Runs"
+    title_suffix = f" - {exp_name}" if exp_name else f" - {len(run_data_list)} Run(s)"
     fig.suptitle(f"Training Evolution{title_suffix}", fontsize=16)
 
     # Determine save path
@@ -596,22 +652,19 @@ def plot_training(
     save_dir = None
     save_path = None
 
-    final_exp_id_for_path = experiment_id_for_save_path # This was set if exp_name was used
+    final_exp_id_for_path = experiment_id_for_save_path
 
     if exp_name and final_exp_id_for_path:
         save_dir = f"{storage_path}/mlruns/{final_exp_id_for_path}/plots"
         save_path = f"{save_dir}/training_comparison_{timestamp}.png"
-    elif len(valid_runs_processed_for_metrics) == 1:
-        # Only one run plotted, and exp_name was NOT provided (so final_exp_id_for_path is None)
-        # Try to get its experiment_id for artifact path
-        single_run_id = valid_runs_processed_for_metrics[0]['run_id']
-        if not final_exp_id_for_path: # Should be None if we are in this elif block's condition
+    elif len(run_data_list) == 1:
+        single_run_id = run_data_list[0]['run_id']
+        if not final_exp_id_for_path:
             try:
-                single_run_data_item = valid_runs_processed_for_metrics[0]
+                single_run_data_item = run_data_list[0]
                 if 'run_obj' in single_run_data_item and single_run_data_item['run_obj'] is not None:
                     final_exp_id_for_path = single_run_data_item['run_obj'].info.experiment_id
                 else:
-                    # Removed print(f"PLOT_TRAINING: Warning: Cached run_obj not found for single run {single_run_id}. Attempting a new get_run call.")
                     fallback_run_obj = client.get_run(single_run_id)
                     final_exp_id_for_path = fallback_run_obj.info.experiment_id
             except Exception as e:
@@ -620,15 +673,15 @@ def plot_training(
         if final_exp_id_for_path:
             save_dir = f"{storage_path}/mlruns/{final_exp_id_for_path}/{single_run_id}/artifacts/plots"
         else:
-            save_dir = f"{storage_path}/plots" # Fallback
+            save_dir = f"{storage_path}/plots"
         save_path = f"{save_dir}/training_{timestamp}.png"
-    else: # Multiple runs without exp_name, or other fallback
+    else:
         save_dir = f"{storage_path}/plots"
         save_path = f"{save_dir}/training_comparison_{timestamp}.png"
 
-    os.makedirs(save_dir, exist_ok=True) # Ensure directory exists before saving
+    os.makedirs(save_dir, exist_ok=True)
     show_figure(save_path)
-    plt.close(fig) # Close the figure after saving/showing
+    plt.close(fig)
 
 def compare_posterior(
         exp_name=None,
