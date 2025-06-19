@@ -183,6 +183,10 @@ def single_run(
     total_observations = 6565626
     #classes = kwargs['classes']
     classes = (desi_tracers.groupby('class').sum()['targets'].reindex(["LRG", "ELG", "QSO"]) / total_observations).to_dict()
+    # enforce lows:
+    classes["LRG"] = (0.25, classes["LRG"])
+    classes["ELG"] = (0.25, classes["ELG"])
+    classes["QSO"] = (0.0, classes["QSO"])
     mlflow.log_dict(classes, "classes.json")
     # Get nominal design from observed tracer counts
     nominal_design = torch.tensor(desi_tracers.groupby('class').sum()['observed'].reindex(classes.keys()).values, device=current_pytorch_device)
@@ -221,8 +225,8 @@ def single_run(
         # Create design grid with specified step size
         designs_dict = {
             f'N_{class_name}': np.arange(
-                run_args["design_low"],
-                class_frac + run_args["design_step"], 
+                max(class_frac[0], run_args["design_low"]),
+                min(class_frac[1] + run_args["design_step"], 1.0), 
                 run_args["design_step"]
             ) for class_name, class_frac in classes.items()
         }
@@ -371,8 +375,18 @@ def single_run(
         seed = auto_seed(base_seed=run_args["pyro_seed"], rank=global_rank)
         # for starting a new run from a checkpoint
         checkpoint = torch.load(restart_path, map_location=current_pytorch_device, weights_only=False)
-        posterior_flow.module.module.load_state_dict(checkpoint['model_state_dict'], strict=True)
-        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        # Restore RNG states if they exist in the checkpoint
+        if 'rng_state' in checkpoint:
+            rng_state = checkpoint['rng_state']
+            random.setstate(rng_state['python'])
+            np.random.set_state(rng_state['numpy'])
+            torch.set_rng_state(rng_state['torch'].cpu())
+            pyro.get_param_store().set_state(rng_state['pyro'])
+            if torch.cuda.is_available() and rng_state['cuda'] is not None:
+                torch.cuda.set_rng_state_all([state.cpu() for state in rng_state['cuda']])
+            if global_rank == 0:
+                print("RNG states restored from checkpoint")
+        posterior_flow.module.load_state_dict(checkpoint['model_state_dict'], strict=True)
         if global_rank == 0:
             print(f"Checkpoint loaded from {restart_path}")
         tdist.barrier()
