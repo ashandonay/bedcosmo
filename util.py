@@ -127,14 +127,26 @@ def init_training_env(tdist, device):
         # When CUDA_VISIBLE_DEVICES isolates one GPU, PyTorch sees it as device 0.
         pytorch_device_idx = int(os.environ["LOCAL_RANK"])  # The only GPU visible to this process
         effective_device_id = pytorch_device_idx
+        
+        # Initialize CUDA context before DDP setup
+        torch.cuda.init()
         torch.cuda.set_device(pytorch_device_idx)
         
+        # Ensure CUDA is available and device is set before DDP init
+        if not torch.cuda.is_available():
+            raise RuntimeError("CUDA is not available but LOCAL_RANK is set")
+        
+        # Create torch.device object for device_id
+        device_obj = torch.device(f"cuda:{pytorch_device_idx}")
+        
+        # Initialize process group with explicit device ID
         tdist.init_process_group(
             backend="nccl",
             init_method="env://",
             world_size=int(os.environ["WORLD_SIZE"]),
             rank=global_rank,
-            timeout=timedelta(seconds=180)  # Increased timeout
+            timeout=timedelta(seconds=180),  # Increased timeout
+            device_id=device_obj  # Pass torch.device object
         )
         print(f"Process group initialized for rank {global_rank}")
 
@@ -581,16 +593,13 @@ def run_eval(run_obj, parsed_run_params, eval_args, step='loss_best', cosmo_exp=
     else:
         raise ValueError("run_eval requires either run_obj and parsed_run_params, or a run_id_for_fallback_only")
 
-    # Download classes.json once here
-    classes_json_path = mlflow.artifacts.download_artifacts(run_id=current_run_id, artifact_path="classes.json")
-    with open(classes_json_path) as f:
-        classes_data = json.load(f)
-    
-    # Pass run_obj, parsed_run_params (which should be consistent with run_obj), and classes_data
-    num_tracers, posterior_flow = load_model(run_obj, parsed_run_params, classes_data, step, eval_args, cosmo_exp)
+    with open(mlflow.artifacts.download_artifacts(run_id=current_run_id, artifact_path="classes.json")) as f:
+        classes = json.load(f)
+    # Pass run_obj, parsed_run_params (which should be consistent with run_obj), and classes
+    num_tracers, posterior_flow = load_model(run_obj, parsed_run_params, classes, step, eval_args, cosmo_exp)
 
     # Use parsed_run_params which should have 'include_D_M' correctly typed
-    nominal_design = torch.tensor(num_tracers.desi_tracers.groupby('class').sum()['observed'].reindex(classes_data.keys()).values, device=eval_args["device"], dtype=torch.float64)
+    nominal_design = torch.tensor(num_tracers.desi_tracers.groupby('class').sum()['observed'].reindex(classes.keys()).values, device=eval_args["device"], dtype=torch.float64)
     # Ensure include_D_M is a boolean if it comes from parsed_params
     include_D_M_flag = parsed_run_params.get("include_D_M", False) # Default to False if not found
     central_vals = num_tracers.central_val if include_D_M_flag else num_tracers.central_val[1::2]
@@ -608,9 +617,9 @@ def run_eval(run_obj, parsed_run_params, eval_args, step='loss_best', cosmo_exp=
         samples = getdist.MCSamples(samples=nominal_samples, names=num_tracers.cosmo_params, labels=num_tracers.latex_labels, settings={'ignore_rows': 0.0})
     return samples
 
-def load_model(run_obj, parsed_run_params, classes_data, step, eval_args, cosmo_exp='num_tracers'):
+def load_model(run_obj, parsed_run_params, classes, step, eval_args, cosmo_exp='num_tracers'):
     # Assumes run_obj is the MLflow Run object and parsed_run_params is the output of parse_mlflow_params(run_obj.data.params)
-    # classes_data is the already loaded content of classes.json
+    # classes is the already loaded content of classes.json
     storage_path = os.environ["SCRATCH"] + f"/bed/BED_cosmo/{cosmo_exp}"
 
     current_run_id = run_obj.info.run_id
@@ -635,7 +644,7 @@ def load_model(run_obj, parsed_run_params, classes_data, step, eval_args, cosmo_
         )
 
     input_dim = len(num_tracers.cosmo_params)
-    context_dim = len(classes_data.keys()) + 10 if parsed_run_params.get("include_D_M", False) else len(classes_data.keys()) + 5
+    context_dim = len(classes.keys()) + 10 if parsed_run_params.get("include_D_M", False) else len(classes.keys()) + 5
     
     nf_seed_from_params = parsed_run_params.get("nf_seed")
     nf_seed_for_init = None

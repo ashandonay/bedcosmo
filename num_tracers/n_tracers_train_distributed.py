@@ -44,6 +44,7 @@ import argparse
 import io
 import contextlib
 from plotting import get_contour_area, plot_training, eig_steps
+import getdist.mcsamples
 
 class FlowLikelihoodDataset(Dataset):
     def __init__(self, num_tracers, designs, n_particles_per_device, observation_labels, target_labels, device="cuda"):
@@ -563,13 +564,9 @@ def single_run(
                     # Capture getdist output only on rank 0 to avoid clutter, ensure getdist is available
                     if global_rank == 0: # Check global_rank
                         try:
-                            import getdist.mcsamples
                             with contextlib.redirect_stdout(io.StringIO()):
                                 nominal_samples_gd = getdist.mcsamples.MCSamples(samples=nominal_samples, names=target_labels, labels=num_tracers.latex_labels)
                             local_nominal_area = get_contour_area(nominal_samples_gd, 'Om', 'hrdrag', 0.68)[0]
-                        except ImportError:
-                            print("Rank 0: getdist not installed, cannot calculate nominal area.")
-                            local_nominal_area = float('nan') # Or handle as error
                         except Exception as e:
                             print(f"Rank 0: Error during getdist processing: {e}")
                             local_nominal_area = float('nan')
@@ -640,6 +637,17 @@ def single_run(
 
     # Only save checkpoint and plot on rank 0
     if global_rank == 0:
+        if run_args["log_nominal_area"]:
+            nominal_samples = posterior_flow(nominal_context).sample((5000,)).cpu().numpy()
+            nominal_samples[:, -1] *= 100000
+            try:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    nominal_samples_gd = getdist.mcsamples.MCSamples(samples=nominal_samples, names=target_labels, labels=num_tracers.latex_labels)
+                last_nominal_area = get_contour_area(nominal_samples_gd, 'Om', 'hrdrag', 0.68)[0]
+            except Exception as e:
+                print(f"Rank 0: Error during getdist processing: {e}")
+                last_nominal_area = float('nan')
+            mlflow.log_metric("nominal_area", last_nominal_area, step=step)
         checkpoint_path = f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/checkpoints/checkpoint_last.pt"
         save_checkpoint(posterior_flow.module, optimizer, checkpoint_path, step=run_args.get("steps", 0), artifact_path="checkpoints", scheduler=scheduler)
         plot_training(
