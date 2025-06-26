@@ -2,6 +2,7 @@ import os
 import sys
 import time
 import datetime
+import random
 # Get the directory containing the current script
 script_dir = os.path.dirname(os.path.abspath(__file__))
 # Get the parent directory ('BED_cosmo/') and add it to the Python path
@@ -30,6 +31,7 @@ from bed.grid import Grid
 
 import mlflow
 import mlflow.pytorch
+from mlflow.tracking import MlflowClient
 from tqdm import tqdm
 
 from bed.grid import Grid
@@ -118,7 +120,8 @@ def single_run(
     resume_step=None,
     add_steps=0,
     profile=False,
-    restart_path=None,
+    restart_id=None,
+    restart_step=None,
     **kwargs,
 ):
 
@@ -136,9 +139,8 @@ def single_run(
     
     # Initialize MLflow experiment and run info on rank 0
     current_pytorch_device = f"cuda:{pytorch_device_idx}" if "LOCAL_RANK" in os.environ and torch.cuda.is_available() else (f"cuda:{effective_device_id}" if effective_device_id != -1 else "cpu")
-    # get total number of devices used
 
-    ml_info, run_args, start_step, best_loss, best_nominal_area = init_run(
+    ml_info, run_args, checkpoint, start_step, best_loss, best_nominal_area = init_run(
         tdist, 
         global_rank, 
         current_pytorch_device, 
@@ -149,44 +151,23 @@ def single_run(
         kwargs, 
         resume_id=resume_id, 
         resume_step=resume_step, 
-        add_steps=add_steps
+        add_steps=add_steps,
+        restart_id=restart_id,
+        restart_step=restart_step
         )
-
-    # Broadcast run_args from rank 0 to ensure consistency, especially for 'steps' when resuming with add_steps
-    if global_rank == 0:
-        # run_args was already prepared correctly on rank 0 (either new or resumed with add_steps)
-        run_args_list_to_broadcast = [run_args]
-    else:
-        run_args_list_to_broadcast = [None]  # Placeholder for other ranks
-
-    if tdist.is_initialized():
-        tdist.barrier() # Ensure all ranks are ready before broadcasting run_args
-    
-    tdist.broadcast_object_list(run_args_list_to_broadcast, src=0)
-    run_args = run_args_list_to_broadcast[0] # All ranks now have the definitive run_args
-    if global_rank != 0 and resume_id: # For non-rank 0, if resuming, print the received run_args for verification
-        print(f"Rank {global_rank} received run_args after broadcast: steps = {run_args.get('steps')}")
-
-    # All ranks join the same run
-    if resume_id:
-        mlflow.start_run(run_id=resume_id, nested=True)
-    else:
-        mlflow.start_run(run_id=ml_info.run_id, nested=True)
 
     desi_df = pd.read_csv(home_dir + run_args["data_path"] + 'desi_data.csv')
     desi_tracers = pd.read_csv(home_dir + run_args["data_path"] + 'desi_tracers.csv')
     nominal_cov = np.load(home_dir + run_args["data_path"] + 'desi_cov.npy')
-    # select only the rows corresponding to the tracers
     
-
     ############################################### Priors ###############################################
 
     total_observations = 6565626
     #classes = kwargs['classes']
     classes = (desi_tracers.groupby('class').sum()['targets'].reindex(["LRG", "ELG", "QSO"]) / total_observations).to_dict()
     # enforce lows:
-    classes["LRG"] = (0.25, classes["LRG"])
-    classes["ELG"] = (0.25, classes["ELG"])
+    classes["LRG"] = (0.0, classes["LRG"])
+    classes["ELG"] = (0.0, classes["ELG"])
     classes["QSO"] = (0.0, classes["QSO"])
     mlflow.log_dict(classes, "classes.json")
     # Get nominal design from observed tracer counts
@@ -305,92 +286,75 @@ def single_run(
     
     # Initialize optimizer
     optimizer = torch.optim.Adam(posterior_flow.parameters(), lr=run_args["initial_lr"])
-    scheduler = init_scheduler(optimizer, run_args)
     
-    # Load checkpoint if specified
     if resume_id:
-        checkpoint_dir = f"{storage_path}/mlruns/{ml_info.experiment_id}/{resume_id}/artifacts/checkpoints"
-        checkpoint_file = [f for f in os.listdir(checkpoint_dir) if f.startswith('checkpoint_') and f.endswith('.pt') and f.split('_')[-1].split('.')[0] == str(start_step)][0]
-        checkpoint_path = f"{checkpoint_dir}/{checkpoint_file}"
-        # Broadcast checkpoint path to all ranks
-        if global_rank == 0: # Check global_rank
-            # Convert checkpoint path to bytes and create tensor
-            checkpoint_path_bytes = checkpoint_path.encode('utf-8')
-            checkpoint_path_length = len(checkpoint_path_bytes)
-            checkpoint_path_tensor = torch.tensor([checkpoint_path_length], dtype=torch.long, device=current_pytorch_device)
-            checkpoint_path_bytes_tensor = torch.tensor(list(checkpoint_path_bytes), dtype=torch.uint8, device=current_pytorch_device)
-        else:
-            checkpoint_path_tensor = torch.zeros(1, dtype=torch.long, device=current_pytorch_device)
-            checkpoint_path_bytes_tensor = None
-
-        # Broadcast checkpoint path length
-        tdist.broadcast(checkpoint_path_tensor, src=0)
-        
-        # Create tensor for receiving bytes on non-zero ranks
-        if global_rank != 0: # Check global_rank
-            checkpoint_path_bytes_tensor = torch.zeros(checkpoint_path_tensor.item(), dtype=torch.uint8, device=current_pytorch_device)
-        
-        # Broadcast checkpoint path bytes
-        tdist.broadcast(checkpoint_path_bytes_tensor, src=0)
-        
-        # Convert bytes back to string
-        if global_rank != 0: # Check global_rank
-            checkpoint_path = bytes(checkpoint_path_bytes_tensor.cpu().numpy()).decode('utf-8')
-
-        # Load the checkpoint
-        checkpoint = torch.load(checkpoint_path, map_location=current_pytorch_device, weights_only=False)
-        
         # Load model state dict
-        state_dict = checkpoint['model_state_dict']
-        
-        # Load the state_dict directly into the innermost base model
-        # (since posterior_flow is DDP(DDP(base_model)) and state_dict has bare keys)
-        posterior_flow.module.load_state_dict(state_dict, strict=True)
-        
-        if global_rank == 0:
-            print(f"Checkpoint loaded from {checkpoint_path}")
-            print(f"Resuming from step {start_step}")
+        posterior_flow.module.load_state_dict(checkpoint['model_state_dict'], strict=True)
 
-        # Restore RNG states if they exist in the checkpoint
-        if 'rng_state' in checkpoint:
-            rng_state = checkpoint['rng_state']
-            random.setstate(rng_state['python'])
-            np.random.set_state(rng_state['numpy'])
-            torch.set_rng_state(rng_state['torch'].cpu())
-            pyro.get_param_store().set_state(rng_state['pyro'])
-            if torch.cuda.is_available() and rng_state['cuda'] is not None:
-                torch.cuda.set_rng_state_all([state.cpu() for state in rng_state['cuda']])
-            if global_rank == 0:
-                print("RNG states restored from checkpoint")
-
-        # Load optimizer state
+        # Load optimizer state (preserve original optimizer state for resume)
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         
-        # Load scheduler state if it exists
+        # Create scheduler with original run parameters (already loaded into run_args during resume)
+        scheduler = init_scheduler(optimizer, run_args)
+        
+        # Load scheduler state if it exists (preserve original scheduler state for resume)
         if 'scheduler_state_dict' in checkpoint:
             scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
-
+            
+            if global_rank == 0:
+                print("Scheduler state restored from checkpoint")
+                current_lr = optimizer.param_groups[0]['lr']
+                print(f"Current learning rate: {current_lr}")
+        else:
+            if global_rank == 0:
+                print("Warning: No scheduler state found in checkpoint")
+                print("  Learning rate may not be correct for the resume step")
+                current_lr = optimizer.param_groups[0]['lr']
+                print(f"  Current learning rate: {current_lr}")
+                
+                # If no scheduler state, we need to manually step the scheduler to the correct point
+                print(f"  Manually stepping scheduler to step {resume_step}")
+                step_freq = run_args.get("step_freq", 1)
+                scheduler_steps_needed = resume_step // step_freq
+                print(f"  Step frequency: {step_freq}, scheduler steps needed: {scheduler_steps_needed}")
+                
+                for _ in range(scheduler_steps_needed):
+                    scheduler.step()
+                
+                current_lr = optimizer.param_groups[0]['lr']
+                if global_rank == 0:
+                    print(f"  Learning rate after manual stepping: {current_lr}")
+        
+        if global_rank == 0:
+            print(f"Optimizer LR after loading: {optimizer.param_groups[0]['lr']}")
+            print("Resume checkpoint loading completed")
+            
         # Synchronize all ranks after loading checkpoint
         tdist.barrier()
-    elif restart_path:
-        seed = auto_seed(base_seed=run_args["pyro_seed"], rank=global_rank)
-        # for starting a new run from a checkpoint
-        checkpoint = torch.load(restart_path, map_location=current_pytorch_device, weights_only=False)
-        # Restore RNG states if they exist in the checkpoint
-        if 'rng_state' in checkpoint:
-            rng_state = checkpoint['rng_state']
-            random.setstate(rng_state['python'])
-            np.random.set_state(rng_state['numpy'])
-            torch.set_rng_state(rng_state['torch'].cpu())
-            pyro.get_param_store().set_state(rng_state['pyro'])
-            if torch.cuda.is_available() and rng_state['cuda'] is not None:
-                torch.cuda.set_rng_state_all([state.cpu() for state in rng_state['cuda']])
-            if global_rank == 0:
-                print("RNG states restored from checkpoint")
+
+    elif restart_id:
+        # Load model weights and optimizer state
         posterior_flow.module.load_state_dict(checkpoint['model_state_dict'], strict=True)
+        
+        # Update the learning rate in the loaded optimizer state to match current run_args
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        for param_group in optimizer.param_groups:
+            old_lr = param_group['lr']
+            param_group['lr'] = run_args['initial_lr']
+            if global_rank == 0:
+                print(f"Updated optimizer learning rate: {old_lr} -> {run_args['initial_lr']}")
+        
+        # Create fresh scheduler with new learning rate bounds
+        scheduler = init_scheduler(optimizer, run_args)
+        
         if global_rank == 0:
-            print(f"Checkpoint loaded from {restart_path}")
+            print(f"Using existing optimizer statistics with new learning rate schedule")
+            print(f"Initial lr: {run_args['initial_lr']}, Final lr: {run_args.get('final_lr', run_args['initial_lr'])}")
+            print("Fresh scheduler created with current parameters")
+        
+        # Synchronize all ranks after loading checkpoint
         tdist.barrier()
+        
         # test sample from the flow (only on rank 0)
         with torch.no_grad():
             samples = posterior_flow.module(nominal_context).sample((1000,)).cpu().numpy()
@@ -398,6 +362,7 @@ def single_run(
             plt.plot(samples.squeeze()[:, 0], samples.squeeze()[:, 1], 'o', alpha=0.5)
             plt.savefig(f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/plots/init_samples_rank_{global_rank}.png")
     else:
+        scheduler = init_scheduler(optimizer, run_args)
         seed = auto_seed(base_seed=run_args["pyro_seed"], rank=global_rank)
         # test sample from the flow (only on rank 0)
         with torch.no_grad():
@@ -410,7 +375,7 @@ def single_run(
     # Disable tqdm progress bar if output is not a TTY
     is_tty = sys.stdout.isatty()
     # Set n_particles per GPU, which will also be the batch size
-    n_particles_per_device = run_args.get("n_particles_per_device", 1024)
+    n_particles_per_device = run_args.get("n_particles_per_device", 500)
 
     dataloader = get_dataloader(
         num_tracers=num_tracers,
@@ -423,16 +388,13 @@ def single_run(
         world_size=tdist.get_world_size() if "LOCAL_RANK" in os.environ else 1
     )
 
-    steps = run_args.get("steps", 1000)
-
+    total_steps = run_args.get("total_steps", 1000)
     step = start_step
-    best_loss = float('inf')
-    best_nominal_area = float('inf')
-    global_nominal_area = np.nan
+    global_nominal_area = None
 
     # Initialize pbar as None by default
     if is_tty and global_rank == 0:
-        pbar = tqdm(total=steps - step, desc="Training Progress", position=0, leave=True)
+        pbar = tqdm(total=total_steps - step, desc="Training Progress", position=0, leave=True)
 
     # Profiling block
     if profile:
@@ -475,6 +437,23 @@ def single_run(
                     # No need for global loss aggregation during profiling, focus on per-rank
                     agg_loss.backward()
                     torch.nn.utils.clip_grad_norm_(posterior_flow.parameters(), max_norm=1.0)
+
+
+                    # Save checkpoints BEFORE optimizer step (so loss values match exactly)
+                    if step % 100 == 0 and step != 0:
+                        # Save rank-specific checkpoint (default behavior)
+                        checkpoint_path = f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/checkpoints/checkpoint_rank_{global_rank}_{step}.pt"
+                        save_checkpoint(posterior_flow.module, optimizer, checkpoint_path, step=step, artifact_path="checkpoints", scheduler=scheduler, global_rank=global_rank, additional_state={
+                            'rank': global_rank,
+                            'world_size': tdist.get_world_size(),
+                            'local_loss': loss.mean().item(),
+                            'local_agg_loss': agg_loss.item()
+                        })
+                        
+                        if global_rank == 0:
+                            print(f"Saved rank-specific checkpoints for step {step}")
+
+                    # Optimizer step
                     optimizer.step()
                     break # Exit after one batch from dataloader for this profile step
                 # --- End of simulated training step ---
@@ -511,7 +490,11 @@ def single_run(
             print("Exiting after profiling.")
             return # Exit single_run function
 
-    while step < steps:
+    while step < total_steps:
+        # Restore RNG state right before the first training step if resuming from checkpoint
+        if step == start_step and checkpoint is not None:
+            restore_state(checkpoint, start_step, global_rank)
+            
         for context, samples in dataloader:
             optimizer.zero_grad()
 
@@ -528,6 +511,10 @@ def single_run(
             global_loss = global_loss_tensor.item() / tdist.get_world_size()
             global_agg_loss = global_agg_loss_tensor.item() / tdist.get_world_size()
 
+            # Log metrics for each rank
+            mlflow.log_metric(f"loss_rank_{global_rank}", loss.mean().item(), step=step)
+            mlflow.log_metric(f"agg_loss_rank_{global_rank}", agg_loss.item(), step=step)
+
             # Backpropagation
             agg_loss.backward()
 
@@ -536,30 +523,27 @@ def single_run(
 
             # Optimizer step
             optimizer.step()
-
-            # Synchronize all ranks before proceeding
+            step += 1
+        
+            # Synchronize across ranks before scheduler step
             tdist.barrier()
 
-            # Log metrics for each rank
-            mlflow.log_metric(f"loss_rank_{global_rank}", loss.mean().item(), step=step)
-            mlflow.log_metric(f"agg_loss_rank_{global_rank}", agg_loss.item(), step=step)
+            # Update scheduler every step_freq steps
+            if step % run_args.get("step_freq", 1) == 0:
+                scheduler.step()
 
-            # Update progress bar or print status
-            if global_rank == 0:
-                mlflow.log_metric("loss", global_loss, step=step)
-                mlflow.log_metric("agg_loss", global_agg_loss, step=step)
-                if is_tty:
-                    pbar.update(1)
-                    if run_args["log_nominal_area"]:
-                        pbar.set_description(f"Loss: {loss.mean().item():.3f}, Area: {global_nominal_area:.3f}")
-                    else:
-                        pbar.set_description(f"Loss: {loss.mean().item():.3f}")
-                else:
-                    print(f"Step {step}, Loss: {loss.mean().item():.3f}") if not run_args["log_nominal_area"] else print(f"Step {step}, Loss: {loss.mean().item():.3f}, Area: {global_nominal_area:.3f}")
-
-            if step % 100 == 0 and step != 0:
+            if step % 1000 == 0 and step != total_steps:
+                # Save rank-specific checkpoint at regular interval
+                checkpoint_path = f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/checkpoints/checkpoint_rank_{global_rank}_{step}.pt"
+                save_checkpoint(posterior_flow.module, optimizer, checkpoint_path, step=step, artifact_path="checkpoints", scheduler=scheduler, global_rank=global_rank, additional_state={
+                    'rank': global_rank,
+                    'world_size': tdist.get_world_size(),
+                    'local_loss': loss.mean().item(),
+                    'local_agg_loss': agg_loss.item()
+                })
                 if run_args["log_nominal_area"]:
-                    nominal_samples = posterior_flow(nominal_context).sample((5000,)).cpu().numpy()
+                    with torch.no_grad():
+                        nominal_samples = posterior_flow(nominal_context).sample((5000,)).cpu().numpy()
                     nominal_samples[:, -1] *= 100000
                     # Capture getdist output only on rank 0 to avoid clutter, ensure getdist is available
                     if global_rank == 0: # Check global_rank
@@ -588,68 +572,86 @@ def single_run(
                     area_to_broadcast = torch.tensor([global_nominal_area_val if global_rank == 0 else 0.0], device=current_pytorch_device)
                     tdist.broadcast(area_to_broadcast, src=0)
                     global_nominal_area = area_to_broadcast.item()
+                    if global_rank == 0:
+                        mlflow.log_metric("nominal_area", global_nominal_area, step=step)
 
-                # Log the global nominal area on rank 0
-                if global_rank == 0:
-                    mlflow.log_metric("nominal_area", global_nominal_area, step=step)
-                    checkpoint_saved = False
-                    if global_loss < best_loss:
-                        best_loss = global_loss
-                        checkpoint_saved = True
-                        checkpoint_path = f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/checkpoints/checkpoint_loss_{step}.pt"
-                        save_checkpoint(posterior_flow.module, optimizer, checkpoint_path, step=step, artifact_path="checkpoints", scheduler=scheduler)
-                        checkpoint_path = f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/checkpoints/checkpoint_loss_best.pt"
-                        save_checkpoint(posterior_flow.module, optimizer, checkpoint_path, step=step, artifact_path="checkpoints", scheduler=scheduler)
-                        mlflow.log_metric("best_loss", best_loss, step=step)
-                    if global_nominal_area < best_nominal_area:
-                        # Save checkpoint if the global nominal area is the best so far
-                        best_nominal_area = global_nominal_area
-                        mlflow.log_metric("best_nominal_area", best_nominal_area, step=step)
-                        if not checkpoint_saved:
+                        if global_nominal_area < best_nominal_area:
+                            # Save checkpoint if the global nominal area is the best so far
+                            best_nominal_area = global_nominal_area
+                            mlflow.log_metric("best_nominal_area", best_nominal_area, step=step)
                             # Save the best nominal area checkpoint
                             checkpoint_path = f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/checkpoints/checkpoint_nominal_area_{step}.pt"
-                            save_checkpoint(posterior_flow.module, optimizer, checkpoint_path, step=step, artifact_path="checkpoints", scheduler=scheduler)
+                            save_checkpoint(posterior_flow.module, optimizer, checkpoint_path, step=step, artifact_path="checkpoints", scheduler=scheduler, global_rank=global_rank)
 
                             # Save the final best area checkpoint
                             checkpoint_path = f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/checkpoints/checkpoint_nominal_area_best.pt"
-                            save_checkpoint(posterior_flow.module, optimizer, checkpoint_path, step=step, artifact_path="checkpoints", scheduler=scheduler)
+                            save_checkpoint(posterior_flow.module, optimizer, checkpoint_path, step=step, artifact_path="checkpoints", scheduler=scheduler, global_rank=global_rank)
 
-            # Synchronize across ranks before scheduler step
-            tdist.barrier()
+                # Log the global nominal area on rank 0
+                if global_rank == 0:
+                    print_training_state(posterior_flow, optimizer, step)
+                    if global_loss < best_loss:
+                        best_loss = global_loss
+                        checkpoint_path = f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/checkpoints/checkpoint_loss_{step}.pt"
+                        save_checkpoint(posterior_flow.module, optimizer, checkpoint_path, step=step, artifact_path="checkpoints", scheduler=scheduler, global_rank=global_rank)
+                        checkpoint_path = f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/checkpoints/checkpoint_loss_best.pt"
+                        save_checkpoint(posterior_flow.module, optimizer, checkpoint_path, step=step, artifact_path="checkpoints", scheduler=scheduler, global_rank=global_rank)
+                        mlflow.log_metric("best_loss", best_loss, step=step)
 
+            # Update progress bar or print status
             if global_rank == 0:
+                mlflow.log_metric("loss", global_loss, step=step)
+                mlflow.log_metric("agg_loss", global_agg_loss, step=step)
                 for param_group in optimizer.param_groups:
                     mlflow.log_metric("lr", param_group['lr'], step=step)
-
-            # Update scheduler every step_freq steps
-            if step % run_args.get("step_freq", 1) == 0:
-                scheduler.step()
-
+                if is_tty:
+                    pbar.update(1)
+                    if run_args["log_nominal_area"] and global_nominal_area is not None:
+                        pbar.set_description(f"Loss: {loss.mean().item():.3f}, Area: {global_nominal_area:.3f}")
+                    else:
+                        pbar.set_description(f"Loss: {loss.mean().item():.3f}")
+                else:
+                    if run_args["log_nominal_area"] and global_nominal_area is not None:
+                        print(f"Step {step}, Loss: {loss.mean().item():.3f}, Area: {global_nominal_area:.3f}")
+                    else:
+                        print(f"Step {step}, Loss: {loss.mean().item():.3f}")
 
             log_usage_metrics(current_pytorch_device, process, step, global_rank)
-            step += 1
-            if step >= steps:
+
+            tdist.barrier()
+
+            if step >= total_steps:
                 break
 
     # Ensure progress bar closes cleanly
     if global_rank == 0 and is_tty:
         pbar.close()
 
-    # Only save checkpoint and plot on rank 0
+    # Save final rank-specific checkpoint for all ranks (default behavior)
+    final_checkpoint_path = f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/checkpoints/checkpoint_rank_{global_rank}_final.pt"
+    save_checkpoint(posterior_flow.module, optimizer, final_checkpoint_path, step=run_args.get("total_steps", 0), artifact_path="checkpoints", scheduler=scheduler, global_rank=global_rank, additional_state={
+        'rank': global_rank,
+        'world_size': tdist.get_world_size(),
+        'final_step': step,
+        'training_completed': True
+    })
+    if global_rank == 0:
+        print(f"Saved final rank-specific checkpoints for all ranks")
+
+    ########################################## Final Evaluation ##########################################
     if global_rank == 0:
         if run_args["log_nominal_area"]:
-            nominal_samples = posterior_flow(nominal_context).sample((5000,)).cpu().numpy()
+            with torch.no_grad():
+                nominal_samples = posterior_flow(nominal_context).sample((5000,)).cpu().numpy()
             nominal_samples[:, -1] *= 100000
             try:
                 with contextlib.redirect_stdout(io.StringIO()):
                     nominal_samples_gd = getdist.mcsamples.MCSamples(samples=nominal_samples, names=target_labels, labels=num_tracers.latex_labels)
-                last_nominal_area = get_contour_area(nominal_samples_gd, 'Om', 'hrdrag', 0.68)[0]
+                final_nominal_area = get_contour_area(nominal_samples_gd, 'Om', 'hrdrag', 0.68)[0]
             except Exception as e:
                 print(f"Rank 0: Error during getdist processing: {e}")
-                last_nominal_area = float('nan')
-            mlflow.log_metric("nominal_area", last_nominal_area, step=step)
-        checkpoint_path = f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/checkpoints/checkpoint_last.pt"
-        save_checkpoint(posterior_flow.module, optimizer, checkpoint_path, step=run_args.get("steps", 0), artifact_path="checkpoints", scheduler=scheduler)
+                final_nominal_area = float('nan')
+            mlflow.log_metric("nominal_area", final_nominal_area, step=step)
         plot_training(
             run_id=ml_info.run_id,
             var=None,
@@ -662,13 +664,14 @@ def single_run(
             eval_args = {"n_samples": 3000, "device": current_pytorch_device, "eval_seed": 1}
             eig_steps(
                 run_id=ml_info.run_id,
-                steps=[500, 'last'],
+                steps=[500, 1000, 'final'],
                 eval_args=eval_args,
                 cosmo_exp='num_tracers'
             )
 
         plt.close('all')
         print("Run", ml_info.experiment_id + "/" + ml_info.run_id, "completed.")
+    
     # Final memory logging
     if "LOCAL_RANK" in os.environ:
         # Synchronize all ranks before ending MLflow runs
@@ -703,11 +706,15 @@ if __name__ == '__main__':
     parser.add_argument('--exp_name', type=str, default=default_exp_name, help='Experiment name')
 
     # Add arguments for resuming from a checkpoint
-    parser.add_argument('--resume_id', type=str, default=None, help='MLflow run ID to resume training from')
-    parser.add_argument('--resume_step', type=int, default=None, help='Step to resume training from')
-    parser.add_argument('--add_steps', type=int, default=0, help='Number of steps to add to the training')
+    parser.add_argument('--resume_id', type=str, default=None, help='MLflow run ID to resume training from (continues existing run with same parameters)')
+    parser.add_argument('--resume_step', type=int, default=None, help='Step to resume training from (required when using --resume_id)')
+    parser.add_argument('--add_steps', type=int, default=0, help='Number of steps to add to the training (only used with --resume_id)')
     parser.add_argument('--profile', action='store_true', help='Enable profiling for a few steps and then exit.')
-    parser.add_argument('--restart_path', type=str, default=None, help='Path to checkpoint for restarting training')
+    parser.add_argument('--restart_id', type=str, default=None, help='MLflow run ID to restart training from (creates new run with current parameters)')
+    parser.add_argument('--restart_step', type=lambda x: int(x) if x.isdigit() else x, default=None, help='Step to restart training from (optional when using --restart_id, defaults to latest). Can be an integer or string like "final"')
+    
+    # Note: Rank-specific checkpoint saving/loading is now the default behavior
+    # No additional arguments needed for this functionality
 
     for key, value in default_args.items():
         arg_type = type(value)
@@ -725,6 +732,24 @@ if __name__ == '__main__':
     cosmo_model = args.cosmo_model
     device = args.device
 
+    # Validate checkpoint loading arguments
+    if args.resume_id and args.restart_id:
+        raise ValueError("Cannot use --resume_id with --restart_id. Choose one:\n"
+                        "  --resume_id: Continue existing run with same parameters\n"
+                        "  --restart_id: Start new run with potentially different parameters")
+    
+    if args.resume_id and args.resume_step is None:
+        raise ValueError("--resume_step is required when using --resume_id")
+    
+    if args.resume_step is not None and args.resume_id is None:
+        raise ValueError("--resume_step can only be used with --resume_id")
+    
+    if args.restart_step is not None and args.restart_id is None:
+        raise ValueError("--restart_step can only be used with --restart_id")
+    
+    if args.add_steps > 0 and args.resume_id is None:
+        raise ValueError("--add_steps can only be used with --resume_id")
+
     # --- Prepare Final Config --- 
     run_args = run_args_dict[cosmo_model].copy() # Start with defaults for the chosen model
 
@@ -738,7 +763,7 @@ if __name__ == '__main__':
                 if os.environ.get('RANK') == 0:
                     print(f"Overriding '{key}': {run_args[key]} -> {value}")
                 run_args[key] = value
-
+    
     # --- Setup & Run --- 
     # Determine device for the main script part, before DDP spawns processes
     # This initial `device_check` is for the process launching srun, not for the DDP ranks themselves.
@@ -768,9 +793,6 @@ if __name__ == '__main__':
     else:
         script_level_device_str = "cpu"
 
-    print(f'Main script context: Using device string: {script_level_device_str}.')
-    print(f"Rank {os.environ.get('RANK')} (Global) / {os.environ.get('LOCAL_RANK')} (Env Var): In __main__, about to call single_run.")
-
     single_run(
         cosmo_model=cosmo_model,
         run_args=run_args,
@@ -780,5 +802,6 @@ if __name__ == '__main__':
         resume_step=args.resume_step,
         add_steps=args.add_steps,
         profile=args.profile,
-        restart_path=args.restart_path
+        restart_id=args.restart_id,
+        restart_step=args.restart_step
     )

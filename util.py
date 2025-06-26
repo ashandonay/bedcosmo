@@ -20,6 +20,7 @@ from pyro.contrib.util import lexpand
 import subprocess
 from torch.nn.parallel import DistributedDataParallel as DDP
 from datetime import datetime, timedelta
+import traceback
 
 torch.set_default_dtype(torch.float64)
 
@@ -47,23 +48,69 @@ def auto_seed(base_seed=0, rank=0):
     pyro.set_rng_seed(global_seed)
     return global_seed
 
+def restore_state(checkpoint, step, global_rank):
+    # Restore RNG state at the beginning of each step if resuming from checkpoint
+    
+    # Handle Pyro's RNG state restoration (includes torch, random, and numpy)
+    try:
+        rng_state = checkpoint['rng_state']
+        pyro_state = rng_state['pyro']
+        if pyro_state is None:
+            if global_rank == 0:
+                print("Warning: Pyro RNG state is None, skipping restoration")
+            return
+        
+        # Ensure the torch state in Pyro's state has the correct dtype and is on CPU
+        if isinstance(pyro_state, dict) and 'torch' in pyro_state:
+            torch_state = pyro_state['torch']
+            if isinstance(torch_state, torch.Tensor):
+                # Move to CPU first, then ensure correct dtype
+                torch_state = torch_state.cpu()
+                if torch_state.dtype != torch.uint8:
+                    # Convert to uint8 if it's not already
+                    torch_state = torch_state.to(torch.uint8)
+            elif isinstance(torch_state, (list, np.ndarray)):
+                # Convert from list/array to uint8 tensor on CPU
+                torch_state = torch.tensor(torch_state, dtype=torch.uint8, device='cpu')
+            else:
+                # If we can't convert, skip Pyro RNG restoration
+                raise ValueError(f"Cannot convert torch state of type {type(torch_state)} to uint8 tensor")
+            pyro_state['torch'] = torch_state
+        
+        pyro.util.set_rng_state(pyro_state)  # Pyro's RNG state for deterministic sampling
+    except Exception as e:
+        if global_rank == 0:
+            print(f"Warning: Could not restore Pyro RNG state: {e}. Continuing with current state.")
+            traceback.print_exc()
+    
+    # Restore CUDA RNG states separately (not handled by Pyro)
+    if torch.cuda.is_available() and 'cuda' in rng_state and rng_state['cuda'] is not None:
+        torch.cuda.set_rng_state_all([state.cpu() for state in rng_state['cuda']])
+    
+    # Also restore Pyro's param store state if it exists in the checkpoint
+    if 'pyro_param_state' in rng_state:
+        pyro.get_param_store().set_state(rng_state['pyro_param_state'])
+    
+    if global_rank == 0:
+        print(f"RNG state restored for step {step}")
+
 def print_memory_usage(process, step):
     mem_info = process.memory_info()
     print(f"Step {step}: Memory Usage: {mem_info.rss / 1024**2:.2f} MB")
 
-def save_checkpoint(model, optimizer, filepath, step=None, artifact_path=None, scheduler=None):
+def save_checkpoint(model, optimizer, filepath, step=None, artifact_path=None, scheduler=None, additional_state=None, global_rank=None):
     """
-    Saves the training checkpoint.
+    Saves the training checkpoint with comprehensive state information.
 
     Args:
         model (torch.nn.Module): The PyTorch model to save.
         optimizer (torch.optim.Optimizer): The optimizer used during training.
         filepath (str): Path to save the checkpoint.
         step (int, optional): Current training step.
-        loss_best (float, optional): Best loss value seen so far.
-        nominal_area_best (float, optional): Best area value seen so far.
-        history (list, optional): Training loss history.
         artifact_path (str, optional): Path to log the artifact to in MLflow.
+        scheduler (torch.optim.lr_scheduler._LRScheduler, optional): Learning rate scheduler.
+        additional_state (dict, optional): Additional state to save (e.g., training metrics, configuration).
+        global_rank (int, optional): Global rank in distributed training.
     """
     # Get the state dict from the model, handling DDP wrapper if present
     if hasattr(model, 'module'):
@@ -82,17 +129,31 @@ def save_checkpoint(model, optimizer, filepath, step=None, artifact_path=None, s
         checkpoint['step'] = step
 
     # Save RNG states correctly
-    checkpoint['rng_state'] = {
-        'python': random.getstate(),
-        'numpy': np.random.get_state(),
-        'torch': torch.get_rng_state(),
-        'pyro': pyro.get_param_store().get_state(),
-        'cuda': [state for state in torch.cuda.get_rng_state_all()] if torch.cuda.is_available() else None
-    }
+    checkpoint['rng_state'] = get_rng_state()
+    
+    # Also save Pyro's param store state (in case there are any parameters)
+    checkpoint['rng_state']['pyro_param_state'] = pyro.get_param_store().get_state()
+    
+    # Always include global rank information
+    if global_rank is not None:
+        if additional_state is None:
+            additional_state = {}
+        additional_state['global_rank'] = global_rank
+    
+    # Include additional state if provided
+    if additional_state is not None:
+        checkpoint['additional_state'] = additional_state
     
     # Log the checkpoint to mlflow
     torch.save(checkpoint, filepath)
-    mlflow.log_artifact(filepath, artifact_path=artifact_path)
+    if artifact_path:
+        mlflow.log_artifact(filepath, artifact_path)
+
+def get_rng_state():
+    return {
+        'pyro': pyro.util.get_rng_state(),  # This includes torch, random, and numpy states
+        'cuda': torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
+    }
 
 def init_training_env(tdist, device):
     # Set PyTorch CPU threads at the beginning of DDP environment initialization.
@@ -284,14 +345,19 @@ def init_nf(flow_type, input_dim, context_dim, run_args, device="cuda:0", seed=0
 
 def init_scheduler(optimizer, run_args):
     # Setup
-    steps_per_cycle = run_args["steps"] // run_args["n_cycles"]
+    steps_per_cycle = run_args["total_steps"] // run_args["n_cycles"]
     initial_lr = run_args["initial_lr"]
     final_lr = run_args["final_lr"]
 
-    if run_args["scheduler_type"] == "cosine":
+    if run_args["scheduler_type"] == "constant":
+        scheduler = torch.optim.lr_scheduler.ConstantLR(
+            optimizer, 
+            factor=1.0
+            )
+    elif run_args["scheduler_type"] == "cosine":
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
             optimizer, 
-            T_max=run_args["steps"],
+            T_max=run_args["total_steps"],
             eta_min=final_lr
             )
     elif run_args["scheduler_type"] == "linear":
@@ -300,11 +366,11 @@ def init_scheduler(optimizer, run_args):
             optimizer, 
             start_factor=1.0, 
             end_factor=final_lr / initial_lr, 
-            total_iters=run_args["steps"] - 1
+            total_iters=run_args["total_steps"] - 1
             )
     elif run_args["scheduler_type"] == "exponential":
         # calculate gamma from initial and final lr
-        gamma = (final_lr / initial_lr) ** (1 / run_args["steps"])
+        gamma = (final_lr / initial_lr) ** (1 / run_args["total_steps"])
         scheduler = torch.optim.lr_scheduler.ExponentialLR(
             optimizer, 
             gamma=gamma
@@ -327,76 +393,83 @@ def init_scheduler(optimizer, run_args):
         raise ValueError(f"Unknown scheduler_type: {run_args['scheduler_type']}")
     return scheduler
 
-def init_run(tdist, global_rank, current_pytorch_device, storage_path, mlflow_experiment_name, cosmo_model, run_args, kwargs, resume_id=None, resume_step=None, add_steps=0):
-        """Initialize MLflow run settings and broadcast to all ranks."""
-        
+def init_run(
+        tdist, 
+        global_rank, 
+        current_pytorch_device, 
+        storage_path, 
+        mlflow_experiment_name, 
+        cosmo_model, 
+        run_args, 
+        kwargs, 
+        resume_id=None, 
+        resume_step=None,
+        add_steps=0,
+        restart_id=None,
+        restart_step=None
+        ):
+    """Initialize MLflow run settings and broadcast to all ranks."""
+    if not resume_id:
+        if not restart_id:
+            # Start new run
+            if global_rank == 0:
+                print(f"=== NEW RUN MODE ===")
+                print("Starting fresh training run")
+            checkpoint = None
+        else:
+            if global_rank == 0:
+                print(f"=== RESTART MODE ===")
+                print(f"Restart ID: {restart_id}")
+                if restart_step is not None:
+                    print(f"Restarting from checkpoint at step {restart_step}")
+                else:
+                    print("Restarting from latest checkpoint")
+                print("Will use MLflow run ID to find checkpoint directory")
+                print("Will create new MLflow run with current parameters")
+            client = mlflow.MlflowClient()
+            ref_run = client.get_run(restart_id)
+            checkpoint_dir = f"{storage_path}/mlruns/{ref_run.info.experiment_id}/{restart_id}/artifacts/checkpoints"
+            # Load the checkpoint
+            checkpoint, _ = get_checkpoint(
+                restart_step, 
+                checkpoint_dir, 
+                current_pytorch_device, 
+                tdist, 
+                global_rank, 
+                total_steps=int(ref_run.data.params["total_steps"])
+                )
+            # Validate checkpoint compatibility for restart mode
+            validate_checkpoint_compatibility(checkpoint, run_args, mode="restart", global_rank=global_rank)
+
         if global_rank == 0:
-            if resume_id:
-                # Resume existing run
-                client = mlflow.MlflowClient()
-                run_info = client.get_run(resume_id)
-                exp_id = run_info.info.experiment_id
-                exp_name = mlflow.get_experiment(exp_id).name
-                
-                mlflow.set_experiment(experiment_id=exp_id)
-                mlflow.start_run(run_id=resume_id)
-                
-                if resume_step is None:
-                    raise ValueError("resume_step must be provided when resuming a run")
-                
-                # Update run parameters
-                mlflow_experiment_name = exp_name
-                cosmo_model = run_info.data.params["cosmo_model"]
-                run_args = parse_mlflow_params(run_info.data.params)
-                if add_steps:
-                    run_args["steps"] += add_steps
-                
-                n_devices = tdist.get_world_size() if "LOCAL_RANK" in os.environ else 1
-                if run_args["n_particles"] != n_devices * run_args["n_particles_per_device"]:
-                    raise ValueError(f"n_particles ({run_args['n_particles']}) must be equal to n_devices * n_particles_per_device ({n_devices * run_args['n_particles_per_device']})")
-                
-                # Get metrics from previous run
-                best_nominal_area, best_loss, start_step = _get_resume_metrics(
-                    client, resume_id, resume_step, storage_path, exp_id
-                )
+            mlflow.set_experiment(mlflow_experiment_name)
+            mlflow.start_run()
+            # Set n_devices and n_particles using the world size and n_particles_per_device
+            run_args["n_devices"] = tdist.get_world_size() if "LOCAL_RANK" in os.environ else 1
+            run_args["n_particles"] = run_args["n_devices"] * run_args["n_particles_per_device"]
 
-                # Prepare tensors for broadcasting
-                tensors = _prepare_broadcast_tensors(
-                    exp_id, start_step, best_loss, best_nominal_area, 
-                    current_pytorch_device, resume_id, exp_name
-                )
-            else:
-                # Start new run
-                mlflow.set_experiment(mlflow_experiment_name)
-                mlflow.start_run()
-                
-                # Set n_devices and n_particles using the world size and n_particles_per_device
-                run_args["n_devices"] = tdist.get_world_size() if "LOCAL_RANK" in os.environ else 1
-                run_args["n_particles"] = run_args["n_devices"] * run_args["n_particles_per_device"]
-
-                # Log parameters
-                mlflow.log_param("cosmo_model", cosmo_model)
-                for key, value in run_args.items():
-                    mlflow.log_param(key, value)
-                for key, value in kwargs.items():
-                    mlflow.log_param(key, value)
-                
-                # Initialize metrics
-                start_step = 0
-                best_loss = np.nan
-                best_nominal_area = np.nan
-                
-                
-                # Create artifact directories
-                os.makedirs(f"{storage_path}/mlruns/{mlflow.active_run().info.experiment_id}/{mlflow.active_run().info.run_id}/artifacts/checkpoints", exist_ok=True)
-                os.makedirs(f"{storage_path}/mlruns/{mlflow.active_run().info.experiment_id}/{mlflow.active_run().info.run_id}/artifacts/plots", exist_ok=True)
-                
-                # Prepare tensors for broadcasting
-                tensors = _prepare_broadcast_tensors(
-                    mlflow.active_run().info.experiment_id, start_step, 
-                    best_loss, best_nominal_area, current_pytorch_device,
-                    mlflow.active_run().info.run_id, mlflow_experiment_name
-                )
+            # Log parameters
+            mlflow.log_param("cosmo_model", cosmo_model)
+            for key, value in run_args.items():
+                mlflow.log_param(key, value)
+            for key, value in kwargs.items():
+                mlflow.log_param(key, value)
+            
+            # Initialize metrics
+            start_step = 0
+            best_loss = float('inf')
+            best_nominal_area = float('inf')
+            
+            # Create artifact directories
+            os.makedirs(f"{storage_path}/mlruns/{mlflow.active_run().info.experiment_id}/{mlflow.active_run().info.run_id}/artifacts/checkpoints", exist_ok=True)
+            os.makedirs(f"{storage_path}/mlruns/{mlflow.active_run().info.experiment_id}/{mlflow.active_run().info.run_id}/artifacts/plots", exist_ok=True)
+            
+            # Prepare tensors for broadcasting
+            tensors = _prepare_broadcast_tensors(
+                mlflow.active_run().info.experiment_id, start_step, 
+                best_loss, best_nominal_area, current_pytorch_device,
+                mlflow.active_run().info.run_id, mlflow_experiment_name
+            )
             print(f"Running with parameters for cosmo_model='{cosmo_model}':")
             print(json.dumps(run_args, indent=2))
         else:
@@ -409,26 +482,96 @@ def init_run(tdist, global_rank, current_pytorch_device, storage_path, mlflow_ex
                 'run_id': [None],
                 'exp_name': [None]
                 }
-        
-        _broadcast_variables(tensors, global_rank, run_args, tdist)
+    else:
+        client = mlflow.MlflowClient()
+        # Resume existing run
+        run_info = client.get_run(resume_id)
+        exp_id = run_info.info.experiment_id
+        exp_name = mlflow.get_experiment(exp_id).name
+        checkpoint_dir = f"{storage_path}/mlruns/{exp_id}/{resume_id}/artifacts/checkpoints"
+        # Load the checkpoint
+        checkpoint, start_step = get_checkpoint(
+            resume_step, 
+            checkpoint_dir, 
+            current_pytorch_device, 
+            tdist, 
+            global_rank, 
+            total_steps=run_args.get("total_steps")
+            )
+        # Validate checkpoint compatibility for resume mode
+        validate_checkpoint_compatibility(checkpoint, run_args, mode="resume", global_rank=global_rank)
+        if global_rank == 0:
+            mlflow.set_experiment(experiment_id=exp_id)
+            mlflow.start_run(run_id=resume_id)
+            
+            if resume_step is None:
+                raise ValueError("resume_step must be provided when resuming a run")
+            print(f"=== RESUME MODE ===")
+            print(f"Resume ID: {resume_id}")
+            print(f"Resume Step: {start_step}")
+            print(f"Add Steps: {add_steps}")
+            print("Will continue existing MLflow run with original parameters")
+            # Update run parameters
+            mlflow_experiment_name = exp_name
+            cosmo_model = run_info.data.params["cosmo_model"]
+            run_args = parse_mlflow_params(run_info.data.params)
+            if add_steps:
+                run_args["total_steps"] += add_steps
+            
+            n_devices = tdist.get_world_size() if "LOCAL_RANK" in os.environ else 1
+            if run_args["n_particles"] != n_devices * run_args["n_particles_per_device"]:
+                raise ValueError(f"n_particles ({run_args['n_particles']}) must be equal to n_devices * n_particles_per_device ({n_devices * run_args['n_particles_per_device']})")
 
-        # Set up MLflow for non-zero ranks
-        if global_rank != 0:
-            mlflow.set_experiment(experiment_id=str(tensors['exp_id'].item()))
-            mlflow.start_run(run_id=tensors['run_id'][0], nested=True)
-        
-        # Create ml_info object
-        ml_info = type('mlinfo', (), {})()
-        ml_info.experiment_id = str(tensors['exp_id'].item())
-        ml_info.run_id = tensors['run_id'][0]
+            # Get metrics from previous run
+            best_nominal_area, best_loss = _get_resume_metrics(client, resume_id, resume_step)
 
-        # All ranks join the same run
-        if resume_id:
-            mlflow.start_run(run_id=resume_id, nested=True)
+            # Prepare tensors for broadcasting
+            tensors = _prepare_broadcast_tensors(
+                exp_id, start_step, best_loss, best_nominal_area, 
+                current_pytorch_device, resume_id, exp_name
+            )
         else:
-            mlflow.start_run(run_id=ml_info.run_id, nested=True)
+            # Initialize tensors on other ranks
+            tensors = {
+                'exp_id': torch.zeros(1, dtype=torch.long, device=current_pytorch_device),
+                'start_step': torch.zeros(1, dtype=torch.long, device=current_pytorch_device),
+                'best_loss': torch.zeros(1, dtype=torch.float64, device=current_pytorch_device),
+                'best_nominal_area': torch.zeros(1, dtype=torch.float64, device=current_pytorch_device),
+                'run_id': [None],
+                'exp_name': [None]
+                }
+    _broadcast_variables(tensors, global_rank, run_args, tdist)
 
-        return ml_info, run_args, tensors['start_step'].item(), tensors['best_loss'].item(), tensors['best_nominal_area'].item()
+    # Set up MLflow for non-zero ranks
+    if global_rank != 0:
+        mlflow.set_experiment(experiment_id=str(tensors['exp_id'].item()))
+        mlflow.start_run(run_id=tensors['run_id'][0], nested=True)
+    
+    # Create ml_info object
+    ml_info = type('mlinfo', (), {})()
+    ml_info.experiment_id = str(tensors['exp_id'].item())
+    ml_info.run_id = tensors['run_id'][0]
+
+    # Broadcast run_args from rank 0 to ensure consistency, especially for 'steps' when resuming with add_steps
+    if global_rank == 0:
+        # run_args was already prepared correctly on rank 0 (either new or resumed with add_steps)
+        run_args_list_to_broadcast = [run_args]
+    else:
+        run_args_list_to_broadcast = [None]  # Placeholder for other ranks
+
+    if tdist.is_initialized():
+        tdist.barrier() # Ensure all ranks are ready before broadcasting run_args
+    
+    tdist.broadcast_object_list(run_args_list_to_broadcast, src=0)
+    run_args = run_args_list_to_broadcast[0] # All ranks now have the definitive run_args
+
+    # All ranks join the same run
+    if resume_id:
+        mlflow.start_run(run_id=resume_id, nested=True)
+    else:
+        mlflow.start_run(run_id=ml_info.run_id, nested=True)
+
+    return ml_info, run_args, checkpoint, tensors['start_step'].item(), tensors['best_loss'].item(), tensors['best_nominal_area'].item()
 
 def _broadcast_variables(tensors, global_rank, run_args,tdist):
 
@@ -441,7 +584,7 @@ def _broadcast_variables(tensors, global_rank, run_args,tdist):
     tdist.broadcast_object_list(tensors['run_id'], src=0)
     tdist.broadcast_object_list(tensors['exp_name'], src=0)
 
-def _get_resume_metrics(client, resume_id, resume_step, storage_path, exp_id):
+def _get_resume_metrics(client, resume_id, resume_step):
     """Get metrics from previous run for resuming."""
     best_nominal_areas = client.get_metric_history(resume_id, 'best_nominal_area')
     best_nominal_area_steps = np.array([metric.step for metric in best_nominal_areas])
@@ -456,20 +599,7 @@ def _get_resume_metrics(client, resume_id, resume_step, storage_path, exp_id):
     closest_idx = np.argmin(np.abs(best_loss_steps - resume_step))
     best_loss = best_losses[closest_idx].value if best_loss_steps[closest_idx] <= resume_step else best_losses[closest_idx - 1].value
     
-    checkpoint_files = os.listdir(f"{storage_path}/mlruns/{exp_id}/{resume_id}/artifacts/checkpoints")
-    checkpoint_steps = sorted([
-        int(f.split('_')[-1].split('.')[0]) 
-        for f in checkpoint_files 
-        if f.startswith('checkpoint_') 
-        and f.endswith('.pt') 
-        and not f.endswith('_loss_best.pt') 
-        and not f.endswith('_nominal_area_best.pt') 
-        and not f.endswith('_last.pt')
-    ])
-    closest_idx = np.argmin(np.abs(np.array(checkpoint_steps) - resume_step))
-    start_step = checkpoint_steps[closest_idx] if checkpoint_steps[closest_idx] <= resume_step else checkpoint_steps[closest_idx - 1]
-    
-    return best_nominal_area, best_loss, start_step
+    return best_nominal_area, best_loss
 
 def _prepare_broadcast_tensors(exp_id, start_step, best_loss, best_nominal_area, device, run_id, exp_name):
     """Prepare tensors for broadcasting."""
@@ -665,8 +795,8 @@ def load_model(run_obj, parsed_run_params, classes, step, eval_args, cosmo_exp='
         )
 
     effective_step = step
-    if step == parsed_run_params.get("steps"): 
-        effective_step = 'last'
+    if step == parsed_run_params.get("total_steps"): 
+        effective_step = 'final'
     
     checkpoint_dir = f'{storage_path}/mlruns/{exp_id}/{current_run_id}/artifacts/checkpoints/'
     if not os.path.isdir(checkpoint_dir):
@@ -677,9 +807,9 @@ def load_model(run_obj, parsed_run_params, classes, step, eval_args, cosmo_exp='
 
     area_checkpoints = [int(f.split('_')[-1].split('.')[0]) for f in checkpoint_files if f.startswith('checkpoint_nominal_area_') and f.endswith('.pt') and 'best' not in f]
     loss_checkpoints = [int(f.split('_')[-1].split('.')[0]) for f in checkpoint_files if f.startswith('checkpoint_loss_') and f.endswith('.pt') and 'best' not in f]
-    regular_checkpoints = [int(f.split('_')[-1].split('.')[0]) for f in checkpoint_files if f.startswith('checkpoint_') and f.endswith('.pt') and not f.endswith('last.pt') and 'loss' not in f and 'area' not in f]
+    regular_checkpoints = [int(f.split('_')[-1].split('.')[0]) for f in checkpoint_files if f.startswith('checkpoint_') and f.endswith('.pt') and not f.endswith('final.pt') and 'loss' not in f and 'area' not in f]
     
-    if effective_step not in area_checkpoints and effective_step not in loss_checkpoints and effective_step not in regular_checkpoints and effective_step != 'loss_best' and effective_step != 'nominal_area_best' and effective_step != 'last':
+    if effective_step not in area_checkpoints and effective_step not in loss_checkpoints and effective_step not in regular_checkpoints and effective_step != 'loss_best' and effective_step != 'nominal_area_best' and effective_step != 'final':
         raise ValueError(f"Step {effective_step} (original step: {step}) not found in available checkpoints types: area={area_checkpoints}, loss={loss_checkpoints}, regular={regular_checkpoints}")
     
     checkpoint_path_to_load = None
@@ -802,12 +932,12 @@ def get_checkpoints(run_id, steps, checkpoint_files, type='all', cosmo_exp='num_
     client = MlflowClient()
     run = client.get_run(run_id)
     run_args = parse_mlflow_params(run.data.params)
-    steps = [step if step != run_args["steps"] else 'last' for step in steps]
+    steps = [step if step != run_args["total_steps"] else 'final' for step in steps]
     if type == 'all':
         checkpoints = sorted([
             int(f.split('_')[-1].split('.')[0]) 
             for f in checkpoint_files 
-            if f.endswith('.pt') and not f.endswith('last.pt') and not f.endswith('best.pt')
+            if f.endswith('.pt') and not f.endswith('final.pt') and not f.endswith('best.pt')
         ])
     elif type == 'area':
         checkpoints = sorted([
@@ -828,7 +958,7 @@ def get_checkpoints(run_id, steps, checkpoint_files, type='all', cosmo_exp='num_
     # get the checkpoints closest to the steps
     plot_checkpoints = [
         checkpoints[np.argmin(np.abs(np.array(checkpoints) - step))]
-        for step in steps if step not in ['loss_best', 'nominal_area_best', 'last']
+        for step in steps if step not in ['loss_best', 'nominal_area_best', 'final']
     ]
 
     # check for duplicates in plot_checkpoints and replace them with the next checkpoint index 
@@ -845,8 +975,8 @@ def get_checkpoints(run_id, steps, checkpoint_files, type='all', cosmo_exp='num_
         plot_checkpoints.append('loss_best')
     if 'nominal_area_best' in steps:
         plot_checkpoints.append('nominal_area_best')
-    if 'last' in steps:
-        plot_checkpoints.append('last')
+    if 'final' in steps:
+        plot_checkpoints.append('final')
 
     return plot_checkpoints
 
@@ -965,6 +1095,93 @@ def log_usage_metrics(device_str, process, step, global_rank=0): # Renamed devic
         print(f"Rank {global_rank}: Process is on CPU. No PyTorch GPU memory metrics to log.")
         pass
 
+def get_checkpoint(target_step, checkpoint_dir, current_pytorch_device, tdist, global_rank, total_steps):
+    # Handle string values for target_step
+    if isinstance(target_step, str):
+        if target_step.lower() == 'final':
+            # For 'final', use total_steps
+            target_step = total_steps
+        else:
+            # Try to convert to int, if it fails, treat as 'final'
+            try:
+                target_step = int(target_step)
+            except ValueError:
+                print(f"Warning: Could not parse '{target_step}' as integer, treating as 'final'")
+                target_step = total_steps
+    
+    # Load rank-specific checkpoints (default behavior)
+    checkpoint_files = [f for f in os.listdir(checkpoint_dir) if f.endswith('.pt')]
+    rank_checkpoint_pattern = f"checkpoint_rank_{global_rank}_"
+    rank_checkpoint_files = [f for f in checkpoint_files if f.startswith(rank_checkpoint_pattern)]
+    
+    if rank_checkpoint_files:
+        # Find the checkpoint closest to target_step
+        rank_checkpoint_steps = []
+        for f in rank_checkpoint_files:
+            try:
+                if 'final' in f:
+                    step = total_steps
+                else:
+                    step = int(f.split('_')[-1].split('.')[0])
+                rank_checkpoint_steps.append((step, f))
+            except ValueError:
+                continue
+        
+        rank_checkpoint_steps.sort()
+        
+        # Find checkpoint closest to target_step
+        closest_idx = 0
+        if len(rank_checkpoint_steps) > 1:
+            if target_step == float('inf'):
+                # For 'latest', take the highest step
+                closest_idx = len(rank_checkpoint_steps) - 1
+            else:
+                closest_idx = np.argmin(np.abs(np.array([s[0] for s in rank_checkpoint_steps]) - target_step))
+        
+        selected_step, selected_file = rank_checkpoint_steps[closest_idx]
+        checkpoint_path = f"{checkpoint_dir}/{selected_file}"
+        
+        if global_rank == 0:
+            print(f"Loading rank-specific checkpoints:")
+            print(f"  Requested step: {target_step}")
+            print(f"  Available steps: {[s[0] for s in rank_checkpoint_steps]}")
+            print(f"  Selected step: {selected_step}")
+
+    else:
+        # Fallback to shared checkpoint if no rank-specific ones found
+        # Find the checkpoint closest to target_step
+        shared_checkpoint_steps = []
+        for f in checkpoint_files:
+            if f.startswith('checkpoint_') and f.endswith('.pt') and not f.startswith('checkpoint_rank_'):
+                try:
+                    step = int(f.split('_')[-1].split('.')[0])
+                    shared_checkpoint_steps.append((step, f))
+                except ValueError:
+                    continue
+        
+        shared_checkpoint_steps.sort()
+        
+        # Find checkpoint closest to target_step
+        closest_idx = 0
+        if len(shared_checkpoint_steps) > 1:
+            if target_step == float('inf'):
+                # For 'latest', take the highest step
+                closest_idx = len(shared_checkpoint_steps) - 1
+            else:
+                closest_idx = np.argmin(np.abs(np.array([s[0] for s in shared_checkpoint_steps]) - target_step))
+        
+        selected_step, selected_file = shared_checkpoint_steps[closest_idx]
+        checkpoint_path = f"{checkpoint_dir}/{selected_file}"
+        
+        if global_rank == 0:
+            print(f"No rank-specific checkpoints found, using shared checkpoint")
+            print(f"  Requested step: {target_step}")
+            print(f"  Available steps: {[s[0] for s in shared_checkpoint_steps]}")
+            print(f"  Selected step: {selected_step}")
+            print(f"Loading checkpoint from {checkpoint_path}")
+    checkpoint = torch.load(checkpoint_path, map_location=current_pytorch_device, weights_only=False)
+    return checkpoint, selected_step
+
 def get_runtime(run_id):
     run = mlflow.get_run(run_id)
 
@@ -978,3 +1195,159 @@ def get_runtime(run_id):
     start_dt = datetime.fromtimestamp(start_ms / 1_000)
     end_dt   = datetime.fromtimestamp(end_ms   / 1_000)
     return end_dt - start_dt
+
+def validate_checkpoint_compatibility(checkpoint, run_args, mode="restart", global_rank=0):
+    """
+    Validate checkpoint compatibility with current run configuration.
+    
+    Args:
+        checkpoint_path (str): Path to the checkpoint file
+        run_args (dict): Current run arguments
+        mode (str): Either "resume" or "restart"
+    
+    Returns:
+        dict: Information about the checkpoint and any compatibility issues
+    """
+    try:
+        info = {
+            'mode': mode,
+            'step': checkpoint.get('step', 'unknown'),
+            'has_model_state': 'model_state_dict' in checkpoint,
+            'has_optimizer_state': 'optimizer_state_dict' in checkpoint,
+            'has_scheduler_state': 'scheduler_state_dict' in checkpoint,
+            'has_rng_state': 'rng_state' in checkpoint,
+            'additional_state': checkpoint.get('additional_state', {}),
+            'warnings': [],
+            'errors': []
+        }
+        
+        # Check for required components
+        if not info['has_model_state']:
+            info['errors'].append("Checkpoint missing model state")
+        
+        if not info['has_optimizer_state']:
+            info['warnings'].append("Checkpoint missing optimizer state")
+        
+        # For resume mode, scheduler state is important
+        if mode == "resume" and not info['has_scheduler_state']:
+            info['warnings'].append("Checkpoint missing scheduler state (may affect learning rate schedule)")
+        
+        # Check rank information if available
+        if 'global_rank' in info['additional_state']:
+            info['rank'] = info['additional_state']['global_rank']
+        else:
+            info['warnings'].append("Checkpoint missing rank information")
+        
+        # For restart mode, check if learning rate will be updated
+        if mode == "restart" and info['has_optimizer_state']:
+            try:
+                old_lr = checkpoint['optimizer_state_dict']['param_groups'][0]['lr']
+                new_lr = run_args.get('initial_lr', 'unknown')
+                info['lr_change'] = f"{old_lr} -> {new_lr}"
+                if old_lr != new_lr:
+                    info['warnings'].append(f"Learning rate will be updated: {old_lr} -> {new_lr}")
+            except (KeyError, IndexError):
+                info['warnings'].append("Could not determine learning rate change")
+
+        # Verify rank information if available
+        if 'additional_state' in checkpoint and 'global_rank' in checkpoint['additional_state']:
+            checkpoint_rank = checkpoint['additional_state']['global_rank']
+            if checkpoint_rank != global_rank:
+                if global_rank == 0:
+                    print(f"Warning: Checkpoint was saved by rank {checkpoint_rank} but being loaded by rank {global_rank}")
+            else:
+                if global_rank == 0:
+                    print(f"Checkpoint rank verification passed: rank {global_rank}")
+        else:
+            if global_rank == 0:
+                print(f"Note: Checkpoint does not contain rank information")
+        
+        print_checkpoint_info(info, global_rank)
+        return info
+        
+    except Exception as e:
+        return {
+            'mode': mode,
+            'errors': [f"Failed to load checkpoint: {str(e)}"],
+            'warnings': []
+        }
+
+def print_checkpoint_info(checkpoint_info, global_rank=0):
+    """
+    Print checkpoint validation information.
+    
+    Args:
+        checkpoint_info (dict): Output from validate_checkpoint_compatibility
+        global_rank (int): Global rank for distributed training
+    """
+    if global_rank != 0:
+        return
+    
+    print(f"\n=== Checkpoint Validation ({checkpoint_info['mode'].upper()} MODE) ===")
+    print(f"Step: {checkpoint_info['step']}")
+    
+    if 'rank' in checkpoint_info:
+        print(f"Rank: {checkpoint_info['rank']}")
+    
+    if 'lr_change' in checkpoint_info:
+        print(f"Learning Rate: {checkpoint_info['lr_change']}")
+    
+    print(f"Components:")
+    print(f"  Model State: {'pass' if checkpoint_info['has_model_state'] else 'fail'}")
+    print(f"  Optimizer State: {'pass' if checkpoint_info['has_optimizer_state'] else 'fail'}")
+    print(f"  Scheduler State: {'pass' if checkpoint_info['has_scheduler_state'] else 'fail'}")
+    print(f"  RNG State: {'pass' if checkpoint_info['has_rng_state'] else 'fail'}")
+    
+    if checkpoint_info['warnings']:
+        print(f"\nWarnings:")
+        for warning in checkpoint_info['warnings']:
+            print(f"  Warning: {warning}")
+    
+    if checkpoint_info['errors']:
+        print(f"\nErrors:")
+        for error in checkpoint_info['errors']:
+            print(f"  ERROR: {error}")
+    
+    if not checkpoint_info['errors']:
+        print(f"\nCheckpoint validation passed")
+    
+    print("=" * 50)
+
+def print_training_state(model, optimizer, step):
+    print(f"=== OPTIMIZER STATE AT STEP {step} ===")
+    print(f"Learning rate: {optimizer.param_groups[0]['lr']}")
+    print(f"Number of parameter groups: {len(optimizer.param_groups)}")
+    
+    # Print optimizer state for each parameter group
+    for i, param_group in enumerate(optimizer.param_groups):
+        print(f"\nParameter Group {i}:")
+        print(f"  Learning rate: {param_group['lr']}")
+        print(f"  Weight decay: {param_group.get('weight_decay', 0)}")
+        print(f"  Number of parameters: {len(param_group['params'])}")
+        
+        # Print state for first few parameters in this group
+        for j, param in enumerate(param_group['params'][:3]):  # Show first 3 params
+            if param in optimizer.state:
+                state = optimizer.state[param]
+                print(f"    Param {j} state keys: {list(state.keys())}")
+                if 'exp_avg' in state:
+                    print(f"      exp_avg shape: {state['exp_avg'].shape}")
+                    print(f"      exp_avg mean: {state['exp_avg'].mean().item():.6f}")
+                if 'exp_avg_sq' in state:
+                    print(f"      exp_avg_sq shape: {state['exp_avg_sq'].shape}")
+                    print(f"      exp_avg_sq mean: {state['exp_avg_sq'].mean().item():.6f}")
+                if 'step' in state:
+                    print(f"      step: {state['step']}")
+            else:
+                print(f"    Param {j}: No state stored")
+    
+    # Print model parameter statistics
+    print(f"\nMODEL PARAMETER STATISTICS:")
+    total_params = 0
+    for name, param in model.module.named_parameters():
+        if param.requires_grad:
+            total_params += param.numel()
+            if total_params <= 1000000:  # Only print for reasonable number of params
+                print(f"  {name}: shape={param.shape}, mean={param.mean().item():.6f}, std={param.std().item():.6f}")
+    print(f"Total trainable parameters: {total_params}")
+    print("=" * 50)
