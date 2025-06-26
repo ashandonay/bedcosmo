@@ -8,7 +8,7 @@
         "log_nominal_area": true,
         "design_low": 0.05,
         "design_step": 0.05,
-        "steps": 100000,
+        "total_steps": 100000,
         "initial_lr": 1e-2,
         "final_lr": 1e-5,
         "scheduler_type": "linear",
