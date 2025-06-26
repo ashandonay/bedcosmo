@@ -446,8 +446,8 @@ def single_run(
                         save_checkpoint(posterior_flow.module, optimizer, checkpoint_path, step=step, artifact_path="checkpoints", scheduler=scheduler, global_rank=global_rank, additional_state={
                             'rank': global_rank,
                             'world_size': tdist.get_world_size(),
-                            'local_loss': loss.mean().item(),
-                            'local_agg_loss': agg_loss.item()
+                            'local_loss': loss.mean().detach().item(),
+                            'local_agg_loss': agg_loss.detach().item()
                         })
                         
                         if global_rank == 0:
@@ -511,10 +511,6 @@ def single_run(
             global_loss = global_loss_tensor.item() / tdist.get_world_size()
             global_agg_loss = global_agg_loss_tensor.item() / tdist.get_world_size()
 
-            # Log metrics for each rank
-            mlflow.log_metric(f"loss_rank_{global_rank}", loss.mean().item(), step=step)
-            mlflow.log_metric(f"agg_loss_rank_{global_rank}", agg_loss.item(), step=step)
-
             # Backpropagation
             agg_loss.backward()
 
@@ -533,13 +529,14 @@ def single_run(
                 scheduler.step()
 
             if step % 1000 == 0 and step != total_steps:
+                log_usage_metrics(current_pytorch_device, process, step, global_rank)
                 # Save rank-specific checkpoint at regular interval
                 checkpoint_path = f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/checkpoints/checkpoint_rank_{global_rank}_{step}.pt"
                 save_checkpoint(posterior_flow.module, optimizer, checkpoint_path, step=step, artifact_path="checkpoints", scheduler=scheduler, global_rank=global_rank, additional_state={
                     'rank': global_rank,
                     'world_size': tdist.get_world_size(),
-                    'local_loss': loss.mean().item(),
-                    'local_agg_loss': agg_loss.item()
+                    'local_loss': loss.mean().detach().item(),
+                    'local_agg_loss': agg_loss.detach().item()
                 })
                 if run_args["log_nominal_area"]:
                     with torch.no_grad():
@@ -599,24 +596,24 @@ def single_run(
                         mlflow.log_metric("best_loss", best_loss, step=step)
 
             # Update progress bar or print status
-            if global_rank == 0:
+            if global_rank == 0 and step % 10 == 0:
+                mlflow.log_metric(f"loss_rank_{global_rank}", loss.mean().detach().item(), step=step)
+                mlflow.log_metric(f"agg_loss_rank_{global_rank}", agg_loss.detach().item(), step=step)
                 mlflow.log_metric("loss", global_loss, step=step)
                 mlflow.log_metric("agg_loss", global_agg_loss, step=step)
                 for param_group in optimizer.param_groups:
                     mlflow.log_metric("lr", param_group['lr'], step=step)
                 if is_tty:
-                    pbar.update(1)
+                    pbar.update(10)
                     if run_args["log_nominal_area"] and global_nominal_area is not None:
-                        pbar.set_description(f"Loss: {loss.mean().item():.3f}, Area: {global_nominal_area:.3f}")
+                        pbar.set_description(f"Loss: {global_loss:.3f}, Area: {global_nominal_area:.3f}")
                     else:
-                        pbar.set_description(f"Loss: {loss.mean().item():.3f}")
+                        pbar.set_description(f"Loss: {global_loss:.3f}")
                 else:
                     if run_args["log_nominal_area"] and global_nominal_area is not None:
-                        print(f"Step {step}, Loss: {loss.mean().item():.3f}, Area: {global_nominal_area:.3f}")
+                        print(f"Step {step}, Loss: {global_loss:.3f}, Area: {global_nominal_area:.3f}")
                     else:
-                        print(f"Step {step}, Loss: {loss.mean().item():.3f}")
-
-            log_usage_metrics(current_pytorch_device, process, step, global_rank)
+                        print(f"Step {step}, Loss: {global_loss:.3f}")
 
             tdist.barrier()
 
