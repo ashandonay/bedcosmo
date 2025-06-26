@@ -1,17 +1,15 @@
 #!/bin/bash
 #SBATCH -C gpu
-#SBATCH -q regular
+#SBATCH -q debug
 #SBATCH -A desi
-#SBATCH --job-name=train
+#SBATCH --job-name=resume
 #SBATCH --nodes=2
 #SBATCH --ntasks-per-node=1     # 1 primary Slurm task per node
 #SBATCH --cpus-per-task=128     # CPUs for all DDP workers on the node (e.g., 4 workers * 32 cpus/worker)
 #SBATCH --gpus-per-node=4       # Request 4 GPUs for the 1 task on the node
-#SBATCH --time=02:00:00
+#SBATCH --time=00:30:00
 #SBATCH --output=/pscratch/sd/a/ashandon/bed/BED_cosmo/num_tracers/logs/%A_%x_%a.log
 #SBATCH --error=/pscratch/sd/a/ashandon/bed/BED_cosmo/num_tracers/logs/%A_%x_%a.log
-#SBATCH --mail-type=ALL
-#SBATCH --mail-user=ashandon@uci.edu
 
 # Load conda first, then activate, then other GPU libraries
 module load conda
@@ -32,11 +30,14 @@ export MASTER_ADDR=$(scontrol show hostnames $SLURM_NODELIST | head -n 1)
 export MASTER_PORT=$(shuf -i 10000-60000 -n 1)
 
 # Additional environment variables for DDP
-export OMP_NUM_THREADS=$((128 / $NPROC_PER_NODE))
+export OMP_NUM_THREADS=$((128 / $NPROC_PER_NODE)) # Example: Distribute cpus_per_task among OMP threads if needed, or set to a fixed val like 4 or 8
 
 # Tell CUDA to order GPUs by PCI_BUS_ID for consistency
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
 
+# The srun command will launch one instance of torch.distributed.run per node.
+# torch.distributed.run will then spawn NPROC_PER_NODE worker processes on each node.
+# SLURM_PROCID can be used for node_rank as srun launches one task per node here.
 srun torchrun \
      --nproc_per_node=$NPROC_PER_NODE \
      --nnodes=$SLURM_NNODES \
@@ -44,9 +45,8 @@ srun torchrun \
      --rdzv_backend=c10d \
      --rdzv_endpoint=$MASTER_ADDR:$MASTER_PORT \
      /global/homes/a/ashandon/bed/BED_cosmo/num_tracers/n_tracers_train_distributed.py \
-     --exp_name base \
-     --n_particles_per_device 2500 \
-     --total_steps 20000 \
-     --scheduler_type linear \
-     --final_lr 0.0001 \
-     --verbose
+     --resume_id "4e516c7e73ee43a7a970d6dd39fb07ed" \
+     --resume_step 17000 \
+
+
+

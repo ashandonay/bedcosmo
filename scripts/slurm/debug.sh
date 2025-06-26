@@ -1,17 +1,15 @@
 #!/bin/bash
 #SBATCH -C gpu
-#SBATCH -q regular
+#SBATCH -q debug
 #SBATCH -A desi
-#SBATCH --job-name=train
+#SBATCH --job-name=debug
 #SBATCH --nodes=2
 #SBATCH --ntasks-per-node=1     # 1 primary Slurm task per node
 #SBATCH --cpus-per-task=128     # CPUs for all DDP workers on the node (e.g., 4 workers * 32 cpus/worker)
 #SBATCH --gpus-per-node=4       # Request 4 GPUs for the 1 task on the node
-#SBATCH --time=02:00:00
+#SBATCH --time=00:15:00
 #SBATCH --output=/pscratch/sd/a/ashandon/bed/BED_cosmo/num_tracers/logs/%A_%x_%a.log
 #SBATCH --error=/pscratch/sd/a/ashandon/bed/BED_cosmo/num_tracers/logs/%A_%x_%a.log
-#SBATCH --mail-type=ALL
-#SBATCH --mail-user=ashandon@uci.edu
 
 # Load conda first, then activate, then other GPU libraries
 module load conda
@@ -44,9 +42,9 @@ srun torchrun \
      --rdzv_backend=c10d \
      --rdzv_endpoint=$MASTER_ADDR:$MASTER_PORT \
      /global/homes/a/ashandon/bed/BED_cosmo/num_tracers/n_tracers_train_distributed.py \
-     --exp_name base \
+     --exp_name debug \
      --n_particles_per_device 2500 \
-     --total_steps 20000 \
-     --scheduler_type linear \
+     --total_steps 2000 \
+     --scheduler_type constant \
      --final_lr 0.0001 \
      --verbose
