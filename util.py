@@ -705,7 +705,7 @@ def get_runs_data(exp_name=None, run_ids=None, excluded_runs=[], filter_string=N
     return run_data_list, experiment_id, actual_exp_name
 
 
-def run_eval(run_obj, parsed_run_params, eval_args, step='loss_best', cosmo_exp='num_tracers', run_id_for_fallback_only=None):
+def run_eval(run_obj, parsed_run_params, eval_args, step='loss_best', cosmo_exp='num_tracers', run_id_for_fallback_only=None, global_rank=0):
     # run_id_for_fallback_only is if run_obj and parsed_run_params are somehow not available from caller
     storage_path = os.environ["SCRATCH"] + f"/bed/BED_cosmo/{cosmo_exp}"
     mlflow.set_tracking_uri(storage_path + "/mlruns")
@@ -726,7 +726,7 @@ def run_eval(run_obj, parsed_run_params, eval_args, step='loss_best', cosmo_exp=
     with open(mlflow.artifacts.download_artifacts(run_id=current_run_id, artifact_path="classes.json")) as f:
         classes = json.load(f)
     # Pass run_obj, parsed_run_params (which should be consistent with run_obj), and classes
-    num_tracers, posterior_flow = load_model(run_obj, parsed_run_params, classes, step, eval_args, cosmo_exp)
+    num_tracers, posterior_flow = load_model(run_obj, parsed_run_params, classes, step, eval_args, cosmo_exp, global_rank=global_rank)
 
     # Use parsed_run_params which should have 'include_D_M' correctly typed
     nominal_design = torch.tensor(num_tracers.desi_tracers.groupby('class').sum()['observed'].reindex(classes.keys()).values, device=eval_args["device"], dtype=torch.float64)
@@ -747,7 +747,7 @@ def run_eval(run_obj, parsed_run_params, eval_args, step='loss_best', cosmo_exp=
         samples = getdist.MCSamples(samples=nominal_samples, names=num_tracers.cosmo_params, labels=num_tracers.latex_labels, settings={'ignore_rows': 0.0})
     return samples
 
-def load_model(run_obj, parsed_run_params, classes, step, eval_args, cosmo_exp='num_tracers'):
+def load_model(run_obj, parsed_run_params, classes, step, eval_args, cosmo_exp='num_tracers', global_rank=0):
     # Assumes run_obj is the MLflow Run object and parsed_run_params is the output of parse_mlflow_params(run_obj.data.params)
     # classes is the already loaded content of classes.json
     storage_path = os.environ["SCRATCH"] + f"/bed/BED_cosmo/{cosmo_exp}"
@@ -818,7 +818,7 @@ def load_model(run_obj, parsed_run_params, classes, step, eval_args, cosmo_exp='
     elif effective_step in loss_checkpoints:
         checkpoint_path_to_load = f'{checkpoint_dir}checkpoint_loss_{effective_step}.pt'
     else: 
-        checkpoint_path_to_load = f'{checkpoint_dir}checkpoint_rank_0_{effective_step}.pt'
+        checkpoint_path_to_load = f'{checkpoint_dir}checkpoint_rank_{global_rank}_{effective_step}.pt'
     
     checkpoint = torch.load(checkpoint_path_to_load, map_location=eval_args["device"], weights_only=False)
     

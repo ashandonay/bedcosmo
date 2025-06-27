@@ -142,7 +142,7 @@ def plot_run(run_id, eval_args, show_scatter=False, cosmo_exp='num_tracers'):
         print(f"Run {run_id} not found.")
         return
     run_data = run_data_list[0]
-    samples = run_eval(run_data['run_obj'], run_data['params'], eval_args, cosmo_exp=cosmo_exp)
+    samples = run_eval(run_data['run_obj'], run_data['params'], eval_args, cosmo_exp=cosmo_exp, global_rank=0)
     g = plot_posterior(samples, ["tab:blue"], show_scatter=show_scatter)
     plt.show()
 
@@ -790,7 +790,7 @@ def compare_posterior(
                 current_parsed_params = run_data_item_in_group_iter['params'] # Already parsed
 
                 # Call run_eval with pre-fetched run_obj and parsed_params
-                samples_obj = run_eval(current_run_obj, current_parsed_params, eval_args, step=step, cosmo_exp=cosmo_exp)
+                samples_obj = run_eval(current_run_obj, current_parsed_params, eval_args, step=step, cosmo_exp=cosmo_exp, global_rank=0)
 
                 group_samples_collected.append(samples_obj)
 
@@ -1304,7 +1304,7 @@ def eig_steps(
     num_tracers = None
     for s in checkpoint_steps:
         try:
-            num_tracers, posterior_flow = load_model(run_obj, run_args, classes, s, eval_args, cosmo_exp)
+            num_tracers, posterior_flow = load_model(run_obj, run_args, classes, s, eval_args, cosmo_exp, global_rank=0)
             with torch.no_grad():
                 _, eigs = posterior_loss(design=designs,
                                                 model=num_tracers.pyro_model,
