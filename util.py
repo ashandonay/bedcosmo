@@ -818,7 +818,7 @@ def load_model(run_obj, parsed_run_params, classes, step, eval_args, cosmo_exp='
     elif effective_step in loss_checkpoints:
         checkpoint_path_to_load = f'{checkpoint_dir}checkpoint_loss_{effective_step}.pt'
     else: 
-        checkpoint_path_to_load = f'{checkpoint_dir}checkpoint_{effective_step}.pt'
+        checkpoint_path_to_load = f'{checkpoint_dir}checkpoint_rank_0_{effective_step}.pt'
     
     checkpoint = torch.load(checkpoint_path_to_load, map_location=eval_args["device"], weights_only=False)
     
@@ -997,7 +997,7 @@ def get_gpu_utilization(gpu_index=0):
         print(f"GPU stat collection failed: {e}")
         return None, None
     
-def log_usage_metrics(device_str, process, step, global_rank=0): # Renamed device to device_str for clarity
+def log_usage_metrics(device_str, process, step, global_rank=0):
     cpu_memory = process.memory_info().rss / 1024**2  # MB
     mlflow.log_metric("cpu_memory_usage_" + str(global_rank), cpu_memory, step=step)
 
