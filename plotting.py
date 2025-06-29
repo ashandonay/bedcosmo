@@ -693,7 +693,8 @@ def compare_posterior(
         excluded_runs=[],
         level=0.68,
         cosmo_exp='num_tracers',
-        step='loss_best'
+        step='loss_best',
+        global_rank=0
         ):
     """Compares posterior distributions across multiple runs.
     
@@ -790,7 +791,7 @@ def compare_posterior(
                 current_parsed_params = run_data_item_in_group_iter['params'] # Already parsed
 
                 # Call run_eval with pre-fetched run_obj and parsed_params
-                samples_obj = run_eval(current_run_obj, current_parsed_params, eval_args, step=step, cosmo_exp=cosmo_exp, global_rank=0)
+                samples_obj = run_eval(current_run_obj, current_parsed_params, eval_args, step=step, cosmo_exp=cosmo_exp, global_rank=global_rank)
 
                 group_samples_collected.append(samples_obj)
 

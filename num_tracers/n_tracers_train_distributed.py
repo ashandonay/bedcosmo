@@ -122,6 +122,7 @@ def single_run(
     profile=False,
     restart_id=None,
     restart_step=None,
+    restart_checkpoint=None,
     **kwargs,
 ):
 
@@ -153,7 +154,8 @@ def single_run(
         resume_step=resume_step, 
         add_steps=add_steps,
         restart_id=restart_id,
-        restart_step=restart_step
+        restart_step=restart_step,
+        restart_checkpoint=restart_checkpoint
         )
 
     desi_df = pd.read_csv(home_dir + run_args["data_path"] + 'desi_data.csv')
@@ -709,6 +711,7 @@ if __name__ == '__main__':
     parser.add_argument('--profile', action='store_true', help='Enable profiling for a few steps and then exit.')
     parser.add_argument('--restart_id', type=str, default=None, help='MLflow run ID to restart training from (creates new run with current parameters)')
     parser.add_argument('--restart_step', type=lambda x: int(x) if x.isdigit() else x, default=None, help='Step to restart training from (optional when using --restart_id, defaults to latest). Can be an integer or string like "final"')
+    parser.add_argument('--restart_checkpoint', type=str, default=None, help='Specific checkpoint file name to use for all ranks during restart (alternative to --restart_step)')
     
     # Note: Rank-specific checkpoint saving/loading is now the default behavior
     # No additional arguments needed for this functionality
@@ -743,6 +746,14 @@ if __name__ == '__main__':
     
     if args.restart_step is not None and args.restart_id is None:
         raise ValueError("--restart_step can only be used with --restart_id")
+    
+    if args.restart_checkpoint is not None and args.restart_id is None:
+        raise ValueError("--restart_checkpoint can only be used with --restart_id")
+    
+    if args.restart_checkpoint is not None and args.restart_step is not None:
+        raise ValueError("Cannot use --restart_checkpoint with --restart_step. Choose one:\n"
+                        "  --restart_step: Find checkpoint by step number in MLflow run\n"
+                        "  --restart_checkpoint: Use specific checkpoint file path")
     
     if args.add_steps > 0 and args.resume_id is None:
         raise ValueError("--add_steps can only be used with --resume_id")
@@ -800,5 +811,6 @@ if __name__ == '__main__':
         add_steps=args.add_steps,
         profile=args.profile,
         restart_id=args.restart_id,
-        restart_step=args.restart_step
+        restart_step=args.restart_step,
+        restart_checkpoint=args.restart_checkpoint
     )

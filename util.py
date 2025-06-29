@@ -406,7 +406,8 @@ def init_run(
         resume_step=None,
         add_steps=0,
         restart_id=None,
-        restart_step=None
+        restart_step=None,
+        restart_checkpoint=None
         ):
     """Initialize MLflow run settings and broadcast to all ranks."""
     if not resume_id:
@@ -420,7 +421,9 @@ def init_run(
             if global_rank == 0:
                 print(f"=== RESTART MODE ===")
                 print(f"Restart ID: {restart_id}")
-                if restart_step is not None:
+                if restart_checkpoint is not None:
+                    print(f"Restarting from specific checkpoint file: {restart_checkpoint}")
+                elif restart_step is not None:
                     print(f"Restarting from checkpoint at step {restart_step}")
                 else:
                     print("Restarting from latest checkpoint")
@@ -429,15 +432,21 @@ def init_run(
             client = mlflow.MlflowClient()
             ref_run = client.get_run(restart_id)
             checkpoint_dir = f"{storage_path}/mlruns/{ref_run.info.experiment_id}/{restart_id}/artifacts/checkpoints"
-            # Load the checkpoint
-            checkpoint, _ = get_checkpoint(
-                restart_step, 
-                checkpoint_dir, 
-                current_pytorch_device, 
-                tdist, 
-                global_rank, 
-                total_steps=int(ref_run.data.params["total_steps"])
-                )
+            if restart_checkpoint is not None:
+                # Load specific checkpoint file for all ranks
+                print(f"Loading checkpoint from file: {checkpoint_dir}/{restart_checkpoint}")
+                checkpoint = torch.load(f"{checkpoint_dir}/{restart_checkpoint}", map_location=current_pytorch_device, weights_only=False)
+            else:
+                # Use existing logic to find checkpoint by step
+                # Load the checkpoint
+                checkpoint, _ = get_checkpoint(
+                    restart_step, 
+                    checkpoint_dir, 
+                    current_pytorch_device, 
+                    global_rank, 
+                    total_steps=int(ref_run.data.params["total_steps"])
+                    )
+            
             # Validate checkpoint compatibility for restart mode
             validate_checkpoint_compatibility(checkpoint, run_args, mode="restart", global_rank=global_rank)
 
@@ -494,7 +503,6 @@ def init_run(
             resume_step, 
             checkpoint_dir, 
             current_pytorch_device, 
-            tdist, 
             global_rank, 
             total_steps=run_args.get("total_steps")
             )
@@ -542,6 +550,10 @@ def init_run(
                 }
     _broadcast_variables(tensors, global_rank, run_args, tdist)
 
+    # Ensure rank 0 has fully initialized the MLflow run before other ranks join
+    if tdist.is_initialized():
+        tdist.barrier()
+    
     # Set up MLflow for non-zero ranks
     if global_rank != 0:
         mlflow.set_experiment(experiment_id=str(tensors['exp_id'].item()))
@@ -565,11 +577,8 @@ def init_run(
     tdist.broadcast_object_list(run_args_list_to_broadcast, src=0)
     run_args = run_args_list_to_broadcast[0] # All ranks now have the definitive run_args
 
-    # All ranks join the same run
-    if resume_id:
-        mlflow.start_run(run_id=resume_id, nested=True)
-    else:
-        mlflow.start_run(run_id=ml_info.run_id, nested=True)
+    # MLflow runs are already properly initialized above - no need for additional start_run calls
+    # This prevents race conditions that can corrupt meta.yaml files
 
     return ml_info, run_args, checkpoint, tensors['start_step'].item(), tensors['best_loss'].item(), tensors['best_nominal_area'].item()
 
@@ -803,36 +812,12 @@ def load_model(run_obj, parsed_run_params, classes, step, eval_args, cosmo_exp='
          print(f"ERROR: Checkpoint directory not found: {checkpoint_dir}")
          raise FileNotFoundError(f"Checkpoint directory not found: {checkpoint_dir}. Ensure artifacts are downloaded or path is correct.")
 
-    checkpoint_files = os.listdir(checkpoint_dir)
-
-    area_checkpoints = [int(f.split('_')[-1].split('.')[0]) for f in checkpoint_files if f.startswith('checkpoint_nominal_area_') and f.endswith('.pt') and 'best' not in f]
-    loss_checkpoints = [int(f.split('_')[-1].split('.')[0]) for f in checkpoint_files if f.startswith('checkpoint_loss_') and f.endswith('.pt') and 'best' not in f]
-    regular_checkpoints = [int(f.split('_')[-1].split('.')[0]) for f in checkpoint_files if f.startswith('checkpoint_') and f.endswith('.pt') and not f.endswith('final.pt') and 'loss' not in f and 'area' not in f]
+    checkpoint, selected_step = get_checkpoint(effective_step, checkpoint_dir, eval_args["device"], global_rank, parsed_run_params["total_steps"])
+    if selected_step != effective_step:
+        print(f"Warning: Step {effective_step} not found in checkpoints. Loading checkpoint for step {selected_step} instead.")
+        effective_step = selected_step
     
-    if effective_step not in area_checkpoints and effective_step not in loss_checkpoints and effective_step not in regular_checkpoints and effective_step != 'loss_best' and effective_step != 'nominal_area_best' and effective_step != 'final':
-        raise ValueError(f"Step {effective_step} (original step: {step}) not found in available checkpoints types: area={area_checkpoints}, loss={loss_checkpoints}, regular={regular_checkpoints}")
-    
-    checkpoint_path_to_load = None
-    if effective_step in area_checkpoints:
-        checkpoint_path_to_load = f'{checkpoint_dir}checkpoint_nominal_area_{effective_step}.pt'
-    elif effective_step in loss_checkpoints:
-        checkpoint_path_to_load = f'{checkpoint_dir}checkpoint_loss_{effective_step}.pt'
-    else: 
-        checkpoint_path_to_load = f'{checkpoint_dir}checkpoint_rank_{global_rank}_{effective_step}.pt'
-    
-    checkpoint = torch.load(checkpoint_path_to_load, map_location=eval_args["device"], weights_only=False)
-    
-    state_dict = checkpoint['model_state_dict']
-    
-    new_state_dict = {}
-    for k, v in state_dict.items():
-        if k.startswith('module.'):
-            k = k[7:] 
-        if k.startswith('module.'): 
-            k = k[7:] 
-        new_state_dict[k] = v
-        
-    posterior_flow.load_state_dict(new_state_dict, strict=True)
+    posterior_flow.load_state_dict(checkpoint['model_state_dict'], strict=True)
     posterior_flow.to(eval_args["device"])
     posterior_flow.eval()
     
@@ -1095,25 +1080,19 @@ def log_usage_metrics(device_str, process, step, global_rank=0):
         print(f"Rank {global_rank}: Process is on CPU. No PyTorch GPU memory metrics to log.")
         pass
 
-def get_checkpoint(target_step, checkpoint_dir, current_pytorch_device, tdist, global_rank, total_steps):
-    # Handle string values for target_step
-    if isinstance(target_step, str):
-        if target_step.lower() == 'final':
-            # For 'final', use total_steps
-            target_step = total_steps
-        else:
-            # Try to convert to int, if it fails, treat as 'final'
-            try:
-                target_step = int(target_step)
-            except ValueError:
-                print(f"Warning: Could not parse '{target_step}' as integer, treating as 'final'")
-                target_step = total_steps
-    
+def get_checkpoint(target_step, checkpoint_dir, current_pytorch_device, global_rank, total_steps):
+
+    if target_step == 'loss_best' or target_step == 'nominal_area_best':
+        checkpoint = torch.load(f"{checkpoint_dir}/checkpoint_{target_step}.pt", map_location=current_pytorch_device, weights_only=False)
+        return checkpoint, target_step
+    elif target_step == 'final':
+        target_step = total_steps
+        
     # Load rank-specific checkpoints (default behavior)
     checkpoint_files = [f for f in os.listdir(checkpoint_dir) if f.endswith('.pt')]
     rank_checkpoint_pattern = f"checkpoint_rank_{global_rank}_"
     rank_checkpoint_files = [f for f in checkpoint_files if f.startswith(rank_checkpoint_pattern)]
-    
+
     if rank_checkpoint_files:
         # Find the checkpoint closest to target_step
         rank_checkpoint_steps = []
