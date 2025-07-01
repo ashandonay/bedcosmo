@@ -7,9 +7,11 @@
 #SBATCH --ntasks-per-node=1     # 1 primary Slurm task per node
 #SBATCH --cpus-per-task=128     # CPUs for all DDP workers on the node (e.g., 4 workers * 32 cpus/worker)
 #SBATCH --gpus-per-node=4       # Request 4 GPUs for the 1 task on the node
-#SBATCH --time=04:30:00
+#SBATCH --time=02:40:00
 #SBATCH --output=/pscratch/sd/a/ashandon/bed/BED_cosmo/num_tracers/logs/%A_%x_%a.log
 #SBATCH --error=/pscratch/sd/a/ashandon/bed/BED_cosmo/num_tracers/logs/%A_%x_%a.log
+#SBATCH --mail-type=ALL
+#SBATCH --mail-user=ashandon@uci.edu
 
 # Load conda first, then activate, then other GPU libraries
 module load conda
@@ -42,12 +44,14 @@ srun torchrun \
      --rdzv_backend=c10d \
      --rdzv_endpoint=$MASTER_ADDR:$MASTER_PORT \
      /global/homes/a/ashandon/bed/BED_cosmo/num_tracers/n_tracers_train_distributed.py \
-     --exp_name base_restart \
-     --n_particles_per_device 2500 \
+     --exp_name base_restart4 \
+     --n_particles_per_device 3000 \
      --total_steps 50000 \
+     --optimizer Adam \
      --scheduler_type constant \
-     --initial_lr 0.002574962874810058 \
-     --final_lr 0.0001 \
-     --restart_id "0b51ea0c9b90416ab50968450c2968b6" \
-     --restart_step 150000 \
+     --initial_lr 0.00001 \
+     --final_lr 0.000001 \
+     --restart_id "6fadf380762142658cfd3035b0c3bdb6" \
+     --restart_step 50000 \
+     --restart_optimizer \
      --verbose
