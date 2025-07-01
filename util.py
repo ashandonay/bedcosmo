@@ -120,8 +120,10 @@ def save_checkpoint(model, optimizer, filepath, step=None, artifact_path=None, s
 
     checkpoint = {
         'model_state_dict': model_state_dict,
-        'optimizer_state_dict': optimizer.state_dict()
+        'optimizer_state_dict': optimizer.state_dict(),
+        'optimizer_type': optimizer.__class__.__name__
     }
+
     if scheduler is not None:
         checkpoint['scheduler_state_dict'] = scheduler.state_dict()
     
@@ -259,7 +261,7 @@ def init_training_env(tdist, device):
 
     return global_rank, local_rank, effective_device_id, pytorch_device_idx
 
-def init_nf(flow_type, input_dim, context_dim, run_args, device="cuda:0", seed=0, verbose=False, local_rank=None, **kwargs):
+def init_nf(flow_type, input_dim, context_dim, run_args, device="cuda:0", seed=0, verbose=False, **kwargs):
     # Set seeds first, before any model initialization
     if seed is not None:
         # Ensure seed is an integer for all random libraries
@@ -401,17 +403,11 @@ def init_run(
         mlflow_experiment_name, 
         cosmo_model, 
         run_args, 
-        kwargs, 
-        resume_id=None, 
-        resume_step=None,
-        add_steps=0,
-        restart_id=None,
-        restart_step=None,
-        restart_checkpoint=None
+        **kwargs
         ):
     """Initialize MLflow run settings and broadcast to all ranks."""
-    if not resume_id:
-        if not restart_id:
+    if not kwargs.get("resume_id", None):
+        if not kwargs.get("restart_id", None):
             # Start new run
             if global_rank == 0:
                 print(f"=== NEW RUN MODE ===")
@@ -420,27 +416,27 @@ def init_run(
         else:
             if global_rank == 0:
                 print(f"=== RESTART MODE ===")
-                print(f"Restart ID: {restart_id}")
-                if restart_checkpoint is not None:
-                    print(f"Restarting from specific checkpoint file: {restart_checkpoint}")
-                elif restart_step is not None:
-                    print(f"Restarting from checkpoint at step {restart_step}")
+                print(f"Restart ID: {kwargs['restart_id']}")
+                if kwargs.get("restart_checkpoint", None) is not None:
+                    print(f"Restarting from specific checkpoint file: {kwargs['restart_checkpoint']}")
+                elif kwargs.get("restart_step", None) is not None:
+                    print(f"Restarting from checkpoint at step {kwargs['restart_step']}")
                 else:
                     print("Restarting from latest checkpoint")
                 print("Will use MLflow run ID to find checkpoint directory")
                 print("Will create new MLflow run with current parameters")
             client = mlflow.MlflowClient()
-            ref_run = client.get_run(restart_id)
-            checkpoint_dir = f"{storage_path}/mlruns/{ref_run.info.experiment_id}/{restart_id}/artifacts/checkpoints"
-            if restart_checkpoint is not None:
+            ref_run = client.get_run(kwargs["restart_id"])
+            checkpoint_dir = f"{storage_path}/mlruns/{ref_run.info.experiment_id}/{kwargs['restart_id']}/artifacts/checkpoints"
+            if kwargs.get("restart_checkpoint", None) is not None:
                 # Load specific checkpoint file for all ranks
-                print(f"Loading checkpoint from file: {checkpoint_dir}/{restart_checkpoint}")
-                checkpoint = torch.load(f"{checkpoint_dir}/{restart_checkpoint}", map_location=current_pytorch_device, weights_only=False)
+                print(f"Loading checkpoint from file: {checkpoint_dir}/{kwargs['restart_checkpoint']}")
+                checkpoint = torch.load(f"{checkpoint_dir}/{kwargs['restart_checkpoint']}", map_location=current_pytorch_device, weights_only=False)
             else:
                 # Use existing logic to find checkpoint by step
                 # Load the checkpoint
                 checkpoint, _ = get_checkpoint(
-                    restart_step, 
+                    kwargs["restart_step"], 
                     checkpoint_dir, 
                     current_pytorch_device, 
                     global_rank, 
@@ -494,13 +490,13 @@ def init_run(
     else:
         client = mlflow.MlflowClient()
         # Resume existing run
-        run_info = client.get_run(resume_id)
+        run_info = client.get_run(kwargs["resume_id"])
         exp_id = run_info.info.experiment_id
         exp_name = mlflow.get_experiment(exp_id).name
-        checkpoint_dir = f"{storage_path}/mlruns/{exp_id}/{resume_id}/artifacts/checkpoints"
+        checkpoint_dir = f"{storage_path}/mlruns/{exp_id}/{kwargs['resume_id']}/artifacts/checkpoints"
         # Load the checkpoint
         checkpoint, start_step = get_checkpoint(
-            resume_step, 
+            kwargs["resume_step"], 
             checkpoint_dir, 
             current_pytorch_device, 
             global_rank, 
@@ -510,33 +506,33 @@ def init_run(
         validate_checkpoint_compatibility(checkpoint, run_args, mode="resume", global_rank=global_rank)
         if global_rank == 0:
             mlflow.set_experiment(experiment_id=exp_id)
-            mlflow.start_run(run_id=resume_id)
+            mlflow.start_run(run_id=kwargs["resume_id"])
             
-            if resume_step is None:
+            if kwargs.get("resume_step", None) is None:
                 raise ValueError("resume_step must be provided when resuming a run")
             print(f"=== RESUME MODE ===")
-            print(f"Resume ID: {resume_id}")
+            print(f"Resume ID: {kwargs['resume_id']}")
             print(f"Resume Step: {start_step}")
-            print(f"Add Steps: {add_steps}")
+            print(f"Add Steps: {kwargs['add_steps']}")
             print("Will continue existing MLflow run with original parameters")
             # Update run parameters
             mlflow_experiment_name = exp_name
             cosmo_model = run_info.data.params["cosmo_model"]
             run_args = parse_mlflow_params(run_info.data.params)
-            if add_steps:
-                run_args["total_steps"] += add_steps
+            if kwargs.get("add_steps", None):
+                run_args["total_steps"] += kwargs["add_steps"]
             
             n_devices = tdist.get_world_size() if "LOCAL_RANK" in os.environ else 1
             if run_args["n_particles"] != n_devices * run_args["n_particles_per_device"]:
                 raise ValueError(f"n_particles ({run_args['n_particles']}) must be equal to n_devices * n_particles_per_device ({n_devices * run_args['n_particles_per_device']})")
 
             # Get metrics from previous run
-            best_nominal_area, best_loss = _get_resume_metrics(client, resume_id, resume_step)
+            best_nominal_area, best_loss = _get_resume_metrics(client, kwargs["resume_id"], kwargs["resume_step"])
 
             # Prepare tensors for broadcasting
             tensors = _prepare_broadcast_tensors(
                 exp_id, start_step, best_loss, best_nominal_area, 
-                current_pytorch_device, resume_id, exp_name
+                current_pytorch_device, kwargs["resume_id"], exp_name
             )
         else:
             # Initialize tensors on other ranks
@@ -735,13 +731,11 @@ def run_eval(run_obj, parsed_run_params, eval_args, step='loss_best', cosmo_exp=
     with open(mlflow.artifacts.download_artifacts(run_id=current_run_id, artifact_path="classes.json")) as f:
         classes = json.load(f)
     # Pass run_obj, parsed_run_params (which should be consistent with run_obj), and classes
-    num_tracers, posterior_flow = load_model(run_obj, parsed_run_params, classes, step, eval_args, cosmo_exp, global_rank=global_rank)
+    likelihood = init_likelihood(parsed_run_params, eval_args, cosmo_exp)
+    posterior_flow = load_model(likelihood, step, run_obj, parsed_run_params, classes, eval_args, cosmo_exp, global_rank=global_rank)
 
-    # Use parsed_run_params which should have 'include_D_M' correctly typed
-    nominal_design = torch.tensor(num_tracers.desi_tracers.groupby('class').sum()['observed'].reindex(classes.keys()).values, device=eval_args["device"], dtype=torch.float64)
-    # Ensure include_D_M is a boolean if it comes from parsed_params
-    include_D_M_flag = parsed_run_params.get("include_D_M", False) # Default to False if not found
-    central_vals = num_tracers.central_val if include_D_M_flag else num_tracers.central_val[1::2]
+    nominal_design = torch.tensor(likelihood.desi_tracers.groupby('class').sum()['observed'].reindex(classes.keys()).values, device=eval_args["device"], dtype=torch.float64)
+    central_vals = likelihood.central_val if parsed_run_params.get("include_D_M", False) else likelihood.central_val[1::2]
     nominal_context = torch.cat([nominal_design, central_vals], dim=-1)
 
     np.random.seed(eval_args["eval_seed"])
@@ -749,14 +743,104 @@ def run_eval(run_obj, parsed_run_params, eval_args, step='loss_best', cosmo_exp=
     torch.cuda.manual_seed(eval_args["eval_seed"])
 
     nominal_samples = posterior_flow(nominal_context).sample((eval_args["n_samples"],)).cpu().numpy()
-    
     nominal_samples[:, -1] *= 100000
 
     with contextlib.redirect_stdout(io.StringIO()):
-        samples = getdist.MCSamples(samples=nominal_samples, names=num_tracers.cosmo_params, labels=num_tracers.latex_labels, settings={'ignore_rows': 0.0})
+        samples = getdist.MCSamples(samples=nominal_samples, names=likelihood.cosmo_params, labels=likelihood.latex_labels, settings={'ignore_rows': 0.0})
     return samples
 
-def load_model(run_obj, parsed_run_params, classes, step, eval_args, cosmo_exp='num_tracers', global_rank=0):
+def init_likelihood(run_args, eval_args, cosmo_exp='num_tracers'):
+    data_path_param = run_args.get("data_path", "") 
+    data_path = home_dir + data_path_param
+    
+    if cosmo_exp == 'num_tracers':
+        desi_df = pd.read_csv(data_path + 'desi_data.csv')
+        desi_tracers = pd.read_csv(data_path + 'desi_tracers.csv')
+        nominal_cov = np.load(data_path + 'desi_cov.npy')
+
+        cosmo_model = run_args.get("cosmo_model", None)
+        if cosmo_model is None:
+            raise ValueError("cosmo_model is required for num_tracers")
+        
+        likelihood = NumTracers(
+            desi_df, 
+            desi_tracers,
+            cosmo_model,
+            nominal_cov,
+            device=eval_args["device"],
+            include_D_M=run_args.get("include_D_M", False) 
+            )
+    else:
+        raise ValueError(f"{cosmo_exp} not supported")
+    return likelihood
+    
+def eval_designs(
+        designs, 
+        nominal_design, 
+        run_args, 
+        posterior_flow, 
+        likelihood, 
+        target_labels, 
+        n_evals=10,
+        eval_particles=1000
+        ):
+    """
+    Evaluates the EIG of the posterior flow for an input designs tensor.
+
+    Args:
+        designs (torch.Tensor): Designs to evaluate.
+        nominal_design (torch.Tensor): Nominal design to evaluate.
+        run_args (dict): Run arguments.
+
+    Returns:
+        tuple: A tuple containing:
+            - avg_eigs (np.ndarray): Average EIGs for each design.
+            - optimal_eig (float): Maximum EIG.
+            - avg_nominal_eig (float): Average EIG of the nominal design.
+            - optimal_design (torch.Tensor): Design with the maximum EIG.
+    """
+    eigs_batch = []
+    nominal_eig_batch = []
+    for n in range(n_evals):
+        with torch.no_grad():
+            agg_loss, eigs = posterior_loss(design=designs,
+                                            model=likelihood.pyro_model,
+                                            guide=posterior_flow,
+                                            num_particles=eval_particles,
+                                            observation_labels=["y"],
+                                            target_labels=target_labels,
+                                            evaluation=True,
+                                            nflow=True,
+                                            analytic_prior=False,
+                                            condition_design=run_args["condition_design"])
+        eigs_batch.append(eigs.cpu().numpy()/np.log(2))
+
+        with torch.no_grad():
+            agg_loss, nominal_eig = posterior_loss(design=nominal_design.unsqueeze(0),
+                                            model=likelihood.pyro_model,
+                                            guide=posterior_flow,
+                                            num_particles=eval_particles,
+                                            observation_labels=["y"],
+                                            target_labels=target_labels,
+                                            evaluation=True,
+                                            nflow=True,
+                                            analytic_prior=False,
+                                            condition_design=run_args["condition_design"])
+        nominal_eig_batch.append(nominal_eig.cpu().numpy()/np.log(2))
+
+    eigs_batch = np.array(eigs_batch)
+    nominal_eig_batch = np.array(nominal_eig_batch)
+    # avg over the number of evaluations
+    avg_eigs = np.mean(eigs_batch, axis=0)
+    eigs_std = np.std(eigs_batch, axis=0)
+    eigs_se = eigs_std/np.sqrt(n_evals)
+    avg_nominal_eig = np.mean(nominal_eig_batch, axis=0).item()
+
+    optimal_design = designs[np.argmax(avg_eigs)]
+    print("Optimal design (NF):", optimal_design, "Optimal EIG:", np.max(avg_eigs))
+    return avg_eigs, np.max(avg_eigs), avg_nominal_eig, optimal_design
+
+def load_model(likelihood, step, run_obj, parsed_run_params, classes, eval_args, cosmo_exp='num_tracers', global_rank=0):
     # Assumes run_obj is the MLflow Run object and parsed_run_params is the output of parse_mlflow_params(run_obj.data.params)
     # classes is the already loaded content of classes.json
     storage_path = os.environ["SCRATCH"] + f"/bed/BED_cosmo/{cosmo_exp}"
@@ -764,26 +848,11 @@ def load_model(run_obj, parsed_run_params, classes, step, eval_args, cosmo_exp='
     current_run_id = run_obj.info.run_id
     exp_id = run_obj.info.experiment_id
     
-    data_path_param = parsed_run_params.get("data_path", "") 
-    data_path = home_dir + data_path_param
-    
-    desi_df = pd.read_csv(data_path + 'desi_data.csv')
-    desi_tracers = pd.read_csv(data_path + 'desi_tracers.csv')
-    nominal_cov = np.load(data_path + 'desi_cov.npy')
-
-    cosmo_model = parsed_run_params.get("cosmo_model", "Unknown")
-    
-    num_tracers = NumTracers(
-        desi_df, 
-        desi_tracers,
-        cosmo_model,
-        nominal_cov,
-        device=eval_args["device"],
-        include_D_M=parsed_run_params.get("include_D_M", False) 
-        )
-
-    input_dim = len(num_tracers.cosmo_params)
-    context_dim = len(classes.keys()) + 10 if parsed_run_params.get("include_D_M", False) else len(classes.keys()) + 5
+    if cosmo_exp == 'num_tracers':
+        input_dim = len(likelihood.cosmo_params)
+        context_dim = len(classes.keys()) + 10 if parsed_run_params.get("include_D_M", False) else len(classes.keys()) + 5
+    else:
+        raise ValueError(f"{cosmo_exp} not supported")
     
     nf_seed_from_params = parsed_run_params.get("nf_seed")
     nf_seed_for_init = None
@@ -805,7 +874,7 @@ def load_model(run_obj, parsed_run_params, classes, step, eval_args, cosmo_exp='
 
     effective_step = step
     if step == parsed_run_params.get("total_steps"): 
-        effective_step = 'final'
+        effective_step = 'last'
     
     checkpoint_dir = f'{storage_path}/mlruns/{exp_id}/{current_run_id}/artifacts/checkpoints/'
     if not os.path.isdir(checkpoint_dir):
@@ -821,22 +890,22 @@ def load_model(run_obj, parsed_run_params, classes, step, eval_args, cosmo_exp='
     posterior_flow.to(eval_args["device"])
     posterior_flow.eval()
     
-    return num_tracers, posterior_flow
+    return posterior_flow
 
-def calc_entropy(design, posterior_flow, num_tracers, num_samples):
-    # sample values of y from num_tracers.pyro_model
+def calc_entropy(design, posterior_flow, likelihood, num_samples):
+    # sample values of y from likelihood.pyro_model
     expanded_design = lexpand(design.unsqueeze(0), num_samples)
-    y = num_tracers.pyro_model(expanded_design)
+    y = likelihood.pyro_model(expanded_design)
     nominal_context = torch.cat([expanded_design, y], dim=-1)
-    passed_ratio = num_tracers.calc_passed(expanded_design)
-    constrained_parameters = num_tracers.sample_valid_parameters(passed_ratio.shape[:-1])
+    passed_ratio = likelihood.calc_passed(expanded_design)
+    constrained_parameters = likelihood.sample_valid_parameters(passed_ratio.shape[:-1])
     with pyro.plate_stack("plate", passed_ratio.shape[:-1]):
         # register samples in the trace using pyro.sample
         parameters = {}
         for k, v in constrained_parameters.items():
             # use dist.Delta to fix the value of each parameter
             parameters[k] = pyro.sample(k, dist.Delta(v)).unsqueeze(-1)
-    evaluate_samples = torch.cat([parameters[k].unsqueeze(dim=-1) for k in num_tracers.cosmo_params], dim=-1)
+    evaluate_samples = torch.cat([parameters[k].unsqueeze(dim=-1) for k in likelihood.cosmo_params], dim=-1)
     flattened_samples = torch.flatten(evaluate_samples, start_dim=0, end_dim=len(expanded_design.shape[:-1])-1)
     samples = posterior_flow(nominal_context).log_prob(flattened_samples)
     # calculate entropy of samples
@@ -917,12 +986,12 @@ def get_checkpoints(run_id, steps, checkpoint_files, type='all', cosmo_exp='num_
     client = MlflowClient()
     run = client.get_run(run_id)
     run_args = parse_mlflow_params(run.data.params)
-    steps = [step if step != run_args["total_steps"] else 'final' for step in steps]
+    steps = [step if step != run_args["total_steps"] else 'last' for step in steps]
     if type == 'all':
         checkpoints = sorted([
             int(f.split('_')[-1].split('.')[0]) 
             for f in checkpoint_files 
-            if f.endswith('.pt') and not f.endswith('final.pt') and not f.endswith('best.pt')
+            if f.endswith('.pt') and not f.endswith('last.pt') and not f.endswith('best.pt')
         ])
     elif type == 'area':
         checkpoints = sorted([
@@ -943,7 +1012,7 @@ def get_checkpoints(run_id, steps, checkpoint_files, type='all', cosmo_exp='num_
     # get the checkpoints closest to the steps
     plot_checkpoints = [
         checkpoints[np.argmin(np.abs(np.array(checkpoints) - step))]
-        for step in steps if step not in ['loss_best', 'nominal_area_best', 'final']
+        for step in steps if step not in ['loss_best', 'nominal_area_best', 'last']
     ]
 
     # check for duplicates in plot_checkpoints and replace them with the next checkpoint index 
@@ -960,8 +1029,8 @@ def get_checkpoints(run_id, steps, checkpoint_files, type='all', cosmo_exp='num_
         plot_checkpoints.append('loss_best')
     if 'nominal_area_best' in steps:
         plot_checkpoints.append('nominal_area_best')
-    if 'final' in steps:
-        plot_checkpoints.append('final')
+    if 'last' in steps:
+        plot_checkpoints.append('last')
 
     return plot_checkpoints
 
@@ -1085,7 +1154,7 @@ def get_checkpoint(target_step, checkpoint_dir, current_pytorch_device, global_r
     if target_step == 'loss_best' or target_step == 'nominal_area_best':
         checkpoint = torch.load(f"{checkpoint_dir}/checkpoint_{target_step}.pt", map_location=current_pytorch_device, weights_only=False)
         return checkpoint, target_step
-    elif target_step == 'final':
+    elif target_step == 'last':
         target_step = total_steps
         
     # Load rank-specific checkpoints (default behavior)
@@ -1098,7 +1167,7 @@ def get_checkpoint(target_step, checkpoint_dir, current_pytorch_device, global_r
         rank_checkpoint_steps = []
         for f in rank_checkpoint_files:
             try:
-                if 'final' in f:
+                if 'last' in f:
                     step = total_steps
                 else:
                     step = int(f.split('_')[-1].split('.')[0])
