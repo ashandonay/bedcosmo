@@ -44,7 +44,7 @@ import json
 import argparse
 import io
 import contextlib
-from plotting import get_contour_area, plot_training, eig_steps
+from plotting import get_contour_area, plot_training
 import getdist.mcsamples
 
 class FlowLikelihoodDataset(Dataset):
