@@ -159,7 +159,7 @@ def plot_run(run_id, eval_args, show_scatter=False, cosmo_exp='num_tracers'):
     plt.show()
 
 def plot_training(
-        exp_name=None,
+        mlflow_exp=None,
         run_id=None,
         var=None,
         excluded_runs=[],
@@ -169,7 +169,7 @@ def plot_training(
         loss_step_freq=10,
         start_step=0,
         area_step_freq=100,
-        lr_step_freq=1, # Plot LR more frequently if needed
+        lr_step_freq=1,
         show_area=True,
         show_lr=True
         ):
@@ -182,8 +182,8 @@ def plot_training(
     Can take either an experiment name or a list of run IDs.
 
     Args:
-        exp_name (str, optional): Name of the MLflow experiment. If provided, all runs in this experiment will be used.
-        run_id (str or list, optional): Individual or list of specific MLflow run IDs to compare. If provided, exp_name is ignored.
+        mlflow_exp (str, optional): Name of the MLflow experiment. If provided, all runs in this experiment will be used.
+        run_id (str or list, optional): Individual or list of specific MLflow run IDs to compare. If provided, mlflow_exp is ignored.
         var (str or list): Parameter(s) from MLflow run params to include in the label.
         excluded_runs (list): List of run IDs to exclude.
         cosmo_exp (str): Experiment name or ID (if needed for path).
@@ -200,12 +200,11 @@ def plot_training(
     storage_path = os.environ["SCRATCH"] + f"/bed/BED_cosmo/{cosmo_exp}"
 
     run_data_list, experiment_id_for_save_path, _ = get_runs_data(
-        exp_name=exp_name,
+        mlflow_exp=mlflow_exp,
         run_ids=run_id,
         excluded_runs=excluded_runs,
         parse_params=False
     )
-
     if not run_data_list:
         return
 
@@ -241,19 +240,6 @@ def plot_training(
             if group_key_tuple not in grouped_runs:
                 grouped_runs[group_key_tuple] = []
             grouped_runs[group_key_tuple].append(run_data_item)
-
-    # Sort group keys for consistent color assignment
-    def sort_key_for_group_tuple(group_tuple_key):
-        key_as_num_or_str = []
-        for val_in_tuple in group_tuple_key:
-            try:
-                key_as_num_or_str.append(float(val_in_tuple))
-            except (ValueError, TypeError):
-                if isinstance(val_in_tuple, (int, float)):
-                    key_as_num_or_str.append(val_in_tuple)
-                else:
-                    key_as_num_or_str.append(str(val_in_tuple))
-        return tuple(key_as_num_or_str)
 
     sorted_group_keys = sorted(grouped_runs.keys(), key=sort_key_for_group_tuple)
 
@@ -573,7 +559,7 @@ def plot_training(
     plt.tight_layout(rect=[0, 0, 1, 0.97])
 
     # --- Title and Saving ---
-    title_suffix = f" - {exp_name}" if exp_name else f" - {len(run_data_list)} Run(s)"
+    title_suffix = f" - {mlflow_exp}" if mlflow_exp else f" - {len(run_data_list)} Run(s)"
     fig.suptitle(f"Training Evolution{title_suffix}", fontsize=16)
 
     # Determine save path
@@ -583,7 +569,7 @@ def plot_training(
 
     last_exp_id_for_path = experiment_id_for_save_path
 
-    if exp_name and last_exp_id_for_path:
+    if mlflow_exp and last_exp_id_for_path:
         save_dir = f"{storage_path}/mlruns/{last_exp_id_for_path}/plots"
         save_path = f"{save_dir}/training_comparison_{timestamp}.png"
     elif len(run_data_list) == 1:
@@ -613,7 +599,7 @@ def plot_training(
     plt.close(fig)
 
 def compare_posterior(
-        exp_name=None,
+        mlflow_exp=None,
         run_ids=None,
         var=None,
         filter_string=None,
@@ -628,9 +614,9 @@ def compare_posterior(
     """Compares posterior distributions across multiple runs.
     
     Args:
-        exp_name (str, optional): Name of the MLflow experiment.
+        mlflow_exp (str, optional): Name of the MLflow experiment.
         run_ids (list, optional): List of specific run IDs to compare.
-        var (str or list, optional): Parameter(s) to group runs by.
+        var (str or list, optional): Parameter(s) to group runs by. If None, each run is a separate group.
         filter_string (str, optional): MLflow filter string.
         eval_args (dict, optional): Arguments for run_eval.
         show_scatter (bool): Whether to show scatter points.
@@ -648,247 +634,148 @@ def compare_posterior(
     # Convert global_rank to list if it's a single value
     global_ranks = global_rank if isinstance(global_rank, list) else [global_rank]
 
-    run_data_list, experiment_id_for_save_path, actual_exp_name_for_title = get_runs_data(
-        exp_name=exp_name,
+    run_data_list, experiment_id_for_save_path, actual_mlflow_exp_for_title = get_runs_data(
+        mlflow_exp=mlflow_exp,
         run_ids=run_ids,
         excluded_runs=excluded_runs,
         filter_string=filter_string,
         parse_params=True
     )
-
     if not run_data_list:
         return
-
-    cosmo_model_for_desi = "Unknown" 
-    # Use parsed params; parse_mlflow_params keeps string if not convertible, so this is fine
-    if run_data_list and 'params' in run_data_list[0] and 'cosmo_model' in run_data_list[0]['params']:
+    
+    if 'params' in run_data_list[0] and 'cosmo_model' in run_data_list[0]['params']:
         cosmo_model_for_desi = run_data_list[0]['params']['cosmo_model']
     else:
-        print("Warning: Could not determine cosmo_model from the first run for DESI plot. Defaulting to 'Unknown'.")
+        raise ValueError("Could not determine cosmo_model from the first run for DESI plot.")
 
-    if var:
-        vars_list = var if isinstance(var, list) else [var]
-        
-        grouped_runs_by_val_tuple = {} 
-
-        for run_data_item in run_data_list:
-            current_params = run_data_item['params'] # These are now parsed params
-            group_values_for_run = []
+    # Create groups based on var parameter
+    vars_list = var if isinstance(var, list) else [var] if var is not None else []
+    
+    # Group runs by variable values (or by run_id if no var specified)
+    grouped_runs = {}
+    for run_data_item in run_data_list:
+        if var:
+            # Group by variable values
+            current_params = run_data_item['params']
+            group_values = []
             is_valid_for_grouping = True
             for v_key in vars_list:
                 if v_key in current_params:
-                    group_values_for_run.append(current_params[v_key])
+                    group_values.append(current_params[v_key])
                 else:
                     is_valid_for_grouping = False
                     break
             
             if is_valid_for_grouping:
-                group_key_tuple = tuple(group_values_for_run)
-                if group_key_tuple not in grouped_runs_by_val_tuple:
-                    grouped_runs_by_val_tuple[group_key_tuple] = []
-                grouped_runs_by_val_tuple[group_key_tuple].append(run_data_item)
-        
-        def sort_key_for_group_tuple(group_tuple_key):
-            key_as_num_or_str = []
-            for val_in_tuple in group_tuple_key:
-                try:
-                    # Attempt to convert to float for numeric sorting, otherwise use string
-                    key_as_num_or_str.append(float(val_in_tuple))
-                except (ValueError, TypeError): # TypeError if val_in_tuple is already a non-string number like int
-                    if isinstance(val_in_tuple, (int, float)):
-                        key_as_num_or_str.append(val_in_tuple)
-                    else:
-                        key_as_num_or_str.append(str(val_in_tuple)) 
-            return tuple(key_as_num_or_str)
-        
-        sorted_group_keys = sorted(grouped_runs_by_val_tuple.keys(), key=sort_key_for_group_tuple)
-        
-        representative_samples_list = []
-        colors_for_groups = []
-        avg_areas_for_groups = []
-        std_areas_for_groups = []
-        
-        prop_cycle_colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
-
-        for i, group_key_tuple_iter in enumerate(sorted_group_keys):
-            run_data_items_in_group = grouped_runs_by_val_tuple[group_key_tuple_iter]
-            group_color = prop_cycle_colors[i % len(prop_cycle_colors)]
-            colors_for_groups.append(group_color)
-            
-            group_samples_collected = []
-            group_areas_collected = []
-            # Track mean areas per run (across all ranks)
-            run_mean_areas = []
-
-            for item_idx, run_data_item_in_group_iter in enumerate(run_data_items_in_group):
-                # current_run_id = run_data_item_in_group_iter['run_id'] # No longer needed for run_eval fallback
-                current_run_obj = run_data_item_in_group_iter['run_obj']
-                current_parsed_params = run_data_item_in_group_iter['params'] # Already parsed
-
-                # Collect samples for all ranks
-                rank_samples = []
-                rank_areas = []
-                for rank in global_ranks:
-                    # Call run_eval with pre-fetched run_obj and parsed_params
-                    samples_obj = run_eval(current_run_obj, current_parsed_params, eval_args, step=step, cosmo_exp=cosmo_exp, global_rank=rank)
-                    rank_samples.append(samples_obj)
-                    # Calculate area for each rank
-                    area = get_contour_area([samples_obj], 'Om', 'hrdrag', level)[0]
-                    rank_areas.append(area)
-
-                group_samples_collected.append(rank_samples)
-                # Store all rank areas for this run (for overall statistics)
-                group_areas_collected.extend(rank_areas)
-                # Calculate mean area for this run across all ranks
-                run_mean_area = np.mean([area for area in rank_areas if not np.isnan(area)])
-                run_mean_areas.append(run_mean_area)
-            
-            if not group_areas_collected: # Or if all areas are NaN, handle this
-                avg_areas_for_groups.append(np.nan)
-                std_areas_for_groups.append(np.nan)
-                # representative_samples_list.append(None) # Add placeholder if needed for consistent list length
-                print(f"Info: No valid areas collected for group {group_key_tuple_iter}. Skipping representative sample.")
-                continue # Skip to next group if no samples/areas
-
-            avg_areas_for_groups.append(np.mean(group_areas_collected))
-            std_areas_for_groups.append(np.std(group_areas_collected))
-            
-            # Ensure run_mean_areas is not all NaNs before finding median/argmin
-            valid_run_means = [mean for mean in run_mean_areas if not np.isnan(mean)]
-            if len(valid_run_means) == 0:
-                representative_samples_list.append(None) # Or handle as error/skip
-                print(f"Warning: All run mean areas are NaN for group {group_key_tuple_iter}. Cannot select representative.")
-                continue
-
-            median_run_mean = np.median(valid_run_means)
-            
-            closest_mean_diff = np.inf
-            representative_run_idx = -1
-            for run_idx, run_mean in enumerate(run_mean_areas):
-                if not np.isnan(run_mean):
-                    diff = np.abs(run_mean - median_run_mean)
-                    if diff < closest_mean_diff:
-                        closest_mean_diff = diff
-                        representative_run_idx = run_idx
-            
-            if representative_run_idx != -1:
-                representative_samples_list.append(group_samples_collected[representative_run_idx])
-                representative_run_id = run_data_items_in_group[representative_run_idx]['run_id']
-                group_desc_for_print = ', '.join([f'{vars_list[j]}={val}' for j, val in enumerate(group_key_tuple_iter)])
-                print(f"Representative sample run id for group {group_desc_for_print}: {representative_run_id}")
+                group_key = tuple(group_values)
             else:
-                representative_samples_list.append(None) # Should not happen if valid_run_means was > 0
-                print(f"Warning: Could not determine representative sample for group {group_key_tuple_iter}.")
-
-        valid_representative_samples = []
-        valid_colors_for_groups = []
-        for i, s in enumerate(representative_samples_list):
-            if s is not None:
-                # Flatten the list of rank samples for this representative
-                for rank_samples in s:
-                    valid_representative_samples.append(rank_samples)
-                    valid_colors_for_groups.append(colors_for_groups[i])
-
-        if not valid_representative_samples: # Check after filtering Nones
-             print("No representative samples found after grouping and filtering. Cannot plot.")
-             return
-
-        desi_samples_gd = get_desi_samples(cosmo_model_for_desi)
-        desi_area = get_contour_area([desi_samples_gd], 'Om', 'hrdrag', level)[0]
-
-        valid_representative_samples.append(desi_samples_gd)
-        valid_colors_for_groups.append('black')
+                continue  # Skip runs that don't have all required parameters
+        else:
+            # Each run is its own group
+            group_key = run_data_item['run_id']
         
-        g = plot_posterior(valid_representative_samples, valid_colors_for_groups, show_scatter=show_scatter, levels=[level])
-
-        if g.fig.legends:
-            for legend in g.fig.legends: legend.remove()
-
-        custom_legend_handles = []
-        valid_sample_idx = 0 # To pick color from valid_colors_for_groups
-        for i, group_key_tuple_iter in enumerate(sorted_group_keys):
-            if representative_samples_list[i] is not None: # This group contributed a sample
-                 group_color = valid_colors_for_groups[valid_sample_idx] # Color from the filtered list
-                 group_label_desc = ', '.join([f'{vars_list[j]}={val}' for j, val in enumerate(group_key_tuple_iter)])
-            
-                 avg_area_val = avg_areas_for_groups[i] # This should correspond to the i-th group
-                 std_area_val = std_areas_for_groups[i] # This should correspond to the i-th group
-
-                 if not np.isnan(avg_area_val): # Only add legend if area is valid
-                     if std_area_val > 0 and not np.isnan(std_area_val):
-                         custom_legend_handles.append(
-                             Line2D([0], [0], color=group_color, 
-                                    label=f'{group_label_desc}, Area ({int(level*100)}%): {avg_area_val:.3f} ± {std_area_val:.3f}')
-                         )
-                     else:
-                         custom_legend_handles.append(
-                             Line2D([0], [0], color=group_color, 
-                                    label=f'{group_label_desc}, Area ({int(level*100)}%): {avg_area_val:.3f}')
-                         )
-                     valid_sample_idx +=1
-                 else:
-                    print(f"Info: Skipping legend entry for group {group_label_desc} as its avg_area was NaN.")
-
-        custom_legend_handles.append(
-            Line2D([0], [0], color='black', 
-                   label=f'DESI ({cosmo_model_for_desi}), Area ({int(level*100)}%): {desi_area:.3f}')
-        )
-        g.fig.legend(handles=custom_legend_handles, loc='upper right', bbox_to_anchor=(1, 0.99))
-        
-        title_vars_str = ', '.join(vars_list)
-        num_total_runs_analyzed = len(run_data_list)
-        g.fig.suptitle(f'Posterior comparison grouped by {title_vars_str} ({num_total_runs_analyzed} total run(s))\nStep: {step}', y=1.03)
+        if group_key not in grouped_runs:
+            grouped_runs[group_key] = []
+        grouped_runs[group_key].append(run_data_item)
     
-    else: # Not grouping, plot all runs from run_data_list
-        all_samples_to_plot = []
-        colors_for_all_runs = []
-        labels_for_all_runs = []
+    if not grouped_runs:
+        print("No valid groups found. Cannot plot.")
+        return
+    
+    # Sort groups for consistent ordering
+    sorted_group_keys = sorted(grouped_runs.keys(), key=sort_key_for_group_tuple if var else lambda x: x)
+    
+    # Collect samples and calculate areas for each group
+    all_samples = []
+    all_colors = []
+    legend_handles = []
+    prop_cycle_colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
+    
+    for i, group_key in enumerate(sorted_group_keys):
+        group_runs = grouped_runs[group_key]
+        group_color = prop_cycle_colors[i % len(prop_cycle_colors)]
         
-        prop_cycle_colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
+        # Collect samples for all runs in this group across all ranks
+        group_samples = []
+        group_areas = []
         
-        for i, run_data_item_iter in enumerate(run_data_list):
-            current_params = run_data_item_iter['params'] # Already parsed
-            current_run_obj = run_data_item_iter['run_obj'] 
-            current_run_name = run_data_item_iter['name']
+        for run_data_item in group_runs:
+            run_obj = run_data_item['run_obj']
+            params = run_data_item['params']
             
-            # For each run, get samples for all ranks
+            # Get samples for all ranks
             for rank in global_ranks:
-                samples_obj = run_eval(current_run_obj, current_params, eval_args, step=step, cosmo_exp=cosmo_exp, global_rank=rank)
-                if samples_obj is not None:  # Only add if samples were successfully generated
-                    all_samples_to_plot.append(samples_obj)
-                    colors_for_all_runs.append(prop_cycle_colors[i % len(prop_cycle_colors)])
-                    
-                    # Construct label from run name or key parameters
-                    label_text = current_run_name if current_run_name else run_data_item_iter['run_id'][:8]
-                    if len(global_ranks) > 1:
-                        label_text += f' (rank {rank})'
-                    labels_for_all_runs.append(label_text)
-
-        if not all_samples_to_plot:
-            print("No samples generated for any run. Cannot plot.")
-            return
-
-        desi_samples_gd = get_desi_samples(cosmo_model_for_desi)
-        desi_area_for_label = get_contour_area([desi_samples_gd], 'Om', 'hrdrag', level)[0]
-
-        all_samples_to_plot.append(desi_samples_gd)
-        colors_for_all_runs.append('black')
-        # Use a more informative label for DESI if cosmo_model is known
-        desi_label_text = f'DESI'
-        if cosmo_model_for_desi and cosmo_model_for_desi != "Unknown":
-            desi_label_text += f' ({cosmo_model_for_desi})'
-        if not np.isnan(desi_area_for_label):
-             desi_label_text += f', Area: {desi_area_for_label:.3f}'
-        labels_for_all_runs.append(desi_label_text)
+                samples_obj = run_eval(run_obj, params, eval_args, step=step, cosmo_exp=cosmo_exp, global_rank=rank)
+                if samples_obj is not None:
+                    group_samples.append(samples_obj)
+                    area = get_contour_area([samples_obj], 'Om', 'hrdrag', level)[0]
+                    group_areas.append(area)
         
-        g = plot_posterior(all_samples_to_plot, colors_for_all_runs, 
-                           show_scatter=show_scatter, legend_labels=labels_for_all_runs, levels=[level])
+        if not group_samples:
+            print(f"Warning: No valid samples for group {group_key}. Skipping.")
+            continue
         
-        plot_title_exp_part = actual_exp_name_for_title if actual_exp_name_for_title else "Selected Runs"
-        plot_title = f'Posterior comparison for {plot_title_exp_part}\nStep: {step}'
+        # Add samples to plotting lists (all ranks get same color)
+        all_samples.extend(group_samples)
+        all_colors.extend([group_color] * len(group_samples))
+        
+        # Create legend entry
+        if var:
+            group_label = ', '.join([f'{vars_list[j]}={val}' for j, val in enumerate(group_key)])
+        else:
+            group_label = group_key[:8]  # First 8 chars of run_id
+        
+        avg_area = np.mean([area for area in group_areas if not np.isnan(area)])
+        std_area = np.std([area for area in group_areas if not np.isnan(area)])
+        
+        if not np.isnan(avg_area):
+            if std_area > 0 and not np.isnan(std_area):
+                legend_text = f'{group_label}, Area ({int(level*100)}%): {avg_area:.3f} ± {std_area:.3f}'
+            else:
+                legend_text = f'{group_label}, Area ({int(level*100)}%): {avg_area:.3f}'
+            
+            legend_handles.append(
+                Line2D([0], [0], color=group_color, label=legend_text)
+            )
+    
+    if not all_samples:
+        print("No samples generated for any group. Cannot plot.")
+        return
+    
+    # Add DESI samples
+    desi_samples = get_desi_samples(cosmo_model_for_desi)
+    desi_area = get_contour_area([desi_samples], 'Om', 'hrdrag', level)[0]
+    
+    all_samples.append(desi_samples)
+    all_colors.append('black')
+    
+    desi_label = f'DESI ({cosmo_model_for_desi}), Area ({int(level*100)}%): {desi_area:.3f}'
+    legend_handles.append(
+        Line2D([0], [0], color='black', label=desi_label)
+    )
+    
+    # Create the plot
+    g = plot_posterior(all_samples, all_colors, show_scatter=show_scatter, levels=[level])
+    
+    # Remove default legends and add custom one
+    if g.fig.legends:
+        for legend in g.fig.legends:
+            legend.remove()
+    
+    g.fig.legend(handles=legend_handles, loc='upper right', bbox_to_anchor=(1, 0.99))
+    
+    # Set title
+    if var:
+        title_vars_str = ', '.join(vars_list)
+        title = f'Posterior comparison grouped by {title_vars_str} ({len(run_data_list)} total run(s))\nStep: {step}'
+    else:
+        plot_title_exp_part = actual_mlflow_exp_for_title if actual_mlflow_exp_for_title else "Selected Runs"
+        title = f'Posterior comparison for {plot_title_exp_part}\nStep: {step}'
         if filter_string:
-            plot_title += f' (filter: {filter_string})'
-        g.fig.suptitle(plot_title, y=1.03)
+            title += f' (filter: {filter_string})'
+    
+    g.fig.suptitle(title, y=1.03)
 
     plt.tight_layout(rect=[0, 0.03, 1, 0.95]) # Adjusted rect to prevent title overlap with legend
     storage_path_base = os.environ["SCRATCH"] + f"/bed/BED_cosmo/{cosmo_exp}"
@@ -896,9 +783,9 @@ def compare_posterior(
     save_dir = f"{storage_path_base}/plots"
     filename_prefix = "posterior_comparison"
 
-    if exp_name and experiment_id_for_save_path:
+    if mlflow_exp and experiment_id_for_save_path:
         save_dir = f"{storage_path_base}/mlruns/{experiment_id_for_save_path}/plots"
-    elif not exp_name and run_ids and len(run_data_list) == 1 and experiment_id_for_save_path:
+    elif not mlflow_exp and run_ids and len(run_data_list) == 1 and experiment_id_for_save_path:
         single_run_id_for_path = run_data_list[0]['run_id']
         save_dir = f"{storage_path_base}/mlruns/{experiment_id_for_save_path}/{single_run_id_for_path}/artifacts/plots"
         filename_prefix = f"posterior_step_{step}"
@@ -1056,9 +943,9 @@ def compare_contours(run_ids, param1, param2, eval_args, steps='best', level=0.6
     plt.tight_layout()
     plt.show()
     
-def loss_area_plot(exp_name, var_name, step_interval=1000, excluded_runs=[], cosmo_exp='num_tracers'):
+def loss_area_plot(mlflow_exp, var_name, step_interval=1000, excluded_runs=[], cosmo_exp='num_tracers'):
     client = MlflowClient()
-    exp_id = client.get_experiment_by_name(exp_name).experiment_id
+    exp_id = client.get_experiment_by_name(mlflow_exp).experiment_id
     run_ids = [run.info.run_id for run in client.search_runs(exp_id) if run.info.run_id not in excluded_runs]
     all_run_losses = []
     all_run_areas = []
@@ -1202,7 +1089,7 @@ if __name__ == "__main__":
 
     eval_args = {"n_samples": 30000, "device": "cuda:1", "eval_seed": 1}
     plot_training(
-        exp_name='base_NAF_gamma_fixed', 
+        mlflow_exp='base_NAF_gamma_fixed', 
         var='pyro_seed', 
         log_scale=True,
         show_best=True,

@@ -48,14 +48,10 @@ from plotting import get_contour_area, plot_training
 import getdist.mcsamples
 
 class FlowLikelihoodDataset(Dataset):
-    def __init__(self, num_tracers, designs, n_particles_per_device, observation_labels, target_labels, device="cuda"):
-        self.num_tracers = num_tracers
-        # Move designs to GPU for faster sampling
-        self.designs = designs.to(device)
+    def __init__(self, experiment, n_particles_per_device, device="cuda"):
+        self.experiment = experiment
         self.n_particles_per_device = n_particles_per_device
         self.device = device
-        self.observation_labels = observation_labels
-        self.target_labels = target_labels
 
     def __len__(self):
         # We only have one "batch" of designs, so return 1
@@ -63,25 +59,25 @@ class FlowLikelihoodDataset(Dataset):
 
     def __getitem__(self, idx):
         # Dynamically expand the designs on each access
-        expanded_design = lexpand(self.designs, self.n_particles_per_device).to(self.device)
+        expanded_design = lexpand(self.experiment.designs, self.n_particles_per_device).to(self.device)
 
         # Generate samples from the NumTracers pyro model
         with torch.no_grad():
             # Generate the samples directly on the GPU
-            trace = poutine.trace(self.num_tracers.pyro_model).get_trace(expanded_design)
+            trace = poutine.trace(self.experiment.pyro_model).get_trace(expanded_design)
             
             # Assuming trace values are already on the correct device from the model
-            y_dict = {l: trace.nodes[l]["value"] for l in self.observation_labels}
-            theta_dict = {l: trace.nodes[l]["value"] for l in self.target_labels}
+            y_dict = {l: trace.nodes[l]["value"] for l in self.experiment.observation_labels}
+            theta_dict = {l: trace.nodes[l]["value"] for l in self.experiment.cosmo_params}
 
             # Extract the target samples (theta)
-            samples = torch.cat([theta_dict[k].unsqueeze(dim=-1) for k in self.target_labels], dim=-1)
+            samples = torch.cat([theta_dict[k].unsqueeze(dim=-1) for k in self.experiment.cosmo_params], dim=-1)
 
             # Create the condition input
             condition_input = _create_condition_input(
                 design=expanded_design,
                 y_dict=y_dict,
-                observation_labels=self.observation_labels,
+                observation_labels=self.experiment.observation_labels,
                 condition_design=True
             )
 
@@ -89,14 +85,11 @@ class FlowLikelihoodDataset(Dataset):
         return condition_input, samples
 
 # Helper function for DataLoader with DistributedSampler
-def get_dataloader(num_tracers, designs, n_particles_per_device, observation_labels, target_labels, batch_size, pytorch_device_idx_for_ddp, num_workers=0, world_size=None):
+def get_dataloader(experiment, n_particles_per_device, batch_size, pytorch_device_idx_for_ddp, num_workers=0, world_size=None):
     # Create dataset with designs on GPU
     dataset = FlowLikelihoodDataset(
-        num_tracers=num_tracers,
-        designs=designs.to(f"cuda:{pytorch_device_idx_for_ddp}"),
+        experiment=experiment,
         n_particles_per_device=n_particles_per_device,
-        observation_labels=observation_labels,
-        target_labels=target_labels,
         device=f"cuda:{pytorch_device_idx_for_ddp}"
     )
     
@@ -111,9 +104,10 @@ def get_dataloader(num_tracers, designs, n_particles_per_device, observation_lab
     return dataloader
 
 def single_run(
+    cosmo_exp,
     cosmo_model,
     run_args,
-    mlflow_experiment_name,
+    mlflow_exp,
     device="cuda:0",
     profile=False,
     **kwargs
@@ -128,7 +122,6 @@ def single_run(
     gc.collect()
     pyro.clear_param_store()
     storage_path = os.environ["SCRATCH"] + "/bed/BED_cosmo/num_tracers"
-    home_dir = os.environ["HOME"]
     mlflow.set_tracking_uri(storage_path + "/mlruns")
     
     # Initialize MLflow experiment and run info on rank 0
@@ -139,114 +132,56 @@ def single_run(
         global_rank, 
         current_pytorch_device, 
         storage_path, 
-        mlflow_experiment_name, 
+        mlflow_exp, 
         cosmo_model, 
         run_args, 
         **kwargs
         )
 
-    desi_df = pd.read_csv(home_dir + run_args["data_path"] + 'desi_data.csv')
-    desi_tracers = pd.read_csv(home_dir + run_args["data_path"] + 'desi_tracers.csv')
-    nominal_cov = np.load(home_dir + run_args["data_path"] + 'desi_cov.npy')
-    
-    ############################################### Priors ###############################################
-
-    total_observations = 6565626
-    #classes = kwargs['classes']
-    classes = (desi_tracers.groupby('class').sum()['targets'].reindex(["LRG", "ELG", "QSO"]) / total_observations).to_dict()
-    # enforce lows:
-    classes["LRG"] = (0.0, classes["LRG"])
-    classes["ELG"] = (0.0, classes["ELG"])
-    classes["QSO"] = (0.0, classes["QSO"])
-    mlflow.log_dict(classes, "classes.json")
-    # Get nominal design from observed tracer counts
-    nominal_design = torch.tensor(desi_tracers.groupby('class').sum()['observed'].reindex(classes.keys()).values, device=current_pytorch_device)
-
-    num_tracers = NumTracers(
-        desi_df,
-        desi_tracers,
-        cosmo_model,
-        nominal_cov,
-        rank=global_rank,
-        include_D_M=run_args["include_D_M"], 
-        device=current_pytorch_device,
-        verbose=True
-        )
-    
-    target_labels = num_tracers.cosmo_params
-
-    ############################################### Designs ###############################################
-    # if fixed design:
-    if run_args["nominal_design"]:   
-        # Create grid with nominal design values
-        grid_designs = Grid(
-            N_LRG=nominal_design[0].cpu().numpy(), 
-            N_ELG=nominal_design[1].cpu().numpy(), 
-            N_QSO=nominal_design[2].cpu().numpy()
-        )
-
-        # Convert grid to tensor format
-        designs = torch.tensor(getattr(grid_designs, grid_designs.names[0]).squeeze(), device=current_pytorch_device).unsqueeze(0)
-        for name in grid_designs.names[1:]:
-            design_tensor = torch.tensor(getattr(grid_designs, name).squeeze(), device=current_pytorch_device).unsqueeze(0)
-            designs = torch.cat((designs, design_tensor), dim=0)
-        designs = designs.unsqueeze(0)
-
-    else:
-        # Create design grid with specified step size
-        designs_dict = {
-            f'N_{class_name}': np.arange(
-                max(class_frac[0], run_args["design_low"]),
-                min(class_frac[1] + run_args["design_step"], 1.0), 
-                run_args["design_step"]
-            ) for class_name, class_frac in classes.items()
-        }
-
-        # Create constrained grid ensuring designs sum to 1
-        tol = 1e-3
-        grid_designs = Grid(
-            **designs_dict, 
-            constraint=lambda **kwargs: abs(sum(kwargs.values()) - 1.0) < tol
-        )
-
-        # Convert to tensor format
-        designs = torch.tensor(getattr(grid_designs, grid_designs.names[0]).squeeze(), device=current_pytorch_device).unsqueeze(1)
-        for name in grid_designs.names[1:]:
-            design_tensor = torch.tensor(getattr(grid_designs, name).squeeze(), device=current_pytorch_device).unsqueeze(1)
-            designs = torch.cat((designs, design_tensor), dim=1)
-
+    if cosmo_exp == "num_tracers":
+        experiment = NumTracers(
+            data_path=run_args["data_path"],
+            cosmo_model=cosmo_model,
+            step=run_args["design_step"],
+            lower=run_args["design_lower"],
+            global_rank=global_rank,
+            fixed_design=run_args["fixed_design"],
+            include_D_M=run_args["include_D_M"], 
+            device=current_pytorch_device,
+            verbose=run_args["verbose"]
+            )
+    mlflow.log_dict(experiment.classes, "classes.json")
     # Only create prior plot if not resuming and on rank 0
     if not kwargs.get("resume_id", None) and global_rank == 0: # global_rank check
-        fig, axs = plt.subplots(ncols=len(target_labels), nrows=1, figsize=(5*len(target_labels), 5))
-        if len(target_labels) == 1:
+        fig, axs = plt.subplots(ncols=len(experiment.cosmo_params), nrows=1, figsize=(5*len(experiment.cosmo_params), 5))
+        if len(experiment.cosmo_params) == 1:
             axs = [axs]
-        for i, p in enumerate(target_labels):
-            support = num_tracers.priors[p].support
+        for i, p in enumerate(experiment.cosmo_params):
+            support = experiment.priors[p].support
             eval_pts = torch.linspace(support.lower_bound, support.upper_bound, 200, device=current_pytorch_device)
-            prob = torch.exp(num_tracers.priors[p].log_prob(eval_pts))[:-1]
+            prob = torch.exp(experiment.priors[p].log_prob(eval_pts))[:-1]
             prob_norm = prob/torch.sum(prob)
             axs[i].plot(eval_pts.cpu().numpy()[:-1], prob_norm.cpu().numpy(), label="Prior", color="tab:blue", alpha=0.5)
             axs[i].set_title(p)
         plt.tight_layout()
         plt.savefig(f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/plots/prior.png")
 
-    input_dim = len(target_labels)
-    context_dim = len(classes.keys()) + 10 if run_args["include_D_M"] else len(classes.keys()) + 5
+    context_dim = len(experiment.classes.keys()) + 10 if run_args["include_D_M"] else len(experiment.classes.keys()) + 5
     if global_rank == 0:
         print("MLFlow Run Info:", ml_info.experiment_id + "/" + ml_info.run_id)
         print(f"Using {run_args['n_devices']} devices with {run_args['n_particles']} total particles.")
-        print("Designs shape:", designs.shape)
+        print("Designs shape:", experiment.designs.shape)
         print("Calculating normalizing flow EIG...")
-        print(f'Input dim: {input_dim}, Context dim: {context_dim}')
-        print(f"Classes: {classes}\n"
+        print(f'Input dim: {len(experiment.cosmo_params)}, Context dim: {context_dim}')
+        print(f"Classes: {experiment.classes}\n"
             f"Cosmology: {cosmo_model}\n"
-            f"Target labels: {target_labels}")
-        np.save(f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/designs.npy", designs.cpu().detach().numpy())
+            f"Target labels: {experiment.cosmo_params}")
+        np.save(f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/designs.npy", experiment.designs.cpu().detach().numpy())
         mlflow.log_artifact(f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/designs.npy")
 
     posterior_flow = init_nf(
         run_args["flow_type"],
-        input_dim,
+        len(experiment.cosmo_params),
         context_dim,
         run_args,
         device=current_pytorch_device,
@@ -269,8 +204,10 @@ def single_run(
     
     posterior_flow = DDP(posterior_flow, device_ids=ddp_device_spec, output_device=ddp_output_device_spec, find_unused_parameters=False)
     
-    central_vals = num_tracers.central_val if run_args["include_D_M"] else num_tracers.central_val[1::2]
-    nominal_context = torch.cat([nominal_design, central_vals], dim=-1)
+    nominal_context = torch.cat([
+        experiment.nominal_design, 
+        experiment.central_val if run_args["include_D_M"] else experiment.central_val[1::2]
+        ], dim=-1)
     
     # Initialize optimizer
     if run_args["optimizer"] == "Adam":
@@ -377,11 +314,8 @@ def single_run(
     n_particles_per_device = run_args.get("n_particles_per_device", 500)
 
     dataloader = get_dataloader(
-        num_tracers=num_tracers,
-        designs=designs.cpu(),
+        experiment=experiment,
         n_particles_per_device=n_particles_per_device,
-        observation_labels=["y"],
-        target_labels=target_labels,
         batch_size=1,
         pytorch_device_idx_for_ddp=pytorch_device_idx if "LOCAL_RANK" in os.environ else effective_device_id,
         world_size=tdist.get_world_size() if "LOCAL_RANK" in os.environ else 1
@@ -503,12 +437,12 @@ def single_run(
             agg_loss, loss = nf_loss(context, posterior_flow.module, samples, rank=global_rank, verbose_shapes=verbose_shapes)
 
             # Aggregate global loss and agg_loss across all ranks
-            global_loss_tensor = loss.mean().detach()
-            global_agg_loss_tensor = agg_loss.detach()
-            tdist.all_reduce(global_loss_tensor, op=torch.distributed.ReduceOp.SUM)
-            tdist.all_reduce(global_agg_loss_tensor, op=torch.distributed.ReduceOp.SUM)
-            global_loss = global_loss_tensor.item() / tdist.get_world_size()
-            global_agg_loss = global_agg_loss_tensor.item() / tdist.get_world_size()
+            loss_tensor = loss.mean().detach()
+            agg_loss_tensor = agg_loss.detach()
+            tdist.all_reduce(loss_tensor, op=tdist.ReduceOp.SUM)
+            tdist.all_reduce(agg_loss_tensor, op=tdist.ReduceOp.SUM)
+            global_loss = loss_tensor.item() / tdist.get_world_size()
+            global_agg_loss = agg_loss_tensor.item() / tdist.get_world_size()
 
             # Backpropagation
             agg_loss.backward()
@@ -541,33 +475,16 @@ def single_run(
                     with torch.no_grad():
                         nominal_samples = posterior_flow(nominal_context).sample((5000,)).cpu().numpy()
                     nominal_samples[:, -1] *= 100000
-                    # Capture getdist output only on rank 0 to avoid clutter, ensure getdist is available
-                    if global_rank == 0: # Check global_rank
-                        try:
-                            with contextlib.redirect_stdout(io.StringIO()):
-                                nominal_samples_gd = getdist.mcsamples.MCSamples(samples=nominal_samples, names=target_labels, labels=num_tracers.latex_labels)
-                            local_nominal_area = get_contour_area(nominal_samples_gd, 'Om', 'hrdrag', 0.68)[0]
-                        except Exception as e:
-                            print(f"Rank 0: Error during getdist processing: {e}")
-                            local_nominal_area = float('nan')
-                    else: # Other ranks don't compute area directly but need a value for aggregation
-                        local_nominal_area = 0.0 # Or float('nan') if that's better for averaging
-
+                    with contextlib.redirect_stdout(io.StringIO()):
+                        nominal_samples_gd = getdist.mcsamples.MCSamples(samples=nominal_samples, names=experiment.cosmo_params, labels=experiment.latex_labels)
+                    local_nominal_area = get_contour_area(nominal_samples_gd, 'Om', 'hrdrag', 0.68)[0]
+                    mlflow.log_metric(f"nominal_area_rank_{global_rank}", local_nominal_area, step=step)
+                    
                     # Aggregate the nominal areas across all ranks
-                    nominal_area_tensor = torch.tensor(local_nominal_area, device=current_pytorch_device)
-                    tdist.all_reduce(nominal_area_tensor, op=tdist.ReduceOp.SUM)
-                    # For area, if only rank 0 computes it, broadcasting might be better than summing zeros.
-                    # Or ensure all ranks compute it if data is available, or rank 0 broadcasts its result.
-                    # Assuming rank 0 computes and then we want that value:
-                    if global_rank == 0:
-                        global_nominal_area_val = local_nominal_area # Rank 0 has the actual value
-                    else:
-                        global_nominal_area_val = nominal_area_tensor.item() # Should be 0 if others sent 0
+                    local_nominal_area_tensor = torch.tensor(local_nominal_area, device=current_pytorch_device)
+                    tdist.all_reduce(local_nominal_area_tensor, op=tdist.ReduceOp.SUM)
+                    global_nominal_area = local_nominal_area_tensor.item() / tdist.get_world_size()
 
-                    # Broadcast the actual area from rank 0 to all other ranks
-                    area_to_broadcast = torch.tensor([global_nominal_area_val if global_rank == 0 else 0.0], device=current_pytorch_device)
-                    tdist.broadcast(area_to_broadcast, src=0)
-                    global_nominal_area = area_to_broadcast.item()
                     if global_rank == 0:
                         mlflow.log_metric("nominal_area", global_nominal_area, step=step)
 
@@ -642,7 +559,11 @@ def single_run(
             nominal_samples[:, -1] *= 100000
             try:
                 with contextlib.redirect_stdout(io.StringIO()):
-                    nominal_samples_gd = getdist.mcsamples.MCSamples(samples=nominal_samples, names=target_labels, labels=num_tracers.latex_labels)
+                    nominal_samples_gd = getdist.mcsamples.MCSamples(
+                        samples=nominal_samples, 
+                        names=experiment.cosmo_params, 
+                        labels=experiment.latex_labels
+                        )
                 last_nominal_area = get_contour_area(nominal_samples_gd, 'Om', 'hrdrag', 0.68)[0]
             except Exception as e:
                 print(f"Rank 0: Error during getdist processing: {e}")
@@ -684,14 +605,15 @@ if __name__ == '__main__':
     # --- Argument Parsing --- 
     cosmo_model_default = 'base' 
     default_args = run_args_dict[cosmo_model_default]
-    default_exp_name = f"{cosmo_model_default}_{default_args['flow_type']}"
+    default_mlflow_exp_name = f"{cosmo_model_default}_{default_args['flow_type']}"
 
     parser = argparse.ArgumentParser(description="Run Number Tracers Training")
 
     # Add arguments dynamically based on the default config file
+    parser.add_argument('--cosmo_exp', type=str, default='num_tracers', help='Cosmological experiment name')
+    parser.add_argument('--mlflow_exp', type=str, default=default_mlflow_exp_name, help='MLflow experiment name')
     parser.add_argument('--cosmo_model', type=str, default=cosmo_model_default, help='Cosmological model set to use from run_args.json')
     parser.add_argument('--device', type=str, default='cuda:0', help='Device to use for training')
-    parser.add_argument('--exp_name', type=str, default=default_exp_name, help='Experiment name')
 
     # Add arguments for resuming from a checkpoint
     parser.add_argument('--resume_id', type=str, default=None, help='MLflow run ID to resume training from (continues existing run with same parameters)')
@@ -719,8 +641,6 @@ if __name__ == '__main__':
             parser.add_argument(f'--{key}', type=str, default=None, help=f'Override {key} (default: {value})')
 
     args = parser.parse_args()
-    cosmo_model = args.cosmo_model
-    device = args.device
 
     # Validate checkpoint loading arguments
     if args.resume_id and args.restart_id:
@@ -749,7 +669,7 @@ if __name__ == '__main__':
         raise ValueError("--add_steps can only be used with --resume_id")
 
     # --- Prepare Final Config --- 
-    run_args = run_args_dict[cosmo_model].copy() # Start with defaults for the chosen model
+    run_args = run_args_dict[args.cosmo_model].copy() # Start with defaults for the chosen model
 
     # Override defaults with any provided command-line arguments
     args_dict = vars(args)
@@ -808,9 +728,10 @@ if __name__ == '__main__':
         kwargs = {}
 
     single_run(
-        cosmo_model=cosmo_model,
+        cosmo_exp=args.cosmo_exp,
+        cosmo_model=args.cosmo_model,
         run_args=run_args,
-        mlflow_experiment_name=args.exp_name,
+        mlflow_exp=args.mlflow_exp,
         device=script_level_device_str,
         profile=args.profile,
         **kwargs

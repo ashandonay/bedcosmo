@@ -400,7 +400,7 @@ def init_run(
         global_rank, 
         current_pytorch_device, 
         storage_path, 
-        mlflow_experiment_name, 
+        mlflow_exp, 
         cosmo_model, 
         run_args, 
         **kwargs
@@ -447,7 +447,7 @@ def init_run(
             validate_checkpoint_compatibility(checkpoint, run_args, mode="restart", global_rank=global_rank)
 
         if global_rank == 0:
-            mlflow.set_experiment(mlflow_experiment_name)
+            mlflow.set_experiment(mlflow_exp)
             mlflow.start_run()
             # Set n_devices and n_particles using the world size and n_particles_per_device
             run_args["n_devices"] = tdist.get_world_size() if "LOCAL_RANK" in os.environ else 1
@@ -473,7 +473,7 @@ def init_run(
             tensors = _prepare_broadcast_tensors(
                 mlflow.active_run().info.experiment_id, start_step, 
                 best_loss, best_nominal_area, current_pytorch_device,
-                mlflow.active_run().info.run_id, mlflow_experiment_name
+                mlflow.active_run().info.run_id, mlflow_exp
             )
             print(f"Running with parameters for cosmo_model='{cosmo_model}':")
             print(json.dumps(run_args, indent=2))
@@ -485,14 +485,14 @@ def init_run(
                 'best_loss': torch.zeros(1, dtype=torch.float64, device=current_pytorch_device),
                 'best_nominal_area': torch.zeros(1, dtype=torch.float64, device=current_pytorch_device),
                 'run_id': [None],
-                'exp_name': [None]
+                'mlflow_exp': [None]
                 }
     else:
         client = mlflow.MlflowClient()
         # Resume existing run
         run_info = client.get_run(kwargs["resume_id"])
         exp_id = run_info.info.experiment_id
-        exp_name = mlflow.get_experiment(exp_id).name
+        mlflow_exp = mlflow.get_experiment(exp_id).name
         checkpoint_dir = f"{storage_path}/mlruns/{exp_id}/{kwargs['resume_id']}/artifacts/checkpoints"
         # Load the checkpoint
         checkpoint, start_step = get_checkpoint(
@@ -516,7 +516,6 @@ def init_run(
             print(f"Add Steps: {kwargs['add_steps']}")
             print("Will continue existing MLflow run with original parameters")
             # Update run parameters
-            mlflow_experiment_name = exp_name
             cosmo_model = run_info.data.params["cosmo_model"]
             run_args = parse_mlflow_params(run_info.data.params)
             if kwargs.get("add_steps", None):
@@ -532,7 +531,7 @@ def init_run(
             # Prepare tensors for broadcasting
             tensors = _prepare_broadcast_tensors(
                 exp_id, start_step, best_loss, best_nominal_area, 
-                current_pytorch_device, kwargs["resume_id"], exp_name
+                current_pytorch_device, kwargs["resume_id"], mlflow_exp
             )
         else:
             # Initialize tensors on other ranks
@@ -542,7 +541,7 @@ def init_run(
                 'best_loss': torch.zeros(1, dtype=torch.float64, device=current_pytorch_device),
                 'best_nominal_area': torch.zeros(1, dtype=torch.float64, device=current_pytorch_device),
                 'run_id': [None],
-                'exp_name': [None]
+                'mlflow_exp': [None]
                 }
     _broadcast_variables(tensors, global_rank, run_args, tdist)
 
@@ -587,7 +586,7 @@ def _broadcast_variables(tensors, global_rank, run_args,tdist):
     tdist.broadcast(tensors['best_loss'], src=0)
     tdist.broadcast(tensors['best_nominal_area'], src=0)
     tdist.broadcast_object_list(tensors['run_id'], src=0)
-    tdist.broadcast_object_list(tensors['exp_name'], src=0)
+    tdist.broadcast_object_list(tensors['mlflow_exp'], src=0)
 
 def _get_resume_metrics(client, resume_id, resume_step):
     """Get metrics from previous run for resuming."""
@@ -606,7 +605,7 @@ def _get_resume_metrics(client, resume_id, resume_step):
     
     return best_nominal_area, best_loss
 
-def _prepare_broadcast_tensors(exp_id, start_step, best_loss, best_nominal_area, device, run_id, exp_name):
+def _prepare_broadcast_tensors(exp_id, start_step, best_loss, best_nominal_area, device, run_id, mlflow_exp):
     """Prepare tensors for broadcasting."""
     return {
         'exp_id': torch.tensor([int(exp_id)], dtype=torch.long, device=device),
@@ -614,15 +613,15 @@ def _prepare_broadcast_tensors(exp_id, start_step, best_loss, best_nominal_area,
         'best_loss': torch.tensor([best_loss], dtype=torch.float64, device=device),
         'best_nominal_area': torch.tensor([best_nominal_area], dtype=torch.float64, device=device),
         'run_id': [run_id],
-        'exp_name': [exp_name]
+        'mlflow_exp': [mlflow_exp]
     }
 
-def get_runs_data(exp_name=None, run_ids=None, excluded_runs=[], filter_string=None, parse_params=False):
+def get_runs_data(mlflow_exp=None, run_ids=None, excluded_runs=[], filter_string=None, parse_params=False):
     """
     Fetches run data from MLflow based on experiment name or run IDs.
 
     Args:
-        exp_name (str, optional): Name of the MLflow experiment.
+        mlflow_exp (str, optional): Name of the MLflow experiment.
         run_ids (str or list, optional): A single run ID or a list of run IDs.
         excluded_runs (list, optional): A list of run IDs to exclude from the result.
         filter_string (str, optional): An MLflow filter string to apply when searching for runs.
@@ -638,16 +637,16 @@ def get_runs_data(exp_name=None, run_ids=None, excluded_runs=[], filter_string=N
     client = MlflowClient()
     run_data_list = []
     experiment_id = None
-    actual_exp_name = exp_name
+    actual_mlflow_exp = mlflow_exp
 
-    if exp_name is not None:
+    if mlflow_exp is not None:
         try:
-            exp = client.get_experiment_by_name(exp_name)
+            exp = client.get_experiment_by_name(mlflow_exp)
             if exp is None:
-                print(f"Error: Experiment '{exp_name}' not found.")
+                print(f"Error: Experiment '{mlflow_exp}' not found.")
                 return [], None, None
             experiment_id = exp.experiment_id
-            actual_exp_name = exp.name
+            actual_mlflow_exp = exp.name
             
             run_infos = client.search_runs(
                 experiment_ids=[experiment_id],
@@ -666,7 +665,7 @@ def get_runs_data(exp_name=None, run_ids=None, excluded_runs=[], filter_string=N
                         'exp_id': run_obj.info.experiment_id
                     })
         except Exception as e:
-            print(f"Error fetching runs for experiment '{exp_name}': {e}")
+            print(f"Error fetching runs for experiment '{mlflow_exp}': {e}")
             return [], None, None
             
     elif run_ids is not None:
@@ -682,12 +681,12 @@ def get_runs_data(exp_name=None, run_ids=None, excluded_runs=[], filter_string=N
                 run_obj = client.get_run(rid)
                 if experiment_id is None:
                     experiment_id = run_obj.info.experiment_id
-                    if actual_exp_name is None:
+                    if actual_mlflow_exp is None:
                         try:
                             exp = client.get_experiment(experiment_id)
-                            actual_exp_name = exp.name if exp else "Selected Runs"
+                            actual_mlflow_exp = exp.name if exp else "Selected Runs"
                         except Exception:
-                            actual_exp_name = "Selected Runs (from run_id)"
+                            actual_mlflow_exp = "Selected Runs (from run_id)"
 
                 params = parse_mlflow_params(run_obj.data.params) if parse_params else run_obj.data.params
                 run_data_list.append({
@@ -700,14 +699,14 @@ def get_runs_data(exp_name=None, run_ids=None, excluded_runs=[], filter_string=N
             except Exception as e:
                 print(f"Warning: Could not fetch data for run {rid}: {e}. Skipping this run.")
     else:
-        print("Either exp_name or run_ids must be provided.")
+        print("Either mlflow_exp or run_ids must be provided.")
         return [], None, None
 
     if not run_data_list:
         print("No runs found to process.")
         return [], None, None
 
-    return run_data_list, experiment_id, actual_exp_name
+    return run_data_list, experiment_id, actual_mlflow_exp
 
 
 def run_eval(run_obj, parsed_run_params, eval_args, step='loss_best', cosmo_exp='num_tracers', run_id_for_fallback_only=None, global_rank=0):
@@ -731,11 +730,11 @@ def run_eval(run_obj, parsed_run_params, eval_args, step='loss_best', cosmo_exp=
     with open(mlflow.artifacts.download_artifacts(run_id=current_run_id, artifact_path="classes.json")) as f:
         classes = json.load(f)
     # Pass run_obj, parsed_run_params (which should be consistent with run_obj), and classes
-    likelihood = init_likelihood(parsed_run_params, eval_args, cosmo_exp)
-    posterior_flow = load_model(likelihood, step, run_obj, parsed_run_params, classes, eval_args, cosmo_exp, global_rank=global_rank)
+    experiment = init_experiment(cosmo_exp, parsed_run_params, eval_args)
+    posterior_flow = load_model(experiment, step, run_obj, parsed_run_params, classes, eval_args, global_rank=global_rank)
 
-    nominal_design = torch.tensor(likelihood.desi_tracers.groupby('class').sum()['observed'].reindex(classes.keys()).values, device=eval_args["device"], dtype=torch.float64)
-    central_vals = likelihood.central_val if parsed_run_params.get("include_D_M", False) else likelihood.central_val[1::2]
+    nominal_design = torch.tensor(experiment.desi_tracers.groupby('class').sum()['observed'].reindex(classes.keys()).values, device=eval_args["device"], dtype=torch.float64)
+    central_vals = experiment.central_val if parsed_run_params.get("include_D_M", False) else experiment.central_val[1::2]
     nominal_context = torch.cat([nominal_design, central_vals], dim=-1)
 
     np.random.seed(eval_args["eval_seed"])
@@ -746,41 +745,36 @@ def run_eval(run_obj, parsed_run_params, eval_args, step='loss_best', cosmo_exp=
     nominal_samples[:, -1] *= 100000
 
     with contextlib.redirect_stdout(io.StringIO()):
-        samples = getdist.MCSamples(samples=nominal_samples, names=likelihood.cosmo_params, labels=likelihood.latex_labels, settings={'ignore_rows': 0.0})
+        samples = getdist.MCSamples(samples=nominal_samples, names=experiment.cosmo_params, labels=experiment.latex_labels, settings={'ignore_rows': 0.0})
     return samples
 
-def init_likelihood(run_args, eval_args, cosmo_exp='num_tracers'):
+def init_experiment(cosmo_exp, run_args, eval_args, design_args=None):
     data_path_param = run_args.get("data_path", "") 
-    data_path = home_dir + data_path_param
-    
+    if design_args is None:
+        design_args = {
+            "design_lower": run_args.get("design_lower", 0.05),
+            "design_step": run_args.get("design_step", 0.05),
+            "fixed_design": run_args.get("fixed_design", False)
+            }
     if cosmo_exp == 'num_tracers':
-        desi_df = pd.read_csv(data_path + 'desi_data.csv')
-        desi_tracers = pd.read_csv(data_path + 'desi_tracers.csv')
-        nominal_cov = np.load(data_path + 'desi_cov.npy')
-
-        cosmo_model = run_args.get("cosmo_model", None)
-        if cosmo_model is None:
-            raise ValueError("cosmo_model is required for num_tracers")
-        
-        likelihood = NumTracers(
-            desi_df, 
-            desi_tracers,
-            cosmo_model,
-            nominal_cov,
+        experiment = NumTracers(
+            data_path_param,
+            run_args.get("cosmo_model", "base"),
+            design_args.get("design_step", 0.05),
+            design_args.get("design_lower", 0.05),
+            fixed_design=design_args.get("fixed_design", False),
+            global_rank=0,
             device=eval_args["device"],
             include_D_M=run_args.get("include_D_M", False) 
             )
     else:
         raise ValueError(f"{cosmo_exp} not supported")
-    return likelihood
+    return experiment
     
-def eval_designs(
-        designs, 
-        nominal_design, 
+def eval_eigs(
+        experiment, 
         run_args, 
         posterior_flow, 
-        likelihood, 
-        target_labels, 
         n_evals=10,
         eval_particles=1000
         ):
@@ -803,29 +797,28 @@ def eval_designs(
     nominal_eig_batch = []
     for n in range(n_evals):
         with torch.no_grad():
-            agg_loss, eigs = posterior_loss(design=designs,
-                                            model=likelihood.pyro_model,
+            agg_loss, eigs = posterior_loss(
+                                            experiment=experiment,
                                             guide=posterior_flow,
                                             num_particles=eval_particles,
-                                            observation_labels=["y"],
-                                            target_labels=target_labels,
                                             evaluation=True,
                                             nflow=True,
                                             analytic_prior=False,
-                                            condition_design=run_args["condition_design"])
+                                            condition_design=run_args["condition_design"]
+                                            )
         eigs_batch.append(eigs.cpu().numpy()/np.log(2))
 
         with torch.no_grad():
-            agg_loss, nominal_eig = posterior_loss(design=nominal_design.unsqueeze(0),
-                                            model=likelihood.pyro_model,
+            agg_loss, nominal_eig = posterior_loss(
+                                            experiment=experiment,
                                             guide=posterior_flow,
                                             num_particles=eval_particles,
-                                            observation_labels=["y"],
-                                            target_labels=target_labels,
                                             evaluation=True,
                                             nflow=True,
                                             analytic_prior=False,
-                                            condition_design=run_args["condition_design"])
+                                            condition_design=run_args["condition_design"],
+                                            nominal_design=True
+                                            )
         nominal_eig_batch.append(nominal_eig.cpu().numpy()/np.log(2))
 
     eigs_batch = np.array(eigs_batch)
@@ -836,23 +829,22 @@ def eval_designs(
     eigs_se = eigs_std/np.sqrt(n_evals)
     avg_nominal_eig = np.mean(nominal_eig_batch, axis=0).item()
 
-    optimal_design = designs[np.argmax(avg_eigs)]
-    print("Optimal design (NF):", optimal_design, "Optimal EIG:", np.max(avg_eigs))
+    optimal_design = experiment.designs[np.argmax(avg_eigs)]
     return avg_eigs, np.max(avg_eigs), avg_nominal_eig, optimal_design
 
-def load_model(likelihood, step, run_obj, parsed_run_params, classes, eval_args, cosmo_exp='num_tracers', global_rank=0):
+def load_model(experiment, step, run_obj, parsed_run_params, classes, eval_args, global_rank=0):
     # Assumes run_obj is the MLflow Run object and parsed_run_params is the output of parse_mlflow_params(run_obj.data.params)
     # classes is the already loaded content of classes.json
-    storage_path = os.environ["SCRATCH"] + f"/bed/BED_cosmo/{cosmo_exp}"
+    storage_path = os.environ["SCRATCH"] + f"/bed/BED_cosmo/{experiment.name}"
 
     current_run_id = run_obj.info.run_id
     exp_id = run_obj.info.experiment_id
     
-    if cosmo_exp == 'num_tracers':
-        input_dim = len(likelihood.cosmo_params)
+    if experiment.name == 'num_tracers':
+        input_dim = len(experiment.cosmo_params)
         context_dim = len(classes.keys()) + 10 if parsed_run_params.get("include_D_M", False) else len(classes.keys()) + 5
     else:
-        raise ValueError(f"{cosmo_exp} not supported")
+        raise ValueError(f"{experiment.name} not supported")
     
     nf_seed_from_params = parsed_run_params.get("nf_seed")
     nf_seed_for_init = None
@@ -873,8 +865,8 @@ def load_model(likelihood, step, run_obj, parsed_run_params, classes, eval_args,
         )
 
     effective_step = step
-    if step == parsed_run_params.get("total_steps"): 
-        effective_step = 'last'
+    if step == 'last': 
+        effective_step = parsed_run_params.get("total_steps")
     
     checkpoint_dir = f'{storage_path}/mlruns/{exp_id}/{current_run_id}/artifacts/checkpoints/'
     if not os.path.isdir(checkpoint_dir):
@@ -892,20 +884,20 @@ def load_model(likelihood, step, run_obj, parsed_run_params, classes, eval_args,
     
     return posterior_flow
 
-def calc_entropy(design, posterior_flow, likelihood, num_samples):
-    # sample values of y from likelihood.pyro_model
+def calc_entropy(design, posterior_flow, experiment, num_samples):
+    # sample values of y from experiment.pyro_model
     expanded_design = lexpand(design.unsqueeze(0), num_samples)
-    y = likelihood.pyro_model(expanded_design)
+    y = experiment.pyro_model(expanded_design)
     nominal_context = torch.cat([expanded_design, y], dim=-1)
-    passed_ratio = likelihood.calc_passed(expanded_design)
-    constrained_parameters = likelihood.sample_valid_parameters(passed_ratio.shape[:-1])
+    passed_ratio = experiment.calc_passed(expanded_design)
+    constrained_parameters = experiment.sample_valid_parameters(passed_ratio.shape[:-1])
     with pyro.plate_stack("plate", passed_ratio.shape[:-1]):
         # register samples in the trace using pyro.sample
         parameters = {}
         for k, v in constrained_parameters.items():
             # use dist.Delta to fix the value of each parameter
             parameters[k] = pyro.sample(k, dist.Delta(v)).unsqueeze(-1)
-    evaluate_samples = torch.cat([parameters[k].unsqueeze(dim=-1) for k in likelihood.cosmo_params], dim=-1)
+    evaluate_samples = torch.cat([parameters[k].unsqueeze(dim=-1) for k in experiment.cosmo_params], dim=-1)
     flattened_samples = torch.flatten(evaluate_samples, start_dim=0, end_dim=len(expanded_design.shape[:-1])-1)
     samples = posterior_flow(nominal_context).log_prob(flattened_samples)
     # calculate entropy of samples
@@ -980,6 +972,19 @@ def parse_mlflow_params(params_dict):
 
     return parsed_params
 
+def sort_key_for_group_tuple(group_tuple_key):
+    key_as_num_or_str = []
+    for val_in_tuple in group_tuple_key:
+        try:
+            # Attempt to convert to float for numeric sorting, otherwise use string
+            key_as_num_or_str.append(float(val_in_tuple))
+        except (ValueError, TypeError): # TypeError if val_in_tuple is already a non-string number like int
+            if isinstance(val_in_tuple, (int, float)):
+                key_as_num_or_str.append(val_in_tuple)
+            else:
+                key_as_num_or_str.append(str(val_in_tuple)) 
+    return tuple(key_as_num_or_str)
+    
 def get_checkpoints(run_id, steps, checkpoint_files, type='all', cosmo_exp='num_tracers', verbose=False):
     storage_path = os.environ["SCRATCH"] + f"/bed/BED_cosmo/{cosmo_exp}"
     mlflow.set_tracking_uri(storage_path + "/mlruns")
