@@ -170,23 +170,21 @@ def single_run(
     if global_rank == 0:
         print("MLFlow Run Info:", ml_info.experiment_id + "/" + ml_info.run_id)
         print(f"Using {run_args['n_devices']} devices with {run_args['n_particles']} total particles.")
+        print(f"Design classes: {experiment.classes}")
         print("Designs shape:", experiment.designs.shape)
         print("Calculating normalizing flow EIG...")
         print(f'Input dim: {len(experiment.cosmo_params)}, Context dim: {context_dim}')
-        print(f"Classes: {experiment.classes}\n"
-            f"Cosmology: {cosmo_model}\n"
-            f"Target labels: {experiment.cosmo_params}")
+        print(f"Cosmology: {cosmo_model}")
+        print(f"Target labels: {experiment.cosmo_params}")
         np.save(f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/designs.npy", experiment.designs.cpu().detach().numpy())
         mlflow.log_artifact(f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/designs.npy")
 
     posterior_flow = init_nf(
-        run_args["flow_type"],
+        run_args,
         len(experiment.cosmo_params),
         context_dim,
-        run_args,
         device=current_pytorch_device,
-        seed=run_args["nf_seed"],
-        verbose=True
+        seed=run_args["nf_seed"]
     )
     # For DDP, ensure device_ids and output_device use the pytorch_device_idx (which is 0)
     if "LOCAL_RANK" in os.environ and torch.cuda.is_available():
@@ -551,24 +549,8 @@ def single_run(
     if global_rank == 0:
         print(f"Saved last rank-specific checkpoints for all ranks")
 
-    ########################################## Final Evaluation ##########################################
+    ########################################## Final Plots ##########################################
     if global_rank == 0:
-        if run_args["log_nominal_area"]:
-            with torch.no_grad():
-                nominal_samples = posterior_flow(nominal_context).sample((5000,)).cpu().numpy()
-            nominal_samples[:, -1] *= 100000
-            try:
-                with contextlib.redirect_stdout(io.StringIO()):
-                    nominal_samples_gd = getdist.mcsamples.MCSamples(
-                        samples=nominal_samples, 
-                        names=experiment.cosmo_params, 
-                        labels=experiment.latex_labels
-                        )
-                last_nominal_area = get_contour_area(nominal_samples_gd, 'Om', 'hrdrag', 0.68)[0]
-            except Exception as e:
-                print(f"Rank 0: Error during getdist processing: {e}")
-                last_nominal_area = float('nan')
-            mlflow.log_metric("nominal_area", last_nominal_area, step=step)
         plot_training(
             run_id=ml_info.run_id,
             var=None,
@@ -577,7 +559,6 @@ def single_run(
             area_step_freq=100,
             show_best=False
         )
-
         plt.close('all')
         print("Run", ml_info.experiment_id + "/" + ml_info.run_id, "completed.")
     

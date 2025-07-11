@@ -22,14 +22,12 @@ from matplotlib.path import Path
 from scipy.spatial import ConvexHull
 import matplotlib.colors
 import warnings
-import contextlib
-import torch
 from datetime import datetime
 from pyro_oed_src import posterior_loss
 import json
 from IPython.display import display
 
-def plot_posterior(samples, colors, legend_labels=None, show_scatter=False, line_style="-", levels=[0.68, 0.95]):
+def plot_posterior(samples, colors, legend_labels=None, show_scatter=False, line_style="-", alpha=1.0, levels=[0.68, 0.95]):
     """
     Plots posterior distributions using GetDist triangle plots.
 
@@ -39,6 +37,7 @@ def plot_posterior(samples, colors, legend_labels=None, show_scatter=False, line
         legend_labels (list, optional): List of legend labels for each sample.
         show_scatter (bool): If True, show scatter/histograms on the 1D/2D plots.
         line_style (str or list): Line style for contours. Can be a single string or a list of strings corresponding to each sample.
+        alpha (float or list): Alpha value for the contours. Can be a single float or a list of floats corresponding to each sample.
         levels (float or list, optional): Contour levels to use (e.g., 0.68 or [0.68, 0.95]).
             If a single float is provided, it is converted to a list.
             If None, the default GetDist settings are used.
@@ -77,9 +76,10 @@ def plot_posterior(samples, colors, legend_labels=None, show_scatter=False, line
         elif len(line_style) > len(samples):
             # Truncate if too many elements
             line_style = line_style[:len(samples)]
-
+            
     # Set line styles in GetDist settings
     g.settings.line_styles = line_style
+    g.settings.plot_args = {'alpha': alpha}
 
     # Prepare contour_args with custom levels if provided
     # For GetDist, we don't pass line styles in contour_args when using multiple styles
@@ -154,7 +154,7 @@ def plot_run(run_id, eval_args, show_scatter=False, cosmo_exp='num_tracers'):
         print(f"Run {run_id} not found.")
         return
     run_data = run_data_list[0]
-    samples = run_eval(run_data['run_obj'], run_data['params'], eval_args, cosmo_exp=cosmo_exp, global_rank=0)
+    samples, _ = get_nominal_samples(run_data['run_obj'], run_data['params'], eval_args, cosmo_exp=cosmo_exp, global_rank=0)
     g = plot_posterior(samples, ["tab:blue"], show_scatter=show_scatter)
     plt.show()
 
@@ -556,11 +556,9 @@ def plot_training(
                 ax_lr.set_ylim(min_lr_overall * 0.9, min_lr_overall * 1.1)
 
     # Adjust layout
-    plt.tight_layout(rect=[0, 0, 1, 0.97])
-
-    # --- Title and Saving ---
-    title_suffix = f" - {mlflow_exp}" if mlflow_exp else f" - {len(run_data_list)} Run(s)"
-    fig.suptitle(f"Training Evolution{title_suffix}", fontsize=16)
+    title = f"Training Evolution - {mlflow_exp}" if mlflow_exp else f"Training Evolution - {len(run_data_list)} Run(s)"
+    fig.set_constrained_layout(True)
+    fig.suptitle(title, fontsize=16)
 
     # Determine save path
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -595,7 +593,7 @@ def plot_training(
         save_path = f"{save_dir}/training_comparison_{timestamp}.png"
 
     os.makedirs(save_dir, exist_ok=True)
-    show_figure(save_path)
+    show_figure(save_path, fig=fig)
     plt.close(fig)
 
 def compare_posterior(
@@ -603,22 +601,28 @@ def compare_posterior(
         run_ids=None,
         var=None,
         filter_string=None,
-        eval_args=None,
+        guide_samples=10000,
         show_scatter=False,
         excluded_runs=[],
         level=0.68,
         cosmo_exp='num_tracers',
         step='loss_best',
+        seed=1,
+        device="cuda:0",
         global_rank=0
         ):
-    """Compares posterior distributions across multiple runs.
+    """
+    Compares posterior distributions across multiple runs.
     
     Args:
         mlflow_exp (str, optional): Name of the MLflow experiment.
         run_ids (list, optional): List of specific run IDs to compare.
         var (str or list, optional): Parameter(s) to group runs by. If None, each run is a separate group.
         filter_string (str, optional): MLflow filter string.
-        eval_args (dict, optional): Arguments for run_eval.
+        guide_samples (int, optional): Number of samples to draw from the posterior (guide).
+        seed (int, optional): Random seed.
+        device (str, optional): Device to use.
+        global_rank (int or list, optional): Global rank(s) to evaluate. If list, plots all ranks with same color per run.
         show_scatter (bool): Whether to show scatter points.
         excluded_runs (list): List of run IDs to exclude.
         level (float): Contour level.
@@ -626,11 +630,7 @@ def compare_posterior(
         step (str or int): Checkpoint to evaluate.
         global_rank (int or list): Global rank(s) to evaluate. If list, plots all ranks with same color per run.
     """
-    client = MlflowClient()
     
-    if eval_args is None:
-        eval_args = {"n_samples": 10000, "device": "cuda:0", "eval_seed": 1}
-
     # Convert global_rank to list if it's a single value
     global_ranks = global_rank if isinstance(global_rank, list) else [global_rank]
 
@@ -700,13 +700,19 @@ def compare_posterior(
         group_samples = []
         group_areas = []
         
-        for run_data_item in group_runs:
-            run_obj = run_data_item['run_obj']
-            params = run_data_item['params']
-            
+        for run_data_item in group_runs:  
             # Get samples for all ranks
             for rank in global_ranks:
-                samples_obj = run_eval(run_obj, params, eval_args, step=step, cosmo_exp=cosmo_exp, global_rank=rank)
+                samples_obj, selected_step = get_nominal_samples(
+                    run_data_item['run_obj'], 
+                    run_data_item['params'], 
+                    guide_samples=guide_samples,
+                    seed=seed,
+                    device=device,
+                    step=step, 
+                    cosmo_exp=cosmo_exp, 
+                    global_rank=rank
+                    )
                 if samples_obj is not None:
                     group_samples.append(samples_obj)
                     area = get_contour_area([samples_obj], 'Om', 'hrdrag', level)[0]
@@ -763,21 +769,21 @@ def compare_posterior(
         for legend in g.fig.legends:
             legend.remove()
     
-    g.fig.legend(handles=legend_handles, loc='upper right', bbox_to_anchor=(1, 0.99))
-    
     # Set title
     if var:
         title_vars_str = ', '.join(vars_list)
-        title = f'Posterior comparison grouped by {title_vars_str} ({len(run_data_list)} total run(s))\nStep: {step}'
+        title = f'Posterior comparison grouped by {title_vars_str} ({len(run_data_list)} total run(s)), Step: {step}'
     else:
         plot_title_exp_part = actual_mlflow_exp_for_title if actual_mlflow_exp_for_title else "Selected Runs"
-        title = f'Posterior comparison for {plot_title_exp_part}\nStep: {step}'
+        title = f'Posterior comparison for {plot_title_exp_part}, Step: {step}'
         if filter_string:
             title += f' (filter: {filter_string})'
-    
-    g.fig.suptitle(title, y=1.03)
 
-    plt.tight_layout(rect=[0, 0.03, 1, 0.95]) # Adjusted rect to prevent title overlap with legend
+    g.fig.set_constrained_layout(True)
+    leg = g.fig.legend(handles=legend_handles, loc='upper right', bbox_to_anchor=(0.99, 0.96))
+    leg.set_in_layout(False)
+    g.fig.suptitle(title)
+
     storage_path_base = os.environ["SCRATCH"] + f"/bed/BED_cosmo/{cosmo_exp}"
     
     save_dir = f"{storage_path_base}/plots"
@@ -788,7 +794,7 @@ def compare_posterior(
     elif not mlflow_exp and run_ids and len(run_data_list) == 1 and experiment_id_for_save_path:
         single_run_id_for_path = run_data_list[0]['run_id']
         save_dir = f"{storage_path_base}/mlruns/{experiment_id_for_save_path}/{single_run_id_for_path}/artifacts/plots"
-        filename_prefix = f"posterior_step_{step}"
+        filename_prefix = f"posterior_step_{selected_step}"
 
     os.makedirs(save_dir, exist_ok=True)
     save_filename = f"{filename_prefix}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
@@ -800,7 +806,7 @@ def compare_posterior(
     elif plt.get_fignums():
         fig_to_close = plt.gcf()
 
-    show_figure(last_save_path)
+    show_figure(last_save_path, fig=g.fig)
 
     if fig_to_close and fig_to_close in plt.get_fignums():
          plt.close(fig_to_close)
@@ -843,13 +849,33 @@ def get_contour_area(samples, param1, param2, level=0.68):
     plt.close(temp_fig) 
     return areas
 
-def compare_contours(run_ids, param1, param2, eval_args, steps='best', level=0.68, show_grid=False):
+def compare_contours(
+        run_ids, 
+        param1, 
+        param2, 
+        guide_samples=10000,
+        seed=1,
+        device="cuda:0",
+        global_rank=0,
+        steps='best', 
+        cosmo_exp='num_tracers',
+        level=0.68, 
+        show_grid=False
+        ):
     samples = []
     run_ids = [run_ids] if type(run_ids) != list else run_ids
     steps = [steps] if type(steps) != list else steps
     for run_id in run_ids:
         for step in steps:
-            samples.append(run_eval(run_id, eval_args, step=step))
+            samples.append(get_nominal_samples(
+                run_id, 
+                guide_samples=guide_samples,
+                seed=seed,
+                device=device,
+                step=step, 
+                cosmo_exp=cosmo_exp, 
+                global_rank=global_rank
+                )[0])
     
     areas_shoelace = []
     areas_grid = []
@@ -1057,7 +1083,7 @@ def loss_area_plot(mlflow_exp, var_name, step_interval=1000, excluded_runs=[], c
     storage_path = os.environ["SCRATCH"] + f"/bed/BED_cosmo/{cosmo_exp}"
     os.makedirs(f"{storage_path}/mlruns/{exp_id}/plots", exist_ok=True)
     save_path = f"{storage_path}/mlruns/{exp_id}/plots/loss_area_plot_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
-    show_figure(save_path)
+    show_figure(save_path, fig=plt.gcf())
 
 def plot_lr_schedule(initial_lr, gamma, gamma_freq, steps=100000):
     steps = np.arange(0, steps, 1)
@@ -1067,23 +1093,49 @@ def plot_lr_schedule(initial_lr, gamma, gamma_freq, steps=100000):
 
     return lr[-1]
 
-def show_figure(save_path):
-    # Check if running in a TTY, otherwise assume interactive (like notebook) and show
-    try:
-        is_tty = os.isatty(sys.stdout.fileno())
-    except (io.UnsupportedOperation, AttributeError):
-        is_tty = False
 
-    plt.savefig(save_path)
-    print(f"Saved plot to {save_path}")
+def show_figure(save_path, fig=None, close_fig=True, display_fig=True):
+    """
+    Save and optionally display a matplotlib figure.
     
-    if not is_tty:
-        try:
-            display(plt.gcf())
-        except:
-            plt.show()
-    else:
-        plt.close()
+    Args:
+        save_path (str): Path where to save the figure
+        fig (matplotlib.figure.Figure, optional): Figure to save. If None, uses current figure
+        close_fig (bool): Whether to close the figure after saving
+        display_fig (bool): Whether to display the figure (in non-TTY environments)
+    """
+    # Determine the figure to work with
+    target_fig = fig if fig is not None else plt.gcf()
+    
+    # Save the figure
+    _save_figure(target_fig, save_path)
+    
+    # Display figure if requested and in interactive environment
+    if display_fig and _is_interactive_environment():
+        _display_figure(target_fig)
+    
+    # Close figure if requested
+    if close_fig:
+        plt.close(target_fig)
+
+def _is_interactive_environment():
+    """Check if we're in an interactive environment (not TTY)."""
+    try:
+        return not os.isatty(sys.stdout.fileno())
+    except (io.UnsupportedOperation, AttributeError):
+        return True
+
+def _save_figure(fig, save_path):
+    """Save a figure to the specified path."""
+    fig.savefig(save_path)
+    print(f"Saved plot to {save_path}")
+
+def _display_figure(fig):
+    """Display a figure in an interactive environment."""
+    try:
+        display(fig)
+    except Exception:
+        plt.show()
 
 if __name__ == "__main__":
 

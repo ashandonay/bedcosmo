@@ -1,4 +1,5 @@
 import os
+import sys
 import mlflow
 import pandas as pd
 import torch
@@ -11,6 +12,12 @@ from astropy import constants
 from torch import trapezoid
 from bed.grid import GridStack
 from bed.grid import Grid
+# Get the directory containing the current script
+script_dir = os.path.dirname(os.path.abspath(__file__))
+# Get the parent directory ('BED_cosmo/') and add it to the Python path
+parent_dir_abs = os.path.abspath(os.path.join(script_dir, os.pardir))
+sys.path.insert(0, parent_dir_abs)
+from util import *
 
 storage_path = os.environ["SCRATCH"] + "/bed/BED_cosmo/num_tracers"
 home_dir = os.environ["HOME"]
@@ -28,6 +35,7 @@ class NumTracers:
         global_rank=0, 
         device="cuda:0", 
         include_D_M=False, 
+        seed=None,
         verbose=False
     ):
 
@@ -38,6 +46,9 @@ class NumTracers:
         self.cosmo_model = cosmo_model
         self.device = device
         self.global_rank = global_rank  
+        self.seed = seed
+        if seed is not None:
+            auto_seed(self.seed)
         self.rdrag = 149.77
         self.c = constants.c.to('km/s').value
         self.corr_matrix = torch.tensor(self.nominal_cov/np.sqrt(np.outer(np.diag(self.nominal_cov), np.diag(self.nominal_cov))), device=self.device)
@@ -388,26 +399,30 @@ class NumTracers:
             return result.reshape(output_shape)
 
 
-    def sample_flow(self, tracer_ratio, posterior_flow, num_data_samples=100, num_param_samples=1000):
+    def sample_guide(self, tracer_ratio, guide, num_data_samples=100, num_param_samples=1000, central=True):
 
-        rescaled_sigmas = torch.zeros(self.sigmas.shape, device=self.device)
-        rescaled_sigmas[1::2] = self.sigmas[1::2] * torch.sqrt((self.efficiency[1::2]*tracer_ratio)/self.nominal_passed_ratio)
-        if self.include_D_M:
-            means = self.central_val
-            rescaled_sigmas[::2] = self.sigmas[::2] * torch.sqrt((self.efficiency[::2]*tracer_ratio)/self.nominal_passed_ratio)
-            covariance_matrix = self.corr_matrix * (rescaled_sigmas.unsqueeze(-1) * rescaled_sigmas.unsqueeze(-2))
+        if central:
+            rescaled_sigmas = torch.zeros(self.sigmas.shape, device=self.device)
+            passed_ratio = self.calc_passed(tracer_ratio)
+            means = torch.zeros(passed_ratio.shape[:-1] + (self.sigmas.shape[-1],), device=self.device)
+            means[:, :, 1::2] = lexpand(self.central_val[1::2].unsqueeze(0), num_data_samples)
+            rescaled_sigmas = torch.zeros(passed_ratio.shape[:-1] + (self.sigmas.shape[-1],), device=self.device)
+            rescaled_sigmas[:, :, 1::2] = self.sigmas[1::2] * torch.sqrt(self.nominal_passed_ratio/passed_ratio)
+            if self.include_D_M:
+                means[:, :, ::2] = lexpand(self.central_val[::2].unsqueeze(0), num_data_samples)
+                rescaled_sigmas[:, :, ::2] = self.sigmas[::2] * torch.sqrt(self.nominal_passed_ratio/passed_ratio)
+                covariance_matrix = self.corr_matrix * (rescaled_sigmas.unsqueeze(-1) * rescaled_sigmas.unsqueeze(-2))
+            else:
+                covariance_matrix = self.corr_matrix[1::2, 1::2] * (rescaled_sigmas[1::2].unsqueeze(-1) * rescaled_sigmas[1::2].unsqueeze(-2))
+            with pyro.plate("data", num_data_samples):
+                data_samples = pyro.sample(self.observation_labels[0], dist.MultivariateNormal(means.squeeze(), covariance_matrix.squeeze())).unsqueeze(1)
         else:
-            means = self.central_val[1::2]
-            covariance_matrix = self.corr_matrix[1::2, 1::2] * (rescaled_sigmas[1::2].unsqueeze(-1) * rescaled_sigmas[1::2].unsqueeze(-2))
-
-        with pyro.plate("data", num_data_samples):
-            data_samples = pyro.sample(self.observation_labels[0], dist.MultivariateNormal(means, covariance_matrix))
-
-        context = torch.cat([lexpand(tracer_ratio, num_data_samples), data_samples], dim=-1)
+            data_samples = self.pyro_model(tracer_ratio)
+        context = torch.cat([tracer_ratio, data_samples], dim=-1)
         # Sample parameters conditioned on the data batch
-        param_samples = posterior_flow(context).sample((num_param_samples,))
-
-        return torch.flatten(param_samples, start_dim=0, end_dim=-2)
+        param_samples = guide(context.squeeze()).sample((num_param_samples,))
+        param_samples[:, :, -1] *= 100000
+        return param_samples
 
     def sample_brute_force(self, tracer_ratio, grid_designs, grid_features, grid_params, designer, num_data_samples=100, num_param_samples=1000):
         
@@ -568,7 +583,7 @@ class NumTracers:
                 # only use D_H values for mean and covariance matrix
                 means = means[:, :, 1::2].to(self.device)
                 covariance_matrix = self.corr_matrix[1::2, 1::2] * (rescaled_sigmas[:, :, 1::2].unsqueeze(-1) * rescaled_sigmas[:, :, 1::2].unsqueeze(-2))
-                
+
             return pyro.sample(self.observation_labels[0], dist.MultivariateNormal(means, covariance_matrix))
 
     def unnorm_lfunc(self, params, features, designs):
