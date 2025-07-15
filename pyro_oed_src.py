@@ -224,29 +224,37 @@ def nf_loss(context, guide, samples, rank=0, verbose_shapes=False):
 
     return agg_loss, loss
 
-def posterior_loss(design, model, guide, num_particles, observation_labels, target_labels, 
-                   nflow=False, verbose_shapes=False, evaluation=False, analytic_prior=True, condition_design=True, context=True):
+def posterior_loss(experiment, guide, num_particles, 
+                   nflow=False, verbose_shapes=False, evaluation=False, 
+                   analytic_prior=True, condition_design=True, 
+                   context=True, nominal_design=False
+                   ):
     # num_particles = num_samples
-    expanded_design = lexpand(design, num_particles) # expand num_particles copies to left dimension
+    if not nominal_design:
+        expanded_design = lexpand(experiment.designs, num_particles)
+    else:
+        if getattr(experiment, "nominal_design", None) is None:
+            raise ValueError("Nominal design not found in experiment")
+        expanded_design = lexpand(experiment.nominal_design.reshape(1, -1), num_particles)
     if nflow:
         batch_shape = expanded_design.shape[:-1]
         # Sample y and theta from p(y, theta | d)
-        trace = poutine.trace(model).get_trace(expanded_design)
-        y_dict = {l: trace.nodes[l]["value"] for l in observation_labels}
-        theta_dict = {l: trace.nodes[l]["value"] for l in target_labels}
+        trace = poutine.trace(experiment.pyro_model).get_trace(expanded_design)
+        y_dict = {l: trace.nodes[l]["value"] for l in experiment.observation_labels}
+        theta_dict = {l: trace.nodes[l]["value"] for l in experiment.cosmo_params}
         # combine y and design into the  input
         condition_input = _create_condition_input(design=expanded_design,
                                                 y_dict=y_dict,
-                                                observation_labels=observation_labels,
+                                                observation_labels=experiment.observation_labels,
                                                 condition_design=condition_design)
-        evaluate_samples = torch.cat([theta_dict[k].unsqueeze(dim=-1) for k in target_labels], dim=-1)#.squeeze(dim=-1)
+        evaluate_samples = torch.cat([theta_dict[k].unsqueeze(dim=-1) for k in experiment.cosmo_params], dim=-1)#.squeeze(dim=-1)
         # Flatten batch dimensions into one batch dimension - required for nflows :(
         flattened_samples = torch.flatten(evaluate_samples, start_dim=0, end_dim=len(batch_shape)-1)
         flattened_condition = torch.flatten(condition_input, start_dim=0, end_dim=len(batch_shape)-1)
         # Flatten posterior dimensions - if any
         #flattened_samples = torch.flatten(flattened_samples, start_dim=0, end_dim=-1)
         if verbose_shapes:
-            print("design shape", design.shape)
+            print("design shape", experiment.designs.shape)
             print("batch_shape", batch_shape)
             print("condition_input shape", condition_input.shape)
             print("evaluate_samples shape", evaluate_samples.shape)
@@ -267,34 +275,34 @@ def posterior_loss(design, model, guide, num_particles, observation_labels, targ
             neg_log_prob = neg_log_prob.reshape(batch_shape)
         else:
             neg_log_prob = -1*guide.log_prob(inputs=flattened_samples)
-            neg_log_prob = neg_log_prob.reshape(-1, design.shape[0])
+            neg_log_prob = neg_log_prob.reshape(-1, experiment.designs.shape[0])
         agg_loss, loss = _safe_mean_terms(neg_log_prob)
 
     else:
         # Sample from p(y, theta | d) the model
-        trace = poutine.trace(model).get_trace(expanded_design) # trace: graph data structure denoting relationships amongst different pyro primitives
-        y_dict = {l: trace.nodes[l]["value"] for l in observation_labels} # trace.nodes contains a collection (OrderedDict) of site names and metadata
-        theta_dict = {l: trace.nodes[l]["value"] for l in target_labels}
+        trace = poutine.trace(experiment.pyro_model).get_trace(expanded_design) # trace: graph data structure denoting relationships amongst different pyro primitives
+        y_dict = {l: trace.nodes[l]["value"] for l in experiment.observation_labels} # trace.nodes contains a collection (OrderedDict) of site names and metadata
+        theta_dict = {l: trace.nodes[l]["value"] for l in experiment.cosmo_params}
 
         # Run through q(theta | y, d)
         conditional_guide = pyro.condition(guide, data=theta_dict) # set the sample statements in the guide to the values in theta_dict
         cond_trace = poutine.trace(conditional_guide).get_trace(
-            y_dict, expanded_design, observation_labels, target_labels) 
+            y_dict, expanded_design, experiment.observation_labels, experiment.cosmo_params) 
         cond_trace.compute_log_prob() # compute site-wise log probabilities of each trace. (shape = batch_shape)
 
-        terms = -sum(cond_trace.nodes[l]["log_prob"] for l in target_labels) # forward pass through network and evaluate loss func
+        terms = -sum(cond_trace.nodes[l]["log_prob"] for l in experiment.cosmo_params) # forward pass through network and evaluate loss func
         agg_loss, loss = _safe_mean_terms(terms)
 
     if evaluation:
         if analytic_prior:
             #prior_entropy = model.prior_entropy() # add target labels here
             # First dimension is number of MC samples for sum - reason for zero index
-            prior_entropy = sum(trace.nodes[l]["fn"].entropy().mean(dim=0) for l in target_labels) # shape: [num_designs]
+            prior_entropy = sum(trace.nodes[l]["fn"].entropy().mean(dim=0) for l in experiment.cosmo_params) # shape: [num_designs]
             loss = prior_entropy - loss
         else:
             trace.compute_log_prob()
             # First dimension is number of MC samples for sum - reason for zero index
-            prior_entropy = -1*sum(trace.nodes[l]["log_prob"].mean(dim=0) for l in target_labels)
+            prior_entropy = -1*sum(trace.nodes[l]["log_prob"].mean(dim=0) for l in experiment.cosmo_params)
             loss = prior_entropy - loss
     return agg_loss, loss
 

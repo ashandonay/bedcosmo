@@ -1,3 +1,7 @@
+import os
+import sys
+import mlflow
+import pandas as pd
 import torch
 import numpy as np
 import pyro
@@ -8,33 +12,124 @@ from astropy import constants
 from torch import trapezoid
 from bed.grid import GridStack
 from bed.grid import Grid
+# Get the directory containing the current script
+script_dir = os.path.dirname(os.path.abspath(__file__))
+# Get the parent directory ('BED_cosmo/') and add it to the Python path
+parent_dir_abs = os.path.abspath(os.path.join(script_dir, os.pardir))
+sys.path.insert(0, parent_dir_abs)
+from util import *
+
+storage_path = os.environ["SCRATCH"] + "/bed/BED_cosmo/num_tracers"
+home_dir = os.environ["HOME"]
+mlflow.set_tracking_uri(storage_path + "/mlruns")
 
 class NumTracers:
+    def __init__(
+        self, 
+        data_path="/data/tracers_v1/", 
+        cosmo_model="base", 
+        step=0.05, 
+        lower=0.05, 
+        upper=1.0, 
+        fixed_design=False, 
+        global_rank=0, 
+        device="cuda:0", 
+        include_D_M=False, 
+        seed=None,
+        verbose=False
+    ):
 
-    def __init__(self, desi_data, desi_tracers, cosmo_model, nominal_cov, rank=0, device="cuda:0", include_D_M=False, verbose=False):
-        self.desi_tracers = desi_tracers
+        self.name = 'num_tracers'
+        self.desi_data = pd.read_csv(home_dir + data_path + 'desi_data.csv')
+        self.desi_tracers = pd.read_csv(home_dir + data_path + 'desi_tracers.csv')
+        self.nominal_cov = np.load(home_dir + data_path + 'desi_cov.npy')
         self.cosmo_model = cosmo_model
-        self.nominal_cov = nominal_cov
         self.device = device
-        self.get_priors() # initialize the priors
-        self.cosmo_params = list(self.priors.keys())
+        self.global_rank = global_rank  
+        self.seed = seed
+        if seed is not None:
+            auto_seed(self.seed)
         self.rdrag = 149.77
         self.c = constants.c.to('km/s').value
-        self.corr_matrix = torch.tensor(self.nominal_cov/np.sqrt(np.outer(np.diag(self.nominal_cov), np.diag(self.nominal_cov))), device=device)
+        self.corr_matrix = torch.tensor(self.nominal_cov/np.sqrt(np.outer(np.diag(self.nominal_cov), np.diag(self.nominal_cov))), device=self.device)
         self.include_D_M = include_D_M
-        self.efficiency = torch.tensor(desi_data["efficiency"].tolist()[::2], device=device)
-        self.sigmas = torch.tensor(desi_data["std"].tolist(), device=device)
-        self.central_val = torch.tensor(desi_data["value_at_z"].tolist(), device=device)
-        self.z_eff = torch.tensor(desi_data["z"].tolist()[::2], device=device)
-        passed_num = torch.tensor(desi_data["passed"].tolist()[::2], device=device)
+        self.efficiency = torch.tensor(self.desi_data["efficiency"].tolist()[::2], device=self.device)
+        self.sigmas = torch.tensor(self.desi_data["std"].tolist(), device=self.device)
+        self.central_val = torch.tensor(self.desi_data["value_at_z"].tolist(), device=self.device)
+        self.z_eff = torch.tensor(self.desi_data["z"].tolist()[::2], device=self.device)
+        passed_num = torch.tensor(self.desi_data["passed"].tolist()[::2], device=self.device)
         # use nominal efficiency to calculate the nominal passed ratio
-        self.nominal_tot = (desi_data[::2]["observed"]).sum()
+        self.nominal_tot = (self.desi_data[::2]["observed"]).sum()
+        self.total_observations = 6565626
         self.nominal_passed_ratio = passed_num/self.nominal_tot
-        if verbose and rank == 0:
+        if verbose and self.global_rank == 0:
             print(f"z_eff: {self.z_eff}\n",
                 f"sigmas: {self.sigmas}\n",
                 f"nominal_passed: {self.nominal_passed_ratio}")
+        # Create dictionary with upper limits and lower limit lists for each class
+        self.targets = ["LRG", "ELG", "QSO"]
+        lower_limits = [lower]*len(self.targets)
+        num_targets = self.desi_tracers.groupby('class').sum()['targets'].reindex(self.targets)
+        self.classes = {
+            target: (
+                lower_limits[i],  # individual lower limit value for each class
+                num_targets[target] / self.total_observations   # upper limit
+            ) for i, target in enumerate(self.targets)
+        }
+        self.nominal_design = torch.tensor(self.desi_tracers.groupby('class').sum()['observed'].reindex(self.classes.keys()).values, device=self.device)
+        self.get_priors() # initialize the priors
+        self.cosmo_params = list(self.priors.keys())
+        self.observation_labels = ["y"]
+        self.init_designs(step=step, lower=lower, upper=upper, fixed_design=fixed_design)
 
+
+    def init_designs(self, step=0.05, lower=0.05, upper=1.0, fixed_design=False, variable_bounds=True):
+        if fixed_design:
+            # Create grid with nominal design values using self.targets
+            grid_params = {
+                f'N_{target}': self.nominal_design[i].cpu().numpy() 
+                for i, target in enumerate(self.targets)
+            }
+            grid_designs = Grid(**grid_params)
+
+            # Convert grid to tensor format
+            designs = torch.tensor(getattr(grid_designs, grid_designs.names[0]).squeeze(), device=self.device).unsqueeze(0)
+            for name in grid_designs.names[1:]:
+                design_tensor = torch.tensor(getattr(grid_designs, name).squeeze(), device=self.device).unsqueeze(0)
+                designs = torch.cat((designs, design_tensor), dim=0)
+            designs = designs.unsqueeze(0)
+
+        else:
+            if variable_bounds:
+                designs_dict = {
+                    f'N_{target}': np.arange(
+                        self.classes[target][0],  # lower limit from classes dict
+                        self.classes[target][1] + step,  # upper limit from classes dict
+                        step
+                    ) for target in self.targets
+                }
+            else:
+                designs_dict = {
+                    f'N_{target}': np.arange(
+                        lower,
+                        upper + step, 
+                        step
+                    ) for target in self.targets
+                }
+
+            # Create constrained grid ensuring designs sum to 1
+            tol = 1e-3
+            grid_designs = Grid(
+                **designs_dict, 
+                constraint=lambda **kwargs: abs(sum(kwargs.values()) - 1.0) < tol
+            )
+
+            # Convert to tensor format
+            designs = torch.tensor(getattr(grid_designs, grid_designs.names[0]).squeeze(), device=self.device).unsqueeze(1)
+            for name in grid_designs.names[1:]:
+                design_tensor = torch.tensor(getattr(grid_designs, name).squeeze(), device=self.device).unsqueeze(1)
+                designs = torch.cat((designs, design_tensor), dim=1)
+        self.designs = designs.to(self.device)
 
     def get_priors(self):
         Om_range = torch.tensor([0.01, 0.99], device=self.device)
@@ -304,26 +399,30 @@ class NumTracers:
             return result.reshape(output_shape)
 
 
-    def sample_flow(self, tracer_ratio, posterior_flow, num_data_samples=100, num_param_samples=1000):
+    def sample_guide(self, tracer_ratio, guide, num_data_samples=100, num_param_samples=1000, central=True):
 
-        rescaled_sigmas = torch.zeros(self.sigmas.shape, device=self.device)
-        rescaled_sigmas[1::2] = self.sigmas[1::2] * torch.sqrt((self.efficiency[1::2]*tracer_ratio)/self.nominal_passed_ratio)
-        if self.include_D_M:
-            means = self.central_val
-            rescaled_sigmas[::2] = self.sigmas[::2] * torch.sqrt((self.efficiency[::2]*tracer_ratio)/self.nominal_passed_ratio)
-            covariance_matrix = self.corr_matrix * (rescaled_sigmas.unsqueeze(-1) * rescaled_sigmas.unsqueeze(-2))
+        if central:
+            rescaled_sigmas = torch.zeros(self.sigmas.shape, device=self.device)
+            passed_ratio = self.calc_passed(tracer_ratio)
+            means = torch.zeros(passed_ratio.shape[:-1] + (self.sigmas.shape[-1],), device=self.device)
+            means[:, :, 1::2] = lexpand(self.central_val[1::2].unsqueeze(0), num_data_samples)
+            rescaled_sigmas = torch.zeros(passed_ratio.shape[:-1] + (self.sigmas.shape[-1],), device=self.device)
+            rescaled_sigmas[:, :, 1::2] = self.sigmas[1::2] * torch.sqrt(self.nominal_passed_ratio/passed_ratio)
+            if self.include_D_M:
+                means[:, :, ::2] = lexpand(self.central_val[::2].unsqueeze(0), num_data_samples)
+                rescaled_sigmas[:, :, ::2] = self.sigmas[::2] * torch.sqrt(self.nominal_passed_ratio/passed_ratio)
+                covariance_matrix = self.corr_matrix * (rescaled_sigmas.unsqueeze(-1) * rescaled_sigmas.unsqueeze(-2))
+            else:
+                covariance_matrix = self.corr_matrix[1::2, 1::2] * (rescaled_sigmas[1::2].unsqueeze(-1) * rescaled_sigmas[1::2].unsqueeze(-2))
+            with pyro.plate("data", num_data_samples):
+                data_samples = pyro.sample(self.observation_labels[0], dist.MultivariateNormal(means.squeeze(), covariance_matrix.squeeze())).unsqueeze(1)
         else:
-            means = self.central_val[1::2]
-            covariance_matrix = self.corr_matrix[1::2, 1::2] * (rescaled_sigmas[1::2].unsqueeze(-1) * rescaled_sigmas[1::2].unsqueeze(-2))
-
-        with pyro.plate("data", num_data_samples):
-            data_samples = pyro.sample("y", dist.MultivariateNormal(means, covariance_matrix))
-
-        context = torch.cat([lexpand(tracer_ratio, num_data_samples), data_samples], dim=-1)
+            data_samples = self.pyro_model(tracer_ratio)
+        context = torch.cat([tracer_ratio, data_samples], dim=-1)
         # Sample parameters conditioned on the data batch
-        param_samples = posterior_flow(context).sample((num_param_samples,))
-
-        return torch.flatten(param_samples, start_dim=0, end_dim=-2)
+        param_samples = guide(context.squeeze()).sample((num_param_samples,))
+        param_samples[:, :, -1] *= 100000
+        return param_samples
 
     def sample_brute_force(self, tracer_ratio, grid_designs, grid_features, grid_params, designer, num_data_samples=100, num_param_samples=1000):
         
@@ -338,7 +437,7 @@ class NumTracers:
             covariance_matrix = self.corr_matrix[1::2, 1::2] * (rescaled_sigmas[1::2].unsqueeze(-1) * rescaled_sigmas[1::2].unsqueeze(-2))
 
         with pyro.plate("data", num_data_samples):
-            data_samples = pyro.sample("y", dist.MultivariateNormal(means, covariance_matrix))
+            data_samples = pyro.sample(self.observation_labels[0], dist.MultivariateNormal(means, covariance_matrix))
             
         post_samples = []
         post_input = {}
@@ -484,8 +583,8 @@ class NumTracers:
                 # only use D_H values for mean and covariance matrix
                 means = means[:, :, 1::2].to(self.device)
                 covariance_matrix = self.corr_matrix[1::2, 1::2] * (rescaled_sigmas[:, :, 1::2].unsqueeze(-1) * rescaled_sigmas[:, :, 1::2].unsqueeze(-2))
-                
-            return pyro.sample("y", dist.MultivariateNormal(means, covariance_matrix))
+
+            return pyro.sample(self.observation_labels[0], dist.MultivariateNormal(means, covariance_matrix))
 
     def unnorm_lfunc(self, params, features, designs):
         parameters = { }

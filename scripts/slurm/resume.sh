@@ -45,8 +45,8 @@ srun torchrun \
      --rdzv_backend=c10d \
      --rdzv_endpoint=$MASTER_ADDR:$MASTER_PORT \
      /global/homes/a/ashandon/bed/BED_cosmo/num_tracers/n_tracers_train_distributed.py \
-     --resume_id "4e516c7e73ee43a7a970d6dd39fb07ed" \
-     --resume_step 17000 \
+     --resume_id "321df50a19a649168bf2895ab0e7bd45" \
+     --resume_step 23000 \
 
 
 

@@ -341,8 +341,7 @@ def run_eval(eval_args, run_id, exp, device, **kwargs):
                     ax1.plot(eigs_bits, label=f'NF step {run_args["steps"]}', color="tab:blue", alpha=0.4)
 
                     with torch.no_grad():
-                        agg_loss, nominal_eig = posterior_loss(design=nominal_design.unsqueeze(0),
-                                                        model=num_tracers.pyro_model,
+                        agg_loss, nominal_eig = posterior_loss(experiment=num_tracers,
                                                         guide=posterior_flow,
                                                         num_particles=eval_args["eval_particles"],
                                                         observation_labels=["y"],
@@ -350,7 +349,8 @@ def run_eval(eval_args, run_id, exp, device, **kwargs):
                                                         evaluation=True,
                                                         nflow=True,
                                                         analytic_prior=False,
-                                                        condition_design=run_args["condition_design"])
+                                                        condition_design=run_args["condition_design"],
+                                                        nominal_design=True)
                     nominal_eig_bits = nominal_eig.cpu().detach().numpy()/np.log(2)
                     nominal_eig_batch.append(nominal_eig_bits)
                     ax1.axhline(y=nominal_eig_bits, linestyle='--', label='Nominal EIG', color="black", alpha=0.4)
@@ -516,6 +516,9 @@ def run_eval(eval_args, run_id, exp, device, **kwargs):
                     brute_force_nominal_samples_gd = getdist.MCSamples(samples=brute_force_nominal_samples, names=target_labels, labels=latex_labels)
                     brute_force_optimal_samples_gd = getdist.MCSamples(samples=brute_force_optimal_samples, names=target_labels, labels=latex_labels)
 
+                    # Set line styles in GetDist settings
+                    g.settings.line_styles = ['-', '-', '--', '--']
+
                     g.triangle_plot(
                         [nominal_samples_gd, optimal_samples_gd, brute_force_nominal_samples_gd, brute_force_optimal_samples_gd],
                         filled=False, 
@@ -524,12 +527,9 @@ def run_eval(eval_args, run_id, exp, device, **kwargs):
                         legend_loc='upper right',
                         diag1d_kwargs={
                             'colors': ['black', 'tab:blue', 'black', 'tab:blue'],
-                            'normalized': True,
-                            'linestyle': ['-', '-', '--', '--']
+                            'normalized': True
                         },
-                        contour_args={
-                            'ls': ['-', '-', '--', '--']
-                            }
+                        contour_args={}
                         )
                     #brute_force_samples = num_tracers.sample_brute_force(optimal_brute_force, grid_designs, grid_features, grid_params, designer).cpu().numpy()
                     corner.corner(brute_force_nominal_samples, labels=latex_labels, show_titles=False, title_fmt=".2f", 
