@@ -167,6 +167,13 @@ def single_run(
         plt.savefig(f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/plots/prior.png")
 
     context_dim = len(experiment.classes.keys()) + 10 if run_args["include_D_M"] else len(experiment.classes.keys()) + 5
+    posterior_flow = init_nf(
+        run_args,
+        len(experiment.cosmo_params),
+        context_dim,
+        device=current_pytorch_device,
+        seed=run_args["nf_seed"]
+        )
     if global_rank == 0:
         print("MLFlow Run Info:", ml_info.experiment_id + "/" + ml_info.run_id)
         print(f"Using {run_args['n_devices']} devices with {run_args['n_particles']} total particles.")
@@ -176,16 +183,10 @@ def single_run(
         print(f'Input dim: {len(experiment.cosmo_params)}, Context dim: {context_dim}')
         print(f"Cosmology: {cosmo_model}")
         print(f"Target labels: {experiment.cosmo_params}")
+        print("Flow model initialized: \n", posterior_flow)
         np.save(f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/designs.npy", experiment.designs.cpu().detach().numpy())
         mlflow.log_artifact(f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/designs.npy")
 
-    posterior_flow = init_nf(
-        run_args,
-        len(experiment.cosmo_params),
-        context_dim,
-        device=current_pytorch_device,
-        seed=run_args["nf_seed"]
-    )
     # For DDP, ensure device_ids and output_device use the pytorch_device_idx (which is 0)
     if "LOCAL_RANK" in os.environ and torch.cuda.is_available():
         ddp_device_spec = [pytorch_device_idx] 
@@ -272,6 +273,7 @@ def single_run(
             for param_group in optimizer.param_groups:
                 old_lr = param_group['lr']
                 param_group['lr'] = run_args['initial_lr']
+                param_group['initial_lr'] = run_args['initial_lr']
                 if global_rank == 0:
                     print(f"Restarted optimizer with initial learning rate: {old_lr} -> {run_args['initial_lr']}")
         else:

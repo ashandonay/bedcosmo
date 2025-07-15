@@ -25,7 +25,6 @@ import seaborn as sns
 import corner
 import getdist
 
-from nflows.transforms import made as made_module
 from bed.grid import Grid
 
 from astropy.cosmology import Planck18
@@ -143,11 +142,7 @@ def single_run(
     desi_df = pd.read_csv(home_dir + run_args["data_path"] + 'desi_data.csv')
     desi_tracers = pd.read_csv(home_dir + run_args["data_path"] + 'desi_tracers.csv')
     nominal_cov = np.load(home_dir + run_args["data_path"] + 'desi_cov.npy')
-    # select only the rows corresponding to the tracers
-    
 
-    #desi_data = desi_df[desi_df['tracer'].isin(run_args["tracers"])]
-    #nominal_cov = desi_cov[np.ix_(desi_data.index, desi_data.index)]
 
     ############################################### Priors ###############################################
 
@@ -156,65 +151,25 @@ def single_run(
     classes = (desi_tracers.groupby('class').sum()['targets'].reindex(["LRG", "ELG", "QSO"]) / total_observations).to_dict()
     mlflow.log_dict(classes, "classes.json")
 
-    num_tracers = NumTracers(
-        desi_df,
-        desi_tracers,
-        cosmo_model,
-        nominal_cov,
-        include_D_M=run_args["include_D_M"], 
-        device=device,
-        verbose=True
-        )
+    if cosmo_model == "num_tracers":
+        experiment = NumTracers(
+            data_path=run_args["data_path"],
+            cosmo_model=cosmo_model,
+            step=run_args["design_step"],
+            lower=run_args["design_lower"],
+            global_rank=global_rank,
+            fixed_design=run_args["fixed_design"],
+            include_D_M=run_args["include_D_M"], 
+            device=device,
+            verbose=run_args["verbose"]
+            )
     
-    target_labels = num_tracers.cosmo_params
+    target_labels = experiment.cosmo_params
     print(f"Classes: {classes}\n"
         f"Cosmology: {cosmo_model}\n"
         f"Target labels: {target_labels}")
 
-    ############################################### Designs ###############################################
-    # if fixed design:
-    if kwargs["fixed_design"]:
-        # Get nominal design from observed tracer counts
-        nominal_design = torch.tensor(desi_tracers.groupby('class').sum()['observed'].reindex(classes.keys()).values, device=device)
-        
-        # Create grid with nominal design values
-        grid_designs = Grid(
-            N_LRG=nominal_design[0].cpu().numpy(), 
-            N_ELG=nominal_design[1].cpu().numpy(), 
-            N_QSO=nominal_design[2].cpu().numpy()
-        )
-
-        # Convert grid to tensor format
-        designs = torch.tensor(getattr(grid_designs, grid_designs.names[0]).squeeze(), device=device).unsqueeze(0)
-        for name in grid_designs.names[1:]:
-            design_tensor = torch.tensor(getattr(grid_designs, name).squeeze(), device=device).unsqueeze(0)
-            designs = torch.cat((designs, design_tensor), dim=0)
-        designs = designs.unsqueeze(0)
-
-    else:
-        # Create design grid with specified step size
-        designs_dict = {
-            f'N_{class_name}': np.arange(
-                run_args["design_low"],
-                class_frac + run_args["design_step"], 
-                run_args["design_step"]
-            ) for class_name, class_frac in classes.items()
-        }
-
-        # Create constrained grid ensuring designs sum to 1
-        tol = 1e-3
-        grid_designs = Grid(
-            **designs_dict, 
-            constraint=lambda **kwargs: abs(sum(kwargs.values()) - 1.0) < tol
-        )
-
-        # Convert to tensor format
-        designs = torch.tensor(getattr(grid_designs, grid_designs.names[0]).squeeze(), device=device).unsqueeze(1)
-        for name in grid_designs.names[1:]:
-            design_tensor = torch.tensor(getattr(grid_designs, name).squeeze(), device=device).unsqueeze(1)
-            designs = torch.cat((designs, design_tensor), dim=1)
-    print("Designs shape:", designs.shape)
-    np.save(f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/designs.npy", designs.cpu().detach().numpy())
+    np.save(f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/designs.npy", experiment.designs.cpu().detach().numpy())
     mlflow.log_artifact(f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/designs.npy")
 
     # Only create prior plot if not resuming
@@ -223,9 +178,9 @@ def single_run(
         if len(target_labels) == 1:
             axs = [axs]
         for i, p in enumerate(target_labels):
-            support = num_tracers.priors[p].support
+            support = experiment.priors[p].support
             eval_pts = torch.linspace(support.lower_bound, support.upper_bound, 200, device=device)
-            prob = torch.exp(num_tracers.priors[p].log_prob(eval_pts))[:-1]
+            prob = torch.exp(experiment.priors[p].log_prob(eval_pts))[:-1]
             prob_norm = prob/torch.sum(prob)
             axs[i].plot(eval_pts.cpu().numpy()[:-1], prob_norm.cpu().numpy(), label="Prior", color="tab:blue", alpha=0.5)
             axs[i].set_title(p)
@@ -246,9 +201,10 @@ def single_run(
         seed=run_args["nf_seed"],
         verbose=True
         )
-    nominal_design = torch.tensor(desi_tracers.groupby('class').sum()['observed'].reindex(classes.keys()).values, device=device)
-    central_vals = num_tracers.central_val if run_args["include_D_M"] else num_tracers.central_val[1::2]
-    nominal_context = torch.cat([nominal_design, central_vals], dim=-1)
+    nominal_context = torch.cat([
+        experiment.nominal_design, 
+        experiment.central_val if run_args["include_D_M"] else experiment.central_val[1::2]
+        ], dim=-1)
     
     # Initialize optimizer
     optimizer = torch.optim.Adam(posterior_flow.parameters(), lr=run_args["initial_lr"])
@@ -317,8 +273,7 @@ def single_run(
                         print(f"Profiling step {step}")
                         optimizer.zero_grad()
                         agg_loss, loss = posterior_loss(
-                            design=designs,
-                            model=num_tracers.pyro_model,
+                            experiment=experiment,
                             guide=posterior_flow,
                             num_particles=run_args["n_particles"],
                             observation_labels=["y"],
@@ -366,8 +321,7 @@ def single_run(
     num_steps_range = trange(start_step, run_args["steps"], desc="Loss: 0.000 ", disable=not is_tty)
     for step in num_steps_range:
         optimizer.zero_grad() #  clear gradients from previous step
-        agg_loss, loss = posterior_loss(design=designs,
-                                        model=num_tracers.pyro_model,
+        agg_loss, loss = posterior_loss(experiment=experiment,
                                         guide=posterior_flow,
                                         num_particles=run_args["n_particles"],
                                         observation_labels=["y"],
@@ -403,7 +357,7 @@ def single_run(
                 nominal_samples = posterior_flow(nominal_context).sample((30000,)).cpu().numpy()
                 nominal_samples[:, -1] *= 100000
                 with contextlib.redirect_stdout(io.StringIO()):
-                    nominal_samples_gd = getdist.MCSamples(samples=nominal_samples, names=target_labels, labels=num_tracers.latex_labels)
+                    nominal_samples_gd = getdist.MCSamples(samples=nominal_samples, names=target_labels, labels=experiment.latex_labels)
                 nominal_area = get_contour_area(nominal_samples_gd, 'Om', 'hrdrag', 0.68)[0]
                 mlflow.log_metric("nominal_area", nominal_area, step=step)
                 if nominal_area < best_nominal_area:

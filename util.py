@@ -232,9 +232,8 @@ def init_training_env(tdist, device):
             timeout=timedelta(seconds=180),  # Increased timeout
             device_id=device_obj  # Pass torch.device object
         )
-        print(f"Process group initialized for rank {global_rank}")
 
-    else: # Not DDP
+    else: # Not using DDP
         local_rank = 0 # Placeholder, not a DDP local rank
         global_rank = 0
         print("Running without DDP (single-node, single-GPU/CPU)")
@@ -262,23 +261,21 @@ def init_training_env(tdist, device):
             effective_device_id = -1 # Indicates CPU
 
     # Log the PyTorch thread count after rank is known
-    # Determine a preliminary rank for logging even before full DDP init, if possible
-    log_rank_prefix = ""
-    if "RANK" in os.environ:
-        log_rank_prefix = f"[Rank {os.environ.get('RANK')}] "
-    elif "SLURM_PROCID" in os.environ:
-        log_rank_prefix = f"[SlurmPROCID {os.environ.get('SLURM_PROCID')}] "
-    
-    try:
-        print(f"{log_rank_prefix}PyTorch CPU threads set to: {torch.get_num_threads()} (within init_training_env)")
-        # Print available CPU cores as seen by this Python process
-        print(f"{log_rank_prefix}os.cpu_count() (cores available to this process): {os.cpu_count()}")
-        # You can also check SLURM_CPUS_PER_TASK if it's set and inherited by the DDP worker
-        slurm_cpus_task = os.environ.get("SLURM_CPUS_PER_TASK")
-        if slurm_cpus_task:
-            print(f"{log_rank_prefix}SLURM_CPUS_PER_TASK (inherited by worker): {slurm_cpus_task}")
-    except Exception as e:
-        print(f"{log_rank_prefix}Warning: Could not get PyTorch CPU thread count or os.cpu_count(): {e}")
+    if global_rank == 0:
+        log_rank_prefix = ""
+        if "RANK" in os.environ:
+            log_rank_prefix = f"[Rank {os.environ.get('RANK')}] "
+        elif "SLURM_PROCID" in os.environ:
+            log_rank_prefix = f"[SlurmPROCID {os.environ.get('SLURM_PROCID')}] "
+        try:
+            print(f"Process group initialized for rank {global_rank}")
+            print(f"{log_rank_prefix}PyTorch CPU threads set to: {torch.get_num_threads()} (within init_training_env)")
+            print(f"{log_rank_prefix}os.cpu_count() (cores available to this process): {os.cpu_count()}")
+            slurm_cpus_task = os.environ.get("SLURM_CPUS_PER_TASK")
+            if slurm_cpus_task:
+                print(f"{log_rank_prefix}SLURM_CPUS_PER_TASK (inherited by worker): {slurm_cpus_task}")
+        except Exception as e:
+            print(f"{log_rank_prefix}Warning: Could not get PyTorch CPU thread count or os.cpu_count(): {e}")
 
     return global_rank, local_rank, effective_device_id, pytorch_device_idx
 
@@ -291,9 +288,9 @@ def init_nf(run_args, input_dim, context_dim, device="cuda:0", seed=None, **kwar
     """
     with temporary_seed(seed):
         flow_type = run_args.get("flow_type")
-        n_layers = int(run_args.get("n_layers", 1))
-        hidden_size = int(run_args.get("hidden_size", 64))
-        n_transforms = int(run_args.get("n_transforms", 5))
+        n_transforms = int(run_args.get("n_transforms", 2))
+        hyper_n_layers = int(run_args.get("hyper_n_layers", 2))
+        hyper_hidden_size = int(run_args.get("hyper_hidden_size", 64))
 
         # Initialize the flow model
         if flow_type == "NSF":
@@ -301,59 +298,54 @@ def init_nf(run_args, input_dim, context_dim, device="cuda:0", seed=None, **kwar
             posterior_flow = zuko.flows.NSF(
                 features=input_dim, 
                 context=context_dim, 
-                transforms=n_transforms, 
+                transforms=n_transforms,
                 bins=bins_val,
-                hidden_features=((hidden_size,) * n_layers),
+                hidden_features=((hyper_hidden_size,) * hyper_n_layers),
                 **kwargs
             )
         elif flow_type == "NAF":
-            signal_val = int(run_args.get("signal"))
+            mnn_signal = int(run_args.get("mnn_signal"))
+            mnn_hidden_size = int(run_args.get("mnn_hidden_size", 64))
+            mnn_n_layers = int(run_args.get("mnn_n_layers", 2))
             posterior_flow = zuko.flows.NAF(
                 features=input_dim, 
                 context=context_dim, 
                 transforms=n_transforms,
-                signal=signal_val,
-                network={"hidden_features": ((hidden_size,) * n_layers)}
-            )
+                signal=mnn_signal,
+                randperm=False,
+                network={"hidden_features": ((mnn_hidden_size,) * mnn_n_layers)},
+                hidden_features=((hyper_hidden_size,) * hyper_n_layers) # for the hyper network
+                )
         elif flow_type == "MAF":
+            transform = run_args.get("transform", None)
+            if transform == "affine":
+                univariate = zuko.transforms.MonotonicAffineTransform
+            elif transform == "rqs":
+                univariate = zuko.transforms.MonotonicRQSTransform
+            else:
+                raise ValueError(f"Unknown transform: {transform}")
             posterior_flow = zuko.flows.MAF(
                 features=input_dim, 
                 context=context_dim, 
                 transforms=n_transforms,
-                hidden_features=((hidden_size,) * n_layers),
+                randperm=False,
+                univariate=univariate,
+                hidden_features=((hyper_hidden_size,) * hyper_n_layers), # for the hyper network
                 **kwargs
-            )
-        elif flow_type == "MAF_Affine":
-            posterior_flow = zuko.flows.MAF(
-                features=input_dim, 
-                context=context_dim, 
-                transforms=n_transforms,
-                univariate=zuko.transforms.MonotonicAffineTransform,
-                **kwargs
-            )
-        elif flow_type == "MAF_RQS":
-            shape_val = int(run_args.get("shape"))
-            posterior_flow = zuko.flows.MAF(
-                features=input_dim, 
-                context=context_dim, 
-                transforms=n_transforms,
-                univariate=zuko.transforms.MonotonicRQSTransform,
-                shapes=([shape_val], [shape_val], [shape_val-1]),
-                **kwargs
-            )
+                )
         elif flow_type == "NICE":
             posterior_flow = zuko.flows.NICE(
                 features=input_dim, 
                 context=context_dim, 
                 transforms=n_transforms,
                 **kwargs
-            )
+                )
         elif flow_type == "GF":
             posterior_flow = zuko.flows.GF(
                 features=input_dim, 
                 context=context_dim, 
                 transforms=n_transforms
-            )
+                )
         else:
             raise ValueError(f"Unknown flow type: {flow_type}")
 
@@ -380,13 +372,25 @@ def init_scheduler(optimizer, run_args):
             eta_min=final_lr
             )
     elif run_args["scheduler_type"] == "linear":
-        # factor is the number we multiply the initial lr by to get the final lr at each step
-        scheduler = torch.optim.lr_scheduler.LinearLR(
-            optimizer, 
-            start_factor=1.0, 
-            end_factor=final_lr / initial_lr, 
-            total_iters=run_args["total_steps"] - 1
-            )
+        # This provides a linear ramp from initial_lr to final_lr.
+        # It can handle both increasing and decreasing LR by using LambdaLR.
+        def lr_lambda(step):
+            total_steps = run_args["total_steps"]
+            if initial_lr == 0:
+                if final_lr != 0:
+                    raise ValueError("Cannot use 'linear' scheduler for warmup from initial_lr=0, as the optimizer's base LR is 0.")
+                return 1.0  # LR is 0 and stays 0.
+            
+            if total_steps <= 1:
+                return final_lr / initial_lr
+            
+            progress = step / (total_steps - 1)
+            end_factor = final_lr / initial_lr
+            
+            # Linear interpolation of the multiplicative factor
+            return 1.0 + (end_factor - 1.0) * progress
+        
+        scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
     elif run_args["scheduler_type"] == "exponential":
         # calculate gamma from initial and final lr
         gamma = (final_lr / initial_lr) ** (1 / run_args["total_steps"])
@@ -430,7 +434,8 @@ def init_run(
                 print(f"=== NEW RUN MODE ===")
                 print("Starting fresh training run")
             checkpoint = None
-        else:
+        else: 
+            # Restart from existing run
             if global_rank == 0:
                 print(f"=== RESTART MODE ===")
                 print(f"Restart ID: {kwargs['restart_id']}")
@@ -444,6 +449,8 @@ def init_run(
                 print("Will create new MLflow run with current parameters")
             client = mlflow.MlflowClient()
             ref_run = client.get_run(kwargs["restart_id"])
+            # fix the model parameters for the restart run
+            run_args = _fix_model_args(run_args, ref_run, global_rank)
             checkpoint_dir = f"{storage_path}/mlruns/{ref_run.info.experiment_id}/{kwargs['restart_id']}/artifacts/checkpoints"
             if kwargs.get("restart_checkpoint", None) is not None:
                 # Load specific checkpoint file for all ranks
@@ -593,6 +600,57 @@ def init_run(
     # This prevents race conditions that can corrupt meta.yaml files
 
     return ml_info, run_args, checkpoint, tensors['start_step'].item(), tensors['best_loss'].item(), tensors['best_nominal_area'].item()
+
+def _fix_model_args(run_args, ref_run, global_rank=0):
+    """
+    Fix model arguments to match the reference run parameters.
+    Returns a tuple of (updated_run_args, changed_params) where changed_params
+    is a dict of parameter names that were overwritten.
+    """
+    changed_params = {}
+    
+    # Common parameters that apply to all flow types
+    common_params = ["flow_type", "n_transforms", "hyper_hidden_size", "hyper_n_layers"]
+    
+    # Store original values and update common parameters
+    for param in common_params:
+        original_value = run_args.get(param)
+        new_value = ref_run.data.params[param]
+        run_args[param] = new_value
+        
+        if original_value != new_value:
+            changed_params[param] = (original_value, new_value)
+    
+    # Flow-specific parameters
+    flow_type = ref_run.data.params["flow_type"]
+    flow_specific_params = {
+        "MAF": ["transform"],
+        "NAF": ["mnn_signal", "mnn_hidden_size", "mnn_n_layers"],
+        "NSF": ["bins"]
+    }
+    
+    if flow_type in flow_specific_params:
+        for param in flow_specific_params[flow_type]:
+            original_value = run_args.get(param)
+            new_value = ref_run.data.params[param]
+            run_args[param] = new_value
+            
+            if original_value != new_value:
+                changed_params[param] = (original_value, new_value)
+    
+    # Handle condition_design parameter
+    original_condition_design = run_args.get("condition_design")
+    run_args["condition_design"] = ref_run.data.params["condition_design"]
+    if original_condition_design != run_args["condition_design"]:
+        changed_params["condition_design"] = (original_condition_design, run_args["condition_design"])
+    
+    # Log changes if any parameters were modified
+    if changed_params and global_rank == 0:
+        print("=== MODEL PARAMETERS OVERWRITTEN BY REFERENCE RUN ===")
+        for param_name, (old_value, new_value) in changed_params.items():
+            print(f"  {param_name}: {old_value} -> {new_value}")
+    
+    return run_args
 
 def _broadcast_variables(tensors, global_rank, run_args,tdist):
 

@@ -330,7 +330,7 @@ class Evaluation:
         g.fig.set_constrained_layout(True)
         leg = g.fig.legend(handles=custom_legend, loc='upper right', bbox_to_anchor=(0.99, 0.96))
         leg.set_in_layout(False)
-        g.fig.suptitle(f"Posterior Steps for Run: {self.run_obj.info.run_name} ({self.run_id[:8]})", 
+        g.fig.suptitle(f"Posterior Steps for Run: {self.run_id[:8]}", 
                       fontsize=12)
         
         show_figure(f"{self.save_path}/plots/posterior_steps_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png", fig=g.fig)
@@ -399,12 +399,23 @@ def run_eval(
 
     evaluate.posterior(step=eval_step)
     evaluate.eig_grid(step=eval_step)
-    evaluate.posterior_steps(steps=[eval_step//4, eval_step//2, 'last'])
-    evaluate.eig_steps(steps=[eval_step//4, eval_step//2, 'last'])
+    evaluate.posterior_steps(steps=[eval_step//4, eval_step//2, 3*eval_step//4, 'last'])
+    evaluate.eig_steps(steps=[eval_step//4, eval_step//2, 3*eval_step//4, 'last'])
 
     evaluate.sample_posterior(step=eval_step, level=0.68, num_data_samples=15, design_type='optimal', central=True)
     evaluate.sample_posterior(step=eval_step, level=0.68, num_data_samples=15, design_type='nominal', central=True)
     
+    compare_posterior(
+        run_ids=[run_id],
+        var=None, 
+        guide_samples=guide_samples,
+        seed=1,
+        device=device,
+        show_scatter=False,
+        step=200000,
+        global_rank=[0,1,2,3,4,5,6,7]
+        )
+
 if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Run Number Tracers Training")

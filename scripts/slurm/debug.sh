@@ -7,7 +7,7 @@
 #SBATCH --ntasks-per-node=1     # 1 primary Slurm task per node
 #SBATCH --cpus-per-task=128     # CPUs for all DDP workers on the node (e.g., 4 workers * 32 cpus/worker)
 #SBATCH --gpus-per-node=4       # Request 4 GPUs for the 1 task on the node
-#SBATCH --time=00:05:00
+#SBATCH --time=00:20:00
 #SBATCH --output=/pscratch/sd/a/ashandon/bed/BED_cosmo/num_tracers/logs/%A_%x_%a.log
 #SBATCH --error=/pscratch/sd/a/ashandon/bed/BED_cosmo/num_tracers/logs/%A_%x_%a.log
 
@@ -42,9 +42,12 @@ srun torchrun \
      --rdzv_backend=c10d \
      --rdzv_endpoint=$MASTER_ADDR:$MASTER_PORT \
      /global/homes/a/ashandon/bed/BED_cosmo/num_tracers/n_tracers_train_distributed.py \
-     --exp_name debug \
-     --n_particles_per_device 3000 \
+     --mlflow_exp debug \
+     --cosmo_exp num_tracers \
+     --n_particles_per_device 5000 \
      --total_steps 1000 \
-     --scheduler_type constant \
+     --hidden_size 128 \
+     --n_layers 4 \
+     --scheduler_type linear \
      --final_lr 0.0001 \
      --verbose
