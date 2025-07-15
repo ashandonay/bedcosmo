@@ -28,12 +28,8 @@ import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 from matplotlib.lines import Line2D
 from mpl_toolkits.axes_grid1 import make_axes_locatable
-import seaborn as sns
-import corner
 import getdist
 from getdist import plots
-
-from nflows.transforms import made as made_module
 from bed.grid import Grid
 
 from astropy.cosmology import Planck18
@@ -293,7 +289,7 @@ def run_eval(eval_args, run_id, exp, device, **kwargs):
                     )
                 posterior_flow = DDP(posterior_flow, device_ids=[0], output_device=0, find_unused_parameters=False)
                 print(f"Loading NF model from {run_id}...")
-                checkpoint = torch.load(f'{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/checkpoints/checkpoint_last.pt', map_location=device)
+                checkpoint = torch.load(f'{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/checkpoints/checkpoint_last.pt', map_location=device, weights_only=False)
 
                 # Load model state dict
                 state_dict = checkpoint['model_state_dict']
@@ -321,7 +317,11 @@ def run_eval(eval_args, run_id, exp, device, **kwargs):
                 np.save(f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/nominal_design.npy", nominal_design.cpu().numpy())
                 mlflow.log_artifact(f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/nominal_design.npy")
 
-                plt.figure()
+                plt.figure(figsize=(10, 8))
+                gs = gridspec.GridSpec(2, 1, height_ratios=[3, 1])
+                ax1 = plt.subplot(gs[0])
+                ax2 = plt.subplot(gs[1], sharex=ax1)
+                
                 eigs_batch = []
                 nominal_eig_batch = []
                 for n in range(eval_args["num_evals"]):
@@ -338,7 +338,7 @@ def run_eval(eval_args, run_id, exp, device, **kwargs):
                                                         condition_design=run_args["condition_design"])
                     eigs_bits = eigs.cpu().detach().numpy()/np.log(2)
                     eigs_batch.append(eigs_bits)
-                    plt.plot(eigs_bits, label=f'NF step {run_args["steps"]}', color="tab:blue", alpha=0.4)
+                    ax1.plot(eigs_bits, label=f'NF step {run_args["steps"]}', color="tab:blue", alpha=0.4)
 
                     with torch.no_grad():
                         agg_loss, nominal_eig = posterior_loss(design=nominal_design.unsqueeze(0),
@@ -353,11 +353,10 @@ def run_eval(eval_args, run_id, exp, device, **kwargs):
                                                         condition_design=run_args["condition_design"])
                     nominal_eig_bits = nominal_eig.cpu().detach().numpy()/np.log(2)
                     nominal_eig_batch.append(nominal_eig_bits)
-                    plt.axhline(y=nominal_eig_bits, linestyle='--', label='Nominal EIG', color="black", alpha=0.4)
+                    ax1.axhline(y=nominal_eig_bits, linestyle='--', label='Nominal EIG', color="black", alpha=0.4)
                 if eval_args["brute_force"]:
-                    plt.plot(brute_force_EIG.squeeze(), label='Brute Force', color='black')
-                plt.xlabel("Design Index")
-                plt.ylabel("EIG")
+                    ax1.plot(brute_force_EIG.squeeze(), label='Brute Force', color='black')
+                
                 eigs_batch = np.array(eigs_batch)
                 nominal_eig_batch = np.array(nominal_eig_batch)
                 # avg over the number of evaluations
@@ -365,16 +364,26 @@ def run_eval(eval_args, run_id, exp, device, **kwargs):
                 eig_std = torch.tensor(np.std(eigs_batch, axis=0), device=device)
                 eig_se = eig_std/np.sqrt(eval_args["num_evals"])
                 avg_nominal_eig = np.mean(nominal_eig_batch, axis=0)
-                plt.plot(eig_avg.cpu().numpy(), label='Avg EIG', color='tab:blue', lw=2)
-                plt.axhline(y=avg_nominal_eig, linestyle='--', label='Avg Nominal EIG', color='black', lw=2)
+                
+                ax1.plot(eig_avg.cpu().numpy(), label='Avg EIG', color='tab:blue', lw=2)
+                ax1.axhline(y=avg_nominal_eig, linestyle='--', label='Avg Nominal EIG', color='black', lw=2)
+                
                 # Get the existing handles and labels
-                handles, labels = plt.gca().get_legend_handles_labels()
-                # Choose which items you want to include (e.g., the first and third)
+                handles, labels = ax1.get_legend_handles_labels()
+                # Choose which items you want to include
                 handles_to_show = [handles[-2], handles[-1]]
                 labels_to_show = [labels[-2], labels[-1]]
                 # Create a legend with only the selected items
-                plt.legend(handles_to_show, labels_to_show)
-                plt.title(f"{eval_args['num_evals']} EIG eval(s) with {eval_args['eval_particles']} samples")  
+                ax1.legend(handles_to_show, labels_to_show)
+                ax1.set_title(f"{eval_args['num_evals']} EIG eval(s) with {eval_args['eval_particles']} samples")
+                ax1.set_ylabel("EIG [bits]")
+                
+                # Plot standard error in bottom subplot
+                ax2.plot(eig_se.cpu().numpy(), color='tab:blue', label='Standard Error')
+                ax2.set_xlabel("Design Index")
+                ax2.set_ylabel("SE [bits]")
+                ax2.legend()
+                
                 plt.tight_layout()
                 plt.savefig(f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/plots/eigs.png")
                 # save eigs at the end
@@ -556,9 +565,9 @@ if __name__ == '__main__':
     eval_args = {
         "nf_model": True,
         "brute_force": False,
-        "post_samples": 20000,
-        "eval_particles": 3000,
-        "num_evals": 8,
+        "post_samples": 5000,
+        "eval_particles": 500,
+        "num_evals": 20,
         "params_grid": 100,
         "features_grid": 30,
         "mem": 200000
