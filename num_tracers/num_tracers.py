@@ -70,11 +70,9 @@ class NumTracers:
                 f"nominal_passed: {self.nominal_passed_ratio}")
         # Create dictionary with upper limits and lower limit lists for each class
         self.targets = ["BGS", "LRG", "ELG", "QSO"]
-        lower_limits = [design_lower]*len(self.targets)
-        upper_limits = [design_upper]*len(self.targets)
         num_targets = self.desi_tracers.groupby('class').sum()['targets'].reindex(self.targets)
-        lower_limits = [lower]*len(self.targets)
-        upper_limits = [num_targets[target] / self.total_observations for target in self.targets]
+        lower_limits = [design_lower]*len(self.targets)
+        upper_limits = [num_targets[target] / self.total_obs for target in self.targets]
         #lower_limits = [0.30, 0.5, 0.12]
         #upper_limits = [0.35, 0.55, 0.18]
         self.classes = {
