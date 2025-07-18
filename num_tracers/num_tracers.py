@@ -73,10 +73,14 @@ class NumTracers:
         lower_limits = [design_lower]*len(self.targets)
         upper_limits = [design_upper]*len(self.targets)
         num_targets = self.desi_tracers.groupby('class').sum()['targets'].reindex(self.targets)
+        lower_limits = [lower]*len(self.targets)
+        upper_limits = [num_targets[target] / self.total_observations for target in self.targets]
+        #lower_limits = [0.30, 0.5, 0.12]
+        #upper_limits = [0.35, 0.55, 0.18]
         self.classes = {
             target: (
                 lower_limits[i],  # individual lower limit value for each class
-                upper_limits[i]   # upper limit
+                upper_limits[i]
             ) for i, target in enumerate(self.targets)
         }
         self.context_dim = len(self.classes.keys()) + 5

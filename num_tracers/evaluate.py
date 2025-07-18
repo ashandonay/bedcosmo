@@ -380,7 +380,25 @@ def run_eval(
         n_particles,
         n_evals
         ):
+    """
+    Runs the evaluation routine for a given run ID.
 
+    Args:
+        design_lower (float): Lowest design fraction.
+        design_step (float): Step size for design grid.
+        run_id (str): MLflow run ID to evaluate.
+        eval_step (int): Step to evaluate.
+        guide_samples (int): Number of samples to generate from the posterior.
+        device (str): Device to use for evaluation.
+    """
+    # default to run design parameters if not specified
+    client = MlflowClient()
+    run_info = client.get_run(run_id)
+    run_args = parse_mlflow_params(run_info.data.params)
+    if design_lower is None:
+        design_lower = run_args["design_lower"]
+    if design_step is None:
+        design_step = run_args["design_step"]
 
     # Create evaluation plots
     evaluate = Evaluation(
@@ -396,7 +414,6 @@ def run_eval(
         n_evals=n_evals,
         n_particles=n_particles
     )
-
     evaluate.posterior(step=eval_step)
     evaluate.eig_grid(step=eval_step)
     evaluate.posterior_steps(steps=[eval_step//4, eval_step//2, 3*eval_step//4, 'last'])
@@ -412,7 +429,7 @@ def run_eval(
         seed=1,
         device=device,
         show_scatter=False,
-        step=200000,
+        step=eval_step,
         global_rank=[0,1,2,3,4,5,6,7]
         )
 
@@ -426,8 +443,8 @@ if __name__ == "__main__":
     parser.add_argument('--global_rank', type=int, default=0, help='Global rank')
     parser.add_argument('--n_particles', type=int, default=1000, help='Number of particles to use for evaluation')
     parser.add_argument('--guide_samples', type=int, default=10000, help='Number of samples to generate from the posterior')
-    parser.add_argument('--design_lower', type=float, default=0.05, help='Lowest design fraction')
-    parser.add_argument('--design_step', type=float, default=0.05, help='Step size for design grid')
+    parser.add_argument('--design_lower', type=float, default=None, help='Lowest design fraction')
+    parser.add_argument('--design_step', type=float, default=None, help='Step size for design grid')
     parser.add_argument('--n_evals', type=int, default=20, help='Number of evaluations to average over')
     parser.add_argument('--device', type=str, default="cuda:0", help='Device to use for evaluation')
     parser.add_argument('--eval_seed', type=int, default=1, help='Seed for evaluation')
