@@ -142,8 +142,9 @@ def single_run(
         experiment = NumTracers(
             data_path=run_args["data_path"],
             cosmo_model=cosmo_model,
-            step=run_args["design_step"],
-            lower=run_args["design_lower"],
+            design_step=run_args["design_step"],
+            design_lower=run_args["design_lower"],
+            design_upper=run_args["design_upper"],
             global_rank=global_rank,
             fixed_design=run_args["fixed_design"],
             include_D_M=run_args["include_D_M"], 
@@ -166,11 +167,10 @@ def single_run(
         plt.tight_layout()
         plt.savefig(f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/plots/prior.png")
 
-    context_dim = len(experiment.classes.keys()) + 10 if run_args["include_D_M"] else len(experiment.classes.keys()) + 5
     posterior_flow = init_nf(
         run_args,
         len(experiment.cosmo_params),
-        context_dim,
+        experiment.context_dim,
         device=current_pytorch_device,
         seed=run_args["nf_seed"]
         )
@@ -180,7 +180,7 @@ def single_run(
         print(f"Design classes: {experiment.classes}")
         print("Designs shape:", experiment.designs.shape)
         print("Calculating normalizing flow EIG...")
-        print(f'Input dim: {len(experiment.cosmo_params)}, Context dim: {context_dim}')
+        print(f'Input dim: {len(experiment.cosmo_params)}, Context dim: {experiment.context_dim}')
         print(f"Cosmology: {cosmo_model}")
         print(f"Target labels: {experiment.cosmo_params}")
         print("Flow model initialized: \n", posterior_flow)

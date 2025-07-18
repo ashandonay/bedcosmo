@@ -28,13 +28,14 @@ class NumTracers:
         self, 
         data_path="/data/tracers_v1/", 
         cosmo_model="base", 
-        step=0.05, 
-        lower=0.05, 
-        upper=1.0, 
+        design_step=0.05, 
+        design_lower=0.05, 
+        design_upper=1.0, 
         fixed_design=False, 
         global_rank=0, 
         device="cuda:0", 
-        include_D_M=False, 
+        include_D_M=True, 
+        include_D_V=True,
         seed=None,
         verbose=False
     ):
@@ -43,6 +44,9 @@ class NumTracers:
         self.desi_data = pd.read_csv(home_dir + data_path + 'desi_data.csv')
         self.desi_tracers = pd.read_csv(home_dir + data_path + 'desi_tracers.csv')
         self.nominal_cov = np.load(home_dir + data_path + 'desi_cov.npy')
+        self.DH_idx = np.where(self.desi_data["quantity"] == "DH_over_rs")[0]
+        self.DM_idx = np.where(self.desi_data["quantity"] == "DM_over_rs")[0]
+        self.DV_idx = np.where(self.desi_data["quantity"] == "DV_over_rs")[0]
         self.cosmo_model = cosmo_model
         self.device = device
         self.global_rank = global_rank  
@@ -53,37 +57,41 @@ class NumTracers:
         self.c = constants.c.to('km/s').value
         self.corr_matrix = torch.tensor(self.nominal_cov/np.sqrt(np.outer(np.diag(self.nominal_cov), np.diag(self.nominal_cov))), device=self.device)
         self.include_D_M = include_D_M
-        self.efficiency = torch.tensor(self.desi_data["efficiency"].tolist()[::2], device=self.device)
+        self.include_D_V = include_D_V
+        self.efficiency = torch.tensor(self.desi_data.drop_duplicates(subset=['tracer'])['efficiency'].tolist(), device=self.device)
         self.sigmas = torch.tensor(self.desi_data["std"].tolist(), device=self.device)
         self.central_val = torch.tensor(self.desi_data["value_at_z"].tolist(), device=self.device)
-        self.z_eff = torch.tensor(self.desi_data["z"].tolist()[::2], device=self.device)
-        passed_num = torch.tensor(self.desi_data["passed"].tolist()[::2], device=self.device)
-        # use nominal efficiency to calculate the nominal passed ratio
-        self.nominal_tot = (self.desi_data[::2]["observed"]).sum()
-        self.total_observations = 6565626
-        self.nominal_passed_ratio = passed_num/self.nominal_tot
+        self.tracer_bins = self.desi_data.drop_duplicates(subset=['tracer'])['tracer'].tolist()
+        self.total_obs = int(self.desi_data.drop_duplicates(subset=['tracer'])['observed'].sum())
+        self.nominal_passed_ratio = torch.tensor(self.desi_data['passed'].tolist(), device=self.device)/self.total_obs
         if verbose and self.global_rank == 0:
-            print(f"z_eff: {self.z_eff}\n",
+            print(f"tracer_bins: {self.tracer_bins}\n",
                 f"sigmas: {self.sigmas}\n",
                 f"nominal_passed: {self.nominal_passed_ratio}")
         # Create dictionary with upper limits and lower limit lists for each class
-        self.targets = ["LRG", "ELG", "QSO"]
-        lower_limits = [lower]*len(self.targets)
+        self.targets = ["BGS", "LRG", "ELG", "QSO"]
+        lower_limits = [design_lower]*len(self.targets)
+        upper_limits = [design_upper]*len(self.targets)
         num_targets = self.desi_tracers.groupby('class').sum()['targets'].reindex(self.targets)
         self.classes = {
             target: (
                 lower_limits[i],  # individual lower limit value for each class
-                num_targets[target] / self.total_observations   # upper limit
+                upper_limits[i]   # upper limit
             ) for i, target in enumerate(self.targets)
         }
+        self.context_dim = len(self.classes.keys()) + 5
+        if include_D_M:
+            self.context_dim += 5
+        if include_D_V:
+            self.context_dim += 2
         self.nominal_design = torch.tensor(self.desi_tracers.groupby('class').sum()['observed'].reindex(self.classes.keys()).values, device=self.device)
         self.get_priors() # initialize the priors
         self.cosmo_params = list(self.priors.keys())
         self.observation_labels = ["y"]
-        self.init_designs(step=step, lower=lower, upper=upper, fixed_design=fixed_design)
+        self.init_designs(design_step=design_step, design_lower=design_lower, design_upper=design_upper, fixed_design=fixed_design)
 
 
-    def init_designs(self, step=0.05, lower=0.05, upper=1.0, fixed_design=False, variable_bounds=True):
+    def init_designs(self, design_step=0.05, design_lower=0.05, design_upper=1.0, fixed_design=False, variable_bounds=True):
         if fixed_design:
             # Create grid with nominal design values using self.targets
             grid_params = {
@@ -104,16 +112,16 @@ class NumTracers:
                 designs_dict = {
                     f'N_{target}': np.arange(
                         self.classes[target][0],  # lower limit from classes dict
-                        self.classes[target][1] + step,  # upper limit from classes dict
-                        step
+                        self.classes[target][1] + design_step,  # upper limit from classes dict
+                        design_step
                     ) for target in self.targets
                 }
             else:
                 designs_dict = {
                     f'N_{target}': np.arange(
-                        lower,
-                        upper + step, 
-                        step
+                        design_lower,
+                        design_upper + design_step, 
+                        design_step
                     ) for target in self.targets
                 }
 
@@ -156,30 +164,38 @@ class NumTracers:
             
     def calc_passed(self, class_ratio):
         if type(class_ratio) == torch.Tensor:
-            assert class_ratio.shape[-1] == 3, "class_ratio should have 3 columns (LRG, ELG, QSO)"
-            obs_ratio = torch.zeros((class_ratio.shape[0], class_ratio.shape[1], 5), device=self.device)
+            assert class_ratio.shape[-1] == len(self.targets), f"class_ratio should have {len(self.targets)} columns"
+            obs_ratio = torch.zeros((class_ratio.shape[0], class_ratio.shape[1], len(self.desi_data)), device=self.device)
 
             # multiply each class ratio by the observed fraction in each tracer bin
+            BGSs = self.desi_tracers.loc[self.desi_tracers["class"] == "BGS"]["observed"]
+            BGS_dist = class_ratio[..., 0].unsqueeze(-1) * torch.tensor((BGSs / BGSs.sum()).values, device=self.device).unsqueeze(0)
+            obs_ratio[..., np.where(self.desi_data["tracer"] == "BGS")[0]] = BGS_dist[..., 0].unsqueeze(-1)
+
             LRGs = self.desi_tracers.loc[self.desi_tracers["class"] == "LRG"]["observed"]
-            LRG_dist = class_ratio[..., 0].unsqueeze(-1) * torch.tensor((LRGs / LRGs.sum()).values, device=self.device).unsqueeze(0)
-            obs_ratio[..., 0:2] = LRG_dist[..., 0:2]
+            LRG_dist = class_ratio[..., 1].unsqueeze(-1) * torch.tensor((LRGs / LRGs.sum()).values, device=self.device).unsqueeze(0)
+            obs_ratio[..., np.where(self.desi_data["tracer"] == "LRG1")[0]] = LRG_dist[..., 0].unsqueeze(-1)
+            obs_ratio[..., np.where(self.desi_data["tracer"] == "LRG2")[0]] = LRG_dist[..., 1].unsqueeze(-1)
+
             ELGs = self.desi_tracers.loc[self.desi_tracers["class"] == "ELG"]["observed"]
-            ELG_dist = class_ratio[..., 1].unsqueeze(-1) * torch.tensor((ELGs / ELGs.sum()).values, device=self.device).unsqueeze(0)
+            ELG_dist = class_ratio[..., 2].unsqueeze(-1) * torch.tensor((ELGs / ELGs.sum()).values, device=self.device).unsqueeze(0)
             # add the last value in LRG_dist to the first value in ELG_dist to get LRG3+ELG1
-            obs_ratio[..., 2] = (LRG_dist[..., 2] + ELG_dist[..., 0])
-            obs_ratio[..., 3] = ELG_dist[..., 1]
+            obs_ratio[..., np.where(self.desi_data["tracer"] == "LRG3+ELG1")[0]] = (LRG_dist[..., 2] + ELG_dist[..., 0]).unsqueeze(-1)
+            obs_ratio[..., np.where(self.desi_data["tracer"] == "ELG2")[0]] = ELG_dist[..., 1].unsqueeze(-1)
 
             QSOs = self.desi_tracers.loc[self.desi_tracers["class"] == "QSO"]["observed"]
-            QSO_dist = class_ratio[..., 2].unsqueeze(-1) * torch.tensor((QSOs / QSOs.sum()).values, device=self.device).unsqueeze(0)
-            obs_ratio[..., 4] = QSO_dist[..., 0]
+            QSO_dist = class_ratio[..., 3].unsqueeze(-1) * torch.tensor((QSOs / QSOs.sum()).values, device=self.device).unsqueeze(0)
+            obs_ratio[..., np.where(self.desi_data["tracer"] == "QSO")[0]] = QSO_dist[..., 0].unsqueeze(-1)
+            obs_ratio[..., np.where(self.desi_data["tracer"] == "Lya QSO")[0]] = QSO_dist[..., 1].unsqueeze(-1)
 
-            efficiency = torch.stack([
-                torch.tensor(self.desi_tracers.loc[self.desi_tracers["tracer"] == "LRG1", "efficiency"].values[0], device=self.device).expand_as(LRG_dist[..., 0]),
-                torch.tensor(self.desi_tracers.loc[self.desi_tracers["tracer"] == "LRG2", "efficiency"].values[0], device=self.device).expand_as(LRG_dist[..., 1]),
-                (LRG_dist[..., 2] / (LRG_dist[..., 2] + ELG_dist[..., 0])) * self.desi_tracers.loc[self.desi_tracers["tracer"] == "LRG3", "efficiency"].values[0] + (ELG_dist[..., 0] / (LRG_dist[..., 2] + ELG_dist[..., 0])) * self.desi_tracers.loc[self.desi_tracers["tracer"] == "ELG1", "efficiency"].values[0],
-                torch.tensor(self.desi_tracers.loc[self.desi_tracers["tracer"] == "ELG2", "efficiency"].values[0], device=self.device).expand_as(ELG_dist[..., 1]),
-                torch.tensor(self.desi_tracers.loc[self.desi_tracers["tracer"] == "Lya QSO", "efficiency"].values[0], device=self.device).expand_as(QSO_dist[..., 0])
-            ], dim=-1)
+            efficiency = torch.zeros((class_ratio.shape[0], class_ratio.shape[1], len(self.desi_data)), device=self.device)
+            efficiency[..., np.where(self.desi_data["tracer"] == "BGS")[0]] = torch.tensor(self.desi_tracers.loc[self.desi_tracers["tracer"] == "BGS", "efficiency"].values[0], device=self.device).expand_as(BGS_dist[..., 0]).unsqueeze(-1)
+            efficiency[..., np.where(self.desi_data["tracer"] == "LRG1")[0]] = torch.tensor(self.desi_tracers.loc[self.desi_tracers["tracer"] == "LRG1", "efficiency"].values[0], device=self.device).expand_as(LRG_dist[..., 0]).unsqueeze(-1)
+            efficiency[..., np.where(self.desi_data["tracer"] == "LRG2")[0]] = torch.tensor(self.desi_tracers.loc[self.desi_tracers["tracer"] == "LRG2", "efficiency"].values[0], device=self.device).expand_as(LRG_dist[..., 1]).unsqueeze(-1)
+            efficiency[..., np.where(self.desi_data["tracer"] == "LRG3+ELG1")[0]] = ((LRG_dist[..., 2] / (LRG_dist[..., 2] + ELG_dist[..., 0])) * self.desi_tracers.loc[self.desi_tracers["tracer"] == "LRG3", "efficiency"].values[0] + (ELG_dist[..., 0] / (LRG_dist[..., 2] + ELG_dist[..., 0])) * self.desi_tracers.loc[self.desi_tracers["tracer"] == "ELG1", "efficiency"].values[0]).unsqueeze(-1)
+            efficiency[..., np.where(self.desi_data["tracer"] == "ELG2")[0]] = torch.tensor(self.desi_tracers.loc[self.desi_tracers["tracer"] == "ELG2", "efficiency"].values[0], device=self.device).expand_as(ELG_dist[..., 1]).unsqueeze(-1)
+            efficiency[..., np.where(self.desi_data["tracer"] == "QSO")[0]] = torch.tensor(self.desi_tracers.loc[self.desi_tracers["tracer"] == "QSO", "efficiency"].values[0], device=self.device).expand_as(QSO_dist[..., 0]).unsqueeze(-1)
+            efficiency[..., np.where(self.desi_data["tracer"] == "Lya QSO")[0]] = torch.tensor(self.desi_tracers.loc[self.desi_tracers["tracer"] == "Lya QSO", "efficiency"].values[0], device=self.device).expand_as(QSO_dist[..., 1]).unsqueeze(-1)
 
             # scale obs_ratio by efficiency to get the number of passed objects
             passed_ratio = obs_ratio*efficiency
@@ -187,7 +203,6 @@ class NumTracers:
             return passed_ratio
         elif type(class_ratio) == Grid:
             obs_ratio = np.zeros((5,) + len(class_ratio.shape)*(1,))
-            print('obs_ratio', obs_ratio.shape)
 
             LRGs = self.desi_tracers.loc[self.desi_tracers["class"] == "LRG"]["observed"]
             LRG_dist = (class_ratio.N_LRG * np.array((LRGs / LRGs.sum()).values)).squeeze()
@@ -211,16 +226,16 @@ class NumTracers:
                 np.array(self.desi_tracers.loc[self.desi_tracers["tracer"] == "Lya QSO", "efficiency"].values[0])
             ], axis=-1)
 
-            print('efficiency', efficiency.shape)
             passed_ratio = obs_ratio*efficiency
 
             return passed_ratio
 
 
-    def D_H_func(self, z, Om, Ok=None, w0=None, wa=None, hrdrag=None):
+    def D_H_func(self, z_eff, Om, Ok=None, w0=None, wa=None, hrdrag=None):
         """
-        Hubble distance
+        Hubble distance divided by the sound horizon D_H/r_d
         """
+        z = z_eff.reshape((len(self.cosmo_params))*[1] + [-1])
         if self.cosmo_model == 'base':
             return (self.c/(100000*hrdrag)) * 1 / torch.sqrt(
                 Om * (1+z)**3 + 
@@ -252,10 +267,12 @@ class NumTracers:
                 (1 - Om - Ok) * (1 + z)**(3 * (1 + w0 + wa)) * torch.exp(-3 * wa * (z / (1 + z)))
                 )
 
-    def D_M_func(self, z, Om, Ok=None, w0=None, wa=None, hrdrag=None):
+    def D_M_func(self, z_eff, Om, Ok=None, w0=None, wa=None, hrdrag=None):
         """
-        Transverse comoving distance
+        Transverse comoving distance divided by the sound horizon D_M/r_d
         """
+        z_array = z_eff.unsqueeze(-1) * torch.linspace(0, 1, 100, device=self.device).view(1, -1)
+        z = z_array.expand((len(self.cosmo_params)-1)*[1] + [-1, -1])
         if self.cosmo_model == 'base':
             # calculates the transverse comoving distance for a lambdaCDM cosmology 
             result = (self.c/(100000*hrdrag)) * trapezoid(
@@ -398,6 +415,11 @@ class NumTracers:
 
             return result.reshape(output_shape)
 
+    def D_V_func(self, z_eff, Om, Ok=None, w0=None, wa=None, hrdrag=None):
+        """
+        The angle-averaged distance D_V/r_d = (z * (D_M/r_d)^2 * (D_H/r_d))^(1/3) divided by the sound horizon D_V/r_d
+        """
+        return (z_eff.reshape((len(self.cosmo_params))*[1] + [-1]) * self.D_M_func(z_eff, Om, Ok, w0, wa, hrdrag)**2 * self.D_H_func(z_eff, Om, Ok, w0, wa, hrdrag))**(1/3)
 
     def sample_guide(self, tracer_ratio, guide, num_data_samples=100, num_param_samples=1000, central=True):
 
@@ -405,15 +427,15 @@ class NumTracers:
             rescaled_sigmas = torch.zeros(self.sigmas.shape, device=self.device)
             passed_ratio = self.calc_passed(tracer_ratio)
             means = torch.zeros(passed_ratio.shape[:-1] + (self.sigmas.shape[-1],), device=self.device)
-            means[:, :, 1::2] = lexpand(self.central_val[1::2].unsqueeze(0), num_data_samples)
+            means[:, :, self.DH_idx] = lexpand(self.central_val[self.DH_idx].unsqueeze(0), num_data_samples)
             rescaled_sigmas = torch.zeros(passed_ratio.shape[:-1] + (self.sigmas.shape[-1],), device=self.device)
-            rescaled_sigmas[:, :, 1::2] = self.sigmas[1::2] * torch.sqrt(self.nominal_passed_ratio/passed_ratio)
+            rescaled_sigmas[:, :, self.DH_idx] = self.sigmas[self.DH_idx] * torch.sqrt(self.nominal_passed_ratio/passed_ratio)
             if self.include_D_M:
-                means[:, :, ::2] = lexpand(self.central_val[::2].unsqueeze(0), num_data_samples)
-                rescaled_sigmas[:, :, ::2] = self.sigmas[::2] * torch.sqrt(self.nominal_passed_ratio/passed_ratio)
+                means[:, :, self.DM_idx] = lexpand(self.central_val[self.DM_idx].unsqueeze(0), num_data_samples)
+                rescaled_sigmas[:, :, self.DM_idx] = self.sigmas[self.DM_idx] * torch.sqrt(self.nominal_passed_ratio/passed_ratio)
                 covariance_matrix = self.corr_matrix * (rescaled_sigmas.unsqueeze(-1) * rescaled_sigmas.unsqueeze(-2))
             else:
-                covariance_matrix = self.corr_matrix[1::2, 1::2] * (rescaled_sigmas[1::2].unsqueeze(-1) * rescaled_sigmas[1::2].unsqueeze(-2))
+                covariance_matrix = self.corr_matrix[self.DH_idx, self.DH_idx] * (rescaled_sigmas[self.DH_idx].unsqueeze(-1) * rescaled_sigmas[self.DH_idx].unsqueeze(-2))
             with pyro.plate("data", num_data_samples):
                 data_samples = pyro.sample(self.observation_labels[0], dist.MultivariateNormal(means.squeeze(), covariance_matrix.squeeze())).unsqueeze(1)
         else:
@@ -427,14 +449,14 @@ class NumTracers:
     def sample_brute_force(self, tracer_ratio, grid_designs, grid_features, grid_params, designer, num_data_samples=100, num_param_samples=1000):
         
         rescaled_sigmas = torch.zeros(self.sigmas.shape, device=self.device)
-        rescaled_sigmas[1::2] = self.sigmas[1::2] * torch.sqrt((self.efficiency[1::2]*tracer_ratio)/self.nominal_passed_ratio)
+        rescaled_sigmas[self.DH_idx] = self.sigmas[self.DH_idx] * torch.sqrt((self.efficiency[self.DH_idx]*tracer_ratio)/self.nominal_passed_ratio)
         if self.include_D_M:
             means = self.central_val
-            rescaled_sigmas[::2] = self.sigmas[::2] * torch.sqrt((self.efficiency[::2]*tracer_ratio)/self.nominal_passed_ratio)
+            rescaled_sigmas[self.DM_idx] = self.sigmas[self.DM_idx] * torch.sqrt((self.efficiency[self.DM_idx]*tracer_ratio)/self.nominal_passed_ratio)
             covariance_matrix = self.corr_matrix * (rescaled_sigmas.unsqueeze(-1) * rescaled_sigmas.unsqueeze(-2))
         else:
-            means = self.central_val[1::2]
-            covariance_matrix = self.corr_matrix[1::2, 1::2] * (rescaled_sigmas[1::2].unsqueeze(-1) * rescaled_sigmas[1::2].unsqueeze(-2))
+            means = self.central_val[self.DH_idx]
+            covariance_matrix = self.corr_matrix[self.DH_idx, self.DH_idx] * (rescaled_sigmas[self.DH_idx].unsqueeze(-1) * rescaled_sigmas[self.DH_idx].unsqueeze(-2))
 
         with pyro.plate("data", num_data_samples):
             data_samples = pyro.sample(self.observation_labels[0], dist.MultivariateNormal(means, covariance_matrix))
@@ -471,26 +493,23 @@ class NumTracers:
                     parameters[k] = v
 
         rescaled_sigmas = torch.zeros(grid_params.shape + (len(self.sigmas),), device=self.device)
-        rescaled_sigmas[..., 1::2] = self.sigmas[1::2] * torch.sqrt((self.efficiency[1::2]*tracer_ratio)/self.nominal_passed_ratio)
+        rescaled_sigmas[..., self.DH_idx] = self.sigmas[self.DH_idx] * torch.sqrt((self.efficiency[self.DH_idx]*tracer_ratio)/self.nominal_passed_ratio)
         if self.include_D_M:
             y = self.central_val
-            rescaled_sigmas[..., ::2] = self.sigmas[::2] * torch.sqrt((self.efficiency[::2]*tracer_ratio)/self.nominal_passed_ratio)
+            rescaled_sigmas[..., self.DM_idx] = self.sigmas[self.DM_idx] * torch.sqrt((self.efficiency[self.DM_idx]*tracer_ratio)/self.nominal_passed_ratio)
             covariance_matrix = self.corr_matrix * (rescaled_sigmas.unsqueeze(-1) * rescaled_sigmas.unsqueeze(-2))
         else:
-            y = self.central_val[1::2]
-            covariance_matrix = self.corr_matrix[1::2, 1::2] * (rescaled_sigmas[..., 1::2].unsqueeze(-1) * rescaled_sigmas[..., 1::2].unsqueeze(-2))
+            y = self.central_val[self.DH_idx]
+            covariance_matrix = self.corr_matrix[self.DH_idx, self.DH_idx] * (rescaled_sigmas[..., self.DH_idx].unsqueeze(-1) * rescaled_sigmas[..., self.DH_idx].unsqueeze(-2))
         with GridStack(grid_params):
             parameters = {k: torch.tensor(getattr(grid_params, k), device=self.device).unsqueeze(-1) for k in grid_params.names}
         mean = torch.zeros(grid_params.shape + (len(self.sigmas),), device=self.device)
-        z = self.z_eff.reshape((len(self.cosmo_params))*[1] + [-1])
-        mean[..., 1::2] = self.D_H_func(z, **parameters)
+        mean[..., self.DH_idx] = self.D_H_func(**parameters)
 
         if self.include_D_M:
-            z_array = self.z_eff.unsqueeze(-1) * torch.linspace(0, 1, 100, device=self.device).view(1, -1)
-            z = z_array.expand((len(self.cosmo_params)-1)*[1] + [-1, -1])
-            mean[..., ::2] = self.D_M_func(z, **parameters)
+            mean[..., self.DM_idx] = self.D_M_func(**parameters)
         else:
-            mean = mean[..., 1::2]
+            mean = mean[..., self.DH_idx]
 
         # evaluate the multivariate normal likelihood
         likelihood = dist.MultivariateNormal(mean, covariance_matrix).log_prob(y).exp()
@@ -564,15 +583,18 @@ class NumTracers:
                 parameters[k] = pyro.sample(k, dist.Delta(v)).unsqueeze(-1)
             means = torch.zeros(passed_ratio.shape[:-1] + (self.sigmas.shape[-1],), device=self.device)
             rescaled_sigmas = torch.zeros(passed_ratio.shape[:-1] + (self.sigmas.shape[-1],), device=self.device)
-
-            z = self.z_eff.reshape(2*[1] + [-1])
-            means[:, :, 1::2] = self.D_H_func(z, **parameters)
-            rescaled_sigmas[:, :, 1::2] = self.sigmas[1::2] * torch.sqrt(self.nominal_passed_ratio/passed_ratio)
+            z_eff = torch.tensor(self.desi_data[self.desi_data["quantity"] == "DH_over_rs"]["z"].to_list(), device=self.device)
+            means[:, :, self.DH_idx] = self.D_H_func(z_eff, **parameters)
+            rescaled_sigmas[:, :, self.DH_idx] = self.sigmas[self.DH_idx] * torch.sqrt(self.nominal_passed_ratio[self.DH_idx]/passed_ratio[..., self.DH_idx])
             if self.include_D_M:
-                z_array = self.z_eff.unsqueeze(-1) * torch.linspace(0, 1, 100, device=self.device).view(1, -1)
-                z = z_array.expand(2*[1] + [-1, -1])
-                means[:, :, ::2] = self.D_M_func(z, **parameters)
-                rescaled_sigmas[:, :, ::2] = self.sigmas[::2] * torch.sqrt(self.nominal_passed_ratio/passed_ratio)
+                z_eff = torch.tensor(self.desi_data[self.desi_data["quantity"] == "DM_over_rs"]["z"].to_list(), device=self.device)
+                means[:, :, self.DM_idx] = self.D_M_func(z_eff, **parameters)
+                rescaled_sigmas[:, :, self.DM_idx] = self.sigmas[self.DM_idx] * torch.sqrt(self.nominal_passed_ratio[self.DM_idx]/passed_ratio[..., self.DM_idx])
+
+            if self.include_D_V:
+                z_eff = torch.tensor(self.desi_data[self.desi_data["quantity"] == "DV_over_rs"]["z"].to_list(), device=self.device)
+                means[:, :, self.DV_idx] = self.D_V_func(z_eff, **parameters)
+                rescaled_sigmas[:, :, self.DV_idx] = self.sigmas[self.DV_idx] * torch.sqrt(self.nominal_passed_ratio[self.DV_idx]/passed_ratio[..., self.DV_idx])
 
             # extract correlation matrix from DESI covariance matrix
             if self.include_D_M:
@@ -581,8 +603,8 @@ class NumTracers:
                 covariance_matrix = self.corr_matrix * (rescaled_sigmas.unsqueeze(-1) * rescaled_sigmas.unsqueeze(-2))
             else:
                 # only use D_H values for mean and covariance matrix
-                means = means[:, :, 1::2].to(self.device)
-                covariance_matrix = self.corr_matrix[1::2, 1::2] * (rescaled_sigmas[:, :, 1::2].unsqueeze(-1) * rescaled_sigmas[:, :, 1::2].unsqueeze(-2))
+                means = means[:, :, self.DH_idx].to(self.device)
+                covariance_matrix = self.corr_matrix[self.DH_idx, self.DH_idx] * (rescaled_sigmas[:, :, self.DH_idx].unsqueeze(-1) * rescaled_sigmas[:, :, self.DH_idx].unsqueeze(-2))
 
             return pyro.sample(self.observation_labels[0], dist.MultivariateNormal(means, covariance_matrix))
 
@@ -591,24 +613,18 @@ class NumTracers:
         for key in params.names:
             parameters[key] = torch.tensor(getattr(params, key), device=self.device)
         likelihood = 1
-        print(designs.shape)
         passed_ratio = self.calc_passed(designs)
-        print(passed_ratio.shape)
-        print(self.nominal_passed_ratio[0].cpu().numpy())
-        for i in range(len(self.z_eff)):
-            z = self.z_eff[i].reshape((len(self.cosmo_params)-1)*[1] + [-1])
-            D_H_mean = self.D_H_func(z, **parameters)
+        for i in range(len(self.tracer_bins)):
+            D_H_mean = self.D_H_func(**parameters)
             D_H_diff = getattr(features, features.names[i]) - D_H_mean.cpu().numpy()
             print(getattr(designs, designs.names[i]).shape)
-            D_H_sigma = self.sigmas[1::2].cpu().numpy()[i] * np.sqrt(self.nominal_passed_ratio[i].cpu().numpy()/passed_ratio[i])
+            D_H_sigma = self.sigmas[self.DH_idx].cpu().numpy()[i] * np.sqrt(self.nominal_passed_ratio[i].cpu().numpy()/passed_ratio[i])
             likelihood = np.exp(-0.5 * (D_H_diff / D_H_sigma) ** 2) * likelihood
             
             if self.include_D_M:
-                z_array = self.z_eff[i].unsqueeze(-1) * torch.linspace(0, 1, 100, device=self.device).view(1, -1)
-                z = z_array.expand((len(self.cosmo_params)-1)*[1] + [-1, -1])
-                D_M_mean = self.D_M_func(z, **parameters)
-                D_M_diff = getattr(features, features.names[i+len(self.z_eff)]) - D_M_mean.cpu().numpy()
-                D_M_sigma = self.sigmas[::2].cpu().numpy()[i] * np.sqrt(self.nominal_passed_ratio[i].cpu().numpy()/passed_ratio[i])
+                D_M_mean = self.D_M_func(**parameters)
+                D_M_diff = getattr(features, features.names[i+len(self.tracer_bins)]) - D_M_mean.cpu().numpy()
+                D_M_sigma = self.sigmas[self.DM_idx].cpu().numpy()[i] * np.sqrt(self.nominal_passed_ratio[i].cpu().numpy()/passed_ratio[i])
                 likelihood = np.exp(-0.5 * (D_M_diff / D_M_sigma) ** 2) * likelihood
 
         return likelihood

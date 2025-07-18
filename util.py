@@ -914,14 +914,13 @@ def load_model(experiment, step, run_obj, run_args, device, global_rank=0):
     
     if experiment.name == 'num_tracers':
         input_dim = len(experiment.cosmo_params)
-        context_dim = len(experiment.classes.keys()) + 10 if run_args.get("include_D_M", False) else len(experiment.classes.keys()) + 5
     else:
         raise ValueError(f"{experiment.name} not supported")
 
     posterior_flow = init_nf(
         run_args, 
         input_dim, 
-        context_dim,
+        experiment.context_dim,
         device,
         seed=None
         )
