@@ -129,7 +129,7 @@ class NumTracers:
                     design_step
                 ) for i, target in enumerate(self.targets)
             }
-            print(designs_dict)
+            
             # Create constrained grid ensuring designs sum to 1
             tol = 1e-3
             grid_designs = Grid(
