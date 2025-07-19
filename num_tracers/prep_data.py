@@ -3,31 +3,39 @@ import matplotlib.pyplot as plt
 import pandas as pd
 
 # efficiencies from this paper: https://arxiv.org/pdf/2411.12020 (Table 2)
+eff_BGS = 0.989
 eff_LRG = 0.991
 # assume the VLO efficiency is 95% and the LOP efficiency is 70% (https://arxiv.org/pdf/2306.06307)
 #eff_ELG_VLO = 0.95
 #eff_ELG_LOP = 0.7
 eff_ELG = 0.727
 eff_QSO = 0.668
+eff_LyaQSO = 0.668
 
-comp_LRG = .693
-comp_ELG = .352
-comp_QSO = .874
+comp_BGS = 0.636
+comp_LRG = 0.693
+comp_ELG = 0.352
+comp_QSO = 0.874
+comp_LyaQSO = 0.874
 
 # from table 3
+passed_BGS = 300017
 passed_LRG1 = 506911
 passed_LRG2 = 771894
 passed_LRG3 = 859822
 passed_ELG1 = 1016365
 passed_ELG2 = 1415707
+passed_QSO = 856652
 passed_LyaQSO = 709565
 passed_LRG3ELG1 = passed_LRG3 + passed_ELG1
 
+obs_BGS = passed_BGS / eff_BGS
 obs_LRG1 = passed_LRG1 / eff_LRG
 obs_LRG2 = passed_LRG2 / eff_LRG
 obs_LRG3 = passed_LRG3 / eff_LRG
 obs_ELG1 = passed_ELG1 / eff_ELG
 obs_ELG2 = passed_ELG2 / eff_ELG
+obs_QSO = passed_QSO / eff_QSO
 obs_LyaQSO = passed_LyaQSO / eff_QSO
 obs_LRG3ELG1 = obs_LRG3 + obs_ELG1
 
@@ -41,8 +49,7 @@ desi_data = '/home/ashandonay/data/bao_data/desi_gaussian_bao_ALL_GCcomb_mean.tx
 cov_matrix = np.loadtxt('/home/ashandonay/data/bao_data/desi_gaussian_bao_ALL_GCcomb_cov.txt')
 
 column_names = ['z', 'value_at_z', 'quantity']
-data_df = pd.read_csv(desi_data, delimiter=' ', names=column_names, comment='#')
-desi_df = data_df.loc[(data_df['quantity'] == 'DH_over_rs') | (data_df['quantity'] == 'DM_over_rs')]
+desi_df = pd.read_csv(desi_data, delimiter=' ', names=column_names, comment='#')
 
 cov_matrix = cov_matrix[np.ix_(desi_df.index, desi_df.index)]
 corr_matrix = cov_matrix/np.sqrt(np.outer(np.diag(cov_matrix), np.diag(cov_matrix)))
@@ -50,18 +57,20 @@ np.save('/home/ashandonay/data/tracers_v' + str(data_version) + '/desi_cov.npy',
 np.save('/home/ashandonay/data/tracers_v' + str(data_version) + '/desi_corr.npy', corr_matrix)
 
 desi_df.insert(0, 'tracer', '')
-desi_df.insert(1, 'passed', 0)
-desi_df.insert(2, 'observed', 0)
-desi_df.insert(4, 'efficiency', 1)
-desi_df.insert(5, 'std', 0)
+desi_df.insert(1, 'passed', 0.0)
+desi_df.insert(2, 'observed', 0.0)
+desi_df.insert(4, 'efficiency', 1.0)
+desi_df.insert(5, 'std', 0.0)
 # add the diagonal of the cov matrix to the dataframe
 desi_df.loc[:, 'std'] = np.sqrt(np.diag(cov_matrix))
 
 # data from table 1 of https://arxiv.org/pdf/2404.03002
+desi_df.loc[desi_df['z'] == 0.295, ["tracer", "passed", "observed"]] = "BGS", passed_BGS, obs_BGS
 desi_df.loc[desi_df['z'] == 0.51, ["tracer", "passed", "observed"]] = "LRG1", passed_LRG1, obs_LRG1
 desi_df.loc[desi_df['z'] == 0.706, ["tracer", "passed", "observed"]] = "LRG2", passed_LRG2, obs_LRG2
 desi_df.loc[desi_df['z'] == 0.930, ["tracer", "passed", "observed"]] = "LRG3+ELG1", passed_LRG3ELG1, obs_LRG3ELG1
 desi_df.loc[desi_df['z'] == 1.317, ["tracer", "passed", "observed"]] = "ELG2", passed_ELG2, obs_ELG2
+desi_df.loc[desi_df['z'] == 1.492, ["tracer", "passed", "observed"]] = "QSO", passed_QSO, obs_QSO
 desi_df.loc[desi_df['z'] == 2.330, ["tracer", "passed", "observed"]] = "Lya QSO", passed_LyaQSO, obs_LyaQSO
 
 
@@ -112,21 +121,23 @@ eff_comb_ELG2 = (ELG2_VLO / (ELG2_VLO + ELG2_LOP)) * eff_ELG_VLO + (ELG2_LOP / (
 
 """
 
+desi_df.loc[desi_df['z'] == 0.295, "efficiency"] = eff_BGS
 desi_df.loc[desi_df['z'] == 0.51, "efficiency"] =  eff_LRG
 desi_df.loc[desi_df['z'] == 0.706, "efficiency"] = eff_LRG
 desi_df.loc[desi_df['z'] == 0.930, "efficiency"] = eff_LRG3ELG1
 desi_df.loc[desi_df['z'] == 1.317, "efficiency"] = eff_ELG
 #desi_df.loc[desi_df['z'] == 0.930, "efficiency"] = (num_ELG1 / num_LRG3ELG1) * ((ELG1_VLO / (ELG1_VLO + ELG1_LOP)) * eff_ELG_VLO + (ELG1_LOP / (ELG1_VLO + ELG1_LOP)) * eff_ELG_LOP) + (1 - (num_ELG1 / num_LRG3ELG1)) * eff_LRG
 #desi_df.loc[desi_df['z'] == 1.317, "efficiency"] = (ELG2_VLO / (ELG2_VLO + ELG2_LOP)) * eff_ELG_VLO + (ELG2_LOP / (ELG2_VLO + ELG2_LOP)) * eff_ELG_LOP
-desi_df.loc[desi_df['z'] == 2.330, "efficiency"] = eff_QSO
+desi_df.loc[desi_df['z'] == 1.492, "efficiency"] = eff_QSO
+desi_df.loc[desi_df['z'] == 2.330, "efficiency"] = eff_LyaQSO
 desi_df.to_csv('/home/ashandonay/data/tracers_v' + str(data_version) + '/desi_data.csv', index=False)
 
 desi_tracers = pd.DataFrame({
-    'tracer': ['LRG1', 'LRG2', 'LRG3', 'ELG1', 'ELG2', 'Lya QSO'],
-    'class': ['LRG', 'LRG', 'LRG', 'ELG', 'ELG', 'QSO'],
-    'efficiency': [eff_LRG, eff_LRG, eff_LRG, eff_ELG, eff_ELG, eff_QSO],
-    'comp': [comp_LRG, comp_LRG, comp_LRG, comp_ELG, comp_ELG, comp_QSO],
-    'passed': [passed_LRG1, passed_LRG2, passed_LRG3, passed_ELG1, passed_ELG2, passed_LyaQSO],
+    'tracer': ['BGS', 'LRG1', 'LRG2', 'LRG3', 'ELG1', 'ELG2', 'QSO', 'Lya QSO'],
+    'class': ['BGS', 'LRG', 'LRG', 'LRG', 'ELG', 'ELG', 'QSO', 'QSO'],
+    'efficiency': [eff_BGS, eff_LRG, eff_LRG, eff_LRG, eff_ELG, eff_ELG, eff_QSO, eff_LyaQSO],
+    'comp': [comp_BGS, comp_LRG, comp_LRG, comp_LRG, comp_ELG, comp_ELG, comp_QSO, comp_LyaQSO],
+    'passed': [passed_BGS, passed_LRG1, passed_LRG2, passed_LRG3, passed_ELG1, passed_ELG2, passed_QSO, passed_LyaQSO],
     })
 desi_tracers['observed'] = desi_tracers['passed'] / desi_tracers['efficiency']
 total_observations = desi_tracers['observed'].sum()
