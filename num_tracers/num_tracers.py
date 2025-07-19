@@ -64,10 +64,6 @@ class NumTracers:
         self.tracer_bins = self.desi_data.drop_duplicates(subset=['tracer'])['tracer'].tolist()
         self.total_obs = int(self.desi_data.drop_duplicates(subset=['tracer'])['observed'].sum())
         self.nominal_passed_ratio = torch.tensor(self.desi_data['passed'].tolist(), device=self.device)/self.total_obs
-        if verbose and self.global_rank == 0:
-            print(f"tracer_bins: {self.tracer_bins}\n",
-                f"sigmas: {self.sigmas}\n",
-                f"nominal_passed: {self.nominal_passed_ratio}")
         # Create dictionary with upper limits and lower limit lists for each class
         self.targets = ["BGS", "LRG", "ELG", "QSO"]
         self.num_targets = self.desi_tracers.groupby('class').sum()['targets'].reindex(self.targets)
@@ -81,6 +77,11 @@ class NumTracers:
         self.cosmo_params = list(self.priors.keys())
         self.observation_labels = ["y"]
         self.init_designs(fixed_design=fixed_design, design_step=design_step, design_lower=design_lower, design_upper=design_upper)
+        if verbose and self.global_rank == 0:
+            print(f"tracer_bins: {self.tracer_bins}\n",
+                f"sigmas: {self.sigmas}\n",
+                f"nominal_design: {self.nominal_design}\n",
+                f"nominal_passed: {self.nominal_passed_ratio}")
 
 
     def init_designs(self, fixed_design=False, design_step=0.05, design_lower=0.05, design_upper=1.0):
@@ -128,7 +129,7 @@ class NumTracers:
                     design_step
                 ) for i, target in enumerate(self.targets)
             }
-
+            print(designs_dict)
             # Create constrained grid ensuring designs sum to 1
             tol = 1e-3
             grid_designs = Grid(

@@ -151,7 +151,6 @@ def single_run(
             device=current_pytorch_device,
             verbose=run_args["verbose"]
             )
-    mlflow.log_dict(experiment.classes, "classes.json")
     # Only create prior plot if not resuming and on rank 0
     if not kwargs.get("resume_id", None) and global_rank == 0: # global_rank check
         fig, axs = plt.subplots(ncols=len(experiment.cosmo_params), nrows=1, figsize=(5*len(experiment.cosmo_params), 5))
@@ -177,7 +176,6 @@ def single_run(
     if global_rank == 0:
         print("MLFlow Run Info:", ml_info.experiment_id + "/" + ml_info.run_id)
         print(f"Using {run_args['n_devices']} devices with {run_args['n_particles']} total particles.")
-        print(f"Design classes: {experiment.classes}")
         print("Designs shape:", experiment.designs.shape)
         print("Calculating normalizing flow EIG...")
         print(f'Input dim: {len(experiment.cosmo_params)}, Context dim: {experiment.context_dim}')
@@ -612,6 +610,11 @@ if __name__ == '__main__':
     # No additional arguments needed for this functionality
 
     for key, value in default_args.items():
+        if value is None:
+            parser.add_argument(f'--{key}', type=str, default=None, 
+                              help=f'Override {key} (default: None)')
+            continue
+            
         arg_type = type(value)
         if isinstance(value, bool):
             parser.add_argument(f'--{key}', action='store_true', help=f'Enable {key}')
@@ -619,6 +622,10 @@ if __name__ == '__main__':
             parser.set_defaults(**{key: value})
         elif isinstance(value, (int, float, str)):
             parser.add_argument(f'--{key}', type=arg_type, default=None, help=f'Override {key} (default: {value})')
+        elif isinstance(value, list):
+            # For lists, we'll accept them as JSON strings and parse them
+            parser.add_argument(f'--{key}', type=str, default=None, 
+                              help=f'Override {key} as JSON string (default: {value})')
         else:
             print(f"Warning: Argument type for key '{key}' not explicitly handled ({arg_type}). Treating as string.")
             parser.add_argument(f'--{key}', type=str, default=None, help=f'Override {key} (default: {value})')
@@ -658,8 +665,42 @@ if __name__ == '__main__':
     args_dict = vars(args)
     for key, value in args_dict.items():
         if key not in ['cosmo_model', 'resume_id', 'resume_step', 'add_steps', 'profile', 'checkpoint_path'] and value is not None and key in run_args:
-            if isinstance(run_args[key], bool) and isinstance(value, bool):
+            # Handle the case where the original value was None
+            if run_args[key] is None:
+                # Try to parse as JSON first (for lists), then as other types
+                try:
+                    parsed_value = json.loads(value)
+                    if os.environ.get('RANK') == 0:
+                        print(f"Setting '{key}' from None to: {parsed_value}")
+                    run_args[key] = parsed_value
+                except json.JSONDecodeError:
+                    # If not JSON, try to parse as other types
+                    try:
+                        # Try to parse as float first, then int, then keep as string
+                        if '.' in value:
+                            parsed_value = float(value)
+                        else:
+                            parsed_value = int(value)
+                        if os.environ.get('RANK') == 0:
+                            print(f"Setting '{key}' from None to: {parsed_value}")
+                        run_args[key] = parsed_value
+                    except ValueError:
+                        # Keep as string
+                        if os.environ.get('RANK') == 0:
+                            print(f"Setting '{key}' from None to: {value}")
+                        run_args[key] = value
+            elif isinstance(run_args[key], bool) and isinstance(value, bool):
                 run_args[key] = value
+            elif isinstance(run_args[key], list):
+                # Parse JSON string back to list
+                try:
+                    parsed_value = json.loads(value)
+                    if os.environ.get('RANK') == 0:
+                        print(f"Overriding '{key}': {run_args[key]} -> {parsed_value}")
+                    run_args[key] = parsed_value
+                except json.JSONDecodeError as e:
+                    if os.environ.get('RANK') == 0:
+                        print(f"Warning: Could not parse '{key}' as JSON: {e}. Keeping default value.")
             elif not isinstance(run_args[key], bool):
                 if os.environ.get('RANK') == 0:
                     print(f"Overriding '{key}': {run_args[key]} -> {value}")
