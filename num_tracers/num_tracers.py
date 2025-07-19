@@ -30,7 +30,7 @@ class NumTracers:
         cosmo_model="base", 
         design_step=0.05, 
         design_lower=0.05, 
-        design_upper=1.0, 
+        design_upper=None, 
         fixed_design=False, 
         global_rank=0, 
         device="cuda:0", 
@@ -70,30 +70,20 @@ class NumTracers:
                 f"nominal_passed: {self.nominal_passed_ratio}")
         # Create dictionary with upper limits and lower limit lists for each class
         self.targets = ["BGS", "LRG", "ELG", "QSO"]
-        num_targets = self.desi_tracers.groupby('class').sum()['targets'].reindex(self.targets)
-        lower_limits = [design_lower]*len(self.targets)
-        upper_limits = [num_targets[target] / self.total_obs for target in self.targets]
-        #lower_limits = [0.30, 0.5, 0.12]
-        #upper_limits = [0.35, 0.55, 0.18]
-        self.classes = {
-            target: (
-                lower_limits[i],  # individual lower limit value for each class
-                upper_limits[i]
-            ) for i, target in enumerate(self.targets)
-        }
-        self.context_dim = len(self.classes.keys()) + 5
+        self.num_targets = self.desi_tracers.groupby('class').sum()['targets'].reindex(self.targets)
+        self.context_dim = len(self.targets) + 5
         if include_D_M:
             self.context_dim += 5
         if include_D_V:
             self.context_dim += 2
-        self.nominal_design = torch.tensor(self.desi_tracers.groupby('class').sum()['observed'].reindex(self.classes.keys()).values, device=self.device)
+        self.nominal_design = torch.tensor(self.desi_tracers.groupby('class').sum()['observed'].reindex(self.targets).values, device=self.device)
         self.get_priors() # initialize the priors
         self.cosmo_params = list(self.priors.keys())
         self.observation_labels = ["y"]
-        self.init_designs(design_step=design_step, design_lower=design_lower, design_upper=design_upper, fixed_design=fixed_design)
+        self.init_designs(fixed_design=fixed_design, design_step=design_step, design_lower=design_lower, design_upper=design_upper)
 
 
-    def init_designs(self, design_step=0.05, design_lower=0.05, design_upper=1.0, fixed_design=False, variable_bounds=True):
+    def init_designs(self, fixed_design=False, design_step=0.05, design_lower=0.05, design_upper=1.0):
         if fixed_design:
             # Create grid with nominal design values using self.targets
             grid_params = {
@@ -110,22 +100,34 @@ class NumTracers:
             designs = designs.unsqueeze(0)
 
         else:
-            if variable_bounds:
-                designs_dict = {
-                    f'N_{target}': np.arange(
-                        self.classes[target][0],  # lower limit from classes dict
-                        self.classes[target][1] + design_step,  # upper limit from classes dict
-                        design_step
-                    ) for target in self.targets
-                }
+            if type(design_lower) == float:
+                lower_limits = [design_lower]*len(self.targets)
+            elif type(design_lower) == list:
+                lower_limits = design_lower
             else:
-                designs_dict = {
-                    f'N_{target}': np.arange(
-                        design_lower,
-                        design_upper + design_step, 
-                        design_step
-                    ) for target in self.targets
-                }
+                raise ValueError("design_lower must be a float or list")
+            
+            if design_upper is None:
+                upper_limits = [self.num_targets[target] / self.total_obs for target in self.targets]
+            elif type(design_upper) == float:
+                upper_limits = [design_upper]*len(self.targets)
+            elif type(design_upper) == list:
+                upper_limits = design_upper
+            else:
+                raise ValueError("design_upper must be a float or list")
+            
+            if self.global_rank == 0:
+                print(f"design_lower: {lower_limits}\n",
+                    f"design_upper: {upper_limits}\n",
+                    f"design_step: {design_step}")
+                
+            designs_dict = {
+                f'N_{target}': np.arange(
+                    lower_limits[i],
+                    upper_limits[i] + design_step,
+                    design_step
+                ) for i, target in enumerate(self.targets)
+            }
 
             # Create constrained grid ensuring designs sum to 1
             tol = 1e-3
