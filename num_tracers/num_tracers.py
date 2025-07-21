@@ -126,9 +126,11 @@ class NumTracers:
                 raise ValueError("design_upper must be a float or list")
             
             if self.global_rank == 0 and self.verbose:
-                print(f"design_lower: {lower_limits}\n",
-                    f"design_upper: {upper_limits}\n",
-                    f"design_step: {design_step}")
+                print(
+                    f"design steps: {design_steps}\n",
+                    f"design lower: {lower_limits}\n",
+                    f"design upper: {upper_limits}\n"
+                    )
                 
             designs_dict = {
                 f'N_{target}': np.arange(
