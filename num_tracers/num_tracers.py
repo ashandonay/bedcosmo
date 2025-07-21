@@ -51,6 +51,7 @@ class NumTracers:
         self.device = device
         self.global_rank = global_rank  
         self.seed = seed
+        self.verbose = verbose
         if seed is not None:
             auto_seed(self.seed)
         self.rdrag = 149.77
@@ -77,7 +78,7 @@ class NumTracers:
         self.cosmo_params = list(self.priors.keys())
         self.observation_labels = ["y"]
         self.init_designs(fixed_design=fixed_design, design_step=design_step, design_lower=design_lower, design_upper=design_upper)
-        if verbose and self.global_rank == 0:
+        if self.global_rank == 0 and self.verbose:
             print(f"tracer_bins: {self.tracer_bins}\n",
                 f"sigmas: {self.sigmas}\n",
                 f"nominal_design: {self.nominal_design}\n",
@@ -101,6 +102,13 @@ class NumTracers:
             designs = designs.unsqueeze(0)
 
         else:
+            if type(design_step) == float:
+                design_steps = [design_step]*len(self.targets)
+            elif type(design_step) == list:
+                design_steps = design_step
+            else:
+                raise ValueError("design_lower must be a float or list")
+            
             if type(design_lower) == float:
                 lower_limits = [design_lower]*len(self.targets)
             elif type(design_lower) == list:
@@ -117,7 +125,7 @@ class NumTracers:
             else:
                 raise ValueError("design_upper must be a float or list")
             
-            if self.global_rank == 0:
+            if self.global_rank == 0 and self.verbose:
                 print(f"design_lower: {lower_limits}\n",
                     f"design_upper: {upper_limits}\n",
                     f"design_step: {design_step}")
@@ -125,8 +133,8 @@ class NumTracers:
             designs_dict = {
                 f'N_{target}': np.arange(
                     lower_limits[i],
-                    upper_limits[i] + design_step,
-                    design_step
+                    upper_limits[i] + design_steps[i],
+                    design_steps[i]
                 ) for i, target in enumerate(self.targets)
             }
             
@@ -434,13 +442,19 @@ class NumTracers:
             means = torch.zeros(passed_ratio.shape[:-1] + (self.sigmas.shape[-1],), device=self.device)
             means[:, :, self.DH_idx] = lexpand(self.central_val[self.DH_idx].unsqueeze(0), num_data_samples)
             rescaled_sigmas = torch.zeros(passed_ratio.shape[:-1] + (self.sigmas.shape[-1],), device=self.device)
-            rescaled_sigmas[:, :, self.DH_idx] = self.sigmas[self.DH_idx] * torch.sqrt(self.nominal_passed_ratio/passed_ratio)
+            rescaled_sigmas[:, :, self.DH_idx] = self.sigmas[self.DH_idx] * torch.sqrt(self.nominal_passed_ratio[self.DH_idx]/passed_ratio[..., self.DH_idx])
             if self.include_D_M:
                 means[:, :, self.DM_idx] = lexpand(self.central_val[self.DM_idx].unsqueeze(0), num_data_samples)
-                rescaled_sigmas[:, :, self.DM_idx] = self.sigmas[self.DM_idx] * torch.sqrt(self.nominal_passed_ratio/passed_ratio)
+                rescaled_sigmas[:, :, self.DM_idx] = self.sigmas[self.DM_idx] * torch.sqrt(self.nominal_passed_ratio[self.DM_idx]/passed_ratio[..., self.DM_idx])
+            if self.include_D_V:
+                means[:, :, self.DV_idx] = lexpand(self.central_val[self.DV_idx].unsqueeze(0), num_data_samples)
+                rescaled_sigmas[:, :, self.DV_idx] = self.sigmas[self.DV_idx] * torch.sqrt(self.nominal_passed_ratio[self.DV_idx]/passed_ratio[..., self.DV_idx])
+
+            if self.include_D_V and self.include_D_M:
                 covariance_matrix = self.corr_matrix * (rescaled_sigmas.unsqueeze(-1) * rescaled_sigmas.unsqueeze(-2))
             else:
-                covariance_matrix = self.corr_matrix[self.DH_idx, self.DH_idx] * (rescaled_sigmas[self.DH_idx].unsqueeze(-1) * rescaled_sigmas[self.DH_idx].unsqueeze(-2))
+                covariance_matrix = self.corr_matrix[self.DH_idx, self.DH_idx] * (rescaled_sigmas[:, :, self.DH_idx].unsqueeze(-1) * rescaled_sigmas[:, :, self.DH_idx].unsqueeze(-2))
+
             with pyro.plate("data", num_data_samples):
                 data_samples = pyro.sample(self.observation_labels[0], dist.MultivariateNormal(means.squeeze(), covariance_matrix.squeeze())).unsqueeze(1)
         else:
@@ -454,10 +468,10 @@ class NumTracers:
     def sample_brute_force(self, tracer_ratio, grid_designs, grid_features, grid_params, designer, num_data_samples=100, num_param_samples=1000):
         
         rescaled_sigmas = torch.zeros(self.sigmas.shape, device=self.device)
-        rescaled_sigmas[self.DH_idx] = self.sigmas[self.DH_idx] * torch.sqrt((self.efficiency[self.DH_idx]*tracer_ratio)/self.nominal_passed_ratio)
+        rescaled_sigmas[self.DH_idx] = self.sigmas[self.DH_idx] * torch.sqrt((self.efficiency[self.DH_idx]*tracer_ratio)/self.nominal_passed_ratio[self.DH_idx])
         if self.include_D_M:
             means = self.central_val
-            rescaled_sigmas[self.DM_idx] = self.sigmas[self.DM_idx] * torch.sqrt((self.efficiency[self.DM_idx]*tracer_ratio)/self.nominal_passed_ratio)
+            rescaled_sigmas[self.DM_idx] = self.sigmas[self.DM_idx] * torch.sqrt((self.efficiency[self.DM_idx]*tracer_ratio)/self.nominal_passed_ratio[self.DM_idx])
             covariance_matrix = self.corr_matrix * (rescaled_sigmas.unsqueeze(-1) * rescaled_sigmas.unsqueeze(-2))
         else:
             means = self.central_val[self.DH_idx]
@@ -498,10 +512,10 @@ class NumTracers:
                     parameters[k] = v
 
         rescaled_sigmas = torch.zeros(grid_params.shape + (len(self.sigmas),), device=self.device)
-        rescaled_sigmas[..., self.DH_idx] = self.sigmas[self.DH_idx] * torch.sqrt((self.efficiency[self.DH_idx]*tracer_ratio)/self.nominal_passed_ratio)
+        rescaled_sigmas[..., self.DH_idx] = self.sigmas[self.DH_idx] * torch.sqrt((self.efficiency[self.DH_idx]*tracer_ratio)/self.nominal_passed_ratio[self.DH_idx])
         if self.include_D_M:
             y = self.central_val
-            rescaled_sigmas[..., self.DM_idx] = self.sigmas[self.DM_idx] * torch.sqrt((self.efficiency[self.DM_idx]*tracer_ratio)/self.nominal_passed_ratio)
+            rescaled_sigmas[..., self.DM_idx] = self.sigmas[self.DM_idx] * torch.sqrt((self.efficiency[self.DM_idx]*tracer_ratio)/self.nominal_passed_ratio[self.DM_idx])
             covariance_matrix = self.corr_matrix * (rescaled_sigmas.unsqueeze(-1) * rescaled_sigmas.unsqueeze(-2))
         else:
             y = self.central_val[self.DH_idx]

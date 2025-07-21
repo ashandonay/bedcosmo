@@ -793,7 +793,7 @@ def get_nominal_samples(run_obj, run_args, guide_samples=101, seed=1, device="cu
     posterior_flow, selected_step = load_model(experiment, step, run_obj, run_args, device, global_rank=global_rank)
     auto_seed(seed)
 
-    nominal_design = torch.tensor(experiment.desi_tracers.groupby('class').sum()['observed'].reindex(experiment.classes.keys()).values, device=device, dtype=torch.float64)
+    nominal_design = torch.tensor(experiment.desi_tracers.groupby('class').sum()['observed'].reindex(experiment.targets).values, device=device, dtype=torch.float64)
     central_vals = experiment.central_val if run_args.get("include_D_M", False) else experiment.central_val[1::2]
     nominal_context = torch.cat([nominal_design, central_vals], dim=-1)
 
@@ -808,24 +808,19 @@ def init_experiment(
         cosmo_exp, 
         run_args, 
         device="cuda:0", 
-        design_args=None,
+        design_args={},
         seed=None
         ):
     data_path_param = run_args.get("data_path", "") 
-    if design_args is None:
-        design_args = {
-            "design_lower": run_args.get("design_lower", 0.05),
-            "design_step": run_args.get("design_step", 0.05),
-            "fixed_design": run_args.get("fixed_design", False)
-            }
     if cosmo_exp == 'num_tracers':
         from num_tracers import NumTracers
         experiment = NumTracers(
             data_path_param,
             run_args.get("cosmo_model", "base"),
-            design_args.get("design_step", 0.05),
-            design_args.get("design_lower", 0.05),
-            fixed_design=design_args.get("fixed_design", False),
+            design_step=design_args.get("design_step", run_args.get("design_step", 0.05)),
+            design_lower=design_args.get("design_lower", run_args.get("design_lower", 0.05)),
+            design_upper=design_args.get("design_upper", run_args.get("design_upper", 1.0)),
+            fixed_design=run_args.get("fixed_design", False),
             global_rank=0,
             device=device,
             include_D_M=run_args.get("include_D_M", False),

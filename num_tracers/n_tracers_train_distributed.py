@@ -510,24 +510,25 @@ def single_run(
                         mlflow.log_metric("best_loss", best_loss, step=step)
 
             # Update progress bar or print status
-            if global_rank == 0 and step % 10 == 0:
+            if step % 10 == 0:
                 mlflow.log_metric(f"loss_rank_{global_rank}", loss.mean().detach().item(), step=step)
                 mlflow.log_metric(f"agg_loss_rank_{global_rank}", agg_loss.detach().item(), step=step)
-                mlflow.log_metric("loss", global_loss, step=step)
-                mlflow.log_metric("agg_loss", global_agg_loss, step=step)
-                for param_group in optimizer.param_groups:
-                    mlflow.log_metric("lr", param_group['lr'], step=step)
-                if is_tty:
-                    pbar.update(10)
-                    if run_args["log_nominal_area"] and global_nominal_area is not None:
-                        pbar.set_description(f"Loss: {global_loss:.3f}, Area: {global_nominal_area:.3f}")
+                if global_rank == 0:
+                    mlflow.log_metric("loss", global_loss, step=step)
+                    mlflow.log_metric("agg_loss", global_agg_loss, step=step)
+                    for param_group in optimizer.param_groups:
+                        mlflow.log_metric("lr", param_group['lr'], step=step)
+                    if is_tty:
+                        pbar.update(10)
+                        if run_args["log_nominal_area"] and global_nominal_area is not None:
+                            pbar.set_description(f"Loss: {global_loss:.3f}, Area: {global_nominal_area:.3f}")
+                        else:
+                            pbar.set_description(f"Loss: {global_loss:.3f}")
                     else:
-                        pbar.set_description(f"Loss: {global_loss:.3f}")
-                else:
-                    if run_args["log_nominal_area"] and global_nominal_area is not None:
-                        print(f"Step {step}, Loss: {global_loss:.3f}, Area: {global_nominal_area:.3f}")
-                    else:
-                        print(f"Step {step}, Loss: {global_loss:.3f}")
+                        if run_args["log_nominal_area"] and global_nominal_area is not None:
+                            print(f"Step {step}, Loss: {global_loss:.3f}, Area: {global_nominal_area:.3f}")
+                        else:
+                            print(f"Step {step}, Loss: {global_loss:.3f}")
 
             tdist.barrier()
 

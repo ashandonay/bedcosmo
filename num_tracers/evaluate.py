@@ -39,7 +39,7 @@ class Evaluation:
         self.exp_id = run_data['exp_id']
         self.cosmo_exp = cosmo_exp
         self.storage_path = os.environ["SCRATCH"] + f"/bed/BED_cosmo/{self.cosmo_exp}"
-        self.save_path = f"{self.storage_path}/mlruns/{self.exp_id}/{self.run_id}/artifacts/"
+        self.save_path = f"{self.storage_path}/mlruns/{self.exp_id}/{self.run_id}/artifacts"
         self.guide_samples = guide_samples
         self.seed = seed
         auto_seed(self.seed) # fix random seed
@@ -54,9 +54,6 @@ class Evaluation:
             "design_step": design_step,
             "fixed_design": self.run_args["fixed_design"]
         }
-        with open(mlflow.artifacts.download_artifacts(run_id=self.run_id, artifact_path="classes.json")) as f:
-            self.classes = json.load(f)
-
         self.experiment = init_experiment(self.cosmo_exp, self.run_args, device=self.device, design_args=design_args, seed=self.seed)
 
 
@@ -229,7 +226,9 @@ class Evaluation:
 
     def eig_grid(self, step):
         """
-        Plots the EIG on a 2D grid for a given step.
+        Plots the EIG on a 2D grid with subplot layout:
+        - Top plot: colors points by the 3rd design variable (f_QSO)
+        - Bottom plot: colors points by EIG values
         """
         flow_model, _ = load_model(
             self.experiment, step, self.run_obj, 
@@ -237,37 +236,112 @@ class Evaluation:
             global_rank=self.global_rank
             )
         eigs, optimal_eig, avg_nominal_eig, optimal_design = self.calc_eig_batch(flow_model)
-        fig = plt.figure(figsize=(8, 8))
-        ax = fig.add_axes([0.12, 0.1, 0.68, 0.8])
-        sc = ax.scatter(
-            self.experiment.designs[:, 0].cpu().numpy(), self.experiment.designs[:, 1].cpu().numpy(),
-            c=eigs, cmap='viridis', s=60, alpha=0.8, marker='o',
-            vmin=np.min(eigs), vmax=np.max(eigs)
-        )
-        # Add optimal and nominal markers
-        ax.scatter(optimal_design[0].cpu().numpy(), optimal_design[1].cpu().numpy(),
-                c='red', s=70, alpha=0.8, marker='*', label='Optimal Design')
-        ax.scatter(self.experiment.nominal_design[0].cpu().numpy(), self.experiment.nominal_design[1].cpu().numpy(),
-                c='black', s=70, alpha=0.8, marker='*', label='Nominal Design')
-        ax.set_xlabel("$f_{LRG}$", fontsize=14)
-        ax.set_ylabel("$f_{ELG}$", fontsize=14)
-        ax.grid(True, alpha=0.3)
-        ax.set_aspect('equal')
-        ax.set_box_aspect(1)
-        ax.legend(fontsize=14)
+        
+        # Create figure with subplots
+        fig = plt.figure(figsize=(8, 12))
+        gs = fig.add_gridspec(2, 2, width_ratios=[1, 0.08], height_ratios=[1, 1], wspace=0.1, hspace=0.2)
+        
+        # Create subplots
+        ax_top = fig.add_subplot(gs[0, 0])
+        ax_bottom = fig.add_subplot(gs[1, 0])
+        cbar_ax_top = fig.add_subplot(gs[0, 1])
+        cbar_ax_bottom = fig.add_subplot(gs[1, 1])
 
-        # Dynamically match colorbar height and position to the plot
-        plot_pos = ax.get_position().bounds  # (left, bottom, width, height)
-        gap = 0.03
-        cbar_width = 0.03
-        cax = fig.add_axes([
-            plot_pos[0] + plot_pos[2] + gap,  # left
-            plot_pos[1],                      # bottom
-            cbar_width,                       # width
-            plot_pos[3]                       # height
-        ])
-        fig.colorbar(sc, cax=cax, label='EIG [bits]')
+        # Get design variables
+        designs = self.experiment.designs.cpu().numpy()
+        nominal_design = self.experiment.nominal_design.cpu().numpy()
+        optimal_design = optimal_design.cpu().numpy()
 
+        # Top plot: scatter with 3rd design variable as color
+        scatter_top = ax_top.scatter(designs[:, 1], designs[:, 2],
+                    c=designs[:, 2],
+                    cmap='viridis',
+                    s=60,
+                    alpha=0.8,
+                    marker='o',
+                    vmin=np.min(designs[:, 2]),
+                    vmax=np.max(designs[:, 2]))
+        
+        # Add nominal and optimal markers to top plot
+        ax_top.scatter(nominal_design[1], nominal_design[2],
+                    c=nominal_design[2],
+                    cmap='viridis',
+                    s=70,
+                    alpha=0.8,
+                    vmin=np.min(designs[:, 2]),
+                    vmax=np.max(designs[:, 2]),
+                    edgecolor='black',
+                    marker='*',
+                    label='Nominal Design')
+        
+        ax_top.scatter(optimal_design[1], optimal_design[2],
+                    c='red',
+                    s=70,
+                    alpha=0.8,
+                    edgecolor='red',
+                    marker='*',
+                    label='Optimal Design')
+        
+        # Configure top plot
+        ax_top.set_title(f'Design Variables (step={step})')
+        ax_top.set_xlabel("$f_{LRG}$", fontsize=14)
+        ax_top.set_ylabel("$f_{ELG}$", fontsize=14)
+        ax_top.grid(True, alpha=0.3)
+        ax_top.set_aspect('equal')
+        ax_top.set_box_aspect(1)
+        ax_top.legend(fontsize=12)
+
+        # Bottom plot: scatter with EIG as color
+        scatter_bottom = ax_bottom.scatter(designs[:, 1], designs[:, 2],
+                    c=eigs,
+                    cmap='viridis',
+                    s=60,
+                    alpha=0.8,
+                    marker='o',
+                    vmin=np.min(eigs),
+                    vmax=np.max(eigs))
+        
+        # Add nominal and optimal markers to bottom plot
+        ax_bottom.scatter(nominal_design[1], nominal_design[2],
+                    c='black',
+                    s=70,
+                    alpha=0.8,
+                    marker='*',
+                    label='Nominal Design')
+        
+        ax_bottom.scatter(optimal_design[1], optimal_design[2],
+                    c='red',
+                    s=70,
+                    alpha=0.8,
+                    edgecolor='red',
+                    marker='*',
+                    label='Optimal Design')
+
+        # Configure bottom plot
+        ax_bottom.set_title('Expected Information Gain')
+        ax_bottom.set_xlabel("$f_{LRG}$", fontsize=14)
+        ax_bottom.set_ylabel("$f_{ELG}$", fontsize=14)
+        ax_bottom.grid(True, alpha=0.3)
+        ax_bottom.set_aspect('equal')
+        ax_bottom.set_box_aspect(1)
+        ax_bottom.legend(fontsize=12)
+
+        # Add colorbars with tick values
+        cbar_top = plt.colorbar(scatter_top, cax=cbar_ax_top, label='$f_{QSO}$')
+        cbar_bottom = plt.colorbar(scatter_bottom, cax=cbar_ax_bottom, label='EIG [bits]')
+        
+        # Set tick values for colorbars with intermediate ticks
+        # Top colorbar (f_QSO) - 5 evenly spaced ticks
+        f_qso_ticks = np.linspace(np.min(designs[:, 2]), np.max(designs[:, 2]), 5)
+        cbar_top.set_ticks(f_qso_ticks)
+        cbar_top.set_ticklabels([f'{tick:.2f}' for tick in f_qso_ticks])
+        
+        # Bottom colorbar (EIG) - 5 evenly spaced ticks
+        eig_ticks = np.linspace(np.min(eigs), np.max(eigs), 5)
+        cbar_bottom.set_ticks(eig_ticks)
+        cbar_bottom.set_ticklabels([f'{tick:.2f}' for tick in eig_ticks])
+
+        plt.tight_layout()
         show_figure(f"{self.save_path}/plots/eig_grid_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png", fig=fig)
 
     def posterior_steps(self, steps, level=0.68):
