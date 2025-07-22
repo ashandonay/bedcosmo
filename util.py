@@ -279,7 +279,14 @@ def init_training_env(tdist, device):
 
     return global_rank, local_rank, effective_device_id, pytorch_device_idx
 
-def init_nf(run_args, input_dim, context_dim, device="cuda:0", seed=None, **kwargs):
+def init_nf(
+        run_args, 
+        input_dim, 
+        context_dim,
+        device="cuda:0", 
+        seed=None, 
+        **kwargs
+        ):
     """
     Initialize the flow model.
 
@@ -988,12 +995,18 @@ def parse_mlflow_params(params_dict):
     """
     parsed_params = {}
     for key, value_str in params_dict.items():
-        # 1. Try Boolean
+        # 1. Try Boolean and None
         if value_str.lower() == 'true':
             parsed_params[key] = True
             continue
         if value_str.lower() == 'false':
             parsed_params[key] = False
+            continue
+        if value_str.lower() == 'null':
+            parsed_params[key] = None
+            continue
+        if value_str.lower() == 'none':
+            parsed_params[key] = None
             continue
 
         # 2. Try Integer
@@ -1279,12 +1292,11 @@ def get_checkpoint(target_step, checkpoint_dir, current_pytorch_device, global_r
         selected_step, selected_file = shared_checkpoint_steps[closest_idx]
         checkpoint_path = f"{checkpoint_dir}/{selected_file}"
         
-        if global_rank == 0:
-            print(f"No rank-specific checkpoints found, using shared checkpoint")
-            print(f"  Requested step: {target_step}")
-            print(f"  Available steps: {[s[0] for s in shared_checkpoint_steps]}")
-            print(f"  Selected step: {selected_step}")
-            print(f"Loading checkpoint from {checkpoint_path}")
+        print(f"No rank-specific checkpoints found for rank {global_rank}, using shared checkpoint")
+        print(f"  Requested step: {target_step}")
+        print(f"  Available steps: {[s[0] for s in shared_checkpoint_steps]}")
+        print(f"  Selected step: {selected_step}")
+        print(f"Loading checkpoint from {checkpoint_path}")
     checkpoint = torch.load(checkpoint_path, map_location=current_pytorch_device, weights_only=False)
     return checkpoint, selected_step
 

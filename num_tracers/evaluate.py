@@ -283,7 +283,7 @@ class Evaluation:
                     label='Optimal Design')
         
         # Configure top plot
-        ax_top.set_title(f'Design Variables (step={step})')
+        ax_top.set_title(f'Design Variables')
         ax_top.set_xlabel("$f_{LRG}$", fontsize=14)
         ax_top.set_ylabel("$f_{ELG}$", fontsize=14)
         ax_top.grid(True, alpha=0.3)

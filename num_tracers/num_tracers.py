@@ -85,7 +85,7 @@ class NumTracers:
                 f"nominal_passed: {self.nominal_passed_ratio}")
 
 
-    def init_designs(self, fixed_design=False, design_step=0.05, design_lower=0.05, design_upper=1.0):
+    def init_designs(self, fixed_design=False, design_step=0.05, design_lower=0.05, design_upper=None):
         if fixed_design:
             # Create grid with nominal design values using self.targets
             grid_params = {
