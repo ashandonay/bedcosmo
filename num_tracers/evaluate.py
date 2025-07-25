@@ -504,7 +504,7 @@ def run_eval(
         device=device,
         show_scatter=False,
         step=eval_step,
-        global_rank=[0,1,2,3,4,5,6,7]
+        global_rank=list(range(int(run_args["n_devices"])))
         )
 
 if __name__ == "__main__":
