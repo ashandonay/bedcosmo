@@ -424,13 +424,13 @@ def init_scheduler(optimizer, run_args):
     return scheduler
 
 def init_run(
-        tdist, 
-        global_rank, 
-        current_pytorch_device, 
-        storage_path, 
-        mlflow_exp, 
-        cosmo_model, 
-        run_args, 
+        mlflow_exp,
+        cosmo_model,
+        run_args,
+        tdist,
+        global_rank,
+        current_pytorch_device,
+        storage_path,
         **kwargs
         ):
     """Initialize MLflow run settings and broadcast to all ranks."""
@@ -441,6 +441,8 @@ def init_run(
                 print(f"=== NEW RUN MODE ===")
                 print("Starting fresh training run")
             checkpoint = None
+            # Set cosmo_model in run_args for a fresh run
+            run_args["cosmo_model"] = cosmo_model
         else: 
             # Restart from existing run
             if global_rank == 0:
@@ -485,7 +487,6 @@ def init_run(
             run_args["n_particles"] = run_args["n_devices"] * run_args["n_particles_per_device"]
 
             # Log parameters
-            mlflow.log_param("cosmo_model", cosmo_model)
             for key, value in run_args.items():
                 mlflow.log_param(key, value)
             for key, value in kwargs.items():
@@ -617,7 +618,7 @@ def _fix_model_args(run_args, ref_run, global_rank=0):
     changed_params = {}
     
     # Common parameters that apply to all flow types
-    common_params = ["flow_type", "n_transforms", "hyper_hidden_size", "hyper_n_layers"]
+    common_params = ["cosmo_model", "flow_type", "n_transforms", "hyper_hidden_size", "hyper_n_layers"]
     
     # Store original values and update common parameters
     for param in common_params:
@@ -931,7 +932,7 @@ def load_model(experiment, step, run_obj, run_args, device, global_rank=0):
     if step == 'last': 
         effective_step = run_args.get("total_steps")
     
-    checkpoint_dir = f'{storage_path}/mlruns/{exp_id}/{current_run_id}/artifacts/checkpoints/'
+    checkpoint_dir = f'{storage_path}/mlruns/{exp_id}/{current_run_id}/artifacts/checkpoints'
     if not os.path.isdir(checkpoint_dir):
          print(f"ERROR: Checkpoint directory not found: {checkpoint_dir}")
          raise FileNotFoundError(f"Checkpoint directory not found: {checkpoint_dir}. Ensure artifacts are downloaded or path is correct.")
@@ -1262,10 +1263,6 @@ def get_checkpoint(target_step, checkpoint_dir, current_pytorch_device, global_r
         
         selected_step, selected_file = rank_checkpoint_steps[closest_idx]
         checkpoint_path = f"{checkpoint_dir}/{selected_file}"
-        
-        if global_rank == 0:
-            print(f"Loading checkpoints:", "Requested:", target_step, "Selected:", selected_step)
-
     else:
         # Fallback to shared checkpoint if no rank-specific ones found
         # Find the checkpoint closest to target_step

@@ -12,6 +12,8 @@ from astropy import constants
 from torch import trapezoid
 from bed.grid import GridStack
 from bed.grid import Grid
+import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D
 # Get the directory containing the current script
 script_dir = os.path.dirname(os.path.abspath(__file__))
 # Get the parent directory ('BED_cosmo/') and add it to the Python path
@@ -32,11 +34,12 @@ class NumTracers:
         design_lower=0.05, 
         design_upper=None, 
         fixed_design=False, 
-        global_rank=0, 
-        device="cuda:0", 
         include_D_M=True, 
         include_D_V=True,
         seed=None,
+        global_rank=0, 
+        device="cuda:0",
+        mode='eval',
         verbose=False
     ):
 
@@ -49,6 +52,7 @@ class NumTracers:
         self.DV_idx = np.where(self.desi_data["quantity"] == "DV_over_rs")[0]
         self.cosmo_model = cosmo_model
         self.device = device
+        self.mode = mode
         self.global_rank = global_rank  
         self.seed = seed
         self.verbose = verbose
@@ -83,7 +87,6 @@ class NumTracers:
                 f"sigmas: {self.sigmas}\n",
                 f"nominal_design: {self.nominal_design}\n",
                 f"nominal_passed: {self.nominal_passed_ratio}")
-
 
     def init_designs(self, fixed_design=False, design_step=0.05, design_lower=0.05, design_upper=None):
         if fixed_design:
@@ -135,7 +138,7 @@ class NumTracers:
             designs_dict = {
                 f'N_{target}': np.arange(
                     lower_limits[i],
-                    upper_limits[i] + design_steps[i],
+                    upper_limits[i],
                     design_steps[i]
                 ) for i, target in enumerate(self.targets)
             }
@@ -152,8 +155,56 @@ class NumTracers:
             for name in grid_designs.names[1:]:
                 design_tensor = torch.tensor(getattr(grid_designs, name).squeeze(), device=self.device).unsqueeze(1)
                 designs = torch.cat((designs, design_tensor), dim=1)
+                
         self.designs = designs.to(self.device)
 
+    def design_plot(self):
+        """
+        Plot the design variables in 3D with the 4th dimension (QSO) as color
+        """
+        fig = plt.figure(figsize=(10, 8))
+        ax_3d = fig.add_subplot(111, projection='3d')
+
+        # Convert tensors to numpy for plotting
+        designs_np = self.designs.cpu().numpy()
+        nominal_design_np = self.nominal_design.cpu().numpy()
+        
+        cbar_min = np.min(designs_np[:, 3])
+        cbar_max = np.max(designs_np[:, 3])
+        # 3D scatter plot with 4th dimension (QSO) as color
+        scatter_3d = ax_3d.scatter(designs_np[:, 1], designs_np[:, 2], designs_np[:, 0],
+                    c=designs_np[:, 3],  # 4th dimension (QSO) as color
+                    cmap='viridis',
+                    s=60,
+                    alpha=0.8,
+                    marker='o',
+                    vmin=cbar_min,
+                    vmax=cbar_max)
+        
+        # Add nominal and optimal markers
+        ax_3d.scatter(nominal_design_np[1], nominal_design_np[2], nominal_design_np[0],
+                    c=nominal_design_np[3],
+                    cmap='viridis',
+                    s=100,
+                    alpha=0.8,
+                    vmin=cbar_min,
+                    vmax=cbar_max,
+                    marker='*',
+                    label='Nominal Design')
+        
+        # Configure 3D plot
+        ax_3d.set_title('Design Variables', fontsize=16)
+        ax_3d.set_xlabel("$f_{LRG}$", fontsize=14)
+        ax_3d.set_ylabel("$f_{ELG}$", fontsize=14)
+        ax_3d.set_zlabel("$f_{BGS}$", fontsize=14)
+        ax_3d.grid(True, alpha=0.3)
+        ax_3d.legend(fontsize=12)
+        
+        # Add colorbar
+        cbar = plt.colorbar(scatter_3d, ax=ax_3d, shrink=0.8, aspect=20)
+        cbar.set_label("$f_{QSO}$", fontsize=14)
+        return fig
+    
     def get_priors(self):
         Om_range = torch.tensor([0.01, 0.99], device=self.device)
         Ok_range = torch.tensor([-0.3, 0.3], device=self.device)

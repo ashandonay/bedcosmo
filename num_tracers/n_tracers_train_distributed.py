@@ -44,7 +44,7 @@ import json
 import argparse
 import io
 import contextlib
-from plotting import get_contour_area, plot_training
+from plotting import get_contour_area, plot_training, save_figure
 import getdist.mcsamples
 
 class FlowLikelihoodDataset(Dataset):
@@ -128,29 +128,33 @@ def single_run(
     current_pytorch_device = f"cuda:{pytorch_device_idx}" if "LOCAL_RANK" in os.environ and torch.cuda.is_available() else (f"cuda:{effective_device_id}" if effective_device_id != -1 else "cpu")
 
     ml_info, run_args, checkpoint, start_step, best_loss, best_nominal_area = init_run(
+        mlflow_exp, 
+        cosmo_model, 
+        run_args, 
         tdist, 
         global_rank, 
         current_pytorch_device, 
         storage_path, 
-        mlflow_exp, 
-        cosmo_model, 
-        run_args, 
         **kwargs
         )
 
     if cosmo_exp == "num_tracers":
         experiment = NumTracers(
             data_path=run_args["data_path"],
-            cosmo_model=cosmo_model,
+            cosmo_model=run_args["cosmo_model"],
             design_step=run_args["design_step"],
             design_lower=run_args["design_lower"],
             design_upper=run_args["design_upper"],
-            global_rank=global_rank,
             fixed_design=run_args["fixed_design"],
-            include_D_M=run_args["include_D_M"], 
+            include_D_M=run_args["include_D_M"],
+            global_rank=global_rank,
             device=current_pytorch_device,
+            mode='train',
             verbose=run_args["verbose"]
             )
+        if global_rank == 0:
+            fig = experiment.design_plot()
+            save_figure(f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/plots/designs.png", fig=fig, close_fig=True, display_fig=False)
     # Only create prior plot if not resuming and on rank 0
     if not kwargs.get("resume_id", None) and global_rank == 0: # global_rank check
         fig, axs = plt.subplots(ncols=len(experiment.cosmo_params), nrows=1, figsize=(5*len(experiment.cosmo_params), 5))

@@ -1,5 +1,9 @@
 import sys
 import os
+import contextlib
+import io
+import json
+import matplotlib
 parent_dir = os.path.abspath(os.path.join(os.getcwd(), os.pardir))
 if parent_dir not in sys.path:
     sys.path.insert(0, parent_dir)
@@ -24,7 +28,7 @@ mlflow.set_tracking_uri("file:" + os.environ["SCRATCH"] + "/bed/BED_cosmo/num_tr
 
 class Evaluation:
     def __init__(
-            self, run_id, guide_samples, seed=1, design_lower=0.05, design_step=0.05,
+            self, run_id, guide_samples, seed=1, design_step=0.05, design_lower=0.05, design_upper=None,
             cosmo_exp='num_tracers', levels=[0.68, 0.95], global_rank=0, 
             n_evals=20, device="cuda:0", n_particles=1000, verbose=False
             ):
@@ -45,67 +49,104 @@ class Evaluation:
         auto_seed(self.seed) # fix random seed
         self.device = device
         self.levels = levels
-        self.global_rank = global_rank
+        self.global_ranks = global_rank if isinstance(global_rank, list) else [global_rank]
         self.n_evals = n_evals
         self.n_particles = n_particles
         self.verbose = verbose
         design_args = {
-            "design_lower": design_lower,
             "design_step": design_step,
+            "design_lower": design_lower,
+            "design_upper": design_upper,
             "fixed_design": self.run_args["fixed_design"]
         }
         self.experiment = init_experiment(self.cosmo_exp, self.run_args, device=self.device, design_args=design_args, seed=self.seed)
 
+    def _eval_step(self, step, design_type='nominal', global_rank=None):
+        """
+        Generates samples given the nominal context (nominal design + central values).
+        Args:
+            step (int): Step to calculate the nominal samples for.
+        Returns: a GetDist MCSamples object with the nominal samples
+        """
+        if global_rank is None:
+            global_ranks_list = self.global_ranks
+        else:
+            global_ranks_list = [global_rank]
+        rank_samples = []
+        rank_eigs = []
+        for rank in global_ranks_list:
+            flow_model, _ = load_model(
+                self.experiment, step, self.run_obj, 
+                self.run_args, self.device, 
+                global_rank=rank
+                )
+            if design_type == 'optimal':
+                _, eig, _, design = self.calc_eig_batch(flow_model)
+                rank_eigs.append(eig)
+            elif design_type == 'nominal':
+                design = self.experiment.nominal_design
+                _, _, eig, _ = self.calc_eig_batch(flow_model)
+                rank_eigs.append(eig)
+            else:
+                raise ValueError(f"Invalid design type: {design_type}")
+            
+            rank_samples.append(self._get_samples(design, flow_model))
+        return rank_samples, np.mean(rank_eigs)
 
+    def _get_samples(self, design, flow_model):
+        context = torch.cat([design, self.experiment.central_val], dim=-1)
+        samples = flow_model(context).sample((self.guide_samples,)).cpu().numpy()
+        samples[:, -1] *= 100000 # Rescale the hrdrag samples 
+        with contextlib.redirect_stdout(io.StringIO()):
+            samples_gd = getdist.MCSamples(samples=samples, names=self.experiment.cosmo_params, labels=self.experiment.latex_labels)
+        return samples_gd
+    
     def posterior(self, step):
         """
         Evaluates the posterior of the optimal and nominal designs for a given run and returns the samples.
         """
-        flow_model, _ = load_model(
-            self.experiment, step, self.run_obj, 
-            self.run_args, self.device, 
-            global_rank=self.global_rank
-            )
-        eigs, optimal_eig, nominal_eig, optimal_design = self.calc_eig_batch(flow_model)
-        optimal_samples_gd = self.get_samples(optimal_design, flow_model)
-        nominal_samples_gd = self.get_samples(self.experiment.nominal_design, flow_model)
-        desi_samples = np.load(f"{home_dir}/data/mcmc_samples/{self.run_args['cosmo_model']}.npy")
-        with contextlib.redirect_stdout(io.StringIO()):
-            desi_samples_gd = getdist.MCSamples(samples=desi_samples, names=self.experiment.cosmo_params, labels=self.experiment.latex_labels)
-        color_list = ['tab:blue', 'black', 'black']
-        line_style = ['-', '-', '--']
-        all_samples = [optimal_samples_gd, nominal_samples_gd, desi_samples_gd]
-        legend_labels = ['Optimal Design (NF)', 'DESI Nominal Design (NF)', 'DESI Nominal Design (MCMC)']
-        g = plot_posterior(all_samples, color_list, levels=self.levels, line_style=line_style)
+        all_samples = []
+        all_colors = []
+        # Sample with optimal design
+        optimal_samples, optimal_eig = self._eval_step(step, design_type='optimal')
+        all_samples.extend(optimal_samples)
+        # Set the optimal design samples to blue
+        all_colors.extend(['tab:blue'] * len(optimal_samples))
+        # Sample with nominal design
+        nominal_samples, nominal_eig = self._eval_step(step, design_type='nominal')
+        all_samples.extend(nominal_samples)
+        # Set the nominal design samples to gray
+        all_colors.extend(['gray'] * len(nominal_samples))
+        # Get the DESI MCMC samples
+        desi_samples_gd = get_desi_samples(self.run_args['cosmo_model'])
+        all_samples.append(desi_samples_gd)
+        all_colors.append('black')
+        g = plot_posterior(all_samples, all_colors, levels=self.levels)
 
+        # Create custom legend
         if g.fig.legends:
             for legend in g.fig.legends:
                 legend.remove()
-
-        # Create custom legend
         custom_legend = []
         custom_legend.append(
-            Line2D([0], [0], color=color_list[0], linestyle=line_style[0],
-                    label=f'{legend_labels[0]}, EIG: {optimal_eig:.2f}')
+            Line2D([0], [0], color='tab:blue', label=f'Optimal Design (NF), EIG: {optimal_eig:.2f}')
         )
         custom_legend.append(
-            Line2D([0], [0], color=color_list[1], linestyle=line_style[1],
-                    label=f'{legend_labels[1]}, EIG: {nominal_eig:.2f}')
+            Line2D([0], [0], color='gray', label=f'Nominal Design (NF), EIG: {nominal_eig:.2f}')
         )
         custom_legend.append(
-            Line2D([0], [0], color=color_list[2], linestyle=line_style[2],
-                    label=f'{legend_labels[2]}')
+            Line2D([0], [0], color='black', label=f'DESI Nominal Design (MCMC)')
         )
         g.fig.set_constrained_layout(True)
         leg = g.fig.legend(handles=custom_legend, loc='upper right', bbox_to_anchor=(0.99, 0.96))
         leg.set_in_layout(False)
-        show_figure(f"{self.save_path}/plots/posterior_eval_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png", fig=g.fig)
+        save_figure(f"{self.save_path}/plots/posterior_eval_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png", fig=g.fig)
     
-    def sample_posterior(self, step, level, num_data_samples, design_type='optimal', central=True):
+    def sample_posterior(self, step, level, num_data_samples, design_type='optimal', global_rank=0, central=True):
         posterior_flow, _ = load_model(
             self.experiment, step, 
             self.run_obj, self.run_args, 
-            device=self.device, global_rank=self.global_rank
+            device=self.device, global_rank=global_rank
             )
 
         _, _, _, optimal_design = self.calc_eig_batch(posterior_flow)
@@ -135,10 +176,11 @@ class Evaluation:
                 )
             all_samples.append(samples_gd)
             areas.append(get_contour_area([samples_gd], 'Om', 'hrdrag', level)[0])
-        central_samples_gd = self.get_samples(design, posterior_flow)
-        central_area = get_contour_area([central_samples_gd], 'Om', 'hrdrag', level)[0]
-        all_samples.append(central_samples_gd)
-        g = plot_posterior(all_samples, ['tab:blue']*len(data_idxs), levels=[level], alpha=0.7)
+        # Get the central samples with the nominal design indexed by the input global rank
+        central_samples_gd, _ = self._eval_step(step, design_type='nominal', global_rank=global_rank)
+        central_area = get_contour_area(central_samples_gd, 'Om', 'hrdrag', level)[0]
+        all_samples.append(central_samples_gd[0])
+        g = plot_posterior(all_samples, ['gray']*len(data_idxs) + ['black'], levels=[level], alpha=0.7)
         if g.fig.legends:
             for legend in g.fig.legends:
                 legend.remove()
@@ -148,7 +190,7 @@ class Evaluation:
         g.fig.suptitle(f"{design_type.capitalize()} Design {int(level*100)}% Credible Region, Avg areas: {np.mean(areas):.3f} +/- {np.std(areas):.3f}, Central val: {central_area:.3f}", 
                       fontsize=12)
         
-        show_figure(f"{self.save_path}/plots/posterior_samples_{design_type}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png", fig=g.fig)
+        save_figure(f"{self.save_path}/plots/posterior_samples_{design_type}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png", fig=g.fig)
 
     def calc_eig_batch(self, flow_model):
         """
@@ -160,8 +202,8 @@ class Evaluation:
         Returns:
             tuple: A tuple containing:
                 - avg_eigs (np.ndarray): Average EIGs for each design.
-                - optimal_eig (float): Maximum EIG.
-                - avg_nominal_eig (float): Average EIG of the nominal design.
+                - optimal_avg_eig (float): Maximum of average EIGs.
+                - nominal_avg_eig (float): Average EIG of the nominal design.
                 - optimal_design (torch.Tensor): Design with the maximum EIG.
         """
 
@@ -180,10 +222,10 @@ class Evaluation:
         avg_eigs = np.mean(eigs_batch, axis=0)
         eigs_std = np.std(eigs_batch, axis=0)
         eigs_se = eigs_std/np.sqrt(self.n_evals)
-        avg_nominal_eig = np.mean(nominal_eig_batch, axis=0).item()
+        nominal_avg_eig = np.mean(nominal_eig_batch, axis=0).item()
 
         optimal_design = self.experiment.designs[np.argmax(avg_eigs)]
-        return avg_eigs, np.max(avg_eigs), avg_nominal_eig, optimal_design
+        return avg_eigs, np.max(avg_eigs), nominal_avg_eig, optimal_design
 
     def calc_eig(self, flow_model, nominal_design=False):
         """
@@ -210,21 +252,40 @@ class Evaluation:
 
         return eigs
 
-    def get_samples(self, design, flow_model):
+    def design_comparison(self, step, width=0.2, global_rank=0):
         """
-        Generates samples given the nominal context (nominal design + central values).
-        Args:
-            step (int): Step to calculate the nominal samples for.
-        Returns: a GetDist MCSamples object with the nominal samples
+        Plots a comparison of the nominal and optimal design.
         """
-        context = torch.cat([design, self.experiment.central_val], dim=-1)
-        samples = flow_model(context).sample((self.guide_samples,)).cpu().numpy()
-        samples[:, -1] *= 100000 # Rescale the hrdrag samples 
-        with contextlib.redirect_stdout(io.StringIO()):
-            samples_gd = getdist.MCSamples(samples=samples, names=self.experiment.cosmo_params, labels=self.experiment.latex_labels)
-        return samples_gd
+        flow_model, _ = load_model(
+            self.experiment, step, self.run_obj, 
+            self.run_args, self.device, 
+            global_rank=global_rank
+            )
+        _, _, _, optimal_design = self.calc_eig_batch(flow_model)
+        # Set the positions for the bars
+        x = np.arange(len(self.experiment.targets))  # the label locations
 
-    def eig_grid(self, step):
+        # Create the bar chart
+        fig, ax = plt.subplots(figsize=(14, 7))
+        # Convert tensors to CPU numpy arrays if they're on GPU
+        nominal_design_cpu = self.experiment.nominal_design.cpu().numpy()
+        optimal_design_cpu = optimal_design.cpu().numpy()
+        
+        bars1 = ax.bar(x - width/2, nominal_design_cpu, width, label='Nominal Design', color='black')
+        bars2 = ax.bar(x + width/2, optimal_design_cpu, width, label='Optimal Design', color='tab:blue')
+        ax.set_xlabel('Tracers')
+        ax.set_ylabel('Num Tracers')
+        ax.set_xticks(x)
+        ax.set_xticklabels(self.experiment.targets)
+        ax.legend()
+        plt.suptitle(f"{self.experiment.name} Design Variables ({', '.join(self.experiment.targets)})", fontsize=16)
+        plt.tight_layout()
+        save_path = f"{self.save_path}/plots/design_comparison_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+        save_figure(save_path, fig=fig)
+        plt.close(fig)
+
+
+    def eig_grid(self, step, global_rank=0):
         """
         Plots the EIG on a 2D grid with subplot layout:
         - Top plot: colors points by the 3rd design variable (f_QSO)
@@ -233,9 +294,9 @@ class Evaluation:
         flow_model, _ = load_model(
             self.experiment, step, self.run_obj, 
             self.run_args, self.device, 
-            global_rank=self.global_rank
+            global_rank=global_rank
             )
-        eigs, optimal_eig, avg_nominal_eig, optimal_design = self.calc_eig_batch(flow_model)
+        eigs, optimal_avg_eig, nominal_avg_eig, optimal_design = self.calc_eig_batch(flow_model)
         
         # Create figure with subplots
         fig = plt.figure(figsize=(8, 12))
@@ -266,7 +327,7 @@ class Evaluation:
         ax_top.scatter(nominal_design[1], nominal_design[2],
                     c=nominal_design[2],
                     cmap='viridis',
-                    s=70,
+                    s=75,
                     alpha=0.8,
                     vmin=np.min(designs[:, 2]),
                     vmax=np.max(designs[:, 2]),
@@ -275,10 +336,10 @@ class Evaluation:
                     label='Nominal Design')
         
         ax_top.scatter(optimal_design[1], optimal_design[2],
-                    c='red',
-                    s=70,
+                    c='tab:blue',
+                    s=75,
                     alpha=0.8,
-                    edgecolor='red',
+                    edgecolor='tab:blue',
                     marker='*',
                     label='Optimal Design')
         
@@ -304,16 +365,14 @@ class Evaluation:
         # Add nominal and optimal markers to bottom plot
         ax_bottom.scatter(nominal_design[1], nominal_design[2],
                     c='black',
-                    s=70,
-                    alpha=0.8,
+                    s=75,
                     marker='*',
                     label='Nominal Design')
         
         ax_bottom.scatter(optimal_design[1], optimal_design[2],
-                    c='red',
-                    s=70,
-                    alpha=0.8,
-                    edgecolor='red',
+                    c='tab:blue',
+                    s=75,
+                    edgecolor='tab:blue',
                     marker='*',
                     label='Optimal Design')
 
@@ -342,7 +401,7 @@ class Evaluation:
         cbar_bottom.set_ticklabels([f'{tick:.2f}' for tick in eig_ticks])
 
         plt.tight_layout()
-        show_figure(f"{self.save_path}/plots/eig_grid_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png", fig=fig)
+        save_figure(f"{self.save_path}/plots/eig_grid_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png", fig=fig)
 
     def posterior_steps(self, steps, level=0.68):
         """
@@ -356,25 +415,21 @@ class Evaluation:
         colors = plt.cm.viridis_r(np.linspace(0, 1, len(steps)))
         
         all_samples = []
-        all_areas = []
-        color_list = []
+        all_colors = []
+        areas = []
         custom_legend = []
 
-        checkpoint_dir = f'{self.storage_path}/mlruns/{self.exp_id}/{self.run_id}/artifacts/checkpoints/'
+        checkpoint_dir = f'{self.storage_path}/mlruns/{self.exp_id}/{self.run_id}/artifacts/checkpoints'
         if not os.path.isdir(checkpoint_dir):
             print(f"Warning: Checkpoint directory not found for run {self.run_id}, skipping. Path: {checkpoint_dir}")
             return
         for i, step in enumerate(steps):
-            flow_model, _ = load_model(
-                self.experiment, step, 
-                self.run_obj, self.run_args, 
-                self.device, global_rank=self.global_rank
-                )
-            samples = self.get_samples(self.experiment.nominal_design, flow_model)
-            all_samples.append(samples)
-            color_list.append(colors[i % len(colors)])
-            area = get_contour_area(samples, 'Om', 'hrdrag', level)[0]
-            all_areas.append(area)
+            samples, _ = self._eval_step(step, design_type='nominal')
+            all_samples.extend(samples)
+            # Convert RGBA color to hex string before extending
+            color_hex = matplotlib.colors.to_hex(colors[i % len(colors)])
+            all_colors.extend([color_hex] * len(samples))
+            areas.append(np.mean(get_contour_area(samples, 'Om', 'hrdrag', level), axis=0))
             if step == 'last':
                 step_label = self.run_args["total_steps"]
             elif step == 'loss_best':
@@ -382,15 +437,15 @@ class Evaluation:
             else:
                 step_label = step
             custom_legend.append(
-                Line2D([0], [0], color=colors[i % len(colors)], 
-                        label=f'Step {step_label}, {int(level*100)}% Area: {area:.2f}')
+                Line2D([0], [0], color=color_hex, 
+                        label=f'Step {step_label}, {int(level*100)}% Area: {areas[i]:.2f}')
             )
         desi_samples_gd = get_desi_samples(self.run_args['cosmo_model'])
         desi_area = get_contour_area([desi_samples_gd], 'Om', 'hrdrag', level)[0]
         all_samples.append(desi_samples_gd)
-        color_list.append('black')  
-        all_areas.append(desi_area)
-        g = plot_posterior(all_samples, color_list, levels=[level])
+        all_colors.append('black')  
+        areas.append(desi_area)
+        g = plot_posterior(all_samples, all_colors, levels=[level])
         # Remove existing legends if any
         if g.fig.legends:
             for legend in g.fig.legends:
@@ -407,9 +462,9 @@ class Evaluation:
         g.fig.suptitle(f"Posterior Steps for Run: {self.run_id[:8]}", 
                       fontsize=12)
         
-        show_figure(f"{self.save_path}/plots/posterior_steps_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png", fig=g.fig)
+        save_figure(f"{self.save_path}/plots/posterior_steps_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png", fig=g.fig)
 
-    def eig_steps(self, steps=None):
+    def eig_steps(self, steps=None, global_rank=0):
         """
         Plots the EIG in 1D at various steps.
         Args:
@@ -426,19 +481,19 @@ class Evaluation:
             flow_model, selected_step = load_model(
                 self.experiment, s, 
                 self.run_obj, self.run_args, 
-                self.device, global_rank=self.global_rank
+                self.device, global_rank=global_rank
                 )
-            eigs, _, nominal_eig, _ = self.calc_eig_batch(flow_model)
+            eigs, _, nominal_avg_eig, _ = self.calc_eig_batch(flow_model)
             plt.plot(eigs, label=f'Step {selected_step}')
             if s == 'last':
-                plt.axhline(y=nominal_eig, color='black', linestyle='--', label='Nominal EIG')
+                plt.axhline(y=nominal_avg_eig, color='black', linestyle='--', label='Nominal EIG')
 
         plt.xlabel("Design Index")
         plt.ylabel("EIG")
         plt.legend()
         plt.suptitle(f"EIG Steps for Run: {self.run_obj.info.run_name} ({self.run_id[:8]})")
         plt.tight_layout()
-        show_figure(f"{self.save_path}/plots/eig_steps_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png", fig=plt.gcf())
+        save_figure(f"{self.save_path}/plots/eig_steps_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png", fig=plt.gcf())
 
 def run_eval(
         design_lower, 
@@ -473,6 +528,11 @@ def run_eval(
         design_lower = run_args["design_lower"]
     if design_step is None:
         design_step = run_args["design_step"]
+    
+    if eval_step == 'last':
+        eval_step = run_args["total_steps"]
+    elif eval_step is not None:
+        eval_step = int(eval_step)
 
     # Create evaluation plots
     evaluate = Evaluation(
@@ -492,6 +552,7 @@ def run_eval(
     evaluate.eig_grid(step=eval_step)
     evaluate.posterior_steps(steps=[eval_step//4, eval_step//2, 3*eval_step//4, 'last'])
     evaluate.eig_steps(steps=[eval_step//4, eval_step//2, 3*eval_step//4, 'last'])
+    evaluate.design_comparison(step=eval_step)
 
     evaluate.sample_posterior(step=eval_step, level=0.68, num_data_samples=15, design_type='optimal', central=True)
     evaluate.sample_posterior(step=eval_step, level=0.68, num_data_samples=15, design_type='nominal', central=True)
@@ -509,20 +570,24 @@ def run_eval(
 
 if __name__ == "__main__":
 
-    parser = argparse.ArgumentParser(description="Run Number Tracers Training")
+    parser = argparse.ArgumentParser(description='Run Number Tracers Training')
     parser.add_argument('--run_id', type=str, default=None, help='MLflow run ID to resume training from (continues existing run with same parameters)')
-    parser.add_argument('--eval_step', type=int, default=None, help='Step to resume training from (required when using --resume_id)')
+    parser.add_argument('--eval_step', type=str, default=None, help='Step to evaluate (can be integer or "last")')
     parser.add_argument('--cosmo_exp', type=str, default='num_tracers', help='Cosmological model set to use from run_args.json')
     parser.add_argument('--levels', type=float, default=[0.68, 0.95], help='Levels for contour plot')
-    parser.add_argument('--global_rank', type=int, default=0, help='Global rank')
+    parser.add_argument('--global_rank', type=str, default='0', help='List of global ranks to evaluate')
     parser.add_argument('--n_particles', type=int, default=1000, help='Number of particles to use for evaluation')
     parser.add_argument('--guide_samples', type=int, default=10000, help='Number of samples to generate from the posterior')
     parser.add_argument('--design_lower', type=float, default=None, help='Lowest design fraction')
     parser.add_argument('--design_step', type=float, default=None, help='Step size for design grid')
     parser.add_argument('--n_evals', type=int, default=20, help='Number of evaluations to average over')
-    parser.add_argument('--device', type=str, default="cuda:0", help='Device to use for evaluation')
+    parser.add_argument('--device', type=str, default='cuda:0', help='Device to use for evaluation')
     parser.add_argument('--eval_seed', type=int, default=1, help='Seed for evaluation')
 
     args = parser.parse_args()
+    
+    # Convert global_rank string to list of integers using json.loads
+    if isinstance(args.global_rank, str):
+        args.global_rank = json.loads(args.global_rank)
 
     run_eval(**vars(args))

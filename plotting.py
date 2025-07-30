@@ -76,14 +76,13 @@ def plot_posterior(samples, colors, legend_labels=None, show_scatter=False, line
         elif len(line_style) > len(samples):
             # Truncate if too many elements
             line_style = line_style[:len(samples)]
-            
+
     # Set line styles in GetDist settings
     g.settings.line_styles = line_style
     g.settings.plot_args = {'alpha': alpha}
 
     # Prepare contour_args with custom levels if provided
     # For GetDist, we don't pass line styles in contour_args when using multiple styles
-    contour_args = {}
 
     # Set contour levels if provided
     if levels is not None:
@@ -104,7 +103,6 @@ def plot_posterior(samples, colors, legend_labels=None, show_scatter=False, line
             'colors': colors,
             'normalized': True
         },
-        contour_args=contour_args,
         show=False
     )
 
@@ -556,7 +554,7 @@ def plot_training(
                 ax_lr.set_ylim(min_lr_overall * 0.9, min_lr_overall * 1.1)
 
     # Adjust layout
-    title = f"Training Evolution - {mlflow_exp}" if mlflow_exp else f"Training Evolution - {len(run_data_list)} Run(s)"
+    title = f"Training History - {mlflow_exp}" if mlflow_exp else f"Training History - {len(run_data_list)} Run(s)"
     fig.set_constrained_layout(True)
     fig.suptitle(title, fontsize=16)
 
@@ -593,7 +591,7 @@ def plot_training(
         save_path = f"{save_dir}/training_comparison_{timestamp}.png"
 
     os.makedirs(save_dir, exist_ok=True)
-    show_figure(save_path, fig=fig)
+    save_figure(save_path, fig=fig)
     plt.close(fig)
 
 def compare_posterior(
@@ -806,7 +804,7 @@ def compare_posterior(
     elif plt.get_fignums():
         fig_to_close = plt.gcf()
 
-    show_figure(last_save_path, fig=g.fig)
+    save_figure(last_save_path, fig=g.fig)
 
     if fig_to_close and fig_to_close in plt.get_fignums():
          plt.close(fig_to_close)
@@ -1083,7 +1081,7 @@ def loss_area_plot(mlflow_exp, var_name, step_interval=1000, excluded_runs=[], c
     storage_path = os.environ["SCRATCH"] + f"/bed/BED_cosmo/{cosmo_exp}"
     os.makedirs(f"{storage_path}/mlruns/{exp_id}/plots", exist_ok=True)
     save_path = f"{storage_path}/mlruns/{exp_id}/plots/loss_area_plot_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
-    show_figure(save_path, fig=plt.gcf())
+    save_figure(save_path, fig=plt.gcf())
 
 def plot_lr_schedule(initial_lr, gamma, gamma_freq, steps=100000):
     steps = np.arange(0, steps, 1)
@@ -1094,7 +1092,7 @@ def plot_lr_schedule(initial_lr, gamma, gamma_freq, steps=100000):
     return lr[-1]
 
 
-def show_figure(save_path, fig=None, close_fig=True, display_fig=True):
+def save_figure(save_path, fig=None, close_fig=True, display_fig=True):
     """
     Save and optionally display a matplotlib figure.
     
