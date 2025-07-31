@@ -19,6 +19,7 @@ script_dir = os.path.dirname(os.path.abspath(__file__))
 # Get the parent directory ('BED_cosmo/') and add it to the Python path
 parent_dir_abs = os.path.abspath(os.path.join(script_dir, os.pardir))
 sys.path.insert(0, parent_dir_abs)
+from custom_dist import ConstrainedUniform2D
 from util import *
 
 storage_path = os.environ["SCRATCH"] + "/bed/BED_cosmo/num_tracers"
@@ -353,7 +354,7 @@ class NumTracers:
         elif self.cosmo_model == 'base_omegak':
             # piecewise function that calculates the transverse comoving distance for a constant dark energy density cosmology 
             # using sinh and sin based on the samples of Ok
-            output_shape = Om.shape[:2] + (z.shape[2],)
+            output_shape = Om.shape[:2] + (z.shape[-2],)
             result = torch.zeros(output_shape, device=self.device).flatten(0, 1)
             Om = Om.flatten(0, 1)
             Ok = Ok.flatten(0, 1)
@@ -425,7 +426,7 @@ class NumTracers:
         elif self.cosmo_model == 'base_omegak_w_wa':
             # piecewise function that calculates the transverse comoving distance for a w0 and wa cosmology 
             # using sinh and sin based on the samples of Ok 
-            output_shape = Om.shape[:2] + (z.shape[2],)
+            output_shape = Om.shape[:2] + (z.shape[-2],)
             result = torch.zeros(output_shape, device=self.device).flatten(0, 1)
             Om = Om.flatten(0, 1)
             Ok = Ok.flatten(0, 1)
@@ -646,13 +647,18 @@ class NumTracers:
 
     def pyro_model(self, tracer_ratio):
         passed_ratio = self.calc_passed(tracer_ratio)
-        constrained_parameters = self.sample_valid_parameters(passed_ratio.shape[:-1])
         with pyro.plate_stack("plate", passed_ratio.shape[:-1]):
+            w0wa_priors = {'w0': self.priors['w0'], 'wa': self.priors['wa']}
+            w0wa_samples = ConstrainedUniform2D(w0wa_priors, upper=1.0).sample((passed_ratio.shape[:-1]))
+            OmOk_priors = {'Om': self.priors['Om'], 'Ok': self.priors['Ok']}
+            OmOk_samples = ConstrainedUniform2D(OmOk_priors, lower=0.0, upper=1.0).sample((passed_ratio.shape[:-1]))
             # register samples in the trace using pyro.sample
             parameters = {}
-            for k, v in constrained_parameters.items():
-                # use dist.Delta to fix the value of each parameter
-                parameters[k] = pyro.sample(k, dist.Delta(v)).unsqueeze(-1)
+            parameters['hrdrag'] = pyro.sample('hrdrag', self.priors['hrdrag']).unsqueeze(-1)
+            parameters['Om'] = pyro.sample('Om', dist.Delta(OmOk_samples[..., 0])).unsqueeze(-1)
+            parameters['Ok'] = pyro.sample('Ok', dist.Delta(OmOk_samples[..., 1])).unsqueeze(-1)
+            parameters['w0'] = pyro.sample('w0', dist.Delta(w0wa_samples[..., 0])).unsqueeze(-1)
+            parameters['wa'] = pyro.sample('wa', dist.Delta(w0wa_samples[..., 1])).unsqueeze(-1)
             means = torch.zeros(passed_ratio.shape[:-1] + (self.sigmas.shape[-1],), device=self.device)
             rescaled_sigmas = torch.zeros(passed_ratio.shape[:-1] + (self.sigmas.shape[-1],), device=self.device)
             z_eff = torch.tensor(self.desi_data[self.desi_data["quantity"] == "DH_over_rs"]["z"].to_list(), device=self.device)
