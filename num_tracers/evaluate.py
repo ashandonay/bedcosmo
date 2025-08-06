@@ -121,7 +121,7 @@ class Evaluation:
         desi_samples_gd = get_desi_samples(self.run_args['cosmo_model'])
         all_samples.append(desi_samples_gd)
         all_colors.append('black')
-        g = plot_posterior(all_samples, all_colors, levels=self.levels)
+        g = plot_posterior(all_samples, all_colors, levels=self.levels, width_inch=10)
 
         # Create custom legend
         if g.fig.legends:
@@ -140,7 +140,7 @@ class Evaluation:
         g.fig.set_constrained_layout(True)
         leg = g.fig.legend(handles=custom_legend, loc='upper right', bbox_to_anchor=(0.99, 0.96))
         leg.set_in_layout(False)
-        save_figure(f"{self.save_path}/plots/posterior_eval_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png", fig=g.fig)
+        save_figure(f"{self.save_path}/plots/posterior_eval_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png", fig=g.fig, dpi=400)
     
     def sample_posterior(self, step, level, num_data_samples, design_type='optimal', global_rank=0, central=True):
         posterior_flow, _ = load_model(
@@ -180,7 +180,7 @@ class Evaluation:
         central_samples_gd, _ = self._eval_step(step, design_type='nominal', global_rank=global_rank)
         central_area = get_contour_area(central_samples_gd, 'Om', 'hrdrag', level)[0]
         all_samples.append(central_samples_gd[0])
-        g = plot_posterior(all_samples, ['gray']*len(data_idxs) + ['black'], levels=[level], alpha=0.7)
+        g = plot_posterior(all_samples, ['gray']*len(data_idxs) + ['black'], levels=[level], alpha=0.7, width_inch=10)
         if g.fig.legends:
             for legend in g.fig.legends:
                 legend.remove()
@@ -190,7 +190,7 @@ class Evaluation:
         g.fig.suptitle(f"{design_type.capitalize()} Design {int(level*100)}% Credible Region, Avg areas: {np.mean(areas):.3f} +/- {np.std(areas):.3f}, Central val: {central_area:.3f}", 
                       fontsize=12)
         
-        save_figure(f"{self.save_path}/plots/posterior_samples_{design_type}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png", fig=g.fig)
+        save_figure(f"{self.save_path}/plots/posterior_samples_{design_type}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png", fig=g.fig, dpi=400)
 
     def calc_eig_batch(self, flow_model):
         """
@@ -281,7 +281,7 @@ class Evaluation:
         plt.suptitle(f"{self.experiment.name} Design Variables ({', '.join(self.experiment.targets)})", fontsize=16)
         plt.tight_layout()
         save_path = f"{self.save_path}/plots/design_comparison_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
-        save_figure(save_path, fig=fig)
+        save_figure(save_path, fig=fig, dpi=400)
         plt.close(fig)
 
 
@@ -401,7 +401,7 @@ class Evaluation:
         cbar_bottom.set_ticklabels([f'{tick:.2f}' for tick in eig_ticks])
 
         plt.tight_layout()
-        save_figure(f"{self.save_path}/plots/eig_grid_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png", fig=fig)
+        save_figure(f"{self.save_path}/plots/eig_grid_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png", fig=fig, dpi=400)
 
     def posterior_steps(self, steps, level=0.68):
         """
@@ -445,7 +445,7 @@ class Evaluation:
         all_samples.append(desi_samples_gd)
         all_colors.append('black')  
         areas.append(desi_area)
-        g = plot_posterior(all_samples, all_colors, levels=[level])
+        g = plot_posterior(all_samples, all_colors, levels=[level], width_inch=12)
         # Remove existing legends if any
         if g.fig.legends:
             for legend in g.fig.legends:
@@ -462,7 +462,7 @@ class Evaluation:
         g.fig.suptitle(f"Posterior Steps for Run: {self.run_id[:8]}", 
                       fontsize=12)
         
-        save_figure(f"{self.save_path}/plots/posterior_steps_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png", fig=g.fig)
+        save_figure(f"{self.save_path}/plots/posterior_steps_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png", fig=g.fig, dpi=400)
 
     def eig_steps(self, steps=None, global_rank=0):
         """
@@ -493,7 +493,7 @@ class Evaluation:
         plt.legend()
         plt.suptitle(f"EIG Steps for Run: {self.run_obj.info.run_name} ({self.run_id[:8]})")
         plt.tight_layout()
-        save_figure(f"{self.save_path}/plots/eig_steps_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png", fig=plt.gcf())
+        save_figure(f"{self.save_path}/plots/eig_steps_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png", fig=plt.gcf(), dpi=400)
 
 def run_eval(
         design_lower, 
@@ -550,7 +550,7 @@ def run_eval(
     )
     evaluate.posterior(step=eval_step)
     evaluate.eig_grid(step=eval_step)
-    evaluate.posterior_steps(steps=[eval_step//4, eval_step//2, 3*eval_step//4, 'last'])
+    evaluate.posterior_steps(steps=[1000, 5000, 20000, 'last'])
     evaluate.eig_steps(steps=[eval_step//4, eval_step//2, 3*eval_step//4, 'last'])
     evaluate.design_comparison(step=eval_step)
 

@@ -27,7 +27,7 @@ from pyro_oed_src import posterior_loss
 import json
 from IPython.display import display
 
-def plot_posterior(samples, colors, legend_labels=None, show_scatter=False, line_style="-", alpha=1.0, levels=[0.68, 0.95]):
+def plot_posterior(samples, colors, legend_labels=None, show_scatter=False, line_style="-", alpha=1.0, levels=[0.68, 0.95], width_inch=7):
     """
     Plots posterior distributions using GetDist triangle plots.
 
@@ -41,10 +41,11 @@ def plot_posterior(samples, colors, legend_labels=None, show_scatter=False, line
         levels (float or list, optional): Contour levels to use (e.g., 0.68 or [0.68, 0.95]).
             If a single float is provided, it is converted to a list.
             If None, the default GetDist settings are used.
+        width_inch (float): Width of the plot in inches. Higher values increase resolution.
     Returns:
         g: GetDist plotter object with the generated triangle plot.
     """
-    g = plots.get_subplot_plotter(width_inch=7)
+    g = plots.get_subplot_plotter(width_inch=width_inch)
 
     if type(samples) != list:
         samples = [samples]
@@ -80,6 +81,13 @@ def plot_posterior(samples, colors, legend_labels=None, show_scatter=False, line
     # Set line styles in GetDist settings
     g.settings.line_styles = line_style
     g.settings.plot_args = {'alpha': alpha}
+    
+    # Additional settings for higher resolution
+    g.settings.solid_contour_palefactor = 0.6
+    g.settings.alpha_filled_add = 0.85
+    g.settings.alpha_factor_contour_lines = 1.0
+    g.settings.linewidth_contour = 1.5
+    g.settings.linewidth_meanlikes = 1.5
 
     # Prepare contour_args with custom levels if provided
     # For GetDist, we don't pass line styles in contour_args when using multiple styles
@@ -90,7 +98,6 @@ def plot_posterior(samples, colors, legend_labels=None, show_scatter=False, line
             levels = [levels]
         for sample in samples:
             sample.updateSettings({'contours': levels})
-        g.settings.num_plot_contours = len(levels)
 
     # Create triangle plot
     g.triangle_plot(
@@ -169,7 +176,8 @@ def plot_training(
         area_step_freq=100,
         lr_step_freq=1,
         show_area=True,
-        show_lr=True
+        show_lr=True,
+        dpi=300
         ):
     """
     Compares training loss, learning rate, and posterior contour area evolution
@@ -591,7 +599,7 @@ def plot_training(
         save_path = f"{save_dir}/training_comparison_{timestamp}.png"
 
     os.makedirs(save_dir, exist_ok=True)
-    save_figure(save_path, fig=fig)
+    save_figure(save_path, fig=fig, dpi=dpi)
     plt.close(fig)
 
 def compare_posterior(
@@ -607,7 +615,8 @@ def compare_posterior(
         step='loss_best',
         seed=1,
         device="cuda:0",
-        global_rank=0
+        global_rank=0,
+        dpi=300
         ):
     """
     Compares posterior distributions across multiple runs.
@@ -804,7 +813,7 @@ def compare_posterior(
     elif plt.get_fignums():
         fig_to_close = plt.gcf()
 
-    save_figure(last_save_path, fig=g.fig)
+    save_figure(last_save_path, fig=g.fig, dpi=dpi)
 
     if fig_to_close and fig_to_close in plt.get_fignums():
          plt.close(fig_to_close)
@@ -1092,7 +1101,7 @@ def plot_lr_schedule(initial_lr, gamma, gamma_freq, steps=100000):
     return lr[-1]
 
 
-def save_figure(save_path, fig=None, close_fig=True, display_fig=True):
+def save_figure(save_path, fig=None, close_fig=True, display_fig=True, dpi=300):
     """
     Save and optionally display a matplotlib figure.
     
@@ -1106,7 +1115,7 @@ def save_figure(save_path, fig=None, close_fig=True, display_fig=True):
     target_fig = fig if fig is not None else plt.gcf()
     
     # Save the figure
-    _save_figure(target_fig, save_path)
+    _save_figure(target_fig, save_path, dpi=dpi)
     
     # Display figure if requested and in interactive environment
     if display_fig and _is_interactive_environment():
@@ -1123,9 +1132,9 @@ def _is_interactive_environment():
     except (io.UnsupportedOperation, AttributeError):
         return True
 
-def _save_figure(fig, save_path):
+def _save_figure(fig, save_path, dpi=300):
     """Save a figure to the specified path."""
-    fig.savefig(save_path)
+    fig.savefig(save_path, dpi=dpi)
     print(f"Saved plot to {save_path}")
 
 def _display_figure(fig):

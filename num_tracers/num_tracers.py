@@ -600,65 +600,36 @@ class NumTracers:
             param_samples.append(param_mesh[tuple(indices[i])])
         return torch.tensor(np.array(param_samples), device=self.device)
 
-    def sample_valid_parameters(self, samples_shape):
+    def sample_valid_parameters(self, passed_ratio):
+
+        # register samples in the trace using pyro.sample
         parameters = {}
-        # draw samples from priors with the correct shape
-        for k, v in self.priors.items():
-            if isinstance(v, dist.Distribution):
-                parameters[k] = v.sample((samples_shape[0], samples_shape[1]))  # No unsqueeze
-            else:
-                parameters[k] = v
-        # check constraint (w0 + wa) < 0 and re-sample if necessary
-        if "w0" in parameters and "wa" in parameters:
-            # Compute the constraint for each sample
-            constraint_satisfied = (parameters["w0"] + parameters["wa"]) < 0
-            invalid_indices = ~constraint_satisfied
 
-            # re-sample until all invalid samples are replaced
-            while invalid_indices.any():
-                for i in range(invalid_indices.shape[0]):
-                    row_invalid = invalid_indices[i]  # shape: (samples_shape[1],)
-                    invalid_count = row_invalid.sum().item()
-                    if invalid_count > 0:
-                        # replace only the invalid samples in row i
-                        parameters["w0"][i, row_invalid] = self.priors["w0"].sample((invalid_count,))
-                        parameters["wa"][i, row_invalid] = self.priors["wa"].sample((invalid_count,))
-                # re-check the constraint after replacement
-                constraint_satisfied = (parameters["w0"] + parameters["wa"]) < 0
-                invalid_indices = ~constraint_satisfied
-        
-        if "Ok" in parameters:
-            # Compute the constraint for each sample
-            constraint_satisfied = ((parameters["Om"] + parameters["Ok"]) < 1) & ((parameters["Om"] + parameters["Ok"]) > 0)
-            invalid_indices = ~constraint_satisfied
-
-            # re-sample until all invalid samples are replaced
-            while invalid_indices.any():
-                for i in range(invalid_indices.shape[0]):
-                    row_invalid = invalid_indices[i]
-                    invalid_count = row_invalid.sum().item()
-                    if invalid_count > 0:
-                        parameters["Om"][i, row_invalid] = self.priors["Om"].sample((invalid_count,))
-                        parameters["Ok"][i, row_invalid] = self.priors["Ok"].sample((invalid_count,))
-                constraint_satisfied = ((parameters["Om"] + parameters["Ok"]) < 1) & ((parameters["Om"] + parameters["Ok"]) > 0)
-                invalid_indices = ~constraint_satisfied
+        if 'Ok' in self.priors.keys():
+            # 0 < Om + Ok < 1
+            OmOk_priors = {'Om': self.priors['Om'], 'Ok': self.priors['Ok']}
+            OmOk_samples = ConstrainedUniform2D(OmOk_priors, lower=0.0, upper=1.0).sample((passed_ratio.shape[:-1]))
+            parameters['Om'] = pyro.sample('Om', dist.Delta(OmOk_samples[..., 0])).unsqueeze(-1)
+            parameters['Ok'] = pyro.sample('Ok', dist.Delta(OmOk_samples[..., 1])).unsqueeze(-1)
+        else:
+            parameters['Om'] = pyro.sample('Om', self.priors['Om']).unsqueeze(-1)
+        if 'wa' in self.priors.keys():
+            # w0 + wa < 0
+            w0wa_priors = {'w0': self.priors['w0'], 'wa': self.priors['wa']}
+            w0wa_samples = ConstrainedUniform2D(w0wa_priors, upper=0.0).sample((passed_ratio.shape[:-1]))
+            parameters['w0'] = pyro.sample('w0', dist.Delta(w0wa_samples[..., 0])).unsqueeze(-1)
+            parameters['wa'] = pyro.sample('wa', dist.Delta(w0wa_samples[..., 1])).unsqueeze(-1)
+        elif 'w0' in self.priors.keys():
+            parameters['w0'] = pyro.sample('w0', self.priors['w0']).unsqueeze(-1)
+            
+        parameters['hrdrag'] = pyro.sample('hrdrag', self.priors['hrdrag']).unsqueeze(-1)
 
         return parameters
 
     def pyro_model(self, tracer_ratio):
         passed_ratio = self.calc_passed(tracer_ratio)
         with pyro.plate_stack("plate", passed_ratio.shape[:-1]):
-            w0wa_priors = {'w0': self.priors['w0'], 'wa': self.priors['wa']}
-            w0wa_samples = ConstrainedUniform2D(w0wa_priors, upper=1.0).sample((passed_ratio.shape[:-1]))
-            OmOk_priors = {'Om': self.priors['Om'], 'Ok': self.priors['Ok']}
-            OmOk_samples = ConstrainedUniform2D(OmOk_priors, lower=0.0, upper=1.0).sample((passed_ratio.shape[:-1]))
-            # register samples in the trace using pyro.sample
-            parameters = {}
-            parameters['hrdrag'] = pyro.sample('hrdrag', self.priors['hrdrag']).unsqueeze(-1)
-            parameters['Om'] = pyro.sample('Om', dist.Delta(OmOk_samples[..., 0])).unsqueeze(-1)
-            parameters['Ok'] = pyro.sample('Ok', dist.Delta(OmOk_samples[..., 1])).unsqueeze(-1)
-            parameters['w0'] = pyro.sample('w0', dist.Delta(w0wa_samples[..., 0])).unsqueeze(-1)
-            parameters['wa'] = pyro.sample('wa', dist.Delta(w0wa_samples[..., 1])).unsqueeze(-1)
+            parameters = self.sample_valid_parameters(passed_ratio)
             means = torch.zeros(passed_ratio.shape[:-1] + (self.sigmas.shape[-1],), device=self.device)
             rescaled_sigmas = torch.zeros(passed_ratio.shape[:-1] + (self.sigmas.shape[-1],), device=self.device)
             z_eff = torch.tensor(self.desi_data[self.desi_data["quantity"] == "DH_over_rs"]["z"].to_list(), device=self.device)
@@ -675,7 +646,7 @@ class NumTracers:
                 rescaled_sigmas[:, :, self.DV_idx] = self.sigmas[self.DV_idx] * torch.sqrt(self.nominal_passed_ratio[self.DV_idx]/passed_ratio[..., self.DV_idx])
 
             # extract correlation matrix from DESI covariance matrix
-            if self.include_D_M:
+            if self.include_D_V and self.include_D_M:
                 means = means.to(self.device)
                 # convert correlation matrix to covariance matrix using rescaled sigmas
                 covariance_matrix = self.corr_matrix * (rescaled_sigmas.unsqueeze(-1) * rescaled_sigmas.unsqueeze(-2))
