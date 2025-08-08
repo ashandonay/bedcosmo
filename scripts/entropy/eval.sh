@@ -1,7 +1,7 @@
 #!/bin/bash
 
 export OMP_NUM_THREADS=4 
-GPUS=2
+GPUS=1
 
 torchrun \
     --nproc_per_node=$GPUS \

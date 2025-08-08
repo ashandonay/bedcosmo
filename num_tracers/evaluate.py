@@ -142,7 +142,7 @@ class Evaluation:
         leg.set_in_layout(False)
         save_figure(f"{self.save_path}/plots/posterior_eval_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png", fig=g.fig, dpi=400)
     
-    def sample_posterior(self, step, level, num_data_samples, design_type='optimal', global_rank=0, central=True):
+    def sample_posterior(self, step, level, num_data_samples=10, global_rank=0, central=True):
         posterior_flow, _ = load_model(
             self.experiment, step, 
             self.run_obj, self.run_args, 
@@ -150,47 +150,80 @@ class Evaluation:
             )
 
         _, _, _, optimal_design = self.calc_eig_batch(posterior_flow)
-
-        if design_type == 'optimal':
-            design = optimal_design
-        elif design_type == 'nominal':
-            design = self.experiment.nominal_design
-
-        samples = self.experiment.sample_guide(
-            lexpand(design.unsqueeze(0), num_data_samples), 
-            posterior_flow, 
-            num_data_samples=num_data_samples, 
-            num_param_samples=self.guide_samples,
-            central=central
-            )
-
-        data_idxs = np.arange(1, num_data_samples) # sample 10 data points
+        pair_keys = [k for k in self.run_obj.data.metrics.keys() if k.startswith(f'nominal_area_{global_rank}_')]
+        pair_names = [p.replace('nominal_area_0_', '') for p in pair_keys]
+        design_areas = {'nominal': {p: [] for p in pair_names}, 'optimal': {p: [] for p in pair_names}}
         all_samples = []
-        areas = []
-        for d in data_idxs:
-            with contextlib.redirect_stdout(io.StringIO()):
-                samples_gd = getdist.MCSamples(
-                    samples=samples[:, d, :].cpu().numpy(),
-                    names=self.experiment.cosmo_params,
-                    labels=self.experiment.latex_labels
+        colors = []
+        inputs = (('optimal', 'tab:blue', optimal_design), ('nominal', 'gray', self.experiment.nominal_design))
+        for design_type, color, design in inputs:
+            data_idxs = np.arange(1, num_data_samples) # sample N data points
+            samples = self.experiment.sample_guide(
+                lexpand(design.unsqueeze(0), num_data_samples), 
+                posterior_flow, 
+                num_data_samples=num_data_samples, 
+                num_param_samples=self.guide_samples,
+                central=central
                 )
-            all_samples.append(samples_gd)
-            areas.append(get_contour_area([samples_gd], 'Om', 'hrdrag', level)[0])
-        # Get the central samples with the nominal design indexed by the input global rank
-        central_samples_gd, _ = self._eval_step(step, design_type='nominal', global_rank=global_rank)
-        central_area = get_contour_area(central_samples_gd, 'Om', 'hrdrag', level)[0]
-        all_samples.append(central_samples_gd[0])
-        g = plot_posterior(all_samples, ['gray']*len(data_idxs) + ['black'], levels=[level], alpha=0.7, width_inch=10)
+
+            pair_avg_areas = []
+            pair_avg_areas_std = []
+            for d in data_idxs:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    samples_gd = getdist.MCSamples(
+                        samples=samples[:, d, :].cpu().numpy(),
+                        names=self.experiment.cosmo_params,
+                        labels=self.experiment.latex_labels
+                    )
+                all_samples.append(samples_gd)
+                for p in pair_names:
+                    param1, param2 = p.split('_')
+                    design_areas[design_type][p].append(get_contour_area(
+                        [samples_gd], level, param1, param2, design_type=design_type)[0][f'{design_type}_area_{p}']
+                        )
+            # Get the central samples with the nominal design indexed by the input global rank
+            central_samples_gd, _ = self._eval_step(step, design_type='nominal', global_rank=global_rank)
+            all_samples.append(central_samples_gd[0])
+            colors.extend([color]*len(data_idxs) + ['black'])
+
+        g = plot_posterior(all_samples, colors, levels=[level], alpha=0.7, width_inch=10)
         if g.fig.legends:
             for legend in g.fig.legends:
                 legend.remove()
+
+        param_names = g.param_names_for_root(all_samples[0])
+        param_name_list = [p.name for p in param_names.names]
+        for design_idx, (design_type, color, design) in enumerate(inputs):
+            for p in pair_names:
+                param1, param2 = p.split('_')
+                pair_avg_areas = np.mean(design_areas[design_type][p])
+                pair_avg_areas_std = np.std(design_areas[design_type][p])
+                # find parameter indices and map to lower triangle
+                if param1 in param_name_list and param2 in param_name_list:
+                    j = param_name_list.index(param1)  # x-axis
+                    i_idx = param_name_list.index(param2)  # y-axis
+                    r, c = (max(i_idx, j), min(i_idx, j))
+                    ax = g.subplots[r][c]
+
+                    title = f"Avg Area: {pair_avg_areas:.3f} +/- {pair_avg_areas_std:.3f}"
+                    y_pos = 0.95 - 0.08 * design_idx
+                    ax.text(0.05, y_pos, title, transform=ax.transAxes, fontsize=10, va='top', color=color)
         
         g.fig.set_constrained_layout(True)
         # Set title with proper positioning
-        g.fig.suptitle(f"{design_type.capitalize()} Design {int(level*100)}% Credible Region, Avg areas: {np.mean(areas):.3f} +/- {np.std(areas):.3f}, Central val: {central_area:.3f}", 
-                      fontsize=12)
-        
-        save_figure(f"{self.save_path}/plots/posterior_samples_{design_type}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png", fig=g.fig, dpi=400)
+        # add labels for Nominal and Optimal to total legend
+        custom_legend = []
+        custom_legend.append(
+            Line2D([0], [0], color='tab:blue', label=f'Optimal Design')
+        )
+        custom_legend.append(
+            Line2D([0], [0], color='gray', label=f'Nominal Design')
+        )
+        g.fig.set_constrained_layout(True)
+        leg = g.fig.legend(handles=custom_legend, loc='upper right', bbox_to_anchor=(0.99, 0.96))
+        leg.set_in_layout(False)
+        g.fig.suptitle(f"Posterior (Rank {global_rank}) for {num_data_samples} Data Samples, {int(level*100)}% Credible Regions", fontsize=12)
+        save_figure(f"{self.save_path}/plots/posterior_samples_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png", fig=g.fig, dpi=400)
 
     def calc_eig_batch(self, flow_model):
         """
@@ -429,7 +462,7 @@ class Evaluation:
             # Convert RGBA color to hex string before extending
             color_hex = matplotlib.colors.to_hex(colors[i % len(colors)])
             all_colors.extend([color_hex] * len(samples))
-            areas.append(np.mean(get_contour_area(samples, 'Om', 'hrdrag', level), axis=0))
+            areas.append(np.mean([get_contour_area(samples, level, 'Om', 'hrdrag')[0]['nominal_area_Om_hrdrag'] for s in samples]))
             if step == 'last':
                 step_label = self.run_args["total_steps"]
             elif step == 'loss_best':
@@ -441,7 +474,7 @@ class Evaluation:
                         label=f'Step {step_label}, {int(level*100)}% Area: {areas[i]:.2f}')
             )
         desi_samples_gd = get_desi_samples(self.run_args['cosmo_model'])
-        desi_area = get_contour_area([desi_samples_gd], 'Om', 'hrdrag', level)[0]
+        desi_area = get_contour_area([desi_samples_gd], level, 'Om', 'hrdrag')[0]['nominal_area_Om_hrdrag']
         all_samples.append(desi_samples_gd)
         all_colors.append('black')  
         areas.append(desi_area)
@@ -553,9 +586,7 @@ def run_eval(
     evaluate.posterior_steps(steps=[1000, 5000, 20000, 'last'])
     evaluate.eig_steps(steps=[eval_step//4, eval_step//2, 3*eval_step//4, 'last'])
     evaluate.design_comparison(step=eval_step)
-
-    evaluate.sample_posterior(step=eval_step, level=0.68, num_data_samples=15, design_type='optimal', central=True)
-    evaluate.sample_posterior(step=eval_step, level=0.68, num_data_samples=15, design_type='nominal', central=True)
+    evaluate.sample_posterior(step=eval_step, level=0.68, central=True)
     
     compare_posterior(
         run_ids=[run_id],
