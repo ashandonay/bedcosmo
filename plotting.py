@@ -455,15 +455,15 @@ def plot_training(
                         if len(plot_area_values_filtered) < len(plot_area_values):
                             print(f"Warning: Run {run_id_iter} - Omitted {len(plot_area_values) - len(plot_area_values_filtered)} non-positive {pair_name} Area values for log scale plot.")
                         ax_area.plot(plot_area_steps_filtered, plot_area_values_filtered/desi_area, 
-                                   alpha=base_alpha, linewidth=1.5, color=line_color, label=pair_name)
+                                   alpha=base_alpha, linewidth=1.5, color=line_color, label=pair_name.replace('_', ', '))
                     else:
                         ax_area.plot(plot_area_steps, plot_area_values/desi_area, 
-                                   alpha=base_alpha, linewidth=1.5, color=color, label=pair_name)
+                                   alpha=base_alpha, linewidth=1.5, color=color, label=pair_name.replace('_', ', '))
                         
                     ax_area.axhline(1, color='black', linestyle='--', lw=1.5)
                     
             # Configure ax2 (Contour Area)
-            ax_area.set_ylabel("Posterior Contour Area / Nominal DESI Area")
+            ax_area.set_ylabel("(Posterior Contour Area) / (Nominal DESI Contour Area)")
             ax_area.tick_params(axis='y')
             ax_area.legend(loc='best', title="Parameter Pair")
             ax_area.grid(True, axis='y', linestyle='--', alpha=0.6)
@@ -543,9 +543,8 @@ def plot_training(
                 ax_lr.set_ylim(min_lr_overall * 0.9, min_lr_overall * 1.1)
 
     # Adjust layout
-    title = f"Training History - {mlflow_exp}" if mlflow_exp else f"Training History - {len(run_data_list)} Run(s)"
     fig.set_constrained_layout(True)
-    fig.suptitle(title, fontsize=16)
+    fig.suptitle("Training History", fontsize=16)
 
     # Determine save path
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -988,7 +987,7 @@ def compare_training(
             
             nom_area_hist_raw = []
             best_area_hist_raw = []
-            if show_area:
+            if show_area and 'nominal_area' in client.get_metric_names(run_id_iter):
                 nom_area_hist_raw = client.get_metric_history(run_id_iter, 'nominal_area')
                 if show_best:
                     best_area_hist_raw = client.get_metric_history(run_id_iter, 'best_nominal_area')
