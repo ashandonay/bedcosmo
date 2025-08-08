@@ -479,28 +479,34 @@ def single_run(
                     nominal_samples[:, -1] *= 100000
                     with contextlib.redirect_stdout(io.StringIO()):
                         nominal_samples_gd = getdist.mcsamples.MCSamples(samples=nominal_samples, names=experiment.cosmo_params, labels=experiment.latex_labels)
-                    local_nominal_area = get_contour_area(nominal_samples_gd, 'Om', 'hrdrag', 0.68)[0]
-                    mlflow.log_metric(f"nominal_area_rank_{global_rank}", local_nominal_area, step=step)
+                    local_nominal_areas = get_contour_area(nominal_samples_gd, 0.68, *experiment.cosmo_params, global_rank=global_rank, design_type='nominal')[0]
+                    
+                    print(local_nominal_areas)
+                    # Log metrics per rank with tags instead of rank labels
+                    mlflow.log_metrics(local_nominal_areas, step=step)
                     
                     # Aggregate the nominal areas across all ranks
-                    local_nominal_area_tensor = torch.tensor(local_nominal_area, device=current_pytorch_device)
-                    tdist.all_reduce(local_nominal_area_tensor, op=tdist.ReduceOp.SUM)
-                    global_nominal_area = local_nominal_area_tensor.item() / tdist.get_world_size()
+                    local_nominal_areas_tensor = torch.tensor(list(local_nominal_areas.values()), device=current_pytorch_device)
+                    tdist.all_reduce(local_nominal_areas_tensor, op=tdist.ReduceOp.SUM)
+                    global_nominal_areas_tensor = local_nominal_areas_tensor / tdist.get_world_size()
 
+                    # Log each individual parameter pair area separately
                     if global_rank == 0:
-                        mlflow.log_metric("nominal_area", global_nominal_area, step=step)
+                        for i, (pair_key, _) in enumerate(local_nominal_areas.items()):
+                            pair_name = pair_key.replace('nominal_area_0_', '')
+                            mlflow.log_metric(f"nominal_area_{pair_name}", global_nominal_areas_tensor[i].item(), step=step)
+                            if global_nominal_areas_tensor[i].item() < best_nominal_area:
+                                # Save checkpoint if the mean area is the best so far
+                                best_nominal_area = global_nominal_areas_tensor[i].item()
+                                mlflow.log_metric("best_avg_nominal_area", best_nominal_area, step=step)
+                                mlflow.log_metric(f"best_nominal_area_{pair_key}", best_nominal_area, step=step)
+                                # Save the best nominal area checkpoint
+                                checkpoint_path = f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/checkpoints/checkpoint_nominal_area_{step}.pt"
+                                save_checkpoint(posterior_flow.module, optimizer, checkpoint_path, step=step, artifact_path="checkpoints", scheduler=scheduler, global_rank=global_rank)
 
-                        if global_nominal_area < best_nominal_area:
-                            # Save checkpoint if the global nominal area is the best so far
-                            best_nominal_area = global_nominal_area
-                            mlflow.log_metric("best_nominal_area", best_nominal_area, step=step)
-                            # Save the best nominal area checkpoint
-                            checkpoint_path = f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/checkpoints/checkpoint_nominal_area_{step}.pt"
-                            save_checkpoint(posterior_flow.module, optimizer, checkpoint_path, step=step, artifact_path="checkpoints", scheduler=scheduler, global_rank=global_rank)
-
-                            # Save the last best area checkpoint
-                            checkpoint_path = f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/checkpoints/checkpoint_nominal_area_best.pt"
-                            save_checkpoint(posterior_flow.module, optimizer, checkpoint_path, step=step, artifact_path="checkpoints", scheduler=scheduler, global_rank=global_rank)
+                                # Save the last best area checkpoint
+                                checkpoint_path = f"{storage_path}/mlruns/{ml_info.experiment_id}/{ml_info.run_id}/artifacts/checkpoints/checkpoint_nominal_area_best.pt"
+                                save_checkpoint(posterior_flow.module, optimizer, checkpoint_path, step=step, artifact_path="checkpoints", scheduler=scheduler, global_rank=global_rank)
 
                 # Log the global nominal area on rank 0
                 if global_rank == 0:
@@ -525,11 +531,13 @@ def single_run(
                     if is_tty:
                         pbar.update(10)
                         if run_args["log_nominal_area"] and global_nominal_area is not None:
+                            # Show mean area in progress bar
                             pbar.set_description(f"Loss: {global_loss:.3f}, Area: {global_nominal_area:.3f}")
                         else:
                             pbar.set_description(f"Loss: {global_loss:.3f}")
                     else:
                         if run_args["log_nominal_area"] and global_nominal_area is not None:
+                            # Show mean area in print statement
                             print(f"Step {step}, Loss: {global_loss:.3f}, Area: {global_nominal_area:.3f}")
                         else:
                             print(f"Step {step}, Loss: {global_loss:.3f}")
@@ -561,8 +569,7 @@ def single_run(
             var=None,
             log_scale=True,
             loss_step_freq=10,
-            area_step_freq=100,
-            show_best=False
+            area_step_freq=100
         )
         plt.close('all')
         print("Run", ml_info.experiment_id + "/" + ml_info.run_id, "completed.")
