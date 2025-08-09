@@ -178,6 +178,7 @@ def plot_training(
         lr_step_freq=1,
         show_area=True,
         show_lr=True,
+        area_limits=None,
         dpi=300
         ):
     """
@@ -416,9 +417,9 @@ def plot_training(
             plot_loss_values = np.array(loss_values)[sampled_indices]
 
             if log_scale:
-                ax1.plot(plot_loss_steps, plot_loss_values - min_loss_overall, alpha=base_alpha, color='black', label=plot_label)
+                ax1.plot(plot_loss_steps, plot_loss_values - min_loss_overall, alpha=base_alpha, color='gray', label=plot_label)
             else:
-                ax1.plot(plot_loss_steps, plot_loss_values, alpha=base_alpha, color='black', label=plot_label)
+                ax1.plot(plot_loss_steps, plot_loss_values, alpha=base_alpha, color='gray', label=plot_label)
 
         # --- Plot Nominal Area (ax2) ---
         if show_area:
@@ -426,7 +427,7 @@ def plot_training(
                 print("Warning: area_step_freq should ideally be a multiple of 100 as nominal_area is logged every 100 steps.")
             sampling_rate = max(1, area_step_freq // 100)
 
-            nom_area_data = metrics['nominal_area']
+            nom_area_data = metrics.get('nominal_area', {})
             # Define line styles for different area pairs
             area_line_colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
             
@@ -448,22 +449,14 @@ def plot_training(
                     # Use different line style for each area pair
                     line_color = area_line_colors[area_idx % len(area_line_colors)]
                     
-                    if log_scale:
-                        positive_mask = plot_area_values > 0
-                        plot_area_steps_filtered = plot_area_steps[positive_mask]
-                        plot_area_values_filtered = plot_area_values[positive_mask]
-                        if len(plot_area_values_filtered) < len(plot_area_values):
-                            print(f"Warning: Run {run_id_iter} - Omitted {len(plot_area_values) - len(plot_area_values_filtered)} non-positive {pair_name} Area values for log scale plot.")
-                        ax_area.plot(plot_area_steps_filtered, plot_area_values_filtered/desi_area, 
-                                   alpha=base_alpha, linewidth=1.5, color=line_color, label=pair_name.replace('_', ', '))
-                    else:
-                        ax_area.plot(plot_area_steps, plot_area_values/desi_area, 
-                                   alpha=base_alpha, linewidth=1.5, color=color, label=pair_name.replace('_', ', '))
+                    ax_area.plot(plot_area_steps, plot_area_values/desi_area, 
+                                 alpha=base_alpha, color=line_color, label=pair_name.replace('_', ', '))
                         
                     ax_area.axhline(1, color='black', linestyle='--', lw=1.5)
                     
             # Configure ax2 (Contour Area)
             ax_area.set_ylabel("(Posterior Contour Area) / (Nominal DESI Contour Area)")
+            ax_area.set_ylim(area_limits)
             ax_area.tick_params(axis='y')
             ax_area.legend(loc='best', title="Parameter Pair")
             ax_area.grid(True, axis='y', linestyle='--', alpha=0.6)
@@ -477,15 +470,7 @@ def plot_training(
                 plot_lr_steps = np.array(lr_steps)[sampled_indices]
                 plot_lr_values = np.array(lr_values)[sampled_indices]
 
-                if log_scale:
-                    positive_mask = plot_lr_values > 0
-                    plot_lr_steps_filtered = plot_lr_steps[positive_mask]
-                    plot_lr_values_filtered = plot_lr_values[positive_mask]
-                    if len(plot_lr_values_filtered) < len(plot_lr_values):
-                        print(f"Warning: Run {run_id_iter} - Omitted {len(plot_lr_values) - len(plot_lr_values_filtered)} non-positive LR values for log scale plot.")
-                    ax_lr.plot(plot_lr_steps_filtered, plot_lr_values_filtered, alpha=base_alpha, color='black', label=plot_label)
-                else:
-                    ax_lr.plot(plot_lr_steps, plot_lr_values, alpha=base_alpha, color='black', label=plot_label)
+                ax_lr.plot(plot_lr_steps, plot_lr_values, alpha=base_alpha, color='gray', label=plot_label)
 
         # Add this group/run to the set of legend entries
         if is_valid_for_grouping:
@@ -516,10 +501,7 @@ def plot_training(
     # Apply log scale if requested
     if log_scale:
         ax1.set_yscale('log')
-        if show_area:
-            ax_area.set_yscale('log')
-        if show_lr:
-            ax_lr.set_yscale('log')
+
     else:
         # Set linear scale limits with padding
         if max_loss_overall > min_loss_overall:

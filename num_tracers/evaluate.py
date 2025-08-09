@@ -48,7 +48,7 @@ class Evaluation:
         self.seed = seed
         auto_seed(self.seed) # fix random seed
         self.device = device
-        self.levels = levels
+        self.levels = levels if isinstance(levels, list) else [levels]
         self.global_ranks = global_rank if isinstance(global_rank, list) else [global_rank]
         self.n_evals = n_evals
         self.n_particles = n_particles
@@ -101,22 +101,24 @@ class Evaluation:
             samples_gd = getdist.MCSamples(samples=samples, names=self.experiment.cosmo_params, labels=self.experiment.latex_labels)
         return samples_gd
     
-    def posterior(self, step):
+    def posterior(self, step, display=['nominal', 'optimal']):
         """
         Evaluates the posterior of the optimal and nominal designs for a given run and returns the samples.
         """
         all_samples = []
         all_colors = []
-        # Sample with optimal design
-        optimal_samples, optimal_eig = self._eval_step(step, design_type='optimal')
-        all_samples.extend(optimal_samples)
-        # Set the optimal design samples to blue
-        all_colors.extend(['tab:blue'] * len(optimal_samples))
-        # Sample with nominal design
-        nominal_samples, nominal_eig = self._eval_step(step, design_type='nominal')
-        all_samples.extend(nominal_samples)
-        # Set the nominal design samples to gray
-        all_colors.extend(['gray'] * len(nominal_samples))
+        if 'optimal' in display:
+            # Sample with optimal design
+            optimal_samples, optimal_eig = self._eval_step(step, design_type='optimal')
+            all_samples.extend(optimal_samples)
+            # Set the optimal design samples to blue
+            all_colors.extend(['tab:blue'] * len(optimal_samples))
+        if 'nominal' in display:
+            # Sample with nominal design
+            nominal_samples, nominal_eig = self._eval_step(step, design_type='nominal')
+            all_samples.extend(nominal_samples)
+            # Set the nominal design samples to gray
+            all_colors.extend(['gray'] * len(nominal_samples))
         # Get the DESI MCMC samples
         desi_samples_gd = get_desi_samples(self.run_args['cosmo_model'])
         all_samples.append(desi_samples_gd)
@@ -128,12 +130,14 @@ class Evaluation:
             for legend in g.fig.legends:
                 legend.remove()
         custom_legend = []
-        custom_legend.append(
-            Line2D([0], [0], color='tab:blue', label=f'Optimal Design (NF), EIG: {optimal_eig:.2f}')
-        )
-        custom_legend.append(
-            Line2D([0], [0], color='gray', label=f'Nominal Design (NF), EIG: {nominal_eig:.2f}')
-        )
+        if 'optimal' in display:
+            custom_legend.append(
+                Line2D([0], [0], color='tab:blue', label=f'Optimal Design (NF)')
+            )
+        if 'nominal' in display:
+            custom_legend.append(
+                Line2D([0], [0], color='gray', label=f'Nominal Design (NF)')
+            )
         custom_legend.append(
             Line2D([0], [0], color='black', label=f'DESI Nominal Design (MCMC)')
         )
@@ -581,23 +585,12 @@ def run_eval(
         n_evals=n_evals,
         n_particles=n_particles
     )
-    evaluate.posterior(step=eval_step)
+    evaluate.posterior(step=eval_step, display=['nominal'])
     evaluate.eig_grid(step=eval_step)
     evaluate.posterior_steps(steps=[1000, 5000, 20000, 'last'])
     evaluate.eig_steps(steps=[eval_step//4, eval_step//2, 3*eval_step//4, 'last'])
     evaluate.design_comparison(step=eval_step)
     evaluate.sample_posterior(step=eval_step, level=0.68, central=True)
-    
-    compare_posterior(
-        run_ids=[run_id],
-        var=None, 
-        guide_samples=guide_samples,
-        seed=1,
-        device=device,
-        show_scatter=False,
-        step=eval_step,
-        global_rank=list(range(int(run_args["n_devices"])))
-        )
 
 if __name__ == "__main__":
 
@@ -605,7 +598,7 @@ if __name__ == "__main__":
     parser.add_argument('--run_id', type=str, default=None, help='MLflow run ID to resume training from (continues existing run with same parameters)')
     parser.add_argument('--eval_step', type=str, default=None, help='Step to evaluate (can be integer or "last")')
     parser.add_argument('--cosmo_exp', type=str, default='num_tracers', help='Cosmological model set to use from run_args.json')
-    parser.add_argument('--levels', type=float, default=[0.68, 0.95], help='Levels for contour plot')
+    parser.add_argument('--levels', type=float, default=0.68, help='Levels for contour plot')
     parser.add_argument('--global_rank', type=str, default='0', help='List of global ranks to evaluate')
     parser.add_argument('--n_particles', type=int, default=1000, help='Number of particles to use for evaluation')
     parser.add_argument('--guide_samples', type=int, default=10000, help='Number of samples to generate from the posterior')
