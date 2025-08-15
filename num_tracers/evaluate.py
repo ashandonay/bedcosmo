@@ -95,15 +95,19 @@ class Evaluation:
 
     def _get_samples(self, design, flow_model):
         context = torch.cat([design, self.experiment.central_val], dim=-1)
-        samples = flow_model(context).sample((self.guide_samples,)).cpu().numpy()
-        samples[:, -1] *= 100000 # Rescale the hrdrag samples 
+        samples = self.experiment.sample_params(flow_model, context, num_samples=self.guide_samples).cpu().numpy()
         with contextlib.redirect_stdout(io.StringIO()):
             samples_gd = getdist.MCSamples(samples=samples, names=self.experiment.cosmo_params, labels=self.experiment.latex_labels)
         return samples_gd
     
     def posterior(self, step, display=['nominal', 'optimal']):
         """
-        Evaluates the posterior of the optimal and nominal designs for a given run and returns the samples.
+        Plot the posterior for a given type(s) of design input.
+
+        Args:
+            step (int): The checkpoint step to plot the posterior for.
+            display (list): The designs to display.
+
         """
         all_samples = []
         all_colors = []
@@ -162,13 +166,13 @@ class Evaluation:
         inputs = (('optimal', 'tab:blue', optimal_design), ('nominal', 'gray', self.experiment.nominal_design))
         for design_type, color, design in inputs:
             data_idxs = np.arange(1, num_data_samples) # sample N data points
-            samples = self.experiment.sample_guide(
+            samples = self.experiment.sample_params_from_data_samples(
                 lexpand(design.unsqueeze(0), num_data_samples), 
                 posterior_flow, 
                 num_data_samples=num_data_samples, 
                 num_param_samples=self.guide_samples,
                 central=central
-                )
+                ).cpu().numpy()
 
             pair_avg_areas = []
             pair_avg_areas_std = []

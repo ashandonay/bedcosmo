@@ -31,6 +31,7 @@ class NumTracers:
         self, 
         data_path="/data/tracers_v1/", 
         cosmo_model="base", 
+        flow_type="MAF",
         design_step=0.05, 
         design_lower=0.05, 
         design_upper=None, 
@@ -52,6 +53,7 @@ class NumTracers:
         self.DM_idx = np.where(self.desi_data["quantity"] == "DM_over_rs")[0]
         self.DV_idx = np.where(self.desi_data["quantity"] == "DV_over_rs")[0]
         self.cosmo_model = cosmo_model
+        self.flow_type = flow_type
         self.device = device
         self.mode = mode
         self.global_rank = global_rank  
@@ -211,7 +213,14 @@ class NumTracers:
         Ok_range = torch.tensor([-0.3, 0.3], device=self.device)
         w0_range = torch.tensor([-3.0, 1.0], device=self.device)
         wa_range = torch.tensor([-3.0, 2.0], device=self.device)
-        hrdrag_range = torch.tensor([0.01, 1.0], device=self.device)
+        if self.flow_type == "MAF":
+            self.h_scaling_factor = 100
+            hrdrag_range = torch.tensor([10.0, 1000.0], device=self.device)
+        elif self.flow_type == "NAF":
+            self.h_scaling_factor = 100000
+            hrdrag_range = torch.tensor([0.01, 1.0], device=self.device)
+        else:
+            raise ValueError(f"Invalid flow type: {self.flow_type}")
 
         if self.cosmo_model == 'base':
             self.priors = {'Om': dist.Uniform(*Om_range), 'hrdrag': dist.Uniform(*hrdrag_range)}
@@ -304,32 +313,32 @@ class NumTracers:
         """
         z = z_eff.reshape((len(self.cosmo_params))*[1] + [-1])
         if self.cosmo_model == 'base':
-            return (self.c/(100000*hrdrag)) * 1 / torch.sqrt(
+            return (self.c/(100*hrdrag)) * 1 / torch.sqrt(
                 Om * (1+z)**3 + 
                 (1-Om)
                 )
         
         elif self.cosmo_model == 'base_omegak':
-            return (self.c/(100000*hrdrag)) * 1 / torch.sqrt(
+            return (self.c/(self.h_scaling_factor*hrdrag)) * 1 / torch.sqrt(
                 Om * (1+z)**3 + 
                 Ok * (1+z)**2 + 
                 (1 - Om - Ok)
                 )
 
         elif self.cosmo_model == 'base_w':
-            return (self.c/(100000*hrdrag)) * 1 / torch.sqrt(
+            return (self.c/(self.h_scaling_factor*hrdrag)) * 1 / torch.sqrt(
                 Om * (1+z)**3 + 
                 (1-Om) * (1+z)**(3*(1+w0))
                 )
         
         elif self.cosmo_model == 'base_w_wa':
-            return (self.c/(100000*hrdrag)) * 1 / torch.sqrt(
+            return (self.c/(self.h_scaling_factor*hrdrag)) * 1 / torch.sqrt(
                 Om * (1+z)**3 + 
                 (1 - Om) * (1 + z)**(3 * (1 + w0 + wa)) * torch.exp(-3 * wa * (z / (1 + z)))
                 )
         
         elif self.cosmo_model == 'base_omegak_w_wa':
-            return (self.c/(100000*hrdrag)) * 1 / torch.sqrt(
+            return (self.c/(self.h_scaling_factor*hrdrag)) * 1 / torch.sqrt(
                 Om * (1+z)**3 + Ok * (1+z)**2 + 
                 (1 - Om - Ok) * (1 + z)**(3 * (1 + w0 + wa)) * torch.exp(-3 * wa * (z / (1 + z)))
                 )
@@ -342,7 +351,7 @@ class NumTracers:
         z = z_array.expand((len(self.cosmo_params)-1)*[1] + [-1, -1])
         if self.cosmo_model == 'base':
             # calculates the transverse comoving distance for a lambdaCDM cosmology 
-            result = (self.c/(100000*hrdrag)) * trapezoid(
+            result = (self.c/(self.h_scaling_factor*hrdrag)) * trapezoid(
                 (1 / torch.sqrt(
                     Om.unsqueeze(-1) * (1 + z)**3 + 
                     (1 - Om.unsqueeze(-1))
@@ -363,7 +372,7 @@ class NumTracers:
 
             neg_mask = Ok.flatten() < 0 # Ok < 0
             if neg_mask.any():
-                result[neg_mask, :] = ((self.c/(100000*hrdrag[neg_mask])/torch.sqrt(-Ok[neg_mask])) * torch.sin(
+                result[neg_mask, :] = ((self.c/(self.h_scaling_factor*hrdrag[neg_mask])/torch.sqrt(-Ok[neg_mask])) * torch.sin(
                     torch.sqrt(-Ok[neg_mask]) * trapezoid(
                         (1 / torch.sqrt(
                             Om[neg_mask].unsqueeze(-1) * (1 + z)**3 + 
@@ -377,7 +386,7 @@ class NumTracers:
 
             pos_mask = Ok.flatten() > 0 # Ok > 0
             if pos_mask.any():
-                result[pos_mask, :] = ((self.c/(100000*hrdrag[pos_mask])/torch.sqrt(Ok[pos_mask])) * torch.sinh(
+                result[pos_mask, :] = ((self.c/(self.h_scaling_factor*hrdrag[pos_mask])/torch.sqrt(Ok[pos_mask])) * torch.sinh(
                     torch.sqrt(Ok[pos_mask]) * trapezoid(
                         (1 / torch.sqrt(
                             Om[pos_mask].unsqueeze(-1) * (1 + z)**3 + 
@@ -391,7 +400,7 @@ class NumTracers:
 
             zero_mask = Ok.flatten() == 0 # Ok = 0
             if zero_mask.any():
-                result[zero_mask, :] = ((self.c/(100000*hrdrag[zero_mask])) * trapezoid(
+                result[zero_mask, :] = ((self.c/(self.h_scaling_factor*hrdrag[zero_mask])) * trapezoid(
                     (1 / torch.sqrt(
                         Om[zero_mask].unsqueeze(-1) * (1 + z)**3 + 
                         (1 - Om[zero_mask].unsqueeze(-1))
@@ -403,7 +412,7 @@ class NumTracers:
             return result.reshape(output_shape)
 
         elif self.cosmo_model == 'base_w':
-            result = (self.c/(100000*hrdrag)) * trapezoid(
+            result = (self.c/(self.h_scaling_factor*hrdrag)) * trapezoid(
                 (1 / torch.sqrt(
                     Om.unsqueeze(-1) * (1 + z)**3 + 
                     (1 - Om.unsqueeze(-1)) * (1 + z)**(3 * (1 + w0.unsqueeze(-1)))
@@ -413,7 +422,7 @@ class NumTracers:
             return result
         
         elif self.cosmo_model == 'base_w_wa':
-            result = (self.c/(100000*hrdrag)) * trapezoid(
+            result = (self.c/(self.h_scaling_factor*hrdrag)) * trapezoid(
                 (1 / torch.sqrt(
                     Om.unsqueeze(-1) * (1 + z)**3 + 
                     (1 - Om.unsqueeze(-1)) * (1 + z)**(3 * (1 + w0.unsqueeze(-1) + wa.unsqueeze(-1))) * 
@@ -437,7 +446,7 @@ class NumTracers:
 
             neg_mask = Ok.flatten() < 0 # Ok < 0
             if neg_mask.any():
-                result[neg_mask, :] = ((self.c/(100000*hrdrag[neg_mask])/torch.sqrt(-Ok[neg_mask])) * torch.sin(
+                result[neg_mask, :] = ((self.c/(self.h_scaling_factor*hrdrag[neg_mask])/torch.sqrt(-Ok[neg_mask])) * torch.sin(
                     torch.sqrt(-Ok[neg_mask]) * trapezoid(
                         (1 / torch.sqrt(
                             Om[neg_mask].unsqueeze(-1) * (1 + z)**3 + 
@@ -453,7 +462,7 @@ class NumTracers:
 
             pos_mask = Ok.flatten() > 0 # Ok > 0
             if pos_mask.any():
-                result[pos_mask, :] = ((self.c/(100000*hrdrag[pos_mask])/torch.sqrt(Ok[pos_mask])) * torch.sinh(
+                result[pos_mask, :] = ((self.c/(self.h_scaling_factor*hrdrag[pos_mask])/torch.sqrt(Ok[pos_mask])) * torch.sinh(
                     torch.sqrt(Ok[pos_mask]) * trapezoid(
                         (1 / torch.sqrt(
                             Om[pos_mask].unsqueeze(-1) * (1 + z)**3 + 
@@ -469,7 +478,7 @@ class NumTracers:
 
             zero_mask = Ok.flatten() == 0 # Ok = 0
             if zero_mask.any():
-                result[zero_mask, :] = ((self.c/(100000*hrdrag[zero_mask])) * trapezoid(
+                result[zero_mask, :] = ((self.c/(self.h_scaling_factor*hrdrag[zero_mask])) * trapezoid(
                     (1 / torch.sqrt(
                         Om[zero_mask].unsqueeze(-1) * (1 + z)**3 + 
                         (1 - Om[zero_mask].unsqueeze(-1)) *
@@ -488,20 +497,39 @@ class NumTracers:
         """
         return (z_eff.reshape((len(self.cosmo_params))*[1] + [-1]) * self.D_M_func(z_eff, Om, Ok, w0, wa, hrdrag)**2 * self.D_H_func(z_eff, Om, Ok, w0, wa, hrdrag))**(1/3)
 
-    def sample_guide(self, tracer_ratio, guide, num_data_samples=100, num_param_samples=1000, central=True):
-
+    def sample_params(self, guide, context, num_samples=5000):
+        """
+        Samples parameters from the guide (variational distribution).
+        Args:
+            guide (pyro.infer.guide.Guide): The guide to sample from.
+            context (torch.Tensor): The context to sample from.
+            num_samples (int): The number of parameter samples to draw.
+        """
+        with torch.no_grad():
+            param_samples = guide(context.squeeze()).sample((num_samples,))
+        param_samples[..., -1] *= self.h_scaling_factor
+        return param_samples
+    
+    def sample_data(self, tracer_ratio, num_samples=100, central=True):
+        """
+        Samples data from the likelihood.
+        Args:
+            tracer_ratio (torch.Tensor): The tracer ratio.
+            num_samples (int): The number of data samples to draw.
+            central (bool): Whether to use the fixed central value of the data samples.
+        """
         if central:
             rescaled_sigmas = torch.zeros(self.sigmas.shape, device=self.device)
             passed_ratio = self.calc_passed(tracer_ratio)
             means = torch.zeros(passed_ratio.shape[:-1] + (self.sigmas.shape[-1],), device=self.device)
-            means[:, :, self.DH_idx] = lexpand(self.central_val[self.DH_idx].unsqueeze(0), num_data_samples)
+            means[:, :, self.DH_idx] = lexpand(self.central_val[self.DH_idx].unsqueeze(0), num_samples)
             rescaled_sigmas = torch.zeros(passed_ratio.shape[:-1] + (self.sigmas.shape[-1],), device=self.device)
             rescaled_sigmas[:, :, self.DH_idx] = self.sigmas[self.DH_idx] * torch.sqrt(self.nominal_passed_ratio[self.DH_idx]/passed_ratio[..., self.DH_idx])
             if self.include_D_M:
-                means[:, :, self.DM_idx] = lexpand(self.central_val[self.DM_idx].unsqueeze(0), num_data_samples)
+                means[:, :, self.DM_idx] = lexpand(self.central_val[self.DM_idx].unsqueeze(0), num_samples)
                 rescaled_sigmas[:, :, self.DM_idx] = self.sigmas[self.DM_idx] * torch.sqrt(self.nominal_passed_ratio[self.DM_idx]/passed_ratio[..., self.DM_idx])
             if self.include_D_V:
-                means[:, :, self.DV_idx] = lexpand(self.central_val[self.DV_idx].unsqueeze(0), num_data_samples)
+                means[:, :, self.DV_idx] = lexpand(self.central_val[self.DV_idx].unsqueeze(0), num_samples)
                 rescaled_sigmas[:, :, self.DV_idx] = self.sigmas[self.DV_idx] * torch.sqrt(self.nominal_passed_ratio[self.DV_idx]/passed_ratio[..., self.DV_idx])
 
             if self.include_D_V and self.include_D_M:
@@ -509,14 +537,27 @@ class NumTracers:
             else:
                 covariance_matrix = self.corr_matrix[self.DH_idx, self.DH_idx] * (rescaled_sigmas[:, :, self.DH_idx].unsqueeze(-1) * rescaled_sigmas[:, :, self.DH_idx].unsqueeze(-2))
 
-            with pyro.plate("data", num_data_samples):
+            with pyro.plate("data", num_samples):
                 data_samples = pyro.sample(self.observation_labels[0], dist.MultivariateNormal(means.squeeze(), covariance_matrix.squeeze())).unsqueeze(1)
         else:
             data_samples = self.pyro_model(tracer_ratio)
+        return data_samples
+    
+    def sample_params_from_data_samples(self, tracer_ratio, guide, num_data_samples=100, num_param_samples=1000, central=True):
+        """
+        Samples parameters from the posterior distribution conditioned on the data sampled from the likelihood.
+        Args:
+            tracer_ratio (torch.Tensor): The tracer ratio.
+            guide (pyro.infer.guide.Guide): The guide to sample from.
+            num_data_samples (int): The number of data samples to use.
+            num_param_samples (int): The number of parameter samples to draw.
+            central (bool): Whether to use the fixed central value of the data samples.
+        """
+        data_samples = self.sample_data(tracer_ratio, num_data_samples, central)
         context = torch.cat([tracer_ratio, data_samples], dim=-1)
         # Sample parameters conditioned on the data batch
         param_samples = guide(context.squeeze()).sample((num_param_samples,))
-        param_samples[:, :, -1] *= 100000
+        param_samples[:, :, -1] *= self.h_scaling_factor
         return param_samples
 
     def sample_brute_force(self, tracer_ratio, grid_designs, grid_features, grid_params, designer, num_data_samples=100, num_param_samples=1000):

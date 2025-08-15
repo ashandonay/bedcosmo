@@ -805,8 +805,7 @@ def get_nominal_samples(run_obj, run_args, guide_samples=101, seed=1, device="cu
     central_vals = experiment.central_val if run_args.get("include_D_M", False) else experiment.central_val[1::2]
     nominal_context = torch.cat([nominal_design, central_vals], dim=-1)
 
-    nominal_samples = posterior_flow(nominal_context).sample((guide_samples,)).cpu().numpy()
-    nominal_samples[:, -1] *= 100000
+    nominal_samples = experiment.sample_params(posterior_flow, nominal_context, num_samples=guide_samples).cpu().numpy()
 
     with contextlib.redirect_stdout(io.StringIO()):
         samples = getdist.MCSamples(samples=nominal_samples, names=experiment.cosmo_params, labels=experiment.latex_labels, settings={'ignore_rows': 0.0})
@@ -817,19 +816,29 @@ def init_experiment(
         run_args, 
         device="cuda:0", 
         design_args={},
+        global_rank=0,
         seed=None
         ):
-    data_path_param = run_args.get("data_path", "") 
+    """
+    Initializes the experiment class with the run arguments.
+    Args:
+        cosmo_exp (str): The name of the cosmology experiment.
+        run_args (dict): The run arguments.
+        device (str): The device to use.
+        design_args (dict): The design arguments.
+        seed (int): The seed to use.
+    """
     if cosmo_exp == 'num_tracers':
         from num_tracers import NumTracers
         experiment = NumTracers(
-            data_path_param,
+            run_args.get("data_path", "/data/tracers_v2/"),
             run_args.get("cosmo_model", "base"),
+            run_args.get("flow_type", "MAF"),
             design_step=design_args.get("design_step", run_args.get("design_step", 0.05)),
             design_lower=design_args.get("design_lower", run_args.get("design_lower", 0.05)),
             design_upper=design_args.get("design_upper", run_args.get("design_upper", 1.0)),
             fixed_design=run_args.get("fixed_design", False),
-            global_rank=0,
+            global_rank=global_rank,
             device=device,
             include_D_M=run_args.get("include_D_M", False),
             seed=seed

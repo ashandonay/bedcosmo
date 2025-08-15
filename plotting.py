@@ -305,7 +305,7 @@ def plot_training(
                 nom_area_hist_raw = {}
                 # Get all metrics for this run to find area pair metrics
                 all_metrics = client.get_run(run_id_iter).data.metrics
-                area_metrics = {k: v for k, v in all_metrics.items() if k.startswith('nominal_area_0_')}
+                area_metrics = {k: v for k, v in all_metrics.items() if k.startswith('nominal_area_avg')}
                 nom_area_hist_raw = {}
                 for metric_name in area_metrics.keys():
                     nom_area_hist_raw[metric_name] = client.get_metric_history(run_id_iter, metric_name)
@@ -433,8 +433,8 @@ def plot_training(
             
             for area_idx, (metric_name, area_data) in enumerate(nom_area_data.items()):
                 if area_data:
-                    # Extract parameter pair name from metric name (e.g., 'nominal_area_0_Om_hrdrag' -> 'Om_hrdrag')
-                    pair_name = metric_name.replace('nominal_area_0_', '')
+                    # Extract parameter pair name from metric name (e.g., 'avg_nominal_area_Om_hrdrag' -> 'Om, hrdrag')
+                    pair_name = metric_name.replace('nominal_area_avg_', '')
                     param1, param2 = pair_name.split('_')[:2]
                     
                     desi_samples_gd = get_desi_samples(run_data_list[0]['params']['cosmo_model'])
@@ -1207,7 +1207,7 @@ def compare_training(
         ]))
         for cm in cosmo_models:
             desi_samples_gd = get_desi_samples(cm)
-            desi_area = get_contour_area([desi_samples_gd], 'Om', 'hrdrag', 0.68)[0]
+            desi_area = get_contour_area([desi_samples_gd], 0.68, 'Om', 'hrdrag')[0]
             ax_area.axhline(desi_area, color='black', linestyle='--', label=f'DESI ({cm}), Area: {desi_area:.3f}', alpha=0.5)
         # Configure ax2 (Contour Area)
         ax_area.set_ylabel("Posterior Contour Area")
