@@ -179,7 +179,7 @@ class Evaluation:
             for d in data_idxs:
                 with contextlib.redirect_stdout(io.StringIO()):
                     samples_gd = getdist.MCSamples(
-                        samples=samples[:, d, :].cpu().numpy(),
+                        samples=samples[:, d, :],
                         names=self.experiment.cosmo_params,
                         labels=self.experiment.latex_labels
                     )
