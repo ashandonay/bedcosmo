@@ -190,7 +190,7 @@ def _vnmc_eig_loss(model, guide, observation_labels, target_labels, contrastive=
     
     return loss_fn
 
-def nf_loss(context, guide, samples, rank=0, verbose_shapes=False):
+def nf_loss(context, guide, samples, experiment, rank=0, verbose_shapes=False):
     """
     Computes the negative log-probability loss for a normalizing flow model given pre-sampled data.
 
@@ -216,7 +216,11 @@ def nf_loss(context, guide, samples, rank=0, verbose_shapes=False):
         print(f"Flattened context shape: {flattened_context.shape}")
 
     # Compute the negative log-probability
-    neg_log_prob = -guide(flattened_context).log_prob(flattened_samples)
+    if experiment.preprocess:
+        y_flat = experiment.params_to_unconstrained(flattened_samples)
+    else:
+        y_flat = flattened_samples
+    neg_log_prob = -guide(flattened_context).log_prob(y_flat)
     neg_log_prob = neg_log_prob.view(-1, 1).mean(dim=-1)
 
     # Compute the aggregate loss

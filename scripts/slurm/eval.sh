@@ -22,8 +22,10 @@ srun torchrun \
     --nnodes=1 \
     --nproc_per_node=1 \
     /global/homes/a/ashandon/bed/BED_cosmo/num_tracers/evaluate.py \
-    --run_id 65d9012617de4360a96c19412554b576 \
+    --run_id 150d24136348447390a22d690001cab4 \
     --eval_step last \
     --global_rank "[0, 1, 2, 3]" \
-    --guide_samples 100000 \
-    --n_particles 501
+    --levels 0.68 \
+    --guide_samples 10000 \
+    --n_particles 1001 \
+    --profile

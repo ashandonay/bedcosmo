@@ -20,6 +20,8 @@ import subprocess
 from torch.nn.parallel import DistributedDataParallel as DDP
 from datetime import datetime, timedelta
 import traceback
+import functools
+import time
 
 torch.set_default_dtype(torch.float64)
 
@@ -27,6 +29,138 @@ home_dir = os.environ["HOME"]
 if home_dir + "/bed/BED_cosmo" not in sys.path:
     sys.path.insert(0, home_dir + "/bed/BED_cosmo")
 sys.path.insert(0, home_dir + "/bed/BED_cosmo/num_tracers")
+
+
+class Bijector:
+    @staticmethod
+    def _logit(x, eps: float = 1e-6):
+        """
+        Numerically stable logit with clamping.
+        x in (0,1) -> R
+        """
+        x = torch.clamp(x, eps, 1.0 - eps)
+        return torch.log(x) - torch.log1p(-x)
+
+    @staticmethod
+    def _sigmoid(y: torch.Tensor) -> torch.Tensor:
+        """
+        Standard logistic sigmoid.
+        R -> (0,1)
+        """
+        return torch.sigmoid(y)
+
+    @staticmethod
+    def _to_unit_interval(x: torch.Tensor, a: float, b: float, eps: float = 1e-6) -> torch.Tensor:
+        """
+        Affine map from (a,b) to (0,1), with clamping for numerical stability.
+        """
+        u = (x - a) / (b - a)
+        return torch.clamp(u, eps, 1.0 - eps)
+
+    @staticmethod
+    def _from_unit_interval(u: torch.Tensor, a: float, b: float) -> torch.Tensor:
+        """
+        Affine map from (0,1) back to (a,b).
+        """
+        return a + u * (b - a)
+
+    @staticmethod
+    def _interval_to_R(x: torch.Tensor, a: float, b: float, eps: float = 1e-6) -> torch.Tensor:
+        """
+        Map from a bounded open interval (a,b) to R via affine -> (-1,1) then atanh.
+        Equivalent to: atanh(u) = 0.5 * [log(1+u) - log(1-u)].
+        """
+        # map to (0,1)
+        u01 = Bijector._to_unit_interval(x, a, b, eps)
+        # to (-1,1)
+        u = 2.0 * u01 - 1.0
+        u = torch.clamp(u, -1.0 + eps, 1.0 - eps)
+        return 0.5 * (torch.log1p(u) - torch.log1p(-u))  # atanh(u)
+
+    @staticmethod
+    def _R_to_interval(y: torch.Tensor, a: float, b: float) -> torch.Tensor:
+        """
+        Map from R to (a,b) via tanh then affine.
+        """
+        u = torch.tanh(y)          # (-1,1)
+        u01 = 0.5 * (u + 1.0)      # (0,1)
+        return Bijector._from_unit_interval(u01, a, b)
+
+    @staticmethod
+    def _log_interval_to_R(x: torch.Tensor, a: float, b: float, H: float = 5.0) -> torch.Tensor:
+        """
+        Log + affine bijector mapping a positive interval [a, b] with 0 < a < b
+        to an approximately symmetric range [-H, H] in R.
+
+        Forward:
+            y = s * (log(x) - c)
+        where:
+            c = 0.5 * (log(a) + log(b))      # center in log-space (geometric mean)
+            s = (2H) / (log(b) - log(a))     # scale so that a -> -H and b -> +H
+        """
+        a_t = torch.tensor(a, device=x.device, dtype=x.dtype)
+        b_t = torch.tensor(b, device=x.device, dtype=x.dtype)
+        H_t = torch.tensor(H, device=x.device, dtype=x.dtype)
+
+        loga = torch.log(a_t)
+        logb = torch.log(b_t)
+        c = 0.5 * (loga + logb)
+        s = (2.0 * H_t) / (logb - loga)
+
+        return s * (torch.log(x) - c)
+
+    @staticmethod
+    def _R_to_log_interval(y: torch.Tensor, a: float, b: float, H: float = 5.0) -> torch.Tensor:
+        """
+        Inverse of `_log_interval_to_R`:
+            x = exp( y / s + c )
+        with the same c and s definitions.
+        """
+        a_t = torch.tensor(a, device=y.device, dtype=y.dtype)
+        b_t = torch.tensor(b, device=y.device, dtype=y.dtype)
+        H_t = torch.tensor(H, device=y.device, dtype=y.dtype)
+
+        loga = torch.log(a_t)
+        logb = torch.log(b_t)
+        c = 0.5 * (loga + logb)
+        s = (2.0 * H_t) / (logb - loga)
+
+        return torch.exp(y / s + c)
+    
+def profile_method(func):
+    """Decorator to profile method execution time - checks self.profile"""
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        # Check if the instance has profile
+        if hasattr(args[0], 'profile') and args[0].profile:
+            start_time = time.time()
+            result = func(*args, **kwargs)
+            end_time = time.time()
+            execution_time = end_time - start_time
+            print(f"⏱️  {func.__name__} took {execution_time:.2f} seconds")
+            return result
+        else:
+            # No profiling overhead when disabled
+            return func(*args, **kwargs)
+    return wrapper
+
+def profile_function(profile=False):
+    """Decorator to profile function execution time - only active when profile is True"""
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            if profile:
+                start_time = time.time()
+                result = func(*args, **kwargs)
+                end_time = time.time()
+                execution_time = end_time - start_time
+                print(f"⏱️  {func.__name__} took {execution_time:.2f} seconds")
+                return result
+            else:
+                # No profiling overhead when disabled
+                return func(*args, **kwargs)
+        return wrapper
+    return decorator
 
 def auto_seed(base_seed=0, rank=0):
     if base_seed < 0:
@@ -296,32 +430,29 @@ def init_nf(
     with temporary_seed(seed):
         flow_type = run_args.get("flow_type")
         n_transforms = int(run_args.get("n_transforms", 2))
-        hyper_n_layers = int(run_args.get("hyper_n_layers", 2))
-        hyper_hidden_size = int(run_args.get("hyper_hidden_size", 64))
+        cond_n_layers = int(run_args.get("cond_n_layers", 2))
+        cond_hidden_size = int(run_args.get("cond_hidden_size", 64))
 
         # Initialize the flow model
         if flow_type == "NSF":
-            bins_val = int(run_args.get("bins"))
             posterior_flow = zuko.flows.NSF(
                 features=input_dim, 
                 context=context_dim, 
                 transforms=n_transforms,
-                bins=bins_val,
-                hidden_features=((hyper_hidden_size,) * hyper_n_layers),
+                bins=int(run_args.get("spline_bins")),
+                randperm=True,
+                hidden_features=((cond_hidden_size,) * cond_n_layers),
                 **kwargs
             )
         elif flow_type == "NAF":
-            mnn_signal = int(run_args.get("mnn_signal"))
-            mnn_hidden_size = int(run_args.get("mnn_hidden_size", 64))
-            mnn_n_layers = int(run_args.get("mnn_n_layers", 2))
             posterior_flow = zuko.flows.NAF(
                 features=input_dim, 
                 context=context_dim, 
                 transforms=n_transforms,
-                signal=mnn_signal,
-                randperm=False,
-                network={"hidden_features": ((mnn_hidden_size,) * mnn_n_layers)},
-                hidden_features=((hyper_hidden_size,) * hyper_n_layers) # for the hyper network
+                signal=int(run_args.get("mnn_signal")),
+                randperm=True,
+                network={"hidden_features": ((int(run_args.get("mnn_hidden_size", 64)),) * int(run_args.get("mnn_n_layers", 2)))},
+                hidden_features=((cond_hidden_size,) * cond_n_layers) # for the conditional network
                 )
         elif flow_type == "MAF":
             transform = run_args.get("transform", None)
@@ -335,9 +466,9 @@ def init_nf(
                 features=input_dim, 
                 context=context_dim, 
                 transforms=n_transforms,
-                randperm=False,
+                randperm=True,
                 univariate=univariate,
-                hidden_features=((hyper_hidden_size,) * hyper_n_layers), # for the hyper network
+                hidden_features=((cond_hidden_size,) * cond_n_layers), # for the conditional network
                 **kwargs
                 )
         elif flow_type == "NICE":
@@ -366,61 +497,152 @@ def init_scheduler(optimizer, run_args):
     steps_per_cycle = run_args["total_steps"] // run_args["n_cycles"]
     initial_lr = run_args["initial_lr"]
     final_lr = run_args["final_lr"]
+    
+    # Get warmup fraction, defaulting to 0.0 (no warmup)
+    warmup_fraction = run_args.get("warmup_fraction", 0.0)
+    warmup_steps = int(warmup_fraction * run_args["total_steps"])
 
     if run_args["scheduler_type"] == "constant":
-        scheduler = torch.optim.lr_scheduler.ConstantLR(
-            optimizer, 
-            factor=1.0
-            )
+        if warmup_steps > 0:
+            # Create a warmup + constant schedule
+            def lr_lambda(step):
+                if step < warmup_steps:
+                    # Linear warmup from 0 to initial_lr
+                    return step / warmup_steps
+                else:
+                    # Constant at initial_lr
+                    return 1.0
+            scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+        else:
+            scheduler = torch.optim.lr_scheduler.ConstantLR(
+                optimizer, 
+                factor=1.0
+                )
     elif run_args["scheduler_type"] == "cosine":
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            optimizer, 
-            T_max=run_args["total_steps"],
-            eta_min=final_lr
-            )
+        if warmup_steps > 0:
+            # Create a warmup + cosine schedule
+            def lr_lambda(step):
+                if step < warmup_steps:
+                    # Linear warmup from 0 to initial_lr
+                    return step / warmup_steps
+                else:
+                    # Cosine decay from initial_lr to final_lr
+                    adjusted_step = step - warmup_steps
+                    adjusted_total_steps = run_args["total_steps"] - warmup_steps
+                    cosine_factor = 0.5 * (1 + np.cos(np.pi * adjusted_step / adjusted_total_steps))
+                    return (final_lr + (initial_lr - final_lr) * cosine_factor) / initial_lr
+            scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+        else:
+            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+                optimizer, 
+                T_max=run_args["total_steps"],
+                eta_min=final_lr
+                )
     elif run_args["scheduler_type"] == "linear":
-        # This provides a linear ramp from initial_lr to final_lr.
-        # It can handle both increasing and decreasing LR by using LambdaLR.
-        def lr_lambda(step):
-            total_steps = run_args["total_steps"]
-            if initial_lr == 0:
-                if final_lr != 0:
-                    raise ValueError("Cannot use 'linear' scheduler for warmup from initial_lr=0, as the optimizer's base LR is 0.")
-                return 1.0  # LR is 0 and stays 0.
+        if warmup_steps > 0:
+            # Create a warmup + linear schedule
+            def lr_lambda(step):
+                if step < warmup_steps:
+                    # Linear warmup from 0 to initial_lr
+                    return step / warmup_steps
+                else:
+                    # Linear decay from initial_lr to final_lr
+                    adjusted_step = step - warmup_steps
+                    adjusted_total_steps = run_args["total_steps"] - warmup_steps
+                    if adjusted_total_steps <= 1:
+                        return final_lr / initial_lr
+                    
+                    progress = adjusted_step / (adjusted_total_steps - 1)
+                    end_factor = final_lr / initial_lr
+                    return 1.0 + (end_factor - 1.0) * progress
+            scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+        else:
+            # This provides a linear ramp from initial_lr to final_lr.
+            # It can handle both increasing and decreasing LR by using LambdaLR.
+            def lr_lambda(step):
+                total_steps = run_args["total_steps"]
+                if initial_lr == 0:
+                    if final_lr != 0:
+                        raise ValueError("Cannot use 'linear' scheduler for warmup from initial_lr=0, as the optimizer's base LR is 0.")
+                    return 1.0  # LR is 0 and stays 0.
+                
+                if total_steps <= 1:
+                    return final_lr / initial_lr
+                
+                progress = step / (total_steps - 1)
+                end_factor = final_lr / initial_lr
+                
+                # Linear interpolation of the multiplicative factor
+                return 1.0 + (end_factor - 1.0) * progress
             
-            if total_steps <= 1:
-                return final_lr / initial_lr
-            
-            progress = step / (total_steps - 1)
-            end_factor = final_lr / initial_lr
-            
-            # Linear interpolation of the multiplicative factor
-            return 1.0 + (end_factor - 1.0) * progress
-        
-        scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+            scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
     elif run_args["scheduler_type"] == "exponential":
-        # calculate gamma from initial and final lr
-        gamma = (final_lr / initial_lr) ** (1 / run_args["total_steps"])
-        scheduler = torch.optim.lr_scheduler.ExponentialLR(
-            optimizer, 
-            gamma=gamma
-            )
+        if warmup_steps > 0:
+            # Create a warmup + exponential schedule
+            def lr_lambda(step):
+                if step < warmup_steps:
+                    # Linear warmup from 0 to initial_lr
+                    return step / warmup_steps
+                else:
+                    # Exponential decay from initial_lr to final_lr
+                    adjusted_step = step - warmup_steps
+                    adjusted_total_steps = run_args["total_steps"] - warmup_steps
+                    gamma = (final_lr / initial_lr) ** (1 / adjusted_total_steps)
+                    return (initial_lr * (gamma ** adjusted_step)) / initial_lr
+            scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+        else:
+            # calculate gamma from initial and final lr
+            gamma = (final_lr / initial_lr) ** (1 / run_args["total_steps"])
+            scheduler = torch.optim.lr_scheduler.ExponentialLR(
+                optimizer, 
+                gamma=gamma
+                )
     elif run_args["scheduler_type"] == "lambda":
-        def lr_lambda(step):
-            cycle = step // steps_per_cycle
-            cycle_progress = (step % steps_per_cycle) / steps_per_cycle
-            # Decaying peak
-            peak = initial_lr * (gamma ** cycle)
-            # Cosine decay within cycle
-            cosine = 0.5 * (1 + np.cos(np.pi * cycle_progress))
-            lr = final_lr + (peak - final_lr) * cosine
-            return lr / initial_lr  # LambdaLR expects a multiplier of the initial LR
-        scheduler = torch.optim.lr_scheduler.LambdaLR(
-            optimizer, 
-            lr_lambda
-            )
+        # Get gamma from run_args for lambda scheduler
+        gamma = run_args.get("gamma", 0.1)
+        if warmup_steps > 0:
+            # Create a warmup + lambda schedule
+            def lr_lambda(step):
+                if step < warmup_steps:
+                    # Linear warmup from 0 to initial_lr
+                    return step / warmup_steps
+                else:
+                    # Original lambda schedule logic
+                    adjusted_step = step - warmup_steps
+                    adjusted_total_steps = run_args["total_steps"] - warmup_steps
+                    steps_per_cycle = adjusted_total_steps // run_args["n_cycles"]
+                    cycle = adjusted_step // steps_per_cycle
+                    cycle_progress = (adjusted_step % steps_per_cycle) / steps_per_cycle
+                    # Decaying peak
+                    peak = initial_lr * (gamma ** cycle)
+                    # Cosine decay within cycle
+                    cosine = 0.5 * (1 + np.cos(np.pi * cycle_progress))
+                    lr = final_lr + (peak - final_lr) * cosine
+                    return lr / initial_lr  # LambdaLR expects a multiplier of the initial LR
+            scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+        else:
+            def lr_lambda(step):
+                cycle = step // steps_per_cycle
+                cycle_progress = (step % steps_per_cycle) / steps_per_cycle
+                # Decaying peak
+                peak = initial_lr * (gamma ** cycle)
+                # Cosine decay within cycle
+                cosine = 0.5 * (1 + np.cos(np.pi * cycle_progress))
+                lr = final_lr + (peak - final_lr) * cosine
+                return lr / initial_lr  # LambdaLR expects a multiplier of the initial LR
+            scheduler = torch.optim.lr_scheduler.LambdaLR(
+                optimizer, 
+                lr_lambda
+                )
     else:
         raise ValueError(f"Unknown scheduler_type: {run_args['scheduler_type']}")
+    
+    # Log warmup information if warmup is enabled
+    if warmup_steps > 0:
+        print(f"Learning rate warmup enabled: {warmup_steps} steps ({warmup_fraction:.1%} of total steps)")
+        print(f"  Warmup: 0.0 → {initial_lr}")
+        print(f"  Schedule: {initial_lr} → {final_lr} over {run_args['total_steps'] - warmup_steps} steps")
+    
     return scheduler
 
 def init_run(
@@ -618,7 +840,7 @@ def _fix_model_args(run_args, ref_run, global_rank=0):
     changed_params = {}
     
     # Common parameters that apply to all flow types
-    common_params = ["cosmo_model", "flow_type", "n_transforms", "hyper_hidden_size", "hyper_n_layers"]
+    common_params = ["cosmo_model", "flow_type", "n_transforms", "cond_hidden_size", "cond_n_layers"]
     
     # Store original values and update common parameters
     for param in common_params:
@@ -634,7 +856,7 @@ def _fix_model_args(run_args, ref_run, global_rank=0):
     flow_specific_params = {
         "MAF": ["transform"],
         "NAF": ["mnn_signal", "mnn_hidden_size", "mnn_n_layers"],
-        "NSF": ["bins"]
+        "NSF": ["spline_bins"]
     }
     
     if flow_type in flow_specific_params:
@@ -838,6 +1060,7 @@ def init_experiment(
             design_lower=design_args.get("design_lower", run_args.get("design_lower", 0.05)),
             design_upper=design_args.get("design_upper", run_args.get("design_upper", 1.0)),
             fixed_design=run_args.get("fixed_design", False),
+            preprocess=run_args.get("preprocess", False),
             global_rank=global_rank,
             device=device,
             include_D_M=run_args.get("include_D_M", False),

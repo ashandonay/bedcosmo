@@ -30,7 +30,7 @@ class Evaluation:
     def __init__(
             self, run_id, guide_samples, seed=1, design_step=0.05, design_lower=0.05, design_upper=None,
             cosmo_exp='num_tracers', levels=[0.68, 0.95], global_rank=0, 
-            n_evals=20, device="cuda:0", n_particles=1000, verbose=False
+            n_evals=20, device="cuda:0", n_particles=1000, verbose=False, profile=False
             ):
         self.run_id = run_id
         run_data_list, _, _ = get_runs_data(run_ids=self.run_id)
@@ -53,6 +53,7 @@ class Evaluation:
         self.n_evals = n_evals
         self.n_particles = n_particles
         self.verbose = verbose
+        self.profile = profile
         design_args = {
             "design_step": design_step,
             "design_lower": design_lower,
@@ -61,6 +62,7 @@ class Evaluation:
         }
         self.experiment = init_experiment(self.cosmo_exp, self.run_args, device=self.device, design_args=design_args, seed=self.seed)
 
+    @profile_method
     def _eval_step(self, step, design_type='nominal', global_rank=None):
         """
         Generates samples given the nominal context (nominal design + central values).
@@ -93,6 +95,7 @@ class Evaluation:
             rank_samples.append(self._get_samples(design, flow_model))
         return rank_samples, np.mean(rank_eigs)
 
+    @profile_method
     def _get_samples(self, design, flow_model):
         context = torch.cat([design, self.experiment.central_val], dim=-1)
         samples = self.experiment.sample_params(flow_model, context, num_samples=self.guide_samples).cpu().numpy()
@@ -233,6 +236,7 @@ class Evaluation:
         g.fig.suptitle(f"Posterior (Rank {global_rank}) for {num_data_samples} Data Samples, {int(level*100)}% Credible Regions", fontsize=12)
         save_figure(f"{self.save_path}/plots/posterior_samples_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png", fig=g.fig, dpi=400)
 
+    @profile_method
     def calc_eig_batch(self, flow_model):
         """
         Calculates the average + std of the EIG over a batch of evaluations.
@@ -250,13 +254,17 @@ class Evaluation:
 
         eigs_batch = []
         nominal_eig_batch = []
+        
         for n in range(self.n_evals):
+            if self.verbose and n % 5 == 0:
+                print(f"  EIG evaluation {n+1}/{self.n_evals}")
+            
             eigs = self.calc_eig(flow_model, nominal_design=False)
             eigs_batch.append(eigs.cpu().numpy()/np.log(2))
             
             nominal_eig = self.calc_eig(flow_model, nominal_design=True)
             nominal_eig_batch.append(nominal_eig.cpu().numpy()/np.log(2))
-
+        
         eigs_batch = np.array(eigs_batch)
         nominal_eig_batch = np.array(nominal_eig_batch)
         # avg over the number of evaluations
@@ -276,7 +284,7 @@ class Evaluation:
             flow_model (torch.nn.Module): The flow model to evaluate.
             nominal_design (bool): Whether to evaluate the nominal design.
         Returns:
-            eigs (torch.Tensor): The EIGs for the evaluation designs tensor.
+            eigs (torch.Tensor): The EIGs for each design.
         """
 
         with torch.no_grad():
@@ -548,7 +556,8 @@ def run_eval(
         levels, 
         global_rank, 
         n_particles,
-        n_evals
+        n_evals,
+        profile=False
         ):
     """
     Runs the evaluation routine for a given run ID.
@@ -587,14 +596,30 @@ def run_eval(
         levels=levels,
         global_rank=global_rank,
         n_evals=n_evals,
-        n_particles=n_particles
+        n_particles=n_particles,
+        profile=profile
     )
+    
+    print(f"\nStarting evaluation for run {run_id}")
+    print(f"Running posterior evaluation...")
     evaluate.posterior(step=eval_step, display=['nominal'])
+    
+    print(f"Running EIG grid evaluation...")
     evaluate.eig_grid(step=eval_step)
+    
+    print(f"Running posterior steps evaluation...")
     evaluate.posterior_steps(steps=[1000, 5000, 20000, 'last'])
+    
+    print(f"Running EIG steps evaluation...")
     evaluate.eig_steps(steps=[eval_step//4, eval_step//2, 3*eval_step//4, 'last'])
+    
+    print(f"Running design comparison...")
     evaluate.design_comparison(step=eval_step)
+    
+    print(f"Running sample posterior evaluation...")
     evaluate.sample_posterior(step=eval_step, level=0.68, central=True)
+    
+    print(f"Evaluation completed successfully!")
 
 if __name__ == "__main__":
 
@@ -611,6 +636,7 @@ if __name__ == "__main__":
     parser.add_argument('--n_evals', type=int, default=20, help='Number of evaluations to average over')
     parser.add_argument('--device', type=str, default='cuda:0', help='Device to use for evaluation')
     parser.add_argument('--eval_seed', type=int, default=1, help='Seed for evaluation')
+    parser.add_argument('--profile', action='store_true', help='Enable detailed profiling with cProfile')
 
     args = parser.parse_args()
     
@@ -618,4 +644,17 @@ if __name__ == "__main__":
     if isinstance(args.global_rank, str):
         args.global_rank = json.loads(args.global_rank)
 
-    run_eval(**vars(args))
+    if args.profile:
+        print(f"Starting method-level profiling...")
+        
+        # Filter out profiling arguments before calling run_eval
+        eval_args = {k: v for k, v in vars(args).items() 
+                    if k != 'profile'}
+        
+        run_eval(**eval_args, profile=True)
+
+    else:
+        # Filter out profiling arguments before calling run_eval
+        eval_args = {k: v for k, v in vars(args).items() 
+                    if k != 'profile'}
+        run_eval(**eval_args, profile=False)

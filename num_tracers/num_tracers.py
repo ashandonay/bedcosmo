@@ -20,7 +20,7 @@ script_dir = os.path.dirname(os.path.abspath(__file__))
 parent_dir_abs = os.path.abspath(os.path.join(script_dir, os.pardir))
 sys.path.insert(0, parent_dir_abs)
 from custom_dist import ConstrainedUniform2D
-from util import *
+from util import Bijector, auto_seed
 
 storage_path = os.environ["SCRATCH"] + "/bed/BED_cosmo/num_tracers"
 home_dir = os.environ["HOME"]
@@ -40,6 +40,7 @@ class NumTracers:
         include_D_V=True,
         seed=None,
         global_rank=0, 
+        preprocess=False,
         device="cuda:0",
         mode='eval',
         verbose=False
@@ -83,6 +84,13 @@ class NumTracers:
         self.nominal_design = torch.tensor(self.desi_tracers.groupby('class').sum()['observed'].reindex(self.targets).values, device=self.device)
         self.get_priors() # initialize the priors
         self.cosmo_params = list(self.priors.keys())
+        self.preprocess = preprocess
+        # store as Python lists of ints; works for advanced indexing
+        self._idx_Om = [self.cosmo_params.index('Om')] if 'Om' in self.cosmo_params else []
+        self._idx_Ok = [self.cosmo_params.index('Ok')] if 'Ok' in self.cosmo_params else []
+        self._idx_w0 = [self.cosmo_params.index('w0')] if 'w0' in self.cosmo_params else []
+        self._idx_wa = [self.cosmo_params.index('wa')] if 'wa' in self.cosmo_params else []
+        self._idx_hr = [self.cosmo_params.index('hrdrag')] if 'hrdrag' in self.cosmo_params else []
         self.observation_labels = ["y"]
         self.init_designs(fixed_design=fixed_design, design_step=design_step, design_lower=design_lower, design_upper=design_upper)
         if self.global_rank == 0 and self.verbose:
@@ -213,15 +221,17 @@ class NumTracers:
         Ok_range = torch.tensor([-0.3, 0.3], device=self.device)
         w0_range = torch.tensor([-3.0, 1.0], device=self.device)
         wa_range = torch.tensor([-3.0, 2.0], device=self.device)
+        hrdrag_range = torch.tensor([10.0, 1000.0], device=self.device)
+        '''
         if self.flow_type == "MAF":
             self.h_scaling_factor = 100
             hrdrag_range = torch.tensor([10.0, 1000.0], device=self.device)
-        elif self.flow_type == "NAF":
+        elif self.flow_type == "NAF" or self.flow_type == "NSF":
             self.h_scaling_factor = 100000
             hrdrag_range = torch.tensor([0.01, 1.0], device=self.device)
         else:
             raise ValueError(f"Invalid flow type: {self.flow_type}")
-
+        '''
         if self.cosmo_model == 'base':
             self.priors = {'Om': dist.Uniform(*Om_range), 'hrdrag': dist.Uniform(*hrdrag_range)}
             self.latex_labels = ['\Omega_m', 'H_0r_d']
@@ -237,6 +247,80 @@ class NumTracers:
         elif self.cosmo_model == 'base_omegak_w_wa':
             self.priors = {'Om': dist.Uniform(*Om_range), 'Ok': dist.Uniform(*Ok_range), 'w0': dist.Uniform(*w0_range), 'wa': dist.Uniform(*wa_range), 'hrdrag': dist.Uniform(*hrdrag_range)}
             self.latex_labels = ['\Omega_m', '\Omega_k', 'w_0', 'w_a', 'H_0r_d']
+
+
+    def params_to_unconstrained(self, params):
+        """
+        Vectorized: map PHYSICAL space -> unconstrained R^D.
+        Expected input shape: (..., D) where D == len(self.cosmo_params).
+
+        Returns:
+            y (torch.Tensor): The unconstrained parameters.
+        """
+        D = len(self.cosmo_params)
+        assert params.shape[-1] == D, f"Expected last dim {D}, got {params.shape[-1]}"
+        y = params.clone()
+
+        # Om in (0,1): logit
+        if self._idx_Om:
+            x = params[..., self._idx_Om]
+            y[..., self._idx_Om] = Bijector._interval_to_R(x, 0.01, 0.99)
+
+        # Ok in (-0.3, 0.3): affine -> (-1,1) -> atanh
+        if self._idx_Ok:
+            x = params[..., self._idx_Ok]
+            y[..., self._idx_Ok] = Bijector._interval_to_R(x, -0.3, 0.3)
+
+        # w0 in (-3, 1)
+        if self._idx_w0:
+            x = params[..., self._idx_w0]
+            y[..., self._idx_w0] = Bijector._interval_to_R(x, -3.0, 1.0)
+
+        # wa in (-3, 2)
+        if self._idx_wa:
+            x = params[..., self._idx_wa]
+            y[..., self._idx_wa] = Bijector._interval_to_R(x, -3.0, 2.0)
+
+        # hrdrag > 0: log
+        if self._idx_hr:
+            x = params[..., self._idx_hr]
+            y[..., self._idx_hr] = Bijector._log_interval_to_R(x, a=10.0, b=1000.0, H=5.0)
+
+        return y
+
+    def params_from_unconstrained(self, y):
+        """
+        Vectorized: map unconstrained R^D -> PHYSICAL space.
+        Expected input shape: (..., D) where D == len(self.cosmo_params).
+
+        Returns:
+            x (torch.Tensor): The physical parameters.
+        """
+        D = len(self.cosmo_params)
+        assert y.shape[-1] == D, f"Expected last dim {D}, got {y.shape[-1]}"
+        x = y.clone()
+
+        # Om: sigmoid
+        if self._idx_Om:
+            x[..., self._idx_Om] = Bijector._R_to_interval(y[..., self._idx_Om], 0.01, 0.99)
+
+        # Ok: tanh to (-1,1) then affine back to (-0.3, 0.3)
+        if self._idx_Ok:
+            x[..., self._idx_Ok] = Bijector._R_to_interval(y[..., self._idx_Ok], -0.3, 0.3)
+
+        # w0
+        if self._idx_w0:
+            x[..., self._idx_w0] = Bijector._R_to_interval(y[..., self._idx_w0], -3.0, 1.0)
+
+        # wa
+        if self._idx_wa:
+            x[..., self._idx_wa] = Bijector._R_to_interval(y[..., self._idx_wa], -3.0, 2.0)
+
+        # hrdrag: exp
+        if self._idx_hr:
+            x[..., self._idx_hr] = Bijector._R_to_log_interval(y[..., self._idx_hr], a=10.0, b=1000.0, H=5.0)
+
+        return x
             
     def calc_passed(self, class_ratio):
         if type(class_ratio) == torch.Tensor:
@@ -319,26 +403,26 @@ class NumTracers:
                 )
         
         elif self.cosmo_model == 'base_omegak':
-            return (self.c/(self.h_scaling_factor*hrdrag)) * 1 / torch.sqrt(
+            return (self.c/(100*hrdrag)) * 1 / torch.sqrt(
                 Om * (1+z)**3 + 
                 Ok * (1+z)**2 + 
                 (1 - Om - Ok)
                 )
 
         elif self.cosmo_model == 'base_w':
-            return (self.c/(self.h_scaling_factor*hrdrag)) * 1 / torch.sqrt(
+            return (self.c/(100*hrdrag)) * 1 / torch.sqrt(
                 Om * (1+z)**3 + 
                 (1-Om) * (1+z)**(3*(1+w0))
                 )
         
         elif self.cosmo_model == 'base_w_wa':
-            return (self.c/(self.h_scaling_factor*hrdrag)) * 1 / torch.sqrt(
+            return (self.c/(100*hrdrag)) * 1 / torch.sqrt(
                 Om * (1+z)**3 + 
                 (1 - Om) * (1 + z)**(3 * (1 + w0 + wa)) * torch.exp(-3 * wa * (z / (1 + z)))
                 )
         
         elif self.cosmo_model == 'base_omegak_w_wa':
-            return (self.c/(self.h_scaling_factor*hrdrag)) * 1 / torch.sqrt(
+            return (self.c/(100*hrdrag)) * 1 / torch.sqrt(
                 Om * (1+z)**3 + Ok * (1+z)**2 + 
                 (1 - Om - Ok) * (1 + z)**(3 * (1 + w0 + wa)) * torch.exp(-3 * wa * (z / (1 + z)))
                 )
@@ -351,7 +435,7 @@ class NumTracers:
         z = z_array.expand((len(self.cosmo_params)-1)*[1] + [-1, -1])
         if self.cosmo_model == 'base':
             # calculates the transverse comoving distance for a lambdaCDM cosmology 
-            result = (self.c/(self.h_scaling_factor*hrdrag)) * trapezoid(
+            result = (self.c/(100*hrdrag)) * trapezoid(
                 (1 / torch.sqrt(
                     Om.unsqueeze(-1) * (1 + z)**3 + 
                     (1 - Om.unsqueeze(-1))
@@ -372,7 +456,7 @@ class NumTracers:
 
             neg_mask = Ok.flatten() < 0 # Ok < 0
             if neg_mask.any():
-                result[neg_mask, :] = ((self.c/(self.h_scaling_factor*hrdrag[neg_mask])/torch.sqrt(-Ok[neg_mask])) * torch.sin(
+                result[neg_mask, :] = ((self.c/(100*hrdrag[neg_mask])/torch.sqrt(-Ok[neg_mask])) * torch.sin(
                     torch.sqrt(-Ok[neg_mask]) * trapezoid(
                         (1 / torch.sqrt(
                             Om[neg_mask].unsqueeze(-1) * (1 + z)**3 + 
@@ -386,7 +470,7 @@ class NumTracers:
 
             pos_mask = Ok.flatten() > 0 # Ok > 0
             if pos_mask.any():
-                result[pos_mask, :] = ((self.c/(self.h_scaling_factor*hrdrag[pos_mask])/torch.sqrt(Ok[pos_mask])) * torch.sinh(
+                result[pos_mask, :] = ((self.c/(100*hrdrag[pos_mask])/torch.sqrt(Ok[pos_mask])) * torch.sinh(
                     torch.sqrt(Ok[pos_mask]) * trapezoid(
                         (1 / torch.sqrt(
                             Om[pos_mask].unsqueeze(-1) * (1 + z)**3 + 
@@ -400,7 +484,7 @@ class NumTracers:
 
             zero_mask = Ok.flatten() == 0 # Ok = 0
             if zero_mask.any():
-                result[zero_mask, :] = ((self.c/(self.h_scaling_factor*hrdrag[zero_mask])) * trapezoid(
+                result[zero_mask, :] = ((self.c/(100*hrdrag[zero_mask])) * trapezoid(
                     (1 / torch.sqrt(
                         Om[zero_mask].unsqueeze(-1) * (1 + z)**3 + 
                         (1 - Om[zero_mask].unsqueeze(-1))
@@ -412,7 +496,7 @@ class NumTracers:
             return result.reshape(output_shape)
 
         elif self.cosmo_model == 'base_w':
-            result = (self.c/(self.h_scaling_factor*hrdrag)) * trapezoid(
+            result = (self.c/(100*hrdrag)) * trapezoid(
                 (1 / torch.sqrt(
                     Om.unsqueeze(-1) * (1 + z)**3 + 
                     (1 - Om.unsqueeze(-1)) * (1 + z)**(3 * (1 + w0.unsqueeze(-1)))
@@ -422,7 +506,7 @@ class NumTracers:
             return result
         
         elif self.cosmo_model == 'base_w_wa':
-            result = (self.c/(self.h_scaling_factor*hrdrag)) * trapezoid(
+            result = (self.c/(100*hrdrag)) * trapezoid(
                 (1 / torch.sqrt(
                     Om.unsqueeze(-1) * (1 + z)**3 + 
                     (1 - Om.unsqueeze(-1)) * (1 + z)**(3 * (1 + w0.unsqueeze(-1) + wa.unsqueeze(-1))) * 
@@ -446,7 +530,7 @@ class NumTracers:
 
             neg_mask = Ok.flatten() < 0 # Ok < 0
             if neg_mask.any():
-                result[neg_mask, :] = ((self.c/(self.h_scaling_factor*hrdrag[neg_mask])/torch.sqrt(-Ok[neg_mask])) * torch.sin(
+                result[neg_mask, :] = ((self.c/(100*hrdrag[neg_mask])/torch.sqrt(-Ok[neg_mask])) * torch.sin(
                     torch.sqrt(-Ok[neg_mask]) * trapezoid(
                         (1 / torch.sqrt(
                             Om[neg_mask].unsqueeze(-1) * (1 + z)**3 + 
@@ -462,7 +546,7 @@ class NumTracers:
 
             pos_mask = Ok.flatten() > 0 # Ok > 0
             if pos_mask.any():
-                result[pos_mask, :] = ((self.c/(self.h_scaling_factor*hrdrag[pos_mask])/torch.sqrt(Ok[pos_mask])) * torch.sinh(
+                result[pos_mask, :] = ((self.c/(100*hrdrag[pos_mask])/torch.sqrt(Ok[pos_mask])) * torch.sinh(
                     torch.sqrt(Ok[pos_mask]) * trapezoid(
                         (1 / torch.sqrt(
                             Om[pos_mask].unsqueeze(-1) * (1 + z)**3 + 
@@ -478,7 +562,7 @@ class NumTracers:
 
             zero_mask = Ok.flatten() == 0 # Ok = 0
             if zero_mask.any():
-                result[zero_mask, :] = ((self.c/(self.h_scaling_factor*hrdrag[zero_mask])) * trapezoid(
+                result[zero_mask, :] = ((self.c/(100*hrdrag[zero_mask])) * trapezoid(
                     (1 / torch.sqrt(
                         Om[zero_mask].unsqueeze(-1) * (1 + z)**3 + 
                         (1 - Om[zero_mask].unsqueeze(-1)) *
@@ -507,7 +591,9 @@ class NumTracers:
         """
         with torch.no_grad():
             param_samples = guide(context.squeeze()).sample((num_samples,))
-        param_samples[..., -1] *= self.h_scaling_factor
+        if self.preprocess:
+            param_samples = self.params_from_unconstrained(param_samples)
+        param_samples[..., -1] *= 100
         return param_samples
     
     def sample_data(self, tracer_ratio, num_samples=100, central=True):
@@ -557,7 +643,8 @@ class NumTracers:
         context = torch.cat([tracer_ratio, data_samples], dim=-1)
         # Sample parameters conditioned on the data batch
         param_samples = guide(context.squeeze()).sample((num_param_samples,))
-        param_samples[:, :, -1] *= self.h_scaling_factor
+        param_samples = self.params_from_unconstrained(param_samples)
+        param_samples[:, :, -1] *= 100
         return param_samples
 
     def sample_brute_force(self, tracer_ratio, grid_designs, grid_features, grid_params, designer, num_data_samples=100, num_param_samples=1000):

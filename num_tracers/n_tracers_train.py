@@ -150,6 +150,7 @@ def single_run(
             include_D_M=run_args["include_D_M"],
             global_rank=global_rank,
             device=current_pytorch_device,
+            preprocess=run_args["preprocess"],
             mode='train',
             verbose=run_args["verbose"]
             )
@@ -367,7 +368,7 @@ def single_run(
                     samples = samples.to(current_pytorch_device)
                     
                     temp_verbose_shapes = run_args["verbose"] if profile_step == 0 else False
-                    agg_loss, loss = nf_loss(context, posterior_flow.module, samples, rank=global_rank, verbose_shapes=temp_verbose_shapes)
+                    agg_loss, loss = nf_loss(context, posterior_flow.module, samples, experiment, rank=global_rank, verbose_shapes=temp_verbose_shapes)
                     
                     # No need for global loss aggregation during profiling, focus on per-rank
                     agg_loss.backward()
@@ -436,7 +437,7 @@ def single_run(
             if step > 0:
                 verbose_shapes = False
             # Compute the loss using nf_loss
-            agg_loss, loss = nf_loss(context, posterior_flow.module, samples, rank=global_rank, verbose_shapes=verbose_shapes)
+            agg_loss, loss = nf_loss(context, posterior_flow.module, samples, experiment, rank=global_rank, verbose_shapes=verbose_shapes)
 
             # Aggregate global loss and agg_loss across all ranks
             loss_tensor = loss.mean().detach()
@@ -562,7 +563,8 @@ def single_run(
             var=None,
             log_scale=True,
             loss_step_freq=10,
-            area_step_freq=100
+            area_step_freq=100,
+            area_limits=[0.5, 5]
         )
         plt.close('all')
         print("Run", ml_info.experiment_id + "/" + ml_info.run_id, "completed.")
