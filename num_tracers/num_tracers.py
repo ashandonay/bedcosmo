@@ -728,7 +728,7 @@ class NumTracers:
             param_samples.append(param_mesh[tuple(indices[i])])
         return torch.tensor(np.array(param_samples), device=self.device)
 
-    def sample_valid_parameters(self, passed_ratio):
+    def sample_valid_parameters(self, sample_shape):
 
         # register samples in the trace using pyro.sample
         parameters = {}
@@ -736,7 +736,7 @@ class NumTracers:
         if 'Ok' in self.priors.keys():
             # 0 < Om + Ok < 1
             OmOk_priors = {'Om': self.priors['Om'], 'Ok': self.priors['Ok']}
-            OmOk_samples = ConstrainedUniform2D(OmOk_priors, lower=0.0, upper=1.0).sample((passed_ratio.shape[:-1]))
+            OmOk_samples = ConstrainedUniform2D(OmOk_priors, lower=0.0, upper=1.0).sample(sample_shape)
             parameters['Om'] = pyro.sample('Om', dist.Delta(OmOk_samples[..., 0])).unsqueeze(-1)
             parameters['Ok'] = pyro.sample('Ok', dist.Delta(OmOk_samples[..., 1])).unsqueeze(-1)
         else:
@@ -744,7 +744,7 @@ class NumTracers:
         if 'wa' in self.priors.keys():
             # w0 + wa < 0
             w0wa_priors = {'w0': self.priors['w0'], 'wa': self.priors['wa']}
-            w0wa_samples = ConstrainedUniform2D(w0wa_priors, upper=0.0).sample((passed_ratio.shape[:-1]))
+            w0wa_samples = ConstrainedUniform2D(w0wa_priors, upper=0.0).sample(sample_shape)
             parameters['w0'] = pyro.sample('w0', dist.Delta(w0wa_samples[..., 0])).unsqueeze(-1)
             parameters['wa'] = pyro.sample('wa', dist.Delta(w0wa_samples[..., 1])).unsqueeze(-1)
         elif 'w0' in self.priors.keys():
@@ -757,7 +757,7 @@ class NumTracers:
     def pyro_model(self, tracer_ratio):
         passed_ratio = self.calc_passed(tracer_ratio)
         with pyro.plate_stack("plate", passed_ratio.shape[:-1]):
-            parameters = self.sample_valid_parameters(passed_ratio)
+            parameters = self.sample_valid_parameters(passed_ratio.shape[:-1])
             means = torch.zeros(passed_ratio.shape[:-1] + (self.sigmas.shape[-1],), device=self.device)
             rescaled_sigmas = torch.zeros(passed_ratio.shape[:-1] + (self.sigmas.shape[-1],), device=self.device)
             z_eff = torch.tensor(self.desi_data[self.desi_data["quantity"] == "DH_over_rs"]["z"].to_list(), device=self.device)
