@@ -127,7 +127,7 @@ def single_run(
     # Initialize MLflow experiment and run info on rank 0
     current_pytorch_device = f"cuda:{pytorch_device_idx}" if "LOCAL_RANK" in os.environ and torch.cuda.is_available() else (f"cuda:{effective_device_id}" if effective_device_id != -1 else "cpu")
 
-    ml_info, run_args, checkpoint, start_step, best_loss, best_nominal_area = init_run(
+    ml_info, run_args, checkpoint, priors_run_path, start_step, best_loss, best_nominal_area = init_run(
         mlflow_exp, 
         cosmo_model, 
         run_args, 
@@ -140,6 +140,7 @@ def single_run(
 
     if cosmo_exp == "num_tracers":
         experiment = NumTracers(
+            priors_path=priors_run_path,
             data_path=run_args["data_path"],
             cosmo_model=run_args["cosmo_model"],
             flow_type=run_args["flow_type"],
@@ -585,38 +586,32 @@ if __name__ == '__main__':
     #set default dtype
     torch.set_default_dtype(torch.float64)
 
-    # --- Load Default Config --- 
-    config_path = os.path.join(os.path.dirname(__file__), 'run_args.json')
-    with open(config_path, 'r') as f:
-        run_args_dict = json.load(f)
 
     # --- Argument Parsing --- 
-    cosmo_model_default = 'base' 
-    default_args = run_args_dict[cosmo_model_default]
-    default_mlflow_exp_name = f"{cosmo_model_default}_{default_args['flow_type']}"
-
     parser = argparse.ArgumentParser(description="Run Number Tracers Training")
 
     # Add arguments dynamically based on the default config file
     parser.add_argument('--cosmo_exp', type=str, default='num_tracers', help='Cosmological experiment name')
-    parser.add_argument('--mlflow_exp', type=str, default=default_mlflow_exp_name, help='MLflow experiment name')
-    parser.add_argument('--cosmo_model', type=str, default=cosmo_model_default, help='Cosmological model set to use from run_args.json')
+    parser.add_argument('--mlflow_exp', type=str, default="base", help='MLflow experiment name')
+    parser.add_argument('--cosmo_model', type=str, default="base", help='Cosmological model set to use from run_args.json')
     parser.add_argument('--device', type=str, default='cuda:0', help='Device to use for training')
 
     # Add arguments for resuming from a checkpoint
     parser.add_argument('--resume_id', type=str, default=None, help='MLflow run ID to resume training from (continues existing run with same parameters)')
     parser.add_argument('--resume_step', type=int, default=None, help='Step to resume training from (required when using --resume_id)')
-    parser.add_argument('--add_steps', type=int, default=0, help='Number of steps to add to the training (only used with --resume_id)')
-    parser.add_argument('--profile', action='store_true', help='Enable profiling for a few steps and then exit.')
     parser.add_argument('--restart_id', type=str, default=None, help='MLflow run ID to restart training from (creates new run with current parameters)')
     parser.add_argument('--restart_step', type=lambda x: int(x) if x.isdigit() else x, default=None, help='Step to restart training from (optional when using --restart_id, defaults to latest). Can be an integer or string like "last"')
     parser.add_argument('--restart_checkpoint', type=str, default=None, help='Specific checkpoint file name to use for all ranks during restart (alternative to --restart_step)')
     parser.add_argument('--restart_optimizer', action='store_true', help='Restart optimizer from checkpoint')
-    
-    # Note: Rank-specific checkpoint saving/loading is now the default behavior
-    # No additional arguments needed for this functionality
+    parser.add_argument('--add_steps', type=int, default=0, help='Number of steps to add to the training (only used with --resume_id)')
+    parser.add_argument('--profile', action='store_true', help='Enable profiling for a few steps and then exit.')
 
-    for key, value in default_args.items():
+    # --- Load Default Config --- 
+    config_path = os.path.join(os.path.dirname(__file__), 'run_args.json')
+    with open(config_path, 'r') as f:
+        run_args_dict = json.load(f)
+
+    for key, value in run_args_dict.items():
         if value is None:
             parser.add_argument(f'--{key}', type=str, default=None, 
                               help=f'Override {key} (default: None)')
@@ -638,7 +633,6 @@ if __name__ == '__main__':
             parser.add_argument(f'--{key}', type=str, default=None, help=f'Override {key} (default: {value})')
 
     args = parser.parse_args()
-
     # Validate checkpoint loading arguments
     if args.resume_id and args.restart_id:
         raise ValueError("Cannot use --resume_id with --restart_id. Choose one:\n"
@@ -665,54 +659,29 @@ if __name__ == '__main__':
     if args.add_steps > 0 and args.resume_id is None:
         raise ValueError("--add_steps can only be used with --resume_id")
 
-    # --- Prepare Final Config --- 
-    run_args = run_args_dict[args.cosmo_model].copy() # Start with defaults for the chosen model
 
-    # Override defaults with any provided command-line arguments
-    args_dict = vars(args)
-    for key, value in args_dict.items():
-        if key not in ['cosmo_model', 'resume_id', 'resume_step', 'add_steps', 'profile', 'checkpoint_path'] and value is not None and key in run_args:
-            # Handle the case where the original value was None
-            if run_args[key] is None:
-                # Try to parse as JSON first (for lists), then as other types
-                try:
-                    parsed_value = json.loads(value)
-                    if os.environ.get('RANK') == 0:
-                        print(f"Setting '{key}' from None to: {parsed_value}")
-                    run_args[key] = parsed_value
-                except json.JSONDecodeError:
-                    # If not JSON, try to parse as other types
+    # Override default run_args with any provided command-line arguments
+    run_args = vars(args)
+    for key, value in run_args.items():
+        if key in run_args_dict.keys():
+            if value is not None:
+                if isinstance(run_args_dict[key], bool) and isinstance(value, bool):
+                    run_args[key] = value
+                elif isinstance(run_args_dict[key], list):
+                    # Parse JSON string back to list
                     try:
-                        # Try to parse as float first, then int, then keep as string
-                        if '.' in value:
-                            parsed_value = float(value)
-                        else:
-                            parsed_value = int(value)
-                        if os.environ.get('RANK') == 0:
-                            print(f"Setting '{key}' from None to: {parsed_value}")
+                        parsed_value = json.loads(value)
                         run_args[key] = parsed_value
-                    except ValueError:
-                        # Keep as string
+                    except json.JSONDecodeError as e:
                         if os.environ.get('RANK') == 0:
-                            print(f"Setting '{key}' from None to: {value}")
-                        run_args[key] = value
-            elif isinstance(run_args[key], bool) and isinstance(value, bool):
-                run_args[key] = value
-            elif isinstance(run_args[key], list):
-                # Parse JSON string back to list
-                try:
-                    parsed_value = json.loads(value)
-                    if os.environ.get('RANK') == 0:
-                        print(f"Overriding '{key}': {run_args[key]} -> {parsed_value}")
-                    run_args[key] = parsed_value
-                except json.JSONDecodeError as e:
-                    if os.environ.get('RANK') == 0:
-                        print(f"Warning: Could not parse '{key}' as JSON: {e}. Keeping default value.")
-            elif not isinstance(run_args[key], bool):
+                            print(f"Warning: Could not parse '{key}' as JSON: {e}. Keeping default value.")
+                elif not isinstance(run_args_dict[key], float):
+                    run_args[key] = value
                 if os.environ.get('RANK') == 0:
                     print(f"Overriding '{key}': {run_args[key]} -> {value}")
-                run_args[key] = value
-    
+            else:
+                run_args[key] = run_args_dict[key]
+
     # --- Setup & Run --- 
     # Determine device for the main script part, before DDP spawns processes
     # This initial `device_check` is for the process launching srun, not for the DDP ranks themselves.

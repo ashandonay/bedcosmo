@@ -60,7 +60,7 @@ class Evaluation:
             "design_upper": design_upper,
             "fixed_design": self.run_args["fixed_design"]
         }
-        self.experiment = init_experiment(self.cosmo_exp, self.run_args, device=self.device, design_args=design_args, seed=self.seed)
+        self.experiment = init_experiment(self.run_obj, self.run_args, device=self.device, design_args=design_args, seed=self.seed)
 
     @profile_method
     def _eval_step(self, step, design_type='nominal', global_rank=None):

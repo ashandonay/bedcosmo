@@ -22,6 +22,7 @@ from datetime import datetime, timedelta
 import traceback
 import functools
 import time
+import shutil
 
 torch.set_default_dtype(torch.float64)
 
@@ -32,6 +33,202 @@ sys.path.insert(0, home_dir + "/bed/BED_cosmo/num_tracers")
 
 
 class Bijector:
+    def __init__(self, experiment, cdf_bins=1000):
+        self.experiment = experiment
+        self.cdfs = self.create_cdfs(num_bins=cdf_bins)
+
+    def create_cdfs(self, num_bins=10000, num_samples=500000):
+        """
+        Create memory-efficient CDF bins from raw samples.
+        
+        Instead of storing all raw samples, this creates a compact representation
+        of the empirical CDF using a small number of bins.
+        
+        Args:
+            samples: Raw samples from the empirical prior
+            num_bins: Number of CDF bins to create (default: 1000)
+            
+        Returns:
+            Dictionary with 'bins' and 'cdf_values' keys for fast CDF computation
+        """
+        with pyro.plate_stack("plate", (num_samples,)):
+            empirical_priors = self.experiment.sample_valid_parameters((num_samples,))
+        cdfs = {}
+        for key, samples in empirical_priors.items():
+            sorted_samples, _ = torch.sort(samples.flatten())
+            n_samples = len(sorted_samples)
+
+            # Create evenly spaced bins across the extended range
+            bins = torch.linspace(self.experiment.priors[key].low, self.experiment.priors[key].high, num_bins, device=samples.device)
+            
+            # Compute CDF values for each bin
+            cdf_values = torch.zeros_like(bins)
+            for i, bin_val in enumerate(bins):
+                count = (sorted_samples <= bin_val).sum()
+                cdf_values[i] = count / n_samples
+            
+            # Store additional metadata for better boundary handling
+            cdfs[key] = {
+                'bins': bins,
+                'cdf_values': cdf_values
+            }
+        return cdfs
+
+    def prior_to_gaussian(self, samples, param_key, target_mean=0.0, target_std=1.0):
+        """
+        Convert samples from an empirical prior distribution to Gaussian distribution using pre-computed CDF bins.
+        
+        This method uses pre-computed empirical CDF bins for fast transformation:
+        1. Interpolate empirical CDF values using stored bins: u = F_empirical(x)
+        2. Apply inverse CDF of standard normal: z = F_normal^(-1)(u)
+        3. Scale to target Gaussian: y = target_mean + target_std * z
+        
+        Args:
+            samples: Tensor of samples to transform to Gaussian space
+            empirical_cdf: Pre-computed CDF bins dict with 'bins' and 'cdf_values' keys
+            target_mean: Mean of the target Gaussian distribution (default: 0.0)
+            target_std: Standard deviation of the target Gaussian distribution (default: 1.0)
+            
+        Returns:
+            Tensor of samples transformed to the target Gaussian distribution
+        """
+        # Extract CDF bins and values
+        bins = self.cdfs[param_key]['bins']
+        cdf_values = self.cdfs[param_key]['cdf_values']
+        
+        samples_flat = samples.flatten()
+        
+
+        # Use the continuous CDF for smooth transformation
+        # Clamp samples to ensure they're within bin bounds to prevent index out of bounds
+        samples_flat = torch.clamp(samples_flat, bins[0], bins[-1])
+        
+        # Find insertion indices for each sample in the sorted bins
+        indices = torch.searchsorted(bins, samples_flat, right=False)
+        
+        # Get CDF values at these indices
+        u = cdf_values[indices]
+        
+                # Handle boundary cases separately with special interpolation
+        at_bottom_bin = (indices == 0)
+        at_top_bin = (indices == len(bins) - 1)
+        
+        # Interpolate samples at bottom bin (between min and next bin above)
+        if at_bottom_bin.any():
+            u[at_bottom_bin] = self._interpolate_cdf(
+                samples_flat[at_bottom_bin], 
+                bins[0], bins[1], 
+                cdf_values[0], cdf_values[1]
+            )
+        
+        # Interpolate samples at top bin (between max and previous bin below)
+        if at_top_bin.any():
+            u[at_top_bin] = self._interpolate_cdf(
+                samples_flat[at_top_bin], 
+                bins[-2], bins[-1], 
+                cdf_values[-2], cdf_values[-1]
+            )
+        
+        # Handle middle bins (normal interpolation between adjacent bins)
+        middle_mask = ~(at_bottom_bin | at_top_bin)
+        if middle_mask.any():
+            middle_indices = indices[middle_mask]
+            u[middle_mask] = self._interpolate_cdf(
+                samples_flat[middle_mask],
+                bins[middle_indices], 
+                bins[middle_indices + 1],
+                cdf_values[middle_indices], 
+                cdf_values[middle_indices + 1]
+            )
+        
+        # Step 2: Apply inverse CDF of standard normal (quantile function)
+        # Add small epsilon to prevent floating-point issues with exactly 0 or 1
+        eps = 1e-10
+        u_safe = torch.clamp(u, eps, 1.0 - eps)
+        
+        z = np.sqrt(2.0) * torch.erfinv(2.0 * u_safe - 1.0)
+        
+        # Step 3: Scale to target Gaussian distribution
+        y = target_mean + target_std * z
+        
+        return y.to(samples.dtype).unsqueeze(-1)
+
+    def gaussian_to_prior(self, gaussian_samples, param_key, source_mean=0.0, source_std=1.0):
+        """
+        Convert samples from Gaussian distribution back to the original empirical prior distribution space.
+        
+        This is the inverse of prior_to_gaussian:
+        1. Scale from target Gaussian to standard normal: z = (y - source_mean) / source_std
+        2. Apply CDF of standard normal: u = F_normal(z)
+        3. Apply empirical inverse CDF of empirical prior: x = F_empirical^(-1)(u)
+        
+        Args:
+            gaussian_samples: Tensor of samples from the Gaussian distribution
+            empirical_cdf: Pre-computed CDF bins dict with 'bins' and 'cdf_values' keys
+            source_mean: Mean of the source Gaussian distribution (default: 0.0)
+            source_std: Standard deviation of the source Gaussian distribution (default: 1.0)
+            
+        Returns:
+            Tensor of samples transformed back to the empirical prior distribution space
+        """
+        # Step 1: Scale from target Gaussian to standard normal N(0,1)
+        z = (gaussian_samples - source_mean) / source_std
+        
+        # Step 2: Apply CDF of standard normal to get uniform [0,1]
+        u = 0.5 * (1.0 + torch.erf(z / np.sqrt(2.0)))
+        
+        # Step 3: Apply empirical inverse CDF using the same boundary-aware interpolation
+        bins = self.cdfs[param_key]['bins']
+        cdf_values = self.cdfs[param_key]['cdf_values']
+        
+        # Use searchsorted to find where each CDF value would be inserted in cdf_values
+        indices = torch.searchsorted(cdf_values, u.flatten(), right=False)
+        indices = torch.clamp(indices, 0, len(cdf_values) - 1)
+        
+        # Initialize output tensor
+        x = torch.zeros_like(u.flatten())
+        
+        # Handle boundary cases separately with special interpolation
+        at_bottom_cdf = (indices == 0)
+        at_top_cdf = (indices == len(cdf_values) - 1)
+        
+        # Interpolate samples at bottom CDF (between min and next CDF above)
+        if at_bottom_cdf.any():
+            x[at_bottom_cdf] = self._interpolate_cdf(
+                u.flatten()[at_bottom_cdf],
+                cdf_values[0], cdf_values[1],
+                bins[0], bins[1]
+            )
+        
+        # Interpolate samples at top CDF (between max and previous CDF below)
+        if at_top_cdf.any():
+            x[at_top_cdf] = self._interpolate_cdf(
+                u.flatten()[at_top_cdf],
+                cdf_values[-2], cdf_values[-1],
+                bins[-2], bins[-1]
+            )
+        
+        # Handle middle CDF values (normal interpolation between adjacent CDF values)
+        middle_mask = ~(at_bottom_cdf | at_top_cdf)
+        if middle_mask.any():
+            middle_indices = indices[middle_mask]
+            x[middle_mask] = self._interpolate_cdf(
+                u.flatten()[middle_mask],
+                cdf_values[middle_indices],
+                cdf_values[middle_indices + 1],
+                bins[middle_indices],
+                bins[middle_indices + 1]
+            )
+        
+        return x.to(gaussian_samples.dtype).unsqueeze(-1)
+    
+
+    # Helper function for linear interpolation
+    def _interpolate_cdf(self, samples, bin_low, bin_high, cdf_low, cdf_high):
+        """Interpolate CDF values between two bins"""
+        distances = (samples - bin_low) / (bin_high - bin_low)
+        return cdf_low + distances * (cdf_high - cdf_low)
+    
     @staticmethod
     def _logit(x, eps: float = 1e-6):
         """
@@ -126,7 +323,7 @@ class Bijector:
         s = (2.0 * H_t) / (logb - loga)
 
         return torch.exp(y / s + c)
-    
+
 def profile_method(func):
     """Decorator to profile method execution time - checks self.profile"""
     @functools.wraps(func)
@@ -665,6 +862,29 @@ def init_run(
             checkpoint = None
             # Set cosmo_model in run_args for a fresh run
             run_args["cosmo_model"] = cosmo_model
+            
+            # For fresh run, priors_run_path is set to the priors_path.yaml file
+            priors_run_path = run_args.get("priors_path", None)
+            
+            if global_rank == 0:
+                mlflow.set_experiment(mlflow_exp)
+                mlflow.start_run()
+                # Set n_devices and n_particles using the world size and n_particles_per_device
+                run_args["n_devices"] = tdist.get_world_size() if "LOCAL_RANK" in os.environ else 1
+                run_args["n_particles"] = run_args["n_devices"] * run_args["n_particles_per_device"]
+
+                # Log parameters
+                for key, value in run_args.items():
+                    mlflow.log_param(key, value)
+                for key, value in kwargs.items():
+                    mlflow.log_param(key, value)
+
+                # Save priors file to artifacts if provided
+                if run_args.get("priors_path"):
+                    _save_priors_file(run_args.get("priors_path"), storage_path)
+                else:
+                    raise ValueError("A priors_path.yaml must be provided for a fresh run.")
+
         else: 
             # Restart from existing run
             if global_rank == 0:
@@ -682,7 +902,12 @@ def init_run(
             ref_run = client.get_run(kwargs["restart_id"])
             # fix the model parameters for the restart run
             run_args = _fix_model_args(run_args, ref_run, global_rank)
+
             checkpoint_dir = f"{storage_path}/mlruns/{ref_run.info.experiment_id}/{kwargs['restart_id']}/artifacts/checkpoints"
+            
+            # Use saved priors file from artifacts for restart
+            priors_run_path = f"{storage_path}/mlruns/{ref_run.info.experiment_id}/{kwargs['restart_id']}/artifacts/priors.yaml"
+
             if kwargs.get("restart_checkpoint", None) is not None:
                 # Load specific checkpoint file for all ranks
                 print(f"Loading checkpoint from file: {checkpoint_dir}/{kwargs['restart_checkpoint']}")
@@ -702,18 +927,6 @@ def init_run(
             validate_checkpoint_compatibility(checkpoint, run_args, mode="restart", global_rank=global_rank)
 
         if global_rank == 0:
-            mlflow.set_experiment(mlflow_exp)
-            mlflow.start_run()
-            # Set n_devices and n_particles using the world size and n_particles_per_device
-            run_args["n_devices"] = tdist.get_world_size() if "LOCAL_RANK" in os.environ else 1
-            run_args["n_particles"] = run_args["n_devices"] * run_args["n_particles_per_device"]
-
-            # Log parameters
-            for key, value in run_args.items():
-                mlflow.log_param(key, value)
-            for key, value in kwargs.items():
-                mlflow.log_param(key, value)
-            
             # Initialize metrics
             start_step = 0
             best_loss = float('inf')
@@ -748,6 +961,10 @@ def init_run(
         exp_id = run_info.info.experiment_id
         mlflow_exp = mlflow.get_experiment(exp_id).name
         checkpoint_dir = f"{storage_path}/mlruns/{exp_id}/{kwargs['resume_id']}/artifacts/checkpoints"
+        
+        # Use saved priors file from artifacts for resume
+        priors_run_path = f"{storage_path}/mlruns/{exp_id}/{kwargs['resume_id']}/artifacts/priors.yaml"
+
         # Load the checkpoint
         checkpoint, start_step = get_checkpoint(
             kwargs["resume_step"], 
@@ -829,7 +1046,29 @@ def init_run(
     # MLflow runs are already properly initialized above - no need for additional start_run calls
     # This prevents race conditions that can corrupt meta.yaml files
 
-    return ml_info, run_args, checkpoint, tensors['start_step'].item(), tensors['best_loss'].item(), tensors['best_nominal_area'].item()
+    return ml_info, run_args, checkpoint, priors_run_path, tensors['start_step'].item(), tensors['best_loss'].item(), tensors['best_nominal_area'].item()
+
+def _save_priors_file(input_priors_path, storage_path):
+    """Save priors file to artifacts."""
+    if input_priors_path is None:
+        raise ValueError("Priors path is None")
+    
+    if not os.path.exists(input_priors_path):
+        raise RuntimeError(f"Priors file not found at {input_priors_path}")
+    
+    try:
+        priors_artifact_path = f"{storage_path}/mlruns/{mlflow.active_run().info.experiment_id}/{mlflow.active_run().info.run_id}/artifacts/priors.yaml"
+        shutil.copy2(input_priors_path, priors_artifact_path)
+        mlflow.log_artifact(priors_artifact_path, "priors")
+        print(f"Saved priors file to artifacts: {priors_artifact_path}")
+            
+        # Verify the file was saved correctly
+        if not os.path.exists(priors_artifact_path):
+            raise RuntimeError(f"Failed to save priors file to artifacts: {priors_artifact_path}")
+            
+        return priors_artifact_path
+    except Exception as e:
+        raise RuntimeError(f"Failed to save priors file: {e}")
 
 def _fix_model_args(run_args, ref_run, global_rank=0):
     """
@@ -1034,7 +1273,7 @@ def get_nominal_samples(run_obj, run_args, guide_samples=101, seed=1, device="cu
     return samples, selected_step
 
 def init_experiment(
-        cosmo_exp, 
+        run_obj,
         run_args, 
         device="cuda:0", 
         design_args={},
@@ -1050,12 +1289,13 @@ def init_experiment(
         design_args (dict): The design arguments.
         seed (int): The seed to use.
     """
-    if cosmo_exp == 'num_tracers':
+    if run_args.get("cosmo_exp") == 'num_tracers':
         from num_tracers import NumTracers
         experiment = NumTracers(
-            run_args.get("data_path", "/data/tracers_v2/"),
-            run_args.get("cosmo_model", "base"),
-            run_args.get("flow_type", "MAF"),
+            priors_path=run_obj.info.artifact_uri + "/priors.yaml",
+            data_path=run_args.get("data_path", "/data/tracers_v2/"),
+            cosmo_model=run_args.get("cosmo_model", "base"),
+            flow_type=run_args.get("flow_type", "MAF"),
             design_step=design_args.get("design_step", run_args.get("design_step", 0.05)),
             design_lower=design_args.get("design_lower", run_args.get("design_lower", 0.05)),
             design_upper=design_args.get("design_upper", run_args.get("design_upper", 1.0)),
@@ -1067,7 +1307,7 @@ def init_experiment(
             seed=seed
             )
     else:
-        raise ValueError(f"{cosmo_exp} not supported")
+        raise ValueError(f"{run_args.get('cosmo_exp')} not supported")
     return experiment
     
 def eval_eigs(

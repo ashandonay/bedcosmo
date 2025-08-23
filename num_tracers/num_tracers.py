@@ -1,5 +1,6 @@
 import os
 import sys
+import yaml
 import mlflow
 import pandas as pd
 import torch
@@ -29,6 +30,7 @@ mlflow.set_tracking_uri(storage_path + "/mlruns")
 class NumTracers:
     def __init__(
         self, 
+        priors_path="num_tracers/priors.yaml",
         data_path="/data/tracers_v1/", 
         cosmo_model="base", 
         flow_type="MAF",
@@ -82,7 +84,7 @@ class NumTracers:
         if include_D_V:
             self.context_dim += 2
         self.nominal_design = torch.tensor(self.desi_tracers.groupby('class').sum()['observed'].reindex(self.targets).values, device=self.device)
-        self.get_priors() # initialize the priors
+        self.get_priors(priors_path) # initialize the priors
         self.cosmo_params = list(self.priors.keys())
         self.preprocess = preprocess
         # store as Python lists of ints; works for advanced indexing
@@ -216,38 +218,82 @@ class NumTracers:
         cbar.set_label("$f_{QSO}$", fontsize=14)
         return fig
     
-    def get_priors(self):
-        Om_range = torch.tensor([0.01, 0.99], device=self.device)
-        Ok_range = torch.tensor([-0.3, 0.3], device=self.device)
-        w0_range = torch.tensor([-3.0, 1.0], device=self.device)
-        wa_range = torch.tensor([-3.0, 2.0], device=self.device)
-        hrdrag_range = torch.tensor([10.0, 1000.0], device=self.device)
-        '''
-        if self.flow_type == "MAF":
-            self.h_scaling_factor = 100
-            hrdrag_range = torch.tensor([10.0, 1000.0], device=self.device)
-        elif self.flow_type == "NAF" or self.flow_type == "NSF":
-            self.h_scaling_factor = 100000
-            hrdrag_range = torch.tensor([0.01, 1.0], device=self.device)
-        else:
-            raise ValueError(f"Invalid flow type: {self.flow_type}")
-        '''
-        if self.cosmo_model == 'base':
-            self.priors = {'Om': dist.Uniform(*Om_range), 'hrdrag': dist.Uniform(*hrdrag_range)}
-            self.latex_labels = ['\Omega_m', 'H_0r_d']
-        elif self.cosmo_model == 'base_omegak':
-            self.priors = {'Om': dist.Uniform(*Om_range), 'Ok': dist.Uniform(*Ok_range), 'hrdrag': dist.Uniform(*hrdrag_range)}
-            self.latex_labels = ['\Omega_m', '\Omega_k', 'H_0r_d']
-        elif self.cosmo_model == 'base_w':
-            self.priors = {'Om': dist.Uniform(*Om_range), 'w0': dist.Uniform(*w0_range), 'hrdrag': dist.Uniform(*hrdrag_range)}
-            self.latex_labels = ['\Omega_m', 'w_0', 'H_0r_d']
-        elif self.cosmo_model == 'base_w_wa':
-            self.priors = {'Om': dist.Uniform(*Om_range), 'w0': dist.Uniform(*w0_range), 'wa': dist.Uniform(*wa_range), 'hrdrag': dist.Uniform(*hrdrag_range)}
-            self.latex_labels = ['\Omega_m', 'w_0', 'w_a', 'H_0r_d']
-        elif self.cosmo_model == 'base_omegak_w_wa':
-            self.priors = {'Om': dist.Uniform(*Om_range), 'Ok': dist.Uniform(*Ok_range), 'w0': dist.Uniform(*w0_range), 'wa': dist.Uniform(*wa_range), 'hrdrag': dist.Uniform(*hrdrag_range)}
-            self.latex_labels = ['\Omega_m', '\Omega_k', 'w_0', 'w_a', 'H_0r_d']
+    def get_priors(self, prior_path):
+        """
+        Load cosmological priors and constraints from a YAML configuration file.
+        
+        This function dynamically constructs the priors and latex labels based on the
+        specified cosmology model in the YAML file. It supports uniform distributions
+        and handles parameter constraints like Om + Ok < 1 and w0 + wa < 0.
+        
+        Args:
+            prior_path (str): Path to the YAML file containing prior definitions
+            
+        Raises:
+            FileNotFoundError: If the prior file doesn't exist
+            yaml.YAMLError: If the YAML file is malformed
+            ValueError: If required sections or parameters are missing, or if bounds are invalid
+            
+        The YAML file should have the following structure:
+        - parameters: defines each parameter with distribution type and bounds
+        - models: defines cosmology models and their parameter lists
+        - constraints: defines parameter constraints (optional)
+        """
+        try:
+            with open(prior_path, 'r') as file:
+                prior_data = yaml.safe_load(file)
+            with open(os.path.join(os.path.dirname(__file__), 'models.yaml'), 'r') as file:
+                cosmo_models = yaml.safe_load(file)
+        except Exception as e:
+            raise ValueError(f"Error parsing YAML file: {e}")
 
+        # Get the specified cosmology model
+        if self.cosmo_model not in cosmo_models:
+            raise ValueError(f"Cosmology model '{self.cosmo_model}' not found in cosmo_models.yaml. Available models: {list(cosmo_models.keys())}")
+        
+        # Initialize priors, constraints, and latex labels
+        self.priors = {}
+        self.param_constraints = {}
+        self.latex_labels = []
+
+        model_parameters = cosmo_models[self.cosmo_model]['parameters']
+        self.latex_labels = cosmo_models[self.cosmo_model]['latex_labels']
+        for constraint in cosmo_models[self.cosmo_model].get('constraints', []):
+            self.param_constraints[constraint] = prior_data['constraints'][constraint]
+        
+        # Create priors for each parameter in the model
+        for param_name in model_parameters:
+            if param_name not in prior_data['parameters']:
+                raise ValueError(f"Parameter '{param_name}' not found in prior.yaml parameters section")
+            
+            param_config = prior_data['parameters'][param_name]
+            
+            # Validate parameter configuration
+            if 'distribution' not in param_config:
+                raise ValueError(f"Parameter '{param_name}' missing 'distribution' section in prior.yaml")
+            if 'latex' not in param_config:
+                raise ValueError(f"Parameter '{param_name}' missing 'latex' section in prior.yaml")
+            
+            dist_config = param_config['distribution']
+            
+            if dist_config['type'] == 'uniform':
+                if 'lower' not in dist_config or 'upper' not in dist_config:
+                    raise ValueError(f"Prior distribution for '{param_name}' is missing 'lower' or 'upper' bounds")
+                lower = dist_config.get('lower', 0.0)
+                upper = dist_config.get('upper', 1.0)
+                if lower >= upper:
+                    raise ValueError(f"Invalid bounds for '{param_name}': lower ({lower}) must be < upper ({upper})")
+                self.priors[param_name] = dist.Uniform(*torch.tensor([lower, upper], device=self.device))
+            else:
+                raise ValueError(f"Distribution type '{dist_config['type']}' not supported. Only 'uniform' is currently supported.")
+        
+        if self.global_rank == 0 and self.verbose:
+            print(f"Loaded priors for model '{self.cosmo_model}': {list(self.priors.keys())}")
+            print(f"LaTeX labels: {self.latex_labels}")
+            if self.param_constraints:
+                print(f"Model constraints: {self.param_constraints.keys()}")
+
+        self.param_bijector = Bijector(self, cdf_bins=1000)
 
     def params_to_unconstrained(self, params):
         """
@@ -261,30 +307,33 @@ class NumTracers:
         assert params.shape[-1] == D, f"Expected last dim {D}, got {params.shape[-1]}"
         y = params.clone()
 
-        # Om in (0,1): logit
+        if not hasattr(self, 'param_bijector'):
+            raise ValueError("Prior bijector not initialized, call get_priors() first.")
+
+        # Om in (0,1): use empirical prior transformation
         if self._idx_Om:
             x = params[..., self._idx_Om]
-            y[..., self._idx_Om] = Bijector._interval_to_R(x, 0.01, 0.99)
+            y[..., self._idx_Om] = self.param_bijector.prior_to_gaussian(x, 'Om')
 
-        # Ok in (-0.3, 0.3): affine -> (-1,1) -> atanh
+        # Ok in (-0.3, 0.3): use empirical prior transformation
         if self._idx_Ok:
             x = params[..., self._idx_Ok]
-            y[..., self._idx_Ok] = Bijector._interval_to_R(x, -0.3, 0.3)
+            y[..., self._idx_Ok] = self.param_bijector.prior_to_gaussian(x, 'Ok')
 
-        # w0 in (-3, 1)
+        # w0 in (-3, 1): use empirical prior transformation
         if self._idx_w0:
             x = params[..., self._idx_w0]
-            y[..., self._idx_w0] = Bijector._interval_to_R(x, -3.0, 1.0)
+            y[..., self._idx_w0] = self.param_bijector.prior_to_gaussian(x, 'w0')
 
-        # wa in (-3, 2)
+        # wa in (-3, 2): use empirical prior transformation
         if self._idx_wa:
             x = params[..., self._idx_wa]
-            y[..., self._idx_wa] = Bijector._interval_to_R(x, -3.0, 2.0)
+            y[..., self._idx_wa] = self.param_bijector.prior_to_gaussian(x, 'wa')
 
-        # hrdrag > 0: log
+        # hrdrag > 0: use empirical prior transformation
         if self._idx_hr:
             x = params[..., self._idx_hr]
-            y[..., self._idx_hr] = Bijector._log_interval_to_R(x, a=10.0, b=1000.0, H=5.0)
+            y[..., self._idx_hr] = self.param_bijector.prior_to_gaussian(x, 'hrdrag')
 
         return y
 
@@ -300,25 +349,28 @@ class NumTracers:
         assert y.shape[-1] == D, f"Expected last dim {D}, got {y.shape[-1]}"
         x = y.clone()
 
-        # Om: sigmoid
+        if not hasattr(self, 'param_bijector'):
+            raise ValueError("Prior bijector not initialized, call get_priors() first.")
+        
+        # Om: use empirical prior inverse transformation
         if self._idx_Om:
-            x[..., self._idx_Om] = Bijector._R_to_interval(y[..., self._idx_Om], 0.01, 0.99)
+            x[..., self._idx_Om] = self.param_bijector.gaussian_to_prior(y[..., self._idx_Om], 'Om')
 
-        # Ok: tanh to (-1,1) then affine back to (-0.3, 0.3)
+        # Ok: use empirical prior inverse transformation
         if self._idx_Ok:
-            x[..., self._idx_Ok] = Bijector._R_to_interval(y[..., self._idx_Ok], -0.3, 0.3)
+            x[..., self._idx_Ok] = self.param_bijector.gaussian_to_prior(y[..., self._idx_Ok], 'Ok')
 
-        # w0
+        # w0: use empirical prior inverse transformation
         if self._idx_w0:
-            x[..., self._idx_w0] = Bijector._R_to_interval(y[..., self._idx_w0], -3.0, 1.0)
+            x[..., self._idx_w0] = self.param_bijector.gaussian_to_prior(y[..., self._idx_w0], 'w0')
 
-        # wa
+        # wa: use empirical prior inverse transformation
         if self._idx_wa:
-            x[..., self._idx_wa] = Bijector._R_to_interval(y[..., self._idx_wa], -3.0, 2.0)
+            x[..., self._idx_wa] = self.param_bijector.gaussian_to_prior(y[..., self._idx_wa], 'wa')
 
-        # hrdrag: exp
+        # hrdrag: use empirical prior inverse transformation
         if self._idx_hr:
-            x[..., self._idx_hr] = Bijector._R_to_log_interval(y[..., self._idx_hr], a=10.0, b=1000.0, H=5.0)
+            x[..., self._idx_hr] = self.param_bijector.gaussian_to_prior(y[..., self._idx_hr], 'hrdrag')
 
         return x
             
@@ -733,23 +785,43 @@ class NumTracers:
         # register samples in the trace using pyro.sample
         parameters = {}
 
-        if 'Ok' in self.priors.keys():
-            # 0 < Om + Ok < 1
-            OmOk_priors = {'Om': self.priors['Om'], 'Ok': self.priors['Ok']}
-            OmOk_samples = ConstrainedUniform2D(OmOk_priors, lower=0.0, upper=1.0).sample(sample_shape)
-            parameters['Om'] = pyro.sample('Om', dist.Delta(OmOk_samples[..., 0])).unsqueeze(-1)
-            parameters['Ok'] = pyro.sample('Ok', dist.Delta(OmOk_samples[..., 1])).unsqueeze(-1)
-        else:
-            parameters['Om'] = pyro.sample('Om', self.priors['Om']).unsqueeze(-1)
-        if 'wa' in self.priors.keys():
-            # w0 + wa < 0
-            w0wa_priors = {'w0': self.priors['w0'], 'wa': self.priors['wa']}
-            w0wa_samples = ConstrainedUniform2D(w0wa_priors, upper=0.0).sample(sample_shape)
-            parameters['w0'] = pyro.sample('w0', dist.Delta(w0wa_samples[..., 0])).unsqueeze(-1)
-            parameters['wa'] = pyro.sample('wa', dist.Delta(w0wa_samples[..., 1])).unsqueeze(-1)
-        elif 'w0' in self.priors.keys():
-            parameters['w0'] = pyro.sample('w0', self.priors['w0']).unsqueeze(-1)
+        # Handle constraints based on YAML configuration
+        if hasattr(self, 'param_constraints'):
+            # Check for valid density constraint
+            if 'valid_densities' in self.param_constraints:
+                # 0 < Om + Ok < 1
+                OmOk_priors = {'Om': self.priors['Om'], 'Ok': self.priors['Ok']}
+                OmOk_samples = ConstrainedUniform2D(OmOk_priors, **self.param_constraints["valid_densities"]["bounds"]).sample(sample_shape)
+                parameters['Om'] = pyro.sample('Om', dist.Delta(OmOk_samples[..., 0])).unsqueeze(-1)
+                parameters['Ok'] = pyro.sample('Ok', dist.Delta(OmOk_samples[..., 1])).unsqueeze(-1)
+            else:
+                # Sample Om, Ok normally if no constraint or Ok not present
+                if 'Om' in self.priors.keys():
+                    parameters['Om'] = pyro.sample('Om', self.priors['Om']).unsqueeze(-1)
+                if 'Ok' in self.priors.keys():
+                    parameters['Ok'] = pyro.sample('Ok', self.priors['Ok']).unsqueeze(-1)
             
+            # Check for high z matter domination constraint
+            if 'high_z_matter_dom' in self.param_constraints:
+                # w0 + wa < 0
+                w0wa_priors = {'w0': self.priors['w0'], 'wa': self.priors['wa']}
+                w0wa_samples = ConstrainedUniform2D(w0wa_priors, **self.param_constraints["high_z_matter_dom"]["bounds"]).sample(sample_shape)
+                parameters['w0'] = pyro.sample('w0', dist.Delta(w0wa_samples[..., 0])).unsqueeze(-1)
+                parameters['wa'] = pyro.sample('wa', dist.Delta(w0wa_samples[..., 1])).unsqueeze(-1)
+            else:
+                # Sample w0, wa normally if no constraint or wa not present
+                if 'w0' in self.priors.keys():
+                    parameters['w0'] = pyro.sample('w0', self.priors['w0']).unsqueeze(-1)
+                if 'wa' in self.priors.keys():
+                    parameters['wa'] = pyro.sample('wa', self.priors['wa']).unsqueeze(-1)
+        else:
+            # if no parameter constraints defined
+            if 'Om' in self.priors.keys():
+                parameters['Om'] = pyro.sample('Om', self.priors['Om']).unsqueeze(-1)
+            if 'w0' in self.priors.keys():
+                parameters['w0'] = pyro.sample('w0', self.priors['w0']).unsqueeze(-1)
+            
+        # Always sample hrdrag
         parameters['hrdrag'] = pyro.sample('hrdrag', self.priors['hrdrag']).unsqueeze(-1)
 
         return parameters
