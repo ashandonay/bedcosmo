@@ -21,7 +21,7 @@ script_dir = os.path.dirname(os.path.abspath(__file__))
 parent_dir_abs = os.path.abspath(os.path.join(script_dir, os.pardir))
 sys.path.insert(0, parent_dir_abs)
 from custom_dist import ConstrainedUniform2D
-from util import Bijector, auto_seed
+from util import Bijector, auto_seed, profile_method
 
 storage_path = os.environ["SCRATCH"] + "/bed/BED_cosmo/num_tracers"
 home_dir = os.environ["HOME"]
@@ -45,7 +45,8 @@ class NumTracers:
         preprocess=False,
         device="cuda:0",
         mode='eval',
-        verbose=False
+        verbose=False,
+        profile=False
     ):
 
         self.name = 'num_tracers'
@@ -62,6 +63,7 @@ class NumTracers:
         self.global_rank = global_rank  
         self.seed = seed
         self.verbose = verbose
+        self.profile = profile
         if seed is not None:
             auto_seed(self.seed)
         self.rdrag = 149.77
@@ -84,6 +86,10 @@ class NumTracers:
         if include_D_V:
             self.context_dim += 2
         self.nominal_design = torch.tensor(self.desi_tracers.groupby('class').sum()['observed'].reindex(self.targets).values, device=self.device)
+        self.nominal_context = torch.cat([
+            self.nominal_design, 
+            self.central_val if self.include_D_M else self.central_val[1::2]
+            ], dim=-1)
         self.get_priors(priors_path) # initialize the priors
         self.cosmo_params = list(self.priors.keys())
         self.preprocess = preprocess
@@ -101,6 +107,7 @@ class NumTracers:
                 f"nominal_design: {self.nominal_design}\n",
                 f"nominal_passed: {self.nominal_passed_ratio}")
 
+    @profile_method
     def init_designs(self, fixed_design=False, design_step=0.05, design_lower=0.05, design_upper=None):
         if fixed_design:
             # Create grid with nominal design values using self.targets
@@ -218,6 +225,7 @@ class NumTracers:
         cbar.set_label("$f_{QSO}$", fontsize=14)
         return fig
     
+    @profile_method
     def get_priors(self, prior_path):
         """
         Load cosmological priors and constraints from a YAML configuration file.
@@ -295,6 +303,7 @@ class NumTracers:
 
         self.param_bijector = Bijector(self, cdf_bins=1000)
 
+    @profile_method
     def params_to_unconstrained(self, params):
         """
         Vectorized: map PHYSICAL space -> unconstrained R^D.
@@ -337,6 +346,7 @@ class NumTracers:
 
         return y
 
+    @profile_method
     def params_from_unconstrained(self, y):
         """
         Vectorized: map unconstrained R^D -> PHYSICAL space.
@@ -374,6 +384,7 @@ class NumTracers:
 
         return x
             
+    @profile_method
     def calc_passed(self, class_ratio):
         if type(class_ratio) == torch.Tensor:
             assert class_ratio.shape[-1] == len(self.targets), f"class_ratio should have {len(self.targets)} columns"
@@ -442,7 +453,7 @@ class NumTracers:
 
             return passed_ratio
 
-
+    @profile_method
     def D_H_func(self, z_eff, Om, Ok=None, w0=None, wa=None, hrdrag=None):
         """
         Hubble distance divided by the sound horizon D_H/r_d
@@ -479,6 +490,7 @@ class NumTracers:
                 (1 - Om - Ok) * (1 + z)**(3 * (1 + w0 + wa)) * torch.exp(-3 * wa * (z / (1 + z)))
                 )
 
+    @profile_method
     def D_M_func(self, z_eff, Om, Ok=None, w0=None, wa=None, hrdrag=None):
         """
         Transverse comoving distance divided by the sound horizon D_M/r_d
@@ -627,12 +639,14 @@ class NumTracers:
 
             return result.reshape(output_shape)
 
+    @profile_method
     def D_V_func(self, z_eff, Om, Ok=None, w0=None, wa=None, hrdrag=None):
         """
         The angle-averaged distance D_V/r_d = (z * (D_M/r_d)^2 * (D_H/r_d))^(1/3) divided by the sound horizon D_V/r_d
         """
         return (z_eff.reshape((len(self.cosmo_params))*[1] + [-1]) * self.D_M_func(z_eff, Om, Ok, w0, wa, hrdrag)**2 * self.D_H_func(z_eff, Om, Ok, w0, wa, hrdrag))**(1/3)
 
+    @profile_method
     def sample_params(self, guide, context, num_samples=5000):
         """
         Samples parameters from the guide (variational distribution).
@@ -648,6 +662,7 @@ class NumTracers:
         param_samples[..., -1] *= 100
         return param_samples
     
+    @profile_method
     def sample_data(self, tracer_ratio, num_samples=100, central=True):
         """
         Samples data from the likelihood.
@@ -826,6 +841,7 @@ class NumTracers:
 
         return parameters
 
+    @profile_method
     def pyro_model(self, tracer_ratio):
         passed_ratio = self.calc_passed(tracer_ratio)
         with pyro.plate_stack("plate", passed_ratio.shape[:-1]):

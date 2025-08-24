@@ -334,7 +334,7 @@ def profile_method(func):
             result = func(*args, **kwargs)
             end_time = time.time()
             execution_time = end_time - start_time
-            print(f"⏱️  {func.__name__} took {execution_time:.2f} seconds")
+            print(f"⏱️  {func.__name__} took {execution_time:.5f} seconds")
             return result
         else:
             # No profiling overhead when disabled
@@ -444,7 +444,7 @@ def restore_state(checkpoint, step, global_rank):
         pyro.get_param_store().set_state(rng_state['pyro_param_state'])
     
     if global_rank == 0:
-        print(f"RNG state restored for step {step}")
+        print(f"RNG state restored at step {step}")
 
 def print_memory_usage(process, step):
     mem_info = process.memory_info()
@@ -508,107 +508,6 @@ def get_rng_state():
         'pyro': pyro.util.get_rng_state(),  # This includes torch, random, and numpy states
         'cuda': torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
     }
-
-def init_training_env(tdist, device):
-    # Set PyTorch CPU threads at the beginning of DDP environment initialization.
-    # This helps manage CPU resources used by PyTorch's own operations on CPU.
-    # It's separate from OMP_NUM_THREADS which affects OpenMP-enabled libraries like NumPy/SciPy.
-    try:
-        # Logic based on OMP_NUM_THREADS or a default, with a cap.
-        omp_threads_str = os.environ.get("OMP_NUM_THREADS")
-        num_pytorch_cpu_threads = 0 # Initialize
-        if omp_threads_str:
-            num_pytorch_cpu_threads = int(omp_threads_str)
-            # Cap PyTorch threads if OMP_NUM_THREADS is very large (e.g. > 8)
-            # Adjust this cap as needed. If OMP_NUM_THREADS is already a per-process target for all libs, this might not be needed.
-            if num_pytorch_cpu_threads > 32: 
-                num_pytorch_cpu_threads = 32
-            elif num_pytorch_cpu_threads <= 0:
-                num_pytorch_cpu_threads = 1 # Must be at least 1
-        else:
-            num_pytorch_cpu_threads = 4 # Default if OMP_NUM_THREADS is not set
-        
-        torch.set_num_threads(num_pytorch_cpu_threads)
-        # Logging will be done after rank is determined.
-    except Exception as e:
-        # Using a generic print here as rank might not be available yet for prefixed logging.
-        print(f"Warning: Could not set PyTorch CPU threads during init_training_env: {e}")
-
-    # DDP initialization
-    if "LOCAL_RANK" in os.environ and torch.cuda.is_available():
-        local_rank = int(os.environ["LOCAL_RANK"]) # SLURM's local rank
-        global_rank = int(os.environ["RANK"])
-        
-        # When CUDA_VISIBLE_DEVICES isolates one GPU, PyTorch sees it as device 0.
-        pytorch_device_idx = int(os.environ["LOCAL_RANK"])  # The only GPU visible to this process
-        effective_device_id = pytorch_device_idx
-        
-        # Initialize CUDA context before DDP setup
-        torch.cuda.init()
-        torch.cuda.set_device(pytorch_device_idx)
-        
-        # Ensure CUDA is available and device is set before DDP init
-        if not torch.cuda.is_available():
-            raise RuntimeError("CUDA is not available but LOCAL_RANK is set")
-        
-        # Create torch.device object for device_id
-        device_obj = torch.device(f"cuda:{pytorch_device_idx}")
-        
-        # Initialize process group with explicit device ID
-        tdist.init_process_group(
-            backend="nccl",
-            init_method="env://",
-            world_size=int(os.environ["WORLD_SIZE"]),
-            rank=global_rank,
-            timeout=timedelta(seconds=180),  # Increased timeout
-            device_id=device_obj  # Pass torch.device object
-        )
-
-    else: # Not using DDP
-        local_rank = 0 # Placeholder, not a DDP local rank
-        global_rank = 0
-        print("Running without DDP (single-node, single-GPU/CPU)")
-        if torch.cuda.is_available():
-            parsed_id_from_arg = 0 # Default to 0 for non-DDP CUDA
-            if isinstance(device, str) and device.startswith("cuda:") and ":" in device.split(":"):
-                try:
-                    parsed_id_from_arg = int(device.split(':')[1])
-                    if not (0 <= parsed_id_from_arg < torch.cuda.device_count()):
-                        print(f"Warning: Parsed device ID {parsed_id_from_arg} from '{device}' is invalid. Defaulting to 0.")
-                        parsed_id_from_arg = 0
-                except (IndexError, ValueError):
-                    print(f"Warning: Could not parse device ID from '{device}'. Defaulting to 0.")
-                    parsed_id_from_arg = 0
-            elif isinstance(device, int):
-                 if 0 <= device < torch.cuda.device_count():
-                     parsed_id_from_arg = device
-                 else:
-                     print(f"Warning: Integer device ID {device} is invalid. Defaulting to 0.")
-                     parsed_id_from_arg = 0
-            
-            effective_device_id = parsed_id_from_arg
-            torch.cuda.set_device(effective_device_id)
-        else:
-            effective_device_id = -1 # Indicates CPU
-
-    # Log the PyTorch thread count after rank is known
-    if global_rank == 0:
-        log_rank_prefix = ""
-        if "RANK" in os.environ:
-            log_rank_prefix = f"[Rank {os.environ.get('RANK')}] "
-        elif "SLURM_PROCID" in os.environ:
-            log_rank_prefix = f"[SlurmPROCID {os.environ.get('SLURM_PROCID')}] "
-        try:
-            print(f"Process group initialized for rank {global_rank}")
-            print(f"{log_rank_prefix}PyTorch CPU threads set to: {torch.get_num_threads()} (within init_training_env)")
-            print(f"{log_rank_prefix}os.cpu_count() (cores available to this process): {os.cpu_count()}")
-            slurm_cpus_task = os.environ.get("SLURM_CPUS_PER_TASK")
-            if slurm_cpus_task:
-                print(f"{log_rank_prefix}SLURM_CPUS_PER_TASK (inherited by worker): {slurm_cpus_task}")
-        except Exception as e:
-            print(f"{log_rank_prefix}Warning: Could not get PyTorch CPU thread count or os.cpu_count(): {e}")
-
-    return global_rank, local_rank, effective_device_id, pytorch_device_idx
 
 def init_nf(
         run_args, 
@@ -842,324 +741,6 @@ def init_scheduler(optimizer, run_args):
     
     return scheduler
 
-def init_run(
-        mlflow_exp,
-        cosmo_model,
-        run_args,
-        tdist,
-        global_rank,
-        current_pytorch_device,
-        storage_path,
-        **kwargs
-        ):
-    """Initialize MLflow run settings and broadcast to all ranks."""
-    if not kwargs.get("resume_id", None):
-        if not kwargs.get("restart_id", None):
-            # Start new run
-            if global_rank == 0:
-                print(f"=== NEW RUN MODE ===")
-                print("Starting fresh training run")
-            checkpoint = None
-            # Set cosmo_model in run_args for a fresh run
-            run_args["cosmo_model"] = cosmo_model
-            
-            # For fresh run, priors_run_path is set to the priors_path.yaml file
-            priors_run_path = run_args.get("priors_path", None)
-            
-            if global_rank == 0:
-                mlflow.set_experiment(mlflow_exp)
-                mlflow.start_run()
-                # Set n_devices and n_particles using the world size and n_particles_per_device
-                run_args["n_devices"] = tdist.get_world_size() if "LOCAL_RANK" in os.environ else 1
-                run_args["n_particles"] = run_args["n_devices"] * run_args["n_particles_per_device"]
-
-                # Log parameters
-                for key, value in run_args.items():
-                    mlflow.log_param(key, value)
-                for key, value in kwargs.items():
-                    mlflow.log_param(key, value)
-
-                # Save priors file to artifacts if provided
-                if run_args.get("priors_path"):
-                    _save_priors_file(run_args.get("priors_path"), storage_path)
-                else:
-                    raise ValueError("A priors_path.yaml must be provided for a fresh run.")
-
-        else: 
-            # Restart from existing run
-            if global_rank == 0:
-                print(f"=== RESTART MODE ===")
-                print(f"Restart ID: {kwargs['restart_id']}")
-                if kwargs.get("restart_checkpoint", None) is not None:
-                    print(f"Restarting from specific checkpoint file: {kwargs['restart_checkpoint']}")
-                elif kwargs.get("restart_step", None) is not None:
-                    print(f"Restarting from checkpoint at step {kwargs['restart_step']}")
-                else:
-                    print("Restarting from latest checkpoint")
-                print("Will use MLflow run ID to find checkpoint directory")
-                print("Will create new MLflow run with current parameters")
-            client = mlflow.MlflowClient()
-            ref_run = client.get_run(kwargs["restart_id"])
-            # fix the model parameters for the restart run
-            run_args = _fix_model_args(run_args, ref_run, global_rank)
-
-            checkpoint_dir = f"{storage_path}/mlruns/{ref_run.info.experiment_id}/{kwargs['restart_id']}/artifacts/checkpoints"
-            
-            # Use saved priors file from artifacts for restart
-            priors_run_path = f"{storage_path}/mlruns/{ref_run.info.experiment_id}/{kwargs['restart_id']}/artifacts/priors.yaml"
-
-            if kwargs.get("restart_checkpoint", None) is not None:
-                # Load specific checkpoint file for all ranks
-                print(f"Loading checkpoint from file: {checkpoint_dir}/{kwargs['restart_checkpoint']}")
-                checkpoint = torch.load(f"{checkpoint_dir}/{kwargs['restart_checkpoint']}", map_location=current_pytorch_device, weights_only=False)
-            else:
-                # Use existing logic to find checkpoint by step
-                # Load the checkpoint
-                checkpoint, _ = get_checkpoint(
-                    kwargs["restart_step"], 
-                    checkpoint_dir, 
-                    current_pytorch_device, 
-                    global_rank, 
-                    total_steps=int(ref_run.data.params["total_steps"])
-                    )
-            
-            # Validate checkpoint compatibility for restart mode
-            validate_checkpoint_compatibility(checkpoint, run_args, mode="restart", global_rank=global_rank)
-
-        if global_rank == 0:
-            # Initialize metrics
-            start_step = 0
-            best_loss = float('inf')
-            best_nominal_area = float('inf')
-            
-            # Create artifact directories
-            os.makedirs(f"{storage_path}/mlruns/{mlflow.active_run().info.experiment_id}/{mlflow.active_run().info.run_id}/artifacts/checkpoints", exist_ok=True)
-            os.makedirs(f"{storage_path}/mlruns/{mlflow.active_run().info.experiment_id}/{mlflow.active_run().info.run_id}/artifacts/plots", exist_ok=True)
-            
-            # Prepare tensors for broadcasting
-            tensors = _prepare_broadcast_tensors(
-                mlflow.active_run().info.experiment_id, start_step, 
-                best_loss, best_nominal_area, current_pytorch_device,
-                mlflow.active_run().info.run_id, mlflow_exp
-            )
-            print(f"Running with parameters for cosmo_model='{cosmo_model}':")
-            print(json.dumps(run_args, indent=2))
-        else:
-            # Initialize tensors on other ranks
-            tensors = {
-                'exp_id': torch.zeros(1, dtype=torch.long, device=current_pytorch_device),
-                'start_step': torch.zeros(1, dtype=torch.long, device=current_pytorch_device),
-                'best_loss': torch.zeros(1, dtype=torch.float64, device=current_pytorch_device),
-                'best_nominal_area': torch.zeros(1, dtype=torch.float64, device=current_pytorch_device),
-                'run_id': [None],
-                'mlflow_exp': [None]
-                }
-    else:
-        client = mlflow.MlflowClient()
-        # Resume existing run
-        run_info = client.get_run(kwargs["resume_id"])
-        exp_id = run_info.info.experiment_id
-        mlflow_exp = mlflow.get_experiment(exp_id).name
-        checkpoint_dir = f"{storage_path}/mlruns/{exp_id}/{kwargs['resume_id']}/artifacts/checkpoints"
-        
-        # Use saved priors file from artifacts for resume
-        priors_run_path = f"{storage_path}/mlruns/{exp_id}/{kwargs['resume_id']}/artifacts/priors.yaml"
-
-        # Load the checkpoint
-        checkpoint, start_step = get_checkpoint(
-            kwargs["resume_step"], 
-            checkpoint_dir, 
-            current_pytorch_device, 
-            global_rank, 
-            total_steps=run_args.get("total_steps")
-            )
-        # Validate checkpoint compatibility for resume mode
-        validate_checkpoint_compatibility(checkpoint, run_args, mode="resume", global_rank=global_rank)
-        if global_rank == 0:
-            mlflow.set_experiment(experiment_id=exp_id)
-            mlflow.start_run(run_id=kwargs["resume_id"])
-            
-            if kwargs.get("resume_step", None) is None:
-                raise ValueError("resume_step must be provided when resuming a run")
-            print(f"=== RESUME MODE ===")
-            print(f"Resume ID: {kwargs['resume_id']}")
-            print(f"Resume Step: {start_step}")
-            print(f"Add Steps: {kwargs['add_steps']}")
-            print("Will continue existing MLflow run with original parameters")
-            # Update run parameters
-            cosmo_model = run_info.data.params["cosmo_model"]
-            run_args = parse_mlflow_params(run_info.data.params)
-            if kwargs.get("add_steps", None):
-                run_args["total_steps"] += kwargs["add_steps"]
-            
-            n_devices = tdist.get_world_size() if "LOCAL_RANK" in os.environ else 1
-            if run_args["n_particles"] != n_devices * run_args["n_particles_per_device"]:
-                raise ValueError(f"n_particles ({run_args['n_particles']}) must be equal to n_devices * n_particles_per_device ({n_devices * run_args['n_particles_per_device']})")
-
-            # Get metrics from previous run
-            best_nominal_area, best_loss = _get_resume_metrics(client, kwargs["resume_id"], kwargs["resume_step"])
-
-            # Prepare tensors for broadcasting
-            tensors = _prepare_broadcast_tensors(
-                exp_id, start_step, best_loss, best_nominal_area, 
-                current_pytorch_device, kwargs["resume_id"], mlflow_exp
-            )
-        else:
-            # Initialize tensors on other ranks
-            tensors = {
-                'exp_id': torch.zeros(1, dtype=torch.long, device=current_pytorch_device),
-                'start_step': torch.zeros(1, dtype=torch.long, device=current_pytorch_device),
-                'best_loss': torch.zeros(1, dtype=torch.float64, device=current_pytorch_device),
-                'best_nominal_area': torch.zeros(1, dtype=torch.float64, device=current_pytorch_device),
-                'run_id': [None],
-                'mlflow_exp': [None]
-                }
-    _broadcast_variables(tensors, global_rank, run_args, tdist)
-
-    # Ensure rank 0 has fully initialized the MLflow run before other ranks join
-    if tdist.is_initialized():
-        tdist.barrier()
-    
-    # Set up MLflow for non-zero ranks
-    if global_rank != 0:
-        mlflow.set_experiment(experiment_id=str(tensors['exp_id'].item()))
-        mlflow.start_run(run_id=tensors['run_id'][0], nested=True)
-    
-    # Create ml_info object
-    ml_info = type('mlinfo', (), {})()
-    ml_info.experiment_id = str(tensors['exp_id'].item())
-    ml_info.run_id = tensors['run_id'][0]
-
-    # Broadcast run_args from rank 0 to ensure consistency, especially for 'steps' when resuming with add_steps
-    if global_rank == 0:
-        # run_args was already prepared correctly on rank 0 (either new or resumed with add_steps)
-        run_args_list_to_broadcast = [run_args]
-    else:
-        run_args_list_to_broadcast = [None]  # Placeholder for other ranks
-
-    if tdist.is_initialized():
-        tdist.barrier() # Ensure all ranks are ready before broadcasting run_args
-    
-    tdist.broadcast_object_list(run_args_list_to_broadcast, src=0)
-    run_args = run_args_list_to_broadcast[0] # All ranks now have the definitive run_args
-
-    # MLflow runs are already properly initialized above - no need for additional start_run calls
-    # This prevents race conditions that can corrupt meta.yaml files
-
-    return ml_info, run_args, checkpoint, priors_run_path, tensors['start_step'].item(), tensors['best_loss'].item(), tensors['best_nominal_area'].item()
-
-def _save_priors_file(input_priors_path, storage_path):
-    """Save priors file to artifacts."""
-    if input_priors_path is None:
-        raise ValueError("Priors path is None")
-    
-    if not os.path.exists(input_priors_path):
-        raise RuntimeError(f"Priors file not found at {input_priors_path}")
-    
-    try:
-        priors_artifact_path = f"{storage_path}/mlruns/{mlflow.active_run().info.experiment_id}/{mlflow.active_run().info.run_id}/artifacts/priors.yaml"
-        shutil.copy2(input_priors_path, priors_artifact_path)
-        mlflow.log_artifact(priors_artifact_path, "priors")
-        print(f"Saved priors file to artifacts: {priors_artifact_path}")
-            
-        # Verify the file was saved correctly
-        if not os.path.exists(priors_artifact_path):
-            raise RuntimeError(f"Failed to save priors file to artifacts: {priors_artifact_path}")
-            
-        return priors_artifact_path
-    except Exception as e:
-        raise RuntimeError(f"Failed to save priors file: {e}")
-
-def _fix_model_args(run_args, ref_run, global_rank=0):
-    """
-    Fix model arguments to match the reference run parameters.
-    Returns a tuple of (updated_run_args, changed_params) where changed_params
-    is a dict of parameter names that were overwritten.
-    """
-    changed_params = {}
-    
-    # Common parameters that apply to all flow types
-    common_params = ["cosmo_model", "flow_type", "n_transforms", "cond_hidden_size", "cond_n_layers"]
-    
-    # Store original values and update common parameters
-    for param in common_params:
-        original_value = run_args.get(param)
-        new_value = ref_run.data.params[param]
-        run_args[param] = new_value
-        
-        if original_value != new_value:
-            changed_params[param] = (original_value, new_value)
-    
-    # Flow-specific parameters
-    flow_type = ref_run.data.params["flow_type"]
-    flow_specific_params = {
-        "MAF": ["transform"],
-        "NAF": ["mnn_signal", "mnn_hidden_size", "mnn_n_layers"],
-        "NSF": ["spline_bins"]
-    }
-    
-    if flow_type in flow_specific_params:
-        for param in flow_specific_params[flow_type]:
-            original_value = run_args.get(param)
-            new_value = ref_run.data.params[param]
-            run_args[param] = new_value
-            
-            if original_value != new_value:
-                changed_params[param] = (original_value, new_value)
-    
-    # Handle condition_design parameter
-    original_condition_design = run_args.get("condition_design")
-    run_args["condition_design"] = ref_run.data.params["condition_design"]
-    if original_condition_design != run_args["condition_design"]:
-        changed_params["condition_design"] = (original_condition_design, run_args["condition_design"])
-    
-    # Log changes if any parameters were modified
-    if changed_params and global_rank == 0:
-        print("=== MODEL PARAMETERS OVERWRITTEN BY REFERENCE RUN ===")
-        for param_name, (old_value, new_value) in changed_params.items():
-            print(f"  {param_name}: {old_value} -> {new_value}")
-    
-    return run_args
-
-def _broadcast_variables(tensors, global_rank, run_args,tdist):
-
-    # Broadcast tensors from rank 0 to all ranks
-    tdist.barrier()
-    tdist.broadcast(tensors['exp_id'], src=0)
-    tdist.broadcast(tensors['start_step'], src=0)
-    tdist.broadcast(tensors['best_loss'], src=0)
-    tdist.broadcast(tensors['best_nominal_area'], src=0)
-    tdist.broadcast_object_list(tensors['run_id'], src=0)
-    tdist.broadcast_object_list(tensors['mlflow_exp'], src=0)
-
-def _get_resume_metrics(client, resume_id, resume_step):
-    """Get metrics from previous run for resuming."""
-    best_nominal_areas = client.get_metric_history(resume_id, 'best_nominal_area')
-    best_nominal_area_steps = np.array([metric.step for metric in best_nominal_areas])
-    if len(best_nominal_area_steps) > 0:
-        closest_idx = np.argmin(np.abs(best_nominal_area_steps - resume_step))
-        best_nominal_area = best_nominal_areas[closest_idx].value if best_nominal_area_steps[closest_idx] <= resume_step else best_nominal_areas[closest_idx - 1].value
-    else:
-        best_nominal_area = np.nan
-    
-    best_losses = client.get_metric_history(resume_id, 'best_loss')
-    best_loss_steps = np.array([metric.step for metric in best_losses])
-    closest_idx = np.argmin(np.abs(best_loss_steps - resume_step))
-    best_loss = best_losses[closest_idx].value if best_loss_steps[closest_idx] <= resume_step else best_losses[closest_idx - 1].value
-    
-    return best_nominal_area, best_loss
-
-def _prepare_broadcast_tensors(exp_id, start_step, best_loss, best_nominal_area, device, run_id, mlflow_exp):
-    """Prepare tensors for broadcasting."""
-    return {
-        'exp_id': torch.tensor([int(exp_id)], dtype=torch.long, device=device),
-        'start_step': torch.tensor([start_step], dtype=torch.long, device=device),
-        'best_loss': torch.tensor([best_loss], dtype=torch.float64, device=device),
-        'best_nominal_area': torch.tensor([best_nominal_area], dtype=torch.float64, device=device),
-        'run_id': [run_id],
-        'mlflow_exp': [mlflow_exp]
-    }
-
 def get_runs_data(mlflow_exp=None, run_ids=None, excluded_runs=[], filter_string=None, parse_params=True):
     """
     Fetches run data from MLflow based on experiment name or run IDs.
@@ -1278,7 +859,8 @@ def init_experiment(
         device="cuda:0", 
         design_args={},
         global_rank=0,
-        seed=None
+        seed=None,
+        profile=False
         ):
     """
     Initializes the experiment class with the run arguments.
@@ -1304,7 +886,8 @@ def init_experiment(
             global_rank=global_rank,
             device=device,
             include_D_M=run_args.get("include_D_M", False),
-            seed=seed
+            seed=seed,
+            profile=profile
             )
     else:
         raise ValueError(f"{run_args.get('cosmo_exp')} not supported")
