@@ -30,7 +30,8 @@ class Evaluation:
     def __init__(
             self, run_id, guide_samples, seed=1, design_step=0.05, design_lower=0.05, design_upper=None,
             cosmo_exp='num_tracers', levels=[0.68, 0.95], global_rank=0, 
-            n_evals=20, device="cuda:0", n_particles=1000, verbose=False, profile=False
+            n_evals=20, device="cuda:0", n_particles=1000, verbose=False, profile=False,
+            param_space='physical'
             ):
         self.run_id = run_id
         run_data_list, _, _ = get_runs_data(run_ids=self.run_id)
@@ -61,6 +62,16 @@ class Evaluation:
             "fixed_design": self.run_args["fixed_design"]
         }
         self.experiment = init_experiment(self.run_obj, self.run_args, device=self.device, design_args=design_args, seed=self.seed)
+
+        self.param_space = param_space
+        if self.param_space == 'physical':
+            self.desi_transform = False
+            self.nf_transform = True
+        elif self.param_space == 'unconstrained':
+            self.desi_transform = True
+            self.nf_transform = False
+        else:
+            raise ValueError(f"Invalid parameter space: {self.param_space}")
 
     @profile_method
     def _eval_step(self, step, design_type='nominal', global_rank=None):
@@ -98,7 +109,7 @@ class Evaluation:
     @profile_method
     def _get_samples(self, design, flow_model):
         context = torch.cat([design, self.experiment.central_val], dim=-1)
-        samples = self.experiment.sample_params(flow_model, context, num_samples=self.guide_samples).cpu().numpy()
+        samples = self.experiment.sample_params(flow_model, context, num_samples=self.guide_samples, transform=self.nf_transform).cpu().numpy()
         with contextlib.redirect_stdout(io.StringIO()):
             samples_gd = getdist.MCSamples(samples=samples, names=self.experiment.cosmo_params, labels=self.experiment.latex_labels)
         return samples_gd
@@ -127,7 +138,7 @@ class Evaluation:
             # Set the nominal design samples to gray
             all_colors.extend(['gray'] * len(nominal_samples))
         # Get the DESI MCMC samples
-        desi_samples_gd = get_desi_samples(self.run_args['cosmo_model'])
+        desi_samples_gd = get_desi_samples(self.run_args['cosmo_model'], transform=self.desi_transform, experiment=self.experiment)
         all_samples.append(desi_samples_gd)
         all_colors.append('black')
         g = plot_posterior(all_samples, all_colors, levels=self.levels, width_inch=10)
@@ -151,7 +162,7 @@ class Evaluation:
         g.fig.set_constrained_layout(True)
         leg = g.fig.legend(handles=custom_legend, loc='upper right', bbox_to_anchor=(0.99, 0.96))
         leg.set_in_layout(False)
-        save_figure(f"{self.save_path}/plots/posterior_eval_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png", fig=g.fig, dpi=400)
+        save_figure(f"{self.save_path}/plots/posterior_eval_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{self.param_space}.png", fig=g.fig, dpi=400)
     
     def sample_posterior(self, step, level, num_data_samples=10, global_rank=0, central=True):
         posterior_flow, _ = load_model(
@@ -174,7 +185,8 @@ class Evaluation:
                 posterior_flow, 
                 num_data_samples=num_data_samples, 
                 num_param_samples=self.guide_samples,
-                central=central
+                central=central,
+                transform=self.nf_transform
                 ).cpu().numpy()
 
             pair_avg_areas = []
@@ -489,7 +501,7 @@ class Evaluation:
                 Line2D([0], [0], color=color_hex, 
                         label=f'Step {step_label}, {int(level*100)}% Area: {areas[i]:.2f}')
             )
-        desi_samples_gd = get_desi_samples(self.run_args['cosmo_model'])
+        desi_samples_gd = get_desi_samples(self.run_args['cosmo_model'], transform=self.desi_transform, experiment=self.experiment)
         desi_area = get_contour_area([desi_samples_gd], level, 'Om', 'hrdrag')[0]['nominal_area_Om_hrdrag']
         all_samples.append(desi_samples_gd)
         all_colors.append('black')  
@@ -557,6 +569,7 @@ def run_eval(
         global_rank, 
         n_particles,
         n_evals,
+        param_space,
         profile=False
         ):
     """
@@ -597,6 +610,7 @@ def run_eval(
         global_rank=global_rank,
         n_evals=n_evals,
         n_particles=n_particles,
+        param_space=param_space,
         profile=profile
     )
     
@@ -604,17 +618,17 @@ def run_eval(
     print(f"Running posterior evaluation...")
     evaluate.posterior(step=eval_step, display=['nominal'])
     
-    print(f"Running EIG grid evaluation...")
-    evaluate.eig_grid(step=eval_step)
+    #print(f"Running EIG grid evaluation...")
+    #evaluate.eig_grid(step=eval_step)
     
-    print(f"Running posterior steps evaluation...")
-    evaluate.posterior_steps(steps=[1000, 5000, 20000, 'last'])
+    #print(f"Running posterior steps evaluation...")
+    #evaluate.posterior_steps(steps=[1000, 5000, 20000, 'last'])
     
-    print(f"Running EIG steps evaluation...")
-    evaluate.eig_steps(steps=[eval_step//4, eval_step//2, 3*eval_step//4, 'last'])
+    #print(f"Running EIG steps evaluation...")
+    #evaluate.eig_steps(steps=[eval_step//4, eval_step//2, 3*eval_step//4, 'last'])
     
-    print(f"Running design comparison...")
-    evaluate.design_comparison(step=eval_step)
+    #print(f"Running design comparison...")
+    #evaluate.design_comparison(step=eval_step)
     
     print(f"Running sample posterior evaluation...")
     evaluate.sample_posterior(step=eval_step, level=0.68, central=True)
@@ -636,6 +650,7 @@ if __name__ == "__main__":
     parser.add_argument('--n_evals', type=int, default=20, help='Number of evaluations to average over')
     parser.add_argument('--device', type=str, default='cuda:0', help='Device to use for evaluation')
     parser.add_argument('--eval_seed', type=int, default=1, help='Seed for evaluation')
+    parser.add_argument('--param_space', type=str, default='physical', help='Parameter space to use for evaluation')
     parser.add_argument('--profile', action='store_true', help='Enable detailed profiling with cProfile')
 
     args = parser.parse_args()

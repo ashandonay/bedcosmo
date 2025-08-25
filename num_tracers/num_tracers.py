@@ -647,7 +647,7 @@ class NumTracers:
         return (z_eff.reshape((len(self.cosmo_params))*[1] + [-1]) * self.D_M_func(z_eff, Om, Ok, w0, wa, hrdrag)**2 * self.D_H_func(z_eff, Om, Ok, w0, wa, hrdrag))**(1/3)
 
     @profile_method
-    def sample_params(self, guide, context, num_samples=5000):
+    def sample_params(self, guide, context, num_samples=5000, transform=True):
         """
         Samples parameters from the guide (variational distribution).
         Args:
@@ -657,9 +657,9 @@ class NumTracers:
         """
         with torch.no_grad():
             param_samples = guide(context.squeeze()).sample((num_samples,))
-        if self.preprocess:
+        if self.preprocess and transform:
             param_samples = self.params_from_unconstrained(param_samples)
-        param_samples[..., -1] *= 100
+            param_samples[..., -1] *= 100
         return param_samples
     
     @profile_method
@@ -696,7 +696,7 @@ class NumTracers:
             data_samples = self.pyro_model(tracer_ratio)
         return data_samples
     
-    def sample_params_from_data_samples(self, tracer_ratio, guide, num_data_samples=100, num_param_samples=1000, central=True):
+    def sample_params_from_data_samples(self, tracer_ratio, guide, num_data_samples=100, num_param_samples=1000, central=True, transform=True):
         """
         Samples parameters from the posterior distribution conditioned on the data sampled from the likelihood.
         Args:
@@ -709,9 +709,7 @@ class NumTracers:
         data_samples = self.sample_data(tracer_ratio, num_data_samples, central)
         context = torch.cat([tracer_ratio, data_samples], dim=-1)
         # Sample parameters conditioned on the data batch
-        param_samples = guide(context.squeeze()).sample((num_param_samples,))
-        param_samples = self.params_from_unconstrained(param_samples)
-        param_samples[:, :, -1] *= 100
+        param_samples = self.sample_params(guide, context.squeeze(), num_param_samples, transform)
         return param_samples
 
     def sample_brute_force(self, tracer_ratio, grid_designs, grid_features, grid_params, designer, num_data_samples=100, num_param_samples=1000):

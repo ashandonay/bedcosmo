@@ -220,7 +220,7 @@ class Bijector:
                 bins[middle_indices + 1]
             )
         
-        return x.to(gaussian_samples.dtype).unsqueeze(-1)
+        return x.to(gaussian_samples.dtype).reshape(gaussian_samples.shape)
     
 
     # Helper function for linear interpolation
@@ -1023,7 +1023,7 @@ def calc_entropy(design, posterior_flow, experiment, num_samples):
     _, entropy = _safe_mean_terms(samples)
     return entropy
 
-def get_desi_samples(cosmo_model):
+def get_desi_samples(cosmo_model, transform=False, experiment=None):
     desi_samples = np.load(f"{home_dir}/data/mcmc_samples/{cosmo_model}.npy")
     if cosmo_model == 'base':
         target_labels = ['Om', 'hrdrag']
@@ -1040,8 +1040,17 @@ def get_desi_samples(cosmo_model):
     elif cosmo_model == 'base_omegak_w_wa':
         target_labels = ['Om', 'Ok', 'w0', 'wa', 'hrdrag']
         latex_labels = ['\Omega_m', '\Omega_k', 'w_0', 'w_a', 'H_0r_d']
-    with contextlib.redirect_stdout(io.StringIO()):
-        desi_samples_gd = getdist.MCSamples(samples=desi_samples, names=target_labels, labels=latex_labels)
+
+    if transform and experiment is not None:
+        samples = torch.tensor(desi_samples, device=experiment.device)
+        samples[..., -1] /= 100 # to get hrdrag in units of 100 km/s/Mpc
+        unconstrained_samples = experiment.params_to_unconstrained(samples)
+        with contextlib.redirect_stdout(io.StringIO()):
+            desi_samples_gd = getdist.MCSamples(samples=unconstrained_samples.cpu().numpy(), names=target_labels, labels=latex_labels)
+    else:
+        with contextlib.redirect_stdout(io.StringIO()):
+            desi_samples_gd = getdist.MCSamples(samples=desi_samples, names=target_labels, labels=latex_labels)
+
     return desi_samples_gd
 
 def parse_mlflow_params(params_dict):

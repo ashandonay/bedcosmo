@@ -661,39 +661,58 @@ def get_contour_area(samples, level, *params, global_rank=None, design_type='nom
         # Helper function to calculate area for a single parameter pair
         def calculate_area_for_pair(param1, param2):
             """Helper function to calculate area for a single parameter pair"""
-            # Create a temporary figure for this pair
-            temp_fig, temp_ax = plt.subplots()
-            
-            density = sample.get2DDensity(param1, param2)
-            contour_level = density.getContourLevels([level])[0]
-            
-            # Plot contour on the temporary axes
-            cs = temp_ax.contour(density.x, density.y, density.P, 
-                                levels=[contour_level])
-            paths = cs.get_paths()
-            
-            # Check if any contours were found at this level
-            if not paths:
-                warnings.warn(f"No contour found for {param1}-{param2} at level {level}. Assigning area 0.")
-                plt.close(temp_fig)
-                return f"{design_type}_area_{param1}_{param2}_{global_rank}", 0.0
-            
-            # Calculate total area by summing areas of all paths
-            total_area = 0.0
-            for path in paths:
-                vertices = path.vertices
-                x, y = vertices[:, 0], vertices[:, 1]
+            try:
+                # Create a temporary figure for this pair
+                temp_fig, temp_ax = plt.subplots()
                 
-                # Calculate area using Shoelace formula for this path
-                path_area = 0.5 * np.abs(np.dot(x, np.roll(y, 1)) - np.dot(y, np.roll(x, 1)))
-                total_area += path_area
-            
-            # Close the temporary figure
-            plt.close(temp_fig)
-            if global_rank is not None:
-                return f"{design_type}_area_{global_rank}_{param1}_{param2}", total_area
-            else:
-                return f"{design_type}_area_{param1}_{param2}", total_area
+                density = sample.get2DDensity(param1, param2)
+                if density is None:
+                    warnings.warn(f"2D density returned None for {param1}-{param2}. Skipping area calculation.")
+                    plt.close(temp_fig)
+                    if global_rank is not None:
+                        return f"{design_type}_area_{global_rank}_{param1}_{param2}", 0.0
+                    else:
+                        return f"{design_type}_area_{param1}_{param2}", 0.0
+                
+                contour_level = density.getContourLevels([level])[0]
+                
+                # Plot contour on the temporary axes
+                cs = temp_ax.contour(density.x, density.y, density.P, 
+                                    levels=[contour_level])
+                paths = cs.get_paths()
+                
+                # Check if any contours were found at this level
+                if not paths:
+                    warnings.warn(f"No contour found for {param1}-{param2} at level {level}. Assigning area 0.")
+                    plt.close(temp_fig)
+                    if global_rank is not None:
+                        return f"{design_type}_area_{param1}_{param2}_{global_rank}", 0.0
+                    else:
+                        return f"{design_type}_area_{param1}_{param2}", 0.0
+                
+                # Calculate total area by summing areas of all paths
+                total_area = 0.0
+                for path in paths:
+                    vertices = path.vertices
+                    x, y = vertices[:, 0], vertices[:, 1]
+                    
+                    # Calculate area using Shoelace formula for this path
+                    path_area = 0.5 * np.abs(np.dot(x, np.roll(y, 1)) - np.dot(y, np.roll(x, 1)))
+                    total_area += path_area
+                
+                # Close the temporary figure
+                plt.close(temp_fig)
+                if global_rank is not None:
+                    return f"{design_type}_area_{global_rank}_{param1}_{param2}", total_area
+                else:
+                    return f"{design_type}_area_{param1}_{param2}", total_area
+                    
+            except Exception as e:
+                warnings.warn(f"Error calculating area for {param1}-{param2}: {str(e)}. Setting area to 0.")
+                if global_rank is not None:
+                    return f"{design_type}_area_{global_rank}_{param1}_{param2}", 0.0
+                else:
+                    return f"{design_type}_area_{param1}_{param2}", 0.0
         
         # Use ThreadPoolExecutor for parallel processing
         with concurrent.futures.ThreadPoolExecutor() as executor:

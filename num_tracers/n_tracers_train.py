@@ -33,12 +33,9 @@ import mlflow.pytorch
 from mlflow.tracking import MlflowClient
 from tqdm import tqdm
 
-from bed.grid import Grid
-
 import psutil
 import os
 import gc
-from num_tracers import NumTracers
 from util import *
 import json
 import argparse
@@ -91,7 +88,6 @@ class Trainer:
         self.mlflow_exp = mlflow_exp
         self.run_args = run_args
         self.profile = profile
-        self.client = MlflowClient()
         self.storage_path = os.environ["SCRATCH"] + "/bed/BED_cosmo/num_tracers"
         self.is_tty = sys.stdout.isatty()
         self.verbose = verbose
@@ -103,6 +99,9 @@ class Trainer:
         gc.collect()
         pyro.clear_param_store()
         mlflow.set_tracking_uri(self.storage_path + "/mlruns")
+        
+        # Create MLflow client AFTER setting the tracking URI
+        self.client = MlflowClient()
 
         self._init_device_settings()
         self._init_run()
