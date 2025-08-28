@@ -310,12 +310,6 @@ class NumTracers:
                 priors[param_name] = dist.Uniform(*torch.tensor([lower, upper], device=self.device))
             else:
                 raise ValueError(f"Distribution type '{dist_config['type']}' not supported. Only 'uniform' is currently supported.")
-        
-        if self.global_rank == 0 and self.verbose:
-            print(f"Loaded priors for model '{self.cosmo_model}': {list(priors.keys())}")
-            print(f"LaTeX labels: {latex_labels}")
-            if param_constraints:
-                print(f"Model constraints: {param_constraints.keys()}")
 
         return priors, param_constraints, latex_labels
 
