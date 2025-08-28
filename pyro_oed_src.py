@@ -216,7 +216,7 @@ def nf_loss(context, guide, samples, experiment, rank=0, verbose_shapes=False):
         print(f"Flattened context shape: {flattened_context.shape}")
 
     # Compute the negative log-probability
-    if experiment.preprocess:
+    if experiment.transform_input:
         y_flat = experiment.params_to_unconstrained(flattened_samples)
     else:
         y_flat = flattened_samples

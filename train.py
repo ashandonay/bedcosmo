@@ -33,6 +33,7 @@ import mlflow.pytorch
 from mlflow.tracking import MlflowClient
 from tqdm import tqdm
 
+import shutil
 import psutil
 import os
 import gc
@@ -83,7 +84,7 @@ class FlowLikelihoodDataset(Dataset):
 
 
 class Trainer:
-    def __init__(self, cosmo_exp, mlflow_exp, run_args, profile=False, verbose=False):
+    def __init__(self, cosmo_exp, mlflow_exp, run_args, device=None, profile=False, verbose=False):
         self.cosmo_exp = cosmo_exp
         self.mlflow_exp = mlflow_exp
         self.run_args = run_args
@@ -103,13 +104,9 @@ class Trainer:
         # Create MLflow client AFTER setting the tracking URI
         self.client = MlflowClient()
 
-        self._init_device_settings()
+        self._init_device_settings(device)
         self._init_run()
-        self.experiment = init_experiment(
-            self.run_obj, self.run_args, 
-            self.device, global_rank=self.global_rank, 
-            seed=self.run_args.get("seed", None), profile=self.profile
-            )
+        self.experiment = init_experiment(self.run_obj, self.run_args, device=self.device, global_rank=self.global_rank)
         
         self.posterior_flow = init_nf(
             self.run_args,
@@ -214,7 +211,7 @@ class Trainer:
                         'local_agg_loss': agg_loss.detach().item()
                     })
                     if self.run_args["log_nominal_area"]:
-                        nominal_samples = self.experiment.sample_params(self.posterior_flow, self.experiment.nominal_context, num_samples=5000).cpu().numpy()
+                        nominal_samples = self.experiment.get_guide_samples(self.posterior_flow, self.experiment.nominal_context, num_samples=5000).cpu().numpy()
                         with contextlib.redirect_stdout(io.StringIO()):
                             nominal_samples_gd = getdist.mcsamples.MCSamples(samples=nominal_samples, names=self.experiment.cosmo_params, labels=self.experiment.latex_labels)
                         local_nominal_areas = get_contour_area(nominal_samples_gd, 0.68, *self.experiment.cosmo_params, global_rank=self.global_rank, design_type='nominal')[0]
@@ -369,7 +366,7 @@ class Trainer:
             mlflow.log_artifact(filepath, artifact_path)
 
     @profile_method
-    def _init_device_settings(self):
+    def _init_device_settings(self, device):
         # Set PyTorch CPU threads at the beginning of DDP environment initialization.
         # This helps manage CPU resources used by PyTorch's own operations on CPU.
         # It's separate from OMP_NUM_THREADS which affects OpenMP-enabled libraries like NumPy/SciPy.
@@ -395,62 +392,67 @@ class Trainer:
             print(f"Warning: Could not set PyTorch CPU threads during init_training_env: {e}")
 
         # DDP initialization
-        if "LOCAL_RANK" in os.environ and torch.cuda.is_available():
-            local_rank = int(os.environ["LOCAL_RANK"]) # SLURM's local rank
-            self.global_rank = int(os.environ["RANK"])
-            
-            # When CUDA_VISIBLE_DEVICES isolates one GPU, PyTorch sees it as device 0.
-            self.pytorch_device_idx = int(os.environ["LOCAL_RANK"])  # The only GPU visible to this process
-            self.effective_device_id = self.pytorch_device_idx
-            
-            # Initialize CUDA context before DDP setup
-            torch.cuda.init()
-            torch.cuda.set_device(self.pytorch_device_idx)
-            
-            # Ensure CUDA is available and device is set before DDP init
-            if not torch.cuda.is_available():
-                raise RuntimeError("CUDA is not available but LOCAL_RANK is set")
-            
-            # Create torch.device object for device_id
-            device_obj = torch.device(f"cuda:{self.pytorch_device_idx}")
-            
-            # Initialize process group with explicit device ID
-            tdist.init_process_group(
-                backend="nccl",
-                init_method="env://",
-                world_size=int(os.environ["WORLD_SIZE"]),
-                rank=self.global_rank,
-                timeout=timedelta(seconds=180),  # Increased timeout
-                device_id=device_obj  # Pass torch.device object
-            )
-
-        else: # Not using DDP
-            local_rank = 0 # Placeholder, not a DDP local rank
-            self.global_rank = 0
-            print("Running without DDP (single-node, single-GPU/CPU)")
-            if torch.cuda.is_available():
-                parsed_id_from_arg = 0 # Default to 0 for non-DDP CUDA
-                if isinstance(self.device, str) and self.device.startswith("cuda:") and ":" in self.device.split(":"):
-                    try:
-                        parsed_id_from_arg = int(self.device.split(':')[1])
-                        if not (0 <= parsed_id_from_arg < torch.cuda.device_count()):
-                            print(f"Warning: Parsed device ID {parsed_id_from_arg} from '{self.device}' is invalid. Defaulting to 0.")
-                            parsed_id_from_arg = 0
-                    except (IndexError, ValueError):
-                        print(f"Warning: Could not parse device ID from '{self.device}'. Defaulting to 0.")
-                        parsed_id_from_arg = 0
-                elif isinstance(self.device, int):
-                    if 0 <= self.device < torch.cuda.device_count():
-                        parsed_id_from_arg = self.device
-                    else:
-                        print(f"Warning: Integer device ID {self.device} is invalid. Defaulting to 0.")
-                        parsed_id_from_arg = 0
+        if device is None:
+            if "LOCAL_RANK" in os.environ and torch.cuda.is_available():
+                local_rank = int(os.environ["LOCAL_RANK"]) # SLURM's local rank
+                self.global_rank = int(os.environ["RANK"])
                 
-                self.effective_device_id = parsed_id_from_arg
-                torch.cuda.set_device(self.effective_device_id)
-            else:
-                self.effective_device_id = -1 # Indicates CPU
+                # When CUDA_VISIBLE_DEVICES isolates one GPU, PyTorch sees it as device 0.
+                self.pytorch_device_idx = int(os.environ["LOCAL_RANK"])  # The only GPU visible to this process
+                self.effective_device_id = self.pytorch_device_idx
+                
+                # Initialize CUDA context before DDP setup
+                torch.cuda.init()
+                torch.cuda.set_device(self.pytorch_device_idx)
+                
+                # Ensure CUDA is available and device is set before DDP init
+                if not torch.cuda.is_available():
+                    raise RuntimeError("CUDA is not available but LOCAL_RANK is set")
+                
+                # Create torch.device object for device_id
+                device_obj = torch.device(f"cuda:{self.pytorch_device_idx}")
+                
+                # Initialize process group with explicit device ID
+                tdist.init_process_group(
+                    backend="nccl",
+                    init_method="env://",
+                    world_size=int(os.environ["WORLD_SIZE"]),
+                    rank=self.global_rank,
+                    timeout=timedelta(seconds=180),  # Increased timeout
+                    device_id=device_obj  # Pass torch.device object
+                )
 
+            else: # Not using DDP
+                local_rank = 0 # Placeholder, not a DDP local rank
+                self.global_rank = 0
+                print("Running without DDP (single-node, single-GPU/CPU)")
+                if torch.cuda.is_available():
+                    parsed_id_from_arg = 0 # Default to 0 for non-DDP CUDA
+                    if isinstance(self.device, str) and self.device.startswith("cuda:") and ":" in self.device.split(":"):
+                        try:
+                            parsed_id_from_arg = int(self.device.split(':')[1])
+                            if not (0 <= parsed_id_from_arg < torch.cuda.device_count()):
+                                print(f"Warning: Parsed device ID {parsed_id_from_arg} from '{self.device}' is invalid. Defaulting to 0.")
+                                parsed_id_from_arg = 0
+                        except (IndexError, ValueError):
+                            print(f"Warning: Could not parse device ID from '{self.device}'. Defaulting to 0.")
+                            parsed_id_from_arg = 0
+                    elif isinstance(self.device, int):
+                        if 0 <= self.device < torch.cuda.device_count():
+                            parsed_id_from_arg = self.device
+                        else:
+                            print(f"Warning: Integer device ID {self.device} is invalid. Defaulting to 0.")
+                            parsed_id_from_arg = 0
+                    
+                    self.effective_device_id = parsed_id_from_arg
+                    torch.cuda.set_device(self.effective_device_id)
+                else:
+                    self.effective_device_id = -1 # Indicates CPU
+        else:
+            self.global_rank = 0
+            self.pytorch_device_idx = 0
+            self.effective_device_id = 0
+            
         # Log the PyTorch thread count after rank is known
         if self.global_rank == 0:
             log_rank_prefix = ""
@@ -616,7 +618,6 @@ class Trainer:
                 # Overwrite run parameters with original parameters
                 self.run_args = parse_mlflow_params(self.run_obj.data.params)
                 self.run_args.update(resume_args)
-                print(f"Run args after update: {self.run_args}")
                 if self.run_args.get("add_steps", None):
                     self.run_args["total_steps"] += self.run_args["add_steps"]
                 
@@ -742,7 +743,6 @@ class Trainer:
     def _get_resume_metrics(self):
         """Get metrics from previous run for resuming."""
         best_nominal_areas = self.client.get_metric_history(self.run_args["resume_id"], 'best_avg_nominal_area')
-        print(best_nominal_areas)
         best_nominal_area_steps = np.array([metric.step for metric in best_nominal_areas])
         if len(best_nominal_area_steps) > 0:
             closest_idx = np.argmin(np.abs(best_nominal_area_steps - self.run_args["resume_step"]))
@@ -871,10 +871,14 @@ if __name__ == '__main__':
     parser.add_argument('--cosmo_exp', type=str, default='num_tracers', help='Cosmological experiment name')
     parser.add_argument('--mlflow_exp', type=str, default="base", help='MLflow experiment name')
     parser.add_argument('--cosmo_model', type=str, default="base", help='Cosmological model set to use from run_args.json')
-    parser.add_argument('--device', type=str, default='cuda:0', help='Device to use for training')
+    parser.add_argument('--device', type=str, default=None, help='Device to use for training')
 
     # --- Load Default Config --- 
-    config_path = os.path.join(os.path.dirname(__file__), 'run_args.json')
+    # Parse just these essential arguments
+    args, unknown = parser.parse_known_args()
+
+    # Now you can use args.run_args_path to load the config
+    config_path = os.path.join(os.path.dirname(__file__), args.cosmo_exp, 'run_args.json')
     with open(config_path, 'r') as f:
         run_args_dict = json.load(f)
 
@@ -959,35 +963,6 @@ if __name__ == '__main__':
             else:
                 run_args[key] = run_args_dict[key]
 
-    # --- Setup & Run --- 
-    # Determine device for the main script part, before DDP spawns processes
-    # This initial `device_check` is for the process launching srun, not for the DDP ranks themselves.
-    initial_device_check_cuda = False
-    if torch.cuda.is_available():
-        try:
-            # Check if the device specified in args is valid, otherwise default to cuda:0
-            # The `args.device` is like "cuda:0"
-            if args.device.startswith("cuda:") and ":" in args.device.split(":"):
-                parsed_id = int(args.device.split(':')[1])
-                if 0 <= parsed_id < torch.cuda.device_count():
-                    torch.device(args.device) # Try to create device object
-                    initial_device_check_cuda = True
-                    script_level_device_str = args.device
-                else: # Invalid specific cuda device
-                    script_level_device_str = "cuda:0" # Default to cuda:0
-                    torch.device(script_level_device_str)
-                    initial_device_check_cuda = True
-            else: # Non-specific "cuda" or other
-                 script_level_device_str = "cuda:0" # Default to cuda:0
-                 torch.device(script_level_device_str)
-                 initial_device_check_cuda = True
-        except Exception as e: # Fallback to CPU if any error with CUDA init
-            print(f"Initial CUDA check failed: {e}. Defaulting to CPU for main script context.")
-            initial_device_check_cuda = False
-            script_level_device_str = "cpu"
-    else:
-        script_level_device_str = "cpu"
-
     trainer = Trainer(
         cosmo_exp=args.cosmo_exp,
         mlflow_exp=args.mlflow_exp,
@@ -995,14 +970,3 @@ if __name__ == '__main__':
         profile=args.profile,
     )
     trainer.run()
-    """
-    single_run(
-        cosmo_exp=args.cosmo_exp,
-        cosmo_model=args.cosmo_model,
-        run_args=run_args,
-        mlflow_exp=args.mlflow_exp,
-        device=script_level_device_str,
-        profile=args.profile,
-        **kwargs
-    )
-    """

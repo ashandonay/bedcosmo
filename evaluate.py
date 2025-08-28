@@ -12,7 +12,6 @@ base_dir = os.environ["HOME"] + '/bed/BED_cosmo'
 if base_dir not in sys.path:
     sys.path.insert(0, base_dir)
     
-from num_tracers import NumTracers
 from pyro import distributions as dist
 import numpy as np
 import torch
@@ -23,17 +22,19 @@ import argparse
 from plotting import *
 from util import *
 import mlflow
+import inspect
 from mlflow.tracking import MlflowClient
 mlflow.set_tracking_uri("file:" + os.environ["SCRATCH"] + "/bed/BED_cosmo/num_tracers/mlruns")
 
-class Evaluation:
+class Evaluator:
     def __init__(
-            self, run_id, guide_samples, seed=1, design_step=0.05, design_lower=0.05, design_upper=None,
-            cosmo_exp='num_tracers', levels=[0.68, 0.95], global_rank=0, 
-            n_evals=20, device="cuda:0", n_particles=1000, verbose=False, profile=False,
-            param_space='physical'
+            self, run_id, guide_samples=1000, design_step=0.05, design_lower=0.05, design_upper=None,
+            seed=1, cosmo_exp='num_tracers', levels=[0.68, 0.95], global_rank=0, 
+            n_evals=20, n_particles=1000, param_space='physical',
+            verbose=False, device="cuda:0", profile=False,
             ):
         self.run_id = run_id
+        print(f"\nStarting evaluation for run {self.run_id}")
         run_data_list, _, _ = get_runs_data(run_ids=self.run_id)
         if run_data_list is None:
             print(f"Run {self.run_id} not found.")
@@ -41,6 +42,7 @@ class Evaluation:
         run_data = run_data_list[0]
         self.run_obj = run_data['run_obj']
         self.run_args = run_data['params']
+        self.total_steps = self.run_args["total_steps"]
         self.exp_id = run_data['exp_id']
         self.cosmo_exp = cosmo_exp
         self.storage_path = os.environ["SCRATCH"] + f"/bed/BED_cosmo/{self.cosmo_exp}"
@@ -61,15 +63,15 @@ class Evaluation:
             "design_upper": design_upper,
             "fixed_design": self.run_args["fixed_design"]
         }
-        self.experiment = init_experiment(self.run_obj, self.run_args, device=self.device, design_args=design_args, seed=self.seed)
+        self.experiment = init_experiment(self.run_obj, self.run_args, self.device, design_args=design_args)
 
         self.param_space = param_space
         if self.param_space == 'physical':
-            self.desi_transform = False
-            self.nf_transform = True
+            self.desi_transform_output = False
+            self.nf_transform_output = True
         elif self.param_space == 'unconstrained':
-            self.desi_transform = True
-            self.nf_transform = False
+            self.desi_transform_output = True
+            self.nf_transform_output = False
         else:
             raise ValueError(f"Invalid parameter space: {self.param_space}")
 
@@ -109,7 +111,7 @@ class Evaluation:
     @profile_method
     def _get_samples(self, design, flow_model):
         context = torch.cat([design, self.experiment.central_val], dim=-1)
-        samples = self.experiment.sample_params(flow_model, context, num_samples=self.guide_samples, transform=self.nf_transform).cpu().numpy()
+        samples = self.experiment.get_guide_samples(flow_model, context, num_samples=self.guide_samples, transform_output=self.nf_transform_output).cpu().numpy()
         with contextlib.redirect_stdout(io.StringIO()):
             samples_gd = getdist.MCSamples(samples=samples, names=self.experiment.cosmo_params, labels=self.experiment.latex_labels)
         return samples_gd
@@ -123,6 +125,7 @@ class Evaluation:
             display (list): The designs to display.
 
         """
+        print(f"Running posterior evaluation...")
         all_samples = []
         all_colors = []
         if 'optimal' in display:
@@ -138,7 +141,7 @@ class Evaluation:
             # Set the nominal design samples to gray
             all_colors.extend(['gray'] * len(nominal_samples))
         # Get the DESI MCMC samples
-        desi_samples_gd = get_desi_samples(self.run_args['cosmo_model'], transform=self.desi_transform, experiment=self.experiment)
+        desi_samples_gd = self.experiment.get_desi_samples(transform_output=self.desi_transform_output)
         all_samples.append(desi_samples_gd)
         all_colors.append('black')
         g = plot_posterior(all_samples, all_colors, levels=self.levels, width_inch=10)
@@ -165,6 +168,7 @@ class Evaluation:
         save_figure(f"{self.save_path}/plots/posterior_eval_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{self.param_space}.png", fig=g.fig, dpi=400)
     
     def sample_posterior(self, step, level, num_data_samples=10, global_rank=0, central=True):
+        print(f"Running sample posterior evaluation...")
         posterior_flow, _ = load_model(
             self.experiment, step, 
             self.run_obj, self.run_args, 
@@ -186,7 +190,7 @@ class Evaluation:
                 num_data_samples=num_data_samples, 
                 num_param_samples=self.guide_samples,
                 central=central,
-                transform=self.nf_transform
+                transform_output=self.nf_transform_output
                 ).cpu().numpy()
 
             pair_avg_areas = []
@@ -317,6 +321,7 @@ class Evaluation:
         """
         Plots a comparison of the nominal and optimal design.
         """
+        print(f"Running design comparison...")
         flow_model, _ = load_model(
             self.experiment, step, self.run_obj, 
             self.run_args, self.device, 
@@ -352,6 +357,7 @@ class Evaluation:
         - Top plot: colors points by the 3rd design variable (f_QSO)
         - Bottom plot: colors points by EIG values
         """
+        print(f"Running EIG grid evaluation...")
         flow_model, _ = load_model(
             self.experiment, step, self.run_obj, 
             self.run_args, self.device, 
@@ -473,6 +479,7 @@ class Evaluation:
             level (float): Contour level to plot.
             type (str): Type of steps to plot. Can be 'all', 'area', or 'loss'.
         """
+        print(f"Running posterior steps evaluation...")
         colors = plt.cm.viridis_r(np.linspace(0, 1, len(steps)))
         
         all_samples = []
@@ -501,7 +508,7 @@ class Evaluation:
                 Line2D([0], [0], color=color_hex, 
                         label=f'Step {step_label}, {int(level*100)}% Area: {areas[i]:.2f}')
             )
-        desi_samples_gd = get_desi_samples(self.run_args['cosmo_model'], transform=self.desi_transform, experiment=self.experiment)
+        desi_samples_gd = self.experiment.get_desi_samples(transform_output=self.desi_transform_output)
         desi_area = get_contour_area([desi_samples_gd], level, 'Om', 'hrdrag')[0]['nominal_area_Om_hrdrag']
         all_samples.append(desi_samples_gd)
         all_colors.append('black')  
@@ -531,6 +538,7 @@ class Evaluation:
         Args:
             steps (list): List of steps to plot. Can include 'last' or 'best' as special values.
         """
+        print(f"Running EIG steps evaluation...")
         checkpoint_dir = f"{self.storage_path}/mlruns/{self.exp_id}/{self.run_id}/artifacts/checkpoints"
         if not os.path.isdir(checkpoint_dir):
             print(f"Warning: Checkpoint directory not found for run {self.run_id}, skipping. Path: {checkpoint_dir}")
@@ -556,90 +564,11 @@ class Evaluation:
         plt.tight_layout()
         save_figure(f"{self.save_path}/plots/eig_steps_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png", fig=plt.gcf(), dpi=400)
 
-def run_eval(
-        design_lower, 
-        design_step, 
-        run_id, 
-        eval_step, 
-        guide_samples, 
-        device, 
-        eval_seed, 
-        cosmo_exp, 
-        levels, 
-        global_rank, 
-        n_particles,
-        n_evals,
-        param_space,
-        profile=False
-        ):
-    """
-    Runs the evaluation routine for a given run ID.
-
-    Args:
-        design_lower (float): Lowest design fraction.
-        design_step (float): Step size for design grid.
-        run_id (str): MLflow run ID to evaluate.
-        eval_step (int): Step to evaluate.
-        guide_samples (int): Number of samples to generate from the posterior.
-        device (str): Device to use for evaluation.
-    """
-    # default to run design parameters if not specified
-    client = MlflowClient()
-    run_info = client.get_run(run_id)
-    run_args = parse_mlflow_params(run_info.data.params)
-    if design_lower is None:
-        design_lower = run_args["design_lower"]
-    if design_step is None:
-        design_step = run_args["design_step"]
-    
-    if eval_step == 'last':
-        eval_step = run_args["total_steps"]
-    elif eval_step is not None:
-        eval_step = int(eval_step)
-
-    # Create evaluation plots
-    evaluate = Evaluation(
-        run_id=run_id,
-        guide_samples=guide_samples,
-        seed=eval_seed,
-        device=device,
-        design_lower=design_lower,
-        design_step=design_step,
-        cosmo_exp=cosmo_exp,
-        levels=levels,
-        global_rank=global_rank,
-        n_evals=n_evals,
-        n_particles=n_particles,
-        param_space=param_space,
-        profile=profile
-    )
-    
-    print(f"\nStarting evaluation for run {run_id}")
-    print(f"Running posterior evaluation...")
-    evaluate.posterior(step=eval_step, display=['nominal'])
-    
-    #print(f"Running EIG grid evaluation...")
-    #evaluate.eig_grid(step=eval_step)
-    
-    #print(f"Running posterior steps evaluation...")
-    #evaluate.posterior_steps(steps=[1000, 5000, 20000, 'last'])
-    
-    #print(f"Running EIG steps evaluation...")
-    #evaluate.eig_steps(steps=[eval_step//4, eval_step//2, 3*eval_step//4, 'last'])
-    
-    #print(f"Running design comparison...")
-    #evaluate.design_comparison(step=eval_step)
-    
-    print(f"Running sample posterior evaluation...")
-    evaluate.sample_posterior(step=eval_step, level=0.68, central=True)
-    
-    print(f"Evaluation completed successfully!")
-
 if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description='Run Number Tracers Training')
     parser.add_argument('--run_id', type=str, default=None, help='MLflow run ID to resume training from (continues existing run with same parameters)')
-    parser.add_argument('--eval_step', type=str, default=None, help='Step to evaluate (can be integer or "last")')
+    parser.add_argument('--eval_step', type=str, default='last', help='Step to evaluate (can be integer or "last")')
     parser.add_argument('--cosmo_exp', type=str, default='num_tracers', help='Cosmological model set to use from run_args.json')
     parser.add_argument('--levels', type=float, default=0.68, help='Levels for contour plot')
     parser.add_argument('--global_rank', type=str, default='0', help='List of global ranks to evaluate')
@@ -651,7 +580,7 @@ if __name__ == "__main__":
     parser.add_argument('--device', type=str, default='cuda:0', help='Device to use for evaluation')
     parser.add_argument('--eval_seed', type=int, default=1, help='Seed for evaluation')
     parser.add_argument('--param_space', type=str, default='physical', help='Parameter space to use for evaluation')
-    parser.add_argument('--profile', action='store_true', help='Enable detailed profiling with cProfile')
+    parser.add_argument('--profile', action='store_true', help='Enable profiling of methods')
 
     args = parser.parse_args()
     
@@ -659,17 +588,22 @@ if __name__ == "__main__":
     if isinstance(args.global_rank, str):
         args.global_rank = json.loads(args.global_rank)
 
-    if args.profile:
-        print(f"Starting method-level profiling...")
-        
-        # Filter out profiling arguments before calling run_eval
-        eval_args = {k: v for k, v in vars(args).items() 
-                    if k != 'profile'}
-        
-        run_eval(**eval_args, profile=True)
+    valid_params = inspect.signature(Evaluator.__init__).parameters.keys()
+    valid_params = [k for k in valid_params if k != 'self']
+    eval_args = {k: v for k, v in vars(args).items() if k in valid_params}
 
-    else:
-        # Filter out profiling arguments before calling run_eval
-        eval_args = {k: v for k, v in vars(args).items() 
-                    if k != 'profile'}
-        run_eval(**eval_args, profile=False)
+    evaluator = Evaluator(**eval_args)
+
+    if args.eval_step == 'last':
+        eval_step = evaluator.total_steps
+    elif args.eval_step is not None:
+        eval_step = int(args.eval_step)
+
+    evaluator.posterior(step=eval_step, display=['nominal'])
+    #evaluator.eig_grid(step=eval_step)
+    #evaluator.posterior_steps(steps=[1000, 5000, 20000, 'last'])
+    #evaluator.eig_steps(steps=[eval_step//4, eval_step//2, 3*eval_step//4, 'last'])
+    #evaluator.design_comparison(step=eval_step)
+    #evaluator.sample_posterior(step=eval_step, level=0.68, central=True)
+    
+    print(f"Evaluation completed successfully!")

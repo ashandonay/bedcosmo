@@ -22,7 +22,7 @@ from datetime import datetime, timedelta
 import traceback
 import functools
 import time
-import shutil
+import inspect
 
 torch.set_default_dtype(torch.float64)
 
@@ -33,11 +33,15 @@ sys.path.insert(0, home_dir + "/bed/BED_cosmo/num_tracers")
 
 
 class Bijector:
-    def __init__(self, experiment, cdf_bins=1000):
+    def __init__(self, experiment, priors=None, cdf_bins=1000, cdf_samples=500000):
         self.experiment = experiment
-        self.cdfs = self.create_cdfs(num_bins=cdf_bins)
+        if priors is not None:
+            self.priors = priors
+        else:
+            self.priors = self.experiment.priors
+        self.cdfs = self.create_cdfs(num_bins=cdf_bins, num_samples=cdf_samples)
 
-    def create_cdfs(self, num_bins=10000, num_samples=500000):
+    def create_cdfs(self, num_bins, num_samples):
         """
         Create memory-efficient CDF bins from raw samples.
         
@@ -52,14 +56,14 @@ class Bijector:
             Dictionary with 'bins' and 'cdf_values' keys for fast CDF computation
         """
         with pyro.plate_stack("plate", (num_samples,)):
-            empirical_priors = self.experiment.sample_valid_parameters((num_samples,))
+            empirical_priors = self.experiment.sample_valid_parameters((num_samples,), priors=self.priors)
         cdfs = {}
         for key, samples in empirical_priors.items():
             sorted_samples, _ = torch.sort(samples.flatten())
             n_samples = len(sorted_samples)
 
             # Create evenly spaced bins across the extended range
-            bins = torch.linspace(self.experiment.priors[key].low, self.experiment.priors[key].high, num_bins, device=samples.device)
+            bins = torch.linspace(self.priors[key].low, self.priors[key].high, num_bins, device=samples.device)
             
             # Compute CDF values for each bin
             cdf_values = torch.zeros_like(bins)
@@ -177,16 +181,19 @@ class Bijector:
         # Step 2: Apply CDF of standard normal to get uniform [0,1]
         u = 0.5 * (1.0 + torch.erf(z / np.sqrt(2.0)))
         
+        eps = 1e-4
+        u_safe = torch.clamp(u, eps, 1.0 - eps)
+        
         # Step 3: Apply empirical inverse CDF using the same boundary-aware interpolation
         bins = self.cdfs[param_key]['bins']
         cdf_values = self.cdfs[param_key]['cdf_values']
         
         # Use searchsorted to find where each CDF value would be inserted in cdf_values
-        indices = torch.searchsorted(cdf_values, u.flatten(), right=False)
+        indices = torch.searchsorted(cdf_values, u_safe.flatten(), right=False)
         indices = torch.clamp(indices, 0, len(cdf_values) - 1)
         
         # Initialize output tensor
-        x = torch.zeros_like(u.flatten())
+        x = torch.zeros_like(u_safe.flatten())
         
         # Handle boundary cases separately with special interpolation
         at_bottom_cdf = (indices == 0)
@@ -195,7 +202,7 @@ class Bijector:
         # Interpolate samples at bottom CDF (between min and next CDF above)
         if at_bottom_cdf.any():
             x[at_bottom_cdf] = self._interpolate_cdf(
-                u.flatten()[at_bottom_cdf],
+                u_safe.flatten()[at_bottom_cdf],
                 cdf_values[0], cdf_values[1],
                 bins[0], bins[1]
             )
@@ -203,7 +210,7 @@ class Bijector:
         # Interpolate samples at top CDF (between max and previous CDF below)
         if at_top_cdf.any():
             x[at_top_cdf] = self._interpolate_cdf(
-                u.flatten()[at_top_cdf],
+                u_safe.flatten()[at_top_cdf],
                 cdf_values[-2], cdf_values[-1],
                 bins[-2], bins[-1]
             )
@@ -213,7 +220,7 @@ class Bijector:
         if middle_mask.any():
             middle_indices = indices[middle_mask]
             x[middle_mask] = self._interpolate_cdf(
-                u.flatten()[middle_mask],
+                u_safe.flatten()[middle_mask],
                 cdf_values[middle_indices],
                 cdf_values[middle_indices + 1],
                 bins[middle_indices],
@@ -551,7 +558,7 @@ def init_nf(
                 hidden_features=((cond_hidden_size,) * cond_n_layers) # for the conditional network
                 )
         elif flow_type == "MAF":
-            transform = run_args.get("transform", None)
+            transform = run_args.get("nf_transform", None)
             if transform == "affine":
                 univariate = zuko.transforms.MonotonicAffineTransform
             elif transform == "rqs":
@@ -839,7 +846,7 @@ def get_nominal_samples(run_obj, run_args, guide_samples=101, seed=1, device="cu
     mlflow.set_tracking_uri(storage_path + "/mlruns")
 
     # Pass run_obj, run_args (which should be consistent with run_obj), and classes
-    experiment = init_experiment(cosmo_exp, run_args, device)
+    experiment = init_experiment(run_obj, run_args, device, global_rank=global_rank)
     posterior_flow, selected_step = load_model(experiment, step, run_obj, run_args, device, global_rank=global_rank)
     auto_seed(seed)
 
@@ -847,7 +854,7 @@ def get_nominal_samples(run_obj, run_args, guide_samples=101, seed=1, device="cu
     central_vals = experiment.central_val if run_args.get("include_D_M", False) else experiment.central_val[1::2]
     nominal_context = torch.cat([nominal_design, central_vals], dim=-1)
 
-    nominal_samples = experiment.sample_params(posterior_flow, nominal_context, num_samples=guide_samples).cpu().numpy()
+    nominal_samples = experiment.get_guide_samples(posterior_flow, nominal_context, num_samples=guide_samples).cpu().numpy()
 
     with contextlib.redirect_stdout(io.StringIO()):
         samples = getdist.MCSamples(samples=nominal_samples, names=experiment.cosmo_params, labels=experiment.latex_labels, settings={'ignore_rows': 0.0})
@@ -856,11 +863,9 @@ def get_nominal_samples(run_obj, run_args, guide_samples=101, seed=1, device="cu
 def init_experiment(
         run_obj,
         run_args, 
-        device="cuda:0", 
-        design_args={},
+        device,
         global_rank=0,
-        seed=None,
-        profile=False
+        design_args={},
         ):
     """
     Initializes the experiment class with the run arguments.
@@ -871,24 +876,18 @@ def init_experiment(
         design_args (dict): The design arguments.
         seed (int): The seed to use.
     """
+    run_args.update(design_args)
+    run_args["priors_path"] = run_obj.info.artifact_uri + "/priors.yaml"
+    run_args["device"] = device
     if run_args.get("cosmo_exp") == 'num_tracers':
         from num_tracers import NumTracers
-        experiment = NumTracers(
-            priors_path=run_obj.info.artifact_uri + "/priors.yaml",
-            data_path=run_args.get("data_path", "/data/tracers_v2/"),
-            cosmo_model=run_args.get("cosmo_model", "base"),
-            flow_type=run_args.get("flow_type", "MAF"),
-            design_step=design_args.get("design_step", run_args.get("design_step", 0.05)),
-            design_lower=design_args.get("design_lower", run_args.get("design_lower", 0.05)),
-            design_upper=design_args.get("design_upper", run_args.get("design_upper", 1.0)),
-            fixed_design=run_args.get("fixed_design", False),
-            preprocess=run_args.get("preprocess", False),
-            global_rank=global_rank,
-            device=device,
-            include_D_M=run_args.get("include_D_M", False),
-            seed=seed,
-            profile=profile
-            )
+        valid_params = inspect.signature(NumTracers.__init__).parameters.keys()
+        valid_params = [k for k in valid_params if k != 'self']
+        
+        # Filter run_args to only include valid NumTracers parameters
+        exp_args = {k: v for k, v in run_args.items() if k in valid_params}
+        exp_args['global_rank'] = global_rank
+        experiment = NumTracers(**exp_args)
     else:
         raise ValueError(f"{run_args.get('cosmo_exp')} not supported")
     return experiment
@@ -1023,7 +1022,7 @@ def calc_entropy(design, posterior_flow, experiment, num_samples):
     _, entropy = _safe_mean_terms(samples)
     return entropy
 
-def get_desi_samples(cosmo_model, transform=False, experiment=None):
+def load_desi_samples(cosmo_model):
     desi_samples = np.load(f"{home_dir}/data/mcmc_samples/{cosmo_model}.npy")
     if cosmo_model == 'base':
         target_labels = ['Om', 'hrdrag']
@@ -1041,17 +1040,7 @@ def get_desi_samples(cosmo_model, transform=False, experiment=None):
         target_labels = ['Om', 'Ok', 'w0', 'wa', 'hrdrag']
         latex_labels = ['\Omega_m', '\Omega_k', 'w_0', 'w_a', 'H_0r_d']
 
-    if transform and experiment is not None:
-        samples = torch.tensor(desi_samples, device=experiment.device)
-        samples[..., -1] /= 100 # to get hrdrag in units of 100 km/s/Mpc
-        unconstrained_samples = experiment.params_to_unconstrained(samples)
-        with contextlib.redirect_stdout(io.StringIO()):
-            desi_samples_gd = getdist.MCSamples(samples=unconstrained_samples.cpu().numpy(), names=target_labels, labels=latex_labels)
-    else:
-        with contextlib.redirect_stdout(io.StringIO()):
-            desi_samples_gd = getdist.MCSamples(samples=desi_samples, names=target_labels, labels=latex_labels)
-
-    return desi_samples_gd
+    return desi_samples, target_labels, latex_labels
 
 def parse_mlflow_params(params_dict):
     """
