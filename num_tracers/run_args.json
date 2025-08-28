@@ -4,7 +4,8 @@
     "priors_path": "num_tracers/priors.yaml",
     "data_path": "/data/tracers_v2/",
     "flow_type": "NAF",
-    "transform": "affine",
+    "transform_input": true,
+    "nf_transform": "affine",
     "n_transforms": 2,
     "cond_hidden_size": 256,
     "cond_n_layers": 2,
@@ -29,6 +30,5 @@
     "verbose": false, 
     "log_nominal_area": true,
     "include_D_M": true,
-    "condition_design": true,
-    "preprocess": true
+    "condition_design": true
 }
