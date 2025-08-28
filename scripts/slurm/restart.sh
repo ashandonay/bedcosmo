@@ -43,7 +43,7 @@ srun torchrun \
      --node_rank=$SLURM_PROCID \
      --rdzv_backend=c10d \
      --rdzv_endpoint=$MASTER_ADDR:$MASTER_PORT \
-     /global/homes/a/ashandon/bed/BED_cosmo/num_tracers/n_tracers_train.py \
+     /global/homes/a/ashandon/bed/BED_cosmo/train.py \
      --mlflow_exp base \
      --cosmo_exp num_tracers \
      --restart_id 4c4bd5a922ac4a3a94db5621eb228f85 \

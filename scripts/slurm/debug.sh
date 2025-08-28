@@ -7,7 +7,7 @@
 #SBATCH --ntasks-per-node=1     # 1 primary Slurm task per node
 #SBATCH --cpus-per-task=128     # CPUs for all DDP workers on the node (e.g., 4 workers * 32 cpus/worker)
 #SBATCH --gpus-per-node=4       # Request 4 GPUs for the 1 task on the node
-#SBATCH --time=00:30:00
+#SBATCH --time=00:10:00
 #SBATCH --output=/pscratch/sd/a/ashandon/bed/BED_cosmo/num_tracers/logs/%A_%x_%a.log
 #SBATCH --error=/pscratch/sd/a/ashandon/bed/BED_cosmo/num_tracers/logs/%A_%x_%a.log
 
@@ -41,26 +41,26 @@ srun torchrun \
      --node_rank=$SLURM_PROCID \
      --rdzv_backend=c10d \
      --rdzv_endpoint=$MASTER_ADDR:$MASTER_PORT \
-     /global/homes/a/ashandon/bed/BED_cosmo/num_tracers/n_tracers_train.py \
+     /global/homes/a/ashandon/bed/BED_cosmo/train.py \
      --cosmo_model base_omegak_w_wa \
      --mlflow_exp debug \
      --cosmo_exp num_tracers \
      --pyro_seed 1 \
      --nf_seed 1 \
-     --flow_type NAF \
-     --n_transforms 8 \
+     --flow_type MAF \
+     --n_transforms 10 \
      --cond_hidden_size 256 \
-     --cond_n_layers 3 \
+     --cond_n_layers 5 \
      --mnn_hidden_size 256 \
-     --mnn_n_layers 3 \
-     --mnn_signal 64 \
+     --mnn_n_layers 5 \
+     --mnn_signal 128 \
      --spline_bins 10 \
-     --n_particles_per_device 1000 \
-     --total_steps 10000 \
+     --n_particles_per_device 10000 \
+     --total_steps 5000 \
      --scheduler_type cosine \
-     --initial_lr 0.0005 \
-     --final_lr 0.000001 \
-     --warmup_fraction 0.1 \
+     --initial_lr 0.001 \
+     --final_lr 0.0 \
+     --warmup_fraction 0.0 \
      --design_step "[0.025, 0.05, 0.05, 0.025]" \
      --design_lower "[0.025, 0.1, 0.1, 0.1]" \
      --fixed_design \

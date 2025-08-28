@@ -39,8 +39,8 @@ export CUDA_DEVICE_ORDER=PCI_BUS_ID
 # torch.distributed.run will then spawn NPROC_PER_NODE worker processes on each node.
 # SLURM_PROCID can be used for node_rank as srun launches one task per node here.
 
-RUN_ID=8fa3538e4d8b4d5196f13522f753dc87
-RESUME_STEP=16000
+RUN_ID=31045d23318940cf8d2ce431ec07a886
+RESUME_STEP=198000
 
 # Get the directory where this script is located
 TRUNCATE_SCRIPT="/global/homes/a/ashandon/bed/BED_cosmo/scripts/truncate_metrics.py"
@@ -80,7 +80,7 @@ srun torchrun \
      --node_rank=$SLURM_PROCID \
      --rdzv_backend=c10d \
      --rdzv_endpoint=$MASTER_ADDR:$MASTER_PORT \
-     /global/homes/a/ashandon/bed/BED_cosmo/num_tracers/n_tracers_train.py \
+     /global/homes/a/ashandon/bed/BED_cosmo/train.py \
      --resume_id $RUN_ID \
      --resume_step $RESUME_STEP
 

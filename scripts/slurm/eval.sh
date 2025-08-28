@@ -21,11 +21,11 @@ module load nccl/2.21.5 # NERSC NCCL for Slingshot
 srun torchrun \
     --nnodes=1 \
     --nproc_per_node=1 \
-    /global/homes/a/ashandon/bed/BED_cosmo/num_tracers/evaluate.py \
-    --run_id 150d24136348447390a22d690001cab4 \
+    /global/homes/a/ashandon/bed/BED_cosmo/evaluate.py \
+    --run_id 31045d23318940cf8d2ce431ec07a886 \
     --eval_step last \
     --global_rank "[0, 1, 2, 3]" \
     --levels 0.68 \
     --guide_samples 10000 \
     --n_particles 1001 \
-    --profile
+    --param_space physical
