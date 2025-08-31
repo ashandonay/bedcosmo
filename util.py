@@ -23,6 +23,9 @@ import traceback
 import functools
 import time
 import inspect
+import concurrent.futures
+import warnings
+from itertools import combinations
 
 torch.set_default_dtype(torch.float64)
 
@@ -1519,3 +1522,97 @@ def print_training_state(model, optimizer, step):
                 print(f"  {name}: shape={param.shape}, mean={param.mean().item():.6f}, std={param.std().item():.6f}")
     print(f"Total trainable parameters: {total_params}")
     print("=" * 50)
+
+def get_contour_area(samples, level, *params, global_rank=None, design_type='nominal'):
+    """
+    Calculate contour areas for parameter pairs.
+    
+    Args:
+        samples: GetDist MCSamples object or list of samples
+        level: Contour level (e.g., 0.68 for 68% confidence)
+        *params: Variable number of parameters. Calculates areas for all possible pairs.
+    
+    Returns:
+        dict: Dictionary with keys as parameter pairs (e.g., "param1_param2") and values as lists of areas
+    """
+    # Generate all possible pairs
+    param_pairs = list(combinations(params, 2))
+
+    samples = [samples] if type(samples) != list else samples
+    areas_list = []
+
+    if len(params) < 2:
+        raise ValueError("At least 2 parameters must be provided")
+    for sample in samples:
+        # Helper function to calculate area for a single parameter pair
+        def calculate_area_for_pair(param1, param2):
+            """Helper function to calculate area for a single parameter pair"""
+            try:
+                # Create a temporary figure for this pair
+                temp_fig, temp_ax = plt.subplots()
+                
+                density = sample.get2DDensity(param1, param2)
+                if density is None:
+                    warnings.warn(f"2D density returned None for {param1}-{param2}. Skipping area calculation.")
+                    plt.close(temp_fig)
+                    if global_rank is not None:
+                        return f"{design_type}_area_{global_rank}_{param1}_{param2}", np.nan
+                    else:
+                        return f"{design_type}_area_{param1}_{param2}", np.nan
+                
+                contour_level = density.getContourLevels([level])[0]
+                
+                # Plot contour on the temporary axes
+                cs = temp_ax.contour(density.x, density.y, density.P, 
+                                    levels=[contour_level])
+                paths = cs.get_paths()
+                
+                # Check if any contours were found at this level
+                if not paths:
+                    warnings.warn(f"No contour found for {param1}-{param2} at level {level}. Assigning area NaN.")
+                    plt.close(temp_fig)
+                    if global_rank is not None:
+                        return f"{design_type}_area_{param1}_{param2}_{global_rank}", np.nan
+                    else:
+                        return f"{design_type}_area_{param1}_{param2}", np.nan
+                
+                # Calculate total area by summing areas of all paths
+                total_area = 0.0
+                for path in paths:
+                    vertices = path.vertices
+                    x, y = vertices[:, 0], vertices[:, 1]
+                    
+                    # Calculate area using Shoelace formula for this path
+                    path_area = 0.5 * np.abs(np.dot(x, np.roll(y, 1)) - np.dot(y, np.roll(x, 1)))
+                    total_area += path_area
+                
+                # Close the temporary figure
+                plt.close(temp_fig)
+                if global_rank is not None:
+                    return f"{design_type}_area_{global_rank}_{param1}_{param2}", total_area
+                else:
+                    return f"{design_type}_area_{param1}_{param2}", total_area
+                    
+            except Exception as e:
+                warnings.warn(f"Error calculating area for {param1}-{param2}: {str(e)}. Setting area to NaN.")
+                if global_rank is not None:
+                    return f"{design_type}_area_{global_rank}_{param1}_{param2}", np.nan
+                else:
+                    return f"{design_type}_area_{param1}_{param2}", np.nan
+        
+        # Use ThreadPoolExecutor for parallel processing
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            # Submit all tasks at once
+            future_to_pair = {
+                executor.submit(calculate_area_for_pair, param1, param2): (param1, param2)
+                for param1, param2 in param_pairs
+            }
+        
+        # Collect results as they complete
+        areas_dict = {}
+        for future in concurrent.futures.as_completed(future_to_pair):
+            pair_key, area = future.result()
+            areas_dict[pair_key] = area
+        areas_list.append(areas_dict)
+
+    return areas_list

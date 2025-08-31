@@ -1,6 +1,7 @@
 import sys
 import os
 import io
+import contextlib
 parent_dir = os.path.abspath(os.path.join(os.getcwd(), os.pardir))
 if parent_dir not in sys.path:
     sys.path.insert(0, parent_dir)
@@ -26,8 +27,6 @@ from datetime import datetime
 from pyro_oed_src import posterior_loss
 import json
 from IPython.display import display
-from itertools import combinations
-import concurrent.futures
 
 def plot_posterior(samples, colors, legend_labels=None, show_scatter=False, line_style="-", alpha=1.0, levels=[0.68, 0.95], width_inch=7):
     """
@@ -177,7 +176,8 @@ def plot_training(
         show_area=True,
         area_limits=None,
         show_lr=True,
-        dpi=300
+        dpi=300,
+        step_range=None
         ):
     """
     Plots training loss, learning rate, and posterior contour area evolution
@@ -197,6 +197,7 @@ def plot_training(
         lr_step_freq (int): Sampling frequency for plotting learning rate points.
         show_area (bool): If True, show the area subplot. Default is True.
         show_lr (bool): If True, show the learning rate subplot. Default is True.
+        step_range (tuple, optional): Tuple of (min_step, max_step) to limit the x-axis range. If None, plots all available steps.
     """
     client = MlflowClient()
     storage_path = os.environ["SCRATCH"] + f"/bed/BED_cosmo/{cosmo_exp}"
@@ -232,6 +233,16 @@ def plot_training(
             print(f"Warning: No valid loss points found for run {run_id}.")
             return
 
+        # Apply step range filtering if specified
+        if step_range is not None:
+            min_step, max_step = step_range
+            loss = [(step, value) for step, value in loss if min_step <= step <= max_step]
+            lr = [(step, value) for step, value in lr if min_step <= step <= max_step]
+            
+            if not loss:
+                print(f"Warning: No loss points found in step range {step_range} for run {run_id}.")
+                return
+
         # Get area data if needed
         nom_area = {}
         if show_area:
@@ -241,7 +252,14 @@ def plot_training(
             if area_metrics:
                 for metric_name in area_metrics.keys():
                     metric_hist = client.get_metric_history(run_id, metric_name)
-                    nom_area[metric_name] = [(m.step + start_step, m.value) for m in metric_hist if np.isfinite(m.value)]
+                    area_data = [(m.step + start_step, m.value) for m in metric_hist if np.isfinite(m.value)]
+                    
+                    # Apply step range filtering if specified
+                    if step_range is not None:
+                        min_step, max_step = step_range
+                        area_data = [(step, value) for step, value in area_data if min_step <= step <= max_step]
+                    
+                    nom_area[metric_name] = area_data
             else:
                 print(f"Warning: No area metrics found for run {run_id}. Area plot will be empty.")
 
@@ -316,7 +334,9 @@ def plot_training(
                     pair_name = metric_name.replace('nominal_area_avg_', '')
                     param1, param2 = pair_name.split('_')[:2]
                     
-                    desi_samples_gd = get_desi_samples(run_params['cosmo_model'])
+                    desi_samples, target_labels, latex_labels = load_desi_samples(run_params['cosmo_model'])
+                    with contextlib.redirect_stdout(io.StringIO()):
+                        desi_samples_gd = getdist.MCSamples(samples=desi_samples, names=target_labels, labels=latex_labels)
                     # Get all area pairs from DESI samples
                     desi_area = get_contour_area([desi_samples_gd], 0.68, param1, param2)[0]["nominal_area_"+pair_name]
 
@@ -370,6 +390,11 @@ def plot_training(
     # Apply log scale if requested
     if log_scale:
         ax1.set_yscale('log')
+
+    # Set x-axis limits if step_range is specified
+    if step_range is not None:
+        min_step, max_step = step_range
+        ax1.set_xlim(min_step, max_step)
 
     # Adjust layout
     fig.set_constrained_layout(True)
@@ -525,14 +550,14 @@ def compare_posterior(
     if colors is not None:
         if len(colors) < len(sorted_group_keys):
             print(f"Warning: Only {len(colors)} colors provided for {len(sorted_group_keys)} groups. Repeating colors.")
-        group_colors = [colors[i % len(colors)] for i in range(len(sorted_group_keys))]
+        group_colors = {group_key: colors[i % len(colors)] for i, group_key in enumerate(sorted_group_keys)}
     else:
         prop_cycle_colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
-        group_colors = [prop_cycle_colors[i % len(prop_cycle_colors)] for i in range(len(sorted_group_keys))]
+        group_colors = {group_key: prop_cycle_colors[i % len(prop_cycle_colors)] for i, group_key in enumerate(sorted_group_keys)}
     
-    for i, group_key in enumerate(sorted_group_keys):
+    for group_key in sorted_group_keys:
         group_runs = grouped_runs[group_key]
-        group_color = group_colors[i]
+        group_color = group_colors[group_key]
         
         # Collect samples for all runs in this group across all ranks
         group_samples = []
@@ -577,10 +602,12 @@ def compare_posterior(
         return
     
     # Add DESI samples
-    desi_samples = get_desi_samples(cosmo_model_for_desi)
+    desi_samples, target_labels, latex_labels = load_desi_samples(cosmo_model_for_desi)
+    with contextlib.redirect_stdout(io.StringIO()):
+        desi_samples_gd = getdist.MCSamples(samples=desi_samples, names=target_labels, labels=latex_labels)
     desi_label = f'DESI ({cosmo_model_for_desi})'
     
-    all_samples.append(desi_samples)
+    all_samples.append(desi_samples_gd)
     all_colors.append('black')
     
     legend_handles.append(
@@ -637,100 +664,6 @@ def compare_posterior(
     if fig_to_close and fig_to_close in plt.get_fignums():
          plt.close(fig_to_close)
 
-def get_contour_area(samples, level, *params, global_rank=None, design_type='nominal'):
-    """
-    Calculate contour areas for parameter pairs.
-    
-    Args:
-        samples: GetDist MCSamples object or list of samples
-        level: Contour level (e.g., 0.68 for 68% confidence)
-        *params: Variable number of parameters. Calculates areas for all possible pairs.
-    
-    Returns:
-        dict: Dictionary with keys as parameter pairs (e.g., "param1_param2") and values as lists of areas
-    """
-    # Generate all possible pairs
-    param_pairs = list(combinations(params, 2))
-
-    samples = [samples] if type(samples) != list else samples
-    areas_list = []
-
-    if len(params) < 2:
-        raise ValueError("At least 2 parameters must be provided")
-    for sample in samples:
-        # Helper function to calculate area for a single parameter pair
-        def calculate_area_for_pair(param1, param2):
-            """Helper function to calculate area for a single parameter pair"""
-            try:
-                # Create a temporary figure for this pair
-                temp_fig, temp_ax = plt.subplots()
-                
-                density = sample.get2DDensity(param1, param2)
-                if density is None:
-                    warnings.warn(f"2D density returned None for {param1}-{param2}. Skipping area calculation.")
-                    plt.close(temp_fig)
-                    if global_rank is not None:
-                        return f"{design_type}_area_{global_rank}_{param1}_{param2}", 0.0
-                    else:
-                        return f"{design_type}_area_{param1}_{param2}", 0.0
-                
-                contour_level = density.getContourLevels([level])[0]
-                
-                # Plot contour on the temporary axes
-                cs = temp_ax.contour(density.x, density.y, density.P, 
-                                    levels=[contour_level])
-                paths = cs.get_paths()
-                
-                # Check if any contours were found at this level
-                if not paths:
-                    warnings.warn(f"No contour found for {param1}-{param2} at level {level}. Assigning area 0.")
-                    plt.close(temp_fig)
-                    if global_rank is not None:
-                        return f"{design_type}_area_{param1}_{param2}_{global_rank}", 0.0
-                    else:
-                        return f"{design_type}_area_{param1}_{param2}", 0.0
-                
-                # Calculate total area by summing areas of all paths
-                total_area = 0.0
-                for path in paths:
-                    vertices = path.vertices
-                    x, y = vertices[:, 0], vertices[:, 1]
-                    
-                    # Calculate area using Shoelace formula for this path
-                    path_area = 0.5 * np.abs(np.dot(x, np.roll(y, 1)) - np.dot(y, np.roll(x, 1)))
-                    total_area += path_area
-                
-                # Close the temporary figure
-                plt.close(temp_fig)
-                if global_rank is not None:
-                    return f"{design_type}_area_{global_rank}_{param1}_{param2}", total_area
-                else:
-                    return f"{design_type}_area_{param1}_{param2}", total_area
-                    
-            except Exception as e:
-                warnings.warn(f"Error calculating area for {param1}-{param2}: {str(e)}. Setting area to 0.")
-                if global_rank is not None:
-                    return f"{design_type}_area_{global_rank}_{param1}_{param2}", 0.0
-                else:
-                    return f"{design_type}_area_{param1}_{param2}", 0.0
-        
-        # Use ThreadPoolExecutor for parallel processing
-        with concurrent.futures.ThreadPoolExecutor() as executor:
-            # Submit all tasks at once
-            future_to_pair = {
-                executor.submit(calculate_area_for_pair, param1, param2): (param1, param2)
-                for param1, param2 in param_pairs
-            }
-        
-        # Collect results as they complete
-        areas_dict = {}
-        for future in concurrent.futures.as_completed(future_to_pair):
-            pair_key, area = future.result()
-            areas_dict[pair_key] = area
-        areas_list.append(areas_dict)
-
-    return areas_list
-
 def compare_training(
         mlflow_exp=None,
         run_ids=None,
@@ -748,7 +681,8 @@ def compare_training(
         area_limits=None,
         show_lr=True,
         dpi=300,
-        colors=None
+        colors=None,
+        step_range=None
         ):
     """
     Compares training loss, learning rate, and posterior contour area evolution
@@ -774,6 +708,7 @@ def compare_training(
         param_pair (str, optional): Parameter pair to compare in format "param1,param2" (e.g., "Om,hrdrag").
         dpi (int): DPI for saving the figure.
         colors (list, optional): List of colors to use for each group. If None, uses default matplotlib colors.
+        step_range (tuple, optional): Tuple of (min_step, max_step) to limit the x-axis range. If None, plots all available steps.
     """
     client = MlflowClient()
     storage_path = os.environ["SCRATCH"] + f"/bed/BED_cosmo/{cosmo_exp}"
@@ -894,6 +829,16 @@ def compare_training(
             if not loss:
                 print(f"Warning: No valid loss points found for run {run_id_iter}. Skipping.")
                 continue
+
+            # Apply step range filtering if specified
+            if step_range is not None:
+                min_step, max_step = step_range
+                loss = [(step, value) for step, value in loss if min_step <= step <= max_step]
+                lr = [(step, value) for step, value in lr if min_step <= step <= max_step]
+                
+                if not loss:
+                    print(f"Warning: No loss points found in step range {step_range} for run {run_id_iter}. Skipping.")
+                    continue
 
             all_metrics_for_runs[run_id_iter] = {
                 'loss': loss,
@@ -1057,6 +1002,11 @@ def compare_training(
                 area_hist_raw = client.get_metric_history(run_id_iter, area_metric_name)
                 area_data = [(m.step + current_start_step, m.value) for m in area_hist_raw if np.isfinite(m.value)]
                 
+                # Apply step range filtering if specified
+                if step_range is not None:
+                    min_step, max_step = step_range
+                    area_data = [(step, value) for step, value in area_data if min_step <= step <= max_step]
+                
                 if area_data:
                     area_steps, area_values = zip(*area_data)
                     sampled_indices = np.arange(0, len(area_steps), sampling_rate)
@@ -1064,7 +1014,9 @@ def compare_training(
                     plot_area_values = np.array(area_values)[sampled_indices]
 
                     # Get DESI area for comparison
-                    desi_samples_gd = get_desi_samples(run_params['cosmo_model'])
+                    desi_samples, target_labels, latex_labels = load_desi_samples(run_params['cosmo_model'])
+                    with contextlib.redirect_stdout(io.StringIO()):
+                        desi_samples_gd = getdist.MCSamples(samples=desi_samples, names=target_labels, labels=latex_labels)
                     desi_area = get_contour_area([desi_samples_gd], 0.68, param1, param2)[0]["nominal_area_"+f"{param1}_{param2}"]
                     
                     # Plot normalized area
@@ -1087,8 +1039,6 @@ def compare_training(
                     positive_mask = plot_lr_values > 0
                     plot_lr_steps_filtered = plot_lr_steps[positive_mask]
                     plot_lr_values_filtered = plot_lr_values[positive_mask]
-                    if len(plot_lr_values_filtered) < len(plot_lr_values):
-                        print(f"Warning: Run {run_id_iter} - Omitted {len(plot_lr_values) - len(plot_lr_values_filtered)} non-positive LR values for log scale plot.")
                     ax_lr.plot(plot_lr_steps_filtered, plot_lr_values_filtered, alpha=base_alpha, color=color, label=plot_label)
                 else:
                     ax_lr.plot(plot_lr_steps, plot_lr_values, alpha=base_alpha, color=color, label=plot_label)
@@ -1149,6 +1099,11 @@ def compare_training(
                 ax_lr.set_ylim(min_lr_overall - lr_pad, max_lr_overall + lr_pad)
             elif np.isfinite(min_lr_overall):
                 ax_lr.set_ylim(min_lr_overall * 0.9, min_lr_overall * 1.1)
+
+    # Set x-axis limits if step_range is specified
+    if step_range is not None:
+        min_step, max_step = step_range
+        ax1.set_xlim(min_step, max_step)
 
     # Adjust layout
     title = f"Training History - {mlflow_exp}" if mlflow_exp else f"Training History - {len(run_data_list)} Run(s)"

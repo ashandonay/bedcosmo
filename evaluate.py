@@ -601,7 +601,7 @@ if __name__ == "__main__":
 
     evaluator.posterior(step=eval_step, display=['nominal'])
     #evaluator.eig_grid(step=eval_step)
-    #evaluator.posterior_steps(steps=[1000, 5000, 20000, 'last'])
+    evaluator.posterior_steps(steps=[5000, 10000, 20000, 'last'])
     #evaluator.eig_steps(steps=[eval_step//4, eval_step//2, 3*eval_step//4, 'last'])
     #evaluator.design_comparison(step=eval_step)
     #evaluator.sample_posterior(step=eval_step, level=0.68, central=True)
