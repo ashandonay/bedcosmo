@@ -111,10 +111,7 @@ class Evaluator:
     @profile_method
     def _get_samples(self, design, flow_model):
         context = torch.cat([design, self.experiment.central_val], dim=-1)
-        samples = self.experiment.get_guide_samples(flow_model, context, num_samples=self.guide_samples, transform_output=self.nf_transform_output).cpu().numpy()
-        with contextlib.redirect_stdout(io.StringIO()):
-            samples_gd = getdist.MCSamples(samples=samples, names=self.experiment.cosmo_params, labels=self.experiment.latex_labels)
-        return samples_gd
+        return self.experiment.get_guide_samples(flow_model, context, num_samples=self.guide_samples, transform_output=self.nf_transform_output)
     
     def posterior(self, step, display=['nominal', 'optimal']):
         """
@@ -470,7 +467,7 @@ class Evaluator:
         plt.tight_layout()
         save_figure(f"{self.save_path}/plots/eig_grid_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png", fig=fig, dpi=400)
 
-    def posterior_steps(self, steps, level=0.68):
+    def posterior_steps(self, steps, level=0.68, global_rank=0):
         """
         Plots posterior distributions at different training steps for a single run.
         
@@ -484,9 +481,9 @@ class Evaluator:
         
         all_samples = []
         all_colors = []
-        areas = []
         custom_legend = []
-
+        pair_keys = [k for k in self.run_obj.data.metrics.keys() if k.startswith(f'nominal_area_{global_rank}_')]
+        pair_names = [p.replace('nominal_area_0_', '') for p in pair_keys]
         checkpoint_dir = f'{self.storage_path}/mlruns/{self.exp_id}/{self.run_id}/artifacts/checkpoints'
         if not os.path.isdir(checkpoint_dir):
             print(f"Warning: Checkpoint directory not found for run {self.run_id}, skipping. Path: {checkpoint_dir}")
@@ -497,7 +494,6 @@ class Evaluator:
             # Convert RGBA color to hex string before extending
             color_hex = matplotlib.colors.to_hex(colors[i % len(colors)])
             all_colors.extend([color_hex] * len(samples))
-            areas.append(np.mean([get_contour_area(samples, level, 'Om', 'hrdrag')[0]['nominal_area_Om_hrdrag'] for s in samples]))
             if step == 'last':
                 step_label = self.run_args["total_steps"]
             elif step == 'loss_best':
@@ -506,13 +502,11 @@ class Evaluator:
                 step_label = step
             custom_legend.append(
                 Line2D([0], [0], color=color_hex, 
-                        label=f'Step {step_label}, {int(level*100)}% Area: {areas[i]:.2f}')
+                        label=f'Step {step_label}')
             )
         desi_samples_gd = self.experiment.get_desi_samples(transform_output=self.desi_transform_output)
-        desi_area = get_contour_area([desi_samples_gd], level, 'Om', 'hrdrag')[0]['nominal_area_Om_hrdrag']
         all_samples.append(desi_samples_gd)
         all_colors.append('black')  
-        areas.append(desi_area)
         g = plot_posterior(all_samples, all_colors, levels=[level], width_inch=12)
         # Remove existing legends if any
         if g.fig.legends:
@@ -521,11 +515,11 @@ class Evaluator:
 
         custom_legend.append(
             Line2D([0], [0], color='black', 
-                label=f'DESI, Area ({int(level*100)}% Contour): {desi_area:.3f}')
+                label=f'DESI')
         )
         
         g.fig.set_constrained_layout(True)
-        leg = g.fig.legend(handles=custom_legend, loc='upper right', bbox_to_anchor=(0.99, 0.96))
+        leg = g.fig.legend(handles=custom_legend, loc='upper right', bbox_to_anchor=(0.99, 0.96), title=f'{int(level*100)}% Level')
         leg.set_in_layout(False)
         g.fig.suptitle(f"Posterior Steps for Run: {self.run_id[:8]}", 
                       fontsize=12)
@@ -601,7 +595,7 @@ if __name__ == "__main__":
 
     evaluator.posterior(step=eval_step, display=['nominal'])
     #evaluator.eig_grid(step=eval_step)
-    evaluator.posterior_steps(steps=[5000, 10000, 20000, 'last'])
+    evaluator.posterior_steps(steps=[10000, 30000, 'last'])
     #evaluator.eig_steps(steps=[eval_step//4, eval_step//2, 3*eval_step//4, 'last'])
     #evaluator.design_comparison(step=eval_step)
     #evaluator.sample_posterior(step=eval_step, level=0.68, central=True)
