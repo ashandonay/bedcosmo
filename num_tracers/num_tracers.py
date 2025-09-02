@@ -657,7 +657,7 @@ class NumTracers:
         return (z_eff.reshape((len(self.cosmo_params))*[1] + [-1]) * self.D_M_func(z_eff, Om, Ok, w0, wa, hrdrag)**2 * self.D_H_func(z_eff, Om, Ok, w0, wa, hrdrag))**(1/3)
 
     @profile_method
-    def get_guide_samples(self, guide, context=None, num_samples=5000, transform_output=True):
+    def get_guide_samples(self, guide, context=None, num_samples=5000, params=None, transform_output=True):
         """
         Samples parameters from the guide (variational distribution).
         Args:
@@ -672,19 +672,49 @@ class NumTracers:
         if self.transform_input and transform_output:
             param_samples = self.params_from_unconstrained(param_samples)
             param_samples[..., -1] *= 100
-        return param_samples
-    
-    def get_desi_samples(self, transform_output=False):
-        desi_samples, target_labels, latex_labels = load_desi_samples(self.cosmo_model)
-        if transform_output:
-            samples = torch.tensor(desi_samples, device=self.device)
-            samples[..., -1] /= 100 # to get hrdrag in units of 100 km/s/Mpc
-            unconstrained_samples = self.params_to_unconstrained(samples, bijector_class=self.desi_bijector)
-            with contextlib.redirect_stdout(io.StringIO()):
-                desi_samples_gd = getdist.MCSamples(samples=unconstrained_samples.cpu().numpy(), names=target_labels, labels=latex_labels)
+
+        if params is None:
+            names = self.cosmo_params
+            labels = self.latex_labels
         else:
-            with contextlib.redirect_stdout(io.StringIO()):
-                desi_samples_gd = getdist.MCSamples(samples=desi_samples, names=target_labels, labels=latex_labels)
+            param_indices = [self.cosmo_params.index(param) for param in params if param in self.cosmo_params]
+            param_samples = param_samples[:, param_indices]
+            names = [self.cosmo_params[i] for i in param_indices]
+            labels = [self.latex_labels[i] for i in param_indices]
+        
+        # Check for any constant columns and add tiny noise to prevent getdist from excluding them
+        for i in range(param_samples.shape[1]):
+            col = param_samples[:, i]
+            if torch.all(col == col[0]):
+                print(f"Column {i} ({names[i]}) is constant with value {col[0]}, adding tiny noise")
+                # Add tiny noise to make it non-constant (1e-10 times the value)
+                noise_scale = abs(col[0]) * 1e-10
+                param_samples[:, i] = col + torch.randn_like(col) * noise_scale
+        
+        with contextlib.redirect_stdout(io.StringIO()):
+            param_samples_gd = getdist.MCSamples(samples=param_samples.cpu().numpy(), names=names, labels=labels)
+
+        return param_samples_gd
+    
+    def get_desi_samples(self, num_samples=1000000, params=None, transform_output=False):
+        param_samples, target_labels, latex_labels = load_desi_samples(self.cosmo_model)
+        param_samples = param_samples[:num_samples]
+        if transform_output:
+            param_samples = torch.tensor(param_samples, device=self.device)
+            param_samples[..., -1] /= 100 # to get hrdrag in units of 100 km/s/Mpc
+            param_samples = self.params_to_unconstrained(param_samples, bijector_class=self.desi_bijector).cpu().numpy()
+        
+        if params is None:
+            names = target_labels
+            labels = latex_labels
+        else:
+            param_indices = [target_labels.index(param) for param in params if param in target_labels]
+            param_samples = param_samples[:, param_indices]
+            names = [target_labels[i] for i in param_indices]
+            labels = [latex_labels[i] for i in param_indices]
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            desi_samples_gd = getdist.MCSamples(samples=param_samples, names=names, labels=labels)
 
         return desi_samples_gd
 
