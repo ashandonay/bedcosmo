@@ -45,7 +45,7 @@ import contextlib
 from plotting import get_contour_area, plot_training, save_figure
 import getdist.mcsamples
 
-class FlowLikelihoodDataset(Dataset):
+class LikelihoodDataset(Dataset):
     def __init__(self, experiment, n_particles_per_device, device="cuda"):
         self.experiment = experiment
         self.n_particles_per_device = n_particles_per_device
@@ -186,8 +186,11 @@ class Trainer:
                 # Backpropagation
                 agg_loss.backward()
 
-                # Gradient clipping
-                torch.nn.utils.clip_grad_norm_(self.posterior_flow.parameters(), max_norm=1.0)
+                # Optional gradient clipping for stability
+                grad_clip = self.run_args.get("grad_clip", 0.0)
+                if grad_clip > 0:
+                    print(f"Clipping gradients to {grad_clip}")
+                    torch.nn.utils.clip_grad_norm_(self.posterior_flow.parameters(), max_norm=float(grad_clip))
 
                 # Optimizer step
                 self.optimizer.step()
@@ -211,9 +214,7 @@ class Trainer:
                         'local_agg_loss': agg_loss.detach().item()
                     })
                     if self.run_args["log_nominal_area"]:
-                        nominal_samples = self.experiment.get_guide_samples(self.posterior_flow, self.experiment.nominal_context, num_samples=5000).cpu().numpy()
-                        with contextlib.redirect_stdout(io.StringIO()):
-                            nominal_samples_gd = getdist.mcsamples.MCSamples(samples=nominal_samples, names=self.experiment.cosmo_params, labels=self.experiment.latex_labels)
+                        nominal_samples_gd = self.experiment.get_guide_samples(self.posterior_flow, self.experiment.nominal_context, num_samples=5000)
                         local_nominal_areas = get_contour_area(nominal_samples_gd, 0.68, *self.experiment.cosmo_params, global_rank=self.global_rank, design_type='nominal')[0]
                         
                         # Log metrics per rank with tags instead of rank labels
@@ -475,7 +476,7 @@ class Trainer:
 
     def _init_dataloader(self, batch_size=1, num_workers=0):
         # Create dataset with designs on GPU
-        dataset = FlowLikelihoodDataset(
+        dataset = LikelihoodDataset(
             experiment=self.experiment,
             n_particles_per_device=self.run_args["n_particles_per_device"],
             device=f"cuda:{self.pytorch_device_idx}"

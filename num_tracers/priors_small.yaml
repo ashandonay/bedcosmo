@@ -3,40 +3,40 @@ parameters:
   Om:
     distribution: 
       type: "uniform"
-      lower: 0.01
-      upper: 0.99
+      lower: 0.25
+      upper: 0.35
     latex: "\\Omega_m"
     
   # Curvature density parameter  
   Ok:
     distribution: 
       type: "uniform"
-      lower: -0.3
-      upper: 0.3
+      lower: -0.05
+      upper: 0.05
     latex: "\\Omega_k"
     
   # Dark energy equation of state parameter
   w0:
     distribution: 
       type: "uniform"
-      lower: -3.0
-      upper: 1.0
+      lower: -1.05
+      upper: -0.95
     latex: "w_0"
     
   # Dark energy equation of state evolution parameter
   wa:
     distribution: 
       type: "uniform"
-      lower: -3.0
-      upper: 2.0
+      lower: -0.05
+      upper: 0.05
     latex: "w_a"
     
   # Hubble parameter times sound horizon
   hrdrag:
     distribution:
       type: "uniform"
-      lower: 10.0
-      upper: 1000.0
+      lower: 95.0
+      upper: 105.0
     latex: "H_0 r_d"
 
 # Parameter constraints

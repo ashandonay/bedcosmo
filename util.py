@@ -538,6 +538,11 @@ def init_nf(
         n_transforms = int(run_args.get("n_transforms", 2))
         cond_n_layers = int(run_args.get("cond_n_layers", 2))
         cond_hidden_size = int(run_args.get("cond_hidden_size", 64))
+        activation_type = run_args.get("activation", "ReLU")
+        if activation_type == "ReLU":
+            activation = torch.nn.ReLU()
+        elif activation_type == "ELU":
+            activation = torch.nn.ELU()
 
         # Initialize the flow model
         if flow_type == "NSF":
@@ -548,6 +553,7 @@ def init_nf(
                 bins=int(run_args.get("spline_bins")),
                 randperm=True,
                 hidden_features=((cond_hidden_size,) * cond_n_layers),
+                activation=activation,
                 **kwargs
             )
         elif flow_type == "NAF":
@@ -557,8 +563,12 @@ def init_nf(
                 transforms=n_transforms,
                 signal=int(run_args.get("mnn_signal")),
                 randperm=True,
-                network={"hidden_features": ((int(run_args.get("mnn_hidden_size", 64)),) * int(run_args.get("mnn_n_layers", 2)))},
-                hidden_features=((cond_hidden_size,) * cond_n_layers) # for the conditional network
+                network={
+                    "hidden_features": ((int(run_args.get("mnn_hidden_size", 64)),) * int(run_args.get("mnn_n_layers", 2))),
+                    "activation": activation
+                    },
+                hidden_features=((cond_hidden_size,) * cond_n_layers), # for the conditional network
+                activation=activation,
                 )
         elif flow_type == "MAF":
             transform = run_args.get("nf_transform", None)
@@ -575,6 +585,7 @@ def init_nf(
                 randperm=True,
                 univariate=univariate,
                 hidden_features=((cond_hidden_size,) * cond_n_layers), # for the conditional network
+                activation=activation,
                 **kwargs
                 )
         elif flow_type == "NICE":
@@ -582,19 +593,86 @@ def init_nf(
                 features=input_dim, 
                 context=context_dim, 
                 transforms=n_transforms,
+                activation=activation,
                 **kwargs
                 )
         elif flow_type == "GF":
             posterior_flow = zuko.flows.GF(
                 features=input_dim, 
                 context=context_dim, 
-                transforms=n_transforms
+                transforms=n_transforms,
+                activation=activation,
                 )
         else:
             raise ValueError(f"Unknown flow type: {flow_type}")
 
         # Move to the correct device
         posterior_flow.to(device)
+
+        with torch.no_grad():
+            # 1) Generic linear layers: Use He initialization for ReLU networks
+            for module in posterior_flow.modules():
+                cls = module.__class__.__name__
+                if isinstance(module, torch.nn.Linear) or cls.endswith("Linear"):
+                    if activation_type == "ReLU":
+                        torch.nn.init.kaiming_uniform_(module.weight, mode='fan_out', nonlinearity='relu')
+                    else:
+                        torch.nn.init.xavier_uniform_(module.weight, gain=0.8)
+
+                    if getattr(module, "bias", None) is not None:
+                        torch.nn.init.zeros_(module.bias)
+
+            # 2) Initialize hypernetworks to produce small but non-zero transform parameters
+            for name, sub in posterior_flow.named_modules():
+                lname = name.lower()
+                if any(k in lname for k in ("condition", "hyper", "context")):
+                    last_linear = None
+                    for child in sub.modules():
+                        if isinstance(child, torch.nn.Linear):
+                            last_linear = child
+                    if last_linear is not None:
+                        try:
+                            torch.nn.init.normal_(last_linear.weight, mean=0.0, std=0.01)
+                            if getattr(last_linear, "bias", None) is not None:
+                                torch.nn.init.zeros_(last_linear.bias)
+                        except Exception:
+                            pass
+
+            # 3) NAF-specific: keep monotonic layers small but not vanishing.
+            if flow_type == "NAF":
+                for module in posterior_flow.modules():
+                    cls = module.__class__.__name__
+                    if "Monotonic" in cls and hasattr(module, "weight"):
+                        torch.nn.init.xavier_uniform_(module.weight, gain=0.5)
+                        if getattr(module, "bias", None) is not None:
+                            torch.nn.init.zeros_(module.bias)
+
+                # If the base distribution exposes a scale parameter, set it appropriately
+                # for unconstrained parameter space.
+                try:
+                    if hasattr(posterior_flow, "base") and hasattr(posterior_flow.base, "scale"):
+                        # Use scale=1.0 for unconstrained space (better than 0.5)
+                        posterior_flow.base.scale.data.fill_(1.0)
+                except Exception:
+                    pass
+                
+                # 4) Additional NAF-specific improvements to prevent plateaus
+                # Initialize the final layers of univariate networks to be close to identity
+                # but with small random perturbations to break symmetry
+                for name, module in posterior_flow.named_modules():
+                    if "univariate" in name.lower() and hasattr(module, "network"):
+                        # Find the last linear layer in the univariate network
+                        last_layer = None
+                        for child in module.network:
+                            if isinstance(child, torch.nn.Linear) and child.out_features == 1:
+                                last_layer = child
+                                break
+                        
+                        if last_layer is not None:
+                            # Initialize to small values with some randomness
+                            torch.nn.init.normal_(last_layer.weight, mean=0.0, std=0.05)
+                            if getattr(last_layer, "bias", None) is not None:
+                                torch.nn.init.zeros_(last_layer.bias)
 
     return posterior_flow
 
@@ -743,12 +821,6 @@ def init_scheduler(optimizer, run_args):
     else:
         raise ValueError(f"Unknown scheduler_type: {run_args['scheduler_type']}")
     
-    # Log warmup information if warmup is enabled
-    if warmup_steps > 0:
-        print(f"Learning rate warmup enabled: {warmup_steps} steps ({warmup_fraction:.1%} of total steps)")
-        print(f"  Warmup: 0.0 → {initial_lr}")
-        print(f"  Schedule: {initial_lr} → {final_lr} over {run_args['total_steps'] - warmup_steps} steps")
-    
     return scheduler
 
 def get_runs_data(mlflow_exp=None, run_ids=None, excluded_runs=[], filter_string=None, parse_params=True):
@@ -857,11 +929,9 @@ def get_nominal_samples(run_obj, run_args, guide_samples=101, seed=1, device="cu
     central_vals = experiment.central_val if run_args.get("include_D_M", False) else experiment.central_val[1::2]
     nominal_context = torch.cat([nominal_design, central_vals], dim=-1)
 
-    nominal_samples = experiment.get_guide_samples(posterior_flow, nominal_context, num_samples=guide_samples).cpu().numpy()
+    nominal_samples = experiment.get_guide_samples(posterior_flow, nominal_context, num_samples=guide_samples)
 
-    with contextlib.redirect_stdout(io.StringIO()):
-        samples = getdist.MCSamples(samples=nominal_samples, names=experiment.cosmo_params, labels=experiment.latex_labels, settings={'ignore_rows': 0.0})
-    return samples, selected_step
+    return nominal_samples, selected_step
 
 def init_experiment(
         run_obj,

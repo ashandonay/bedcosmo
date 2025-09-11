@@ -148,7 +148,7 @@ def plot_posterior(samples, colors, legend_labels=None, show_scatter=False, line
                                 param_y,
                                 color=colors[k],
                                 ax=ax,
-                                scatter_size=1,
+                                scatter_size=4,
                                 alpha=0.8,
                             )
 
@@ -168,13 +168,13 @@ def plot_training(
         run_id,
         var=None,
         cosmo_exp='num_tracers',
-        log_scale=False,
+        log_scale=True,
         loss_step_freq=10,
         start_step=0,
         area_step_freq=100,
         lr_step_freq=1,
         show_area=True,
-        area_limits=None,
+        area_limits=[0.0, 5.0],
         show_lr=True,
         dpi=300,
         step_range=None
@@ -742,19 +742,27 @@ def compare_training(
         group_key = []
         is_valid_for_grouping = True
         
-        for v_key in vars_list:
-            if v_key in current_params:
-                value = current_params[v_key]
-                group_key.append(value)
-            else:
-                is_valid_for_grouping = False
-                break
-        
-        if is_valid_for_grouping:
-            group_key_tuple = tuple(group_key)
+        # If var is None, treat each run as its own group using run_id
+        if not vars_list:
+            group_key_tuple = (run_data_item['run_id'],)
             if group_key_tuple not in grouped_runs:
                 grouped_runs[group_key_tuple] = []
             grouped_runs[group_key_tuple].append(run_data_item)
+        else:
+            # Original logic for when var is specified
+            for v_key in vars_list:
+                if v_key in current_params:
+                    value = current_params[v_key]
+                    group_key.append(value)
+                else:
+                    is_valid_for_grouping = False
+                    break
+            
+            if is_valid_for_grouping:
+                group_key_tuple = tuple(group_key)
+                if group_key_tuple not in grouped_runs:
+                    grouped_runs[group_key_tuple] = []
+                grouped_runs[group_key_tuple].append(run_data_item)
 
     # Sort groups for consistent ordering - descending for numerical, alphabetical for text
     def custom_sort_key(group_key):
@@ -789,17 +797,22 @@ def compare_training(
         group_key = []
         is_valid_for_grouping = True
         
-        for v_key in vars_list:
-            if v_key in current_params:
-                group_key.append(current_params[v_key])
-            else:
-                is_valid_for_grouping = False
-                break
-        
-        if is_valid_for_grouping:
-            run_to_group[run_id_iter] = tuple(group_key)
+        # If var is None, each run is its own group
+        if not vars_list:
+            run_to_group[run_id_iter] = (run_id_iter,)
         else:
-            run_to_group[run_id_iter] = None
+            # Original logic for when var is specified
+            for v_key in vars_list:
+                if v_key in current_params:
+                    group_key.append(current_params[v_key])
+                else:
+                    is_valid_for_grouping = False
+                    break
+            
+            if is_valid_for_grouping:
+                run_to_group[run_id_iter] = tuple(group_key)
+            else:
+                run_to_group[run_id_iter] = None
 
     # --- Data Fetching (Metrics) ---
     all_metrics_for_runs = {}  # Keyed by run_id
@@ -961,11 +974,16 @@ def compare_training(
             color = 'gray'  # Use gray for runs that don't match grouping criteria
 
         # Create label from group key
-        label_parts = []
-        for v_key in vars_list:
-            if v_key in run_params:
-                label_parts.append(f"{v_key}={run_params[v_key]}")
-        base_label = ", ".join(label_parts) if label_parts else run_id_iter[:8]
+        if not vars_list:
+            # When var is None, use run_id as the label
+            base_label = run_id_iter[:8]
+        else:
+            # Original logic for when var is specified
+            label_parts = []
+            for v_key in vars_list:
+                if v_key in run_params:
+                    label_parts.append(f"{v_key}={run_params[v_key]}")
+            base_label = ", ".join(label_parts) if label_parts else run_id_iter[:8]
 
         # Only add label if this group hasn't been added to legend yet
         should_add_label = group_key_tuple not in legend_entries_added if is_valid_for_grouping else run_id_iter not in legend_entries_added
