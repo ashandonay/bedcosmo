@@ -538,11 +538,19 @@ def init_nf(
         n_transforms = int(run_args.get("n_transforms", 2))
         cond_n_layers = int(run_args.get("cond_n_layers", 2))
         cond_hidden_size = int(run_args.get("cond_hidden_size", 64))
-        activation_type = run_args.get("activation", "ReLU")
-        if activation_type == "ReLU":
-            activation = torch.nn.ReLU()
-        elif activation_type == "ELU":
-            activation = torch.nn.ELU()
+        activation_type = run_args.get("activation", "ReLU").lower()
+        if activation_type == "relu":
+            activation = torch.nn.ReLU # Rectified Linear Unit
+        elif activation_type == "elu":
+            activation = torch.nn.ELU # Exponential Linear Unit
+        elif activation_type == "sigmoid":
+            activation = torch.nn.Sigmoid # Sigmoid
+        elif activation_type == "tanh":
+            activation = torch.nn.Tanh # Hyperbolic Tangent
+        elif activation_type == "softplus":
+            activation = torch.nn.Softplus # Softplus
+        else:
+            raise ValueError(f"Unknown activation function: {activation_type}")
 
         # Initialize the flow model
         if flow_type == "NSF":
@@ -584,7 +592,7 @@ def init_nf(
                 transforms=n_transforms,
                 randperm=True,
                 univariate=univariate,
-                hidden_features=((cond_hidden_size,) * cond_n_layers), # for the conditional network
+                hidden_features=((cond_hidden_size,) * cond_n_layers),
                 activation=activation,
                 **kwargs
                 )
@@ -601,6 +609,7 @@ def init_nf(
                 features=input_dim, 
                 context=context_dim, 
                 transforms=n_transforms,
+                hidden_features=((cond_hidden_size,) * cond_n_layers),
                 activation=activation,
                 )
         else:
@@ -608,13 +617,13 @@ def init_nf(
 
         # Move to the correct device
         posterior_flow.to(device)
-
+        
         with torch.no_grad():
             # 1) Generic linear layers: Use He initialization for ReLU networks
             for module in posterior_flow.modules():
                 cls = module.__class__.__name__
                 if isinstance(module, torch.nn.Linear) or cls.endswith("Linear"):
-                    if activation_type == "ReLU":
+                    if activation_type == "relu":
                         torch.nn.init.kaiming_uniform_(module.weight, mode='fan_out', nonlinearity='relu')
                     else:
                         torch.nn.init.xavier_uniform_(module.weight, gain=0.8)
@@ -673,7 +682,6 @@ def init_nf(
                             torch.nn.init.normal_(last_layer.weight, mean=0.0, std=0.05)
                             if getattr(last_layer, "bias", None) is not None:
                                 torch.nn.init.zeros_(last_layer.bias)
-
     return posterior_flow
 
 def init_scheduler(optimizer, run_args):

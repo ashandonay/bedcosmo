@@ -40,9 +40,8 @@ import gc
 from util import *
 import json
 import argparse
-import io
-import contextlib
-from plotting import get_contour_area, plot_training, save_figure
+import traceback
+from plotting import get_contour_area, plot_training, save_figure, plot_posterior
 import getdist.mcsamples
 
 class LikelihoodDataset(Dataset):
@@ -160,11 +159,11 @@ class Trainer:
         if self.is_tty and self.global_rank == 0 and not self.profile:
             pbar = tqdm(total=self.run_args["total_steps"] - self.start_step, desc="Training Progress", position=0, leave=True)
 
+        # Restore RNG state at the beginning if using a checkpoint
+        if self.checkpoint is not None:
+            self._restore_state()
+
         while step < self.run_args["total_steps"]:
-            # Restore RNG state right before the first training step if resuming from checkpoint
-            if step == self.start_step and self.checkpoint is not None:
-                restore_state(self.checkpoint, self.start_step, self.global_rank)
-            
             self._init_dataloader()
 
             for context, samples in self.dataloader:
@@ -215,6 +214,11 @@ class Trainer:
                     })
                     if self.run_args["log_nominal_area"]:
                         nominal_samples_gd = self.experiment.get_guide_samples(self.posterior_flow, self.experiment.nominal_context, num_samples=5000)
+                        desi_samples_gd = self.experiment.get_desi_samples(num_samples=5000, params=self.experiment.cosmo_params, transform_output=False)
+                        plt.figure()
+                        plot_posterior([nominal_samples_gd, desi_samples_gd], ['tab:blue', 'black'], legend_labels=['NF', 'MCMC'], levels=[0.68], width_inch=12, show_scatter=[True, False])
+                        plt.savefig(f"{self.storage_path}/mlruns/{self.run_obj.info.experiment_id}/{self.run_obj.info.run_id}/artifacts/plots/posterior/rank_{self.global_rank}/{step}.png")
+                        plt.close('all')
                         local_nominal_areas = get_contour_area(nominal_samples_gd, 0.68, *self.experiment.cosmo_params, global_rank=self.global_rank, design_type='nominal')[0]
                         
                         # Log metrics per rank with tags instead of rank labels
@@ -566,10 +570,6 @@ class Trainer:
             if self.global_rank == 0:
                 if self.priors_run_path is not None:
                     self._save_priors_file()
-
-                # Create artifact directories
-                os.makedirs(f"{self.storage_path}/mlruns/{mlflow.active_run().info.experiment_id}/{mlflow.active_run().info.run_id}/artifacts/checkpoints", exist_ok=True)
-                os.makedirs(f"{self.storage_path}/mlruns/{mlflow.active_run().info.experiment_id}/{mlflow.active_run().info.run_id}/artifacts/plots", exist_ok=True)
                 
                 # Prepare tensors for broadcasting
                 tensors = self._prepare_broadcast_tensors()
@@ -598,6 +598,16 @@ class Trainer:
                 self.global_rank, 
                 total_steps=self.run_args.get("total_steps")
                 )
+            
+            # Validate that the loaded checkpoint step matches the requested resume step
+            if self.start_step != self.run_args["resume_step"]:
+                if self.global_rank == 0:
+                    print(f"Warning: Requested resume step {self.run_args['resume_step']} not found.")
+                    print(f"  Loaded checkpoint from step {self.start_step} instead.")
+                    print(f"  This may cause loss discontinuity.")
+                # Update the resume_step to match the actual loaded step
+                self.run_args["resume_step"] = self.start_step
+            
             # Validate checkpoint compatibility for resume mode
             validate_checkpoint_compatibility(self.checkpoint, self.run_args, mode="resume", global_rank=self.global_rank)
             if self.global_rank == 0:
@@ -649,7 +659,8 @@ class Trainer:
             mlflow.set_experiment(experiment_id=str(tensors['exp_id'].item()))
             mlflow.start_run(run_id=tensors['run_id'][0], nested=True)
             self.run_obj = mlflow.active_run()
-
+        os.makedirs(f"{self.storage_path}/mlruns/{mlflow.active_run().info.experiment_id}/{mlflow.active_run().info.run_id}/artifacts/checkpoints", exist_ok=True)
+        os.makedirs(f"{self.storage_path}/mlruns/{mlflow.active_run().info.experiment_id}/{mlflow.active_run().info.run_id}/artifacts/plots/posterior/rank_{self.global_rank}", exist_ok=True)
         # Broadcast run_args from rank 0 to ensure consistency, especially for 'steps' when resuming with add_steps
         if self.global_rank == 0:
             run_args_list_to_broadcast = [self.run_args]
@@ -661,6 +672,53 @@ class Trainer:
         
         tdist.broadcast_object_list(run_args_list_to_broadcast, src=0)
         self.run_args = run_args_list_to_broadcast[0] # All ranks now have the definitive run_args
+
+    def _restore_state(self):
+        # Restore RNG state at the beginning of each step if resuming from checkpoint
+        
+        # Handle Pyro's RNG state restoration (includes torch, random, and numpy)
+        try:
+            rng_state = self.checkpoint['rng_state']
+            pyro_state = rng_state['pyro']
+            if pyro_state is None:
+                if self.global_rank == 0:
+                    print("Warning: Pyro RNG state is None, skipping restoration")
+                return
+            
+            # Ensure the torch state in Pyro's state has the correct dtype and is on CPU
+            if isinstance(pyro_state, dict) and 'torch' in pyro_state:
+                torch_state = pyro_state['torch']
+                if isinstance(torch_state, torch.Tensor):
+                    # Move to CPU first, then ensure correct dtype
+                    torch_state = torch_state.cpu()
+                    if torch_state.dtype != torch.uint8:
+                        # Convert to uint8 if it's not already
+                        torch_state = torch_state.to(torch.uint8)
+                elif isinstance(torch_state, (list, np.ndarray)):
+                    # Convert from list/array to uint8 tensor on CPU
+                    torch_state = torch.tensor(torch_state, dtype=torch.uint8, device='cpu')
+                else:
+                    # If we can't convert, skip Pyro RNG restoration
+                    raise ValueError(f"Cannot convert torch state of type {type(torch_state)} to uint8 tensor")
+                pyro_state['torch'] = torch_state
+            
+            pyro.util.set_rng_state(pyro_state)  # Pyro's RNG state for deterministic sampling
+            
+            # Restore CUDA RNG states separately (not handled by Pyro)
+            if torch.cuda.is_available() and 'cuda' in rng_state and rng_state['cuda'] is not None:
+                torch.cuda.set_rng_state_all([state.cpu() for state in rng_state['cuda']])
+            
+            # Also restore Pyro's param store state if it exists in the checkpoint
+            if 'pyro_param_state' in rng_state:
+                pyro.get_param_store().set_state(rng_state['pyro_param_state'])
+
+            if self.global_rank == 0:
+                print(f"RNG state restored at step {self.start_step}")
+                
+        except Exception as e:
+            if self.global_rank == 0:
+                print(f"Warning: Could not restore RNG state: {e}. Continuing with current state.")
+                traceback.print_exc()
 
     def _save_priors_file(self):
         """Save priors file to artifacts."""
@@ -693,7 +751,7 @@ class Trainer:
         changed_params = {}
         
         # Common parameters that apply to all flow types
-        common_params = ["cosmo_model", "flow_type", "n_transforms", "cond_hidden_size", "cond_n_layers"]
+        common_params = ["cosmo_model", "flow_type", "n_transforms", "activation", "cond_hidden_size", "cond_n_layers"]
         
         # Store original values and update common parameters
         for param in common_params:
@@ -707,7 +765,7 @@ class Trainer:
         # Flow-specific parameters
         flow_type = ref_run.data.params["flow_type"]
         flow_specific_params = {
-            "MAF": ["transform"],
+            "MAF": ["nf_transform"],
             "NAF": ["mnn_signal", "mnn_hidden_size", "mnn_n_layers"],
             "NSF": ["spline_bins"]
         }
@@ -791,8 +849,13 @@ class Trainer:
             self.scheduler = init_scheduler(self.optimizer, self.run_args)
             
             # Load scheduler state if it exists (preserve original scheduler state for resume)
-            if 'scheduler_state_dict' in self.checkpoint:
+            if 'scheduler_state_dict' in self.checkpoint:            
                 self.scheduler.load_state_dict(self.checkpoint['scheduler_state_dict'])
+                
+                # Update optimizer learning rate to match scheduler's _last_lr
+                if hasattr(self.scheduler, '_last_lr') and self.scheduler._last_lr:
+                    for param_group in self.optimizer.param_groups:
+                        param_group['lr'] = self.scheduler._last_lr[0]
                 
                 if self.global_rank == 0:
                     print("Scheduler state restored from checkpoint")

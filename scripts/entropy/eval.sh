@@ -5,7 +5,7 @@ GPUS=1
 
 torchrun \
     --nproc_per_node=$GPUS \
-    num_tracers/evaluate.py \
+    evaluate.py \
     --run_id 0957d8ba072e4511acfc7d07afc5dc8e \
     --eval_step last \
     --global_rank "[0, 1]" \

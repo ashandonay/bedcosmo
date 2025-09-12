@@ -8,7 +8,7 @@ hidden_size=128
     
 torchrun \
     --nproc_per_node=$GPUS \
-    num_tracers/n_tracers_train.py \
+    train.py \
     --cosmo_model base_omegak_w_wa \
     --mlflow_exp base_omegak_w_wa \
     --cosmo_exp num_tracers \
