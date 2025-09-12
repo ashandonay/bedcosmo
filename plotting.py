@@ -36,7 +36,8 @@ def plot_posterior(samples, colors, legend_labels=None, show_scatter=False, line
         samples (list): List of GetDist MCSamples objects.
         colors (list): List of colors for each sample.
         legend_labels (list, optional): List of legend labels for each sample.
-        show_scatter (bool): If True, show scatter/histograms on the 1D/2D plots.
+        show_scatter (bool or list): If True, show scatter/histograms on the 1D/2D plots for all samples.
+            If a list, specifies whether to show scatter for each sample individually.
         line_style (str or list): Line style for contours. Can be a single string or a list of strings corresponding to each sample.
         alpha (float or list): Alpha value for the contours. Can be a single float or a list of floats corresponding to each sample.
         levels (float or list, optional): Contour levels to use (e.g., 0.68 or [0.68, 0.95]).
@@ -79,6 +80,18 @@ def plot_posterior(samples, colors, legend_labels=None, show_scatter=False, line
             # Truncate if too many elements
             line_style = line_style[:len(samples)]
 
+    # Handle show_scatter - convert to list if it's a boolean
+    if isinstance(show_scatter, bool):
+        show_scatter = [show_scatter] * len(samples)
+    elif isinstance(show_scatter, list):
+        # If it's already a list, ensure it has enough elements
+        if len(show_scatter) < len(samples):
+            # Extend the list by repeating the last element
+            show_scatter = show_scatter + [show_scatter[-1]] * (len(samples) - len(show_scatter))
+        elif len(show_scatter) > len(samples):
+            # Truncate if too many elements
+            show_scatter = show_scatter[:len(samples)]
+
     # Set line styles in GetDist settings
     g.settings.line_styles = line_style
     g.settings.plot_args = {'alpha': alpha}
@@ -117,17 +130,18 @@ def plot_posterior(samples, colors, legend_labels=None, show_scatter=False, line
     param_names = g.param_names_for_root(samples[0])
     param_name_list = [p.name for p in param_names.names]
 
-    if show_scatter:
+    if any(show_scatter):
         for i, param in enumerate(param_name_list):
             if i < len(g.subplots) and i < len(g.subplots[i]):
                 ax = g.subplots[i][i]
                 current_ylim = ax.get_ylim()
                 for k, sample in enumerate(samples):
-                    param_index = sample.paramNames.list().index(param)
-                    if param_index is not None:
-                        values = sample.samples[:, param_index]
-                        ax.hist(values, bins=30, alpha=0.5, color=colors[k],
-                                density=True, histtype='stepfilled', zorder=1)
+                    if show_scatter[k]:  # Only show scatter for this sample if enabled
+                        param_index = sample.paramNames.list().index(param)
+                        if param_index is not None:
+                            values = sample.samples[:, param_index]
+                            ax.hist(values, bins=30, alpha=0.5, color=colors[k],
+                                    density=True, histtype='stepfilled', zorder=1)
                 ax.set_ylim(current_ylim)
 
         param_combinations = [
@@ -142,15 +156,16 @@ def plot_posterior(samples, colors, legend_labels=None, show_scatter=False, line
                     if param_name_list[i] == param_y and param_name_list[j] == param_x:
                         ax = g.subplots[i][j]
                         for k, sample in enumerate(samples):
-                            g.add_2d_scatter(
-                                sample,
-                                param_x,
-                                param_y,
-                                color=colors[k],
-                                ax=ax,
-                                scatter_size=4,
-                                alpha=0.8,
-                            )
+                            if show_scatter[k]:  # Only show scatter for this sample if enabled
+                                g.add_2d_scatter(
+                                    sample,
+                                    param_x,
+                                    param_y,
+                                    color=colors[k],
+                                    ax=ax,
+                                    scatter_size=4,
+                                    alpha=0.8,
+                                )
 
     return g
 
