@@ -98,6 +98,8 @@ class NumTracers:
             ], dim=-1)
         
         # initialize the priors
+        with open(priors_path, 'r') as file:
+            self.prior_data = yaml.safe_load(file)
         self.priors, self.param_constraints, self.latex_labels = self.get_priors(priors_path)
         self.desi_priors, _, _ = self.get_priors(home_dir + data_path + 'priors.yaml')
         self.cosmo_params = list(self.priors.keys())
@@ -696,7 +698,7 @@ class NumTracers:
 
         return param_samples_gd
     
-    def get_desi_samples(self, num_samples=1000000, params=None, transform_output=False):
+    def get_desi_samples(self, num_samples=1000, params=None, transform_output=False):
         param_samples, target_labels, latex_labels = load_desi_samples(self.cosmo_model)
         param_samples = param_samples[:num_samples]
         if transform_output:

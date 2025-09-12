@@ -37,7 +37,9 @@ def plot_posterior(
     alpha=1.0, 
     levels=[0.68, 0.95], 
     width_inch=7, 
-    ranges=None
+    ranges=None,
+    scatter_alpha=0.6,
+    contour_alpha_factor=0.8
     ):
     """
     Plots posterior distributions using GetDist triangle plots.
@@ -56,6 +58,8 @@ def plot_posterior(
         width_inch (float): Width of the plot in inches. Higher values increase resolution.
         ranges (dict, optional): Dictionary specifying fixed ranges for parameters. 
             Keys should be parameter names, values should be tuples of (min, max).
+        scatter_alpha (float): Alpha value for scatter points. Default 0.6 for better distinguishability.
+        contour_alpha_factor (float): Factor to adjust contour alpha for distinguishability. Default 0.8.
     Returns:
         g: GetDist plotter object with the generated triangle plot.
     """
@@ -79,6 +83,19 @@ def plot_posterior(
             return str(c)
 
     colors = [convert_color(c) for c in colors]
+
+    # Create adjusted colors for contours and scatter points
+    def adjust_color_brightness(color, factor):
+        """Adjust color brightness by a factor (0-1 makes darker, >1 makes lighter)"""
+        import matplotlib.colors as mcolors
+        rgb = mcolors.to_rgb(color)
+        # Make darker by multiplying by factor
+        adjusted_rgb = tuple(min(1.0, c * factor) for c in rgb)
+        return mcolors.to_hex(adjusted_rgb)
+    
+    # Create slightly darker colors for contours and lighter for scatter
+    contour_colors = [adjust_color_brightness(c, 0.8) for c in colors]  # Darker contours
+    scatter_colors = [adjust_color_brightness(c, 1.2) for c in colors]  # Lighter scatter
 
     # Handle line_style - convert to list if it's a string
     if isinstance(line_style, str):
@@ -106,7 +123,12 @@ def plot_posterior(
 
     # Set line styles in GetDist settings
     g.settings.line_styles = line_style
-    g.settings.plot_args = {'alpha': alpha}
+    # Apply contour alpha factor for better distinguishability
+    if isinstance(alpha, (int, float)):
+        adjusted_alpha = alpha * contour_alpha_factor
+    else:
+        adjusted_alpha = [a * contour_alpha_factor for a in alpha]
+    g.settings.plot_args = {'alpha': adjusted_alpha}
     
     # Additional settings for higher resolution
     g.settings.solid_contour_palefactor = 0.6
@@ -128,13 +150,12 @@ def plot_posterior(
     # Create triangle plot
     g.triangle_plot(
         samples,
-        colors=colors,
+        colors=contour_colors,
         legend_labels=legend_labels,
         filled=False,
         normalized=True,
-        ranges=ranges,
         diag1d_kwargs={
-            'colors': colors,
+            'colors': contour_colors,
             'normalized': True
         },
         show=False
@@ -142,6 +163,21 @@ def plot_posterior(
 
     param_names = g.param_names_for_root(samples[0])
     param_name_list = [p.name for p in param_names.names]
+    
+    # Manual axis limits if ranges is provided and didn't work
+    if ranges is not None:
+        # Set axis limits manually for each parameter
+        for i, param in enumerate(param_name_list):
+            if param in ranges:
+                min_val, max_val = ranges[param]
+                # Set limits for diagonal (1D) plots
+                if hasattr(g, 'subplots') and g.subplots is not None:
+                    g.subplots[i, i].set_xlim(min_val, max_val)
+                    # Set limits for off-diagonal (2D) plots
+                    for j in range(i):
+                        if param_name_list[j] in ranges:
+                            g.subplots[i, j].set_xlim(ranges[param_name_list[j]][0], ranges[param_name_list[j]][1])
+                            g.subplots[i, j].set_ylim(min_val, max_val)
 
     if any(show_scatter):
         for i, param in enumerate(param_name_list):
@@ -153,7 +189,7 @@ def plot_posterior(
                         param_index = sample.paramNames.list().index(param)
                         if param_index is not None:
                             values = sample.samples[:, param_index]
-                            ax.hist(values, bins=30, alpha=0.5, color=colors[k],
+                            ax.hist(values, bins=30, alpha=scatter_alpha, color=scatter_colors[k],
                                     density=True, histtype='stepfilled', zorder=1)
                 ax.set_ylim(current_ylim)
 
@@ -174,10 +210,10 @@ def plot_posterior(
                                     sample,
                                     param_x,
                                     param_y,
-                                    color=colors[k],
+                                    color=scatter_colors[k],
                                     ax=ax,
                                     scatter_size=4,
-                                    alpha=0.8,
+                                    alpha=scatter_alpha,
                                 )
 
     return g

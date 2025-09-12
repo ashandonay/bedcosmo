@@ -213,10 +213,19 @@ class Trainer:
                         'local_agg_loss': agg_loss.detach().item()
                     })
                     if self.run_args["log_nominal_area"]:
-                        nominal_samples_gd = self.experiment.get_guide_samples(self.posterior_flow, self.experiment.nominal_context, num_samples=5000)
-                        desi_samples_gd = self.experiment.get_desi_samples(num_samples=5000, params=self.experiment.cosmo_params, transform_output=False)
+                        nominal_samples_gd = self.experiment.get_guide_samples(self.posterior_flow, self.experiment.nominal_context, num_samples=10000)
+                        desi_samples_gd = self.experiment.get_desi_samples(num_samples=10000, params=self.experiment.cosmo_params, transform_output=False)
+                        ranges = {param: (self.experiment.prior_data['parameters'][param]['plot']['lower'], self.experiment.prior_data['parameters'][param]['plot']['upper']) for param in self.experiment.cosmo_params}
                         plt.figure()
-                        plot_posterior([nominal_samples_gd, desi_samples_gd], ['tab:blue', 'black'], legend_labels=['NF', 'MCMC'], levels=[0.68], width_inch=12, show_scatter=[True, False])
+                        plot_posterior(
+                            [nominal_samples_gd, desi_samples_gd], 
+                            ['tab:blue', 'black'], 
+                            legend_labels=['NF', 'MCMC'], 
+                            levels=[0.68], 
+                            width_inch=12, 
+                            show_scatter=[True, False],
+                            ranges=ranges
+                            )
                         plt.savefig(f"{self.storage_path}/mlruns/{self.run_obj.info.experiment_id}/{self.run_obj.info.run_id}/artifacts/plots/rank_{self.global_rank}/posterior/{step}.png")
                         plt.close('all')
                         local_nominal_areas = get_contour_area(nominal_samples_gd, 0.68, *self.experiment.cosmo_params, global_rank=self.global_rank, design_type='nominal')[0]
@@ -308,6 +317,7 @@ class Trainer:
                 area_limits=[0.5, 5]
             )
             plt.close('all')
+            create_gif(self.run_obj.info.run_id, fps=1, add_labels=True, label_position='top-right', text_size=1.0, pause_last_frame=3.0)
             print("Run", self.run_obj.info.experiment_id + "/" + self.run_obj.info.run_id, "completed.")
         
         # Final memory logging
