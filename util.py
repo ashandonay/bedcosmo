@@ -26,6 +26,8 @@ import inspect
 import concurrent.futures
 import warnings
 from itertools import combinations
+from PIL import Image, ImageDraw, ImageFont
+import glob
 
 torch.set_default_dtype(torch.float64)
 
@@ -1648,3 +1650,95 @@ def get_contour_area(samples, level, *params, global_rank=None, design_type='nom
         areas_list.append(areas_dict)
 
     return areas_list
+
+def create_gif(run_id, fps=1, add_labels=True, label_position='top-right', text_size=1.0, pause_last_frame=3.0):
+    """Create GIF using PIL with optional labels"""
+    
+    client = MlflowClient()
+    run = client.get_run(run_id)
+    cosmo_exp = run.data.params["cosmo_exp"]
+    storage_path = os.environ["SCRATCH"] + f"/bed/BED_cosmo/{cosmo_exp}"
+    n_devices = int(run.data.params["n_devices"])
+    
+    for i in range(n_devices):
+        dir_path = f"{storage_path}/mlruns/{run.info.experiment_id}/{run.info.run_id}/artifacts/plots/rank_{i}/posterior"
+        output_path = f"{dir_path}/animation.gif"
+    
+        # Get all PNG files and sort them numerically
+        png_files = glob.glob(os.path.join(dir_path, "*.png"))
+        png_files.sort(key=lambda x: int(os.path.basename(x).split('.')[0]))
+        
+        # Load images
+        images = []
+        for i, file in enumerate(png_files):
+            img = Image.open(file)
+            
+            if add_labels:
+                # Extract step number from filename
+                step_num = os.path.basename(file).split('.')[0]
+                
+                # Create a copy to avoid modifying the original
+                img_with_label = img.copy()
+                
+                # Get image dimensions
+                width, height = img_with_label.size
+                
+                # Create drawing context
+                draw = ImageDraw.Draw(img_with_label)
+                
+                # Create scalable font based on text_size
+                try:
+                    # Try to use LiberationSans font (available on your system)
+                    font = ImageFont.truetype("/usr/share/fonts/truetype/LiberationSans-Regular.ttf", int(20 * text_size))
+                except:
+                    if i == 0:
+                        print("Warning: Could not load LiberationSans font. Falling back to default font.")
+                    # Fallback to default font
+                    font = ImageFont.load_default()
+                
+                # Create label text
+                label_text = f"Step: {step_num}"
+                
+                # Simple text size estimation (scaled by text_size parameter)
+                text_width = len(label_text) * int(12 * text_size)  # Approximate width
+                text_height = int(20 * text_size)  # Approximate height
+                
+                # Add padding around text
+                padding = 10
+                
+                # Calculate text position based on label_position with proper margins
+                if label_position == 'top-left':
+                    text_x, text_y = padding, padding
+                elif label_position == 'top-right':
+                    text_x, text_y = width - text_width - padding, padding
+                elif label_position == 'bottom-left':
+                    text_x, text_y = padding, height - text_height - padding
+                elif label_position == 'bottom-right':
+                    text_x, text_y = width - text_width - padding, height - text_height - padding
+                else:  # center
+                    text_x, text_y = (width - text_width) // 2, (height - text_height) // 2
+                
+                # Ensure text doesn't go outside image bounds
+                text_x = max(padding, min(text_x, width - text_width - padding))
+                text_y = max(padding, min(text_y, height - text_height - padding))
+                
+                # Draw simple black text
+                draw.text((text_x, text_y), label_text, font=font, fill='black')
+                
+                images.append(img_with_label)
+            else:
+                images.append(img)
+        
+        # Create GIF with pause on first frame
+        duration = 1000 // fps  # Convert fps to duration in milliseconds
+        last_frame_duration = int(pause_last_frame * 1000)  # Convert pause to milliseconds
+        
+        # Save with custom durations: first frame gets longer duration, others get normal duration
+        images[0].save(
+            output_path,
+            save_all=True,
+            append_images=images[1:],
+            duration=[duration] * (len(images) - 1) + [last_frame_duration],
+            loop=0
+        )
+        print(f"GIF created: {output_path}")

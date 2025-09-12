@@ -149,7 +149,7 @@ class Trainer:
             samples = self.posterior_flow.module(self.experiment.nominal_context).sample((1000,)).cpu().numpy()
             plt.figure()
             plt.plot(samples.squeeze()[:, 0], samples.squeeze()[:, 1], 'o', alpha=0.5)
-            plt.savefig(f"{self.storage_path}/mlruns/{self.run_obj.info.experiment_id}/{self.run_obj.info.run_id}/artifacts/plots/init_samples_rank_{self.global_rank}.png")
+            plt.savefig(f"{self.storage_path}/mlruns/{self.run_obj.info.experiment_id}/{self.run_obj.info.run_id}/artifacts/plots/rank_{self.global_rank}/init_samples.png")
 
     @profile_method
     def run(self):
@@ -217,7 +217,7 @@ class Trainer:
                         desi_samples_gd = self.experiment.get_desi_samples(num_samples=5000, params=self.experiment.cosmo_params, transform_output=False)
                         plt.figure()
                         plot_posterior([nominal_samples_gd, desi_samples_gd], ['tab:blue', 'black'], legend_labels=['NF', 'MCMC'], levels=[0.68], width_inch=12, show_scatter=[True, False])
-                        plt.savefig(f"{self.storage_path}/mlruns/{self.run_obj.info.experiment_id}/{self.run_obj.info.run_id}/artifacts/plots/posterior/rank_{self.global_rank}/{step}.png")
+                        plt.savefig(f"{self.storage_path}/mlruns/{self.run_obj.info.experiment_id}/{self.run_obj.info.run_id}/artifacts/plots/rank_{self.global_rank}/posterior/{step}.png")
                         plt.close('all')
                         local_nominal_areas = get_contour_area(nominal_samples_gd, 0.68, *self.experiment.cosmo_params, global_rank=self.global_rank, design_type='nominal')[0]
                         
@@ -660,7 +660,7 @@ class Trainer:
             mlflow.start_run(run_id=tensors['run_id'][0], nested=True)
             self.run_obj = mlflow.active_run()
         os.makedirs(f"{self.storage_path}/mlruns/{mlflow.active_run().info.experiment_id}/{mlflow.active_run().info.run_id}/artifacts/checkpoints", exist_ok=True)
-        os.makedirs(f"{self.storage_path}/mlruns/{mlflow.active_run().info.experiment_id}/{mlflow.active_run().info.run_id}/artifacts/plots/posterior/rank_{self.global_rank}", exist_ok=True)
+        os.makedirs(f"{self.storage_path}/mlruns/{mlflow.active_run().info.experiment_id}/{mlflow.active_run().info.run_id}/artifacts/plots/rank_{self.global_rank}/posterior", exist_ok=True)
         # Broadcast run_args from rank 0 to ensure consistency, especially for 'steps' when resuming with add_steps
         if self.global_rank == 0:
             run_args_list_to_broadcast = [self.run_args]

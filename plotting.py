@@ -28,7 +28,17 @@ from pyro_oed_src import posterior_loss
 import json
 from IPython.display import display
 
-def plot_posterior(samples, colors, legend_labels=None, show_scatter=False, line_style="-", alpha=1.0, levels=[0.68, 0.95], width_inch=7):
+def plot_posterior(
+    samples, 
+    colors, 
+    legend_labels=None, 
+    show_scatter=False, 
+    line_style="-", 
+    alpha=1.0, 
+    levels=[0.68, 0.95], 
+    width_inch=7, 
+    ranges=None
+    ):
     """
     Plots posterior distributions using GetDist triangle plots.
 
@@ -44,6 +54,8 @@ def plot_posterior(samples, colors, legend_labels=None, show_scatter=False, line
             If a single float is provided, it is converted to a list.
             If None, the default GetDist settings are used.
         width_inch (float): Width of the plot in inches. Higher values increase resolution.
+        ranges (dict, optional): Dictionary specifying fixed ranges for parameters. 
+            Keys should be parameter names, values should be tuples of (min, max).
     Returns:
         g: GetDist plotter object with the generated triangle plot.
     """
@@ -120,6 +132,7 @@ def plot_posterior(samples, colors, legend_labels=None, show_scatter=False, line
         legend_labels=legend_labels,
         filled=False,
         normalized=True,
+        ranges=ranges,
         diag1d_kwargs={
             'colors': colors,
             'normalized': True
