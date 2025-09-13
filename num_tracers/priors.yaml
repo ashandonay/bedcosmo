@@ -39,7 +39,7 @@ parameters:
       lower: -3.0
       upper: 2.0
     plot:
-      lower: -3.1
+      lower: -3.0
       upper: 1.2
     latex: "w_a"
     
