@@ -118,7 +118,6 @@ class Trainer:
             print("MLFlow Run Info:", self.run_obj.info.experiment_id + "/" + self.run_obj.info.run_id)
             print(f"Using {self.run_args['n_devices']} devices with {self.run_args['n_particles']} total particles.")
             print("Designs shape:", self.experiment.designs.shape)
-            print("Calculating normalizing flow EIG...")
             print(f'Input dim: {len(self.experiment.cosmo_params)}, Context dim: {self.experiment.context_dim}')
             print(f"Cosmology: {self.run_args['cosmo_model']}")
             print(f"Target labels: {self.experiment.cosmo_params}")
@@ -317,7 +316,7 @@ class Trainer:
                 area_limits=[0.5, 5]
             )
             plt.close('all')
-            create_gif(self.run_obj.info.run_id, fps=1, add_labels=True, label_position='top-right', text_size=1.0, pause_last_frame=3.0)
+            create_gif(self.run_obj.info.run_id, fps=5, add_labels=True, label_position='top-right', text_size=1.0, pause_last_frame=3.0)
             print("Run", self.run_obj.info.experiment_id + "/" + self.run_obj.info.run_id, "completed.")
         
         # Final memory logging
@@ -517,10 +516,6 @@ class Trainer:
                 self.run_args["n_devices"] = tdist.get_world_size() if "LOCAL_RANK" in os.environ else 1
                 self.run_args["n_particles"] = self.run_args["n_devices"] * self.run_args["n_particles_per_device"]
 
-                # Log parameters
-                for key, value in self.run_args.items():
-                    mlflow.log_param(key, value)
-
             if not self.run_args.get("restart_id", None):
                 # Start new run
                 if self.global_rank == 0:
@@ -581,6 +576,10 @@ class Trainer:
                 if self.priors_run_path is not None:
                     self._save_priors_file()
                 
+                # Log parameters
+                for key, value in self.run_args.items():
+                    mlflow.log_param(key, value)
+
                 # Prepare tensors for broadcasting
                 tensors = self._prepare_broadcast_tensors()
                 print(f"Running with parameters for cosmo_model='{self.run_args['cosmo_model']}':")
@@ -754,9 +753,8 @@ class Trainer:
 
     def _fix_model_args(self, ref_run):
         """
-        Fix model arguments to match the reference run parameters.
-        Returns a tuple of (updated_run_args, changed_params) where changed_params
-        is a dict of parameter names that were overwritten.
+        Update run_args associated with the model to match the reference run.
+        
         """
         changed_params = {}
         
