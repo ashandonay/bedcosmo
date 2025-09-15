@@ -6,7 +6,7 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1     # 1 primary Slurm task per node
 #SBATCH --cpus-per-task=128     # CPUs for all DDP workers on the node (e.g., 4 workers * 32 cpus/worker)
-#SBATCH --gpus-per-node=1       # Number of GPUs to request per node
+#SBATCH --gpus-per-node=4       # Number of GPUs to request per node
 #SBATCH --time=00:10:00
 #SBATCH --output=/pscratch/sd/a/ashandon/bed/BED_cosmo/num_tracers/logs/%A_%x_%a.log
 #SBATCH --error=/pscratch/sd/a/ashandon/bed/BED_cosmo/num_tracers/logs/%A_%x_%a.log
@@ -43,7 +43,7 @@ srun torchrun \
      --rdzv_endpoint=$MASTER_ADDR:$MASTER_PORT \
      /global/homes/a/ashandon/bed/BED_cosmo/train.py \
      --cosmo_model base_omegak_w_wa \
-     --mlflow_exp base_omegak_w_wa_flow \
+     --mlflow_exp debug \
      --cosmo_exp num_tracers \
      --pyro_seed 1 \
      --nf_seed 1 \
