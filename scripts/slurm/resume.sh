@@ -6,7 +6,7 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1     # 1 primary Slurm task per node
 #SBATCH --cpus-per-task=128     # CPUs for all DDP workers on the node (e.g., 4 workers * 32 cpus/worker)
-#SBATCH --gpus-per-node=4       # Request 4 GPUs for the 1 task on the node
+#SBATCH --gpus-per-node=4       # Number of GPUs to request per node
 #SBATCH --time=00:30:00
 #SBATCH --output=/pscratch/sd/a/ashandon/bed/BED_cosmo/num_tracers/logs/%A_%x_%a.log
 #SBATCH --error=/pscratch/sd/a/ashandon/bed/BED_cosmo/num_tracers/logs/%A_%x_%a.log
@@ -19,7 +19,7 @@ conda activate bed-cosmo
 module load nccl/2.21.5 # NERSC NCCL for Slingshot
 
 # Define number of DDP processes per node
-NPROC_PER_NODE=4
+NPROC_PER_NODE=$SLURM_GPUS_PER_NODE
 
 # Set environment variables for distributed training
 # WORLD_SIZE is total number of DDP processes across all nodes
@@ -39,8 +39,8 @@ export CUDA_DEVICE_ORDER=PCI_BUS_ID
 # torch.distributed.run will then spawn NPROC_PER_NODE worker processes on each node.
 # SLURM_PROCID can be used for node_rank as srun launches one task per node here.
 
-RUN_ID=31045d23318940cf8d2ce431ec07a886
-RESUME_STEP=198000
+RUN_ID=e75a34eee94e48beb3a591c579258500
+RESUME_STEP=190000
 
 # Get the directory where this script is located
 TRUNCATE_SCRIPT="/global/homes/a/ashandon/bed/BED_cosmo/scripts/truncate_metrics.py"

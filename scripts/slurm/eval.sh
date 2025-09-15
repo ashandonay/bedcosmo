@@ -5,8 +5,8 @@
 #SBATCH --job-name=eval
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1     # 1 primary Slurm task per node
-#SBATCH --cpus-per-task=128     # CPUs for all DDP workers on the node (e.g., 4 workers * 32 cpus/worker)
-#SBATCH --gpus-per-node=4       # Request 4 GPUs for the 1 task on the node
+#SBATCH --cpus-per-task=32     # CPUs for all DDP workers on the node (e.g., 4 workers * 32 cpus/worker)
+#SBATCH --gpus-per-node=1       # Number of GPUs to request per node
 #SBATCH --time=00:15:00
 #SBATCH --output=/pscratch/sd/a/ashandon/bed/BED_cosmo/num_tracers/logs/%A_%x.log
 #SBATCH --error=/pscratch/sd/a/ashandon/bed/BED_cosmo/num_tracers/logs/%A_%x.log
@@ -22,7 +22,7 @@ srun torchrun \
     --nnodes=1 \
     --nproc_per_node=1 \
     /global/homes/a/ashandon/bed/BED_cosmo/evaluate.py \
-    --run_id 31045d23318940cf8d2ce431ec07a886 \
+    --run_id b324bf1b98d64f0ca526d9d269261d57 \
     --eval_step last \
     --global_rank "[0, 1, 2, 3]" \
     --levels 0.68 \

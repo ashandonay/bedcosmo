@@ -6,8 +6,8 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1     # 1 primary Slurm task per node
 #SBATCH --cpus-per-task=128     # CPUs for all DDP workers on the node (e.g., 4 workers * 32 cpus/worker)
-#SBATCH --gpus-per-node=4       # Request 4 GPUs for the 1 task on the node
-#SBATCH --time=02:00:00
+#SBATCH --gpus-per-node=4       # Number of GPUs to request per node
+#SBATCH --time=04:40:00
 #SBATCH --output=/pscratch/sd/a/ashandon/bed/BED_cosmo/num_tracers/logs/%A_%x_%a.log
 #SBATCH --error=/pscratch/sd/a/ashandon/bed/BED_cosmo/num_tracers/logs/%A_%x_%a.log
 #SBATCH --mail-type=ALL
@@ -21,7 +21,7 @@ conda activate bed-cosmo
 module load nccl/2.21.5 # NERSC NCCL for Slingshot
 
 # Define number of DDP processes per node
-NPROC_PER_NODE=4
+NPROC_PER_NODE=$SLURM_GPUS_PER_NODE
 
 # Set environment variables for distributed training
 # WORLD_SIZE is total number of DDP processes across all nodes
@@ -44,17 +44,17 @@ srun torchrun \
      --rdzv_backend=c10d \
      --rdzv_endpoint=$MASTER_ADDR:$MASTER_PORT \
      /global/homes/a/ashandon/bed/BED_cosmo/train.py \
-     --mlflow_exp base \
+     --mlflow_exp base_omegak_w_wa_flow \
      --cosmo_exp num_tracers \
-     --restart_id 4c4bd5a922ac4a3a94db5621eb228f85 \
-     --restart_step 50000 \
+     --restart_id a08bcca6f941490cae788b80b045a4ee \
+     --restart_step 200000 \
      --restart_optimizer \
      --n_particles_per_device 5000 \
-     --total_steps 50000 \
+     --total_steps 200000 \
      --optimizer Adam \
-     --scheduler_type linear \
-     --initial_lr 0.0001 \
-     --final_lr 0.000001 \
+     --scheduler_type cosine \
+     --initial_lr 0.00005 \
+     --final_lr 0.0 \
      --design_step "[0.025, 0.05, 0.05, 0.025]" \
      --design_lower "[0.025, 0.1, 0.1, 0.1]" \
      --fixed_design \
