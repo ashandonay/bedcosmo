@@ -1,7 +1,9 @@
 import numpy as np
 import matplotlib.pyplot as plt
 import pandas as pd
+import os
 
+home_dir = os.environ["HOME"]
 # efficiencies from this paper: https://arxiv.org/pdf/2411.12020 (Table 2)
 eff_BGS = 0.989
 eff_LRG = 0.991
@@ -42,19 +44,24 @@ obs_LRG3ELG1 = obs_LRG3 + obs_ELG1
 eff_LRG3ELG1 = (obs_LRG3 / obs_LRG3ELG1) * eff_LRG + (obs_ELG1 / obs_LRG3ELG1) * eff_ELG
 obs_LRG3ELG1 = passed_LRG3ELG1 / eff_LRG3ELG1
 
-data_version = 2
+data_version = 3
+os.makedirs(os.path.join(home_dir, 'data/desi/tracers_v' + str(data_version)), exist_ok=True)
 #desi_data = '/home/ashandonay/cobaya/packages/data/bao_data/desi_2024_gaussian_bao_ALL_GCcomb_mean.txt'
 #cov_matrix = np.loadtxt('/home/ashandonay/cobaya/packages/data/bao_data/desi_2024_gaussian_bao_ALL_GCcomb_cov.txt')
-desi_data = '/home/ashandonay/data/bao_data/desi_gaussian_bao_ALL_GCcomb_mean.txt'
-cov_matrix = np.loadtxt('/home/ashandonay/data/bao_data/desi_gaussian_bao_ALL_GCcomb_cov.txt')
+desi_data = home_dir + '/data/desi/bao_data/desi_2024_gaussian_bao_ALL_GCcomb_mean.txt'
+cov_matrix = np.loadtxt(home_dir + '/data/desi/bao_data/desi_2024_gaussian_bao_ALL_GCcomb_cov.txt')
 
 column_names = ['z', 'value_at_z', 'quantity']
 desi_df = pd.read_csv(desi_data, delimiter=' ', names=column_names, comment='#')
 
 cov_matrix = cov_matrix[np.ix_(desi_df.index, desi_df.index)]
 corr_matrix = cov_matrix/np.sqrt(np.outer(np.diag(cov_matrix), np.diag(cov_matrix)))
-np.save('/home/ashandonay/data/tracers_v' + str(data_version) + '/desi_cov.npy', cov_matrix)
-np.save('/home/ashandonay/data/tracers_v' + str(data_version) + '/desi_corr.npy', corr_matrix)
+cov_path = os.path.join(home_dir, 'data/desi/tracers_v' + str(data_version), 'desi_cov.npy')
+corr_path = os.path.join(home_dir, 'data/desi/tracers_v' + str(data_version), 'desi_corr.npy')
+print(f"Saving cov matrix to {cov_path}")
+np.save(cov_path, cov_matrix)
+print(f"Saving corr matrix to {corr_path}")
+np.save(corr_path, corr_matrix)
 
 desi_df.insert(0, 'tracer', '')
 desi_df.insert(1, 'passed', 0.0)
@@ -70,7 +77,7 @@ desi_df.loc[desi_df['z'] == 0.51, ["tracer", "passed", "observed"]] = "LRG1", pa
 desi_df.loc[desi_df['z'] == 0.706, ["tracer", "passed", "observed"]] = "LRG2", passed_LRG2, obs_LRG2
 desi_df.loc[desi_df['z'] == 0.930, ["tracer", "passed", "observed"]] = "LRG3+ELG1", passed_LRG3ELG1, obs_LRG3ELG1
 desi_df.loc[desi_df['z'] == 1.317, ["tracer", "passed", "observed"]] = "ELG2", passed_ELG2, obs_ELG2
-desi_df.loc[desi_df['z'] == 1.492, ["tracer", "passed", "observed"]] = "QSO", passed_QSO, obs_QSO
+desi_df.loc[desi_df['z'] == 1.491, ["tracer", "passed", "observed"]] = "QSO", passed_QSO, obs_QSO
 desi_df.loc[desi_df['z'] == 2.330, ["tracer", "passed", "observed"]] = "Lya QSO", passed_LyaQSO, obs_LyaQSO
 
 
@@ -128,9 +135,11 @@ desi_df.loc[desi_df['z'] == 0.930, "efficiency"] = eff_LRG3ELG1
 desi_df.loc[desi_df['z'] == 1.317, "efficiency"] = eff_ELG
 #desi_df.loc[desi_df['z'] == 0.930, "efficiency"] = (num_ELG1 / num_LRG3ELG1) * ((ELG1_VLO / (ELG1_VLO + ELG1_LOP)) * eff_ELG_VLO + (ELG1_LOP / (ELG1_VLO + ELG1_LOP)) * eff_ELG_LOP) + (1 - (num_ELG1 / num_LRG3ELG1)) * eff_LRG
 #desi_df.loc[desi_df['z'] == 1.317, "efficiency"] = (ELG2_VLO / (ELG2_VLO + ELG2_LOP)) * eff_ELG_VLO + (ELG2_LOP / (ELG2_VLO + ELG2_LOP)) * eff_ELG_LOP
-desi_df.loc[desi_df['z'] == 1.492, "efficiency"] = eff_QSO
+desi_df.loc[desi_df['z'] == 1.491, "efficiency"] = eff_QSO
 desi_df.loc[desi_df['z'] == 2.330, "efficiency"] = eff_LyaQSO
-desi_df.to_csv('/home/ashandonay/data/tracers_v' + str(data_version) + '/desi_data.csv', index=False)
+data_path = os.path.join(home_dir, 'data/desi/tracers_v' + str(data_version), 'desi_data.csv')
+print(f"Saving data to {data_path}")
+desi_df.to_csv(data_path, index=False)
 
 desi_tracers = pd.DataFrame({
     'tracer': ['BGS', 'LRG1', 'LRG2', 'LRG3', 'ELG1', 'ELG2', 'QSO', 'Lya QSO'],
@@ -149,4 +158,6 @@ desi_tracers['targets'] = desi_tracers['observed'] / desi_tracers['comp']
 desi_tracers['passed'] = desi_tracers['passed'] / total_passed
 desi_tracers['observed'] = desi_tracers['observed'] / total_observations
 
-desi_tracers.to_csv('/home/ashandonay/data/tracers_v' + str(data_version) + '/desi_tracers.csv', index=False)
+tracers_path = os.path.join(home_dir, 'data/desi/tracers_v' + str(data_version), 'desi_tracers.csv')
+print(f"Saving tracers to {tracers_path}")
+desi_tracers.to_csv(tracers_path, index=False)

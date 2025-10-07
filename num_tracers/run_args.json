@@ -2,7 +2,7 @@
     "pyro_seed": 1,
     "nf_seed": 1,
     "priors_path": "num_tracers/priors.yaml",
-    "data_path": "/data/tracers_v2/",
+    "data_path": "data/desi/tracers_v3/",
     "flow_type": "MAF",
     "transform_input": true,
     "activation": "relu",

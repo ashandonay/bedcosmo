@@ -51,60 +51,62 @@ def _interp1(xg, yg, x):
     w = (x - x0) / (x1 - x0)
     return y0 + w*(y1 - y0)
 
-class _NuCache:
+class _NeutrinoTableCache:
     def __init__(self, device, dtype):
         self.device = device
         self.dtype = dtype
         self.key = None
-        self.a_grid = None
+        self.a = None
         self.lna = None
         self.fnu = None  # (n_massive, n_ag)
+        self._built = False
+    
+    def _build_table(self, mnu_eV, n_massive, n_ag=1200, qmax=40.0, nq=2000, a_min=0.28):
+        """
+        Build f_nu(a) on an a-grid in (a_min, 1], where
+        f_nu(a) = rho_nu(a)/rho_nu(1)
+                = [ I(a) / I(1) ] * a^{-4}
+        with I(a) = ∫ dq q^2 sqrt(q^2 + (a*y0)^2) / (1+e^q),
+        y0 = (m_per / Tnu0), m_per = mnu_eV / n_massive.
+        """
+        # constants
+        T_cmb = torch.tensor(2.7255, device=self.device, dtype=self.dtype)          # K
+        kB_eV = torch.tensor(8.61733262e-5, device=self.device, dtype=self.dtype)  # eV/K
+        Tnu0 = (torch.tensor(4.0/11.0, device=self.device, dtype=self.dtype))**(1.0/3.0) * T_cmb * kB_eV
 
-def _build_fnu_table(device, dtype, mnu_eV, n_massive,
-                     n_ag=1200, qmax=40.0, nq=2000, a_min=0.28):
-    """
-    Build f_nu(a) on an a-grid in (a_min, 1], where
-      f_nu(a) = rho_nu(a)/rho_nu(1)
-              = [ I(a) / I(1) ] * a^{-4}
-    with I(a) = ∫ dq q^2 sqrt(q^2 + (a*y0)^2) / (1+e^q),
-    y0 = (m_per / Tnu0), m_per = mnu_eV / n_massive.
-    Returns:
-      a_grid: (G,)
-      fnu:    (n_massive, G)  (rows identical for equal masses)
-      ln_a:   (G,)
-    """
-    # constants
-    T_cmb = torch.tensor(2.7255, device=device, dtype=dtype)          # K
-    kB_eV = torch.tensor(8.617333262e-5, device=device, dtype=dtype)  # eV/K
-    Tnu0 = (torch.tensor(4.0/11.0, device=device, dtype=dtype))**(1.0/3.0) * T_cmb * kB_eV
+        m_per = torch.tensor(float(mnu_eV)/int(n_massive), device=self.device, dtype=self.dtype)
+        y0 = m_per / Tnu0
 
-    m_per = torch.tensor(float(mnu_eV)/int(n_massive), device=device, dtype=dtype)
-    y0 = m_per / Tnu0
+        # ln a grid
+        self.lna = torch.linspace(torch.log(torch.as_tensor(a_min, device=self.device, dtype=self.dtype)),
+                            torch.tensor(0.0, device=self.device, dtype=self.dtype),
+                            int(n_ag), device=self.device, dtype=self.dtype)
+        self.a = torch.exp(self.lna)  # (G,)
+        # momentum grid
+        q = torch.linspace(0.0, float(qmax), int(nq), device=self.device, dtype=self.dtype)  # (nq,)
+        fq = 1.0 / (torch.exp(q) + 1.0)
+        q2 = q*q
 
-    # ln a grid
-    ln_a = torch.linspace(torch.log(torch.as_tensor(a_min, device=device, dtype=dtype)),
-                           torch.tensor(0.0, device=device, dtype=dtype),
-                           int(n_ag), device=device, dtype=dtype)
-    a_grid = torch.exp(ln_a)  # (G,)
+        # I(a) integral
+        # E(q,a) = sqrt(q^2 + (a*y0)^2)
+        Ey = torch.sqrt(q2[:, None] + (self.a[None, :] * y0)**2)   # (nq, G)
+        Ia = torch.trapezoid(q2[:, None] * Ey * fq[:, None], q, dim=0)  # (G,)
+        # I(1) at a=1:
+        E1 = torch.sqrt(q2 + y0*y0)
+        I1 = torch.trapezoid(q2 * E1 * fq, q, dim=0)  # scalar
 
-    # momentum grid
-    q = torch.linspace(0.0, float(qmax), int(nq), device=device, dtype=dtype)  # (nq,)
-    fq = 1.0 / (torch.exp(q) + 1.0)                                             # (nq,)
-    q2 = q*q
+        # f_nu(a) = (Ia/I1) * a^{-4}
+        fnu_1d = (Ia / I1) * (self.a**(-4))
+        self.fnu = fnu_1d.unsqueeze(0).expand(int(n_massive), -1)  # (n_massive, G)
 
-    # I(a) integral
-    # E(q,a) = sqrt(q^2 + (a*y0)^2)
-    Ey = torch.sqrt(q2[:, None] + (a_grid[None, :] * y0)**2)   # (nq, G)
-    Ia = torch.trapezoid(q2[:, None] * Ey * fq[:, None], q, dim=0)  # (G,)
-    # I(1) at a=1:
-    E1 = torch.sqrt(q2 + y0*y0)
-    I1 = torch.trapezoid(q2 * E1 * fq, q, dim=0)  # scalar
-
-    # f_nu(a) = (Ia/I1) * a^{-4}
-    fnu_1d = (Ia / I1) * (a_grid**(-4))
-    fnu = fnu_1d.unsqueeze(0).expand(int(n_massive), -1)  # (n_massive, G)
-
-    return a_grid, fnu, ln_a
+        self._built = True
+        pass
+    
+    def get_table(self, mnu_eV, n_massive, n_ag=1200, qmax=40.0, nq=2000, a_min=0.28):
+        """Get the neutrino table, building it if not already built."""
+        if not self._built:
+            self._build_table(mnu_eV, n_massive, n_ag, qmax, nq, a_min)
+        return self.a, self.fnu, self.lna
 
 def _infer_plate_shape(dev, dtype, *args):
     """
@@ -187,7 +189,7 @@ def _cumsimpson(x, y, dim=-1):
 class NumTracers:
     def __init__(
         self, 
-        data_path="/data/tracers_v1/", 
+        data_path="data/desi/tracers_v3/", 
         cosmo_model="base",
         priors_path=None,
         flow_type="MAF",
@@ -207,11 +209,11 @@ class NumTracers:
     ):
 
         self.name = 'num_tracers'
-        self.desi_data = pd.read_csv(home_dir + data_path + 'desi_data.csv')
-        self.desi_tracers = pd.read_csv(home_dir + data_path + 'desi_tracers.csv')
+        self.desi_data = pd.read_csv(os.path.join(home_dir, data_path, 'desi_data.csv'))
+        self.desi_tracers = pd.read_csv(os.path.join(home_dir, data_path, 'desi_tracers.csv'))
         if priors_path is None:
-            priors_path = home_dir + data_path + 'priors.yaml'
-        self.nominal_cov = np.load(home_dir + data_path + 'desi_cov.npy')
+            priors_path = os.path.join(home_dir, data_path, 'priors.yaml')
+        self.nominal_cov = np.load(os.path.join(home_dir, data_path, 'desi_cov.npy'))
         self.DH_idx = np.where(self.desi_data["quantity"] == "DH_over_rs")[0]
         self.DM_idx = np.where(self.desi_data["quantity"] == "DM_over_rs")[0]
         self.DV_idx = np.where(self.desi_data["quantity"] == "DV_over_rs")[0]
@@ -254,7 +256,7 @@ class NumTracers:
         with open(priors_path, 'r') as file:
             self.prior_data = yaml.safe_load(file)
         self.priors, self.param_constraints, self.latex_labels = self.get_priors(priors_path)
-        self.desi_priors, _, _ = self.get_priors(home_dir + data_path + 'priors.yaml')
+        self.desi_priors, _, _ = self.get_priors(os.path.join(home_dir, data_path, 'priors.yaml'))
         self.cosmo_params = list(self.priors.keys())
         self.param_bijector = Bijector(self, cdf_bins=1000, cdf_samples=500000)
         # if the priors are not the same as the DESI priors, create a new bijector for the DESI samples
@@ -823,8 +825,8 @@ class NumTracers:
 
         # massive ν(a) term
         if n_massive > 0 and cache is not None:
-            ln_a = -torch.log1p(z)                                  # a = 1/(1+z)
-            fnu_at_a = _interp1(cache.lna, cache.fnu[0], ln_a)      # (plate, Nz)
+            ln_a = -torch.log1p(z)
+            fnu_at_a = _interp1(cache.lna, cache.fnu[0], ln_a)
             Onu_a = Onu0 * fnu_at_a
         else:
             Onu_a = torch.zeros_like(z, dtype=z.dtype, device=z.device)
@@ -900,25 +902,19 @@ class NumTracers:
         else:
             Onu0 = torch.zeros(plate + (1,), device=dev, dtype=DTYPE)
 
-        # Dark-energy density today (do NOT subtract Onu0 again)
-        Ode0 = 1.0 - Om - Ok - Or                                  # (plate,1)
+        # Dark-energy density today
+        Ode0 = 1.0 - Om - Ok - Or
 
-        # ν cache (if needed)
-        cache = None
+        # neutrino table cache (if needed)
         if n_massive > 0:
             if not hasattr(self, "_nu_cache"): 
-                self._nu_cache = _NuCache(dev, DTYPE)
-            key = (float(mnu), int(n_massive), float(T_cmb), str(DTYPE), str(dev))
-            if getattr(self._nu_cache, "key", None) != key:
-                a_g, f_g, lna_g = _build_fnu_table(dev, DTYPE, float(mnu), int(n_massive))
-                self._nu_cache.key = key
-                self._nu_cache.a   = a_g
-                self._nu_cache.lna = lna_g
-                self._nu_cache.fnu = f_g
-            cache = self._nu_cache
+                self._nu_cache = _NeutrinoTableCache(dev, DTYPE)
+            self._nu_cache.get_table(mnu, n_massive)
+        else:
+            self._nu_cache = None
 
         # common E(z)
-        E = self._E_of_z(z, Om, Ok, w0, wa, Or, Onu0, Ode0, n_massive, cache)
+        E = self._E_of_z(z, Om, Ok, w0, wa, Or, Onu0, Ode0, n_massive, self._nu_cache)
 
         prefac = (torch.as_tensor(self.c, device=dev, dtype=DTYPE) / (100.0 * hrdrag))
         return prefac / E
@@ -940,24 +936,23 @@ class NumTracers:
                 return t
             return t.view(*([1]*len(plate)), 1).expand(plate + (1,))
 
-        Om     = to_plate1(Om)
-        Ok     = to_plate1(0.0 if Ok is None else Ok)
-        w0     = to_plate1(-1.0 if w0 is None else w0)
-        wa     = to_plate1( 0.0 if wa is None else wa)
+        Om = to_plate1(Om)
+        Ok = to_plate1(0.0 if Ok is None else Ok)
+        w0 = to_plate1(-1.0 if w0 is None else w0)
+        wa = to_plate1( 0.0 if wa is None else wa)
         hrdrag = to_plate1(hrdrag)
 
         # ---- targets in z / ln a ----
         z_eff = torch.as_tensor(z_eff, device=dev, dtype=DTYPE)
         if z_eff.ndim == 0:
             z_eff = z_eff[None]
-        z_eff = z_eff.reshape(-1)                     # ensure contiguous 1D
-        Nz     = z_eff.numel()
+        z_eff = z_eff.reshape(-1)
         z_eval = z_eff.reshape(*([1]*len(plate)), -1).expand(plate + (z_eff.shape[-1],))
         ln_a_ev = -torch.log1p(z_eval)
 
         # ---- base Simpson grid in ln a (odd length) & merge exact eval nodes ----
-        zmax      = float(z_eff.max())
-        a_min     = 1.0 / (1.0 + zmax)
+        zmax = float(z_eff.max())
+        a_min = 1.0 / (1.0 + zmax)
         ln_a_base = torch.linspace(math.log(a_min), 0.0, int(n_int)|1, device=dev, dtype=DTYPE)
         ln_a_all  = torch.unique(torch.cat([ln_a_base, ln_a_ev.reshape(-1)])).sort().values
         if ln_a_all[-1].abs() > 0:
@@ -970,29 +965,25 @@ class NumTracers:
         z_all = 1.0 / a_all - 1.0
         zB = z_all.reshape(*([1]*len(plate)), -1).expand(plate + (ln_a_all.numel(),))
 
-        # =======================
-        # >>> SELF-CONSISTENCY <<<
-        # Use YOUR D_H on the same grid to get E = (c/100 hrdrag)/(D_H/r_d)
-        # =======================
         DH_over_rd_all = self.D_H_func(
             zB, Om, Ok, w0, wa, hrdrag,
             h=h, Neff=Neff, mnu=mnu, n_massive=n_massive,
             T_cmb=T_cmb, include_radiation=include_radiation
-        )  # (plate, N_all)
+        )
 
-        pref = (torch.as_tensor(self.c, device=dev, dtype=DTYPE) / (100.0*hrdrag))   # (plate,1)
+        pref = (torch.as_tensor(self.c, device=dev, dtype=DTYPE) / (100.0*hrdrag))
         pref = pref.expand_as(DH_over_rd_all)
-        E_all = (pref / DH_over_rd_all).clamp_min(torch.finfo(DTYPE).tiny*1e6)       # (plate, N_all)
+        E_all = (pref / DH_over_rd_all).clamp_min(torch.finfo(DTYPE).tiny*1e6)
 
         # ---- integrate: ∫ d ln a / (a E(a)) from a(z)→1 ----
         aB = a_all.reshape(*([1]*len(plate)), -1).expand_as(E_all)
         integ = 1.0 / (aB * E_all)
-        cum   = _cumsimpson(ln_a_all, integ, dim=-1)                                  # (plate, N_all)
-        cum_1 = cum[..., -1:]                                                         # (plate, 1)
+        cum = _cumsimpson(ln_a_all, integ, dim=-1)
+        cum_1 = cum[..., -1:]
 
         # exact pick at ln a(z) (we merged nodes above)
         idx = torch.searchsorted(ln_a_all, ln_a_ev)
-        DC_over_DH0 = cum_1 - torch.gather(cum, -1, idx)                              # (plate, Nz)
+        DC_over_DH0 = cum_1 - torch.gather(cum, -1, idx)
 
         # ---- curvature mapping (with flat-limit series) ----
         absOk = torch.abs(Ok)

@@ -608,16 +608,18 @@ def init_nf(
                 for module in posterior_flow.modules():
                     cls = module.__class__.__name__
                     if "Monotonic" in cls and hasattr(module, "weight"):
-                        torch.nn.init.xavier_uniform_(module.weight, gain=0.5)
+                        # Use larger gain to break identity behavior and produce more diverse samples
+                        torch.nn.init.xavier_uniform_(module.weight, gain=1.0)  # Increased from 0.5 to 1.0
                         if getattr(module, "bias", None) is not None:
-                            torch.nn.init.zeros_(module.bias)
+                            torch.nn.init.normal_(module.bias, mean=0.0, std=0.1)  # Add small random bias
 
                 # If the base distribution exposes a scale parameter, set it appropriately
                 # for unconstrained parameter space.
                 try:
                     if hasattr(posterior_flow, "base") and hasattr(posterior_flow.base, "scale"):
-                        # Use scale=1.0 for unconstrained space (better than 0.5)
-                        posterior_flow.base.scale.data.fill_(1.0)
+                        # Use larger scale to ensure samples cover the full parameter space
+                        # when transformed back to physical space
+                        posterior_flow.base.scale.data.fill_(2.0)  # Increased from 1.0 to 2.0
                 except Exception:
                     pass
                 
@@ -634,10 +636,11 @@ def init_nf(
                                 break
                         
                         if last_layer is not None:
-                            # Initialize to small values with some randomness
-                            torch.nn.init.normal_(last_layer.weight, mean=0.0, std=0.05)
+                            # Initialize to larger values to break identity behavior
+                            # This helps the NAF produce more diverse samples initially
+                            torch.nn.init.normal_(last_layer.weight, mean=0.0, std=0.2)  # Increased from 0.05 to 0.2
                             if getattr(last_layer, "bias", None) is not None:
-                                torch.nn.init.zeros_(last_layer.bias)
+                                torch.nn.init.normal_(last_layer.bias, mean=0.0, std=0.1)  # Add small bias instead of zero
     return posterior_flow
 
 def init_scheduler(optimizer, run_args):
@@ -1060,7 +1063,7 @@ def calc_entropy(design, posterior_flow, experiment, num_samples):
     return entropy
 
 def load_desi_samples(cosmo_model):
-    desi_samples = np.load(f"{home_dir}/data/mcmc_samples/{cosmo_model}.npy")
+    desi_samples = np.load(f"{home_dir}/data/desi/mcmc_samples/{cosmo_model}.npy")
     if cosmo_model == 'base':
         target_labels = ['Om', 'hrdrag']
         latex_labels = ['\Omega_m', 'H_0r_d']
