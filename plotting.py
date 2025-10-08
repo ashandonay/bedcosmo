@@ -28,6 +28,18 @@ from pyro_oed_src import posterior_loss
 import json
 from IPython.display import display
 
+home_dir = os.environ["HOME"]
+sys.path.insert(0, home_dir + '/desi-y1-kp/')
+from desi_y1_plotting import KP7StylePaper, utils
+
+style = KP7StylePaper()
+
+# Disable LaTeX rendering globally to avoid "latex could not be found" errors
+# This overrides any LaTeX settings that might be set by the style object
+plt.rcParams['text.usetex'] = False
+plt.rcParams['font.family'] = 'DejaVu Sans'
+plt.rcParams['font.serif'] = ['DejaVu Serif', 'Times New Roman', 'Times', 'serif']
+
 def plot_posterior(
     samples, 
     colors, 
@@ -39,7 +51,8 @@ def plot_posterior(
     width_inch=7, 
     ranges=None,
     scatter_alpha=0.6,
-    contour_alpha_factor=0.8
+    contour_alpha_factor=0.8,
+    style=style
     ):
     """
     Plots posterior distributions using GetDist triangle plots.
@@ -60,10 +73,17 @@ def plot_posterior(
             Keys should be parameter names, values should be tuples of (min, max).
         scatter_alpha (float): Alpha value for scatter points. Default 0.6 for better distinguishability.
         contour_alpha_factor (float): Factor to adjust contour alpha for distinguishability. Default 0.8.
+        style (object, optional): Style object (like KP7StylePaper) to apply to the plotter settings.
     Returns:
         g: GetDist plotter object with the generated triangle plot.
     """
-    g = plots.get_subplot_plotter(width_inch=width_inch)
+    # Use get_single_plotter with proper ratio and scaling like in the notebook
+    getdist_2D_ratio = 1 / 1.2
+    g = plots.get_single_plotter(width_inch=width_inch, ratio=getdist_2D_ratio, scaling=True)
+    
+    # Apply style settings if provided (like KP7StylePaper)
+    if style is not None:
+        g.settings.__dict__.update(style.settings.__dict__)
 
     if type(samples) != list:
         samples = [samples]
