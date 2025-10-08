@@ -162,9 +162,10 @@ class Trainer:
         if self.checkpoint is not None:
             self._restore_state()
 
-        while step < self.run_args["total_steps"]:
-            self._init_dataloader()
+        # Initialize dataloader after restoring state
+        self._init_dataloader()
 
+        while step < self.run_args["total_steps"]:
             for context, samples in self.dataloader:
                 self.optimizer.zero_grad()
 
@@ -203,14 +204,9 @@ class Trainer:
 
                 if step % 1000 == 0:
                     log_usage_metrics(self.device, self.process, step, self.global_rank)
-                    # Save rank-specific checkpoint at regular interval
-                    checkpoint_path = f"{self.storage_path}/mlruns/{self.run_obj.info.experiment_id}/{self.run_obj.info.run_id}/artifacts/checkpoints/checkpoint_rank_{self.global_rank}_{step}.pt"
-                    save_checkpoint(self.posterior_flow.module, self.optimizer, checkpoint_path, step=step, artifact_path="checkpoints", scheduler=self.scheduler, global_rank=self.global_rank, additional_state={
-                        'rank': self.global_rank,
-                        'world_size': tdist.get_world_size(),
-                        'local_loss': loss.mean().detach().item(),
-                        'local_agg_loss': agg_loss.detach().item()
-                    })
+                    
+                    # Perform all RNG operations (plotting, etc.) BEFORE saving checkpoint
+                    # This ensures the saved RNG state is ready for the next training step
                     if self.run_args["log_nominal_area"]:
                         nominal_samples_gd = self.experiment.get_guide_samples(self.posterior_flow, self.experiment.nominal_context, num_samples=10000)
                         desi_samples_gd = self.experiment.get_desi_samples(num_samples=10000, params=self.experiment.cosmo_params, transform_output=False)
@@ -259,6 +255,16 @@ class Trainer:
                                     checkpoint_path = f"{self.storage_path}/mlruns/{self.run_obj.info.experiment_id}/{self.run_obj.info.run_id}/artifacts/checkpoints/checkpoint_nominal_area_best.pt"
                                     self.save_checkpoint(checkpoint_path, step=step, artifact_path="checkpoints", scheduler=self.scheduler, global_rank=self.global_rank)
 
+                    # Save rank-specific checkpoint AFTER all RNG operations are complete
+                    # This ensures RNG state is synchronized for the next training step
+                    checkpoint_path = f"{self.storage_path}/mlruns/{self.run_obj.info.experiment_id}/{self.run_obj.info.run_id}/artifacts/checkpoints/checkpoint_rank_{self.global_rank}_{step}.pt"
+                    save_checkpoint(self.posterior_flow.module, self.optimizer, checkpoint_path, step=step, artifact_path="checkpoints", scheduler=self.scheduler, global_rank=self.global_rank, additional_state={
+                        'rank': self.global_rank,
+                        'world_size': tdist.get_world_size(),
+                        'local_loss': loss.mean().detach().item(),
+                        'local_agg_loss': agg_loss.detach().item()
+                    })
+                    
                     # Log the global nominal area on rank 0
                     if self.global_rank == 0:
                         if self.verbose:
@@ -723,6 +729,9 @@ class Trainer:
 
             if self.global_rank == 0:
                 print(f"RNG state restored at step {self.start_step}")
+                # Generate a test sample to verify RNG state
+                test_sample = torch.randn(5, device=self.device)
+                print(f"Test RNG sample after restore: {test_sample.cpu().numpy()[:3]}...")  # First 3 values
                 
         except Exception as e:
             if self.global_rank == 0:
@@ -852,6 +861,21 @@ class Trainer:
 
             # Load optimizer state (preserve original optimizer state for resume)
             self.optimizer.load_state_dict(self.checkpoint['optimizer_state_dict'])
+            
+            # Optional: Reset momentum buffers to reduce loss spikes after resume
+            # This can help if data distribution has changed or RNG synchronization is imperfect
+            if self.run_args.get("reset_momentum_on_resume", False):
+                if self.global_rank == 0:
+                    print("Resetting optimizer momentum buffers on resume...")
+                for param_group in self.optimizer.param_groups:
+                    for param in param_group['params']:
+                        state = self.optimizer.state[param]
+                        if 'exp_avg' in state:
+                            state['exp_avg'].zero_()
+                        if 'exp_avg_sq' in state:
+                            state['exp_avg_sq'].zero_()
+                if self.global_rank == 0:
+                    print("  Momentum buffers reset successfully")
             
             # Create scheduler with original run parameters (already loaded into run_args during resume)
             self.scheduler = init_scheduler(self.optimizer, self.run_args)
@@ -983,6 +1007,7 @@ if __name__ == '__main__':
     parser.add_argument('--restart_checkpoint', type=str, default=None, help='Specific checkpoint file name to use for all ranks during restart (alternative to --restart_step)')
     parser.add_argument('--restart_optimizer', action='store_true', help='Restart optimizer from checkpoint')
     parser.add_argument('--add_steps', type=int, default=0, help='Number of steps to add to the training (only used with --resume_id)')
+    parser.add_argument('--reset_momentum_on_resume', action='store_true', help='Reset Adam momentum buffers when resuming (can help reduce loss spikes)')
     parser.add_argument('--profile', action='store_true', help='Enable profiling for a few steps and then exit.')
 
     args = parser.parse_args()
