@@ -922,7 +922,7 @@ class NumTracers:
     @profile_method
     def D_M_func(self, z_eff, Om, Ok=None, w0=None, wa=None, hrdrag=None,
                 h=0.6736, Neff=3.044, mnu=0.06, n_massive=1, T_cmb=2.7255,
-                include_radiation=True, n_int=1025):
+                include_radiation=True, n_int=8193):
 
         DTYPE = torch.float64
         dev   = self.device
@@ -1006,7 +1006,7 @@ class NumTracers:
     def D_V_func(
         self, z_eff, Om, Ok=None, w0=None, wa=None, hrdrag=None,
         h=0.6736, Neff=3.044, mnu=0.06, n_massive=1, T_cmb=2.7255,
-        include_radiation=True, n_int=1025,
+        include_radiation=True, n_int=8193,
     ):
         """
         D_V/r_d = [ z * (D_M/r_d)^2 * (D_H/r_d) ]^{1/3}
