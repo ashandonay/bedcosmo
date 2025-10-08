@@ -643,7 +643,7 @@ def init_nf(
                                 torch.nn.init.normal_(last_layer.bias, mean=0.0, std=0.1)  # Add small bias instead of zero
     return posterior_flow
 
-def init_scheduler(optimizer, run_args):
+def create_scheduler(optimizer, run_args):
     # Setup
     steps_per_cycle = run_args["total_steps"] // run_args["n_cycles"]
     initial_lr = run_args["initial_lr"]
