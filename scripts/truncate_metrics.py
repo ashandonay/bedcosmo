@@ -19,6 +19,7 @@ import glob
 from pathlib import Path
 import shutil
 
+scratch_dir = os.environ["SCRATCH"]
 
 def find_metrics_directory(run_id):
     """
@@ -35,7 +36,7 @@ def find_metrics_directory(run_id):
         "num_tracers/mlruns",
         "../num_tracers/mlruns", 
         "../../num_tracers/mlruns",
-        "/pscratch/sd/a/ashandon/bed/BED_cosmo/num_tracers/mlruns"
+        os.path.join(scratch_dir, "bed/BED_cosmo/num_tracers/mlruns")
     ]
     
     for search_path in search_paths:
