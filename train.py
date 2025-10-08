@@ -862,7 +862,7 @@ class Trainer:
             # Load optimizer state (preserve original optimizer state for resume)
             self.optimizer.load_state_dict(self.checkpoint['optimizer_state_dict'])
             
-            # Optional: Reset momentum buffers to reduce loss spikes after resume
+            # Reset momentum buffers to reduce loss spikes after resume
             # This can help if data distribution has changed or RNG synchronization is imperfect
             if self.run_args.get("reset_momentum_on_resume", False):
                 if self.global_rank == 0:
@@ -878,7 +878,7 @@ class Trainer:
                     print("  Momentum buffers reset successfully")
             
             # Create scheduler with original run parameters (already loaded into run_args during resume)
-            self.scheduler = init_scheduler(self.optimizer, self.run_args)
+            self.scheduler = create_scheduler(self.optimizer, self.run_args)
             
             # Load scheduler state if it exists (preserve original scheduler state for resume)
             if 'scheduler_state_dict' in self.checkpoint:            
@@ -940,7 +940,7 @@ class Trainer:
                     print(f"Created fresh optimizer with initial learning rate: {self.run_args['initial_lr']}")
             
             # Create fresh scheduler with new learning rate bounds
-            self.scheduler = init_scheduler(self.optimizer, self.run_args)
+            self.scheduler = create_scheduler(self.optimizer, self.run_args)
             
             if self.global_rank == 0:
                 print(f"Using existing optimizer statistics with new learning rate schedule")
@@ -951,7 +951,7 @@ class Trainer:
             tdist.barrier()
             
         else:
-            self.scheduler = init_scheduler(self.optimizer, self.run_args)
+            self.scheduler = create_scheduler(self.optimizer, self.run_args)
             seed = auto_seed(base_seed=self.run_args["pyro_seed"], rank=self.global_rank)
 
 if __name__ == '__main__':
