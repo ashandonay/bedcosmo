@@ -203,7 +203,8 @@ class Trainer:
                     self.scheduler.step()
 
                 if step % 1000 == 0:
-                    log_usage_metrics(self.device, self.process, step, self.global_rank)
+                    if self.run_args.get("log_usage", False):
+                        log_usage_metrics(self.device, self.process, step, self.global_rank)
                     
                     # Perform all RNG operations (plotting, etc.) BEFORE saving checkpoint
                     # This ensures the saved RNG state is ready for the next training step
@@ -255,8 +256,7 @@ class Trainer:
                                     checkpoint_path = f"{self.storage_path}/mlruns/{self.run_obj.info.experiment_id}/{self.run_obj.info.run_id}/artifacts/checkpoints/checkpoint_nominal_area_best.pt"
                                     self.save_checkpoint(checkpoint_path, step=step, artifact_path="checkpoints", scheduler=self.scheduler, global_rank=self.global_rank)
 
-                    # Save rank-specific checkpoint AFTER all RNG operations are complete
-                    # This ensures RNG state is synchronized for the next training step
+                    # Save rank-specific checkpoint are all RNG operations are complete
                     checkpoint_path = f"{self.storage_path}/mlruns/{self.run_obj.info.experiment_id}/{self.run_obj.info.run_id}/artifacts/checkpoints/checkpoint_rank_{self.global_rank}_{step}.pt"
                     save_checkpoint(self.posterior_flow.module, self.optimizer, checkpoint_path, step=step, artifact_path="checkpoints", scheduler=self.scheduler, global_rank=self.global_rank, additional_state={
                         'rank': self.global_rank,
@@ -1008,6 +1008,7 @@ if __name__ == '__main__':
     parser.add_argument('--restart_optimizer', action='store_true', help='Restart optimizer from checkpoint')
     parser.add_argument('--add_steps', type=int, default=0, help='Number of steps to add to the training (only used with --resume_id)')
     parser.add_argument('--reset_momentum_on_resume', action='store_true', help='Reset Adam momentum buffers when resuming (can help reduce loss spikes)')
+    parser.add_argument('--log_usage', action='store_true', help='Log compute usage of the training script')
     parser.add_argument('--profile', action='store_true', help='Enable profiling for a few steps and then exit.')
 
     args = parser.parse_args()

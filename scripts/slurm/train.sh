@@ -1,13 +1,13 @@
 #!/bin/bash
 #SBATCH -C gpu
-#SBATCH -q shared
+#SBATCH -q regular
 #SBATCH -A desi
 #SBATCH --job-name=train
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1     # 1 primary Slurm task per node
 #SBATCH --cpus-per-task=128     # CPUs for all DDP workers on the node (e.g., 4 workers * 32 cpus/worker)
 #SBATCH --gpus-per-node=4       # Number of GPUs to request per node
-#SBATCH --time=01:20:00
+#SBATCH --time=07:30:00
 #SBATCH --output=/pscratch/sd/a/ashandon/bed/BED_cosmo/num_tracers/logs/%A_%x_%a.log
 #SBATCH --error=/pscratch/sd/a/ashandon/bed/BED_cosmo/num_tracers/logs/%A_%x_%a.log
 #SBATCH --mail-type=ALL
@@ -19,6 +19,8 @@ conda activate bed-cosmo
 
 # Load NERSC CUDA and NCCL modules AFTER conda activation
 module load nccl/2.21.5 # NERSC NCCL for Slingshot
+export NCCL_ASYNC_ERROR_HANDLING=1
+export NCCL_TIMEOUT=1800
 
 # Define number of DDP processes per node
 NPROC_PER_NODE=$SLURM_GPUS_PER_NODE
@@ -59,12 +61,12 @@ srun torchrun \
      --mnn_signal 64 \
      --spline_bins 20 \
      --n_particles_per_device 5000 \
-     --total_steps 50000 \
+     --total_steps 300000 \
      --scheduler_type cosine \
      --grad_clip 0.0 \
-     --initial_lr 0.0001 \
+     --initial_lr 0.0003 \
      --final_lr 0.00 \
-     --warmup_fraction 0.2 \
+     --warmup_fraction 0.1 \
      --design_step "[0.025, 0.05, 0.05, 0.025]" \
      --design_lower "[0.025, 0.1, 0.1, 0.1]" \
      --fixed_design \

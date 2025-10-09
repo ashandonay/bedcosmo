@@ -19,6 +19,8 @@ conda activate bed-cosmo
 
 # Load NERSC CUDA and NCCL modules AFTER conda activation
 module load nccl/2.21.5 # NERSC NCCL for Slingshot
+export NCCL_ASYNC_ERROR_HANDLING=1
+export NCCL_TIMEOUT=1800
 
 # Define number of DDP processes per node
 NPROC_PER_NODE=$SLURM_GPUS_PER_NODE

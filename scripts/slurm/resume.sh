@@ -17,6 +17,8 @@ conda activate bed-cosmo
 
 # Load NERSC CUDA and NCCL modules AFTER conda activation
 module load nccl/2.21.5 # NERSC NCCL for Slingshot
+export NCCL_ASYNC_ERROR_HANDLING=1
+export NCCL_TIMEOUT=1800
 
 # Define number of DDP processes per node
 NPROC_PER_NODE=$SLURM_GPUS_PER_NODE
@@ -39,8 +41,8 @@ export CUDA_DEVICE_ORDER=PCI_BUS_ID
 # torch.distributed.run will then spawn NPROC_PER_NODE worker processes on each node.
 # SLURM_PROCID can be used for node_rank as srun launches one task per node here.
 
-RUN_ID=e75a34eee94e48beb3a591c579258500
-RESUME_STEP=190000
+RUN_ID=c15b5b2695cc43bfb4b61842d8ee6274
+RESUME_STEP=28000
 
 # Get the directory where this script is located
 TRUNCATE_SCRIPT="/global/homes/a/ashandon/bed/BED_cosmo/scripts/truncate_metrics.py"

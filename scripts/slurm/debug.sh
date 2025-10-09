@@ -17,6 +17,8 @@ conda activate bed-cosmo
 
 # Load NERSC CUDA and NCCL modules AFTER conda activation
 module load nccl/2.21.5 # NERSC NCCL for Slingshot
+export NCCL_ASYNC_ERROR_HANDLING=1
+export NCCL_TIMEOUT=1800
 
 # Define number of DDP processes per node
 NPROC_PER_NODE=$SLURM_GPUS_PER_NODE
@@ -47,8 +49,8 @@ srun torchrun \
      --cosmo_exp num_tracers \
      --pyro_seed 1 \
      --nf_seed 1 \
-     --flow_type NAF \
-     --activation relu \
+     --flow_type MAF \
+     --activation elu \
      --n_transforms 10 \
      --cond_hidden_size 256 \
      --cond_n_layers 8 \
@@ -59,9 +61,9 @@ srun torchrun \
      --n_particles_per_device 1000 \
      --total_steps 10000 \
      --scheduler_type cosine \
-     --initial_lr 0.0001 \
+     --initial_lr 0.0002 \
      --final_lr 0.0 \
-     --warmup_fraction 0.2 \
+     --warmup_fraction 0.0 \
      --design_step "[0.025, 0.05, 0.05, 0.025]" \
      --design_lower "[0.025, 0.1, 0.1, 0.1]" \
      --fixed_design \
