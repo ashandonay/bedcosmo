@@ -8,8 +8,8 @@
 #SBATCH --cpus-per-task=128     # CPUs for all DDP workers on the node (e.g., 4 workers * 32 cpus/worker)
 #SBATCH --gpus-per-node=4       # Number of GPUs to request per node
 #SBATCH --time=00:10:00
-#SBATCH --output=/pscratch/sd/a/ashandon/bed/BED_cosmo/num_tracers/logs/%A_%x_%a.log
-#SBATCH --error=/pscratch/sd/a/ashandon/bed/BED_cosmo/num_tracers/logs/%A_%x_%a.log
+#SBATCH --output=/pscratch/sd/a/ashandon/bed/BED_cosmo/num_tracers/logs/%x_%A.log
+#SBATCH --error=/pscratch/sd/a/ashandon/bed/BED_cosmo/num_tracers/logs/%x_%A.log
 
 # Load conda first, then activate, then other GPU libraries
 module load conda
@@ -17,8 +17,12 @@ conda activate bed-cosmo
 
 # Load NERSC CUDA and NCCL modules AFTER conda activation
 module load nccl/2.21.5 # NERSC NCCL for Slingshot
-export NCCL_ASYNC_ERROR_HANDLING=1
+export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
 export NCCL_TIMEOUT=1800
+export NCCL_NET_GDR_LEVEL=PHB # PCI Host Bridge to use GPUdirect
+export NCCL_CROSS_NIC=1
+export NCCL_SOCKET_IFNAME=hsn # high-speed network interface
+export NCCL_DEBUG=WARN
 
 # Define number of DDP processes per node
 NPROC_PER_NODE=$SLURM_GPUS_PER_NODE
@@ -58,13 +62,12 @@ srun torchrun \
      --mnn_n_layers 4 \
      --mnn_signal 64 \
      --spline_bins 20 \
-     --n_particles_per_device 1000 \
+     --n_particles_per_device 200 \
      --total_steps 10000 \
      --scheduler_type cosine \
-     --initial_lr 0.0002 \
+     --initial_lr 0.0005 \
      --final_lr 0.0 \
-     --warmup_fraction 0.0 \
+     --warmup_fraction 0.1 \
      --design_step "[0.025, 0.05, 0.05, 0.025]" \
      --design_lower "[0.025, 0.1, 0.1, 0.1]" \
-     --fixed_design \
      --verbose

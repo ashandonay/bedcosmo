@@ -19,8 +19,12 @@ conda activate bed-cosmo
 
 # Load NERSC CUDA and NCCL modules AFTER conda activation
 module load nccl/2.21.5 # NERSC NCCL for Slingshot
-export NCCL_ASYNC_ERROR_HANDLING=1
+export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
 export NCCL_TIMEOUT=1800
+export NCCL_NET_GDR_LEVEL=PHB # PCI Host Bridge to use GPUdirect
+export NCCL_CROSS_NIC=1
+export NCCL_SOCKET_IFNAME=hsn # high-speed network interface
+export NCCL_DEBUG=WARN
 
 # Define number of DDP processes per node
 NPROC_PER_NODE=$SLURM_GPUS_PER_NODE
