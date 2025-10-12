@@ -193,12 +193,13 @@ class NumTracers:
         cosmo_model="base",
         priors_path=None,
         flow_type="MAF",
-        design_step=0.05, 
-        design_lower=0.05, 
+        design_step=[0.025, 0.05, 0.05, 0.025],
+        design_lower=[0.025, 0.1, 0.1, 0.1],
         design_upper=None, 
         fixed_design=False, 
         include_D_M=True, 
         include_D_V=True,
+        bijector_state=None,
         seed=None,
         global_rank=0, 
         transform_input=False,
@@ -258,7 +259,11 @@ class NumTracers:
         self.priors, self.param_constraints, self.latex_labels = self.get_priors(priors_path)
         self.desi_priors, _, _ = self.get_priors(os.path.join(home_dir, data_path, 'priors.yaml'))
         self.cosmo_params = list(self.priors.keys())
-        self.param_bijector = Bijector(self, cdf_bins=1000, cdf_samples=500000)
+        self.param_bijector = Bijector(self, cdf_bins=2000, cdf_samples=1e7)
+        if bijector_state is not None:
+            if self.global_rank == 0:
+                print(f"Restoring bijector state from checkpoint.")
+            self.param_bijector.set_state(bijector_state)
         # if the priors are not the same as the DESI priors, create a new bijector for the DESI samples
         if self.priors.items() != self.desi_priors.items():
             self.desi_bijector = Bijector(self, priors=self.desi_priors, cdf_bins=1000, cdf_samples=500000)

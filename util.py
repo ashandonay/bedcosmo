@@ -44,7 +44,7 @@ class Bijector:
             self.priors = priors
         else:
             self.priors = self.experiment.priors
-        self.cdfs = self.create_cdfs(num_bins=cdf_bins, num_samples=cdf_samples)
+        self.cdfs = self.create_cdfs(num_bins=int(cdf_bins), num_samples=int(cdf_samples))
 
     def create_cdfs(self, num_bins, num_samples):
         """
@@ -82,6 +82,44 @@ class Bijector:
                 'cdf_values': cdf_values
             }
         return cdfs
+
+
+    def get_state(self):
+        """Serialize the bijector's CDF tables to CPU tensors so they can be
+        persisted inside a checkpoint without device-specific dependencies.
+        """
+        state = {}
+        for key, tensors in self.cdfs.items():
+            state[key] = {
+                'bins': tensors['bins'].detach().cpu(),
+                'cdf_values': tensors['cdf_values'].detach().cpu()
+            }
+        return state
+
+    def set_state(self, state, device=None, dtype=None):
+        """Restore CDF tables from a serialized state dictionary.
+
+        Args:
+            state (dict): Output of `get_state`.
+            device (str or torch.device, optional): Target device for tensors.
+            dtype (torch.dtype, optional): Target dtype for tensors.
+        """
+        if device is not None and not isinstance(device, torch.device):
+            device = torch.device(device)
+
+        sample_cdf = next(iter(self.cdfs.values()), None)
+        default_device = sample_cdf['bins'].device if sample_cdf else torch.device('cpu')
+        default_dtype = sample_cdf['bins'].dtype if sample_cdf else torch.float64
+
+        target_device = device if device is not None else default_device
+        target_dtype = dtype if dtype is not None else default_dtype
+
+        restored = {}
+        for key, tensors in state.items():
+            bins = tensors['bins'].to(device=target_device, dtype=target_dtype)
+            cdf_values = tensors['cdf_values'].to(device=target_device, dtype=target_dtype)
+            restored[key] = {'bins': bins, 'cdf_values': cdf_values}
+        self.cdfs = restored
 
     def prior_to_gaussian(self, samples, param_key, target_mean=0.0, target_std=1.0):
         """
@@ -904,6 +942,7 @@ def init_experiment(
         run_obj,
         run_args, 
         device,
+        checkpoint=None,
         global_rank=0,
         design_args={},
         ):
@@ -927,6 +966,8 @@ def init_experiment(
         # Filter run_args to only include valid NumTracers parameters
         exp_args = {k: v for k, v in run_args.items() if k in valid_params}
         exp_args['global_rank'] = global_rank
+        if checkpoint is not None and 'bijector_state' in checkpoint.keys():
+            exp_args['bijector_state'] = checkpoint['bijector_state']
         experiment = NumTracers(**exp_args)
     else:
         raise ValueError(f"{run_args.get('cosmo_exp')} not supported")

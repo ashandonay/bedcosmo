@@ -130,18 +130,19 @@ class Evaluator:
             optimal_samples, optimal_eig = self._eval_step(step, design_type='optimal')
             all_samples.extend(optimal_samples)
             # Set the optimal design samples to blue
-            all_colors.extend(['tab:blue'] * len(optimal_samples))
+            all_colors.extend(['tab:orange'] * len(optimal_samples))
         if 'nominal' in display:
             # Sample with nominal design
             nominal_samples, nominal_eig = self._eval_step(step, design_type='nominal')
             all_samples.extend(nominal_samples)
-            # Set the nominal design samples to gray
-            all_colors.extend(['gray'] * len(nominal_samples))
+            # Set the nominal design samples to blue
+            all_colors.extend(['tab:blue'] * len(nominal_samples))
         # Get the DESI MCMC samples
         desi_samples_gd = self.experiment.get_desi_samples(transform_output=self.desi_transform_output)
         all_samples.append(desi_samples_gd)
         all_colors.append('black')
         g = plot_posterior(all_samples, all_colors, levels=self.levels, width_inch=10)
+        g.fig.suptitle(f"Posterior Evaluation ({len(self.global_ranks)} Ranks, {self.param_space.capitalize()} Space)", fontsize=16)
 
         # Create custom legend
         if g.fig.legends:
@@ -150,11 +151,11 @@ class Evaluator:
         custom_legend = []
         if 'optimal' in display:
             custom_legend.append(
-                Line2D([0], [0], color='tab:blue', label=f'Optimal Design (NF)')
+                Line2D([0], [0], color='tab:orange', label=f'Optimal Design (NF)')
             )
         if 'nominal' in display:
             custom_legend.append(
-                Line2D([0], [0], color='gray', label=f'Nominal Design (NF)')
+                Line2D([0], [0], color='tab:blue', label=f'Nominal Design (NF)')
             )
         custom_legend.append(
             Line2D([0], [0], color='black', label=f'DESI Nominal Design (MCMC)')
@@ -178,7 +179,7 @@ class Evaluator:
         design_areas = {'nominal': {p: [] for p in pair_names}, 'optimal': {p: [] for p in pair_names}}
         all_samples = []
         colors = []
-        inputs = (('optimal', 'tab:blue', optimal_design), ('nominal', 'gray', self.experiment.nominal_design))
+        inputs = (('optimal', 'tab:orange', optimal_design), ('nominal', 'tab:blue', self.experiment.nominal_design))
         for design_type, color, design in inputs:
             data_idxs = np.arange(1, num_data_samples) # sample N data points
             samples = self.experiment.sample_params_from_data_samples(
@@ -238,10 +239,10 @@ class Evaluator:
         # add labels for Nominal and Optimal to total legend
         custom_legend = []
         custom_legend.append(
-            Line2D([0], [0], color='tab:blue', label=f'Optimal Design')
+            Line2D([0], [0], color='tab:orange', label=f'Optimal Design')
         )
         custom_legend.append(
-            Line2D([0], [0], color='gray', label=f'Nominal Design')
+            Line2D([0], [0], color='tab:blue', label=f'Nominal Design')
         )
         g.fig.set_constrained_layout(True)
         leg = g.fig.legend(handles=custom_legend, loc='upper right', bbox_to_anchor=(0.99, 0.96))
@@ -595,7 +596,7 @@ if __name__ == "__main__":
 
     evaluator.posterior(step=eval_step, display=['nominal'])
     #evaluator.eig_grid(step=eval_step)
-    evaluator.posterior_steps(steps=[10000, 30000, 'last'])
+    evaluator.posterior_steps(steps=[30000, 100000, 200000, 'last'])
     #evaluator.eig_steps(steps=[eval_step//4, eval_step//2, 3*eval_step//4, 'last'])
     #evaluator.design_comparison(step=eval_step)
     #evaluator.sample_posterior(step=eval_step, level=0.68, central=True)

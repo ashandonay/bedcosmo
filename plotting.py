@@ -443,7 +443,7 @@ def plot_training(
                         fontsize=12, color='gray')
                 
         # Configure ax2 (Contour Area)
-        ax_area.set_ylabel("(Posterior Contour Area) / (Nominal DESI Contour Area)")
+        ax_area.set_ylabel("Nominal Design Area Ratio to DESI")
         ax_area.set_ylim(area_limits)
         ax_area.tick_params(axis='y')
         ax_area.legend(loc='best', title="Parameter Pair")
@@ -1172,7 +1172,7 @@ def compare_training(
         ax_area.axhline(1, color='black', linestyle='--', lw=1.5, alpha=0.7, label='DESI Area')
         
         # Configure ax2 (Parameter Pair Area)
-        ax_area.set_ylabel(f"(Posterior Contour Area) / (DESI Contour Area) - {param_pair}")
+        ax_area.set_ylabel(f"Nominal Design Area Ratio to DESI - {param_pair}")
         ax_area.tick_params(axis='y')
         ax_area.grid(True, axis='y', linestyle='--', alpha=0.6)
         ax_area.set_ylim(area_limits)
