@@ -141,18 +141,13 @@ class Trainer:
         
         self.posterior_flow = DDP(self.posterior_flow, device_ids=ddp_device_spec, output_device=ddp_output_device_spec, find_unused_parameters=False)
 
-        # Load model checkpoint BEFORE creating optimizer (for resume)
-        # This ensures optimizer is created with the correct parameter objects
+        # Load model checkpoint before creating optimizer (for resume)
         if self.run_args.get("resume_id", None):
             self.posterior_flow.module.load_state_dict(self.checkpoint['model_state_dict'], strict=True)
-            # Ensure model is in training mode after loading
             self.posterior_flow.train()
 
         self._init_optimizer()
         self._init_scheduler()
-        
-        # Initialize dataloader in __init__ for both fresh and resume
-        # This must happen before RNG restoration (in run()) for resume to work correctly
         self._init_dataloader()
         
         # Only plot initial samples for fresh runs
@@ -357,8 +352,6 @@ class Trainer:
         Saves the training checkpoint with comprehensive state information.
 
         Args:
-            model (torch.nn.Module): The PyTorch model to save.
-            optimizer (torch.optim.Optimizer): The optimizer used during training.
             filepath (str): Path to save the checkpoint.
             step (int, optional): Current training step.
             artifact_path (str, optional): Path to log the artifact to in MLflow.
