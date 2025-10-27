@@ -7,7 +7,7 @@
 #SBATCH --ntasks-per-node=1     # 1 primary Slurm task per node
 #SBATCH --cpus-per-task=128     # CPUs for all DDP workers on the node (e.g., 4 workers * 32 cpus/worker)
 #SBATCH --gpus-per-node=4       # Number of GPUs to request per node
-#SBATCH --time=00:10:00
+#SBATCH --time=00:30:00
 #SBATCH --output=/pscratch/sd/a/ashandon/bed/BED_cosmo/num_tracers/logs/%x_%A.log
 #SBATCH --error=/pscratch/sd/a/ashandon/bed/BED_cosmo/num_tracers/logs/%x_%A.log
 
@@ -51,23 +51,25 @@ srun torchrun \
      --cosmo_model base_omegak_w_wa \
      --mlflow_exp debug \
      --cosmo_exp num_tracers \
+     --priors_path "num_tracers/priors_hrdrag.yaml" \
      --pyro_seed 1 \
      --nf_seed 1 \
-     --flow_type MAF \
+     --flow_type NAF \
      --activation elu \
-     --n_transforms 10 \
-     --cond_hidden_size 256 \
+     --n_transforms 6 \
+     --cond_hidden_size 512 \
      --cond_n_layers 8 \
-     --mnn_hidden_size 256 \
-     --mnn_n_layers 4 \
+     --mnn_hidden_size 512 \
+     --mnn_n_layers 6 \
      --mnn_signal 64 \
      --spline_bins 20 \
-     --n_particles_per_device 200 \
+     --n_particles_per_device 100 \
      --total_steps 10000 \
      --scheduler_type cosine \
      --initial_lr 0.0005 \
      --final_lr 0.0 \
      --warmup_fraction 0.1 \
+     --checkpoint_step_freq 2000 \
      --design_step "[0.025, 0.05, 0.05, 0.025]" \
      --design_lower "[0.025, 0.1, 0.1, 0.1]" \
      --verbose

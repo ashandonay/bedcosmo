@@ -6,6 +6,9 @@ This script is designed to work with the BED_cosmo MLflow tracking structure whe
 are stored in individual files per metric name, with each line containing:
 timestamp value step
 
+The script searches backwards from the end of each file for optimal performance when
+the resume step is near the end (the common case when resuming from large step counts).
+
 Usage:
     python truncate_metrics.py --run_id <run_id> --resume_step <step> [--dry_run]
     
@@ -57,6 +60,9 @@ def truncate_metrics_file(file_path, resume_step, dry_run=False):
     """
     Truncate a metrics file to keep only rows up to the resume_step.
     
+    Searches backwards from the end of the file for optimal performance when
+    the resume_step is near the end (the typical case).
+    
     Args:
         file_path (str): Path to the metrics file
         resume_step (int): Step number to truncate at (inclusive)
@@ -76,16 +82,17 @@ def truncate_metrics_file(file_path, resume_step, dry_run=False):
     original_count = len(lines)
     cutoff_index = -1
     
-    # Find the last line that has step <= resume_step
-    for i, line in enumerate(lines):
+    # Search backwards from the end since truncate_step is almost always near the end
+    # This is much faster when resuming from large step counts
+    for i in range(len(lines) - 1, -1, -1):
+        line = lines[i]
         parts = line.strip().split()
         if len(parts) >= 3:
             try:
                 step = int(parts[2])
                 if step <= resume_step:
                     cutoff_index = i
-                else:
-                    break
+                    break  # Found the last valid line, stop searching
             except ValueError:
                 # Skip lines that don't have a valid step number
                 continue

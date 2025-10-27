@@ -4,6 +4,7 @@ import pyro.poutine as poutine
 from pyro.contrib.util import lexpand
 from pyro.infer.autoguide.utils import mean_field_entropy
 import math
+from torch.utils.data import Dataset
 
 def nmc_eig(
     model,
@@ -190,7 +191,7 @@ def _vnmc_eig_loss(model, guide, observation_labels, target_labels, contrastive=
     
     return loss_fn
 
-def nf_loss(context, guide, samples, experiment, rank=0, verbose_shapes=False):
+def nf_loss(samples, context, guide, experiment, rank=0, verbose_shapes=False, log_probs=None, evaluation=False):
     """
     Computes the negative log-probability loss for a normalizing flow model given pre-sampled data.
 
@@ -205,6 +206,9 @@ def nf_loss(context, guide, samples, experiment, rank=0, verbose_shapes=False):
     - agg_loss: Aggregated loss over all samples.
     - loss: Per-sample loss, reshaped to match the original design batch.
     """
+    # Store original batch shape
+    batch_shape = samples.shape[:-1]  # [num_particles, num_designs]
+    
     # Flatten samples and contexts for normalizing flow input
     flattened_samples = samples.view(-1, samples.shape[-1])
     flattened_context = context.view(-1, context.shape[-1])
@@ -221,10 +225,18 @@ def nf_loss(context, guide, samples, experiment, rank=0, verbose_shapes=False):
     else:
         y_flat = flattened_samples
     neg_log_prob = -guide(flattened_context).log_prob(y_flat)
-    neg_log_prob = neg_log_prob.view(-1, 1).mean(dim=-1)
+    
+    # Reshape back to original batch shape, just like posterior_loss does
+    neg_log_prob = neg_log_prob.reshape(batch_shape)
 
     # Compute the aggregate loss
     agg_loss, loss = _safe_mean_terms(neg_log_prob)
+
+    if evaluation:  
+        if log_probs is None:
+            raise ValueError("Log probabilities are not provided")
+        prior_entropy = -1*sum(log_probs[l].mean(dim=0) for l in experiment.cosmo_params)
+        loss = prior_entropy - loss
 
     return agg_loss, loss
 
@@ -506,3 +518,52 @@ def _create_condition_input(design, y_dict, observation_labels, condition_design
         return torch.cat(ys, dim=-1)
     else:
         return torch.cat(ys[1:], dim=-1)
+
+class LikelihoodDataset(Dataset):
+    def __init__(self, experiment, n_particles_per_device, designs=None, device="cuda", evaluation=False):
+        self.experiment = experiment
+        self.n_particles_per_device = n_particles_per_device
+        self.device = device
+        self.evaluation = evaluation
+        if designs is None:
+            self.designs = experiment.designs
+        else:
+            self.designs = designs
+
+    def __len__(self):
+        # We only have one "batch" of designs, so return 1
+        return 1
+
+    def __getitem__(self, idx):
+        # Dynamically expand the designs on each access
+        expanded_design = lexpand(self.designs, self.n_particles_per_device).to(self.device)
+
+        # Generate samples from the NumTracers pyro model
+        with torch.no_grad():
+            # Generate the samples directly on the GPU
+            trace = poutine.trace(self.experiment.pyro_model).get_trace(expanded_design)
+            
+            # Assuming trace values are already on the correct device from the model
+            y_dict = {l: trace.nodes[l]["value"] for l in self.experiment.observation_labels}
+            theta_dict = {l: trace.nodes[l]["value"] for l in self.experiment.cosmo_params}
+
+            # Extract the target samples (theta)
+            samples = torch.cat([theta_dict[k].unsqueeze(dim=-1) for k in self.experiment.cosmo_params], dim=-1)
+
+            # Create the condition input
+            condition_input = _create_condition_input(
+                design=expanded_design,
+                y_dict=y_dict,
+                observation_labels=self.experiment.observation_labels,
+                condition_design=True
+            )
+
+            # Compute log probabilities only if evaluation=True
+            if self.evaluation:
+                trace.compute_log_prob()
+                # Extract log probabilities for cosmological parameters
+                log_probs = {l: trace.nodes[l]["log_prob"] for l in self.experiment.cosmo_params}
+                return samples, condition_input, log_probs
+            else:
+                return samples, condition_input
+

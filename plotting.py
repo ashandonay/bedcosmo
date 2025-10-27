@@ -258,7 +258,7 @@ def plot_training(
         area_step_freq=100,
         lr_step_freq=1,
         show_area=True,
-        area_limits=[0.0, 5.0],
+        area_limits=[0.5, 2.0],
         show_lr=True,
         dpi=300,
         step_range=None
@@ -482,7 +482,7 @@ def plot_training(
 
     # Adjust layout
     fig.set_constrained_layout(True)
-    fig.suptitle("Training History", fontsize=16)
+    fig.suptitle(f"Training History - Run: {run_id[:8]}", fontsize=16)
 
     # Determine save path
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -1063,7 +1063,7 @@ def compare_training(
             base_label = run_id_iter[:8]
         else:
             # Original logic for when var is specified
-            label_parts = []
+            label_parts = [run_id_iter[:8]]  # Start with run_id
             for v_key in vars_list:
                 if v_key in run_params:
                     label_parts.append(f"{v_key}={run_params[v_key]}")

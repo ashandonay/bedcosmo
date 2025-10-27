@@ -7,9 +7,11 @@
 #SBATCH --ntasks-per-node=1     # 1 primary Slurm task per node
 #SBATCH --cpus-per-task=128     # CPUs for all DDP workers on the node (e.g., 4 workers * 32 cpus/worker)
 #SBATCH --gpus-per-node=4       # Number of GPUs to request per node
-#SBATCH --time=03:30:00
+#SBATCH --time=02:30:00
 #SBATCH --output=/pscratch/sd/a/ashandon/bed/BED_cosmo/num_tracers/logs/%A_%x_%a.log
 #SBATCH --error=/pscratch/sd/a/ashandon/bed/BED_cosmo/num_tracers/logs/%A_%x_%a.log
+#SBATCH --mail-type=ALL
+#SBATCH --mail-user=ashandon@uci.edu
 
 # Load conda first, then activate, then other GPU libraries
 module load conda
@@ -45,8 +47,8 @@ export CUDA_DEVICE_ORDER=PCI_BUS_ID
 # torch.distributed.run will then spawn NPROC_PER_NODE worker processes on each node.
 # SLURM_PROCID can be used for node_rank as srun launches one task per node here.
 
-RUN_ID=d5fe1f700a3a4d4a85f08edefcebb7ec
-RESUME_STEP=101000
+RUN_ID=2bdda64b5e2e44aeb11910f75195efe8
+RESUME_STEP=43000
 
 # Get the directory where this script is located
 TRUNCATE_SCRIPT="/global/homes/a/ashandon/bed/BED_cosmo/scripts/truncate_metrics.py"
@@ -89,6 +91,3 @@ srun torchrun \
      /global/homes/a/ashandon/bed/BED_cosmo/train.py \
      --resume_id $RUN_ID \
      --resume_step $RESUME_STEP
-
-
-

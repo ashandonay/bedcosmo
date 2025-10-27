@@ -958,7 +958,10 @@ def init_experiment(
     run_args.update(design_args)
     run_args["priors_path"] = run_obj.info.artifact_uri + "/priors.yaml"
     run_args["device"] = device
-    if run_args.get("cosmo_exp") == 'num_tracers':
+    
+    cosmo_exp = run_args.get("cosmo_exp")
+    
+    if cosmo_exp == 'num_tracers':
         from num_tracers import NumTracers
         valid_params = inspect.signature(NumTracers.__init__).parameters.keys()
         valid_params = [k for k in valid_params if k != 'self']
@@ -969,8 +972,22 @@ def init_experiment(
         if checkpoint is not None and 'bijector_state' in checkpoint.keys():
             exp_args['bijector_state'] = checkpoint['bijector_state']
         experiment = NumTracers(**exp_args)
+    
+    elif cosmo_exp == 'variable_redshift':
+        from variable_redshift.variable_redshift import VariableRedshift
+        valid_params = inspect.signature(VariableRedshift.__init__).parameters.keys()
+        valid_params = [k for k in valid_params if k != 'self']
+        
+        # Filter run_args to only include valid VariableRedshift parameters
+        exp_args = {k: v for k, v in run_args.items() if k in valid_params}
+        exp_args['global_rank'] = global_rank
+        if checkpoint is not None and 'bijector_state' in checkpoint.keys():
+            exp_args['bijector_state'] = checkpoint['bijector_state']
+        experiment = VariableRedshift(**exp_args)
+    
     else:
-        raise ValueError(f"{run_args.get('cosmo_exp')} not supported")
+        raise ValueError(f"Experiment '{cosmo_exp}' not supported. Supported experiments: 'num_tracers', 'variable_redshift'")
+    
     return experiment
     
 def eval_eigs(
@@ -1176,6 +1193,32 @@ def parse_mlflow_params(params_dict):
 
     return parsed_params
 
+def parse_float_or_list(value):
+    """
+    Parse a string that can be either a single float or a JSON list of floats.
+    
+    Args:
+        value (str): String representation of either a float or a JSON list
+        
+    Returns:
+        float or list: Parsed value as either a single float or list of floats
+    """
+    try:
+        # First try to parse as JSON (for lists)
+        parsed = json.loads(value)
+        if isinstance(parsed, list):
+            # Ensure all elements are numbers
+            return [float(x) for x in parsed]
+        else:
+            # Single value from JSON
+            return float(parsed)
+    except (json.JSONDecodeError, ValueError):
+        try:
+            # If JSON parsing fails, try parsing as a single float
+            return float(value)
+        except ValueError:
+            raise argparse.ArgumentTypeError("Invalid value '{}'. Must be a float or JSON list of floats.".format(value))
+            
 def sort_key_for_group_tuple(group_tuple_key):
     key_as_num_or_str = []
     for val_in_tuple in group_tuple_key:
@@ -1432,8 +1475,24 @@ def get_checkpoint(target_step, checkpoint_dir, current_pytorch_device, global_r
     return checkpoint, selected_step
 
 def get_runtime(run_id):
+    """
+    Get the cumulative active training runtime, excluding downtime between sessions.
+    Falls back to end_time - start_time if cumulative runtime is not available.
+    """
     run = mlflow.get_run(run_id)
-
+    
+    # Try to get cumulative runtime from metrics first
+    try:
+        client = mlflow.tracking.MlflowClient()
+        runtime_history = client.get_metric_history(run_id, 'cumulative_runtime_seconds')
+        if runtime_history:
+            # Get the latest cumulative runtime value
+            cumulative_seconds = runtime_history[-1].value
+            return timedelta(seconds=cumulative_seconds)
+    except Exception:
+        pass  # Fall back to old method
+    
+    # Fallback: use start_time and end_time (includes downtime)
     start_ms = run.info.start_time      # epoch ms
     end_ms   = run.info.end_time        # epoch ms (None until the run is finished)
 
@@ -1695,94 +1754,103 @@ def get_contour_area(samples, level, *params, global_rank=None, design_type='nom
 
     return areas_list
 
-def create_gif(run_id, fps=1, add_labels=True, label_position='top-right', text_size=1.0, pause_last_frame=3.0):
-    """Create GIF using PIL with optional labels"""
+def create_gif(run_id, fps=1, add_labels=True, label_position='top-right', text_size=1.0, pause_last_frame=3.0, rank=0):
+    """Create GIF using PIL with optional labels for a specific rank
+    
+    Args:
+        run_id: MLflow run ID
+        fps: Frames per second for GIF
+        add_labels: Whether to add step labels to frames
+        label_position: Position of step label ('top-left', 'top-right', 'bottom-left', 'bottom-right', 'center')
+        text_size: Size of label text
+        pause_last_frame: Duration to pause on last frame (seconds)
+        rank: Rank index to create GIF for (default: 0)
+    """
     
     client = MlflowClient()
     run = client.get_run(run_id)
     cosmo_exp = run.data.params["cosmo_exp"]
     storage_path = os.environ["SCRATCH"] + f"/bed/BED_cosmo/{cosmo_exp}"
-    n_devices = int(run.data.params["n_devices"])
     
-    for i in range(n_devices):
-        dir_path = f"{storage_path}/mlruns/{run.info.experiment_id}/{run.info.run_id}/artifacts/plots/rank_{i}/posterior"
-        output_path = f"{dir_path}/animation.gif"
+    # Create GIF for the specified rank only
+    dir_path = f"{storage_path}/mlruns/{run.info.experiment_id}/{run.info.run_id}/artifacts/plots/rank_{rank}/posterior"
+    output_path = f"{dir_path}/animation.gif"
+
+    # Get all PNG files and sort them numerically
+    png_files = glob.glob(os.path.join(dir_path, "*.png"))
+    png_files.sort(key=lambda x: int(os.path.basename(x).split('.')[0]))
     
-        # Get all PNG files and sort them numerically
-        png_files = glob.glob(os.path.join(dir_path, "*.png"))
-        png_files.sort(key=lambda x: int(os.path.basename(x).split('.')[0]))
+    # Load images
+    images = []
+    for idx, file in enumerate(png_files):
+        img = Image.open(file)
         
-        # Load images
-        images = []
-        for i, file in enumerate(png_files):
-            img = Image.open(file)
+        if add_labels:
+            # Extract step number from filename
+            step_num = os.path.basename(file).split('.')[0]
             
-            if add_labels:
-                # Extract step number from filename
-                step_num = os.path.basename(file).split('.')[0]
-                
-                # Create a copy to avoid modifying the original
-                img_with_label = img.copy()
-                
-                # Get image dimensions
-                width, height = img_with_label.size
-                
-                # Create drawing context
-                draw = ImageDraw.Draw(img_with_label)
-                
-                # Create scalable font based on text_size
-                try:
-                    # Try to use LiberationSans font (available on your system)
-                    font = ImageFont.truetype("/usr/share/fonts/truetype/LiberationSans-Regular.ttf", int(20 * text_size))
-                except:
-                    if i == 0:
-                        print("Warning: Could not load LiberationSans font. Falling back to default font.")
-                    # Fallback to default font
-                    font = ImageFont.load_default()
-                
-                # Create label text
-                label_text = f"Step: {step_num}"
-                
-                # Simple text size estimation (scaled by text_size parameter)
-                text_width = len(label_text) * int(12 * text_size)  # Approximate width
-                text_height = int(20 * text_size)  # Approximate height
-                
-                # Add padding around text
-                padding = 10
-                
-                # Calculate text position based on label_position with proper margins
-                if label_position == 'top-left':
-                    text_x, text_y = padding, padding
-                elif label_position == 'top-right':
-                    text_x, text_y = width - text_width - padding, padding
-                elif label_position == 'bottom-left':
-                    text_x, text_y = padding, height - text_height - padding
-                elif label_position == 'bottom-right':
-                    text_x, text_y = width - text_width - padding, height - text_height - padding
-                else:  # center
-                    text_x, text_y = (width - text_width) // 2, (height - text_height) // 2
-                
-                # Ensure text doesn't go outside image bounds
-                text_x = max(padding, min(text_x, width - text_width - padding))
-                text_y = max(padding, min(text_y, height - text_height - padding))
-                
-                # Draw simple black text
-                draw.text((text_x, text_y), label_text, font=font, fill='black')
-                
-                images.append(img_with_label)
-            else:
-                images.append(img)
-        
-        # Create GIF with pause on first frame
-        duration = 1000 // fps  # Convert fps to duration in milliseconds
-        last_frame_duration = int(pause_last_frame * 1000)  # Convert pause to milliseconds
-        
-        # Save with custom durations: first frame gets longer duration, others get normal duration
-        images[0].save(
-            output_path,
-            save_all=True,
-            append_images=images[1:],
-            duration=[duration] * (len(images) - 1) + [last_frame_duration],
-            loop=0
-        )
-        print(f"GIF created: {output_path}")
+            # Create a copy to avoid modifying the original
+            img_with_label = img.copy()
+            
+            # Get image dimensions
+            width, height = img_with_label.size
+            
+            # Create drawing context
+            draw = ImageDraw.Draw(img_with_label)
+            
+            # Create scalable font based on text_size
+            try:
+                # Try to use LiberationSans font (available on your system)
+                font = ImageFont.truetype("/usr/share/fonts/truetype/LiberationSans-Regular.ttf", int(20 * text_size))
+            except:
+                if idx == 0:
+                    print("Warning: Could not load LiberationSans font. Falling back to default font.")
+                # Fallback to default font
+                font = ImageFont.load_default()
+            
+            # Create label text
+            label_text = f"Step: {step_num}"
+            
+            # Simple text size estimation (scaled by text_size parameter)
+            text_width = len(label_text) * int(12 * text_size)  # Approximate width
+            text_height = int(20 * text_size)  # Approximate height
+            
+            # Add padding around text
+            padding = 10
+            
+            # Calculate text position based on label_position with proper margins
+            if label_position == 'top-left':
+                text_x, text_y = padding, padding
+            elif label_position == 'top-right':
+                text_x, text_y = width - text_width - padding, padding
+            elif label_position == 'bottom-left':
+                text_x, text_y = padding, height - text_height - padding
+            elif label_position == 'bottom-right':
+                text_x, text_y = width - text_width - padding, height - text_height - padding
+            else:  # center
+                text_x, text_y = (width - text_width) // 2, (height - text_height) // 2
+            
+            # Ensure text doesn't go outside image bounds
+            text_x = max(padding, min(text_x, width - text_width - padding))
+            text_y = max(padding, min(text_y, height - text_height - padding))
+            
+            # Draw simple black text
+            draw.text((text_x, text_y), label_text, font=font, fill='black')
+            
+            images.append(img_with_label)
+        else:
+            images.append(img)
+    
+    # Create GIF with pause on first frame
+    duration = 1000 // fps  # Convert fps to duration in milliseconds
+    last_frame_duration = int(pause_last_frame * 1000)  # Convert pause to milliseconds
+    
+    # Save with custom durations: first frame gets longer duration, others get normal duration
+    images[0].save(
+        output_path,
+        save_all=True,
+        append_images=images[1:],
+        duration=[duration] * (len(images) - 1) + [last_frame_duration],
+        loop=0
+    )
+    print(f"GIF created: {output_path}")

@@ -47,9 +47,9 @@ parameters:
   hrdrag:
     distribution:
       type: "uniform"
-      lower: 10.0
-      upper: 1000.0
-    multiplier: 100
+      lower: .1
+      upper: 10.0
+    multiplier: 10000
     plot:
       lower: 8000.0
       upper: 12000.5

@@ -4,6 +4,8 @@ import contextlib
 import io
 import json
 import matplotlib
+import matplotlib.pyplot as plt
+import matplotlib.gridspec as gridspec
 parent_dir = os.path.abspath(os.path.join(os.getcwd(), os.pardir))
 if parent_dir not in sys.path:
     sys.path.insert(0, parent_dir)
@@ -20,6 +22,8 @@ from getdist import plots
 from bed.grid import Grid
 import argparse
 from plotting import *
+import traceback
+from pyro_oed_src import nf_loss, LikelihoodDataset
 from util import *
 import mlflow
 import inspect
@@ -64,6 +68,9 @@ class Evaluator:
             "fixed_design": self.run_args["fixed_design"]
         }
         self.experiment = init_experiment(self.run_obj, self.run_args, self.device, design_args=design_args)
+        
+        # Cache for EIG calculations to avoid redundant computations
+        self._eig_cache = {}
 
         self.param_space = param_space
         if self.param_space == 'physical':
@@ -96,11 +103,11 @@ class Evaluator:
                 global_rank=rank
                 )
             if design_type == 'optimal':
-                _, eig, _, design = self.calc_eig_batch(flow_model)
+                _, eig, _, design = self.calc_eig_batch(flow_model, step, rank)
                 rank_eigs.append(eig)
             elif design_type == 'nominal':
                 design = self.experiment.nominal_design
-                _, _, eig, _ = self.calc_eig_batch(flow_model)
+                _, _, eig, _ = self.calc_eig_batch(flow_model, step, rank)
                 rank_eigs.append(eig)
             else:
                 raise ValueError(f"Invalid design type: {design_type}")
@@ -113,6 +120,7 @@ class Evaluator:
         context = torch.cat([design, self.experiment.central_val], dim=-1)
         return self.experiment.get_guide_samples(flow_model, context, num_samples=self.guide_samples, transform_output=self.nf_transform_output)
     
+    @profile_method
     def posterior(self, step, display=['nominal', 'optimal']):
         """
         Plot the posterior for a given type(s) of design input.
@@ -142,7 +150,7 @@ class Evaluator:
         all_samples.append(desi_samples_gd)
         all_colors.append('black')
         g = plot_posterior(all_samples, all_colors, levels=self.levels, width_inch=10)
-        g.fig.suptitle(f"Posterior Evaluation ({len(self.global_ranks)} Ranks, {self.param_space.capitalize()} Space)", fontsize=16)
+        g.fig.suptitle(f"Posterior Evaluation - Run: {self.run_id[:8]} ({len(self.global_ranks)} Ranks, {self.param_space.capitalize()} Space)", fontsize=16)
 
         # Create custom legend
         if g.fig.legends:
@@ -165,6 +173,7 @@ class Evaluator:
         leg.set_in_layout(False)
         save_figure(f"{self.save_path}/plots/posterior_eval_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{self.param_space}.png", fig=g.fig, dpi=400)
     
+    @profile_method
     def sample_posterior(self, step, level, num_data_samples=10, global_rank=0, central=True):
         print(f"Running sample posterior evaluation...")
         posterior_flow, _ = load_model(
@@ -173,7 +182,7 @@ class Evaluator:
             device=self.device, global_rank=global_rank
             )
 
-        _, _, _, optimal_design = self.calc_eig_batch(posterior_flow)
+        _, _, _, optimal_design = self.calc_eig_batch(posterior_flow, step, global_rank)
         pair_keys = [k for k in self.run_obj.data.metrics.keys() if k.startswith(f'nominal_area_{global_rank}_')]
         pair_names = [p.replace('nominal_area_0_', '') for p in pair_keys]
         design_areas = {'nominal': {p: [] for p in pair_names}, 'optimal': {p: [] for p in pair_names}}
@@ -182,21 +191,22 @@ class Evaluator:
         inputs = (('optimal', 'tab:orange', optimal_design), ('nominal', 'tab:blue', self.experiment.nominal_design))
         for design_type, color, design in inputs:
             data_idxs = np.arange(1, num_data_samples) # sample N data points
-            samples = self.experiment.sample_params_from_data_samples(
+            samples_array = self.experiment.sample_params_from_data_samples(
                 lexpand(design.unsqueeze(0), num_data_samples), 
                 posterior_flow, 
                 num_data_samples=num_data_samples, 
                 num_param_samples=self.guide_samples,
                 central=central,
                 transform_output=self.nf_transform_output
-                ).cpu().numpy()
+            )
 
             pair_avg_areas = []
             pair_avg_areas_std = []
             for d in data_idxs:
+                # Extract the numpy array from MCSamples and select the d-th data sample
                 with contextlib.redirect_stdout(io.StringIO()):
                     samples_gd = getdist.MCSamples(
-                        samples=samples[:, d, :],
+                        samples=samples_array[:, d, :],
                         names=self.experiment.cosmo_params,
                         labels=self.experiment.latex_labels
                     )
@@ -251,12 +261,15 @@ class Evaluator:
         save_figure(f"{self.save_path}/plots/posterior_samples_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png", fig=g.fig, dpi=400)
 
     @profile_method
-    def calc_eig_batch(self, flow_model):
+    def calc_eig_batch(self, flow_model, step=None, global_rank=None):
         """
         Calculates the average + std of the EIG over a batch of evaluations.
+        Uses caching to avoid redundant calculations.
 
         Args:
             flow_model (torch.nn.Module): The flow model to evaluate.
+            step (int): Step for caching key (optional).
+            global_rank (int): Global rank for caching key (optional).
 
         Returns:
             tuple: A tuple containing:
@@ -265,6 +278,13 @@ class Evaluator:
                 - nominal_avg_eig (float): Average EIG of the nominal design.
                 - optimal_design (torch.Tensor): Design with the maximum EIG.
         """
+        
+        # Create cache key based on model parameters and evaluation settings
+        cache_key = f"step_{step}_rank_{global_rank}_evals_{self.n_evals}_particles_{self.n_particles}"
+        
+        if cache_key in self._eig_cache:
+            print(f"Using cached EIG results for {cache_key}")
+            return self._eig_cache[cache_key]
 
         eigs_batch = []
         nominal_eig_batch = []
@@ -288,7 +308,12 @@ class Evaluator:
         nominal_avg_eig = np.mean(nominal_eig_batch, axis=0).item()
 
         optimal_design = self.experiment.designs[np.argmax(avg_eigs)]
-        return avg_eigs, np.max(avg_eigs), nominal_avg_eig, optimal_design
+        
+        # Cache the results
+        result = (avg_eigs, np.max(avg_eigs), nominal_avg_eig, optimal_design)
+        self._eig_cache[cache_key] = result
+        
+        return result
 
     def calc_eig(self, flow_model, nominal_design=False):
         """
@@ -300,32 +325,48 @@ class Evaluator:
         Returns:
             eigs (torch.Tensor): The EIGs for each design.
         """
+        if nominal_design:
+            designs = self.experiment.nominal_design.unsqueeze(0)
+        else:
+            designs = self.experiment.designs
+        
+        samples, context, log_probs = LikelihoodDataset(
+            experiment=self.experiment,
+            n_particles_per_device=self.n_particles,
+            device=self.device,
+            evaluation=True,
+            designs=designs
+        )[0]
 
         with torch.no_grad():
-            _, eigs = posterior_loss(
-                            experiment=self.experiment,
-                            guide=flow_model,
-                            num_particles=self.n_particles,
-                            evaluation=True,
-                            nflow=True,
-                            analytic_prior=False,
-                            condition_design=self.run_args["condition_design"],
-                            nominal_design=nominal_design
-                            )
+            _, eigs = nf_loss(
+                samples=samples,
+                context=context,
+                guide=flow_model,
+                experiment=self.experiment,
+                rank=0,
+                verbose_shapes=False,
+                log_probs=log_probs,
+                evaluation=True
+            )
 
         return eigs
 
+    @profile_method
     def design_comparison(self, step, width=0.2, global_rank=0):
         """
         Plots a comparison of the nominal and optimal design.
         """
         print(f"Running design comparison...")
+        if self.run_args['fixed_design']:
+            print("Warning: Fixed design was used for training, skipping design comparison plot.")
+            return
         flow_model, _ = load_model(
             self.experiment, step, self.run_obj, 
             self.run_args, self.device, 
             global_rank=global_rank
             )
-        _, _, _, optimal_design = self.calc_eig_batch(flow_model)
+        _, _, _, optimal_design = self.calc_eig_batch(flow_model, step, global_rank)
         # Set the positions for the bars
         x = np.arange(len(self.experiment.targets))  # the label locations
 
@@ -335,8 +376,8 @@ class Evaluator:
         nominal_design_cpu = self.experiment.nominal_design.cpu().numpy()
         optimal_design_cpu = optimal_design.cpu().numpy()
         
-        bars1 = ax.bar(x - width/2, nominal_design_cpu, width, label='Nominal Design', color='black')
-        bars2 = ax.bar(x + width/2, optimal_design_cpu, width, label='Optimal Design', color='tab:blue')
+        bars1 = ax.bar(x - width/2, nominal_design_cpu, width, label='Nominal Design', color='tab:blue')
+        bars2 = ax.bar(x + width/2, optimal_design_cpu, width, label='Optimal Design', color='tab:orange')
         ax.set_xlabel('Tracers')
         ax.set_ylabel('Num Tracers')
         ax.set_xticks(x)
@@ -349,6 +390,7 @@ class Evaluator:
         plt.close(fig)
 
 
+    @profile_method
     def eig_grid(self, step, global_rank=0):
         """
         Plots the EIG on a 2D grid with subplot layout:
@@ -356,12 +398,16 @@ class Evaluator:
         - Bottom plot: colors points by EIG values
         """
         print(f"Running EIG grid evaluation...")
+        if self.run_args['fixed_design']:
+            print("Warning: Fixed design was used for training, skipping EIG grid plot.")
+            return
+
         flow_model, _ = load_model(
             self.experiment, step, self.run_obj, 
             self.run_args, self.device, 
             global_rank=global_rank
             )
-        eigs, optimal_avg_eig, nominal_avg_eig, optimal_design = self.calc_eig_batch(flow_model)
+        eigs, optimal_avg_eig, nominal_avg_eig, optimal_design = self.calc_eig_batch(flow_model, step, global_rank)
         
         # Create figure with subplots
         fig = plt.figure(figsize=(8, 12))
@@ -468,6 +514,7 @@ class Evaluator:
         plt.tight_layout()
         save_figure(f"{self.save_path}/plots/eig_grid_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png", fig=fig, dpi=400)
 
+    @profile_method
     def posterior_steps(self, steps, level=0.68, global_rank=0):
         """
         Plots posterior distributions at different training steps for a single run.
@@ -527,6 +574,7 @@ class Evaluator:
         
         save_figure(f"{self.save_path}/plots/posterior_steps_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png", fig=g.fig, dpi=400)
 
+    @profile_method
     def eig_steps(self, steps=None, global_rank=0):
         """
         Plots the EIG in 1D at various steps.
@@ -538,6 +586,9 @@ class Evaluator:
         if not os.path.isdir(checkpoint_dir):
             print(f"Warning: Checkpoint directory not found for run {self.run_id}, skipping. Path: {checkpoint_dir}")
             return
+        if self.run_args['fixed_design']:
+            print("Warning: Fixed design was used for training, skipping EIG steps plot.")
+            return
         plt.figure(figsize=(10, 6))
         if 'last' not in steps and self.run_args["total_steps"] not in steps:
             steps.append('last')
@@ -547,7 +598,7 @@ class Evaluator:
                 self.run_obj, self.run_args, 
                 self.device, global_rank=global_rank
                 )
-            eigs, _, nominal_avg_eig, _ = self.calc_eig_batch(flow_model)
+            eigs, _, nominal_avg_eig, _ = self.calc_eig_batch(flow_model, selected_step, global_rank)
             plt.plot(eigs, label=f'Step {selected_step}')
             if s == 'last':
                 plt.axhline(y=nominal_avg_eig, color='black', linestyle='--', label='Nominal EIG')
@@ -559,6 +610,65 @@ class Evaluator:
         plt.tight_layout()
         save_figure(f"{self.save_path}/plots/eig_steps_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png", fig=plt.gcf(), dpi=400)
 
+    @profile_method
+    def sorted_eig_designs(self, step, global_rank=0):
+        """
+        Plots sorted EIG values and corresponding designs using the evaluator's EIG calculations.
+        
+        Args:
+            step (int): Step to evaluate.
+            global_rank (int): Global rank to use for evaluation.
+        """
+        print(f"Running sorted EIG and designs plot for step {step}...")
+
+        if self.run_args['fixed_design']:
+            print("Warning: Fixed design was used for training, skipping sorted EIG plot.")
+            return
+
+        flow_model, _ = load_model(
+            self.experiment, step, self.run_obj, 
+            self.run_args, self.device, 
+            global_rank=global_rank
+        )
+        
+        eigs, optimal_avg_eig, nominal_avg_eig, optimal_design = self.calc_eig_batch(flow_model, step, global_rank)
+        
+        # Sort EIG values in descending order
+        sorted_eigs_idx = np.argsort(eigs)[::-1]
+        sorted_eigs = eigs[sorted_eigs_idx]
+        
+        # Get designs and sort them according to sorted EIG indices
+        designs = self.experiment.designs.cpu().numpy()
+        sorted_designs = designs[sorted_eigs_idx]
+        
+        # Create figure with subplots and space for colorbar
+        fig = plt.figure(figsize=(22, 6))  # Increased width to accommodate colorbar
+        gs = gridspec.GridSpec(2, 2, height_ratios=[0.5, 0.1], width_ratios=[1, 0.02], hspace=0.2, wspace=0.1)
+        
+        # Create subplots
+        ax0 = fig.add_subplot(gs[0, 0])  # Top plot for EIG
+        ax1 = fig.add_subplot(gs[1, 0])  # Bottom plot for heatmap
+        cbar_ax = fig.add_subplot(gs[:, 1])  # Colorbar spanning both plots
+        
+        # Plot sorted EIG values
+        ax0.axhline(nominal_avg_eig, color='tab:blue', linestyle='--', label="Nominal EIG")
+        ax0.plot(sorted_eigs, color="tab:orange", label="Sorted EIG")
+        ax0.set_xlim(0, len(sorted_eigs))
+        ax0.set_ylabel("Expected Information Gain [bits]")
+        ax0.legend()
+        
+        # Plot sorted designs
+        im = ax1.imshow(sorted_designs.T, aspect='auto', cmap='viridis')
+        ax1.set_xlabel("Design Index")
+        ax1.set_yticks(np.arange(len(self.experiment.targets)), self.experiment.targets)
+        
+        # Add colorbar spanning the full height
+        cbar = plt.colorbar(im, cax=cbar_ax)
+        cbar.set_label('Design Value')
+        
+        save_figure(f"{self.save_path}/plots/sorted_eig_designs_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png", fig=fig, dpi=400)
+        plt.show()
+
 if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description='Run Number Tracers Training')
@@ -569,8 +679,8 @@ if __name__ == "__main__":
     parser.add_argument('--global_rank', type=str, default='0', help='List of global ranks to evaluate')
     parser.add_argument('--n_particles', type=int, default=1000, help='Number of particles to use for evaluation')
     parser.add_argument('--guide_samples', type=int, default=10000, help='Number of samples to generate from the posterior')
-    parser.add_argument('--design_lower', type=float, default=None, help='Lowest design fraction')
-    parser.add_argument('--design_step', type=float, default=None, help='Step size for design grid')
+    parser.add_argument('--design_lower', type=parse_float_or_list, default=0.05, help='Lowest design fraction (float or JSON list)')
+    parser.add_argument('--design_step', type=parse_float_or_list, default=0.05, help='Step size for design grid (float or JSON list)')
     parser.add_argument('--n_evals', type=int, default=20, help='Number of evaluations to average over')
     parser.add_argument('--device', type=str, default='cuda:0', help='Device to use for evaluation')
     parser.add_argument('--eval_seed', type=int, default=1, help='Seed for evaluation')
@@ -594,11 +704,30 @@ if __name__ == "__main__":
     elif args.eval_step is not None:
         eval_step = int(args.eval_step)
 
-    evaluator.posterior(step=eval_step, display=['nominal'])
+    try:
+        evaluator.posterior(step=eval_step, display=['nominal', 'optimal'])
+    except Exception as e:
+        traceback.print_exc()
     #evaluator.eig_grid(step=eval_step)
-    evaluator.posterior_steps(steps=[30000, 100000, 200000, 'last'])
-    #evaluator.eig_steps(steps=[eval_step//4, eval_step//2, 3*eval_step//4, 'last'])
-    #evaluator.design_comparison(step=eval_step)
-    #evaluator.sample_posterior(step=eval_step, level=0.68, central=True)
+    #evaluator.posterior_steps(steps=[30000, 100000, 200000, 'last'])
+    try:
+        evaluator.eig_steps(steps=[eval_step//4, eval_step//2, 3*eval_step//4, 'last'])
+    except Exception as e:
+        traceback.print_exc()
+
+    try:
+        evaluator.design_comparison(step=eval_step)
+    except Exception as e:
+        traceback.print_exc()
     
+    #try:
+    #    evaluator.sample_posterior(step=eval_step, level=0.68, central=True)
+    #except Exception as e:
+    #     traceback.print_exc()
+
+    try:
+        evaluator.sorted_eig_designs(step=eval_step, global_rank=0)
+    except Exception as e:
+        traceback.print_exc()
+    #evaluator.sample_posterior(step=eval_step, level=0.68, central=True)
     print(f"Evaluation completed successfully!")

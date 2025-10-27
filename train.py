@@ -13,7 +13,7 @@ import torch
 import torch.nn as nn
 import torch.distributed as tdist
 from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import DataLoader
 import torch.multiprocessing as mp
 
 import numpy as np
@@ -23,7 +23,7 @@ from urllib.request import urlopen
 
 import pyro
 from pyro import poutine
-from pyro_oed_src import nf_loss, _create_condition_input
+from pyro_oed_src import nf_loss, LikelihoodDataset
 from pyro.contrib.util import lexpand, rexpand
 
 import matplotlib.pyplot as plt
@@ -44,51 +44,13 @@ import traceback
 from plotting import get_contour_area, plot_training, save_figure, plot_posterior
 import getdist.mcsamples
 
-class LikelihoodDataset(Dataset):
-    def __init__(self, experiment, n_particles_per_device, device="cuda"):
-        self.experiment = experiment
-        self.n_particles_per_device = n_particles_per_device
-        self.device = device
-
-    def __len__(self):
-        # We only have one "batch" of designs, so return 1
-        return 1
-
-    def __getitem__(self, idx):
-        # Dynamically expand the designs on each access
-        expanded_design = lexpand(self.experiment.designs, self.n_particles_per_device).to(self.device)
-
-        # Generate samples from the NumTracers pyro model
-        with torch.no_grad():
-            # Generate the samples directly on the GPU
-            trace = poutine.trace(self.experiment.pyro_model).get_trace(expanded_design)
-            
-            # Assuming trace values are already on the correct device from the model
-            y_dict = {l: trace.nodes[l]["value"] for l in self.experiment.observation_labels}
-            theta_dict = {l: trace.nodes[l]["value"] for l in self.experiment.cosmo_params}
-
-            # Extract the target samples (theta)
-            samples = torch.cat([theta_dict[k].unsqueeze(dim=-1) for k in self.experiment.cosmo_params], dim=-1)
-
-            # Create the condition input
-            condition_input = _create_condition_input(
-                design=expanded_design,
-                y_dict=y_dict,
-                observation_labels=self.experiment.observation_labels,
-                condition_design=True
-            )
-
-        # Return everything on the appropriate device (GPU)
-        return condition_input, samples
-
-
 class Trainer:
     def __init__(self, cosmo_exp, mlflow_exp, run_args, device=None, profile=False, verbose=False):
         self.cosmo_exp = cosmo_exp
         self.mlflow_exp = mlflow_exp
         self.run_args = run_args
         self.profile = profile
-        self.storage_path = os.environ["SCRATCH"] + "/bed/BED_cosmo/num_tracers"
+        self.storage_path = os.environ["SCRATCH"] + f"/bed/BED_cosmo/{cosmo_exp}"
         self.is_tty = sys.stdout.isatty()
         self.verbose = verbose
         
@@ -166,19 +128,24 @@ class Trainer:
         if self.is_tty and self.global_rank == 0 and not self.profile:
             pbar = tqdm(total=self.run_args["total_steps"] - self.start_step, desc="Training Progress", position=0, leave=True)
 
+        # Initialize session start time for runtime tracking
+        self._update_cumulative_runtime(step)
+        
         # Restore RNG state on resume
         if self.checkpoint is not None:
             self._restore_state()
 
         while step < self.run_args["total_steps"]:
-            for context, samples in self.dataloader:         
+            for samples, context in self.dataloader:         
                 self.optimizer.zero_grad()
 
                 if step > 0:
                     self.verbose = False  
                 # Compute the loss using nf_loss
-                agg_loss, loss = nf_loss(context, self.posterior_flow.module, samples, self.experiment, rank=self.global_rank, verbose_shapes=self.verbose)
-
+                agg_loss, loss = nf_loss(
+                    samples, context, self.posterior_flow.module, self.experiment, 
+                    rank=self.global_rank, verbose_shapes=self.verbose, evaluation=False
+                    )
                 # Aggregate global loss and agg_loss across all ranks
                 loss_tensor = loss.mean().detach()
                 agg_loss_tensor = agg_loss.detach()
@@ -207,7 +174,10 @@ class Trainer:
                 if step % self.run_args.get("step_freq", 1) == 0:
                     self.scheduler.step()
 
-                if step % 1000 == 0:
+                if step % self.run_args.get("checkpoint_step_freq", 1000) == 0:
+                    # Update cumulative runtime at each checkpoint
+                    self._update_cumulative_runtime(step)
+                    
                     if self.run_args.get("log_usage", False):
                         log_usage_metrics(self.device, self.process, step, self.global_rank)
                     
@@ -227,7 +197,7 @@ class Trainer:
                             show_scatter=[True, False],
                             ranges=ranges
                             )
-                        plt.savefig(f"{self.run_path}/artifacts/plots/rank_{self.global_rank}/posterior/{step}.png")
+                        plt.savefig(f"{self.run_path}/artifacts/plots/rank_{self.global_rank}/posterior/{step}.png", dpi=400)
                         plt.close('all')
                         local_nominal_areas = get_contour_area(nominal_samples_gd, 0.68, *self.experiment.cosmo_params, global_rank=self.global_rank, design_type='nominal')[0]
                         
@@ -323,6 +293,10 @@ class Trainer:
         if self.global_rank == 0:
             print(f"Saved last rank-specific checkpoints for all ranks")
 
+        # Synchronize all ranks before expensive plotting
+        if "LOCAL_RANK" in os.environ:
+            tdist.barrier()
+        
         if self.global_rank == 0:
             plot_training(
                 run_id=self.run_obj.info.run_id,
@@ -330,11 +304,19 @@ class Trainer:
                 log_scale=True,
                 loss_step_freq=10,
                 area_step_freq=100,
-                area_limits=[0.5, 5]
+                area_limits=[0.5, 2.0]
             )
             plt.close('all')
-            create_gif(self.run_obj.info.run_id, fps=5, add_labels=True, label_position='top-right', text_size=1.0, pause_last_frame=3.0)
+        
+        # Create GIF for all ranks
+        create_gif(self.run_obj.info.run_id, fps=5, add_labels=True, label_position='top-right', text_size=1.0, pause_last_frame=3.0, rank=self.global_rank)
+        
+        if self.global_rank == 0:
             print("Run", self.run_obj.info.experiment_id + "/" + self.run_obj.info.run_id, "completed.")
+        
+        # Final cumulative runtime update
+        final_step = self.run_args.get("total_steps", step)
+        self._update_cumulative_runtime(final_step)
         
         # Final memory logging
         if "LOCAL_RANK" in os.environ:
@@ -344,7 +326,11 @@ class Trainer:
             mlflow.end_run()
             tdist.destroy_process_group()
             if self.global_rank == 0:
-                print("Runtime:", get_runtime(self.run_obj.info.run_id))
+                runtime = get_runtime(self.run_obj.info.run_id)
+                hours = int(runtime.total_seconds() // 3600)
+                minutes = int((runtime.total_seconds() % 3600) // 60)
+                seconds = int(runtime.total_seconds() % 60)
+                print(f"Total active training time: {hours}h {minutes}m {seconds}s")
             
     @profile_method
     def save_checkpoint(self, filepath, step=None, artifact_path=None, scheduler=None, additional_state=None, global_rank=None):
@@ -454,7 +440,7 @@ class Trainer:
                     init_method="env://",
                     world_size=int(os.environ["WORLD_SIZE"]),
                     rank=self.global_rank,
-                    timeout=timedelta(seconds=180),  # Increased timeout
+                    timeout=timedelta(seconds=360),  # Increased timeout
                     device_id=device_obj  # Pass torch.device object
                 )
 
@@ -514,7 +500,8 @@ class Trainer:
         dataset = LikelihoodDataset(
             experiment=self.experiment,
             n_particles_per_device=self.run_args["n_particles_per_device"],
-            device=f"cuda:{self.pytorch_device_idx}"
+            device=f"cuda:{self.pytorch_device_idx}",
+            evaluation=False
         )
         
         # Use regular DataLoader without DistributedSampler
@@ -593,6 +580,9 @@ class Trainer:
             self.start_step = 0
             self.best_loss = float('inf')
             self.best_nominal_area = float('inf')
+            
+            # Initialize runtime tracking (only on rank 0)
+            self.previous_cumulative_runtime = 0.0  # seconds
 
             if self.global_rank == 0:
                 if self.priors_run_path is not None:
@@ -655,8 +645,7 @@ class Trainer:
                 resume_args = {
                     "resume_id": self.run_args["resume_id"],
                     "resume_step": self.run_args["resume_step"],
-                    "add_steps": self.run_args.get("add_steps", None),
-                    "reset_momentum_on_resume": self.run_args.get("reset_momentum_on_resume", False)
+                    "add_steps": self.run_args.get("add_steps", None)
                 }
                 # Overwrite run parameters with original parameters
                 self.run_args = parse_mlflow_params(self.run_obj.data.params)
@@ -670,6 +659,9 @@ class Trainer:
 
                 # Get metrics from previous run
                 self._get_resume_metrics()
+                
+                # Load previous cumulative runtime for resume
+                self._load_cumulative_runtime()
 
                 # Prepare tensors for broadcasting
                 tensors = self._prepare_broadcast_tensors()
@@ -697,6 +689,7 @@ class Trainer:
         os.makedirs(f"{self.run_path}/artifacts/plots/rank_{self.global_rank}/posterior", exist_ok=True)
         # Broadcast run_args from rank 0 to ensure consistency, especially for 'steps' when resuming with add_steps
         if self.global_rank == 0:
+            self.session_start_time = None
             run_args_list_to_broadcast = [self.run_args]
         else:
             run_args_list_to_broadcast = [None]
@@ -846,6 +839,42 @@ class Trainer:
         best_loss_steps = np.array([metric.step for metric in best_losses])
         closest_idx = np.argmin(np.abs(best_loss_steps - self.run_args["resume_step"]))
         self.best_loss = best_losses[closest_idx].value if best_loss_steps[closest_idx] <= self.run_args["resume_step"] else best_losses[closest_idx - 1].value
+    
+    def _load_cumulative_runtime(self):
+        """Load cumulative runtime from previous training sessions."""
+        try:
+            runtime_history = self.client.get_metric_history(self.run_args["resume_id"], 'cumulative_runtime_seconds')
+            if runtime_history:
+                # Get the latest cumulative runtime
+                self.previous_cumulative_runtime = runtime_history[-1].value
+                if self.global_rank == 0:
+                    hours = int(self.previous_cumulative_runtime // 3600)
+                    minutes = int((self.previous_cumulative_runtime % 3600) // 60)
+                    seconds = int(self.previous_cumulative_runtime % 60)
+                    print(f"Loaded previous cumulative runtime: {hours}h {minutes}m {seconds}s")
+            else:
+                self.previous_cumulative_runtime = 0.0
+        except Exception as e:
+            if self.global_rank == 0:
+                print(f"Warning: Could not load cumulative runtime: {e}. Starting from 0.")
+            self.previous_cumulative_runtime = 0.0
+    
+    def _update_cumulative_runtime(self, step):
+        """Update cumulative runtime metric (only rank 0)."""
+        if self.global_rank != 0:
+            return
+            
+        if self.session_start_time is None:
+            # First call - initialize session start time
+            self.session_start_time = time.time()
+            return
+        
+        # Calculate session runtime and add to previous cumulative
+        session_runtime = time.time() - self.session_start_time
+        cumulative_runtime = self.previous_cumulative_runtime + session_runtime
+        
+        # Log runtime to MLflow
+        mlflow.log_metric("cumulative_runtime_seconds", cumulative_runtime, step=step)
         
     def _prepare_broadcast_tensors(self):
         """Prepare tensors for broadcasting to all ranks."""
@@ -875,21 +904,6 @@ class Trainer:
             # Load optimizer state
             self.optimizer.load_state_dict(self.checkpoint['optimizer_state_dict'])
             
-            # Reset momentum buffers to reduce loss spikes after resume
-            # This can help if data distribution has changed or RNG synchronization is imperfect
-            if self.run_args.get("reset_momentum_on_resume", False):
-                if self.global_rank == 0:
-                    print("Resetting optimizer momentum buffers on resume...")
-                for param_group in self.optimizer.param_groups:
-                    for param in param_group['params']:
-                        state = self.optimizer.state[param]
-                        if 'exp_avg' in state:
-                            state['exp_avg'].zero_()
-                        if 'exp_avg_sq' in state:
-                            state['exp_avg_sq'].zero_()
-                if self.global_rank == 0:
-                    print("  Momentum buffers reset successfully")
-            
             # Create scheduler with original run parameters (already loaded into run_args during resume)
             self.scheduler = create_scheduler(self.optimizer, self.run_args)
             
@@ -913,18 +927,21 @@ class Trainer:
                     current_lr = self.optimizer.param_groups[0]['lr']
                     print(f"  Current learning rate: {current_lr}")
                     
-                    # If no scheduler state, we need to manually step the scheduler to the correct point
+                # If no scheduler state, we need to manually step the scheduler to the correct point
+                if self.global_rank == 0:
                     print(f"  Manually stepping scheduler to step {self.run_args['resume_step']}")
-                    step_freq = self.run_args.get("step_freq", 1)
-                    scheduler_steps_needed = self.run_args['resume_step'] // step_freq
+                step_freq = self.run_args.get("step_freq", 1)
+                scheduler_steps_needed = self.run_args['resume_step'] // step_freq
+                if self.global_rank == 0:
                     print(f"  Step frequency: {step_freq}, scheduler steps needed: {scheduler_steps_needed}")
-                    
-                    for _ in range(scheduler_steps_needed):
-                        self.scheduler.step()
-                    
+                
+                # All ranks must step the scheduler to stay synchronized
+                for _ in range(scheduler_steps_needed):
+                    self.scheduler.step()
+                
+                if self.global_rank == 0:
                     current_lr = self.optimizer.param_groups[0]['lr']
-                    if self.global_rank == 0:
-                        print(f"  Learning rate after manual stepping: {current_lr}")
+                    print(f"  Learning rate after manual stepping: {current_lr}")
             
             if self.global_rank == 0:
                 print(f"Optimizer LR after loading: {self.optimizer.param_groups[0]['lr']}")
@@ -1020,7 +1037,6 @@ if __name__ == '__main__':
     parser.add_argument('--restart_checkpoint', type=str, default=None, help='Specific checkpoint file name to use for all ranks during restart (alternative to --restart_step)')
     parser.add_argument('--restart_optimizer', action='store_true', help='Restart optimizer from checkpoint')
     parser.add_argument('--add_steps', type=int, default=0, help='Number of steps to add to the training (only used with --resume_id)')
-    parser.add_argument('--reset_momentum_on_resume', action='store_true', help='Reset Adam momentum buffers when resuming (can help reduce loss spikes)')
     parser.add_argument('--log_usage', action='store_true', help='Log compute usage of the training script')
     parser.add_argument('--profile', action='store_true', help='Enable profiling for a few steps and then exit.')
 
