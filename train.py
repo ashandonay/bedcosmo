@@ -143,7 +143,7 @@ class Trainer:
                     self.verbose = False  
                 # Compute the loss using nf_loss
                 agg_loss, loss = nf_loss(
-                    samples, context, self.posterior_flow.module, self.experiment, 
+                    samples, context, self.posterior_flow, self.experiment, 
                     rank=self.global_rank, verbose_shapes=self.verbose, evaluation=False
                     )
                 # Aggregate global loss and agg_loss across all ranks
