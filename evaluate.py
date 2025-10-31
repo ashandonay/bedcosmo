@@ -36,7 +36,7 @@ class Evaluator:
             self, run_id, guide_samples=1000, design_step=0.05, design_lower=0.05, design_upper=None,
             seed=1, cosmo_exp='num_tracers', levels=[0.68, 0.95], global_rank=0, 
             n_evals=20, n_particles=1000, param_space='physical',
-            verbose=False, device="cuda:0", profile=False,
+            plot_ranks=False, combine_ranks='mean', verbose=False, device="cuda:0", profile=False,
             ):
         self.run_id = run_id
         print(f"\nStarting evaluation for run {self.run_id}")
@@ -58,6 +58,9 @@ class Evaluator:
         self.device = device
         self.levels = levels if isinstance(levels, list) else [levels]
         self.global_ranks = global_rank if isinstance(global_rank, list) else [global_rank]
+        self.plot_ranks = plot_ranks
+        self.combine_ranks = combine_ranks
+        print(f"Handling multi-rank evaluation with {self.combine_ranks} method.")
         self.n_evals = n_evals
         self.n_particles = n_particles
         self.verbose = verbose
@@ -84,27 +87,27 @@ class Evaluator:
             raise ValueError(f"Invalid parameter space: {self.param_space}")
 
     @profile_method
-    def _eval_step(self, step, design_type='nominal', global_rank=None, combine_ranks=False):
+    def _eval_step(self, step, design_type='nominal', global_rank=None):
         """
         Generates samples given the nominal context (nominal design + central values).
         Args:
             step (int): Step to calculate the nominal samples for.
-            combine_ranks (bool): If True, combines samples from all ranks into a single MCSamples object.
-        Returns: 
-            If combine_ranks=True: a single GetDist MCSamples object with combined samples from all ranks
-            If combine_ranks=False: a list of GetDist MCSamples objects, one per rank
         """
         if global_rank is None:
-            global_ranks_list = self.global_ranks
+            # If combine_ranks='first', only use the first rank
+            if self.combine_ranks == 'first':
+                global_ranks_list = [self.global_ranks[0]]
+            else:
+                global_ranks_list = self.global_ranks
         else:
             global_ranks_list = [global_rank]
+        
         rank_samples = []
         rank_eigs = []
         for rank in global_ranks_list:
             flow_model, _ = load_model(
                 self.experiment, step, self.run_obj, 
-                self.run_args, self.device, 
-                global_rank=rank
+                self.run_args, self.device, global_rank=rank
                 )
             if design_type == 'optimal':
                 _, eig, _, design = self.calc_eig_batch(flow_model, step, rank)
@@ -118,9 +121,12 @@ class Evaluator:
             
             rank_samples.append(self._get_samples(design, flow_model))
         
-        # If combine_ranks is True, combine all rank samples into a single MCSamples object
-        if combine_ranks and len(rank_samples) > 1:
-            # Extract sample arrays from all ranks and concatenate
+        # Handle combining/returning samples based on combine_ranks setting
+        if global_rank is not None:
+            # If a specific rank was requested, return just that rank's samples
+            return rank_samples[0], rank_eigs[0]
+        elif self.combine_ranks in ['mean', 'median'] and len(rank_samples) > 1:
+            # Combine samples from all ranks by concatenating
             combined_samples_array = np.concatenate([s.samples for s in rank_samples], axis=0)
             with contextlib.redirect_stdout(io.StringIO()):
                 combined_samples = getdist.MCSamples(
@@ -129,11 +135,11 @@ class Evaluator:
                     labels=self.experiment.latex_labels
                 )
             return combined_samples, np.mean(rank_eigs)
-        elif combine_ranks and len(rank_samples) == 1:
-            # Only one rank, just return it directly (not in a list)
-            return rank_samples[0], np.mean(rank_eigs)
+        elif self.combine_ranks and len(rank_samples) == 1:
+            # Single rank (either only one rank total, or combine_ranks='first')
+            return rank_samples[0], rank_eigs[0]
         else:
-            # Return list of samples (original behavior)
+            # Return list of samples (when combine_ranks is False/None)
             return rank_samples, np.mean(rank_eigs)
 
     @profile_method
@@ -142,51 +148,74 @@ class Evaluator:
         return self.experiment.get_guide_samples(flow_model, context, num_samples=self.guide_samples, transform_output=self.nf_transform_output)
     
     @profile_method
-    def generate_posterior(self, step='last', display=['nominal', 'optimal'], combine_ranks=True):
+    def generate_posterior(self, step='last', display=['nominal', 'optimal']):
         """
         Generates the posterior for given type(s) of design input.
 
         Args:
             step (int): The checkpoint step to plot the posterior for.
             display (list): The designs to display.
-            combine_ranks (bool): If True, combines samples from all ranks into a single posterior distribution.
-                                If False, plots each rank's samples separately.
 
         """
         print(f"Running posterior evaluation...")
         all_samples = []
         all_colors = []
+        all_alphas = []
+        
+        # If plot_ranks=True and multiple ranks, plot individual ranks first (faded)
+        if self.plot_ranks and len(self.global_ranks) > 1 and self.combine_ranks in ['mean', 'median']:
+            for rank in self.global_ranks:
+                if 'nominal' in display:
+                    rank_nominal_samples, _ = self._eval_step(step, design_type='nominal', global_rank=rank)
+                    all_samples.append(rank_nominal_samples)
+                    all_colors.append('tab:blue')
+                    all_alphas.append(0.25)  # Faded for individual ranks
+                
+                if 'optimal' in display and not self.run_args['fixed_design']:
+                    rank_optimal_samples, _ = self._eval_step(step, design_type='optimal', global_rank=rank)
+                    all_samples.append(rank_optimal_samples)
+                    all_colors.append('tab:orange')
+                    all_alphas.append(0.25)  # Faded for individual ranks
+        
+        # Now add combined samples with full alpha
         if 'nominal' in display:
             print(f"Generating posterior samples with nominal design...")
             # Sample with nominal design
-            nominal_samples, nominal_eig = self._eval_step(step, design_type='nominal', combine_ranks=combine_ranks)
-            if combine_ranks:
+            nominal_samples, nominal_eig = self._eval_step(step, design_type='nominal')
+            if self.combine_ranks:
                 # nominal_samples is a single MCSamples object
                 all_samples.append(nominal_samples)
                 all_colors.append('tab:blue')
+                all_alphas.append(1.0)
             else:
                 # nominal_samples is a list of MCSamples objects (one per rank)
                 all_samples.extend(nominal_samples)
                 all_colors.extend(['tab:blue'] * len(nominal_samples))
+                all_alphas.extend([1.0] * len(nominal_samples))
+        
         if 'optimal' in display and not self.run_args['fixed_design']:
             print(f"Generating posterior samples with optimal design...")
             # Sample with optimal design
-            optimal_samples, optimal_eig = self._eval_step(step, design_type='optimal', combine_ranks=combine_ranks)
-            if combine_ranks:
+            optimal_samples, optimal_eig = self._eval_step(step, design_type='optimal')
+            if self.combine_ranks:
                 # optimal_samples is a single MCSamples object
                 all_samples.append(optimal_samples)
                 all_colors.append('tab:orange')
+                all_alphas.append(1.0)
             else:
                 # optimal_samples is a list of MCSamples objects (one per rank)
                 all_samples.extend(optimal_samples)
                 all_colors.extend(['tab:orange'] * len(optimal_samples))
+                all_alphas.extend([1.0] * len(optimal_samples))
 
         # Get the DESI MCMC samples
         desi_samples_gd = self.experiment.get_desi_samples(transform_output=self.desi_transform_output)
         all_samples.append(desi_samples_gd)
         all_colors.append('black')
-        g = plot_posterior(all_samples, all_colors, levels=self.levels, width_inch=10)
-        ranks_label = f"Combined {len(self.global_ranks)} Ranks" if combine_ranks and len(self.global_ranks) > 1 else f"{len(self.global_ranks)} Rank{'s' if len(self.global_ranks) > 1 else ''}"
+        all_alphas.append(1.0)
+        
+        g = plot_posterior(all_samples, all_colors, levels=self.levels, width_inch=10, alpha=all_alphas)
+        ranks_label = f"Combined {len(self.global_ranks)} Ranks" if self.combine_ranks and len(self.global_ranks) > 1 else f"{len(self.global_ranks)} Rank{'s' if len(self.global_ranks) > 1 else ''}"
         g.fig.suptitle(f"Posterior Evaluation - Run: {self.run_id[:8]} ({ranks_label}, {self.param_space.capitalize()} Space)", fontsize=16)
 
         # Create custom legend
@@ -194,13 +223,13 @@ class Evaluator:
             for legend in g.fig.legends:
                 legend.remove()
         custom_legend = []
-        if 'optimal' in display:
-            custom_legend.append(
-                Line2D([0], [0], color='tab:orange', label=f'Optimal Design (NF)')
-            )
         if 'nominal' in display:
             custom_legend.append(
                 Line2D([0], [0], color='tab:blue', label=f'Nominal Design (NF)')
+            )
+        if 'optimal' in display and not self.run_args['fixed_design']:
+            custom_legend.append(
+                Line2D([0], [0], color='tab:orange', label=f'Optimal Design (NF)')
             )
         custom_legend.append(
             Line2D([0], [0], color='black', label=f'DESI Nominal Design (MCMC)')
@@ -390,17 +419,13 @@ class Evaluator:
         return eigs
 
     @profile_method
-    def design_comparison(self, step, width=0.2, combine_ranks='mean'):
+    def design_comparison(self, step, width=0.2):
         """
         Plots a comparison of the nominal and optimal design.
         
         Args:
             step: The step to evaluate
             width: Width of the bars in the bar chart
-            combine_ranks (str): How to combine optimal designs from multiple ranks:
-                                'mean' - average the optimal designs across ranks
-                                'median' - median of optimal designs across ranks
-                                'first' - use only the first rank
         """
         print(f"Running design comparison...")
         if self.run_args['fixed_design']:
@@ -421,17 +446,17 @@ class Evaluator:
         # Combine optimal designs
         if len(self.global_ranks) > 1:
             rank_optimal_designs_array = np.array(rank_optimal_designs)
-            if combine_ranks == 'mean':
+            if self.combine_ranks == 'mean':
                 optimal_design_cpu = np.mean(rank_optimal_designs_array, axis=0)
                 label_suffix = 'Mean'
-            elif combine_ranks == 'median':
+            elif self.combine_ranks == 'median':
                 optimal_design_cpu = np.median(rank_optimal_designs_array, axis=0)
                 label_suffix = 'Median'
-            elif combine_ranks == 'first':
+            elif self.combine_ranks == 'first':
                 optimal_design_cpu = rank_optimal_designs[0]
                 label_suffix = f'Rank {self.global_ranks[0]}'
             else:
-                raise ValueError(f"Invalid combine_ranks value: {combine_ranks}")
+                raise ValueError(f"Invalid combine_ranks value: {self.combine_ranks}")
         else:
             optimal_design_cpu = rank_optimal_designs[0]
             label_suffix = f'Rank {self.global_ranks[0]}'
@@ -459,7 +484,7 @@ class Evaluator:
 
 
     @profile_method
-    def eig_grid(self, step, combine_ranks='mean'):
+    def eig_grid(self, step):
         """
         Plots the EIG on a 2D grid with subplot layout:
         - Top plot: colors points by the 3rd design variable (f_QSO)
@@ -467,10 +492,6 @@ class Evaluator:
         
         Args:
             step: The step to evaluate
-            combine_ranks (str): How to combine EIG results from multiple ranks:
-                                'mean' - average the EIGs across ranks
-                                'median' - median of EIGs across ranks
-                                'first' - use only the first rank
         """
         print(f"Running EIG grid evaluation...")
         if self.run_args['fixed_design']:
@@ -496,23 +517,23 @@ class Evaluator:
         # Combine EIG results
         if len(self.global_ranks) > 1:
             rank_eigs_array = np.array(rank_eigs_list)
-            if combine_ranks == 'mean':
+            if self.combine_ranks == 'mean':
                 eigs = np.mean(rank_eigs_array, axis=0)
                 optimal_design = np.mean(rank_optimal_designs, axis=0)
                 nominal_avg_eig = np.mean(rank_nominal_eigs)
                 label_suffix = 'Mean'
-            elif combine_ranks == 'median':
+            elif self.combine_ranks == 'median':
                 eigs = np.median(rank_eigs_array, axis=0)
                 optimal_design = np.median(rank_optimal_designs, axis=0)
                 nominal_avg_eig = np.median(rank_nominal_eigs)
                 label_suffix = 'Median'
-            elif combine_ranks == 'first':
+            elif self.combine_ranks == 'first':
                 eigs = rank_eigs_list[0]
                 optimal_design = rank_optimal_designs[0]
                 nominal_avg_eig = rank_nominal_eigs[0]
                 label_suffix = f'Rank {self.global_ranks[0]}'
             else:
-                raise ValueError(f"Invalid combine_ranks value: {combine_ranks}")
+                raise ValueError(f"Invalid combine_ranks value: {self.combine_ranks}")
         else:
             eigs = rank_eigs_list[0]
             optimal_design = rank_optimal_designs[0]
@@ -629,14 +650,13 @@ class Evaluator:
         save_figure(f"{self.save_path}/plots/eig_grid_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png", fig=fig, dpi=400)
 
     @profile_method
-    def posterior_steps(self, steps, level=0.68, combine_ranks=True):
+    def posterior_steps(self, steps, level=0.68):
         """
         Plots posterior distributions at different training steps for a single run.
         
         Args:
             steps (list): List of steps to plot. Can include 'last' or 'loss_best' as special values.
             level (float): Contour level to plot.
-            combine_ranks (bool): If True, combines samples from all ranks into a single posterior distribution.
         """
         print(f"Running posterior steps evaluation...")
         colors = plt.cm.viridis_r(np.linspace(0, 1, len(steps)))
@@ -653,10 +673,10 @@ class Evaluator:
             print(f"Warning: Checkpoint directory not found for run {self.run_id}, skipping. Path: {checkpoint_dir}")
             return
         for i, step in enumerate(steps):
-            samples, _ = self._eval_step(step, design_type='nominal', combine_ranks=combine_ranks)
+            samples, _ = self._eval_step(step, design_type='nominal')
             # Convert RGBA color to hex string before extending
             color_hex = matplotlib.colors.to_hex(colors[i % len(colors)])
-            if combine_ranks:
+            if self.combine_ranks:
                 # samples is a single MCSamples object
                 all_samples.append(samples)
                 all_colors.append(color_hex)
@@ -697,161 +717,116 @@ class Evaluator:
         save_figure(f"{self.save_path}/plots/posterior_steps_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png", fig=g.fig, dpi=400)
 
     @profile_method
-    def eig_steps(self, steps=None, plot_ranks=True, combine_ranks='mean'):
-        """
-        Plots the EIG in 1D at various steps.
-        Args:
-            steps (list): List of steps to plot. Can include 'last' or 'best' as special values.
-            plot_ranks (bool): If True, plots each rank separately with different linestyles.
-                             If False, only plots combined results.
-            combine_ranks (str or None): How to combine EIG results from multiple ranks:
-                                        'mean' - average the EIGs across ranks
-                                        'median' - median of EIGs across ranks
-                                        None - don't show combined results
-        """
-        print(f"Running EIG steps evaluation...")
-        checkpoint_dir = f"{self.storage_path}/mlruns/{self.exp_id}/{self.run_id}/artifacts/checkpoints"
-        if not os.path.isdir(checkpoint_dir):
-            print(f"Warning: Checkpoint directory not found for run {self.run_id}, skipping. Path: {checkpoint_dir}")
-            return
-        if self.run_args['fixed_design']:
-            print("Warning: Fixed design was used for training, skipping EIG steps plot.")
-            return
-        
-        plt.figure(figsize=(14, 6))
-        if 'last' not in steps and self.run_args["total_steps"] not in steps:
-            steps.append('last')
-        
-        colors = plt.cm.tab10(np.linspace(0, 1, len(steps)))
-        
-        for step_idx, s in enumerate(steps):
-            step_color = colors[step_idx]
-            rank_eigs_list = []
-            rank_nominal_eigs = []
-            
-            # Calculate EIG for each rank
-            for rank_idx, rank in enumerate(self.global_ranks):
-                flow_model, selected_step = load_model(
-                    self.experiment, s, 
-                    self.run_obj, self.run_args, 
-                    self.device, global_rank=rank
-                )
-                eigs, _, nominal_avg_eig, _ = self.calc_eig_batch(flow_model, selected_step, rank)
-                rank_eigs_list.append(eigs)
-                rank_nominal_eigs.append(nominal_avg_eig)
-                
-                # Plot individual rank if requested
-                if plot_ranks and len(self.global_ranks) > 1:
-                    alpha = 0.4 if combine_ranks else 0.7
-                    plt.plot(eigs, label=f'Step {selected_step}, Rank {rank}', 
-                            color=step_color, linestyle='-', alpha=alpha, linewidth=1.0)
-            
-            # Plot combined EIG if requested
-            if combine_ranks and len(self.global_ranks) > 1:
-                rank_eigs_array = np.array(rank_eigs_list)
-                if combine_ranks == 'mean':
-                    combined_eigs = np.mean(rank_eigs_array, axis=0)
-                    label_suffix = 'Mean'
-                elif combine_ranks == 'median':
-                    combined_eigs = np.median(rank_eigs_array, axis=0)
-                    label_suffix = 'Median'
-                else:
-                    raise ValueError(f"Invalid combine_ranks value: {combine_ranks}")
-                
-                plt.plot(combined_eigs, label=f'Step {selected_step} ({label_suffix})', 
-                        color=step_color, linestyle='-', linewidth=2.5, alpha=1.0)
-                
-                # Plot nominal EIG for the last step (combined)
-                if s == 'last':
-                    combined_nominal = np.mean(rank_nominal_eigs) if combine_ranks == 'mean' else np.median(rank_nominal_eigs)
-                    plt.axhline(y=combined_nominal, color='black', linestyle='--', 
-                               label=f'Nominal EIG ({label_suffix})', linewidth=2)
-            elif len(self.global_ranks) == 1:
-                # Single rank, just plot it normally
-                plt.plot(rank_eigs_list[0], label=f'Step {selected_step}', 
-                        color=step_color, linestyle='-', linewidth=2)
-                if s == 'last':
-                    plt.axhline(y=rank_nominal_eigs[0], color='black', linestyle='--', 
-                               label='Nominal EIG', linewidth=2)
-
-        plt.xlabel("Design Index", fontsize=12)
-        plt.ylabel("EIG [bits]", fontsize=12)
-        plt.legend(bbox_to_anchor=(1.02, 1), loc='upper left', fontsize=9, framealpha=0.9)
-        ranks_label = f"{len(self.global_ranks)} Ranks" if len(self.global_ranks) > 1 else "1 Rank"
-        plt.suptitle(f"EIG Steps for Run: {self.run_obj.info.run_name} ({self.run_id[:8]}, {ranks_label})", fontsize=14)
-        plt.tight_layout()
-        save_figure(f"{self.save_path}/plots/eig_steps_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png", fig=plt.gcf(), dpi=400)
-
-    @profile_method
-    def sorted_eig_designs(self, step, combine_ranks='mean'):
+    def sorted_eig_designs(self, steps='last', sort_step=None):
         """
         Plots sorted EIG values and corresponding designs using the evaluator's EIG calculations.
+        Can plot single or multiple training steps.
         
         Args:
-            step (int): Step to evaluate.
-            combine_ranks (str): How to combine EIG results from multiple ranks:
-                                'mean' - average the EIGs across ranks
-                                'median' - median of EIGs across ranks
-                                'first' - use only the first rank
+            steps (int, str, or list): Step(s) to evaluate. Can be:
+                                      - Single int/str (e.g., 5000 or 'last')
+                                      - List of steps (e.g., [2500, 5000, 7500, 'last'])
+            sort_step (int, str, or None): Which step to use for sorting designs. Must be in `steps`.
+                                          If None, uses 'last' if present, otherwise the largest step.
         """
-        print(f"Running sorted EIG and designs plot for step {step}...")
+        # Convert single step to list for unified handling
+        if not isinstance(steps, list):
+            steps = [steps]
+        
+        print(f"Running sorted EIG and designs plot for step(s) {steps}...")
 
         if self.run_args['fixed_design']:
             print("Warning: Fixed design was used for training, skipping sorted EIG plot.")
             return
-
-        # Calculate EIG for each rank
-        rank_eigs_list = []
-        rank_nominal_eigs = []
         
-        for rank in self.global_ranks:
-            flow_model, _ = load_model(
-                self.experiment, step, self.run_obj, 
-                self.run_args, self.device, 
-                global_rank=rank
-            )
-            eigs, _, nominal_avg_eig, _ = self.calc_eig_batch(flow_model, step, rank)
-            rank_eigs_list.append(eigs)
-            rank_nominal_eigs.append(nominal_avg_eig)
-        
-        # Combine EIG results
-        if len(self.global_ranks) > 1:
-            rank_eigs_array = np.array(rank_eigs_list)
-            if combine_ranks == 'mean':
-                eigs = np.mean(rank_eigs_array, axis=0)
-                nominal_avg_eig = np.mean(rank_nominal_eigs)
-                label_suffix = 'Mean'
-            elif combine_ranks == 'median':
-                eigs = np.median(rank_eigs_array, axis=0)
-                nominal_avg_eig = np.median(rank_nominal_eigs)
-                label_suffix = 'Median'
-            elif combine_ranks == 'first':
-                eigs = rank_eigs_list[0]
-                nominal_avg_eig = rank_nominal_eigs[0]
-                label_suffix = f'Rank {self.global_ranks[0]}'
+        # Determine which step to use for sorting
+        if sort_step is None:
+            # Default: use 'last' if present, otherwise the largest numeric step
+            if 'last' in steps:
+                sort_step = 'last'
             else:
-                raise ValueError(f"Invalid combine_ranks value: {combine_ranks}")
+                # Find the largest numeric step
+                numeric_steps = [s for s in steps if isinstance(s, int)]
+                if numeric_steps:
+                    sort_step = max(numeric_steps)
+                else:
+                    sort_step = steps[-1]  # Fall back to last in list
         else:
-            eigs = rank_eigs_list[0]
-            nominal_avg_eig = rank_nominal_eigs[0]
-            label_suffix = f'Rank {self.global_ranks[0]}'
+            # Validate that sort_step is in the steps list
+            if sort_step not in steps:
+                raise ValueError(f"sort_step={sort_step} must be one of the steps to plot: {steps}")
         
-        # Sort EIG values in descending order (based on combined/mean EIG)
-        sorted_eigs_idx = np.argsort(eigs)[::-1]
-        sorted_eigs = eigs[sorted_eigs_idx]
+        print(f"  Sorting designs by step: {sort_step}")
+        
+        # Create color gradient for multiple steps (yellow to orange)
+        if len(steps) > 1:
+            from matplotlib.colors import LinearSegmentedColormap
+            tab_orange = np.array([1.0, 0.498, 0.055])  # RGB for tab:orange
+            yellow = np.array([1.0, 0.933, 0.0])         # RGB for bright yellow
+            
+            n_steps = len(steps)
+            colors = np.array([yellow * (1 - i/(n_steps-1)) + tab_orange * (i/(n_steps-1)) 
+                              for i in range(n_steps)])
+        else:
+            colors = [np.array([1.0, 0.498, 0.055])]  # Just tab:orange for single step
+        
+        # Store EIG data for all steps
+        all_steps_data = []
+        sorted_eigs_idx = None
+        
+        for step_idx, s in enumerate(steps):
+            rank_eigs_list = []
+            rank_nominal_eigs = []
+            
+            # Calculate EIG for each rank
+            for rank in self.global_ranks:
+                flow_model, selected_step = load_model(
+                    self.experiment, s, self.run_obj, 
+                    self.run_args, self.device, 
+                    global_rank=rank
+                )
+                eigs, _, nominal_avg_eig, _ = self.calc_eig_batch(flow_model, selected_step, rank)
+                rank_eigs_list.append(eigs)
+                rank_nominal_eigs.append(nominal_avg_eig)
+            
+            # Combine EIG results
+            if len(self.global_ranks) > 1:
+                rank_eigs_array = np.array(rank_eigs_list)
+                if self.combine_ranks == 'mean':
+                    combined_eigs = np.mean(rank_eigs_array, axis=0)
+                    combined_nominal = np.mean(rank_nominal_eigs)
+                elif self.combine_ranks == 'median':
+                    combined_eigs = np.median(rank_eigs_array, axis=0)
+                    combined_nominal = np.median(rank_nominal_eigs)
+                elif self.combine_ranks == 'first':
+                    combined_eigs = rank_eigs_list[0]
+                    combined_nominal = rank_nominal_eigs[0]
+                else:
+                    raise ValueError(f"Invalid combine_ranks value: {self.combine_ranks}")
+            else:
+                combined_eigs = rank_eigs_list[0]
+                combined_nominal = rank_nominal_eigs[0]
+            
+            # Store data for this step
+            all_steps_data.append({
+                'step': selected_step,
+                'step_label': s,
+                'combined_eigs': combined_eigs,
+                'rank_eigs_list': rank_eigs_list,
+                'nominal': combined_nominal,
+                'color': colors[step_idx]
+            })
+            
+            # Use the specified sort_step to determine sorting order
+            if s == sort_step:
+                sorted_eigs_idx = np.argsort(combined_eigs)[::-1]
         
         # Get designs and sort them according to sorted EIG indices
         designs = self.experiment.designs.cpu().numpy()
         sorted_designs = designs[sorted_eigs_idx]
         
-        # Sort individual rank EIGs using the same ordering as the combined EIG
-        sorted_rank_eigs = []
-        if len(self.global_ranks) > 1:
-            for rank_eigs in rank_eigs_list:
-                sorted_rank_eigs.append(rank_eigs[sorted_eigs_idx])
-        
         # Create figure with subplots and space for colorbar
-        fig = plt.figure(figsize=(22, 6))  # Increased width to accommodate colorbar
+        fig = plt.figure(figsize=(22, 6))
         gs = gridspec.GridSpec(2, 2, height_ratios=[0.5, 0.1], width_ratios=[1, 0.02], hspace=0.2, wspace=0.1)
         
         # Create subplots
@@ -859,35 +834,65 @@ class Evaluator:
         ax1 = fig.add_subplot(gs[1, 0])  # Bottom plot for heatmap
         cbar_ax = fig.add_subplot(gs[:, 1])  # Colorbar spanning both plots
         
-        # Plot individual rank EIGs (faded) if multiple ranks
-        if len(self.global_ranks) > 1 and combine_ranks != 'first':
-            for rank_idx, sorted_rank_eig in enumerate(sorted_rank_eigs):
-                ax0.plot(sorted_rank_eig, color="tab:orange", alpha=0.25, linewidth=1.0, 
-                        label=f"Rank {self.global_ranks[rank_idx]}" if rank_idx < 3 else "")
+        # Plot all steps with sorted x-axis
+        for step_data in all_steps_data:
+            sorted_combined_eigs = step_data['combined_eigs'][sorted_eigs_idx]
+            
+            # Plot individual ranks if requested (faded)
+            if self.plot_ranks and len(self.global_ranks) > 1 and self.combine_ranks != 'first':
+                for rank_eigs in step_data['rank_eigs_list']:
+                    sorted_rank_eigs = rank_eigs[sorted_eigs_idx]
+                    ax0.plot(sorted_rank_eigs, color=step_data['color'], 
+                            linestyle='-', alpha=0.25, linewidth=1.0)
+            
+            # Plot combined EIG (main line)
+            if len(all_steps_data) > 1:
+                # Multiple steps: show step number in label
+                line_label = f"Step {step_data['step']}"
+            else:
+                # Single step: show rank aggregation method
+                if len(self.global_ranks) > 1:
+                    if self.combine_ranks == 'first':
+                        line_label = f"Sorted EIG (Rank {self.global_ranks[0]})"
+                    else:
+                        line_label = f"Sorted EIG ({self.combine_ranks.capitalize()})"
+                else:
+                    line_label = "Sorted EIG"
+            
+            ax0.plot(sorted_combined_eigs, label=line_label, 
+                    color=step_data['color'], linestyle='-', linewidth=2.5, alpha=1.0, zorder=5)
+            
+            # Plot nominal EIG for the sorting step
+            if step_data['step_label'] == sort_step:
+                ax0.axhline(y=step_data['nominal'], color='black', linestyle='--', 
+                           label='Nominal EIG', linewidth=2, zorder=10)
         
-        # Plot nominal EIG line
-        ax0.axhline(nominal_avg_eig, color='tab:blue', linestyle='--', label="Nominal EIG", linewidth=2, zorder=10)
-        
-        # Plot sorted combined EIG (main line)
-        line_label = f"Sorted EIG ({label_suffix})" if len(self.global_ranks) > 1 else "Sorted EIG"
-        ax0.plot(sorted_eigs, color="tab:orange", label=line_label, linewidth=2.5, alpha=1.0, zorder=5)
-        
-        ax0.set_xlim(0, len(sorted_eigs))
+        ax0.set_xlim(0, len(sorted_combined_eigs))
         ax0.set_ylabel("Expected Information Gain [bits]", fontsize=11)
-        ax0.legend(loc='upper right', fontsize=9)
+        ax0.legend(loc='lower left', fontsize=9, framealpha=0.9)
         
         # Plot sorted designs
         im = ax1.imshow(sorted_designs.T, aspect='auto', cmap='viridis')
-        ax1.set_xlabel("Design Index")
+        if len(all_steps_data) > 1:
+            # Find the actual step number used for sorting
+            sort_step_number = next((step_data['step'] for step_data in all_steps_data 
+                                    if step_data['step_label'] == sort_step), sort_step)
+            xlabel = f"Design Index (sorted by step {sort_step_number} EIG)"
+        else:
+            xlabel = "Design Index"
+        ax1.set_xlabel(xlabel, fontsize=11)
         ax1.set_yticks(np.arange(len(self.experiment.targets)), self.experiment.targets)
         
         # Add colorbar spanning the full height
         cbar = plt.colorbar(im, cax=cbar_ax)
         cbar.set_label('Design Value')
         
-        # Add overall title with rank information
-        fig.suptitle(f'Sorted EIG and Designs ({label_suffix}, {len(self.global_ranks)} Rank{"s" if len(self.global_ranks) > 1 else ""})', 
-                    fontsize=14, y=0.98)
+        # Add overall title
+        if len(all_steps_data) > 1:
+            title = f"EIG Evolution Across Training Steps: {self.run_obj.info.run_name} ({self.run_id[:8]})"
+        else:
+            title = f'Sorted EIG and Designs: {self.run_obj.info.run_name} ({self.run_id[:8]})'
+        fig.suptitle(title, fontsize=14, y=0.98)
         
         save_figure(f"{self.save_path}/plots/sorted_eig_designs_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png", fig=fig, dpi=400)
         plt.show()
@@ -933,8 +938,10 @@ if __name__ == "__main__":
         traceback.print_exc()
     #evaluator.eig_grid(step=eval_step)
     #evaluator.posterior_steps(steps=[30000, 100000, 200000, 'last'])
+    
+    # Plot EIG evolution across multiple training steps
     try:
-        evaluator.eig_steps(steps=[eval_step//4, eval_step//2, 3*eval_step//4, 'last'])
+        evaluator.sorted_eig_designs(steps=[eval_step//4, eval_step//2, 3*eval_step//4, 'last'])
     except Exception as e:
         traceback.print_exc()
 
@@ -948,9 +955,5 @@ if __name__ == "__main__":
     #except Exception as e:
     #     traceback.print_exc()
 
-    try:
-        evaluator.sorted_eig_designs(step=eval_step)
-    except Exception as e:
-        traceback.print_exc()
     #evaluator.sample_posterior(step=eval_step, level=0.68, central=True)
     print(f"Evaluation completed successfully!")

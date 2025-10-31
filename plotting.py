@@ -144,11 +144,14 @@ def plot_posterior(
     # Set line styles in GetDist settings
     g.settings.line_styles = line_style
     # Apply contour alpha factor for better distinguishability
+    # Note: We'll handle per-sample alphas after plotting
     if isinstance(alpha, (int, float)):
         adjusted_alpha = alpha * contour_alpha_factor
+        g.settings.plot_args = {'alpha': adjusted_alpha}
     else:
+        # Convert list to per-sample adjusted alphas
         adjusted_alpha = [a * contour_alpha_factor for a in alpha]
-    g.settings.plot_args = {'alpha': adjusted_alpha}
+        # Don't set in plot_args yet - will handle after triangle_plot
     
     # Additional settings for higher resolution
     g.settings.solid_contour_palefactor = 0.6
@@ -180,6 +183,33 @@ def plot_posterior(
         },
         show=False
     )
+    
+    # If alpha is a list, manually set alpha for each sample's lines and contours
+    if isinstance(alpha, list):
+        # Iterate through all subplots and set alpha for lines and collections
+        n_params = len(samples[0].paramNames.names)
+        for i in range(n_params):
+            for j in range(i + 1):
+                ax = g.subplots[i, j]
+                if ax is not None:
+                    # Handle 1D plots (diagonal, i == j) - set alpha for lines
+                    if i == j:
+                        lines = ax.get_lines()
+                        n_lines_per_sample = len(lines) // len(samples) if len(samples) > 0 else 0
+                        for sample_idx in range(len(samples)):
+                            start_idx = sample_idx * n_lines_per_sample
+                            end_idx = (sample_idx + 1) * n_lines_per_sample
+                            for line in lines[start_idx:end_idx]:
+                                line.set_alpha(adjusted_alpha[sample_idx])
+                    # Handle 2D plots (off-diagonal, i != j) - set alpha for contour collections
+                    else:
+                        collections = ax.collections
+                        n_collections_per_sample = len(collections) // len(samples) if len(samples) > 0 else 0
+                        for sample_idx in range(len(samples)):
+                            start_idx = sample_idx * n_collections_per_sample
+                            end_idx = (sample_idx + 1) * n_collections_per_sample
+                            for collection in collections[start_idx:end_idx]:
+                                collection.set_alpha(adjusted_alpha[sample_idx])
 
     param_names = g.param_names_for_root(samples[0])
     param_name_list = [p.name for p in param_names.names]
