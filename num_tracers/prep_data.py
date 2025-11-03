@@ -4,6 +4,11 @@ import pandas as pd
 import os
 
 home_dir = os.environ["HOME"]
+
+# set to a new version when updating the data
+data_version = 4
+os.makedirs(os.path.join(home_dir, 'data/desi/tracers_v' + str(data_version)), exist_ok=True)
+
 # efficiencies from this paper: https://arxiv.org/pdf/2411.12020 (Table 2)
 eff_BGS = 0.989
 eff_LRG = 0.991
@@ -44,8 +49,6 @@ obs_LRG3ELG1 = obs_LRG3 + obs_ELG1
 eff_LRG3ELG1 = (obs_LRG3 / obs_LRG3ELG1) * eff_LRG + (obs_ELG1 / obs_LRG3ELG1) * eff_ELG
 obs_LRG3ELG1 = passed_LRG3ELG1 / eff_LRG3ELG1
 
-data_version = 3
-os.makedirs(os.path.join(home_dir, 'data/desi/tracers_v' + str(data_version)), exist_ok=True)
 #desi_data = '/home/ashandonay/cobaya/packages/data/bao_data/desi_2024_gaussian_bao_ALL_GCcomb_mean.txt'
 #cov_matrix = np.loadtxt('/home/ashandonay/cobaya/packages/data/bao_data/desi_2024_gaussian_bao_ALL_GCcomb_cov.txt')
 desi_data = home_dir + '/data/desi/bao_data/desi_2024_gaussian_bao_ALL_GCcomb_mean.txt'

@@ -195,7 +195,9 @@ class NumTracers:
         flow_type="MAF",
         design_step=[0.025, 0.05, 0.05, 0.025],
         design_lower=[0.025, 0.1, 0.1, 0.1],
-        design_upper=None, 
+        design_upper=None,
+        design_sum_lower=1.0,
+        design_sum_upper=1.0,
         fixed_design=False, 
         include_D_M=True, 
         include_D_V=True,
@@ -237,8 +239,8 @@ class NumTracers:
         self.sigmas = torch.tensor(self.desi_data["std"].tolist(), device=self.device)
         self.central_val = torch.tensor(self.desi_data["value_at_z"].tolist(), device=self.device)
         self.tracer_bins = self.desi_data.drop_duplicates(subset=['tracer'])['tracer'].tolist()
-        self.total_obs = int(self.desi_data.drop_duplicates(subset=['tracer'])['observed'].sum())
-        self.nominal_passed_ratio = torch.tensor(self.desi_data['passed'].tolist(), device=self.device)/self.total_obs
+        self.nominal_total_obs = int(self.desi_data.drop_duplicates(subset=['tracer'])['observed'].sum())
+        self.nominal_passed_ratio = torch.tensor(self.desi_data['passed'].tolist(), device=self.device)/self.nominal_total_obs
         # Create dictionary with upper limits and lower limit lists for each class
         self.targets = ["BGS", "LRG", "ELG", "QSO"]
         self.num_targets = self.desi_tracers.groupby('class').sum()['targets'].reindex(self.targets)
@@ -278,59 +280,88 @@ class NumTracers:
         self._idx_wa = [self.cosmo_params.index('wa')] if 'wa' in self.cosmo_params else []
         self._idx_hr = [self.cosmo_params.index('hrdrag')] if 'hrdrag' in self.cosmo_params else []
         self.observation_labels = ["y"]
-        self.init_designs(fixed_design=fixed_design, design_step=design_step, design_lower=design_lower, design_upper=design_upper)
+        self.init_designs(
+            fixed_design=fixed_design, step_size=design_step, range_lower=design_lower, 
+            range_upper=design_upper, sum_lower=design_sum_lower, sum_upper=design_sum_upper
+            )
         if self.global_rank == 0 and self.verbose:
             print(f"tracer_bins: {self.tracer_bins}\n",
                 f"sigmas: {self.sigmas}\n",
                 f"nominal_design: {self.nominal_design}\n",
                 f"nominal_passed: {self.nominal_passed_ratio}")
+            if fixed_design:
+                print(f"fixed design (nominal default): {self.designs}" if fixed_design is True else f"fixed design: {self.designs}")
 
     @profile_method
-    def init_designs(self, fixed_design=False, design_step=0.05, design_lower=0.05, design_upper=None):
-        if fixed_design:
-            # Create grid with nominal design values using self.targets
-            grid_params = {
-                f'N_{target}': self.nominal_design[i].cpu().numpy() 
-                for i, target in enumerate(self.targets)
-            }
-            grid_designs = Grid(**grid_params)
+    def init_designs(self, fixed_design=False, step_size=0.05, range_lower=0.05, range_upper=None, sum_lower=1.0, sum_upper=1.0, tol=1e-3):
+        """
+        Initialize design space.
+        
+        Args:
+            fixed_design: Can be:
+                - False: Generate design grid (default)
+                - True: Use nominal design only
+                - list/array: Use specific design(s), shape should be (num_designs, num_targets)
+                  If 1D list with length == num_targets, it will be reshaped to (1, num_targets)
+            design_step: Step size(s) for design grid (ignored if fixed_design is True or list)
+            range_lower: Lower bound(s) for each design variable
+            range_upper: Upper bound(s) for each design variable
+            sum_lower: Lower bound on sum of design variables (default: 1.0)
+            sum_upper: Upper bound on sum of design variables (default: 1.0)
+            tol: Tolerance for sum constraint (default: 1e-3)
 
-            # Convert grid to tensor format
-            designs = torch.tensor(getattr(grid_designs, grid_designs.names[0]).squeeze(), device=self.device).unsqueeze(0)
-            for name in grid_designs.names[1:]:
-                design_tensor = torch.tensor(getattr(grid_designs, name).squeeze(), device=self.device).unsqueeze(0)
-                designs = torch.cat((designs, design_tensor), dim=0)
-            designs = designs.unsqueeze(0)
-
-        else:
-            if type(design_step) == float:
-                design_steps = [design_step]*len(self.targets)
-            elif type(design_step) == list:
-                design_steps = design_step
-            else:
-                raise ValueError("design_lower must be a float or list")
+        """
+        if isinstance(fixed_design, (list, tuple, np.ndarray, torch.Tensor)):
+            # User provided specific design(s)
+            design_array = np.array(fixed_design)
             
-            if type(design_lower) == float:
-                lower_limits = [design_lower]*len(self.targets)
-            elif type(design_lower) == list:
-                lower_limits = design_lower
+            # Handle 1D input (single design)
+            if design_array.ndim == 1:
+                if len(design_array) != len(self.targets):
+                    raise ValueError(f"Fixed design must have {len(self.targets)} values, got {len(design_array)}")
+                design_array = design_array.reshape(1, -1)
+            elif design_array.ndim == 2:
+                if design_array.shape[1] != len(self.targets):
+                    raise ValueError(f"Fixed design must have {len(self.targets)} columns, got {design_array.shape[1]}")
             else:
-                raise ValueError("design_lower must be a float or list")
+                raise ValueError(f"Fixed design must be 1D or 2D, got shape {design_array.shape}")
             
-            if design_upper is None:
-                upper_limits = [self.num_targets[target] / self.total_obs for target in self.targets]
-            elif type(design_upper) == float:
-                upper_limits = [design_upper]*len(self.targets)
-            elif type(design_upper) == list:
-                upper_limits = design_upper
+            designs = torch.tensor(design_array, device=self.device, dtype=torch.float64)
+            
+        elif fixed_design is True or fixed_design == 1:
+            # Use nominal design
+            designs = self.nominal_design.unsqueeze(0).to(self.device)
+        elif fixed_design is False or fixed_design == 0:
+            # Generate design grid
+            if type(step_size) == float:
+                design_steps = [step_size]*len(self.targets)
+            elif type(step_size) == list:
+                design_steps = step_size
             else:
-                raise ValueError("design_upper must be a float or list")
+                raise ValueError("step_size must be a float or list")
+            
+            if type(range_lower) == float:
+                lower_limits = [range_lower]*len(self.targets)
+            elif type(range_lower) == list:
+                lower_limits = range_lower
+            else:
+                raise ValueError("range_lower must be a float or list")
+            
+            if range_upper is None:
+                upper_limits = [self.num_targets[target] / self.nominal_total_obs for target in self.targets]
+            elif type(range_upper) == float:
+                upper_limits = [range_upper]*len(self.targets)
+            elif type(range_upper) == list:
+                upper_limits = range_upper
+            else:
+                raise ValueError("range_upper must be a float or list")
             
             if self.global_rank == 0 and self.verbose:
                 print(
-                    f"design steps: {design_steps}\n",
-                    f"design lower: {lower_limits}\n",
-                    f"design upper: {upper_limits}\n"
+                    f"Designs initialized with the following parameters:\n",
+                    f"step size: {step_size}\n",
+                    f"lower range: {lower_limits}\n",
+                    f"upper range: {upper_limits}\n"
                     )
                 
             designs_dict = {
@@ -341,18 +372,45 @@ class NumTracers:
                 ) for i, target in enumerate(self.targets)
             }
             
-            # Create constrained grid ensuring designs sum to 1
-            tol = 1e-3
-            grid_designs = Grid(
-                **designs_dict, 
-                constraint=lambda **kwargs: abs(sum(kwargs.values()) - 1.0) < tol
-            )
+            # Create constrained grid based on design_sum_lower and design_sum_upper
+            if sum_lower is None and sum_upper is None:
+                # No constraint on sum
+                grid_designs = Grid(**designs_dict)
+            elif sum_lower is not None and sum_upper is not None:
+                if abs(sum_lower - sum_upper) < tol:
+                    # Equal bounds: sum must equal this value
+                    target_sum = sum_lower
+                    grid_designs = Grid(
+                        **designs_dict,
+                        constraint=lambda **kwargs: np.abs(sum(kwargs.values()) - target_sum) < tol
+                    )
+                else:
+                    # Range: sum must be between lower and upper
+                    grid_designs = Grid(
+                        **designs_dict,
+                        constraint=lambda **kwargs: ((sum(kwargs.values()) >= sum_lower - tol) & 
+                                                    (sum(kwargs.values()) <= sum_upper + tol))
+                    )
+            elif sum_lower is not None:
+                # Only lower bound: sum >= lower
+                grid_designs = Grid(
+                    **designs_dict,
+                    constraint=lambda **kwargs: sum(kwargs.values()) >= (sum_lower - tol)
+                )
+            else:
+                # Only upper bound: sum <= upper
+                grid_designs = Grid(
+                    **designs_dict,
+                    constraint=lambda **kwargs: sum(kwargs.values()) <= (sum_upper + tol)
+                )
 
-            # Convert to tensor format
             designs = torch.tensor(getattr(grid_designs, grid_designs.names[0]).squeeze(), device=self.device).unsqueeze(1)
             for name in grid_designs.names[1:]:
                 design_tensor = torch.tensor(getattr(grid_designs, name).squeeze(), device=self.device).unsqueeze(1)
                 designs = torch.cat((designs, design_tensor), dim=1)
+        else:
+            raise ValueError(f"Invalid value for fixed_design: {fixed_design}. "
+                           "Must be False (generate grid), True (use nominal), or a list/array of designs. ")
                 
         self.designs = designs.to(self.device)
 
@@ -559,6 +617,27 @@ class NumTracers:
 
         return x
             
+    @profile_method
+    def sigma_scaling_factor(self, passed_ratio, class_ratio, index):
+        """
+        Calculate the scaling factor for likelihood uncertainties based on the distribution of observations 
+        across tracers (passed_ratio) and the total number of observations (encoded in the sum of class_ratio).
+
+        The total_obs_multiplier is inferred from the sum of class_ratio. If class_ratio (design var) sums to 1.4, 
+        then the total_obs_multiplier is 1.4.
+
+        Args:
+            passed_ratio: Fraction of passed objects in each tracer bin relative to total obs
+            class_ratio: Design variables (fraction allocated to each class)
+            index: Index for the specific measurement
+        
+        Returns:
+            Scaling factor for sigma: sigma_new = sigma_nominal * scaling_factor
+        
+        """
+        total_obs_multiplier = class_ratio.sum(dim=-1, keepdim=True)  # sum across classes
+        return torch.sqrt(self.nominal_passed_ratio[index] / (total_obs_multiplier * passed_ratio[..., index]))
+
     @profile_method
     def calc_passed(self, class_ratio):
         if type(class_ratio) == torch.Tensor:
@@ -1113,9 +1192,10 @@ class NumTracers:
         """
         Samples data from the likelihood.
         Args:
-            tracer_ratio (torch.Tensor): The tracer ratio.
+            tracer_ratio (torch.Tensor): The tracer ratio (design variables).
             num_samples (int): The number of data samples to draw.
             central (bool): Whether to use the fixed central value of the data samples.
+        
         """
         if central:
             rescaled_sigmas = torch.zeros(self.sigmas.shape, device=self.device)
@@ -1123,13 +1203,13 @@ class NumTracers:
             means = torch.zeros(passed_ratio.shape[:-1] + (self.sigmas.shape[-1],), device=self.device)
             means[:, :, self.DH_idx] = lexpand(self.central_val[self.DH_idx].unsqueeze(0), num_samples)
             rescaled_sigmas = torch.zeros(passed_ratio.shape[:-1] + (self.sigmas.shape[-1],), device=self.device)
-            rescaled_sigmas[:, :, self.DH_idx] = self.sigmas[self.DH_idx] * torch.sqrt(self.nominal_passed_ratio[self.DH_idx]/passed_ratio[..., self.DH_idx])
+            rescaled_sigmas[:, :, self.DH_idx] = self.sigmas[self.DH_idx] * self.sigma_scaling_factor(passed_ratio, tracer_ratio, self.DH_idx)
             if self.include_D_M:
                 means[:, :, self.DM_idx] = lexpand(self.central_val[self.DM_idx].unsqueeze(0), num_samples)
-                rescaled_sigmas[:, :, self.DM_idx] = self.sigmas[self.DM_idx] * torch.sqrt(self.nominal_passed_ratio[self.DM_idx]/passed_ratio[..., self.DM_idx])
+                rescaled_sigmas[:, :, self.DM_idx] = self.sigmas[self.DM_idx] * self.sigma_scaling_factor(passed_ratio, tracer_ratio, self.DM_idx)
             if self.include_D_V:
                 means[:, :, self.DV_idx] = lexpand(self.central_val[self.DV_idx].unsqueeze(0), num_samples)
-                rescaled_sigmas[:, :, self.DV_idx] = self.sigmas[self.DV_idx] * torch.sqrt(self.nominal_passed_ratio[self.DV_idx]/passed_ratio[..., self.DV_idx])
+                rescaled_sigmas[:, :, self.DV_idx] = self.sigmas[self.DV_idx] * self.sigma_scaling_factor(passed_ratio, tracer_ratio, self.DV_idx)
 
             if self.include_D_V and self.include_D_M:
                 covariance_matrix = self.corr_matrix * (rescaled_sigmas.unsqueeze(-1) * rescaled_sigmas.unsqueeze(-2))
@@ -1146,11 +1226,12 @@ class NumTracers:
         """
         Samples parameters from the posterior distribution conditioned on the data sampled from the likelihood.
         Args:
-            tracer_ratio (torch.Tensor): The tracer ratio.
+            tracer_ratio (torch.Tensor): The tracer ratio (design variables).
             guide (pyro.infer.guide.Guide): The guide to sample from.
             num_data_samples (int): The number of data samples to use.
             num_param_samples (int): The number of parameter samples to draw.
             central (bool): Whether to use the fixed central value of the data samples.
+        
         """
         data_samples = self.sample_data(tracer_ratio, num_data_samples, central)
         context = torch.cat([tracer_ratio, data_samples], dim=-1)
@@ -1307,16 +1388,16 @@ class NumTracers:
             rescaled_sigmas = torch.zeros(passed_ratio.shape[:-1] + (self.sigmas.shape[-1],), device=self.device)
             z_eff = torch.tensor(self.desi_data[self.desi_data["quantity"] == "DH_over_rs"]["z"].to_list(), device=self.device)
             means[:, :, self.DH_idx] = self.D_H_func(z_eff, **parameters)
-            rescaled_sigmas[:, :, self.DH_idx] = self.sigmas[self.DH_idx] * torch.sqrt(self.nominal_passed_ratio[self.DH_idx]/passed_ratio[..., self.DH_idx])
+            rescaled_sigmas[:, :, self.DH_idx] = self.sigmas[self.DH_idx] * self.sigma_scaling_factor(passed_ratio, tracer_ratio, self.DH_idx)
             if self.include_D_M:
                 z_eff = torch.tensor(self.desi_data[self.desi_data["quantity"] == "DM_over_rs"]["z"].to_list(), device=self.device)
                 means[:, :, self.DM_idx] = self.D_M_func(z_eff, **parameters)
-                rescaled_sigmas[:, :, self.DM_idx] = self.sigmas[self.DM_idx] * torch.sqrt(self.nominal_passed_ratio[self.DM_idx]/passed_ratio[..., self.DM_idx])
+                rescaled_sigmas[:, :, self.DM_idx] = self.sigmas[self.DM_idx] * self.sigma_scaling_factor(passed_ratio, tracer_ratio, self.DM_idx)
 
             if self.include_D_V:
                 z_eff = torch.tensor(self.desi_data[self.desi_data["quantity"] == "DV_over_rs"]["z"].to_list(), device=self.device)
                 means[:, :, self.DV_idx] = self.D_V_func(z_eff, **parameters)
-                rescaled_sigmas[:, :, self.DV_idx] = self.sigmas[self.DV_idx] * torch.sqrt(self.nominal_passed_ratio[self.DV_idx]/passed_ratio[..., self.DV_idx])
+                rescaled_sigmas[:, :, self.DV_idx] = self.sigmas[self.DV_idx] * self.sigma_scaling_factor(passed_ratio, tracer_ratio, self.DV_idx)
 
             # extract correlation matrix from DESI covariance matrix
             if self.include_D_V and self.include_D_M:

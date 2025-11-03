@@ -1015,7 +1015,11 @@ if __name__ == '__main__':
             continue
             
         arg_type = type(value)
-        if isinstance(value, bool):
+        # Special handling for fixed_design to allow --fixed_design (→ True) or --fixed_design [list]
+        if key == 'fixed_design':
+            parser.add_argument(f'--{key}', nargs='?', const=True, default=None,
+                              help=f'Use fixed design. Pass no value for nominal design, or a JSON list for specific design(s) (default: {value})')
+        elif isinstance(value, bool):
             parser.add_argument(f'--{key}', action='store_true', help=f'Enable {key}')
             # Set default explicitly for bools, action handles the logic
             parser.set_defaults(**{key: value})
@@ -1073,7 +1077,23 @@ if __name__ == '__main__':
     for key, value in run_args.items():
         if key in run_args_dict.keys():
             if value is not None:
-                if isinstance(run_args_dict[key], bool) and isinstance(value, bool):
+                # Special handling for fixed_design
+                if key == 'fixed_design':
+                    if value is True:
+                        # Flag passed with no value → use nominal design
+                        run_args[key] = True
+                    elif isinstance(value, str):
+                        # JSON string passed → parse as list
+                        try:
+                            parsed_value = json.loads(value)
+                            run_args[key] = parsed_value
+                        except json.JSONDecodeError as e:
+                            if os.environ.get('RANK', '0') == '0':
+                                print(f"Warning: Could not parse 'fixed_design' as JSON: {e}. Using as-is.")
+                            run_args[key] = value
+                    else:
+                        run_args[key] = value
+                elif isinstance(run_args_dict[key], bool) and isinstance(value, bool):
                     run_args[key] = value
                 elif isinstance(run_args_dict[key], list):
                     # Parse JSON string back to list
@@ -1081,12 +1101,10 @@ if __name__ == '__main__':
                         parsed_value = json.loads(value)
                         run_args[key] = parsed_value
                     except json.JSONDecodeError as e:
-                        if os.environ.get('RANK') == 0:
+                        if os.environ.get('RANK', '0') == '0':
                             print(f"Warning: Could not parse '{key}' as JSON: {e}. Keeping default value.")
                 elif not isinstance(run_args_dict[key], float):
                     run_args[key] = value
-                if os.environ.get('RANK') == 0:
-                    print(f"Overriding '{key}': {run_args[key]} -> {value}")
             else:
                 run_args[key] = run_args_dict[key]
 
