@@ -6,6 +6,8 @@ import json
 import matplotlib
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
+from functools import partial
+import time
 parent_dir = os.path.abspath(os.path.join(os.getcwd(), os.pardir))
 if parent_dir not in sys.path:
     sys.path.insert(0, parent_dir)
@@ -35,9 +37,9 @@ mlflow.set_tracking_uri("file:" + os.environ["SCRATCH"] + "/bed/BED_cosmo/num_tr
 class Evaluator:
     def __init__(
             self, run_id, guide_samples=1000, design_step=0.05, design_lower=0.05, design_upper=None,
-            seed=1, cosmo_exp='num_tracers', levels=[0.68, 0.95], global_rank=0, 
+            design_chunk_size=None, seed=1, cosmo_exp='num_tracers', levels=[0.68, 0.95], global_rank=0, 
             n_evals=20, n_particles=1000, param_space='physical', fixed_design=None,
-            plot_ranks=True, combine_ranks='mean', verbose=False, device="cuda:0", profile=False,
+            verbose=False, device="cuda:0", profile=False
             ):
         self.run_id = run_id
         print(f"\nStarting evaluation for run {self.run_id}")
@@ -58,21 +60,28 @@ class Evaluator:
         auto_seed(self.seed) # fix random seed
         self.device = device
         self.levels = levels if isinstance(levels, list) else [levels]
-        self.global_ranks = global_rank if isinstance(global_rank, list) else [global_rank]
-        self.plot_ranks = plot_ranks
-        self.combine_ranks = combine_ranks
-        print(f"Handling multi-rank evaluation with {self.combine_ranks} method.")
+        self.global_rank = global_rank
         self.n_evals = n_evals
         self.n_particles = n_particles
         self.verbose = verbose
         self.profile = profile
-        design_args = {
+        self.design_chunk_size = design_chunk_size  # Number of designs per chunk (None = use all)
+        
+        # Store design arguments
+        self.design_args = {
             "design_step": design_step,
             "design_lower": design_lower,
             "design_upper": design_upper,
             "fixed_design": self.run_args["fixed_design"]
         }
-        self.experiment = init_experiment(self.run_obj, self.run_args, self.device, design_args=design_args)
+        
+        # Initialize single experiment
+        self.experiment = init_experiment(
+            self.run_obj, self.run_args, self.device, 
+            design_args=self.design_args, global_rank=self.global_rank
+        )
+        
+        # Handle fixed_design
         if fixed_design is not None:
             self.fixed_design = torch.tensor(fixed_design, device=self.device)
         elif self.run_args['fixed_design']:
@@ -80,8 +89,11 @@ class Evaluator:
                 self.fixed_design = torch.tensor(self.run_args['fixed_design'], device=self.device)
             elif self.run_args['fixed_design'] == True:
                 self.fixed_design = self.experiment.nominal_design
+            else:
+                self.fixed_design = False
         else:
             self.fixed_design = False
+        
         # Cache for EIG calculations to avoid redundant computations
         self._eig_cache = {}
 
@@ -95,64 +107,56 @@ class Evaluator:
         else:
             raise ValueError(f"Invalid parameter space: {self.param_space}")
 
+    def _sample_rank_step(self, rank, step, design, nominal_design=False):
+        """
+        Generates samples from a single rank.
+        
+        Args:
+            rank (int): Global rank to generate samples from
+            step (int): Step to generate samples from
+            design: Design tensor
+            nominal_design (bool): Whether this is for nominal design
+            
+        Returns:
+            samples: MCSamples object
+        """
+        # Load model
+        flow_model, _ = load_model(
+            self.experiment, step, self.run_obj, 
+            self.run_args, self.device, global_rank=rank
+        )
+        flow_model = flow_model.to(self.device)
+        
+        # Get samples
+        context = torch.cat([design, self.experiment.central_val], dim=-1)
+        samples = self.experiment.get_guide_samples(
+            flow_model, context, 
+            num_samples=self.guide_samples, 
+            transform_output=self.nf_transform_output
+        )
+        
+        return samples
+
     @profile_method
-    def _eval_step(self, step, nominal_design=False, global_rank=None):
+    def _eval_step(self, step, nominal_design=False):
         """
         Generates samples given the nominal context (nominal design + central values).
         Args:
             step (int): Step to calculate the nominal samples for.
         """
-        if global_rank is None:
-            # If combine_ranks='first', only use the first rank
-            if self.combine_ranks == 'first':
-                global_ranks_list = [self.global_ranks[0]]
-            else:
-                global_ranks_list = self.global_ranks
-        else:
-            global_ranks_list = [global_rank]
-        
-        rank_samples = []
-        
+        # Determine which design to use
         if self.fixed_design is not False:
             design = self.fixed_design
         elif nominal_design:
             design = self.experiment.nominal_design
         else:
-            eigs = self.get_eig(step, nominal_design=False)
+            eigs, _ = self.get_eig(step, nominal_design=False)
             design = self.experiment.designs[np.argmax(eigs)]
 
-        # Generate samples for each rank using the same design
-        for rank in global_ranks_list:
-            flow_model, _ = load_model(
-                self.experiment, step, self.run_obj, 
-                self.run_args, self.device, global_rank=rank
-            )
-            rank_samples.append(self._get_samples(design, flow_model))
-        
-        # Handle combining/returning samples based on combine_ranks setting
-        if global_rank is not None:
-            # If a specific rank was requested, return just that rank's samples
-            return rank_samples[0]
-        elif self.combine_ranks in ['mean', 'median'] and len(rank_samples) > 1:
-            # Combine samples from all ranks by concatenating
-            combined_samples_array = np.concatenate([s.samples for s in rank_samples], axis=0)
-            with contextlib.redirect_stdout(io.StringIO()):
-                combined_samples = getdist.MCSamples(
-                    samples=combined_samples_array,
-                    names=self.experiment.cosmo_params,
-                    labels=self.experiment.latex_labels
-                )
-            return combined_samples
-        elif self.combine_ranks and len(rank_samples) == 1:
-            # Single rank (either only one rank total, or combine_ranks='first')
-            return rank_samples[0]
-        else:
-            # Return list of samples (when combine_ranks is False/None)
-            return rank_samples
+        # Generate samples
+        samples = self._sample_rank_step(self.global_rank, step, design, nominal_design)
+        return samples
 
-    def _get_samples(self, design, flow_model):
-        context = torch.cat([design, self.experiment.central_val], dim=-1)
-        return self.experiment.get_guide_samples(flow_model, context, num_samples=self.guide_samples, transform_output=self.nf_transform_output)
     
     @profile_method
     def generate_posterior(self, step='last', display=['nominal', 'optimal']):
@@ -169,51 +173,19 @@ class Evaluator:
         all_colors = []
         all_alphas = []
         
-        # If plot_ranks=True and multiple ranks, plot individual ranks first (faded)
-        if self.plot_ranks and len(self.global_ranks) > 1 and self.combine_ranks in ['mean', 'median']:
-            for rank in self.global_ranks:
-                if 'nominal' in display:
-                    rank_nominal_samples = self._eval_step(step, nominal_design=True, global_rank=rank)
-                    all_samples.append(rank_nominal_samples)
-                    all_colors.append('tab:blue')
-                    all_alphas.append(0.25)  # Faded for individual ranks
-                
-                if 'optimal' in display and self.fixed_design is False:
-                    rank_optimal_samples = self._eval_step(step, global_rank=rank)
-                    all_samples.append(rank_optimal_samples)
-                    all_colors.append('tab:orange')
-                    all_alphas.append(0.25)  # Faded for individual ranks
-        
-        # Now add combined samples with full alpha
         if 'nominal' in display:
             print(f"Generating posterior samples with nominal design...")
-            # Sample with nominal design
             nominal_samples = self._eval_step(step, nominal_design=True)
-            if self.combine_ranks:
-                # nominal_samples is a single MCSamples object
-                all_samples.append(nominal_samples)
-                all_colors.append('tab:blue')
-                all_alphas.append(1.0)
-            else:
-                # nominal_samples is a list of MCSamples objects (one per rank)
-                all_samples.extend(nominal_samples)
-                all_colors.extend(['tab:blue'] * len(nominal_samples))
-                all_alphas.extend([1.0] * len(nominal_samples))
+            all_samples.append(nominal_samples)
+            all_colors.append('tab:blue')
+            all_alphas.append(1.0)
         
         if 'optimal' in display and self.fixed_design is False:
             print(f"Generating posterior samples with optimal design...")
-            # Sample with optimal design
             optimal_samples = self._eval_step(step)
-            if self.combine_ranks:
-                # optimal_samples is a single MCSamples object
-                all_samples.append(optimal_samples)
-                all_colors.append('tab:orange')
-                all_alphas.append(1.0)
-            else:
-                # optimal_samples is a list of MCSamples objects (one per rank)
-                all_samples.extend(optimal_samples)
-                all_colors.extend(['tab:orange'] * len(optimal_samples))
-                all_alphas.extend([1.0] * len(optimal_samples))
+            all_samples.append(optimal_samples)
+            all_colors.append('tab:orange')
+            all_alphas.append(1.0)
 
         # Get the DESI MCMC samples
         desi_samples_gd = self.experiment.get_desi_samples(transform_output=self.desi_transform_output)
@@ -222,8 +194,7 @@ class Evaluator:
         all_alphas.append(1.0)
         
         g = plot_posterior(all_samples, all_colors, levels=self.levels, width_inch=10, alpha=all_alphas)
-        ranks_label = f"Combined {len(self.global_ranks)} Ranks" if self.combine_ranks and len(self.global_ranks) > 1 else f"{len(self.global_ranks)} Rank{'s' if len(self.global_ranks) > 1 else ''}"
-        g.fig.suptitle(f"Posterior Evaluation - Run: {self.run_id[:8]} ({ranks_label}, {self.param_space.capitalize()} Space)", fontsize=16)
+        g.fig.suptitle(f"Posterior Evaluation - Run: {self.run_id[:8]} (Rank {self.global_rank}, {self.param_space.capitalize()} Space)", fontsize=16)
 
         # Create custom legend
         if g.fig.legends:
@@ -254,9 +225,10 @@ class Evaluator:
             self.run_obj, self.run_args, 
             device=self.device, global_rank=global_rank
             )
+        posterior_flow = posterior_flow.to(self.device)
 
         # Get optimal design based on combined EIGs across ranks
-        eigs = self.get_eig(step, nominal_design=False)
+        eigs, _ = self.get_eig(step, nominal_design=False)
         optimal_design = self.experiment.designs[np.argmax(eigs)]
         pair_keys = [k for k in self.run_obj.data.metrics.keys() if k.startswith(f'nominal_area_{global_rank}_')]
         pair_names = [p.replace('nominal_area_0_', '') for p in pair_keys]
@@ -266,6 +238,7 @@ class Evaluator:
         inputs = (('optimal', 'tab:orange', optimal_design), ('nominal', 'tab:blue', self.experiment.nominal_design))
         for design_type, color, design in inputs:
             data_idxs = np.arange(1, num_data_samples) # sample N data points
+            
             samples_array = self.experiment.sample_params_from_data_samples(
                 lexpand(design.unsqueeze(0), num_data_samples), 
                 posterior_flow, 
@@ -335,30 +308,53 @@ class Evaluator:
         g.fig.suptitle(f"Posterior (Rank {global_rank}) for {num_data_samples} Data Samples, {int(level*100)}% Credible Regions", fontsize=12)
         save_figure(f"{self.save_path}/plots/posterior_samples_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png", fig=g.fig, dpi=400)
 
-    def _compute_eig(self, flow_model, nominal_design=False):
+    def _compute_eig(self, rank, step, flow_model, nominal_design=False, designs=None):
         """
-        Helper function that evaluates the EIG of a single flow model for the evaluation designs tensor.
+        Helper function that evaluates the EIG of a single flow model.
 
         Args:
+            rank (int): Global rank number
+            step (int): Step for reference
             flow_model (torch.nn.Module): The flow model to evaluate.
             nominal_design (bool): Whether to evaluate the nominal design.
+            designs: Tensor of designs to evaluate. If None, determines from nominal_design/fixed_design.
         Returns:
             eigs (torch.Tensor): The EIGs for each design.
         """
-        if nominal_design:
-            designs = self.experiment.nominal_design.unsqueeze(0)
-        elif self.fixed_design is not False:
-            designs = self.fixed_design.unsqueeze(0)
-        else:
-            designs = self.experiment.designs
+        device_obj = torch.device(self.device)
         
-        samples, context, log_probs = LikelihoodDataset(
+        # Determine which designs to use
+        if designs is None:
+            if nominal_design:
+                designs = self.experiment.nominal_design.unsqueeze(0)
+            elif self.fixed_design is not False:
+                designs = self.fixed_design.unsqueeze(0)
+            else:
+                designs = self.experiment.designs
+        
+        # Ensure designs are on the correct device
+        designs = designs.to(device_obj)
+        
+        # Create dataset with explicit device - this creates Pyro trace
+        # Each call samples from p(y|θ,d) using Pyro's RNG, which advances state.
+        # This means different ranks (or multiple calls) get different likelihood samples,
+        # causing Monte Carlo variance in EIG that decreases with n_particles.
+        dataset_result = LikelihoodDataset(
             experiment=self.experiment,
             n_particles_per_device=self.n_particles,
             device=self.device,
             evaluation=True,
             designs=designs
         )[0]
+        
+        samples, context, log_probs = dataset_result
+        
+        # Ensure all tensors are on the correct device
+        samples = samples.to(device_obj)
+        context = context.to(device_obj)
+        if log_probs is not None:
+            log_probs = {k: v.to(device_obj) for k, v in log_probs.items()}
+        flow_model = flow_model.to(device_obj)
 
         with torch.no_grad():
             _, eigs = nf_loss(
@@ -377,9 +373,8 @@ class Evaluator:
     @profile_method
     def get_eig(self, step, nominal_design=False):
         """
-        Calculates the average EIG over a batch of evaluations and multiple ranks.
+        Calculates EIG for the specified rank.
         Uses caching to avoid redundant calculations.
-        Loops over all global ranks and n_evals internally.
 
         Args:
             step (int): Step for caching key and to load the model.
@@ -387,80 +382,127 @@ class Evaluator:
                                  If False, calculate EIGs for all designs (or fixed_design if set).
 
         Returns:
-            If nominal_design=True: float - Combined nominal EIG value.
-            If nominal_design=False: np.ndarray - Combined EIGs for each design (after averaging over evals and ranks).
+            tuple: (result, result_std)
+                - result: If nominal_design=True, float; else np.ndarray (mean over n_evals)
+                - result_std: If nominal_design=True, float; else np.ndarray (std over n_evals)
         """
         
-        # Create cache key based on model parameters and evaluation settings
-        ranks_str = f"{self.global_ranks}" if len(self.global_ranks) > 1 else str(self.global_ranks[0])
-        cache_key = f"step_{step}_ranks_{ranks_str}_combine_{self.combine_ranks}_evals_{self.n_evals}_particles_{self.n_particles}_nominal_{nominal_design}"
+        cache_key = f"step_{step}_particles_{self.n_particles}_nominal_{nominal_design}_evals_{self.n_evals}"
         
+        # Check for cached result
         if cache_key in self._eig_cache:
             print(f"Using cached EIG results for {cache_key}")
-            return self._eig_cache[cache_key]
+            cached_result = self._eig_cache[cache_key]
+            # Handle old cache format (2 or 3 values) vs new format (2 values: result, result_std)
+            if len(cached_result) == 2:
+                # Could be old format (result, individual_ranks) or new format (result, result_std)
+                # Check if second element is a dict (old format)
+                if isinstance(cached_result[1], dict):
+                    # Old format: (result, individual_ranks) - add empty std
+                    result = cached_result[0]
+                    if nominal_design:
+                        result_std = 0.0
+                    else:
+                        result_std = np.zeros_like(result)
+                    return (result, result_std)
+                else:
+                    # New format: (result, result_std)
+                    return cached_result
+            elif len(cached_result) == 3:
+                # Old format: (result, individual_ranks, result_std)
+                return (cached_result[0], cached_result[2])
+            else:
+                return cached_result
 
-        # Collect EIG results for each rank
-        rank_avg_eigs_list = []
+        # Load model
+        flow_model, _ = load_model(
+            self.experiment, step, self.run_obj, 
+            self.run_args, self.device, 
+            global_rank=self.global_rank
+        )
+        flow_model = flow_model.to(self.device)
         
-        for rank in self.global_ranks:
-            # Load model for this rank
-            flow_model, _ = load_model(
-                self.experiment, step, self.run_obj, 
-                self.run_args, self.device, 
-                global_rank=rank
-            )
-            
-            # Average over n_evals for this rank
-            eigs_batch = []
-            
-            for n in range(self.n_evals):
-                if self.verbose and n % 5 == 0:
-                    print(f"  EIG evaluation {n+1}/{self.n_evals} for rank {rank}")
-                
-                eig_result = self._compute_eig(flow_model, nominal_design=nominal_design)
-                eigs_batch.append(eig_result.cpu().numpy()/np.log(2))
-            
-            # Average over evaluations for this rank
-            eigs_batch = np.array(eigs_batch)
-            if nominal_design:
-                # For nominal design, result is a scalar
-                avg_eig = np.mean(eigs_batch, axis=0).item()
-                rank_avg_eigs_list.append(avg_eig)
-            else:
-                # For multiple designs, result is an array
-                avg_eigs = np.mean(eigs_batch, axis=0)
-                rank_avg_eigs_list.append(avg_eigs)
-        
-        # Combine across ranks
-        if len(self.global_ranks) > 1:
-            if nominal_design:
-                # For nominal design, combine scalar values
-                if self.combine_ranks == 'mean':
-                    result = np.mean(rank_avg_eigs_list)
-                elif self.combine_ranks == 'median':
-                    result = np.median(rank_avg_eigs_list)
-                elif self.combine_ranks == 'first':
-                    result = rank_avg_eigs_list[0]
-                else:
-                    raise ValueError(f"Invalid combine_ranks value: {self.combine_ranks}")
-            else:
-                # For multiple designs, combine arrays
-                rank_eigs_array = np.array(rank_avg_eigs_list)
-                if self.combine_ranks == 'mean':
-                    result = np.mean(rank_eigs_array, axis=0)
-                elif self.combine_ranks == 'median':
-                    result = np.median(rank_eigs_array, axis=0)
-                elif self.combine_ranks == 'first':
-                    result = rank_avg_eigs_list[0]
-                else:
-                    raise ValueError(f"Invalid combine_ranks value: {self.combine_ranks}")
+        # Determine which designs to evaluate
+        if nominal_design:
+            all_designs = self.experiment.nominal_design.unsqueeze(0)
+            num_designs = 1
+        elif self.fixed_design is not False:
+            all_designs = self.fixed_design.unsqueeze(0)
+            num_designs = 1
         else:
-            result = rank_avg_eigs_list[0]
+            all_designs = self.experiment.designs
+            num_designs = len(all_designs)
         
-        # Cache the results
-        self._eig_cache[cache_key] = result
+        # Chunk design space if chunk size is specified (for memory constraints)
+        # Chunking is implied by design_chunk_size: None means no chunking, otherwise chunk
+        if num_designs == 1 or self.design_chunk_size is None:
+            # Single design or no chunking - use all designs
+            design_chunks = [list(range(num_designs))]
+        else:
+            # Chunk the design space according to specified chunk size
+            chunk_size = self.design_chunk_size
+            design_chunks = []
+            for i in range(0, num_designs, chunk_size):
+                chunk_indices = list(range(i, min(i + chunk_size, num_designs)))
+                design_chunks.append(chunk_indices)
         
-        return result
+        if self.verbose:
+            print(f"  Evaluating {num_designs} design(s) in {len(design_chunks)} chunk(s) with {self.n_evals} evaluation(s)")
+        
+        # Store all evaluations for averaging
+        all_eval_results = []
+        
+        # Loop over n_evals
+        for eval_idx in range(self.n_evals):
+            if self.verbose:
+                print(f"  Evaluation {eval_idx+1}/{self.n_evals}")
+            
+            # Evaluate each chunk and combine results for this evaluation
+            full_eigs = np.zeros(num_designs)
+            
+            for chunk_idx, design_indices in enumerate(design_chunks):
+                if self.verbose and len(design_chunks) > 1:
+                    print(f"    Chunk {chunk_idx+1}/{len(design_chunks)}: designs {design_indices[0]}-{design_indices[-1]}")
+                
+                # Get designs for this chunk
+                chunk_designs = all_designs[design_indices].to(self.device)
+                
+                # Evaluate this chunk
+                eig_result = self._compute_eig(
+                    self.global_rank, step, flow_model,
+                    nominal_design=nominal_design,
+                    designs=chunk_designs
+                )
+                
+                # Store results for this chunk
+                eig_array = eig_result.cpu().numpy() / np.log(2)
+                if len(design_indices) == 1:
+                    # Single design case
+                    if nominal_design or self.fixed_design is not False:
+                        full_eigs[design_indices[0]] = eig_array.item()
+                    else:
+                        full_eigs[design_indices[0]] = eig_array if isinstance(eig_array, (int, float, np.number)) else eig_array[0]
+                else:
+                    # Multiple designs in chunk
+                    for idx, eig_val in zip(design_indices, eig_array.flatten()):
+                        full_eigs[idx] = eig_val
+            
+            all_eval_results.append(full_eigs)
+        
+        # Average over evaluations and compute std
+        all_eval_results = np.array(all_eval_results)
+        result = np.mean(all_eval_results, axis=0)
+        result_std = np.std(all_eval_results, axis=0)
+        
+        # Handle scalar case for nominal design
+        if nominal_design:
+            result = result[0]  # Scalar
+            result_std = result_std[0]  # Scalar
+        
+        # Cache result and std
+        self._eig_cache[cache_key] = (result, result_std)
+        
+        return (result, result_std)
 
     @profile_method
     def design_comparison(self, step, width=0.2):
@@ -472,11 +514,12 @@ class Evaluator:
             width: Width of the bars in the bar chart
         """
         print(f"Running design comparison...")
+        
         if self.fixed_design is not False:
             design = self.fixed_design.cpu().numpy()
         else:
-            # Get combined EIGs and optimal design (handles all ranks internally)
-            eigs = self.get_eig(step, nominal_design=False)
+            # Get combined EIGs and optimal design
+            eigs, _ = self.get_eig(step, nominal_design=False)
             optimal_design = self.experiment.designs[np.argmax(eigs)]
             design = optimal_design.cpu().numpy()
         
@@ -545,27 +588,18 @@ class Evaluator:
             step: The step to evaluate
         """
         print(f"Running EIG grid evaluation...")
+        # Get reference experiment
         if self.fixed_design is not False:
             print("Warning: Fixed design was used for training, skipping EIG grid plot.")
             return
 
         # Get combined EIGs, nominal EIG, and optimal design (handles all ranks internally)
-        eigs = self.get_eig(step, nominal_design=False)
+        eigs, _ = self.get_eig(step, nominal_design=False)
         optimal_design_tensor = self.experiment.designs[np.argmax(eigs)]
         optimal_design = optimal_design_tensor.cpu().numpy()
         
-        # Determine label suffix based on combine_ranks
-        if len(self.global_ranks) > 1:
-            if self.combine_ranks == 'mean':
-                label_suffix = 'Mean'
-            elif self.combine_ranks == 'median':
-                label_suffix = 'Median'
-            elif self.combine_ranks == 'first':
-                label_suffix = f'Rank {self.global_ranks[0]}'
-            else:
-                label_suffix = 'Combined'
-        else:
-            label_suffix = f'Rank {self.global_ranks[0]}'
+        # Determine label suffix
+        label_suffix = f'Rank {self.global_rank}'
         
         # Create figure with subplots
         fig = plt.figure(figsize=(8, 12))
@@ -670,8 +704,7 @@ class Evaluator:
         cbar_bottom.set_ticklabels([f'{tick:.2f}' for tick in eig_ticks])
 
         # Add overall title with rank information
-        fig.suptitle(f'EIG Grid ({label_suffix}, {len(self.global_ranks)} Rank{"s" if len(self.global_ranks) > 1 else ""})', 
-                    fontsize=14, y=0.995)
+        fig.suptitle(f'EIG Grid ({label_suffix})', fontsize=14, y=0.995)
         
         plt.tight_layout()
         save_figure(f"{self.save_path}/plots/eig_grid_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png", fig=fig, dpi=400)
@@ -691,10 +724,9 @@ class Evaluator:
         all_samples = []
         all_colors = []
         custom_legend = []
-        # Use first global_rank for pair_keys (all ranks should have the same structure)
-        first_rank = self.global_ranks[0] if isinstance(self.global_ranks, list) else self.global_ranks
-        pair_keys = [k for k in self.run_obj.data.metrics.keys() if k.startswith(f'nominal_area_{first_rank}_')]
-        pair_names = [p.replace(f'nominal_area_{first_rank}_', '') for p in pair_keys]
+        # Use global_rank for pair_keys
+        pair_keys = [k for k in self.run_obj.data.metrics.keys() if k.startswith(f'nominal_area_{self.global_rank}_')]
+        pair_names = [p.replace(f'nominal_area_{self.global_rank}_', '') for p in pair_keys]
         checkpoint_dir = f'{self.storage_path}/mlruns/{self.exp_id}/{self.run_id}/artifacts/checkpoints'
         if not os.path.isdir(checkpoint_dir):
             print(f"Warning: Checkpoint directory not found for run {self.run_id}, skipping. Path: {checkpoint_dir}")
@@ -703,14 +735,9 @@ class Evaluator:
             samples = self._eval_step(step, nominal_design=True)
             # Convert RGBA color to hex string before extending
             color_hex = matplotlib.colors.to_hex(colors[i % len(colors)])
-            if self.combine_ranks:
-                # samples is a single MCSamples object
-                all_samples.append(samples)
-                all_colors.append(color_hex)
-            else:
-                # samples is a list of MCSamples objects
-                all_samples.extend(samples)
-                all_colors.extend([color_hex] * len(samples))
+            # samples is a single MCSamples object
+            all_samples.append(samples)
+            all_colors.append(color_hex)
             if step == 'last':
                 step_label = self.run_args["total_steps"]
             elif step == 'loss_best':
@@ -721,6 +748,7 @@ class Evaluator:
                 Line2D([0], [0], color=color_hex, 
                         label=f'Step {step_label}')
             )
+        # Get DESI samples using reference experiment
         desi_samples_gd = self.experiment.get_desi_samples(transform_output=self.desi_transform_output)
         all_samples.append(desi_samples_gd)
         all_colors.append('black')  
@@ -761,7 +789,7 @@ class Evaluator:
             steps = [steps]
         
         print(f"Running sorted EIG and designs plot for step(s) {steps}...")
-
+        
         if self.fixed_design is not False:
             print("Warning: Fixed design was used for training, skipping sorted EIG plot.")
             return
@@ -802,39 +830,23 @@ class Evaluator:
         sorted_eigs_idx = None
         
         for step_idx, s in enumerate(steps):
+            # Use first rank's pre-initialized experiment to get selected_step (just for step resolution)
             flow_model, selected_step = load_model(
                 self.experiment, s, self.run_obj, 
                 self.run_args, self.device, 
-                global_rank=self.global_ranks[0]  # Just need model for one rank to get selected_step
+                global_rank=self.global_rank
             )
             
-            # Get combined EIG result (handles all ranks internally)
-            combined_eigs = self.get_eig(selected_step, nominal_design=False)
-            combined_nominal = self.get_eig(selected_step, nominal_design=True)
-            
-            # Get individual rank EIGs for plotting (if needed)
-            rank_eigs_list = []
-            if self.plot_ranks and len(self.global_ranks) > 1 and self.combine_ranks != 'first':
-                # Need individual rank EIGs for faded plotting
-                # Calculate individually per rank (simplified - just one eval per rank for speed)
-                for rank in self.global_ranks:
-                    rank_flow_model, _ = load_model(
-                        self.experiment, selected_step, self.run_obj, 
-                        self.run_args, self.device, global_rank=rank
-                    )
-                    # Single eval for individual rank (not averaged)
-                    eigs = self._compute_eig(rank_flow_model, nominal_design=False).cpu().numpy() / np.log(2)
-                    rank_eigs_list.append(eigs)
-            else:
-                # If not plotting individual ranks, just use combined result
-                rank_eigs_list = [combined_eigs]
+            # Get EIG results (with std for error bars)
+            combined_eigs, combined_eigs_std = self.get_eig(selected_step, nominal_design=False)
+            combined_nominal, _ = self.get_eig(selected_step, nominal_design=True)
             
             # Store data for this step
             all_steps_data.append({
                 'step': selected_step,
                 'step_label': s,
                 'combined_eigs': combined_eigs,
-                'rank_eigs_list': rank_eigs_list,
+                'combined_eigs_std': combined_eigs_std,
                 'nominal': combined_nominal,
                 'color': colors[step_idx]
             })
@@ -842,8 +854,9 @@ class Evaluator:
             # Use the specified sort_step to determine sorting order
             if s == sort_step:
                 sorted_eigs_idx = np.argsort(combined_eigs)[::-1]
+                sort_step_data = all_steps_data[-1]  # Store reference to sorted step data
         
-        # Get designs and sort them according to sorted EIG indices
+        # Get designs and sort them according to sorted EIG indices (use reference experiment)
         designs = self.experiment.designs.cpu().numpy()
         sorted_designs = designs[sorted_eigs_idx]
         
@@ -860,26 +873,26 @@ class Evaluator:
         for step_data in all_steps_data:
             sorted_combined_eigs = step_data['combined_eigs'][sorted_eigs_idx]
             
-            # Plot individual ranks if requested (faded)
-            if self.plot_ranks and len(self.global_ranks) > 1 and self.combine_ranks != 'first':
-                for rank_eigs in step_data['rank_eigs_list']:
-                    sorted_rank_eigs = rank_eigs[sorted_eigs_idx]
-                    ax0.plot(sorted_rank_eigs, color=step_data['color'], 
-                            linestyle='-', alpha=0.25, linewidth=1.0)
+            # Plot error bars (gray fill) only for the sorted step
+            if step_data['step_label'] == sort_step and 'combined_eigs_std' in step_data:
+                sorted_eigs_std = step_data['combined_eigs_std'][sorted_eigs_idx]
+                x_vals = np.arange(len(sorted_combined_eigs))
+                # Only add label once (on first iteration when we hit the sorted step)
+                add_label = (step_data == sort_step_data)
+                ax0.fill_between(
+                    x_vals,
+                    sorted_combined_eigs - sorted_eigs_std,
+                    sorted_combined_eigs + sorted_eigs_std,
+                    color='gray', alpha=0.3, zorder=1, label='±1 std' if add_label else ''
+                )
             
-            # Plot combined EIG (main line)
+            # Plot EIG (main line)
             if len(all_steps_data) > 1:
                 # Multiple steps: show step number in label
                 line_label = f"Step {step_data['step']}"
             else:
-                # Single step: show rank aggregation method
-                if len(self.global_ranks) > 1:
-                    if self.combine_ranks == 'first':
-                        line_label = f"Sorted EIG (Rank {self.global_ranks[0]})"
-                    else:
-                        line_label = f"Sorted EIG ({self.combine_ranks.capitalize()})"
-                else:
-                    line_label = "Sorted EIG"
+                # Single step: show rank
+                line_label = f"Sorted EIG (Rank {self.global_rank})"
             
             ax0.plot(sorted_combined_eigs, label=line_label, 
                     color=step_data['color'], linestyle='-', linewidth=2.5, alpha=1.0, zorder=5)
@@ -923,23 +936,23 @@ if __name__ == "__main__":
     parser.add_argument('--eval_step', type=str, default='last', help='Step to evaluate (can be integer or "last")')
     parser.add_argument('--cosmo_exp', type=str, default='num_tracers', help='Cosmological model set to use from run_args.json')
     parser.add_argument('--levels', type=float, default=0.68, help='Levels for contour plot')
-    parser.add_argument('--global_rank', type=str, default='0', help='List of global ranks to evaluate')
+    parser.add_argument('--global_rank', type=int, default=0, help='Global rank to evaluate (default: 0)')
     parser.add_argument('--n_particles', type=int, default=1000, help='Number of particles to use for evaluation')
     parser.add_argument('--guide_samples', type=int, default=10000, help='Number of samples to generate from the posterior')
     parser.add_argument('--design_lower', type=parse_float_or_list, default=0.05, help='Lowest design fraction (float or JSON list)')
     parser.add_argument('--design_step', type=parse_float_or_list, default=0.05, help='Step size for design grid (float or JSON list)')
+    parser.add_argument('--design_chunk_size', type=int, default=None, help='Number of designs per chunk (None = use all designs)')
     parser.add_argument('--n_evals', type=int, default=20, help='Number of evaluations to average over')
     parser.add_argument('--device', type=str, default='cuda:0', help='Device to use for evaluation')
     parser.add_argument('--eval_seed', type=int, default=1, help='Seed for evaluation')
     parser.add_argument('--param_space', type=str, default='physical', help='Parameter space to use for evaluation')
     parser.add_argument('--fixed_design', type=str, default=None, help='Evaluate a fixed design as a JSON list (default: None)')
     parser.add_argument('--profile', action='store_true', help='Enable profiling of methods')
+    parser.add_argument('--verbose', action='store_true', help='Enable verbose output')
 
     args = parser.parse_args()
     
-    # Convert global_rank string to list of integers using json.loads
-    if isinstance(args.global_rank, str):
-        args.global_rank = json.loads(args.global_rank)
+    # global_rank is now a single integer (default 0)
 
     valid_params = inspect.signature(Evaluator.__init__).parameters.keys()
     valid_params = [k for k in valid_params if k != 'self']
@@ -957,18 +970,18 @@ if __name__ == "__main__":
     elif args.eval_step is not None:
         eval_step = int(args.eval_step)
 
-    nominal_eig = evaluator.get_eig(step=eval_step, nominal_design=True)
+    nominal_eig, _ = evaluator.get_eig(step=eval_step, nominal_design=True)
+    # Get reference experiment for metadata
     if evaluator.fixed_design is not False:
-        eig = evaluator.get_eig(step=eval_step, nominal_design=False)[0]
+        eig, _ = evaluator.get_eig(step=eval_step, nominal_design=False)
         print(f"Nominal EIG: {nominal_eig}, Fixed Design EIG: {eig}, Fixed Design: {evaluator.fixed_design.tolist()}")
     else:
-        eigs = evaluator.get_eig(step=eval_step, nominal_design=False)
+        eigs, _ = evaluator.get_eig(step=eval_step, nominal_design=False)
         optimal_design = evaluator.experiment.designs[np.argmax(eigs)].cpu().numpy()
         print(f"Nominal EIG: {nominal_eig}, Optimal EIG: {np.max(eigs)}, Optimal Design: {optimal_design.tolist()}")
 
     try:
-        pass
-        #evaluator.generate_posterior(step=eval_step)
+        evaluator.generate_posterior(step=eval_step)
     except Exception as e:
         traceback.print_exc()
     #evaluator.eig_grid(step=eval_step)
