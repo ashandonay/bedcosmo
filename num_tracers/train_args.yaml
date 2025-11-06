@@ -17,6 +17,7 @@ base:
   mnn_hidden_size: 512
   mnn_n_layers: 6
   mnn_signal: 64
+  nf_transform: affine
   spline_bins: 20
   fixed_design: false
   design_step: [0.025, 0.05, 0.05, 0.025]
@@ -32,7 +33,7 @@ base:
   gamma: 0.1
   step_freq: 1
   checkpoint_step_freq: 2000
-  n_particles_per_device: 201
+  n_particles_per_device: 101
   verbose: true
   log_nominal_area: true
   include_D_M: true
@@ -54,6 +55,7 @@ base_omegak:
   mnn_hidden_size: 512
   mnn_n_layers: 8
   mnn_signal: 64
+  nf_transform: affine
   spline_bins: 20
   fixed_design: false
   design_step: [0.025, 0.05, 0.05, 0.025]
@@ -91,6 +93,7 @@ base_w:
   mnn_hidden_size: 512
   mnn_n_layers: 8
   mnn_signal: 64
+  nf_transform: affine
   spline_bins: 20
   fixed_design: false
   design_step: [0.025, 0.05, 0.05, 0.025]
@@ -128,6 +131,7 @@ base_w_wa:
   mnn_hidden_size: 512
   mnn_n_layers: 10
   mnn_signal: 64
+  nf_transform: affine
   spline_bins: 20
   fixed_design: false
   design_step: [0.025, 0.05, 0.05, 0.025]
@@ -165,6 +169,7 @@ base_omegak_w_wa:
   mnn_hidden_size: 512
   mnn_n_layers: 12
   mnn_signal: 64
+  nf_transform: affine
   spline_bins: 20
   fixed_design: false
   design_step: [0.025, 0.05, 0.05, 0.025]
