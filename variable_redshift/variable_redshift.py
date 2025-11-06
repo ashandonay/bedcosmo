@@ -25,7 +25,7 @@ script_dir = os.path.dirname(os.path.abspath(__file__))
 parent_dir_abs = os.path.abspath(os.path.join(script_dir, os.pardir))
 sys.path.insert(0, parent_dir_abs)
 from custom_dist import ConstrainedUniform2D
-from util import Bijector, auto_seed, profile_method, load_desi_samples
+from util import Bijector, auto_seed, profile_method
 
 storage_path = os.environ["SCRATCH"] + "/bed/BED_cosmo/variable_redshift"
 home_dir = os.environ["HOME"]
@@ -225,6 +225,7 @@ class VariableRedshift:
         self.coeff = self.c / (self.H0 * self.rdrag)
         
         self.include_D_M = include_D_M
+        self.include_D_V = False  # Not implemented yet, but keeping for consistency
         self.sigma_D_H = sigma_D_H
         self.sigma_D_M = sigma_D_M
         
@@ -265,9 +266,7 @@ class VariableRedshift:
         self._idx_hr = [self.cosmo_params.index('hrdrag')] if 'hrdrag' in self.cosmo_params else []
         
         # Observation labels
-        self.observation_labels = ["D_H"]
-        if self.include_D_M:
-            self.observation_labels.append("D_M")
+        self.observation_labels = ["y"]  # Single observation label for MultivariateNormal
         
         # Initialize designs
         self.init_designs(
@@ -277,17 +276,25 @@ class VariableRedshift:
             design_upper=design_upper
         )
         
+        self.design_labels = ["z"]
+        
         # Nominal design (single redshift point for evaluation)
-        self.nominal_design = torch.tensor([2.5], device=self.device).unsqueeze(0)
+        self.nominal_design = torch.tensor([2.5], device=self.device)
+        
+        # Compute central values using fiducial cosmology
+        self.central_val = self._compute_central_values()
+        
+        # Update nominal context with central values
         if self.include_D_M:
             self.nominal_context = torch.cat([
                 self.nominal_design,
-                torch.zeros(1, 2, device=self.device)  # Placeholder observations
+                self.central_val
             ], dim=-1)
         else:
+            # Only include D_H observation
             self.nominal_context = torch.cat([
                 self.nominal_design,
-                torch.zeros(1, 1, device=self.device)  # Placeholder observation
+                self.central_val  # Only D_H
             ], dim=-1)
         
         if self.global_rank == 0 and self.verbose:
@@ -370,6 +377,62 @@ class VariableRedshift:
                 setattr(self, f'{param_name}_multiplier', float(param_config['multiplier']))
 
         return priors, param_constraints, latex_labels
+
+    @profile_method
+    def _compute_central_values(self):
+        """
+        Compute central values (D_H, D_M) at the nominal redshift using fiducial cosmology.
+        
+        Uses Planck18 fiducial values:
+        - Om = 0.3152
+        - hrdrag = 99.079 km/s/Mpc
+        
+        Returns:
+            torch.Tensor: Central values for observations as 1D tensor [D_H] or [D_H, D_M]
+        """
+        # Fiducial cosmology parameters (Planck18)
+        fiducial_Om = torch.tensor(0.3152, device=self.device, dtype=torch.float64)
+        fiducial_hrdrag = torch.tensor(99.079, device=self.device, dtype=torch.float64)
+        
+        # Use nominal design redshift (ensure it's properly shaped)
+        z_nominal = self.nominal_design.flatten()
+        
+        # Prepare parameters for D_H_func and D_M_func
+        params = {
+            'Om': fiducial_Om.unsqueeze(-1),
+            'hrdrag': fiducial_hrdrag.unsqueeze(-1)
+        }
+        
+        # Add Ok, w0, wa if they're in the model (use fiducial values)
+        if 'Ok' in self.cosmo_params:
+            params['Ok'] = torch.tensor(0.0, device=self.device, dtype=torch.float64).unsqueeze(-1)
+        if 'w0' in self.cosmo_params:
+            params['w0'] = torch.tensor(-1.0, device=self.device, dtype=torch.float64).unsqueeze(-1)
+        if 'wa' in self.cosmo_params:
+            params['wa'] = torch.tensor(0.0, device=self.device, dtype=torch.float64).unsqueeze(-1)
+        
+        # Compute D_H at nominal redshift
+        D_H_central = self.D_H_func(z_nominal, **params)
+        # Flatten to ensure 1D
+        D_H_val = D_H_central.flatten()
+        
+        if self.include_D_M:
+            # Compute D_M at nominal redshift
+            D_M_central = self.D_M_func(z_nominal, **params)
+            D_M_val = D_M_central.flatten()
+            # Concatenate to create [D_H, D_M] as 1D tensor
+            central_vals = torch.cat([D_H_val, D_M_val])
+        else:
+            # Just D_H as 1D tensor
+            central_vals = D_H_val
+        
+        if self.global_rank == 0 and self.verbose:
+            print(f"Computed central values at z={z_nominal.item():.2f}:")
+            print(f"  D_H/r_d = {D_H_val[0].item():.4f}")
+            if self.include_D_M:
+                print(f"  D_M/r_d = {D_M_val[0].item():.4f}")
+        
+        return central_vals
 
     @profile_method
     def params_to_unconstrained(self, params, bijector_class=None):
@@ -639,6 +702,41 @@ class VariableRedshift:
         return prefac * geom
 
     @profile_method
+    def D_V_func(
+        self, z_eff, Om, Ok=None, w0=None, wa=None, hrdrag=None,
+        h=0.6736, Neff=3.044, mnu=0.06, n_massive=1, T_cmb=2.7255,
+        include_radiation=True, n_int=1025,
+    ):
+        """
+        Angle-averaged distance D_V/r_d = [ z * (D_M/r_d)^2 * (D_H/r_d) ]^{1/3}
+        Shape: (plate, Nz). Uses identical settings as D_H_func/D_M_func.
+        """
+        # Compute using the SAME settings/grid as the caller expects
+        DM = self.D_M_func(
+            z_eff, Om, Ok, w0, wa, hrdrag,
+            h=h, Neff=Neff, mnu=mnu, n_massive=n_massive, T_cmb=T_cmb,
+            include_radiation=include_radiation, n_int=n_int
+        )
+        DH = self.D_H_func(
+            z_eff, Om, Ok, w0, wa, hrdrag,
+            h=h, Neff=Neff, mnu=mnu, n_massive=n_massive, T_cmb=T_cmb,
+            include_radiation=include_radiation
+        )
+
+        # Build z to the same shape as DM/DH (handle 1D or batched z)
+        DTYPE, dev = DM.dtype, DM.device
+        z_t = torch.as_tensor(z_eff, dtype=DTYPE, device=dev)
+        if z_t.ndim == 0:
+            z_t = z_t[None]
+        if z_t.ndim == 1:
+            zB = z_t.reshape(*([1]*(DM.ndim-1)), -1).expand_as(DM)
+        else:
+            zB = torch.broadcast_to(z_t, DM.shape)
+
+        # Identity: D_V = (z * D_M^2 * D_H)^(1/3)
+        return (zB * (DM**2) * DH).pow(1.0/3.0)
+
+    @profile_method
     def sample_valid_parameters(self, sample_shape, priors=None):
         """Sample parameters from priors with constraints."""
         parameters = {}
@@ -693,21 +791,35 @@ class VariableRedshift:
 
     @profile_method
     def pyro_model(self, z):
-        """Pyro model for generating observations given redshift designs."""
+        """
+        Pyro model for generating observations given redshift designs.
+        Uses MultivariateNormal with diagonal covariance matrix.
+        """
         with pyro.plate_stack("plate", z.shape[:-1]):
             parameters = self.sample_valid_parameters(z.shape[:-1])
             
-            # Compute mean predictions
-            D_H_mean = self.D_H_func(z, **parameters)
-            D_H_obs = pyro.sample("D_H", dist.Normal(D_H_mean, self.sigma_D_H).to_event(1))
+            # Compute mean predictions for all observations
+            means = torch.zeros(z.shape[:-1] + (1 if not self.include_D_M else 2,), device=self.device)
             
-            # Sample observations
+            # D_H is always computed
+            D_H_mean = self.D_H_func(z, **parameters)
+            means[..., 0:1] = D_H_mean
+            
             if self.include_D_M:
+                # Compute D_M
                 D_M_mean = self.D_M_func(z, **parameters)
-                D_M_obs = pyro.sample("D_M", dist.Normal(D_M_mean, self.sigma_D_M).to_event(1))
-                return D_H_obs, D_M_obs
+                means[..., 1:2] = D_M_mean
+                
+                # Create diagonal covariance matrix
+                sigmas = torch.tensor([self.sigma_D_H, self.sigma_D_M], device=self.device)
+                covariance_matrix = torch.diag(sigmas ** 2)
             else:
-                return D_H_obs
+                # Only D_H
+                sigmas = torch.tensor([self.sigma_D_H], device=self.device)
+                covariance_matrix = torch.diag(sigmas ** 2)
+            
+            # Sample from MultivariateNormal
+            return pyro.sample(self.observation_labels[0], dist.MultivariateNormal(means, covariance_matrix))
                 
 
     @profile_method
@@ -749,67 +861,86 @@ class VariableRedshift:
 
         return param_samples_gd
     
-    def get_desi_samples(self, num_samples=100000, params=None, transform_output=False):
-        """Get DESI samples (or placeholder for variable redshift)."""
-        # For variable_redshift, we might not have DESI samples
-        # Return samples from the prior as a placeholder
-        if self.global_rank == 0:
-            print("Warning: get_desi_samples not fully implemented for variable_redshift. Returning prior samples.")
-        
-        with torch.no_grad():
-            with pyro.plate("samples", num_samples):
-                param_dict = self.sample_valid_parameters((num_samples,))
-            
-            # Convert to array
-            param_samples = torch.cat([param_dict[k] for k in self.cosmo_params], dim=-1)
-        
-        if transform_output:
-            param_samples = self.params_to_unconstrained(param_samples, bijector_class=self.desi_bijector)
-        
-        param_samples = param_samples.cpu().numpy()
-        
-        if params is None:
-            names = self.cosmo_params
-            labels = self.latex_labels
-        else:
-            param_indices = [self.cosmo_params.index(param) for param in params if param in self.cosmo_params]
-            param_samples = param_samples[:, param_indices]
-            names = [self.cosmo_params[i] for i in param_indices]
-            labels = [self.latex_labels[i] for i in param_indices]
+    def get_nominal_samples(self, num_samples=100000, params=None, transform_output=False):
+        """Get nominal samples for comparison plots."""
+        raise NotImplementedError("get_nominal_samples not implemented for variable_redshift")
 
-        with contextlib.redirect_stdout(io.StringIO()):
-            samples_gd = getdist.MCSamples(samples=param_samples, names=names, labels=labels)
-
-        return samples_gd
 
     @profile_method
     def sample_data(self, designs, num_samples=100, central=False):
-        """Sample data from the likelihood."""
-        # For variable_redshift, designs are redshift values
-        # Generate samples from the pyro model
-        expanded_designs = lexpand(designs, num_samples)
+        """
+        Sample data from the likelihood.
         
-        with torch.no_grad():
-            data_samples = self.pyro_model(expanded_designs)
+        Args:
+            designs: redshift values (design variables)
+            num_samples: number of data samples to draw
+            central: if True, use central values instead of sampling from prior
+        
+        Returns:
+            torch.Tensor: data samples with shape (num_samples, num_observations)
+        """
+        if central:
+            # Use central values with sampling from observation noise only
+            # Expand designs for multiple samples
+            expanded_designs = lexpand(designs, num_samples)
+            
+            # Create means equal to central values
+            means = self.central_val.unsqueeze(0).expand(num_samples, -1)
+            
+            # Create diagonal covariance matrix
+            if self.include_D_M:
+                sigmas = torch.tensor([self.sigma_D_H, self.sigma_D_M], device=self.device)
+                covariance_matrix = torch.diag(sigmas ** 2)
+            else:
+                sigmas = torch.tensor([self.sigma_D_H], device=self.device)
+                covariance_matrix = torch.diag(sigmas ** 2)
+            
+            # Sample from MultivariateNormal centered at central values
+            with pyro.plate("data", num_samples):
+                data_samples = pyro.sample(self.observation_labels[0], 
+                                          dist.MultivariateNormal(means, covariance_matrix))
+        else:
+            # Sample from full prior (parameters + observations)
+            expanded_designs = lexpand(designs, num_samples)
+            with torch.no_grad():
+                data_samples = self.pyro_model(expanded_designs)
         
         return data_samples
     
     def sample_params_from_data_samples(self, designs, guide, num_data_samples=100, num_param_samples=1000, central=False, transform_output=True):
-        """Sample parameters from the posterior distribution conditioned on data."""
+        """
+        Sample parameters from the posterior distribution conditioned on data.
+        
+        Args:
+            designs: redshift values (design variables)
+            guide: trained guide for sampling parameters
+            num_data_samples: number of data realizations to sample
+            num_param_samples: number of parameter samples per data realization
+            central: if True, use central values for data generation
+            transform_output: if True, transform parameters back to physical space
+        
+        Returns:
+            np.ndarray: parameter samples with shape (num_data_samples, num_param_samples, num_params)
+        """
         data_samples = self.sample_data(designs, num_data_samples, central)
         
         # Create context: concatenate design and observations
-        if isinstance(data_samples, tuple):
-            # Multiple observations (D_H and D_M)
-            context = torch.cat([designs.expand(num_data_samples, -1), data_samples[0], data_samples[1]], dim=-1)
-        else:
-            # Single observation (D_H only)
-            context = torch.cat([designs.expand(num_data_samples, -1), data_samples], dim=-1)
+        # data_samples is now always a tensor with shape (num_data_samples, num_observations)
+        context = torch.cat([designs.expand(num_data_samples, -1), data_samples], dim=-1)
         
-        # Sample parameters conditioned on the data
-        param_samples = self.get_guide_samples(guide, context.squeeze(), num_param_samples, transform_output)
+        # Sample parameters for each data realization individually
+        param_samples_list = []
+        for i in range(num_data_samples):
+            # Get context for the i-th data sample
+            context_i = context[i]  # Shape: [context_dim]
+            # Sample parameters conditioned on this specific data sample
+            param_samples_i = self.get_guide_samples(guide, context_i, num_samples=num_param_samples, transform_output=transform_output)
+            param_samples_list.append(param_samples_i.samples)
         
-        return param_samples
+        # Stack all parameter samples: [num_data_samples, num_param_samples, num_params]
+        param_samples_array = np.stack(param_samples_list, axis=0)
+        
+        return param_samples_array
 
     def unnorm_lfunc(self, params, features, designs):
         """

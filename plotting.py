@@ -84,6 +84,17 @@ def plot_posterior(
     # Apply style settings if provided (like KP7StylePaper)
     if style is not None:
         g.settings.__dict__.update(style.settings.__dict__)
+    
+    # Calculate dynamic font sizes for axis labels based on plot width and number of parameters
+    # This ensures text stays readable as plot size changes
+    if isinstance(samples, list) and len(samples) > 0:
+        n_params = len(samples[0].paramNames.names)
+        # Scale axis labels with plot width, accounting for parameter count
+        axis_label_fontsize = max(8, min(18, width_inch * 1.4 / np.sqrt(n_params)))
+        # Apply to GetDist settings
+        g.settings.axes_fontsize = axis_label_fontsize
+        g.settings.axes_labelsize = axis_label_fontsize
+        g.settings.lab_fontsize = axis_label_fontsize
 
     if type(samples) != list:
         samples = [samples]
@@ -447,12 +458,6 @@ def plot_training(
                     # Extract parameter pair name from metric name (e.g., 'avg_nominal_area_Om_hrdrag' -> 'Om, hrdrag')
                     pair_name = metric_name.replace('nominal_area_avg_', '')
                     param1, param2 = pair_name.split('_')[:2]
-                    
-                    desi_samples, target_labels, latex_labels = load_desi_samples(run_params['cosmo_model'])
-                    with contextlib.redirect_stdout(io.StringIO()):
-                        desi_samples_gd = getdist.MCSamples(samples=desi_samples, names=target_labels, labels=latex_labels)
-                    # Get all area pairs from DESI samples
-                    desi_area = get_contour_area([desi_samples_gd], 0.68, param1, param2)[0]["nominal_area_"+pair_name]
 
                     area_steps, area_values = zip(*area_data)
                     sampled_indices = np.arange(0, len(area_steps), sampling_rate)
@@ -461,11 +466,21 @@ def plot_training(
 
                     # Use different line style for each area pair
                     line_color = area_line_colors[area_idx % len(area_line_colors)]
-                    
-                    ax_area.plot(plot_area_steps, plot_area_values/desi_area, 
-                                 color=line_color, label=pair_name.replace('_', ', '))
-                        
-                    ax_area.axhline(1, color='black', linestyle='--', lw=1.5)
+
+                    try:
+                        nominal_samples, target_labels, latex_labels = load_nominal_samples(run_params['cosmo_exp'], run_params['cosmo_model'])
+                        with contextlib.redirect_stdout(io.StringIO()):
+                            nominal_samples_gd = getdist.MCSamples(samples=nominal_samples, names=target_labels, labels=latex_labels)
+                        # Get all area pairs from DESI samples
+                        nominal_area = get_contour_area([nominal_samples_gd], 0.68, param1, param2)[0]["nominal_area_"+pair_name]
+                        ax_area.plot(plot_area_steps, plot_area_values/nominal_area, 
+                                    color=line_color, label=pair_name.replace('_', ', '))
+                        ax_area.axhline(1, color='black', linestyle='--', lw=1.5)
+
+                    except NotImplementedError:
+                        ax_area.plot(plot_area_steps, plot_area_values, 
+                                    color=line_color, label=pair_name.replace('_', ', '))
+
         else:
             # No area data to plot, but still show the subplot
             ax_area.text(0.5, 0.5, 'No area data available', 
@@ -716,16 +731,16 @@ def compare_posterior(
         return
     
     # Add DESI samples
-    desi_samples, target_labels, latex_labels = load_desi_samples(cosmo_model_for_desi)
+    nominal_samples, target_labels, latex_labels = load_nominal_samples(cosmo_exp, cosmo_model_for_desi)
     with contextlib.redirect_stdout(io.StringIO()):
-        desi_samples_gd = getdist.MCSamples(samples=desi_samples, names=target_labels, labels=latex_labels)
-    desi_label = f'DESI ({cosmo_model_for_desi})'
+        nominal_samples_gd = getdist.MCSamples(samples=nominal_samples, names=target_labels, labels=latex_labels)
+    nominal_label = f'Nominal ({cosmo_model_for_desi})'
     
-    all_samples.append(desi_samples_gd)
+    all_samples.append(nominal_samples_gd)
     all_colors.append('black')
     
     legend_handles.append(
-        Line2D([0], [0], color='black', label=desi_label)
+        Line2D([0], [0], color='black', label=nominal_label)
     )
     
     # Create the triangle plot with multiple contour levels
@@ -1145,15 +1160,18 @@ def compare_training(
                     plot_area_steps = np.array(area_steps)[sampled_indices]
                     plot_area_values = np.array(area_values)[sampled_indices]
 
-                    # Get DESI area for comparison
-                    desi_samples, target_labels, latex_labels = load_desi_samples(run_params['cosmo_model'])
-                    with contextlib.redirect_stdout(io.StringIO()):
-                        desi_samples_gd = getdist.MCSamples(samples=desi_samples, names=target_labels, labels=latex_labels)
-                    desi_area = get_contour_area([desi_samples_gd], 0.68, param1, param2)[0]["nominal_area_"+f"{param1}_{param2}"]
-                    
-                    # Plot normalized area
-                    ax_area.plot(plot_area_steps, plot_area_values/desi_area, 
-                                 alpha=base_alpha, color=color, label=plot_label)
+                    # Get nominal samples and area for comparison
+                    try:
+                        nominal_samples, target_labels, latex_labels = load_nominal_samples(run_params['cosmo_exp'], run_params['cosmo_model'])
+                        with contextlib.redirect_stdout(io.StringIO()):
+                            nominal_samples_gd = getdist.MCSamples(samples=nominal_samples, names=target_labels, labels=latex_labels)
+                        nominal_area = get_contour_area([nominal_samples_gd], 0.68, param1, param2)[0]["nominal_area_"+f"{param1}_{param2}"]
+                        ax_area.plot(plot_area_steps, plot_area_values/nominal_area, 
+                                    alpha=base_alpha, color=color, label=plot_label)
+                        ax_area.axhline(1, color='black', linestyle='--', lw=1.5, alpha=0.7, label='Nominal Area')
+                    except NotImplementedError:
+                        ax_area.plot(plot_area_steps, plot_area_values, 
+                                    alpha=base_alpha, color=color, label=plot_label)
                     
             except Exception as e:
                 print(f"Warning: Could not fetch area data for {area_metric_name} in run {run_id_iter}: {e}")
@@ -1198,8 +1216,6 @@ def compare_training(
         ax1.set_ylim(loss_limits)
 
     if show_area and param_pair:
-        # Add reference line at 1.0 (DESI area)
-        ax_area.axhline(1, color='black', linestyle='--', lw=1.5, alpha=0.7, label='DESI Area')
         
         # Configure ax2 (Parameter Pair Area)
         ax_area.set_ylabel(f"Nominal Design Area Ratio to DESI - {param_pair}")

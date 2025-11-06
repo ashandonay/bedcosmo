@@ -26,7 +26,7 @@ script_dir = os.path.dirname(os.path.abspath(__file__))
 parent_dir_abs = os.path.abspath(os.path.join(script_dir, os.pardir))
 sys.path.insert(0, parent_dir_abs)
 from custom_dist import ConstrainedUniform2D
-from util import Bijector, auto_seed, profile_method, load_desi_samples
+from util import Bijector, auto_seed, profile_method, load_nominal_samples
 
 storage_path = os.environ["SCRATCH"] + "/bed/BED_cosmo/num_tracers"
 home_dir = os.environ["HOME"]
@@ -242,14 +242,14 @@ class NumTracers:
         self.nominal_total_obs = int(self.desi_data.drop_duplicates(subset=['tracer'])['observed'].sum())
         self.nominal_passed_ratio = torch.tensor(self.desi_data['passed'].tolist(), device=self.device)/self.nominal_total_obs
         # Create dictionary with upper limits and lower limit lists for each class
-        self.targets = ["BGS", "LRG", "ELG", "QSO"]
-        self.num_targets = self.desi_tracers.groupby('class').sum()['targets'].reindex(self.targets)
-        self.context_dim = len(self.targets) + 5
+        self.design_labels = ["BGS", "LRG", "ELG", "QSO"]
+        self.num_targets = self.desi_tracers.groupby('class').sum()['targets'].reindex(self.design_labels)
+        self.context_dim = len(self.design_labels) + 5
         if include_D_M:
             self.context_dim += 5
         if include_D_V:
             self.context_dim += 2
-        self.nominal_design = torch.tensor(self.desi_tracers.groupby('class').sum()['observed'].reindex(self.targets).values, device=self.device)
+        self.nominal_design = torch.tensor(self.desi_tracers.groupby('class').sum()['observed'].reindex(self.design_labels).values, device=self.device)
         self.nominal_context = torch.cat([
             self.nominal_design, 
             self.central_val if self.include_D_M else self.central_val[1::2]
@@ -317,12 +317,12 @@ class NumTracers:
             
             # Handle 1D input (single design)
             if design_array.ndim == 1:
-                if len(design_array) != len(self.targets):
-                    raise ValueError(f"Fixed design must have {len(self.targets)} values, got {len(design_array)}")
+                if len(design_array) != len(self.design_labels):
+                    raise ValueError(f"Fixed design must have {len(self.design_labels)} values, got {len(design_array)}")
                 design_array = design_array.reshape(1, -1)
             elif design_array.ndim == 2:
-                if design_array.shape[1] != len(self.targets):
-                    raise ValueError(f"Fixed design must have {len(self.targets)} columns, got {design_array.shape[1]}")
+                if design_array.shape[1] != len(self.design_labels):
+                    raise ValueError(f"Fixed design must have {len(self.design_labels)} columns, got {design_array.shape[1]}")
             else:
                 raise ValueError(f"Fixed design must be 1D or 2D, got shape {design_array.shape}")
             
@@ -334,23 +334,23 @@ class NumTracers:
         elif fixed_design is False or fixed_design == 0:
             # Generate design grid
             if type(step_size) == float:
-                design_steps = [step_size]*len(self.targets)
+                design_steps = [step_size]*len(self.design_labels)
             elif type(step_size) == list:
                 design_steps = step_size
             else:
                 raise ValueError("step_size must be a float or list")
             
             if type(range_lower) == float:
-                lower_limits = [range_lower]*len(self.targets)
+                lower_limits = [range_lower]*len(self.design_labels)
             elif type(range_lower) == list:
                 lower_limits = range_lower
             else:
                 raise ValueError("range_lower must be a float or list")
             
             if range_upper is None:
-                upper_limits = [self.num_targets[target] / self.nominal_total_obs for target in self.targets]
+                upper_limits = [self.num_targets[target] / self.nominal_total_obs for target in self.design_labels]
             elif type(range_upper) == float:
-                upper_limits = [range_upper]*len(self.targets)
+                upper_limits = [range_upper]*len(self.design_labels)
             elif type(range_upper) == list:
                 upper_limits = range_upper
             else:
@@ -369,7 +369,7 @@ class NumTracers:
                     lower_limits[i],
                     upper_limits[i],
                     design_steps[i]
-                ) for i, target in enumerate(self.targets)
+                ) for i, target in enumerate(self.design_labels)
             }
             
             # Create constrained grid based on design_sum_lower and design_sum_upper
@@ -641,7 +641,7 @@ class NumTracers:
     @profile_method
     def calc_passed(self, class_ratio):
         if type(class_ratio) == torch.Tensor:
-            assert class_ratio.shape[-1] == len(self.targets), f"class_ratio should have {len(self.targets)} columns"
+            assert class_ratio.shape[-1] == len(self.design_labels), f"class_ratio should have {len(self.design_labels)} columns"
             obs_ratio = torch.zeros((class_ratio.shape[0], class_ratio.shape[1], len(self.desi_data)), device=self.device)
 
             # multiply each class ratio by the observed fraction in each tracer bin
@@ -1164,8 +1164,8 @@ class NumTracers:
 
         return param_samples_gd
     
-    def get_desi_samples(self, num_samples=100000, params=None, transform_output=False):
-        param_samples, target_labels, latex_labels = load_desi_samples(self.cosmo_model)
+    def get_nominal_samples(self, num_samples=100000, params=None, transform_output=False):
+        param_samples, target_labels, latex_labels = load_nominal_samples('num_tracers', self.cosmo_model)
         param_samples = param_samples[:num_samples]
         if transform_output:
             param_samples = torch.tensor(param_samples, device=self.device)
