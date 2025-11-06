@@ -16,6 +16,7 @@ base:
   mnn_hidden_size: 256
   mnn_n_layers: 4
   mnn_signal: 32
+  nf_transform: affine
   spline_bins: 16
   fixed_design: false
   design_step: 0.1
@@ -54,6 +55,7 @@ base_omegak:
   mnn_hidden_size: 256
   mnn_n_layers: 5
   mnn_signal: 32
+  nf_transform: affine
   spline_bins: 16
   fixed_design: false
   design_step: 0.1
@@ -92,6 +94,7 @@ base_w:
   mnn_hidden_size: 256
   mnn_n_layers: 5
   mnn_signal: 32
+  nf_transform: affine
   spline_bins: 16
   fixed_design: false
   design_step: 0.1
@@ -130,6 +133,7 @@ base_w_wa:
   mnn_hidden_size: 256
   mnn_n_layers: 6
   mnn_signal: 32
+  nf_transform: affine
   spline_bins: 16
   fixed_design: false
   design_step: 0.1
@@ -168,6 +172,7 @@ base_omegak_w_wa:
   mnn_hidden_size: 256
   mnn_n_layers: 8
   mnn_signal: 32
+  nf_transform: affine
   spline_bins: 16
   fixed_design: false
   design_step: 0.1

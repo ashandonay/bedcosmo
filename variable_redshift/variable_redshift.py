@@ -645,12 +645,24 @@ class VariableRedshift:
         z_eff = torch.as_tensor(z_eff, device=dev, dtype=DTYPE)
         if z_eff.ndim == 0:
             z_eff = z_eff[None]
-        z_eff = z_eff.reshape(-1)
-        z_eval = z_eff.reshape(*([1]*len(plate)), -1).expand(plate + (z_eff.shape[-1],))
+
+        # Handle z similar to D_H_func
+        if z_eff.ndim == 1:
+            # unbatched z: expand over plate to (plate, Nz)
+            Nz = z_eff.shape[0]
+            z_eval = z_eff.reshape(*([1]*len(plate)), Nz).expand(plate + (Nz,))
+        else:
+            # batched z already: expect (..., Nz); just broadcast to plate if needed
+            assert z_eff.shape[-1] > 0, "z must have a last dimension Nz > 0"
+            if tuple(z_eff.shape[:-1]) != tuple(plate):
+                z_eval = torch.broadcast_to(z_eff, plate + (z_eff.shape[-1],))
+            else:
+                z_eval = z_eff
+        
         ln_a_ev = -torch.log1p(z_eval)
 
         # ---- base Simpson grid in ln a (odd length) & merge exact eval nodes ----
-        zmax = float(z_eff.max())
+        zmax = float(z_eval.max())
         a_min = 1.0 / (1.0 + zmax)
         ln_a_base = torch.linspace(math.log(a_min), 0.0, int(n_int)|1, device=dev, dtype=DTYPE)
         ln_a_all  = torch.unique(torch.cat([ln_a_base, ln_a_ev.reshape(-1)])).sort().values
@@ -799,22 +811,18 @@ class VariableRedshift:
             parameters = self.sample_valid_parameters(z.shape[:-1])
             
             # Compute mean predictions for all observations
-            means = torch.zeros(z.shape[:-1] + (1 if not self.include_D_M else 2,), device=self.device)
-            
-            # D_H is always computed
             D_H_mean = self.D_H_func(z, **parameters)
-            means[..., 0:1] = D_H_mean
-            
             if self.include_D_M:
-                # Compute D_M
                 D_M_mean = self.D_M_func(z, **parameters)
-                means[..., 1:2] = D_M_mean
+                # Concatenate D_H and D_M along last dimension: shape becomes [batch, num_designs, 2]
+                means = torch.cat([D_H_mean, D_M_mean], dim=-1)
                 
                 # Create diagonal covariance matrix
                 sigmas = torch.tensor([self.sigma_D_H, self.sigma_D_M], device=self.device)
                 covariance_matrix = torch.diag(sigmas ** 2)
             else:
-                # Only D_H
+                means = D_H_mean
+                
                 sigmas = torch.tensor([self.sigma_D_H], device=self.device)
                 covariance_matrix = torch.diag(sigmas ** 2)
             
