@@ -1,0 +1,188 @@
+# Training arguments for num_tracers experiment
+# Organized by cosmological model
+
+base:
+  cosmo_model: base
+  mlflow_exp: base
+  pyro_seed: 1
+  nf_seed: 1
+  priors_path: num_tracers/priors.yaml
+  data_path: data/desi/tracers_v3/
+  flow_type: NAF
+  transform_input: true
+  activation: elu
+  n_transforms: 6
+  cond_hidden_size: 512
+  cond_n_layers: 8
+  mnn_hidden_size: 512
+  mnn_n_layers: 6
+  mnn_signal: 64
+  spline_bins: 20
+  fixed_design: false
+  design_step: [0.025, 0.05, 0.05, 0.025]
+  design_lower: [0.025, 0.1, 0.1, 0.1]
+  total_steps: 100000
+  optimizer: Adam
+  initial_lr: 0.0005
+  final_lr: 0.0
+  grad_clip: 0.0
+  warmup_fraction: 0.05
+  scheduler_type: cosine
+  n_cycles: 1
+  gamma: 0.1
+  step_freq: 1
+  checkpoint_step_freq: 2000
+  n_particles_per_device: 201
+  verbose: true
+  log_nominal_area: true
+  include_D_M: true
+  condition_design: true
+
+base_omegak:
+  cosmo_model: base_omegak
+  mlflow_exp: base_omegak
+  pyro_seed: 1
+  nf_seed: 1
+  priors_path: num_tracers/priors.yaml
+  data_path: data/desi/tracers_v3/
+  flow_type: NAF
+  transform_input: true
+  activation: elu
+  n_transforms: 8
+  cond_hidden_size: 512
+  cond_n_layers: 8
+  mnn_hidden_size: 512
+  mnn_n_layers: 8
+  mnn_signal: 64
+  spline_bins: 20
+  fixed_design: false
+  design_step: [0.025, 0.05, 0.05, 0.025]
+  design_lower: [0.025, 0.1, 0.1, 0.1]
+  total_steps: 120000
+  optimizer: Adam
+  initial_lr: 0.0008
+  final_lr: 0.0
+  grad_clip: 0.0
+  warmup_fraction: 0.05
+  scheduler_type: cosine
+  n_cycles: 1
+  gamma: 0.1
+  step_freq: 1
+  checkpoint_step_freq: 2000
+  n_particles_per_device: 101
+  verbose: true
+  log_nominal_area: true
+  include_D_M: true
+  condition_design: true
+
+base_w:
+  cosmo_model: base_w
+  mlflow_exp: base_w
+  pyro_seed: 1
+  nf_seed: 1
+  priors_path: num_tracers/priors.yaml
+  data_path: data/desi/tracers_v3/
+  flow_type: NAF
+  transform_input: true
+  activation: elu
+  n_transforms: 8
+  cond_hidden_size: 512
+  cond_n_layers: 8
+  mnn_hidden_size: 512
+  mnn_n_layers: 8
+  mnn_signal: 64
+  spline_bins: 20
+  fixed_design: false
+  design_step: [0.025, 0.05, 0.05, 0.025]
+  design_lower: [0.025, 0.1, 0.1, 0.1]
+  total_steps: 120000
+  optimizer: Adam
+  initial_lr: 0.0008
+  final_lr: 0.0
+  grad_clip: 0.0
+  warmup_fraction: 0.05
+  scheduler_type: cosine
+  n_cycles: 1
+  gamma: 0.1
+  step_freq: 1
+  checkpoint_step_freq: 2000
+  n_particles_per_device: 101
+  verbose: true
+  log_nominal_area: true
+  include_D_M: true
+  condition_design: true
+
+base_w_wa:
+  cosmo_model: base_w_wa
+  mlflow_exp: base_w_wa
+  pyro_seed: 1
+  nf_seed: 1
+  priors_path: num_tracers/priors.yaml
+  data_path: data/desi/tracers_v3/
+  flow_type: NAF
+  transform_input: true
+  activation: elu
+  n_transforms: 10
+  cond_hidden_size: 512
+  cond_n_layers: 10
+  mnn_hidden_size: 512
+  mnn_n_layers: 10
+  mnn_signal: 64
+  spline_bins: 20
+  fixed_design: false
+  design_step: [0.025, 0.05, 0.05, 0.025]
+  design_lower: [0.025, 0.1, 0.1, 0.1]
+  total_steps: 150000
+  optimizer: Adam
+  initial_lr: 0.0005
+  final_lr: 0.0
+  grad_clip: 0.0
+  warmup_fraction: 0.05
+  scheduler_type: cosine
+  n_cycles: 1
+  gamma: 0.1
+  step_freq: 1
+  checkpoint_step_freq: 2000
+  n_particles_per_device: 101
+  verbose: true
+  log_nominal_area: true
+  include_D_M: true
+  condition_design: true
+
+base_omegak_w_wa:
+  cosmo_model: base_omegak_w_wa
+  mlflow_exp: base_omegak_w_wa
+  pyro_seed: 1
+  nf_seed: 1
+  priors_path: num_tracers/priors.yaml
+  data_path: data/desi/tracers_v3/
+  flow_type: NAF
+  transform_input: true
+  activation: elu
+  n_transforms: 12
+  cond_hidden_size: 512
+  cond_n_layers: 12
+  mnn_hidden_size: 512
+  mnn_n_layers: 12
+  mnn_signal: 64
+  spline_bins: 20
+  fixed_design: false
+  design_step: [0.025, 0.05, 0.05, 0.025]
+  design_lower: [0.025, 0.1, 0.1, 0.1]
+  total_steps: 200000
+  optimizer: Adam
+  initial_lr: 0.0005
+  final_lr: 0.0
+  grad_clip: 0.0
+  warmup_fraction: 0.08
+  scheduler_type: cosine
+  n_cycles: 1
+  gamma: 0.1
+  step_freq: 1
+  checkpoint_step_freq: 2000
+  n_particles_per_device: 101
+  verbose: true
+  log_nominal_area: true
+  include_D_M: true
+  condition_design: true
+

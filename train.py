@@ -39,6 +39,7 @@ import os
 import gc
 from util import *
 import json
+import yaml
 import argparse
 import traceback
 from plotting import get_contour_area, plot_training, save_figure, plot_posterior
@@ -183,23 +184,35 @@ class Trainer:
                     
                     # Perform all RNG operations (plotting, etc.) BEFORE saving checkpoint
                     # This ensures the saved RNG state is ready for the next training step
-                    if self.run_args["log_nominal_area"]:
-                        nominal_samples_gd = self.experiment.get_guide_samples(self.posterior_flow, self.experiment.nominal_context, num_samples=10000)
-                        desi_samples_gd = self.experiment.get_desi_samples(num_samples=10000, params=self.experiment.cosmo_params, transform_output=False)
+                    if self.run_args.get("log_nominal_area", False):
+                        plot_samples, plot_colors, plot_labels, plot_scatter = [], [], [], []
+                        nf_samples = self.experiment.get_guide_samples(self.posterior_flow, self.experiment.nominal_context, num_samples=10000)
+                        plot_samples.append(nf_samples)
+                        plot_colors.append('tab:blue')
+                        plot_labels.append('NF')
+                        plot_scatter.append(True)
+                        try:
+                            nominal_samples = self.experiment.get_nominal_samples(num_samples=10000, params=self.experiment.cosmo_params, transform_output=False)
+                            plot_samples.append(nominal_samples)
+                            plot_colors.append('black')
+                            plot_labels.append('MCMC')
+                            plot_scatter.append(False)
+                        except NotImplementedError:
+                            pass
                         ranges = {param: (self.experiment.prior_data['parameters'][param]['plot']['lower'], self.experiment.prior_data['parameters'][param]['plot']['upper']) for param in self.experiment.cosmo_params}
                         plt.figure()
                         plot_posterior(
-                            [nominal_samples_gd, desi_samples_gd], 
-                            ['tab:blue', 'black'], 
-                            legend_labels=['NF', 'MCMC'], 
+                            plot_samples, 
+                            plot_colors, 
+                            legend_labels=plot_labels, 
                             levels=[0.68], 
                             width_inch=12, 
-                            show_scatter=[True, False],
+                            show_scatter=plot_scatter,
                             ranges=ranges
                             )
                         plt.savefig(f"{self.run_path}/artifacts/plots/rank_{self.global_rank}/posterior/{step}.png", dpi=400)
                         plt.close('all')
-                        local_nominal_areas = get_contour_area(nominal_samples_gd, 0.68, *self.experiment.cosmo_params, global_rank=self.global_rank, design_type='nominal')[0]
+                        local_nominal_areas = get_contour_area(nf_samples, 0.68, *self.experiment.cosmo_params, global_rank=self.global_rank, design_type='nominal')[0]
                         
                         # Log metrics per rank with tags instead of rank labels
                         mlflow.log_metrics(local_nominal_areas, step=step)
@@ -300,6 +313,7 @@ class Trainer:
         if self.global_rank == 0:
             plot_training(
                 run_id=self.run_obj.info.run_id,
+                cosmo_exp=self.cosmo_exp,
                 var=None,
                 log_scale=True,
                 loss_step_freq=10,
@@ -308,8 +322,9 @@ class Trainer:
             )
             plt.close('all')
         
-        # Create GIF for all ranks
-        create_gif(self.run_obj.info.run_id, fps=5, add_labels=True, label_position='top-right', text_size=1.0, pause_last_frame=3.0, rank=self.global_rank)
+        # Create GIF for all ranks (only if we logged posterior plots)
+        if self.run_args.get("log_nominal_area", False):
+            create_gif(self.run_obj.info.run_id, fps=5, add_labels=True, label_position='top-right', text_size=1.0, pause_last_frame=3.0, rank=self.global_rank)
         
         if self.global_rank == 0:
             print("Run", self.run_obj.info.experiment_id + "/" + self.run_obj.info.run_id, "completed.")
@@ -995,20 +1010,75 @@ if __name__ == '__main__':
 
     # Add arguments dynamically based on the default config file
     parser.add_argument('--cosmo_exp', type=str, default='num_tracers', help='Cosmological experiment name')
-    parser.add_argument('--mlflow_exp', type=str, default="base", help='MLflow experiment name')
-    parser.add_argument('--cosmo_model', type=str, default="base", help='Cosmological model set to use from run_args.json')
+    parser.add_argument('--cosmo_model', type=str, default=None, help='Cosmological model set to use from train_args.yaml (not needed for resume)')
+    parser.add_argument('--mlflow_exp', type=str, default='base', help='MLflow experiment name')
     parser.add_argument('--device', type=str, default=None, help='Device to use for training')
+    
+    # Add resume/restart arguments early so we can check them
+    parser.add_argument('--resume_id', type=str, default=None, help='MLflow run ID to resume training from')
+    parser.add_argument('--resume_step', type=int, default=None, help='Step to resume training from')
+    parser.add_argument('--add_steps', type=int, default=0, help='Number of steps to add to the training (only used with --resume_id)')
+    parser.add_argument('--restart_id', type=str, default=None, help='MLflow run ID to restart training from (creates new run with current parameters)')
+    parser.add_argument('--restart_step', type=lambda x: int(x) if x.isdigit() else x, default=None, help='Step to restart training from (optional when using --restart_id, defaults to latest). Can be an integer or string like "last"')
+    parser.add_argument('--restart_checkpoint', type=str, default=None, help='Specific checkpoint file name to use for all ranks during restart (alternative to --restart_step)')
+    parser.add_argument('--restart_optimizer', action='store_true', help='Restart optimizer from checkpoint')
+    parser.add_argument('--log_usage', action='store_true', help='Log compute usage of the training script')
+    parser.add_argument('--profile', action='store_true', help='Enable profiling for a few steps and then exit.')
 
     # --- Load Default Config --- 
     # Parse just these essential arguments
     args, unknown = parser.parse_known_args()
 
-    # Now you can use args.run_args_path to load the config
-    config_path = os.path.join(os.path.dirname(__file__), args.cosmo_exp, 'run_args.json')
-    with open(config_path, 'r') as f:
-        run_args_dict = json.load(f)
+    # For resume or restart, get cosmo_model from MLflow run metadata
+    if args.resume_id:
+        mlflow.set_tracking_uri(os.environ["SCRATCH"] + f"/bed/BED_cosmo/{args.cosmo_exp}/mlruns")
+        client = MlflowClient()
+        resume_run = client.get_run(args.resume_id)
+        cosmo_model = resume_run.data.params.get('cosmo_model', 'base')
+        if os.environ.get('RANK', '0') == '0':
+            print(f"Resume mode: Loading cosmo_model '{cosmo_model}' from run {args.resume_id}")
+    elif args.restart_id:
+        mlflow.set_tracking_uri(os.environ["SCRATCH"] + f"/bed/BED_cosmo/{args.cosmo_exp}/mlruns")
+        client = MlflowClient()
+        restart_run = client.get_run(args.restart_id)
+        cosmo_model = restart_run.data.params.get('cosmo_model', 'base')
+        if os.environ.get('RANK', '0') == '0':
+            print(f"Restart mode: Loading cosmo_model '{cosmo_model}' from run {args.restart_id}")
+    else:
+        # For new runs, cosmo_model must be specified
+        if args.cosmo_model is None:
+            raise ValueError("--cosmo_model is required for new training runs (not needed for resume/restart)")
+        cosmo_model = args.cosmo_model
 
+    # Load config from train_args.yaml based on cosmo_model
+    config_path = os.path.join(os.path.dirname(__file__), args.cosmo_exp, 'train_args.yaml')
+    
+    if not os.path.exists(config_path):
+        raise FileNotFoundError(f"Configuration file not found: {config_path}")
+    
+    with open(config_path, 'r') as f:
+        all_configs = yaml.safe_load(f)
+    
+    # Select configuration for the specified cosmo_model
+    if cosmo_model not in all_configs:
+        available_models = ', '.join(all_configs.keys())
+        raise ValueError(f"Model '{cosmo_model}' not found in {config_path}. Available models: {available_models}")
+    
+    run_args_dict = all_configs[cosmo_model]
+    
+    if os.environ.get('RANK', '0') == '0':
+        print(f"Loaded configuration for model '{cosmo_model}' from {config_path}")
+
+    # Skip keys that are already defined as parser arguments
+    skip_keys = {
+        'cosmo_exp', 'cosmo_model', 'mlflow_exp', 'device', 'resume_id', 
+        'resume_step', 'restart_id', 'restart_step', 'restart_checkpoint', 
+        'restart_optimizer', 'add_steps', 'log_usage', 'profile'
+        }
+    
     for key, value in run_args_dict.items():
+        if key in skip_keys:
+            continue
         if value is None:
             parser.add_argument(f'--{key}', type=str, default=None, 
                               help=f'Override {key} (default: None)')
@@ -1032,17 +1102,6 @@ if __name__ == '__main__':
         else:
             print(f"Warning: Argument type for key '{key}' not explicitly handled ({arg_type}). Treating as string.")
             parser.add_argument(f'--{key}', type=str, default=None, help=f'Override {key} (default: {value})')
-
-    # Add arguments for resuming from a checkpoint
-    parser.add_argument('--resume_id', type=str, default=None, help='MLflow run ID to resume training from (continues existing run with same parameters)')
-    parser.add_argument('--resume_step', type=int, default=None, help='Step to resume training from (required when using --resume_id)')
-    parser.add_argument('--restart_id', type=str, default=None, help='MLflow run ID to restart training from (creates new run with current parameters)')
-    parser.add_argument('--restart_step', type=lambda x: int(x) if x.isdigit() else x, default=None, help='Step to restart training from (optional when using --restart_id, defaults to latest). Can be an integer or string like "last"')
-    parser.add_argument('--restart_checkpoint', type=str, default=None, help='Specific checkpoint file name to use for all ranks during restart (alternative to --restart_step)')
-    parser.add_argument('--restart_optimizer', action='store_true', help='Restart optimizer from checkpoint')
-    parser.add_argument('--add_steps', type=int, default=0, help='Number of steps to add to the training (only used with --resume_id)')
-    parser.add_argument('--log_usage', action='store_true', help='Log compute usage of the training script')
-    parser.add_argument('--profile', action='store_true', help='Enable profiling for a few steps and then exit.')
 
     args = parser.parse_args()
     # Validate checkpoint loading arguments

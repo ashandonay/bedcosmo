@@ -930,7 +930,7 @@ def get_nominal_samples(run_obj, run_args, guide_samples=101, seed=1, device="cu
     posterior_flow, selected_step = load_model(experiment, step, run_obj, run_args, device, global_rank=global_rank)
     auto_seed(seed)
 
-    nominal_design = torch.tensor(experiment.desi_tracers.groupby('class').sum()['observed'].reindex(experiment.targets).values, device=device, dtype=torch.float64)
+    nominal_design = torch.tensor(experiment.desi_tracers.groupby('class').sum()['observed'].reindex(experiment.design_labels).values, device=device, dtype=torch.float64)
     central_vals = experiment.central_val if run_args.get("include_D_M", False) else experiment.central_val[1::2]
     nominal_context = torch.cat([nominal_design, central_vals], dim=-1)
 
@@ -1066,11 +1066,7 @@ def load_model(experiment, step, run_obj, run_args, device, global_rank=0):
 
     current_run_id = run_obj.info.run_id
     exp_id = run_obj.info.experiment_id
-    
-    if experiment.name == 'num_tracers':
-        input_dim = len(experiment.cosmo_params)
-    else:
-        raise ValueError(f"{experiment.name} not supported")
+    input_dim = len(experiment.cosmo_params)
 
     posterior_flow = init_nf(
         run_args, 
@@ -1120,25 +1116,28 @@ def calc_entropy(design, posterior_flow, experiment, num_samples):
     _, entropy = _safe_mean_terms(samples)
     return entropy
 
-def load_desi_samples(cosmo_model):
-    desi_samples = np.load(f"{home_dir}/data/desi/mcmc_samples/{cosmo_model}.npy")
-    if cosmo_model == 'base':
-        target_labels = ['Om', 'hrdrag']
-        latex_labels = ['\Omega_m', 'H_0r_d']
-    elif cosmo_model == 'base_omegak':
-        target_labels = ['Om', 'Ok', 'hrdrag']
-        latex_labels = ['\Omega_m', '\Omega_k', 'H_0r_d']
-    elif cosmo_model == 'base_w':
-        target_labels = ['Om', 'w0', 'hrdrag']
-        latex_labels = ['\Omega_m', 'w_0', 'H_0r_d']
-    elif cosmo_model == 'base_w_wa':
-        target_labels = ['Om', 'w0', 'wa', 'hrdrag']
-        latex_labels = ['\Omega_m', 'w_0', 'w_a', 'H_0r_d']
-    elif cosmo_model == 'base_omegak_w_wa':
-        target_labels = ['Om', 'Ok', 'w0', 'wa', 'hrdrag']
-        latex_labels = ['\Omega_m', '\Omega_k', 'w_0', 'w_a', 'H_0r_d']
+def load_nominal_samples(cosmo_exp, cosmo_model):
+    if cosmo_exp == 'num_tracers':
+        nominal_samples = np.load(f"{home_dir}/data/desi/mcmc_samples/{cosmo_model}.npy")
+        if cosmo_model == 'base':
+            target_labels = ['Om', 'hrdrag']
+            latex_labels = ['\Omega_m', 'H_0r_d']
+        elif cosmo_model == 'base_omegak':
+            target_labels = ['Om', 'Ok', 'hrdrag']
+            latex_labels = ['\Omega_m', '\Omega_k', 'H_0r_d']
+        elif cosmo_model == 'base_w':
+            target_labels = ['Om', 'w0', 'hrdrag']
+            latex_labels = ['\Omega_m', 'w_0', 'H_0r_d']
+        elif cosmo_model == 'base_w_wa':
+            target_labels = ['Om', 'w0', 'wa', 'hrdrag']
+            latex_labels = ['\Omega_m', 'w_0', 'w_a', 'H_0r_d']
+        elif cosmo_model == 'base_omegak_w_wa':
+            target_labels = ['Om', 'Ok', 'w0', 'wa', 'hrdrag']
+            latex_labels = ['\Omega_m', '\Omega_k', 'w_0', 'w_a', 'H_0r_d']
+    else:
+        raise NotImplementedError(f"Nominal samples do not exist for {cosmo_exp}")
 
-    return desi_samples, target_labels, latex_labels
+    return nominal_samples, target_labels, latex_labels
 
 def parse_mlflow_params(params_dict):
     """
@@ -1840,6 +1839,11 @@ def create_gif(run_id, fps=1, add_labels=True, label_position='top-right', text_
             images.append(img_with_label)
         else:
             images.append(img)
+    
+    # Check if any images were found
+    if len(images) == 0:
+        print(f"Warning: No posterior plots found for rank {rank}. Skipping GIF creation.")
+        return
     
     # Create GIF with pause on first frame
     duration = 1000 // fps  # Convert fps to duration in milliseconds

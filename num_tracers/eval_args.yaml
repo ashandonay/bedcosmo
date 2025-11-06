@@ -1,0 +1,68 @@
+# Evaluation arguments for num_tracers experiment
+# Organized by cosmological model
+
+base:
+  cosmo_model: base
+  eval_step: last
+  levels: 0.68
+  guide_samples: 100000
+  n_particles: 5001
+  param_space: physical
+  design_step: [0.025, 0.05, 0.05, 0.025]
+  design_lower: [0.025, 0.1, 0.1, 0.1]
+  design_chunk_size: 5
+  profile: true
+  verbose: true
+
+base_omegak:
+  cosmo_model: base_omegak
+  eval_step: last
+  levels: 0.68
+  guide_samples: 100000
+  n_particles: 5001
+  param_space: physical
+  design_step: [0.025, 0.05, 0.05, 0.025]
+  design_lower: [0.025, 0.1, 0.1, 0.1]
+  design_chunk_size: 5
+  profile: true
+  verbose: true
+
+base_w:
+  cosmo_model: base_w
+  eval_step: last
+  levels: 0.68
+  guide_samples: 100000
+  n_particles: 5001
+  param_space: physical
+  design_step: [0.025, 0.05, 0.05, 0.025]
+  design_lower: [0.025, 0.1, 0.1, 0.1]
+  design_chunk_size: 5
+  profile: true
+  verbose: true
+
+base_w_wa:
+  cosmo_model: base_w_wa
+  eval_step: last
+  levels: 0.68
+  guide_samples: 150000  # More samples for more complex model
+  n_particles: 5001
+  param_space: physical
+  design_step: [0.025, 0.05, 0.05, 0.025]
+  design_lower: [0.025, 0.1, 0.1, 0.1]
+  design_chunk_size: 5
+  profile: true
+  verbose: true
+
+base_omegak_w_wa:
+  cosmo_model: base_omegak_w_wa
+  eval_step: last
+  levels: 0.68
+  guide_samples: 200000  # Even more samples for most complex model
+  n_particles: 5001
+  param_space: physical
+  design_step: [0.025, 0.05, 0.05, 0.025]
+  design_lower: [0.025, 0.1, 0.1, 0.1]
+  design_chunk_size: 5
+  profile: true
+  verbose: true
+

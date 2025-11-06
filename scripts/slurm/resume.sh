@@ -1,17 +1,17 @@
 #!/bin/bash
 #SBATCH -C gpu
-#SBATCH -q regular
+#SBATCH -q debug
 #SBATCH -A desi
 #SBATCH --job-name=resume
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1     # 1 primary Slurm task per node
 #SBATCH --cpus-per-task=128     # CPUs for all DDP workers on the node (e.g., 4 workers * 32 cpus/worker)
 #SBATCH --gpus-per-node=4       # Number of GPUs to request per node
-#SBATCH --time=02:30:00
-#SBATCH --output=/pscratch/sd/a/ashandon/bed/BED_cosmo/num_tracers/logs/%A_%x_%a.log
-#SBATCH --error=/pscratch/sd/a/ashandon/bed/BED_cosmo/num_tracers/logs/%A_%x_%a.log
+#SBATCH --time=00:30:00
 #SBATCH --mail-type=ALL
 #SBATCH --mail-user=ashandon@uci.edu
+#SBATCH --output=/dev/null
+#SBATCH --error=/dev/null
 
 # Load conda first, then activate, then other GPU libraries
 module load conda
@@ -47,14 +47,67 @@ export CUDA_DEVICE_ORDER=PCI_BUS_ID
 # torch.distributed.run will then spawn NPROC_PER_NODE worker processes on each node.
 # SLURM_PROCID can be used for node_rank as srun launches one task per node here.
 
-RUN_ID=2bdda64b5e2e44aeb11910f75195efe8
-RESUME_STEP=43000
+# Parse named arguments
+COSMO_EXP=""
+RESUME_ID=""
+RESUME_STEP=""
+EXTRA_ARGS=()
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --cosmo_exp)
+            COSMO_EXP="$2"
+            shift 2
+            ;;
+        --resume_id)
+            RESUME_ID="$2"
+            shift 2
+            ;;
+        --resume_step)
+            RESUME_STEP="$2"
+            shift 2
+            ;;
+        *)
+            # Collect any additional arguments to pass to Python script
+            EXTRA_ARGS+=("$1")
+            if [[ $2 != --* ]] && [[ -n $2 ]]; then
+                EXTRA_ARGS+=("$2")
+                shift 2
+            else
+                shift 1
+            fi
+            ;;
+    esac
+done
+
+# Validate required arguments
+if [ -z "$COSMO_EXP" ]; then
+    echo "Error: --cosmo_exp is required"
+    echo "Usage: sbatch resume.sh --cosmo_exp <value> --resume_id <value> --resume_step <value> [additional args...]"
+    exit 1
+fi
+
+if [ -z "$RESUME_ID" ]; then
+    echo "Error: --resume_id is required"
+    echo "Usage: sbatch resume.sh --cosmo_exp <value> --resume_id <value> --resume_step <value> [additional args...]"
+    exit 1
+fi
+
+if [ -z "$RESUME_STEP" ]; then
+    echo "Error: --resume_step is required"
+    echo "Usage: sbatch resume.sh --cosmo_exp <value> --resume_id <value> --resume_step <value> [additional args...]"
+    exit 1
+fi
+
+# Set log directory based on cosmo_exp
+LOG_DIR="/pscratch/sd/a/ashandon/bed/BED_cosmo/${COSMO_EXP}/logs"
+mkdir -p "$LOG_DIR"
 
 # Get the directory where this script is located
 TRUNCATE_SCRIPT="/global/homes/a/ashandon/bed/BED_cosmo/scripts/truncate_metrics.py"
 
 echo "=========================================="
-echo "Resuming training run: $RUN_ID"
+echo "Resuming training run: $RESUME_ID"
 echo "Resume step: $RESUME_STEP"
 echo "=========================================="
 
@@ -65,7 +118,7 @@ echo "--------------------------------------------"
 
 if [[ -f "$TRUNCATE_SCRIPT" ]]; then
     echo "Proceeding with metrics truncation..."
-    python3 "$TRUNCATE_SCRIPT" --run_id "$RUN_ID" --resume_step "$RESUME_STEP"
+    python3 "$TRUNCATE_SCRIPT" --run_id "$RESUME_ID" --resume_step "$RESUME_STEP" --cosmo_exp "$COSMO_EXP"
     
     if [[ $? -eq 0 ]]; then
         echo "Metrics truncation completed successfully!"
@@ -89,5 +142,8 @@ srun torchrun \
      --rdzv_backend=c10d \
      --rdzv_endpoint=$MASTER_ADDR:$MASTER_PORT \
      /global/homes/a/ashandon/bed/BED_cosmo/train.py \
-     --resume_id $RUN_ID \
-     --resume_step $RESUME_STEP
+     --cosmo_exp $COSMO_EXP \
+     --resume_id $RESUME_ID \
+     --resume_step $RESUME_STEP \
+     "${EXTRA_ARGS[@]}" \
+     > "${LOG_DIR}/${SLURM_JOB_ID}_${SLURM_JOB_NAME}.log" 2>&1

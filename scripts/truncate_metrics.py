@@ -24,23 +24,37 @@ import shutil
 
 scratch_dir = os.environ["SCRATCH"]
 
-def find_metrics_directory(run_id):
+def find_metrics_directory(run_id, cosmo_exp=None):
     """
     Find the metrics directory for a given run_id by searching through the mlruns structure.
     
     Args:
         run_id (str): The MLflow run ID to search for
+        cosmo_exp (str, optional): Cosmological experiment name (e.g., 'num_tracers', 'variable_redshift')
         
     Returns:
         str: Path to the metrics directory, or None if not found
     """
-    # Search in the current working directory and common locations
-    search_paths = [
-        "num_tracers/mlruns",
-        "../num_tracers/mlruns", 
-        "../../num_tracers/mlruns",
-        os.path.join(scratch_dir, "bed/BED_cosmo/num_tracers/mlruns")
-    ]
+    # If cosmo_exp is specified, search only in that directory
+    if cosmo_exp:
+        search_paths = [
+            f"{cosmo_exp}/mlruns",
+            f"../{cosmo_exp}/mlruns",
+            f"../../{cosmo_exp}/mlruns",
+            os.path.join(scratch_dir, f"bed/BED_cosmo/{cosmo_exp}/mlruns")
+        ]
+    else:
+        # Search in all known locations
+        search_paths = [
+            "num_tracers/mlruns",
+            "../num_tracers/mlruns", 
+            "../../num_tracers/mlruns",
+            os.path.join(scratch_dir, "bed/BED_cosmo/num_tracers/mlruns"),
+            "variable_redshift/mlruns",
+            "../variable_redshift/mlruns",
+            "../../variable_redshift/mlruns",
+            os.path.join(scratch_dir, "bed/BED_cosmo/variable_redshift/mlruns")
+        ]
     
     for search_path in search_paths:
         if os.path.exists(search_path):
@@ -122,12 +136,15 @@ def main():
     parser.add_argument("--resume_step", type=int, required=True, help="Resume step number (inclusive)")
     parser.add_argument("--dry_run", action="store_true", help="Show what would be done without making changes")
     parser.add_argument("--metrics_dir", help="Direct path to metrics directory (optional)")
+    parser.add_argument("--cosmo_exp", help="Cosmological experiment name (e.g., 'num_tracers', 'variable_redshift')")
     
     args = parser.parse_args()
     
     print(f"Truncating metrics for run_id: {args.run_id}")
     print(f"Resume step: {args.resume_step}")
     print(f"Dry run: {args.dry_run}")
+    if args.cosmo_exp:
+        print(f"Cosmo experiment: {args.cosmo_exp}")
     
     # Find metrics directory
     if args.metrics_dir:
@@ -136,11 +153,23 @@ def main():
             print(f"Error: Specified metrics directory does not exist: {metrics_dir}")
             return 1
     else:
-        metrics_dir = find_metrics_directory(args.run_id)
+        metrics_dir = find_metrics_directory(args.run_id, args.cosmo_exp)
         if not metrics_dir:
             print(f"Error: Could not find metrics directory for run_id: {args.run_id}")
             print("Searched in:")
-            for path in ["num_tracers/mlruns", "../num_tracers/mlruns", "../../num_tracers/mlruns"]:
+            if args.cosmo_exp:
+                search_paths = [
+                    f"{args.cosmo_exp}/mlruns",
+                    f"../{args.cosmo_exp}/mlruns",
+                    f"../../{args.cosmo_exp}/mlruns",
+                    os.path.join(scratch_dir, f"bed/BED_cosmo/{args.cosmo_exp}/mlruns")
+                ]
+            else:
+                search_paths = [
+                    "num_tracers/mlruns", "../num_tracers/mlruns", "../../num_tracers/mlruns",
+                    "variable_redshift/mlruns", "../variable_redshift/mlruns", "../../variable_redshift/mlruns"
+                ]
+            for path in search_paths:
                 print(f"  {path}")
             print("You can specify the metrics directory directly with --metrics_dir")
             return 1

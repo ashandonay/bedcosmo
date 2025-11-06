@@ -8,8 +8,42 @@
 #SBATCH --cpus-per-task=128     # CPUs for all DDP workers on the node (e.g., 4 workers * 32 cpus/worker)
 #SBATCH --gpus-per-node=4       # Number of GPUs to request per node
 #SBATCH --time=00:30:00
-#SBATCH --output=/pscratch/sd/a/ashandon/bed/BED_cosmo/num_tracers/logs/%x_%A.log
-#SBATCH --error=/pscratch/sd/a/ashandon/bed/BED_cosmo/num_tracers/logs/%x_%A.log
+#SBATCH --output=/dev/null
+#SBATCH --error=/dev/null
+
+# Parse named arguments
+COSMO_EXP=""
+EXTRA_ARGS=()
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --cosmo_exp)
+            COSMO_EXP="$2"
+            shift 2
+            ;;
+        *)
+            # Collect any additional arguments to pass to Python script
+            EXTRA_ARGS+=("$1")
+            if [[ $2 != --* ]] && [[ -n $2 ]]; then
+                EXTRA_ARGS+=("$2")
+                shift 2
+            else
+                shift 1
+            fi
+            ;;
+    esac
+done
+
+# Validate required arguments
+if [ -z "$COSMO_EXP" ]; then
+    echo "Error: --cosmo_exp is required"
+    echo "Usage: sbatch debug.sh --cosmo_exp <value> [additional args...]"
+    exit 1
+fi
+
+# Set log directory based on cosmo_exp
+LOG_DIR="/pscratch/sd/a/ashandon/bed/BED_cosmo/${COSMO_EXP}/logs"
+mkdir -p "$LOG_DIR"
 
 # Load conda first, then activate, then other GPU libraries
 module load conda
@@ -48,28 +82,7 @@ srun torchrun \
      --rdzv_backend=c10d \
      --rdzv_endpoint=$MASTER_ADDR:$MASTER_PORT \
      /global/homes/a/ashandon/bed/BED_cosmo/train.py \
-     --cosmo_model base_omegak_w_wa \
+     --cosmo_exp "$COSMO_EXP" \
+     "${EXTRA_ARGS[@]}" \
      --mlflow_exp debug \
-     --cosmo_exp num_tracers \
-     --priors_path "num_tracers/priors_hrdrag.yaml" \
-     --pyro_seed 1 \
-     --nf_seed 1 \
-     --flow_type NAF \
-     --activation elu \
-     --n_transforms 6 \
-     --cond_hidden_size 512 \
-     --cond_n_layers 8 \
-     --mnn_hidden_size 512 \
-     --mnn_n_layers 6 \
-     --mnn_signal 64 \
-     --spline_bins 20 \
-     --n_particles_per_device 100 \
-     --total_steps 10000 \
-     --scheduler_type cosine \
-     --initial_lr 0.0005 \
-     --final_lr 0.0 \
-     --warmup_fraction 0.1 \
-     --checkpoint_step_freq 2000 \
-     --design_step "[0.025, 0.05, 0.05, 0.025]" \
-     --design_lower "[0.025, 0.1, 0.1, 0.1]" \
-     --verbose
+     > "${LOG_DIR}/${SLURM_JOB_NAME}_${SLURM_JOB_ID}.log" 2>&1
