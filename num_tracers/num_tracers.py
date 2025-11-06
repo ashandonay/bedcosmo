@@ -261,7 +261,7 @@ class NumTracers:
         self.priors, self.param_constraints, self.latex_labels = self.get_priors(priors_path)
         self.desi_priors, _, _ = self.get_priors(os.path.join(home_dir, data_path, 'priors.yaml'))
         self.cosmo_params = list(self.priors.keys())
-        self.param_bijector = Bijector(self, cdf_bins=5000, cdf_samples=3e7)
+        self.param_bijector = Bijector(self, cdf_bins=5000, cdf_samples=1e7)
         if bijector_state is not None:
             if self.global_rank == 0:
                 print(f"Restoring bijector state from checkpoint.")
