@@ -155,6 +155,15 @@ class Trainer:
                 global_loss = loss_tensor.item() / tdist.get_world_size()
                 global_agg_loss = agg_loss_tensor.item() / tdist.get_world_size()
 
+                # Check for NaN loss values
+                if np.isnan(global_loss) or np.isnan(global_agg_loss) or np.isinf(global_loss) or np.isinf(global_agg_loss):
+                    if self.global_rank == 0:
+                        print(f"\nERROR: NaN/Inf loss detected at step {step}. Stopping training.")
+                        if self.is_tty and not self.profile:
+                            pbar.close()
+                    tdist.barrier()
+                    return
+
                 # Backpropagation
                 agg_loss.backward()
 

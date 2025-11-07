@@ -6,8 +6,8 @@ base:
   mlflow_exp: base
   pyro_seed: 1
   nf_seed: 1
-  priors_path: variable_redshift/priors_hrdrag.yaml
-  flow_type: NAF
+  priors_path: variable_redshift/priors.yaml
+  flow_type: MAF
   transform_input: true
   activation: elu
   n_transforms: 5
@@ -20,11 +20,10 @@ base:
   spline_bins: 16
   fixed_design: false
   design_step: 0.1
-  design_lower: 0.5
-  design_upper: 5.0
+  design_lower: 0.2
+  design_upper: 2.5
   sigma_D_H: 0.2
   sigma_D_M: 0.2
-  sigma_D_V: 0.2
   total_steps: 50000
   optimizer: Adam
   initial_lr: 0.0001
@@ -36,8 +35,8 @@ base:
   gamma: 0.1
   step_freq: 1
   checkpoint_step_freq: 1000
-  n_particles_per_device: 101
-  include_D_M: true
+  n_particles_per_device: 201
+  include_D_M: false
   verbose: true
 
 base_omegak:
@@ -45,8 +44,8 @@ base_omegak:
   mlflow_exp: base_omegak
   pyro_seed: 1
   nf_seed: 1
-  priors_path: variable_redshift/priors_hrdrag.yaml
-  flow_type: NAF
+  priors_path: variable_redshift/priors.yaml
+  flow_type: MAF
   transform_input: true
   activation: elu
   n_transforms: 6
@@ -63,8 +62,7 @@ base_omegak:
   design_upper: 5.0
   sigma_D_H: 0.2
   sigma_D_M: 0.2
-  sigma_D_V: 0.2
-  total_steps: 60000
+  total_steps: 50000
   optimizer: Adam
   initial_lr: 0.0001
   final_lr: 0.0
@@ -75,8 +73,8 @@ base_omegak:
   gamma: 0.1
   step_freq: 1
   checkpoint_step_freq: 1000
-  n_particles_per_device: 101
-  include_D_M: true
+  n_particles_per_device: 201
+  include_D_M: false
   verbose: true
 
 base_w:
@@ -84,7 +82,7 @@ base_w:
   mlflow_exp: base_w
   pyro_seed: 1
   nf_seed: 1
-  priors_path: variable_redshift/priors_hrdrag.yaml
+  priors_path: variable_redshift/priors.yaml
   flow_type: NAF
   transform_input: true
   activation: elu
@@ -102,7 +100,6 @@ base_w:
   design_upper: 5.0
   sigma_D_H: 0.2
   sigma_D_M: 0.2
-  sigma_D_V: 0.2
   total_steps: 60000
   optimizer: Adam
   initial_lr: 0.0001
@@ -115,7 +112,7 @@ base_w:
   step_freq: 1
   checkpoint_step_freq: 1000
   n_particles_per_device: 101
-  include_D_M: true
+  include_D_M: false
   verbose: true
 
 base_w_wa:
@@ -123,7 +120,7 @@ base_w_wa:
   mlflow_exp: variable_redshift_base_w_wa
   pyro_seed: 1
   nf_seed: 1
-  priors_path: variable_redshift/priors_hrdrag.yaml
+  priors_path: variable_redshift/priors.yaml
   flow_type: NAF
   transform_input: true
   activation: elu
@@ -141,7 +138,6 @@ base_w_wa:
   design_upper: 5.0
   sigma_D_H: 0.2
   sigma_D_M: 0.2
-  sigma_D_V: 0.2
   total_steps: 80000
   optimizer: Adam
   initial_lr: 0.00008
@@ -154,7 +150,7 @@ base_w_wa:
   step_freq: 1
   checkpoint_step_freq: 1000
   n_particles_per_device: 101
-  include_D_M: true
+  include_D_M: false
   verbose: true
 
 base_omegak_w_wa:
@@ -162,7 +158,7 @@ base_omegak_w_wa:
   mlflow_exp: base_omegak_w_wa
   pyro_seed: 1
   nf_seed: 1
-  priors_path: variable_redshift/priors_hrdrag.yaml
+  priors_path: variable_redshift/priors.yaml
   flow_type: NAF
   transform_input: true
   activation: elu
@@ -180,7 +176,6 @@ base_omegak_w_wa:
   design_upper: 5.0
   sigma_D_H: 0.2
   sigma_D_M: 0.2
-  sigma_D_V: 0.2
   total_steps: 100000
   optimizer: Adam
   initial_lr: 0.00008
@@ -193,6 +188,6 @@ base_omegak_w_wa:
   step_freq: 1
   checkpoint_step_freq: 1000
   n_particles_per_device: 101
-  include_D_M: true
+  include_D_M: false
   verbose: true
 

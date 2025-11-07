@@ -194,6 +194,7 @@ class VariableRedshift:
         design_lower=0.0,
         design_upper=5.0,
         fixed_design=False,
+        nominal_design=None,
         include_D_M=False,
         sigma_D_H=0.2,
         sigma_D_M=0.2,
@@ -225,7 +226,6 @@ class VariableRedshift:
         self.coeff = self.c / (self.H0 * self.rdrag)
         
         self.include_D_M = include_D_M
-        self.include_D_V = False  # Not implemented yet, but keeping for consistency
         self.sigma_D_H = sigma_D_H
         self.sigma_D_M = sigma_D_M
         
@@ -278,8 +278,10 @@ class VariableRedshift:
         
         self.design_labels = ["z"]
         
-        # Nominal design (single redshift point for evaluation)
-        self.nominal_design = torch.tensor([2.5], device=self.device)
+        if nominal_design is None:
+            self.nominal_design = torch.tensor([(design_upper-design_lower)/2.0 + design_lower], device=self.device)
+        else:
+            self.nominal_design = nominal_design
         
         # Compute central values using fiducial cosmology
         self.central_val = self._compute_central_values()
@@ -305,6 +307,7 @@ class VariableRedshift:
             print(f"  Context dimension: {self.context_dim}")
             print(f"  Include D_M: {self.include_D_M}")
             print(f"  Number of designs: {self.designs.shape[0]}")
+            print(f"  Nominal design: {self.nominal_design}")
 
     @profile_method
     def init_designs(self, fixed_design=False, design_step=0.1, design_lower=0.0, design_upper=5.0):
@@ -712,41 +715,6 @@ class VariableRedshift:
         # (c/H0)/r_d
         prefac = (torch.as_tensor(self.c, device=dev, dtype=DTYPE) / (self.hrdrag_multiplier*hrdrag))
         return prefac * geom
-
-    @profile_method
-    def D_V_func(
-        self, z_eff, Om, Ok=None, w0=None, wa=None, hrdrag=None,
-        h=0.6736, Neff=3.044, mnu=0.06, n_massive=1, T_cmb=2.7255,
-        include_radiation=True, n_int=1025,
-    ):
-        """
-        Angle-averaged distance D_V/r_d = [ z * (D_M/r_d)^2 * (D_H/r_d) ]^{1/3}
-        Shape: (plate, Nz). Uses identical settings as D_H_func/D_M_func.
-        """
-        # Compute using the SAME settings/grid as the caller expects
-        DM = self.D_M_func(
-            z_eff, Om, Ok, w0, wa, hrdrag,
-            h=h, Neff=Neff, mnu=mnu, n_massive=n_massive, T_cmb=T_cmb,
-            include_radiation=include_radiation, n_int=n_int
-        )
-        DH = self.D_H_func(
-            z_eff, Om, Ok, w0, wa, hrdrag,
-            h=h, Neff=Neff, mnu=mnu, n_massive=n_massive, T_cmb=T_cmb,
-            include_radiation=include_radiation
-        )
-
-        # Build z to the same shape as DM/DH (handle 1D or batched z)
-        DTYPE, dev = DM.dtype, DM.device
-        z_t = torch.as_tensor(z_eff, dtype=DTYPE, device=dev)
-        if z_t.ndim == 0:
-            z_t = z_t[None]
-        if z_t.ndim == 1:
-            zB = z_t.reshape(*([1]*(DM.ndim-1)), -1).expand_as(DM)
-        else:
-            zB = torch.broadcast_to(z_t, DM.shape)
-
-        # Identity: D_V = (z * D_M^2 * D_H)^(1/3)
-        return (zB * (DM**2) * DH).pow(1.0/3.0)
 
     @profile_method
     def sample_valid_parameters(self, sample_shape, priors=None):

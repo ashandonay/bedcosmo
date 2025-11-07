@@ -90,7 +90,7 @@ def plot_posterior(
     if isinstance(samples, list) and len(samples) > 0:
         n_params = len(samples[0].paramNames.names)
         # Scale axis labels with plot width, accounting for parameter count
-        axis_label_fontsize = max(8, min(18, width_inch * 1.4 / np.sqrt(n_params)))
+        axis_label_fontsize = max(8, min(14, width_inch * 1.05 / np.sqrt(n_params)))
         # Apply to GetDist settings
         g.settings.axes_fontsize = axis_label_fontsize
         g.settings.axes_labelsize = axis_label_fontsize
@@ -280,7 +280,7 @@ def plot_posterior(
     return g
 
 def plot_run(run_id, eval_args, show_scatter=False, cosmo_exp='num_tracers'):
-    run_data_list, _, _ = get_runs_data(run_ids=run_id, parse_params=True)
+    run_data_list, _, _ = get_runs_data(run_ids=run_id, parse_params=True, cosmo_exp=cosmo_exp)
     if not run_data_list:
         print(f"Run {run_id} not found.")
         return
@@ -324,12 +324,15 @@ def plot_training(
         show_lr (bool): If True, show the learning rate subplot. Default is True.
         step_range (tuple, optional): Tuple of (min_step, max_step) to limit the x-axis range. If None, plots all available steps.
     """
-    client = MlflowClient()
+    # Set MLflow tracking URI before creating client
     storage_path = os.environ["SCRATCH"] + f"/bed/BED_cosmo/{cosmo_exp}"
+    mlflow.set_tracking_uri(storage_path + "/mlruns")
+    client = MlflowClient()
 
     run_data_list, experiment_id_for_save_path, _ = get_runs_data(
         run_ids=[run_id],
-        parse_params=False
+        parse_params=False,
+        cosmo_exp=cosmo_exp
     )
     if not run_data_list:
         return
@@ -342,7 +345,7 @@ def plot_training(
     if show_area:
         has_area_data = run_params.get('log_nominal_area', 'False').lower() == 'true'
         if not has_area_data:
-            print(f"Warning: Run {run_id} does not have area data (log_nominal_area=False). Area plot will be empty.")
+            print(f"Warning: Run {run_id} does not have area data (log_nominal_area=False). Area plot will not be shown.")
 
     # --- Data Fetching (Metrics) ---
     try:
@@ -385,8 +388,6 @@ def plot_training(
                         area_data = [(step, value) for step, value in area_data if min_step <= step <= max_step]
                     
                     nom_area[metric_name] = area_data
-            else:
-                print(f"Warning: No area metrics found for run {run_id}. Area plot will be empty.")
 
     except Exception as e:
         print(f"Error processing metrics for run {run_id}: {e}.")
@@ -395,7 +396,7 @@ def plot_training(
     # --- Plotting Setup ---
     # Calculate number of subplots based on what we want to show
     num_subplots = 1  # Always show loss
-    if show_area:
+    if show_area and len(nom_area) > 0:
         num_subplots += 1
     if show_lr:
         num_subplots += 1
@@ -413,7 +414,7 @@ def plot_training(
     current_ax += 1
     
     ax_area = None
-    if show_area:
+    if show_area and len(nom_area) > 0:
         ax_area = axes[current_ax]
         current_ax += 1
     
@@ -444,7 +445,7 @@ def plot_training(
             ax1.plot(plot_loss_steps, plot_loss_values, color='tab:gray', label=base_label)
 
     # --- Plot Nominal Area (ax2) ---
-    if show_area:
+    if show_area and len(nom_area) > 0:
         if area_step_freq % 100 != 0:
             print("Warning: area_step_freq should ideally be a multiple of 100 as nominal_area is logged every 100 steps.")
         sampling_rate = max(1, area_step_freq // 100)
@@ -452,41 +453,34 @@ def plot_training(
         # Define line styles for different area pairs
         area_line_colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
         
-        if nom_area:
-            for area_idx, (metric_name, area_data) in enumerate(nom_area.items()):
-                if area_data:
-                    # Extract parameter pair name from metric name (e.g., 'avg_nominal_area_Om_hrdrag' -> 'Om, hrdrag')
-                    pair_name = metric_name.replace('nominal_area_avg_', '')
-                    param1, param2 = pair_name.split('_')[:2]
+        for area_idx, (metric_name, area_data) in enumerate(nom_area.items()):
+            if area_data:
+                # Extract parameter pair name from metric name (e.g., 'avg_nominal_area_Om_hrdrag' -> 'Om, hrdrag')
+                pair_name = metric_name.replace('nominal_area_avg_', '')
+                param1, param2 = pair_name.split('_')[:2]
 
-                    area_steps, area_values = zip(*area_data)
-                    sampled_indices = np.arange(0, len(area_steps), sampling_rate)
-                    plot_area_steps = np.array(area_steps)[sampled_indices]
-                    plot_area_values = np.array(area_values)[sampled_indices]
+                area_steps, area_values = zip(*area_data)
+                sampled_indices = np.arange(0, len(area_steps), sampling_rate)
+                plot_area_steps = np.array(area_steps)[sampled_indices]
+                plot_area_values = np.array(area_values)[sampled_indices]
 
-                    # Use different line style for each area pair
-                    line_color = area_line_colors[area_idx % len(area_line_colors)]
+                # Use different line style for each area pair
+                line_color = area_line_colors[area_idx % len(area_line_colors)]
 
-                    try:
-                        nominal_samples, target_labels, latex_labels = load_nominal_samples(run_params['cosmo_exp'], run_params['cosmo_model'])
-                        with contextlib.redirect_stdout(io.StringIO()):
-                            nominal_samples_gd = getdist.MCSamples(samples=nominal_samples, names=target_labels, labels=latex_labels)
-                        # Get all area pairs from DESI samples
-                        nominal_area = get_contour_area([nominal_samples_gd], 0.68, param1, param2)[0]["nominal_area_"+pair_name]
-                        ax_area.plot(plot_area_steps, plot_area_values/nominal_area, 
-                                    color=line_color, label=pair_name.replace('_', ', '))
-                        ax_area.axhline(1, color='black', linestyle='--', lw=1.5)
+                try:
+                    nominal_samples, target_labels, latex_labels = load_nominal_samples(run_params['cosmo_exp'], run_params['cosmo_model'])
+                    with contextlib.redirect_stdout(io.StringIO()):
+                        nominal_samples_gd = getdist.MCSamples(samples=nominal_samples, names=target_labels, labels=latex_labels)
+                    # Get all area pairs from DESI samples
+                    nominal_area = get_contour_area([nominal_samples_gd], 0.68, param1, param2)[0]["nominal_area_"+pair_name]
+                    ax_area.plot(plot_area_steps, plot_area_values/nominal_area, 
+                                color=line_color, label=pair_name.replace('_', ', '))
+                    ax_area.axhline(1, color='black', linestyle='--', lw=1.5)
 
-                    except NotImplementedError:
-                        ax_area.plot(plot_area_steps, plot_area_values, 
-                                    color=line_color, label=pair_name.replace('_', ', '))
+                except NotImplementedError:
+                    ax_area.plot(plot_area_steps, plot_area_values, 
+                                color=line_color, label=pair_name.replace('_', ', '))
 
-        else:
-            # No area data to plot, but still show the subplot
-            ax_area.text(0.5, 0.5, 'No area data available', 
-                        transform=ax_area.transAxes, ha='center', va='center',
-                        fontsize=12, color='gray')
-                
         # Configure ax2 (Contour Area)
         ax_area.set_ylabel("Nominal Design Area Ratio to DESI")
         ax_area.set_ylim(area_limits)
@@ -596,7 +590,8 @@ def compare_posterior(
         run_ids=run_ids,
         excluded_runs=excluded_runs,
         filter_string=filter_string,
-        parse_params=True
+        parse_params=True,
+        cosmo_exp=cosmo_exp
     )
     if not run_data_list:
         return
@@ -839,14 +834,17 @@ def compare_training(
         colors (list, optional): List of colors to use for each group. If None, uses default matplotlib colors.
         step_range (tuple, optional): Tuple of (min_step, max_step) to limit the x-axis range. If None, plots all available steps.
     """
-    client = MlflowClient()
+    # Set MLflow tracking URI before creating client
     storage_path = os.environ["SCRATCH"] + f"/bed/BED_cosmo/{cosmo_exp}"
+    mlflow.set_tracking_uri(storage_path + "/mlruns")
+    client = MlflowClient()
 
     run_data_list, experiment_id_for_save_path, _ = get_runs_data(
         mlflow_exp=mlflow_exp,
         run_ids=run_ids,
         excluded_runs=excluded_runs,
-        parse_params=False
+        parse_params=False,
+        cosmo_exp=cosmo_exp
     )
     if not run_data_list:
         return
@@ -1417,6 +1415,9 @@ def compare_contours(
     plt.show()
     
 def loss_area_plot(mlflow_exp, var_name, step_interval=1000, excluded_runs=[], cosmo_exp='num_tracers'):
+    # Set MLflow tracking URI before creating client
+    storage_path = os.environ["SCRATCH"] + f"/bed/BED_cosmo/{cosmo_exp}"
+    mlflow.set_tracking_uri(storage_path + "/mlruns")
     client = MlflowClient()
     exp_id = client.get_experiment_by_name(mlflow_exp).experiment_id
     run_ids = [run.info.run_id for run in client.search_runs(exp_id) if run.info.run_id not in excluded_runs]

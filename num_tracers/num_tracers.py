@@ -199,6 +199,7 @@ class NumTracers:
         design_sum_lower=1.0,
         design_sum_upper=1.0,
         fixed_design=False, 
+        nominal_design=None,
         include_D_M=True, 
         include_D_V=True,
         bijector_state=None,
@@ -249,7 +250,10 @@ class NumTracers:
             self.context_dim += 5
         if include_D_V:
             self.context_dim += 2
-        self.nominal_design = torch.tensor(self.desi_tracers.groupby('class').sum()['observed'].reindex(self.design_labels).values, device=self.device)
+        if nominal_design is None:
+            self.nominal_design = torch.tensor(self.desi_tracers.groupby('class').sum()['observed'].reindex(self.design_labels).values, device=self.device)
+        else:
+            self.nominal_design = nominal_design
         self.nominal_context = torch.cat([
             self.nominal_design, 
             self.central_val if self.include_D_M else self.central_val[1::2]
@@ -1198,18 +1202,20 @@ class NumTracers:
         
         """
         if central:
-            rescaled_sigmas = torch.zeros(self.sigmas.shape, device=self.device)
-            passed_ratio = self.calc_passed(tracer_ratio)
+            # Expand tracer_ratio for batching with num_samples
+            expanded_tracer_ratio = lexpand(tracer_ratio, num_samples)
+            passed_ratio = self.calc_passed(expanded_tracer_ratio)
             means = torch.zeros(passed_ratio.shape[:-1] + (self.sigmas.shape[-1],), device=self.device)
-            means[:, :, self.DH_idx] = lexpand(self.central_val[self.DH_idx].unsqueeze(0), num_samples)
+            # Broadcast central values across batch dimensions
+            means[:, :, self.DH_idx] = self.central_val[self.DH_idx]
             rescaled_sigmas = torch.zeros(passed_ratio.shape[:-1] + (self.sigmas.shape[-1],), device=self.device)
-            rescaled_sigmas[:, :, self.DH_idx] = self.sigmas[self.DH_idx] * self.sigma_scaling_factor(passed_ratio, tracer_ratio, self.DH_idx)
+            rescaled_sigmas[:, :, self.DH_idx] = self.sigmas[self.DH_idx] * self.sigma_scaling_factor(passed_ratio, expanded_tracer_ratio, self.DH_idx)
             if self.include_D_M:
-                means[:, :, self.DM_idx] = lexpand(self.central_val[self.DM_idx].unsqueeze(0), num_samples)
-                rescaled_sigmas[:, :, self.DM_idx] = self.sigmas[self.DM_idx] * self.sigma_scaling_factor(passed_ratio, tracer_ratio, self.DM_idx)
+                means[:, :, self.DM_idx] = self.central_val[self.DM_idx]
+                rescaled_sigmas[:, :, self.DM_idx] = self.sigmas[self.DM_idx] * self.sigma_scaling_factor(passed_ratio, expanded_tracer_ratio, self.DM_idx)
             if self.include_D_V:
-                means[:, :, self.DV_idx] = lexpand(self.central_val[self.DV_idx].unsqueeze(0), num_samples)
-                rescaled_sigmas[:, :, self.DV_idx] = self.sigmas[self.DV_idx] * self.sigma_scaling_factor(passed_ratio, tracer_ratio, self.DV_idx)
+                means[:, :, self.DV_idx] = self.central_val[self.DV_idx]
+                rescaled_sigmas[:, :, self.DV_idx] = self.sigmas[self.DV_idx] * self.sigma_scaling_factor(passed_ratio, expanded_tracer_ratio, self.DV_idx)
 
             if self.include_D_V and self.include_D_M:
                 covariance_matrix = self.corr_matrix * (rescaled_sigmas.unsqueeze(-1) * rescaled_sigmas.unsqueeze(-2))
@@ -1234,7 +1240,13 @@ class NumTracers:
         
         """
         data_samples = self.sample_data(tracer_ratio, num_data_samples, central)
-        context = torch.cat([tracer_ratio, data_samples], dim=-1)
+        # Expand tracer_ratio to match data_samples shape for concatenation
+        # tracer_ratio is [1, 4], need to expand to [num_data_samples, 1, 4]
+        if tracer_ratio.dim() == 2:
+            expanded_tracer_ratio = tracer_ratio.unsqueeze(0).expand(num_data_samples, -1, -1)
+        else:
+            expanded_tracer_ratio = tracer_ratio.expand(num_data_samples, -1, -1)
+        context = torch.cat([expanded_tracer_ratio, data_samples], dim=-1)
         
         # Sample parameters for each data realization individually
         # This is cleaner and avoids tensor shape complications

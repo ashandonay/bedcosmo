@@ -6,11 +6,11 @@ base:
   eval_step: last
   levels: 0.68
   guide_samples: 50000
-  n_particles: 5001
+  n_particles: 10001
   param_space: physical
-  design_step: 0.1
-  design_lower: 0.5
-  design_upper: 5.0
+  design_step: 0.05
+  design_lower: 0.2
+  design_upper: 2.5
   design_chunk_size: 5
   profile: true
   verbose: true
@@ -23,8 +23,8 @@ base_omegak:
   n_particles: 5001
   param_space: physical
   design_step: 0.1
-  design_lower: 0.5
-  design_upper: 5.0
+  design_lower: 0.2
+  design_upper: 2.5
   design_chunk_size: 5
   profile: true
   verbose: true
@@ -37,8 +37,8 @@ base_w:
   n_particles: 5001
   param_space: physical
   design_step: 0.1
-  design_lower: 0.5
-  design_upper: 5.0
+  design_lower: 0.2
+  design_upper: 2.5
   design_chunk_size: 5
   profile: true
   verbose: true
@@ -51,8 +51,8 @@ base_w_wa:
   n_particles: 5001
   param_space: physical
   design_step: 0.1
-  design_lower: 0.5
-  design_upper: 5.0
+  design_lower: 0.2
+  design_upper: 2.5
   design_chunk_size: 5
   profile: true
   verbose: true
@@ -65,8 +65,8 @@ base_omegak_w_wa:
   n_particles: 5001
   param_space: physical
   design_step: 0.1
-  design_lower: 0.5
-  design_upper: 5.0
+  design_lower: 0.2
+  design_upper: 2.5
   design_chunk_size: 5
   profile: true
   verbose: true

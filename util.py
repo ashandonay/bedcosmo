@@ -828,7 +828,7 @@ def create_scheduler(optimizer, run_args):
     
     return scheduler
 
-def get_runs_data(mlflow_exp=None, run_ids=None, excluded_runs=[], filter_string=None, parse_params=True):
+def get_runs_data(mlflow_exp=None, run_ids=None, excluded_runs=[], filter_string=None, parse_params=True, cosmo_exp='num_tracers'):
     """
     Fetches run data from MLflow based on experiment name or run IDs.
 
@@ -846,6 +846,7 @@ def get_runs_data(mlflow_exp=None, run_ids=None, excluded_runs=[], filter_string
             - str or None: The experiment ID for the fetched runs.
             - str or None: The experiment name for the fetched runs.
     """
+    mlflow.set_tracking_uri(os.environ["SCRATCH"] + f"/bed/BED_cosmo/{cosmo_exp}" + "/mlruns")
     client = MlflowClient()
     run_data_list = []
     experiment_id = None

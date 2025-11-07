@@ -47,7 +47,7 @@ class Evaluator:
         self.run_id = run_id
         print(f"\nStarting evaluation for run {self.run_id}")
         print(f"Using MLflow tracking URI: {mlflow.get_tracking_uri()}")
-        run_data_list, _, _ = get_runs_data(run_ids=self.run_id)
+        run_data_list, _, _ = get_runs_data(run_ids=self.run_id, cosmo_exp=self.cosmo_exp)
         if not run_data_list:  # Check for empty list instead of None
             print(f"Run {self.run_id} not found.")
             raise ValueError(f"Run {self.run_id} not found in experiment {self.cosmo_exp}. Please check that the run exists and cosmo_exp is correct.")
@@ -102,10 +102,10 @@ class Evaluator:
 
         self.param_space = param_space
         if self.param_space == 'physical':
-            self.desi_transform_output = False
+            self.nominal_transform_output = False
             self.nf_transform_output = True
         elif self.param_space == 'unconstrained':
-            self.desi_transform_output = True
+            self.nominal_transform_output = True
             self.nf_transform_output = False
         else:
             raise ValueError(f"Invalid parameter space: {self.param_space}")
@@ -128,70 +128,6 @@ class Evaluator:
         minutes = int((session_runtime % 3600) // 60)
         seconds = int(session_runtime % 60)
         print(f"Evaluation runtime: {hours}h {minutes}m {seconds}s")
-
-    def run(self, eval_step=None):
-        # Determine eval_step
-        if eval_step is None:
-            eval_step = self.total_steps
-        elif eval_step == 'last':
-            eval_step = self.total_steps
-        else:
-            eval_step = int(eval_step)
-        
-        # Initialize timing at start of run
-        self._update_runtime()
-
-        print(f"Computing EIG for step {eval_step}...")
-        print(f"Computing EIG for nominal design...")
-        nominal_eig, _ = self.get_eig(step=eval_step, nominal_design=True)
-        if self.fixed_design is not False:
-            print(f"Computing EIG for fixed design...")
-            eig, _ = self.get_eig(step=eval_step, nominal_design=False)
-            print(f"Nominal EIG: {nominal_eig}, Fixed Design EIG: {eig}, Fixed Design: {self.fixed_design.tolist()}")
-        else:
-            print(f"Computing EIG for all designs...")
-            eigs, _ = self.get_eig(step=eval_step, nominal_design=False)
-            optimal_design = self.experiment.designs[np.argmax(eigs)].cpu().numpy()
-            print(f"Nominal EIG: {nominal_eig}, Optimal EIG: {np.max(eigs)}, Optimal Design: {optimal_design.tolist()}")
-        
-        # Update timing after EIG computation
-        self._update_runtime()
-
-        try:
-            print(f"Generating posterior plot...")
-            self.generate_posterior(step=eval_step)
-            # Update timing after posterior generation
-            self._update_runtime()
-        except Exception as e:
-            traceback.print_exc()
-        #evaluator.eig_grid(step=eval_step)
-        #evaluator.posterior_steps(steps=[30000, 100000, 200000, 'last'])
-        
-        try:
-            print(f"Generating sorted EIG designs plot...")
-            self.eig_designs(steps=[eval_step//8, eval_step//4, eval_step//2, 'last'], sort=False)
-            # Update timing after sorted EIG plots
-            self._update_runtime()
-        except Exception as e:
-            traceback.print_exc()
-
-        try:
-            if self.cosmo_exp == 'num_tracers':
-                print(f"Generating design comparison plot...")
-                self.design_comparison(step=eval_step)
-                # Update timing after design comparison
-                self._update_runtime()
-        except Exception as e:
-            traceback.print_exc()
-
-        #try:
-        #    self.sample_posterior(step=eval_step, level=0.68, central=True)
-        #except Exception as e:
-        #     traceback.print_exc()
-
-        #evaluator.sample_posterior(step=eval_step, level=0.68, central=True)
-        
-        print(f"Evaluation completed successfully!")
 
     def _sample_rank_step(self, rank, step, design, nominal_design=False):
         """
@@ -275,12 +211,14 @@ class Evaluator:
 
         # Get the DESI MCMC samples
         try:
-            nominal_samples_gd = self.experiment.get_nominal_samples(transform_output=self.desi_transform_output)
+            nominal_samples_gd = self.experiment.get_nominal_samples(transform_output=self.nominal_transform_output)
             all_samples.append(nominal_samples_gd)
             all_colors.append('black')
             all_alphas.append(1.0)
+            ref_contour = True
         except NotImplementedError:
             print(f"Warning: get_nominal_samples not implemented for {self.cosmo_exp}, skipping nominal design plot.")
+            ref_contour = False
             pass
         
         plot_width = 10
@@ -289,10 +227,10 @@ class Evaluator:
         # Calculate dynamic font sizes based on plot dimensions and number of parameters
         n_params = len(all_samples[0].paramNames.names)
         # Base font size scales with plot width and inversely with number of parameters
-        # This keeps text readable as the plot gets larger or has more parameters
-        base_fontsize = max(8, min(20, plot_width * 1.6 / np.sqrt(n_params)))
-        title_fontsize = base_fontsize * 1.2  # Title slightly larger than base
-        legend_fontsize = base_fontsize * 0.9  # Legend slightly smaller
+        # Use smaller scaling factors to keep text proportional to plot size
+        base_fontsize = max(7, min(14, plot_width * 1.0 / np.sqrt(n_params)))
+        title_fontsize = base_fontsize * 1.1  # Title slightly larger than base
+        legend_fontsize = base_fontsize * 0.8  # Legend smaller than base
         
         g.fig.suptitle(f"Posterior Evaluation - Run: {self.run_id[:8]} (Rank {self.global_rank}, {self.param_space.capitalize()} Space)", 
                       fontsize=title_fontsize)
@@ -304,15 +242,16 @@ class Evaluator:
         custom_legend = []
         if 'nominal' in display:
             custom_legend.append(
-                Line2D([0], [0], color='tab:blue', label=f'Nominal Design (NF)')
+                Line2D([0], [0], color='tab:blue', label=f'Nominal Design (NF)', linewidth=1.2)
             )
         if 'optimal' in display and self.fixed_design is False:
             custom_legend.append(
-                Line2D([0], [0], color='tab:orange', label=f'Optimal Design (NF)')
+                Line2D([0], [0], color='tab:orange', label=f'Optimal Design (NF)', linewidth=1.2)
             )
-        custom_legend.append(
-            Line2D([0], [0], color='black', label=f'Nominal Design (MCMC)')
-        )
+        if ref_contour:
+            custom_legend.append(
+                Line2D([0], [0], color='black', label=f'Nominal Design (MCMC)', linewidth=1.2)
+            )
         g.fig.set_constrained_layout(True)
         leg = g.fig.legend(handles=custom_legend, loc='upper right', bbox_to_anchor=(0.99, 0.96), 
                           fontsize=legend_fontsize)
@@ -332,8 +271,10 @@ class Evaluator:
         # Get optimal design based on combined EIGs across ranks
         eigs, _ = self.get_eig(step, nominal_design=False)
         optimal_design = self.experiment.designs[np.argmax(eigs)]
-        pair_keys = [k for k in self.run_obj.data.metrics.keys() if k.startswith(f'nominal_area_{global_rank}_')]
-        pair_names = [p.replace('nominal_area_0_', '') for p in pair_keys]
+        
+        # Generate all unique parameter pairs
+        params = self.experiment.cosmo_params
+        pair_names = [f"{params[i]}_{params[j]}" for i in range(len(params)) for j in range(i+1, len(params))]
         design_areas = {'nominal': {p: [] for p in pair_names}, 'optimal': {p: [] for p in pair_names}}
         all_samples = []
         colors = []
@@ -342,7 +283,7 @@ class Evaluator:
             data_idxs = np.arange(1, num_data_samples) # sample N data points
             
             samples_array = self.experiment.sample_params_from_data_samples(
-                lexpand(design.unsqueeze(0), num_data_samples), 
+                design.unsqueeze(0), 
                 posterior_flow, 
                 num_data_samples=num_data_samples, 
                 num_param_samples=self.guide_samples,
@@ -356,7 +297,7 @@ class Evaluator:
                 # Extract the numpy array from MCSamples and select the d-th data sample
                 with contextlib.redirect_stdout(io.StringIO()):
                     samples_gd = getdist.MCSamples(
-                        samples=samples_array[:, d, :],
+                        samples=samples_array[d, :, :],
                         names=self.experiment.cosmo_params,
                         labels=self.experiment.latex_labels
                     )
@@ -367,11 +308,20 @@ class Evaluator:
                         [samples_gd], level, param1, param2, design_type=design_type)[0][f'{design_type}_area_{p}']
                         )
             # Get the central samples with the nominal design indexed by the input global rank
-            central_samples_gd = self._eval_step(step, nominal_design=True, global_rank=global_rank)
-            all_samples.append(central_samples_gd[0])
+            central_samples_gd = self._eval_step(step, nominal_design=True)
+            all_samples.append(central_samples_gd)
             colors.extend([color]*len(data_idxs) + ['black'])
 
-        g = plot_posterior(all_samples, colors, levels=[level], alpha=0.7, width_inch=10)
+        plot_width = 10
+        g = plot_posterior(all_samples, colors, levels=[level], alpha=0.7, width_inch=plot_width)
+        
+        # Calculate dynamic font sizes based on plot dimensions and number of parameters
+        n_params = len(all_samples[0].paramNames.names)
+        base_fontsize = max(7, min(14, plot_width * 1.0 / np.sqrt(n_params)))
+        title_fontsize = base_fontsize * 1.1
+        legend_fontsize = base_fontsize * 0.8
+        text_fontsize = base_fontsize * 0.75  # For area annotations
+        
         if g.fig.legends:
             for legend in g.fig.legends:
                 legend.remove()
@@ -392,22 +342,24 @@ class Evaluator:
 
                     title = f"Avg Area: {pair_avg_areas:.3f} +/- {pair_avg_areas_std:.3f}"
                     y_pos = 0.95 - 0.08 * design_idx
-                    ax.text(0.05, y_pos, title, transform=ax.transAxes, fontsize=10, va='top', color=color)
+                    ax.text(0.05, y_pos, title, transform=ax.transAxes, fontsize=text_fontsize, va='top', color=color)
         
         g.fig.set_constrained_layout(True)
         # Set title with proper positioning
         # add labels for Nominal and Optimal to total legend
         custom_legend = []
         custom_legend.append(
-            Line2D([0], [0], color='tab:orange', label=f'Optimal Design')
+            Line2D([0], [0], color='tab:orange', label=f'Optimal Design', linewidth=1.2)
         )
         custom_legend.append(
-            Line2D([0], [0], color='tab:blue', label=f'Nominal Design')
+            Line2D([0], [0], color='tab:blue', label=f'Nominal Design', linewidth=1.2)
         )
         g.fig.set_constrained_layout(True)
-        leg = g.fig.legend(handles=custom_legend, loc='upper right', bbox_to_anchor=(0.99, 0.96))
+        leg = g.fig.legend(handles=custom_legend, loc='upper right', bbox_to_anchor=(0.99, 0.96), 
+                          fontsize=legend_fontsize)
         leg.set_in_layout(False)
-        g.fig.suptitle(f"Posterior (Rank {global_rank}) for {num_data_samples} Data Samples, {int(level*100)}% Credible Regions", fontsize=12)
+        g.fig.suptitle(f"Posterior (Rank {global_rank}) for {num_data_samples} Data Samples, {int(level*100)}% Credible Regions", 
+                      fontsize=title_fontsize)
         save_figure(f"{self.save_path}/plots/posterior_samples_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png", fig=g.fig, dpi=400)
 
     def _compute_eig(self, rank, step, flow_model, nominal_design=False, designs=None):
@@ -845,34 +797,42 @@ class Evaluator:
                 step_label = step
             custom_legend.append(
                 Line2D([0], [0], color=color_hex, 
-                        label=f'Step {step_label}')
+                        label=f'Step {step_label}', linewidth=1.2)
             )
 
         try:
             # Get nominal samples using reference experiment
-            nominal_samples_gd = self.experiment.get_nominal_samples(transform_output=self.desi_transform_output)
+            nominal_samples_gd = self.experiment.get_nominal_samples(transform_output=self.nominal_transform_output)
             all_samples.append(nominal_samples_gd)
             all_colors.append('black')  
         except NotImplementedError:
             print(f"Warning: get_nominal_samples not implemented for {self.cosmo_exp}, skipping nominal design plot.")
             pass
 
-        g = plot_posterior(all_samples, all_colors, levels=[level], width_inch=12)
+        plot_width = 12
+        g = plot_posterior(all_samples, all_colors, levels=[level], width_inch=plot_width)
+        
+        # Calculate dynamic font sizes based on plot dimensions and number of parameters
+        n_params = len(all_samples[0].paramNames.names)
+        base_fontsize = max(7, min(14, plot_width * 1.0 / np.sqrt(n_params)))
+        title_fontsize = base_fontsize * 1.1
+        legend_fontsize = base_fontsize * 0.8
+        
         # Remove existing legends if any
         if g.fig.legends:
             for legend in g.fig.legends:
                 legend.remove()
 
         custom_legend.append(
-            Line2D([0], [0], color='black', 
-                label=f'DESI')
+            Line2D([0], [0], color='black', label=f'DESI', linewidth=1.2)
         )
         
         g.fig.set_constrained_layout(True)
-        leg = g.fig.legend(handles=custom_legend, loc='upper right', bbox_to_anchor=(0.99, 0.96), title=f'{int(level*100)}% Level')
+        leg = g.fig.legend(handles=custom_legend, loc='upper right', bbox_to_anchor=(0.99, 0.96), 
+                          title=f'{int(level*100)}% Level', fontsize=legend_fontsize)
         leg.set_in_layout(False)
         g.fig.suptitle(f"Posterior Steps for Run: {self.run_id[:8]}", 
-                      fontsize=12)
+                      fontsize=title_fontsize)
         
         save_figure(f"{self.save_path}/plots/posterior_steps_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png", fig=g.fig, dpi=400)
 
@@ -968,23 +928,43 @@ class Evaluator:
         designs = self.experiment.designs.cpu().numpy()
         sorted_designs = designs[sorted_eigs_idx]
         
+        # Check if designs are 1D or multi-dimensional
+        is_1d_design = (sorted_designs.shape[1] == 1)
+        
         # Create figure with subplots and space for colorbar
-        fig = plt.figure(figsize=(22, 6))
-        gs = gridspec.GridSpec(2, 2, height_ratios=[0.5, 0.1], width_ratios=[1, 0.02], hspace=0.2, wspace=0.1)
+        if is_1d_design and not sort:
+            # For 1D designs without sorting, plot EIG directly against design variable (no second subplot needed)
+            fig, ax0 = plt.subplots(figsize=(22, 6))
+            ax1 = None
+            cbar_ax = None
+        elif is_1d_design and sort:
+            # For 1D designs with sorting, use two subplots but no colorbar
+            fig = plt.figure(figsize=(22, 6))
+            gs = gridspec.GridSpec(2, 1, height_ratios=[0.5, 0.1], hspace=0.2)
+            ax0 = fig.add_subplot(gs[0, 0])  # Top plot for EIG
+            ax1 = fig.add_subplot(gs[1, 0])  # Bottom plot for design values
+            cbar_ax = None
+        else:
+            # For multi-dimensional designs, include colorbar
+            fig = plt.figure(figsize=(22, 6))
+            gs = gridspec.GridSpec(2, 2, height_ratios=[0.5, 0.1], width_ratios=[1, 0.02], hspace=0.2, wspace=0.1)
+            ax0 = fig.add_subplot(gs[0, 0])  # Top plot for EIG
+            ax1 = fig.add_subplot(gs[1, 0])  # Bottom plot for heatmap
+            cbar_ax = fig.add_subplot(gs[:, 1])  # Colorbar spanning both plots
         
-        # Create subplots
-        ax0 = fig.add_subplot(gs[0, 0])  # Top plot for EIG
-        ax1 = fig.add_subplot(gs[1, 0])  # Bottom plot for heatmap
-        cbar_ax = fig.add_subplot(gs[:, 1])  # Colorbar spanning both plots
-        
-        # Plot all steps with sorted x-axis
+        # Plot all steps
         for step_data in all_steps_data:
             sorted_combined_eigs = step_data['combined_eigs'][sorted_eigs_idx]
+            
+            # For 1D designs without sorting, use design variable values as x-axis; otherwise use index
+            if is_1d_design and not sort:
+                x_vals = sorted_designs[:, 0]
+            else:
+                x_vals = np.arange(len(sorted_combined_eigs))
             
             # Plot error bars (gray fill) only for the sorted step
             if step_data['step_label'] == sort_step and 'combined_eigs_std' in step_data:
                 sorted_eigs_std = step_data['combined_eigs_std'][sorted_eigs_idx]
-                x_vals = np.arange(len(sorted_combined_eigs))
                 ax0.fill_between(
                     x_vals,
                     sorted_combined_eigs - sorted_eigs_std,
@@ -1004,7 +984,7 @@ class Evaluator:
                 else:
                     line_label = f"EIG (Rank {self.global_rank})"
             
-            ax0.plot(sorted_combined_eigs, label=line_label, 
+            ax0.plot(x_vals, sorted_combined_eigs, label=line_label, 
                     color=step_data['color'], linestyle='-', linewidth=2.5, alpha=1.0 if step_data['step_label'] == sort_step else 0.6, zorder=5)
             
             # Plot nominal EIG for the sorting step
@@ -1012,31 +992,61 @@ class Evaluator:
                 ax0.axhline(y=step_data['nominal'], color='black', linestyle='--', 
                            label='Nominal EIG', linewidth=2, zorder=10)
         
-        ax0.set_xlim(0, len(sorted_combined_eigs))
+        # Set x-axis label and limits based on design dimensionality and sorting
+        if is_1d_design and not sort:
+            ax0.set_xlabel(self.experiment.design_labels[0], fontsize=11)
+            ax0.set_xlim(x_vals.min(), x_vals.max())
+        else:
+            ax0.set_xlim(0, len(sorted_combined_eigs))
+            # Add x-axis label for indexed plots
+            if is_1d_design and sort:
+                if len(all_steps_data) > 1:
+                    sort_step_number = next((step_data['step'] for step_data in all_steps_data 
+                                            if step_data['step_label'] == sort_step), sort_step)
+                    ax0.set_xlabel(f"Design Index (sorted by reference step {sort_step_number} EIG)", fontsize=11)
+                else:
+                    ax0.set_xlabel("Design Index (sorted by EIG)", fontsize=11)
+        
         ax0.set_ylabel("Expected Information Gain [bits]", fontsize=11)
         ax0.legend(loc='lower left', fontsize=9, framealpha=0.9)
         
         # Plot sorted designs
-        im = ax1.imshow(sorted_designs.T, aspect='auto', cmap='viridis')
-        if len(all_steps_data) > 1:
-            # Find the actual step number used for sorting
-            sort_step_number = next((step_data['step'] for step_data in all_steps_data 
-                                    if step_data['step_label'] == sort_step), sort_step)
-            if sort:
+        if is_1d_design and sort:
+            # For 1D sorted designs, plot design values as a line
+            ax1.plot(sorted_designs[:, 0], color='tab:blue', linewidth=2)
+            ax1.set_ylabel(self.experiment.design_labels[0], fontsize=11)
+            ax1.set_xlim(0, len(sorted_designs))
+            if len(all_steps_data) > 1:
+                # Find the actual step number used for sorting
+                sort_step_number = next((step_data['step'] for step_data in all_steps_data 
+                                        if step_data['step_label'] == sort_step), sort_step)
                 xlabel = f"Design Index (sorted by reference step {sort_step_number} EIG)"
             else:
-                xlabel = f"Design Index"
-        else:
-            if sort:
                 xlabel = "Design Index (sorted by EIG)"
+            ax1.set_xlabel(xlabel, fontsize=11)
+            ax1.grid(True, alpha=0.3)
+        elif not is_1d_design:
+            # For multi-dimensional designs, use heatmap with colorbar
+            im = ax1.imshow(sorted_designs.T, aspect='auto', cmap='viridis')
+            if len(all_steps_data) > 1:
+                # Find the actual step number used for sorting
+                sort_step_number = next((step_data['step'] for step_data in all_steps_data 
+                                        if step_data['step_label'] == sort_step), sort_step)
+                if sort:
+                    xlabel = f"Design Index (sorted by reference step {sort_step_number} EIG)"
+                else:
+                    xlabel = f"Design Index"
             else:
-                xlabel = "Design Index"
-        ax1.set_xlabel(xlabel, fontsize=11)
-        ax1.set_yticks(np.arange(len(self.experiment.design_labels)), self.experiment.design_labels)
-        
-        # Add colorbar spanning the full height
-        cbar = plt.colorbar(im, cax=cbar_ax)
-        cbar.set_label('Design Value')
+                if sort:
+                    xlabel = "Design Index (sorted by EIG)"
+                else:
+                    xlabel = "Design Index"
+            ax1.set_xlabel(xlabel, fontsize=11)
+            ax1.set_yticks(np.arange(len(self.experiment.design_labels)), self.experiment.design_labels)
+            
+            # Add colorbar spanning the full height
+            cbar = plt.colorbar(im, cax=cbar_ax)
+            cbar.set_label('Design Value')
         
         # Add overall title
         sort_title = "Sorted" if sort else None
@@ -1048,6 +1058,70 @@ class Evaluator:
         
         save_figure(f"{self.save_path}/plots/eig_designs_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png", fig=fig, dpi=400)
         plt.show()
+
+    def run(self, eval_step=None):
+        # Determine eval_step
+        if eval_step is None:
+            eval_step = self.total_steps
+        elif eval_step == 'last':
+            eval_step = self.total_steps
+        else:
+            eval_step = int(eval_step)
+        
+        # Initialize timing at start of run
+        self._update_runtime()
+
+        print(f"Computing EIG for step {eval_step}...")
+        print(f"Computing EIG for nominal design...")
+        nominal_eig, _ = self.get_eig(step=eval_step, nominal_design=True)
+        if self.fixed_design is not False:
+            print(f"Computing EIG for fixed design...")
+            eig, _ = self.get_eig(step=eval_step, nominal_design=False)
+            print(f"Nominal EIG: {nominal_eig}, Fixed Design EIG: {eig}, Fixed Design: {self.fixed_design.tolist()}")
+        else:
+            print(f"Computing EIG for all designs...")
+            eigs, _ = self.get_eig(step=eval_step, nominal_design=False)
+            optimal_design = self.experiment.designs[np.argmax(eigs)].cpu().numpy()
+            print(f"Nominal EIG: {nominal_eig}, Optimal EIG: {np.max(eigs)}, Optimal Design: {optimal_design.tolist()}")
+        
+        # Update timing after EIG computation
+        self._update_runtime()
+
+        try:
+            print(f"Generating posterior plot...")
+            self.generate_posterior(step=eval_step)
+            self._update_runtime()
+        except Exception as e:
+            traceback.print_exc()
+
+        try:
+            self.posterior_steps(steps=[70000, 80000, 90000, 'last'])
+            self._update_runtime()
+        except Exception as e:
+            traceback.print_exc()
+        
+        try:
+            print(f"Generating sorted EIG designs plot...")
+            self.eig_designs(steps=[eval_step//8, eval_step//4, eval_step//2, 'last'], sort=True)
+            self._update_runtime()
+        except Exception as e:
+            traceback.print_exc()
+
+        try:
+            if self.cosmo_exp == 'num_tracers':
+                print(f"Generating design comparison plot...")
+                self.design_comparison(step=eval_step)
+                self._update_runtime()
+        except Exception as e:
+            traceback.print_exc()
+
+        try:
+            self.sample_posterior(step=eval_step, level=0.68, central=True)
+            self._update_runtime()
+        except Exception as e:
+            traceback.print_exc()
+        
+        print(f"Evaluation completed successfully!")
 
 if __name__ == "__main__":
 
