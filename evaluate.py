@@ -998,14 +998,6 @@ class Evaluator:
             ax0.set_xlim(x_vals.min(), x_vals.max())
         else:
             ax0.set_xlim(0, len(sorted_combined_eigs))
-            # Add x-axis label for indexed plots
-            if is_1d_design and sort:
-                if len(all_steps_data) > 1:
-                    sort_step_number = next((step_data['step'] for step_data in all_steps_data 
-                                            if step_data['step_label'] == sort_step), sort_step)
-                    ax0.set_xlabel(f"Design Index (sorted by reference step {sort_step_number} EIG)", fontsize=11)
-                else:
-                    ax0.set_xlabel("Design Index (sorted by EIG)", fontsize=11)
         
         ax0.set_ylabel("Expected Information Gain [bits]", fontsize=11)
         ax0.legend(loc='lower left', fontsize=9, framealpha=0.9)
