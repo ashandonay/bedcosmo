@@ -1,13 +1,13 @@
 #!/bin/bash
 #SBATCH -C gpu
-#SBATCH -q debug
+#SBATCH -q regular
 #SBATCH -A desi
 #SBATCH --job-name=resume
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1     # 1 primary Slurm task per node
 #SBATCH --cpus-per-task=128     # CPUs for all DDP workers on the node (e.g., 4 workers * 32 cpus/worker)
 #SBATCH --gpus-per-node=4       # Number of GPUs to request per node
-#SBATCH --time=00:30:00
+#SBATCH --time=02:30:00
 #SBATCH --mail-type=ALL
 #SBATCH --mail-user=ashandon@uci.edu
 #SBATCH --output=/dev/null
@@ -103,6 +103,13 @@ fi
 LOG_DIR="/pscratch/sd/a/ashandon/bed/BED_cosmo/${COSMO_EXP}/logs"
 mkdir -p "$LOG_DIR"
 
+# Capture all stdout/stderr into the same log file that torchrun uses.
+JOB_LOG="${LOG_DIR}/${SLURM_JOB_ID}_${SLURM_JOB_NAME}.log"
+touch "$JOB_LOG"
+exec > >(tee -a "$JOB_LOG") 2>&1
+
+echo "Logs will be written to: $JOB_LOG"
+
 # Get the directory where this script is located
 TRUNCATE_SCRIPT="/global/homes/a/ashandon/bed/BED_cosmo/scripts/truncate_metrics.py"
 
@@ -118,16 +125,16 @@ echo "--------------------------------------------"
 
 if [[ -f "$TRUNCATE_SCRIPT" ]]; then
     echo "Proceeding with metrics truncation..."
-    python3 "$TRUNCATE_SCRIPT" --run_id "$RESUME_ID" --resume_step "$RESUME_STEP" --cosmo_exp "$COSMO_EXP"
-    
-    if [[ $? -eq 0 ]]; then
+    if python3 "$TRUNCATE_SCRIPT" --run_id "$RESUME_ID" --resume_step "$RESUME_STEP" --cosmo_exp "$COSMO_EXP"; then
         echo "Metrics truncation completed successfully!"
     else
-        echo "Warning: Metrics truncation failed, but continuing with training resume..."
+        echo "Error: Metrics truncation failed. Aborting resume to avoid corrupt metrics."
+        exit 1
     fi
 else
-    echo "Warning: Truncate script not found at $TRUNCATE_SCRIPT"
-    echo "Continuing without metrics truncation..."
+    echo "Error: Truncate script not found at $TRUNCATE_SCRIPT"
+    echo "Aborting resume. Please ensure the truncate_metrics.py script is available."
+    exit 1
 fi
 
 echo ""
@@ -145,5 +152,4 @@ srun torchrun \
      --cosmo_exp $COSMO_EXP \
      --resume_id $RESUME_ID \
      --resume_step $RESUME_STEP \
-     "${EXTRA_ARGS[@]}" \
-     > "${LOG_DIR}/${SLURM_JOB_ID}_${SLURM_JOB_NAME}.log" 2>&1
+     "${EXTRA_ARGS[@]}"

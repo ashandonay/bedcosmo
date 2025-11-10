@@ -89,8 +89,10 @@ def plot_posterior(
     # This ensures text stays readable as plot size changes
     if isinstance(samples, list) and len(samples) > 0:
         n_params = len(samples[0].paramNames.names)
-        # Scale axis labels with plot width, accounting for parameter count
-        axis_label_fontsize = max(8, min(14, width_inch * 1.05 / np.sqrt(n_params)))
+        # Scale axis labels with plot width AND number of parameters
+        # More parameters = larger triangle plot = need larger fonts
+        # Use additive sqrt scaling with reduced coefficients for better balance
+        axis_label_fontsize = max(9, min(22, width_inch * (0.3 + 0.5 * np.sqrt(n_params))))
         # Apply to GetDist settings
         g.settings.axes_fontsize = axis_label_fontsize
         g.settings.axes_labelsize = axis_label_fontsize
@@ -1540,6 +1542,279 @@ def plot_lr_schedule(initial_lr, gamma, gamma_freq, steps=100000):
     plt.plot(steps, lr, label=legend_label)
 
     return lr[-1]
+
+def plot_designs_parallel_coords(run_id, cosmo_exp='num_tracers', alpha=0.6, linewidth=0.8, 
+                                 figsize=(12, 6), cmap='viridis', save_path=None,
+                                 color_dim=0, labels=None):
+    """
+    Plot design space using parallel coordinates.
+    
+    Each line represents one design point, connecting the 4 tracer fractions.
+    Lines are colored by the specified dimension index.
+    
+    Args:
+        run_id (str): MLflow run ID
+        cosmo_exp (str): Cosmology experiment name (default: 'num_tracers')
+        alpha (float): Transparency of lines (default: 0.6)
+        linewidth (float): Width of lines (default: 0.8)
+        figsize (tuple): Figure size (default: (12, 6))
+        cmap (str): Colormap for line colors (default: 'viridis')
+        save_path (str, optional): Path to save the figure. If None, displays the figure.
+        color_dim (int): Dimension index (0-3) to use for coloring lines. Default: 0
+        labels (tuple/list, optional): Custom labels for each dimension. If None, uses generic
+                                      labels like f_0, f_1, etc. Example: ('f_BGS', 'f_LRG', 'f_ELG', 'f_QSO')
+    
+    Returns:
+        fig: Matplotlib figure object
+    """
+    # Get run data to find exp_id
+    run_data_list, _, _ = get_runs_data(run_ids=run_id, cosmo_exp=cosmo_exp)
+    if not run_data_list:
+        raise ValueError(f"Run {run_id} not found in experiment {cosmo_exp}")
+    
+    run_data = run_data_list[0]
+    exp_id = run_data['exp_id']
+    run_obj = run_data['run_obj']
+    run_args = run_data['params']
+    device = "cuda:0"
+    experiment = init_experiment(
+        run_obj, run_args, device, 
+        design_args={}, global_rank=0
+    )
+    # Build path to designs.npy
+    storage_path = os.environ["SCRATCH"] + f"/bed/BED_cosmo/{cosmo_exp}"
+    designs_path = f"{storage_path}/mlruns/{exp_id}/{run_id}/artifacts/designs.npy"
+    
+    # Load designs
+    if not os.path.exists(designs_path):
+        raise FileNotFoundError(f"Designs file not found: {designs_path}")
+    
+    designs = np.load(designs_path)
+    
+    # Ensure designs is a numpy array
+    if not isinstance(designs, np.ndarray):
+        designs = np.array(designs)
+    
+    # Validate color_dim
+    if not isinstance(color_dim, int) or color_dim not in range(designs.shape[1]):
+        raise ValueError(f"color_dim must be an integer 0-{designs.shape[1]-1}, got {color_dim}")
+    
+    # Extract dimensions
+    n_dims = designs.shape[1]
+    dim_data = {i: designs[:, i] for i in range(n_dims)}
+    
+    # Get color dimension data
+    color_values = dim_data[color_dim]
+    
+    # Validate and set labels
+    if labels is not None:
+        if not isinstance(labels, (tuple, list)) or len(labels) != n_dims:
+            raise ValueError(f"labels must be a tuple/list of length {n_dims}, got {labels}")
+        # Use provided labels as-is (user can format with $ for LaTeX if desired)
+        axis_labels = list(labels)
+    else:
+        # Create generic labels
+        axis_labels = [f'$f_{i}$' for i in range(n_dims)]
+    
+    # Create figure
+    fig, ax = plt.subplots(figsize=figsize)
+    
+    # Parallel axes positions
+    x_positions = np.arange(n_dims)
+    
+    # Color by specified dimension values
+    color_min = color_values.min()
+    color_max = color_values.max()
+    
+    # Get colormap
+    colormap = plt.get_cmap(cmap)
+    # Normalize color values to [0, 1] for colormap
+    color_normalized = (color_values - color_min) / (color_max - color_min + 1e-10)
+    colors = colormap(color_normalized)
+    
+    # Plot lines for each design
+    for i in range(len(designs)):
+        values = [dim_data[j][i] for j in range(n_dims)]
+        ax.plot(x_positions, values, color=colors[i], alpha=alpha, linewidth=linewidth)
+    
+    ax.plot(x_positions, experiment.nominal_design.cpu().numpy(), color='black', alpha=1.0, linewidth=2, label='Nominal Design', zorder=3)
+
+    # Set axis properties
+    ax.set_xticks(x_positions)
+    ax.set_xticklabels(axis_labels, fontsize=12)
+    ax.set_ylabel('Tracer Fraction', fontsize=12)
+    ax.set_title(f'Design Space Displayed by Parallel Coordinates', fontsize=14, pad=5)
+    ax.grid(True, alpha=0.3, linestyle='--')
+    
+    # Set y-axis limits to show full range
+    all_values = np.concatenate([dim_data[j] for j in range(n_dims)])
+    y_min = all_values.min() * 0.5
+    y_max = all_values.max() * 1.1
+    ax.set_ylim(y_min, y_max)
+    
+    plt.tight_layout()
+    
+    # Save if path provided
+    if save_path:
+        _save_figure(fig, save_path, dpi=300)
+    
+    # Display figure in interactive environment
+    if _is_interactive_environment():
+        _display_figure(fig)
+    plt.close(fig)
+
+def plot_designs_3d(run_id, cosmo_exp='num_tracers', figsize=(10, 8), 
+                   cmap='viridis', s=60, alpha=0.8, save_path=None, 
+                   show_nominal=True, dim_mapping=(1, 2, 3, 0), labels=None):
+    """
+    Plot design space in 3D with customizable axis and color mappings.
+    
+    Creates a 3D scatter plot where you can specify which dimension maps to each axis and color.
+    
+    Args:
+        run_id (str): MLflow run ID
+        cosmo_exp (str): Cosmology experiment name (default: 'num_tracers')
+        figsize (tuple): Figure size (default: (10, 8))
+        cmap (str): Colormap for color dimension (default: 'viridis')
+        s (float): Size of scatter points (default: 60)
+        alpha (float): Transparency of points (default: 0.8)
+        save_path (str, optional): Path to save the figure. If None, displays the figure.
+        show_nominal (bool): Whether to show nominal design marker (default: True)
+        dim_mapping (tuple): Tuple of 4 indices (x_idx, y_idx, z_idx, color_idx) specifying which
+                           dimension (0-3) maps to x-axis, y-axis, z-axis, and color.
+                           Default: (1, 2, 3, 0) means x=dim1, y=dim2, z=dim3, color=dim0
+                           Example: (0, 1, 2, 3) means x=dim0, y=dim1, z=dim2, color=dim3
+                           Example: (1, 2, 0, 3) means x=dim1, y=dim2, z=dim0, color=dim3
+        labels (tuple/list, optional): Custom labels for each dimension. If None, uses generic
+                                      labels like f_0, f_1, etc. Example: ('f_BGS', 'f_LRG', 'f_ELG', 'f_QSO')
+    
+    Returns:
+        fig: Matplotlib figure object
+    """
+    # Get run data to find exp_id
+    run_data_list, _, _ = get_runs_data(run_ids=run_id, cosmo_exp=cosmo_exp)
+    if not run_data_list:
+        raise ValueError(f"Run {run_id} not found in experiment {cosmo_exp}")
+    
+    run_data = run_data_list[0]
+    exp_id = run_data['exp_id']
+    run_obj = run_data['run_obj']
+    run_args = run_data['params']
+    device = "cuda:0"
+    experiment = init_experiment(
+        run_obj, run_args, device, 
+        design_args={}, global_rank=0
+    )
+    
+    # Build path to designs.npy
+    storage_path = os.environ["SCRATCH"] + f"/bed/BED_cosmo/{cosmo_exp}"
+    designs_path = f"{storage_path}/mlruns/{exp_id}/{run_id}/artifacts/designs.npy"
+    
+    # Load designs
+    if not os.path.exists(designs_path):
+        raise FileNotFoundError(f"Designs file not found: {designs_path}")
+    
+    designs = np.load(designs_path)
+    
+    # Ensure designs is a numpy array
+    if not isinstance(designs, np.ndarray):
+        designs = np.array(designs)
+    
+    # Validate and extract dimension mapping
+    if not isinstance(dim_mapping, (tuple, list)) or len(dim_mapping) != 4:
+        raise ValueError(f"dim_mapping must be a tuple/list of 4 indices, got {dim_mapping}")
+    
+    x_idx, y_idx, z_idx, color_idx = dim_mapping
+    
+    # Validate indices are in range (will check against actual design dimensions later)
+    n_dims = designs.shape[1]
+    for idx, name in zip([x_idx, y_idx, z_idx, color_idx], ['x', 'y', 'z', 'color']):
+        if not isinstance(idx, int) or idx not in range(n_dims):
+            raise ValueError(f"{name}_idx must be an integer 0-{n_dims-1}, got {idx}")
+    
+    # Check that x, y, z axes are all different (color can match one of them)
+    axis_indices = [x_idx, y_idx, z_idx]
+    if len(set(axis_indices)) < 3:
+        raise ValueError(f"X, Y, and Z axes must be different. "
+                        f"Got: x_idx={x_idx}, y_idx={y_idx}, z_idx={z_idx}")
+    
+    # Extract dimension data
+    n_dims = designs.shape[1]
+    dim_data = {i: designs[:, i] for i in range(n_dims)}
+    
+    # Get data for each axis and color
+    x_data = dim_data[x_idx]
+    y_data = dim_data[y_idx]
+    z_data = dim_data[z_idx]
+    color_data = dim_data[color_idx]
+    
+    # Validate and set labels
+    if labels is not None:
+        if not isinstance(labels, (tuple, list)) or len(labels) != n_dims:
+            raise ValueError(f"labels must be a tuple/list of length {n_dims}, got {labels}")
+        # Use provided labels as-is (user can format with $ for LaTeX if desired)
+        dim_labels = list(labels)
+    else:
+        # Create generic labels
+        dim_labels = [f'$f_{i}$' for i in range(n_dims)]
+    
+    # Create 3D figure
+    fig = plt.figure(figsize=figsize)
+    ax_3d = fig.add_subplot(111, projection='3d')
+    
+    # Set colorbar limits
+    cbar_min = color_data.min()
+    cbar_max = color_data.max()
+    
+    # 3D scatter plot with customizable mappings
+    scatter_3d = ax_3d.scatter(x_data, y_data, z_data,
+                              c=color_data,
+                              cmap=cmap,
+                              s=s,
+                              alpha=alpha,
+                              marker='o',
+                              vmin=cbar_min,
+                              vmax=cbar_max)
+    
+    # Plot nominal design if requested
+    if show_nominal:
+        nominal_design = experiment.nominal_design.cpu().numpy()
+        # Nominal design should have same number of dimensions as designs
+        if len(nominal_design) == n_dims:
+            ax_3d.scatter(nominal_design[x_idx], nominal_design[y_idx], nominal_design[z_idx],
+                        c=nominal_design[color_idx],
+                        cmap=cmap,
+                        s=s*1.5,
+                        alpha=1.0,
+                        vmin=cbar_min,
+                        vmax=cbar_max,
+                        marker='*',
+                        label='Nominal Design',
+                        edgecolors='black',
+                        linewidths=1)
+            ax_3d.legend(fontsize=12)
+    
+    # Configure 3D plot - use fig.suptitle to center title on entire figure (including colorbar)
+    fig.suptitle('Design Space', fontsize=16, y=0.88)
+    ax_3d.set_xlabel(dim_labels[x_idx], fontsize=14)
+    ax_3d.set_ylabel(dim_labels[y_idx], fontsize=14)
+    ax_3d.set_zlabel(dim_labels[z_idx], fontsize=14)
+    ax_3d.grid(True, alpha=0.3)
+    
+    # Add colorbar
+    cbar = plt.colorbar(scatter_3d, ax=ax_3d, shrink=0.8, aspect=20)
+    cbar.set_label(dim_labels[color_idx], fontsize=14)
+    
+    plt.tight_layout(rect=[0, 0, 1, 0.96])  # Adjust top margin to accommodate suptitle
+    
+    # Save if path provided
+    if save_path:
+        _save_figure(fig, save_path, dpi=300)
+    
+    # Display figure in interactive environment
+    if _is_interactive_environment():
+        _display_figure(fig)
+    plt.close(fig)
 
 
 def save_figure(save_path, fig=None, close_fig=True, display_fig=True, dpi=300):

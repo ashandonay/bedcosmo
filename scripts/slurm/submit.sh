@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Helper script to validate arguments, load config defaults, and submit SLURM jobs
-# Usage: ./submit.sh <job_type> --cosmo_exp <value> --cosmo_model <value> [arguments...]
+# Usage: ./submit.sh <job_type> [cosmo_exp] [id] [arguments...]
 
 set -e  # Exit on error
 
@@ -12,7 +12,7 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 if [ $# -eq 0 ]; then
     echo "Error: Job type is required"
     echo ""
-    echo "Usage: ./submit.sh <job_type> --cosmo_exp <value> --cosmo_model <value> [arguments...]"
+    echo "Usage: ./submit.sh <job_type> [cosmo_exp] [model_or_id] [arguments...]"
     echo ""
     echo "Available job types:"
     echo "  train                - Training job"
@@ -29,13 +29,13 @@ if [ $# -eq 0 ]; then
     echo "for the specified cosmo_model. Command-line arguments will override YAML defaults."
     echo ""
     echo "Examples:"
-    echo "  ./submit.sh train --cosmo_exp num_tracers --cosmo_model base"
+    echo "  ./submit.sh train num_tracers base"
     echo "  ./submit.sh train --cosmo_exp num_tracers --cosmo_model base_w_wa --initial_lr 0.0001 --log_usage"
-    echo "  ./submit.sh debug --cosmo_exp num_tracers --cosmo_model base --profile"
-    echo "  ./submit.sh eval --cosmo_exp num_tracers --run_id abc123"
-    echo "  ./submit.sh resume --cosmo_exp num_tracers --resume_id abc123 --resume_step 5000 --log_usage"
-    echo "  ./submit.sh restart --cosmo_exp num_tracers --restart_id abc123 --restart_step 10000"
-    echo "  ./submit.sh restart --cosmo_exp num_tracers --restart_id abc123 --restart_checkpoint checkpoint_rank0_step10000.pt --restart_optimizer"
+    echo "  ./submit.sh debug num_tracers --cosmo_model base --profile"
+    echo "  ./submit.sh eval num_tracers abc123"
+    echo "  ./submit.sh resume num_tracers abc123 5000 --log_usage"
+    echo "  ./submit.sh restart num_tracers abc123 10000"
+    echo "  ./submit.sh restart num_tracers abc123 checkpoint_rank0_step10000.pt --restart_optimizer"
     echo ""
     echo "Optional flags: --log_usage, --profile (for train/debug/resume/restart)"
     echo "Restart-specific: --restart_checkpoint, --restart_optimizer"
@@ -48,6 +48,7 @@ JOB_TYPE=$1
 shift  # Remove job type from arguments
 
 # Initialize variables
+DEFAULT_COSMO_EXP="num_tracers"
 COSMO_EXP=""
 COSMO_MODEL=""
 RUN_ID=""
@@ -60,6 +61,7 @@ LOG_USAGE=false
 PROFILE=false
 RESTART_OPTIMIZER=false
 declare -A CLI_ARGS  # Associative array for command-line arguments
+POSITIONAL_ARGS=()
 
 # Parse named arguments
 while [[ $# -gt 0 ]]; do
@@ -122,26 +124,85 @@ while [[ $# -gt 0 ]]; do
             fi
             ;;
         *)
-            echo "Error: Unknown argument format: $1"
-            echo "Use --key value format for all arguments"
-            exit 1
+            POSITIONAL_ARGS+=("$1")
+            shift 1
             ;;
     esac
 done
 
+# Fill positional fallbacks where appropriate
+if [ -z "$COSMO_EXP" ] && [ ${#POSITIONAL_ARGS[@]} -gt 0 ]; then
+    COSMO_EXP="${POSITIONAL_ARGS[0]}"
+    POSITIONAL_ARGS=("${POSITIONAL_ARGS[@]:1}")
+fi
+
+case $JOB_TYPE in
+    eval)
+        if [ -z "$RUN_ID" ] && [ ${#POSITIONAL_ARGS[@]} -gt 0 ]; then
+            RUN_ID="${POSITIONAL_ARGS[0]}"
+            POSITIONAL_ARGS=("${POSITIONAL_ARGS[@]:1}")
+        fi
+        ;;
+    resume)
+        if [ -z "$RESUME_ID" ] && [ ${#POSITIONAL_ARGS[@]} -gt 0 ]; then
+            RESUME_ID="${POSITIONAL_ARGS[0]}"
+            POSITIONAL_ARGS=("${POSITIONAL_ARGS[@]:1}")
+        fi
+        if [ -z "$RESUME_STEP" ] && [ ${#POSITIONAL_ARGS[@]} -gt 0 ]; then
+            RESUME_STEP="${POSITIONAL_ARGS[0]}"
+            POSITIONAL_ARGS=("${POSITIONAL_ARGS[@]:1}")
+        fi
+        ;;
+    restart)
+        if [ -z "$RESTART_ID" ] && [ ${#POSITIONAL_ARGS[@]} -gt 0 ]; then
+            RESTART_ID="${POSITIONAL_ARGS[0]}"
+            POSITIONAL_ARGS=("${POSITIONAL_ARGS[@]:1}")
+        fi
+        if [ -z "$RESTART_STEP" ] && [ -z "$RESTART_CHECKPOINT" ] && [ ${#POSITIONAL_ARGS[@]} -gt 0 ]; then
+            candidate="${POSITIONAL_ARGS[0]}"
+            if [[ "$candidate" == *.pt ]] || [[ "$candidate" == *checkpoint* ]] || [[ "$candidate" == */* ]]; then
+                RESTART_CHECKPOINT="$candidate"
+            else
+                RESTART_STEP="$candidate"
+            fi
+            POSITIONAL_ARGS=("${POSITIONAL_ARGS[@]:1}")
+        fi
+        ;;
+    *)
+        # No additional positional handling required
+        ;;
+esac
+
+# Allow positional cosmo_model for job types that require it
+if [ -z "$COSMO_MODEL" ] && [ "$JOB_TYPE" != "eval" ] && [ "$JOB_TYPE" != "resume" ] && [ "$JOB_TYPE" != "restart" ] && [ ${#POSITIONAL_ARGS[@]} -gt 0 ]; then
+    COSMO_MODEL="${POSITIONAL_ARGS[0]}"
+    POSITIONAL_ARGS=("${POSITIONAL_ARGS[@]:1}")
+fi
+
+if [ -z "$COSMO_EXP" ]; then
+    COSMO_EXP="$DEFAULT_COSMO_EXP"
+fi
+
+if [ ${#POSITIONAL_ARGS[@]} -gt 0 ]; then
+    echo "Error: Unexpected positional arguments: ${POSITIONAL_ARGS[*]}"
+    echo "Usage: ./submit.sh $JOB_TYPE [cosmo_exp] [id] [additional args...]"
+    exit 1
+fi
+
 # Validate required arguments
 if [ -z "$COSMO_EXP" ]; then
-    echo "Error: --cosmo_exp is required"
-    echo "Usage: ./submit.sh $JOB_TYPE --cosmo_exp <value> --cosmo_model <value> [additional args...]"
+    echo "Error: cosmo_exp is required"
+    echo "Usage: ./submit.sh $JOB_TYPE [cosmo_exp] [cosmo_model] [additional args...]"
     exit 1
 fi
 
 # cosmo_model is NOT required for eval/resume/restart (inferred from MLflow run)
 if [ -z "$COSMO_MODEL" ] && [ "$JOB_TYPE" != "eval" ] && [ "$JOB_TYPE" != "resume" ] && [ "$JOB_TYPE" != "restart" ]; then
     echo "Error: --cosmo_model is required for $JOB_TYPE jobs"
-    echo "Usage: ./submit.sh $JOB_TYPE --cosmo_exp <value> --cosmo_model <value> [additional args...]"
+    echo "Usage: ./submit.sh $JOB_TYPE [cosmo_exp] [cosmo_model] [additional args...]"
     echo "Available models: base, base_omegak, base_w, base_w_wa, base_omegak_w_wa"
     echo ""
+    echo "Note: cosmo_model can be provided positionally after cosmo_exp."
     echo "Note: --cosmo_model is not needed for 'eval', 'resume', or 'restart' jobs (inferred from MLflow run)"
     exit 1
 fi
@@ -326,8 +387,8 @@ case $JOB_TYPE in
     eval)
         SCRIPT_FILE="eval.sh"
         if [ -z "$RUN_ID" ]; then
-            echo "Error: --run_id is required for eval"
-            echo "Usage: ./submit.sh eval --cosmo_exp <value> --run_id <value> [additional args...]"
+            echo "Error: run_id is required for eval"
+            echo "Usage: ./submit.sh eval [cosmo_exp] [run_id] [additional args...]"
             exit 1
         fi
         FINAL_ARGS=("--cosmo_exp" "$COSMO_EXP" "--run_id" "$RUN_ID" "${YAML_ARGS[@]}")
@@ -336,13 +397,13 @@ case $JOB_TYPE in
     resume)
         SCRIPT_FILE="resume.sh"
         if [ -z "$RESUME_ID" ]; then
-            echo "Error: --resume_id is required for resume"
-            echo "Usage: ./submit.sh resume --cosmo_exp <value> --resume_id <value> --resume_step <value> [additional args...]"
+            echo "Error: resume_id is required for resume"
+            echo "Usage: ./submit.sh resume [cosmo_exp] [resume_id] [resume_step] [additional args...]"
             exit 1
         fi
         if [ -z "$RESUME_STEP" ]; then
-            echo "Error: --resume_step is required for resume"
-            echo "Usage: ./submit.sh resume --cosmo_exp <value> --resume_id <value> --resume_step <value> [additional args...]"
+            echo "Error: resume_step is required for resume"
+            echo "Usage: ./submit.sh resume [cosmo_exp] [resume_id] [resume_step] [additional args...]"
             exit 1
         fi
         FINAL_ARGS=("--cosmo_exp" "$COSMO_EXP" "--resume_id" "$RESUME_ID" "--resume_step" "$RESUME_STEP" "${YAML_ARGS[@]}")
@@ -358,14 +419,14 @@ case $JOB_TYPE in
     restart)
         SCRIPT_FILE="restart.sh"
         if [ -z "$RESTART_ID" ]; then
-            echo "Error: --restart_id is required for restart"
-            echo "Usage: ./submit.sh restart --cosmo_exp <value> --restart_id <value> [--restart_step <value> | --restart_checkpoint <value>] [additional args...]"
+            echo "Error: restart_id is required for restart"
+            echo "Usage: ./submit.sh restart [cosmo_exp] [restart_id] [restart_step|restart_checkpoint] [additional args...]"
             exit 1
         fi
         # Either restart_step OR restart_checkpoint must be specified
         if [ -z "$RESTART_STEP" ] && [ -z "$RESTART_CHECKPOINT" ]; then
             echo "Error: Either --restart_step or --restart_checkpoint is required for restart"
-            echo "Usage: ./submit.sh restart --cosmo_exp <value> --restart_id <value> [--restart_step <value> | --restart_checkpoint <value>] [additional args...]"
+            echo "Usage: ./submit.sh restart [cosmo_exp] [restart_id] [restart_step|restart_checkpoint] [additional args...]"
             exit 1
         fi
         FINAL_ARGS=("--cosmo_exp" "$COSMO_EXP" "--restart_id" "$RESTART_ID")
@@ -424,7 +485,29 @@ if [ -n "$RESTART_STEP" ]; then
     echo "Restart step: $RESTART_STEP"
 fi
 echo ""
-echo "Final arguments (${#FINAL_ARGS[@]} args):"
+# Count actual number of arguments (each --key counts as 1, regardless of whether it has a value)
+arg_count=0
+i=0
+while [ $i -lt ${#FINAL_ARGS[@]} ]; do
+    arg="${FINAL_ARGS[$i]}"
+    if [[ "$arg" == --* ]]; then
+        arg_count=$((arg_count + 1))
+        if [ $((i+1)) -lt ${#FINAL_ARGS[@]} ]; then
+            next="${FINAL_ARGS[$((i+1))]}"
+            if [[ "$next" != --* ]]; then
+                i=$((i+2))
+            else
+                i=$((i+1))
+            fi
+        else
+            i=$((i+1))
+        fi
+    else
+        i=$((i+1))
+    fi
+done
+
+echo "Final arguments ($arg_count args):"
 # Print arguments in pairs for readability
 i=0
 while [ $i -lt ${#FINAL_ARGS[@]} ]; do

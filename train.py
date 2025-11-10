@@ -80,7 +80,6 @@ class Trainer:
         if self.global_rank == 0:
             print("MLFlow Run Info:", self.run_obj.info.experiment_id + "/" + self.run_obj.info.run_id)
             print(f"Using {self.run_args['n_devices']} devices with {self.run_args['n_particles']} total particles.")
-            print("Designs shape:", self.experiment.designs.shape)
             print(f'Input dim: {len(self.experiment.cosmo_params)}, Context dim: {self.experiment.context_dim}')
             print(f"Cosmology: {self.run_args['cosmo_model']}")
             print(f"Target labels: {self.experiment.cosmo_params}")

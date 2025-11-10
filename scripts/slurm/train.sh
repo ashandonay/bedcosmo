@@ -7,7 +7,7 @@
 #SBATCH --ntasks-per-node=1     # 1 primary Slurm task per node
 #SBATCH --cpus-per-task=128     # CPUs for all DDP workers on the node (e.g., 4 workers * 32 cpus/worker)
 #SBATCH --gpus-per-node=4       # Number of GPUs to request per node
-#SBATCH --time=11:30:00
+#SBATCH --time=06:00:00
 #SBATCH --mail-type=ALL
 #SBATCH --mail-user=ashandon@uci.edu
 #SBATCH --output=/dev/null
@@ -47,6 +47,13 @@ fi
 LOG_DIR="/pscratch/sd/a/ashandon/bed/BED_cosmo/${COSMO_EXP}/logs"
 mkdir -p "$LOG_DIR"
 
+# Capture all stdout/stderr in a single log file.
+JOB_LOG="${LOG_DIR}/${SLURM_JOB_ID}_${SLURM_JOB_NAME}.log"
+touch "$JOB_LOG"
+exec > >(tee -a "$JOB_LOG") 2>&1
+
+echo "Logs will be written to: $JOB_LOG"
+
 # Load conda first, then activate, then other GPU libraries
 module load conda
 conda activate bed-cosmo
@@ -85,5 +92,4 @@ srun torchrun \
      --rdzv_endpoint=$MASTER_ADDR:$MASTER_PORT \
      /global/homes/a/ashandon/bed/BED_cosmo/train.py \
      --cosmo_exp "$COSMO_EXP" \
-     "${EXTRA_ARGS[@]}" \
-     > "${LOG_DIR}/${SLURM_JOB_ID}_${SLURM_JOB_NAME}.log" 2>&1
+     "${EXTRA_ARGS[@]}"

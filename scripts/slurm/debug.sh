@@ -45,6 +45,13 @@ fi
 LOG_DIR="/pscratch/sd/a/ashandon/bed/BED_cosmo/${COSMO_EXP}/logs"
 mkdir -p "$LOG_DIR"
 
+# Capture all stdout/stderr in a single log file.
+JOB_LOG="${LOG_DIR}/${SLURM_JOB_ID}_${SLURM_JOB_NAME}.log"
+touch "$JOB_LOG"
+exec > >(tee -a "$JOB_LOG") 2>&1
+
+echo "Logs will be written to: $JOB_LOG"
+
 # Load conda first, then activate, then other GPU libraries
 module load conda
 conda activate bed-cosmo
@@ -84,5 +91,4 @@ srun torchrun \
      /global/homes/a/ashandon/bed/BED_cosmo/train.py \
      --cosmo_exp "$COSMO_EXP" \
      "${EXTRA_ARGS[@]}" \
-     --mlflow_exp debug \
-     > "${LOG_DIR}/${SLURM_JOB_NAME}_${SLURM_JOB_ID}.log" 2>&1
+     --mlflow_exp debug

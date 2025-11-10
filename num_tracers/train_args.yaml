@@ -6,25 +6,28 @@ base:
   mlflow_exp: base
   pyro_seed: 1
   nf_seed: 1
-  priors_path: num_tracers/priors.yaml
+  priors_path: num_tracers/priors_hrdrag.yaml
   data_path: data/desi/tracers_v3/
   flow_type: NAF
-  transform_input: true
+  transform_input: false
   activation: elu
-  n_transforms: 6
-  cond_hidden_size: 512
-  cond_n_layers: 8
-  mnn_hidden_size: 512
-  mnn_n_layers: 6
+  n_transforms: 4
+  cond_hidden_size: 128
+  cond_n_layers: 4
+  mnn_hidden_size: 128
+  mnn_n_layers: 4
   mnn_signal: 64
   nf_transform: affine
   spline_bins: 20
   fixed_design: false
-  design_step: [0.025, 0.05, 0.05, 0.025]
-  design_lower: [0.025, 0.1, 0.1, 0.1]
+  design_step: [0.01, 0.02, 0.02, 0.01]
+  design_lower: [0.02, 0.1, 0.1, 0.1]
+  design_upper: [0.0585, 0.3820, 0.5, 0.3291]
+  design_sum_lower: 1.0
+  design_sum_upper: 1.0
   total_steps: 100000
   optimizer: Adam
-  initial_lr: 0.0005
+  initial_lr: 0.01
   final_lr: 0.0
   grad_clip: 0.0
   warmup_fraction: 0.05
@@ -33,7 +36,7 @@ base:
   gamma: 0.1
   step_freq: 1
   checkpoint_step_freq: 2000
-  n_particles_per_device: 101
+  n_particles_per_device: 201
   verbose: true
   log_nominal_area: true
   include_D_M: true
@@ -49,20 +52,23 @@ base_omegak:
   flow_type: NAF
   transform_input: true
   activation: elu
-  n_transforms: 8
+  n_transforms: 6
   cond_hidden_size: 512
   cond_n_layers: 8
   mnn_hidden_size: 512
-  mnn_n_layers: 8
+  mnn_n_layers: 6
   mnn_signal: 64
   nf_transform: affine
   spline_bins: 20
   fixed_design: false
-  design_step: [0.025, 0.05, 0.05, 0.025]
-  design_lower: [0.025, 0.1, 0.1, 0.1]
-  total_steps: 120000
+  design_step: [0.01, 0.02, 0.02, 0.01]
+  design_lower: [0.02, 0.1, 0.1, 0.1]
+  design_upper: [0.0585, 0.3820, 0.5, 0.3291]
+  design_sum_lower: 1.0
+  design_sum_upper: 1.0
+  total_steps: 100000
   optimizer: Adam
-  initial_lr: 0.0008
+  initial_lr: 0.0005
   final_lr: 0.0
   grad_clip: 0.0
   warmup_fraction: 0.05
@@ -87,20 +93,23 @@ base_w:
   flow_type: NAF
   transform_input: true
   activation: elu
-  n_transforms: 8
+  n_transforms: 6
   cond_hidden_size: 512
   cond_n_layers: 8
   mnn_hidden_size: 512
-  mnn_n_layers: 8
+  mnn_n_layers: 6
   mnn_signal: 64
   nf_transform: affine
   spline_bins: 20
   fixed_design: false
-  design_step: [0.025, 0.05, 0.05, 0.025]
-  design_lower: [0.025, 0.1, 0.1, 0.1]
-  total_steps: 120000
+  design_step: [0.01, 0.02, 0.02, 0.01]
+  design_lower: [0.02, 0.1, 0.1, 0.1]
+  design_upper: [0.0585, 0.3820, 0.5, 0.3291]
+  design_sum_lower: 1.0
+  design_sum_upper: 1.0
+  total_steps: 100000
   optimizer: Adam
-  initial_lr: 0.0008
+  initial_lr: 0.0005
   final_lr: 0.0
   grad_clip: 0.0
   warmup_fraction: 0.05
@@ -125,18 +134,21 @@ base_w_wa:
   flow_type: NAF
   transform_input: true
   activation: elu
-  n_transforms: 10
+  n_transforms: 6
   cond_hidden_size: 512
-  cond_n_layers: 10
+  cond_n_layers: 8
   mnn_hidden_size: 512
-  mnn_n_layers: 10
+  mnn_n_layers: 6
   mnn_signal: 64
   nf_transform: affine
   spline_bins: 20
   fixed_design: false
-  design_step: [0.025, 0.05, 0.05, 0.025]
-  design_lower: [0.025, 0.1, 0.1, 0.1]
-  total_steps: 150000
+  design_step: [0.01, 0.02, 0.02, 0.01]
+  design_lower: [0.02, 0.1, 0.1, 0.1]
+  design_upper: [0.0585, 0.3820, 0.5, 0.3291]
+  design_sum_lower: 1.0
+  design_sum_upper: 1.0
+  total_steps: 100000
   optimizer: Adam
   initial_lr: 0.0005
   final_lr: 0.0
@@ -147,7 +159,7 @@ base_w_wa:
   gamma: 0.1
   step_freq: 1
   checkpoint_step_freq: 2000
-  n_particles_per_device: 101
+  n_particles_per_device: 31
   verbose: true
   log_nominal_area: true
   include_D_M: true
@@ -163,29 +175,32 @@ base_omegak_w_wa:
   flow_type: NAF
   transform_input: true
   activation: elu
-  n_transforms: 12
+  n_transforms: 6
   cond_hidden_size: 512
-  cond_n_layers: 12
+  cond_n_layers: 8
   mnn_hidden_size: 512
-  mnn_n_layers: 12
+  mnn_n_layers: 6
   mnn_signal: 64
   nf_transform: affine
   spline_bins: 20
   fixed_design: false
-  design_step: [0.025, 0.05, 0.05, 0.025]
-  design_lower: [0.025, 0.1, 0.1, 0.1]
-  total_steps: 200000
+  design_step: [0.01, 0.02, 0.02, 0.01]
+  design_lower: [0.02, 0.1, 0.1, 0.1]
+  design_upper: [0.0585, 0.3820, 0.5, 0.3291]
+  design_sum_lower: 1.0
+  design_sum_upper: 1.0
+  total_steps: 100000
   optimizer: Adam
   initial_lr: 0.0005
   final_lr: 0.0
   grad_clip: 0.0
-  warmup_fraction: 0.08
+  warmup_fraction: 0.05
   scheduler_type: cosine
   n_cycles: 1
   gamma: 0.1
   step_freq: 1
   checkpoint_step_freq: 2000
-  n_particles_per_device: 101
+  n_particles_per_device: 30
   verbose: true
   log_nominal_area: true
   include_D_M: true

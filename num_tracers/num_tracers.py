@@ -207,7 +207,7 @@ class NumTracers:
         global_rank=0, 
         transform_input=False,
         device="cuda:0",
-        mode='eval',
+        mode='train',
         verbose=False,
         profile=False
     ):
@@ -288,13 +288,6 @@ class NumTracers:
             fixed_design=fixed_design, step_size=design_step, range_lower=design_lower, 
             range_upper=design_upper, sum_lower=design_sum_lower, sum_upper=design_sum_upper
             )
-        if self.global_rank == 0 and self.verbose:
-            print(f"tracer_bins: {self.tracer_bins}\n",
-                f"sigmas: {self.sigmas}\n",
-                f"nominal_design: {self.nominal_design}\n",
-                f"nominal_passed: {self.nominal_passed_ratio}")
-            if fixed_design:
-                print(f"fixed design (nominal default): {self.designs}" if fixed_design is True else f"fixed design: {self.designs}")
 
     @profile_method
     def init_designs(self, fixed_design=False, step_size=0.05, range_lower=0.05, range_upper=None, sum_lower=1.0, sum_upper=1.0, tol=1e-3):
@@ -359,14 +352,6 @@ class NumTracers:
                 upper_limits = range_upper
             else:
                 raise ValueError("range_upper must be a float or list")
-            
-            if self.global_rank == 0 and self.verbose:
-                print(
-                    f"Designs initialized with the following parameters:\n",
-                    f"step size: {step_size}\n",
-                    f"lower range: {lower_limits}\n",
-                    f"upper range: {upper_limits}\n"
-                    )
                 
             designs_dict = {
                 f'N_{target}': np.arange(
@@ -418,6 +403,17 @@ class NumTracers:
                 
         self.designs = designs.to(self.device)
 
+        if self.global_rank == 0 and self.verbose:
+            print(
+                f"Designs initialized with the following parameters:\n",
+                f"step size: {step_size}\n",
+                f"lower range: {range_lower}\n",
+                f"upper range: {range_upper}\n"
+                )
+            print(f"Designs shape: {self.designs.shape}")
+            if fixed_design:
+                print(f"Fixed design (nominal default): {self.designs}" if fixed_design is True else f"Fixed design: {self.designs}")
+            print(f"Nominal design: {self.nominal_design}\n")
     def design_plot(self):
         """
         Plot the design variables in 3D with the 4th dimension (QSO) as color
