@@ -43,7 +43,6 @@ import yaml
 import argparse
 import traceback
 from plotting import get_contour_area, plot_training, save_figure, plot_posterior
-import getdist.mcsamples
 
 class Trainer:
     def __init__(self, cosmo_exp, mlflow_exp, run_args, device=None, profile=False, verbose=False):
@@ -112,13 +111,6 @@ class Trainer:
         self._init_scheduler()
         self._init_dataloader()
         
-        # Only plot initial samples for fresh runs
-        if self.checkpoint is None:
-            with torch.no_grad():
-                samples = self.posterior_flow.module(self.experiment.nominal_context).sample((1000,)).cpu().numpy()
-                plt.figure()
-                plt.plot(samples.squeeze()[:, 0], samples.squeeze()[:, 1], 'o', alpha=0.5)
-                plt.savefig(f"{self.run_path}/artifacts/plots/rank_{self.global_rank}/init_samples.png")
 
     @profile_method
     def run(self):
@@ -343,17 +335,23 @@ class Trainer:
         
         # Final memory logging
         if "LOCAL_RANK" in os.environ:
-            # Synchronize all ranks before ending MLflow runs
+            # Synchronize all ranks before cleanup
             tdist.barrier()
-            # End MLflow run for all ranks
-            mlflow.end_run()
             tdist.destroy_process_group()
             if self.global_rank == 0:
-                runtime = get_runtime(self.run_obj.info.run_id)
-                hours = int(runtime.total_seconds() // 3600)
-                minutes = int((runtime.total_seconds() % 3600) // 60)
-                seconds = int(runtime.total_seconds() % 60)
-                print(f"Total active training time: {hours}h {minutes}m {seconds}s")
+                try:
+                    mlflow.end_run()
+                except Exception as e:
+                    print(f"Warning: Error ending MLflow run: {e}")
+                    print("Run may have been corrupted, but training completed successfully.")
+                try:
+                    runtime = get_runtime(self.run_obj.info.run_id)
+                    hours = int(runtime.total_seconds() // 3600)
+                    minutes = int((runtime.total_seconds() % 3600) // 60)
+                    seconds = int(runtime.total_seconds() % 60)
+                    print(f"Total active training time: {hours}h {minutes}m {seconds}s")
+                except Exception as e:
+                    print(f"Warning: Could not retrieve runtime: {e}")
             
     @profile_method
     def save_checkpoint(self, filepath, step=None, artifact_path=None, scheduler=None, additional_state=None, global_rank=None):
