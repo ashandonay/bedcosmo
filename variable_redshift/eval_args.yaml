@@ -1,5 +1,19 @@
 # Evaluation arguments for variable_redshift experiment
 # Organized by cosmological model
+base_om:
+  cosmo_model: base_om
+  eval_step: last
+  levels: 0.68
+  guide_samples: 50000
+  n_particles: 10001
+  n_evals: 50
+  param_space: physical
+  design_step: 0.05
+  design_lower: 0.2
+  design_upper: 2.5
+  design_chunk_size: 5
+  profile: true
+  verbose: true
 
 base:
   cosmo_model: base
@@ -7,6 +21,7 @@ base:
   levels: 0.68
   guide_samples: 50000
   n_particles: 10001
+  n_evals: 50
   param_space: physical
   design_step: 0.05
   design_lower: 0.2
@@ -21,6 +36,7 @@ base_omegak:
   levels: 0.68
   guide_samples: 60000
   n_particles: 5001
+  n_evals: 50
   param_space: physical
   design_step: 0.1
   design_lower: 0.2
@@ -35,6 +51,7 @@ base_w:
   levels: 0.68
   guide_samples: 60000
   n_particles: 5001
+  n_evals: 50
   param_space: physical
   design_step: 0.1
   design_lower: 0.2
@@ -49,6 +66,7 @@ base_w_wa:
   levels: 0.68
   guide_samples: 80000
   n_particles: 5001
+  n_evals: 50
   param_space: physical
   design_step: 0.1
   design_lower: 0.2
@@ -63,6 +81,7 @@ base_omegak_w_wa:
   levels: 0.68
   guide_samples: 100000
   n_particles: 5001
+  n_evals: 50
   param_space: physical
   design_step: 0.1
   design_lower: 0.2

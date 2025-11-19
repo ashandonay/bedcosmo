@@ -1,16 +1,16 @@
 # Training arguments for variable_redshift experiment
 # Organized by cosmological model
 
-base:
-  cosmo_model: base
-  mlflow_exp: base
+base_om:
+  cosmo_model: base_om
+  mlflow_exp: base_om
   pyro_seed: 1
   nf_seed: 1
   priors_path: variable_redshift/priors.yaml
   flow_type: MAF
   transform_input: true
   activation: elu
-  n_transforms: 5
+  n_transforms: 4
   cond_hidden_size: 256
   cond_n_layers: 4
   mnn_hidden_size: 256
@@ -20,11 +20,11 @@ base:
   spline_bins: 16
   fixed_design: false
   design_step: 0.1
-  design_lower: 0.2
-  design_upper: 2.5
+  design_lower: 0.0
+  design_upper: 4.0
   sigma_D_H: 0.2
   sigma_D_M: 0.2
-  total_steps: 50000
+  total_steps: 20000
   optimizer: Adam
   initial_lr: 0.0001
   final_lr: 0.0
@@ -39,6 +39,44 @@ base:
   include_D_M: false
   verbose: true
 
+base:
+  cosmo_model: base
+  mlflow_exp: base
+  pyro_seed: 1
+  nf_seed: 1
+  priors_path: variable_redshift/priors.yaml
+  flow_type: MAF
+  transform_input: true
+  activation: elu
+  n_transforms: 4
+  cond_hidden_size: 256
+  cond_n_layers: 4
+  mnn_hidden_size: 256
+  mnn_n_layers: 4
+  mnn_signal: 32
+  nf_transform: affine
+  spline_bins: 16
+  fixed_design: false
+  design_step: 0.1
+  design_lower: 0.1
+  design_upper: 3.5
+  sigma_D_H: 0.2
+  sigma_D_M: 0.2
+  total_steps: 50000
+  optimizer: Adam
+  initial_lr: 0.0001
+  final_lr: 0.0
+  grad_clip: 0.0
+  warmup_fraction: 0.05
+  scheduler_type: cosine
+  n_cycles: 1
+  gamma: 0.1
+  step_freq: 1
+  checkpoint_step_freq: 1000
+  n_particles_per_device: 201
+  include_D_M: true
+  verbose: true
+
 base_omegak:
   cosmo_model: base_omegak
   mlflow_exp: base_omegak
@@ -48,7 +86,7 @@ base_omegak:
   flow_type: MAF
   transform_input: true
   activation: elu
-  n_transforms: 6
+  n_transforms: 4
   cond_hidden_size: 256
   cond_n_layers: 5
   mnn_hidden_size: 256
@@ -58,8 +96,8 @@ base_omegak:
   spline_bins: 16
   fixed_design: false
   design_step: 0.1
-  design_lower: 0.5
-  design_upper: 5.0
+  design_lower: 0.0
+  design_upper: 4.0
   sigma_D_H: 0.2
   sigma_D_M: 0.2
   total_steps: 50000
@@ -83,10 +121,10 @@ base_w:
   pyro_seed: 1
   nf_seed: 1
   priors_path: variable_redshift/priors.yaml
-  flow_type: NAF
+  flow_type: MAF
   transform_input: true
   activation: elu
-  n_transforms: 6
+  n_transforms: 4
   cond_hidden_size: 256
   cond_n_layers: 5
   mnn_hidden_size: 256
@@ -96,8 +134,8 @@ base_w:
   spline_bins: 16
   fixed_design: false
   design_step: 0.1
-  design_lower: 0.5
-  design_upper: 5.0
+  design_lower: 0.0
+  design_upper: 4.0
   sigma_D_H: 0.2
   sigma_D_M: 0.2
   total_steps: 60000
@@ -111,7 +149,7 @@ base_w:
   gamma: 0.1
   step_freq: 1
   checkpoint_step_freq: 1000
-  n_particles_per_device: 101
+  n_particles_per_device: 201
   include_D_M: false
   verbose: true
 
@@ -121,10 +159,10 @@ base_w_wa:
   pyro_seed: 1
   nf_seed: 1
   priors_path: variable_redshift/priors.yaml
-  flow_type: NAF
+  flow_type: MAF
   transform_input: true
   activation: elu
-  n_transforms: 8
+  n_transforms: 4
   cond_hidden_size: 256
   cond_n_layers: 6
   mnn_hidden_size: 256
@@ -134,13 +172,13 @@ base_w_wa:
   spline_bins: 16
   fixed_design: false
   design_step: 0.1
-  design_lower: 0.5
-  design_upper: 5.0
+  design_lower: 0.0
+  design_upper: 4.0
   sigma_D_H: 0.2
   sigma_D_M: 0.2
-  total_steps: 80000
+  total_steps: 50000
   optimizer: Adam
-  initial_lr: 0.00008
+  initial_lr: 0.0001
   final_lr: 0.0
   grad_clip: 0.0
   warmup_fraction: 0.05
@@ -149,7 +187,7 @@ base_w_wa:
   gamma: 0.1
   step_freq: 1
   checkpoint_step_freq: 1000
-  n_particles_per_device: 101
+  n_particles_per_device: 201
   include_D_M: false
   verbose: true
 
@@ -159,35 +197,35 @@ base_omegak_w_wa:
   pyro_seed: 1
   nf_seed: 1
   priors_path: variable_redshift/priors.yaml
-  flow_type: NAF
+  flow_type: MAF
   transform_input: true
   activation: elu
-  n_transforms: 10
+  n_transforms: 4
   cond_hidden_size: 256
-  cond_n_layers: 8
+  cond_n_layers: 6
   mnn_hidden_size: 256
-  mnn_n_layers: 8
+  mnn_n_layers: 6
   mnn_signal: 32
   nf_transform: affine
   spline_bins: 16
   fixed_design: false
   design_step: 0.1
-  design_lower: 0.5
-  design_upper: 5.0
+  design_lower: 0.0
+  design_upper: 4.0
   sigma_D_H: 0.2
   sigma_D_M: 0.2
-  total_steps: 100000
+  total_steps: 50000
   optimizer: Adam
-  initial_lr: 0.00008
+  initial_lr: 0.0001
   final_lr: 0.0
   grad_clip: 0.0
-  warmup_fraction: 0.08
+  warmup_fraction: 0.05
   scheduler_type: cosine
   n_cycles: 1
   gamma: 0.1
   step_freq: 1
   checkpoint_step_freq: 1000
-  n_particles_per_device: 101
+  n_particles_per_device: 201
   include_D_M: false
   verbose: true
 

@@ -1,4 +1,8 @@
 # Cosmology model configurations for variable_redshift experiment
+base_om:
+  parameters: ["Om"]
+  latex_labels: ["\\Omega_m"]
+
 base:
   parameters: ["Om", "hrdrag"]
   latex_labels: ["\\Omega_m", "H_0r_d"]

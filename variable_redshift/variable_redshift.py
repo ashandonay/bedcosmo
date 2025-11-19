@@ -224,8 +224,29 @@ class VariableRedshift:
         self.H0 = Planck18.H0.value
         self.c = constants.c.to('km/s').value
         self.coeff = self.c / (self.H0 * self.rdrag)
-        
         self.include_D_M = include_D_M
+
+        if os.path.exists(os.path.join(home_dir, "data", "variable_error.csv")):
+            print(f"Loading variable error from {os.path.join(home_dir, 'data', 'variable_error.csv')}")
+            self.variable_error_df = pd.read_csv(os.path.join(home_dir, "data", "variable_error.csv"))
+            self.variable_error = {
+                'z': torch.tensor(
+                    self.variable_error_df['z'].values,
+                    device=self.device,
+                    dtype=torch.float64
+                ),
+                'D_H': torch.tensor(
+                    self.variable_error_df['DH_errors'].values,
+                    device=self.device,
+                    dtype=torch.float64
+                )
+            }
+            if self.include_D_M:
+                self.variable_error['D_M'] = torch.tensor(
+                    self.variable_error_df['DM_errors'].values,
+                    device=self.device,
+                    dtype=torch.float64
+                )
         self.sigma_D_H = sigma_D_H
         self.sigma_D_M = sigma_D_M
         
@@ -378,8 +399,37 @@ class VariableRedshift:
             
             if 'multiplier' in param_config.keys():
                 setattr(self, f'{param_name}_multiplier', float(param_config['multiplier']))
+        if 'hrdrag' not in model_parameters:
+            setattr(self, 'hrdrag_multiplier', 100.0)
 
         return priors, param_constraints, latex_labels
+
+    def error_func(self, z, D_H, D_M=None):
+        if hasattr(self, 'variable_error'):
+            z_tensor = torch.as_tensor(z, device=self.device, dtype=torch.float64)
+            D_H_scale = _interp1(
+                self.variable_error['z'],
+                self.variable_error['D_H'],
+                z_tensor
+            ).to(dtype=D_H.dtype)
+            D_H_error = D_H * D_H_scale
+
+            if self.include_D_M:
+                D_M_scale = _interp1(
+                    self.variable_error['z'],
+                    self.variable_error['D_M'],
+                    z_tensor
+                ).to(dtype=D_M.dtype)
+                D_M_error = D_M * D_M_scale
+                return D_H_error, D_M_error
+
+            return D_H_error
+        else:
+            sigma_D_H_tensor = torch.tensor(self.sigma_D_H, device=self.device)
+            if self.include_D_M:
+                sigma_D_M_tensor = torch.tensor(self.sigma_D_M, device=self.device)
+                return sigma_D_H_tensor, sigma_D_M_tensor
+            return sigma_D_H_tensor
 
     @profile_method
     def _compute_central_values(self):
@@ -556,11 +606,11 @@ class VariableRedshift:
                 return t
             return t.view(*([1]*len(plate)), 1).expand(plate + (1,))
 
-        Om     = to_plate1(Om)
-        Ok     = to_plate1(0.0 if Ok is None else Ok)
-        w0     = to_plate1(-1.0 if w0 is None else w0)
-        wa     = to_plate1( 0.0 if wa is None else wa)
-        hrdrag = to_plate1(hrdrag)
+        Om = to_plate1(Om)
+        Ok = to_plate1(0.0 if Ok is None else Ok)
+        w0 = to_plate1(-1.0 if w0 is None else w0)
+        wa = to_plate1( 0.0 if wa is None else wa)
+        hrdrag = to_plate1(99.079 if hrdrag is None else hrdrag)
 
         h_t  = None if h is None else torch.as_tensor(h, device=dev, dtype=DTYPE)
         Tcmb = torch.as_tensor(T_cmb, device=dev, dtype=DTYPE)
@@ -642,7 +692,7 @@ class VariableRedshift:
         Ok = to_plate1(0.0 if Ok is None else Ok)
         w0 = to_plate1(-1.0 if w0 is None else w0)
         wa = to_plate1( 0.0 if wa is None else wa)
-        hrdrag = to_plate1(hrdrag)
+        hrdrag = to_plate1(99.079 if hrdrag is None else hrdrag)
 
         # ---- targets in z / ln a ----
         z_eff = torch.as_tensor(z_eff, device=dev, dtype=DTYPE)
@@ -782,18 +832,19 @@ class VariableRedshift:
             D_H_mean = self.D_H_func(z, **parameters)
             if self.include_D_M:
                 D_M_mean = self.D_M_func(z, **parameters)
-                # Concatenate D_H and D_M along last dimension: shape becomes [batch, num_designs, 2]
-                means = torch.cat([D_H_mean, D_M_mean], dim=-1)
-                
-                # Create diagonal covariance matrix
-                sigmas = torch.tensor([self.sigma_D_H, self.sigma_D_M], device=self.device)
-                covariance_matrix = torch.diag(sigmas ** 2)
+                means = torch.cat([D_H_mean, D_M_mean], dim=-1) # [batch, num_designs, 2]
+
+                # Compute errors for covariance matrix
+                D_H_error, D_M_error = self.error_func(z, D_H_mean, D_M_mean)
+                sigmas = torch.cat([D_H_error, D_M_error], dim=-1)
             else:
                 means = D_H_mean
-                
-                sigmas = torch.tensor([self.sigma_D_H], device=self.device)
-                covariance_matrix = torch.diag(sigmas ** 2)
-            
+
+                # Compute error for covariance matrix
+                D_H_error = self.error_func(z, D_H_mean)
+                sigmas = D_H_error
+
+            covariance_matrix = torch.diag_embed(sigmas ** 2)
             # Sample from MultivariateNormal
             return pyro.sample(self.observation_labels[0], dist.MultivariateNormal(means, covariance_matrix))
                 
