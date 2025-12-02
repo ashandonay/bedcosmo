@@ -3,10 +3,11 @@ import os
 import contextlib
 import io
 import json
+import gc
+import pickle
 import matplotlib
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
-from functools import partial
 import time
 parent_dir = os.path.abspath(os.path.join(os.getcwd(), os.pardir))
 if parent_dir not in sys.path:
@@ -16,13 +17,9 @@ base_dir = os.environ["HOME"] + '/bed/BED_cosmo'
 if base_dir not in sys.path:
     sys.path.insert(0, base_dir)
     
-from pyro import distributions as dist
 import numpy as np
 import torch
-import pandas as pd
 import getdist
-from getdist import plots
-from bed.grid import Grid
 import argparse
 from plotting import *
 import traceback
@@ -31,16 +28,20 @@ from matplotlib.patches import Rectangle
 from util import *
 import mlflow
 import inspect
-from mlflow.tracking import MlflowClient
 
 class Evaluator:
     def __init__(
             self, run_id, guide_samples=1000, design_step=0.05, design_lower=0.05, design_upper=None,
-            design_chunk_size=None, seed=1, cosmo_exp='num_tracers', levels=[0.68, 0.95], global_rank=0, 
+            design_chunk_size=None, seed=1, cosmo_exp='num_tracers', levels=[0.68, 0.95], global_rank=0, eig_file_path=None,
             n_evals=10, n_particles=1000, param_space='physical', fixed_design=None, design_sum_lower=1.0, design_sum_upper=1.0,
-            display_run=False, verbose=False, device="cuda:0", profile=False
+            display_run=False, verbose=False, device="cuda:0", profile=False, sort=True, include_nominal=False, batch_size=1,
+            particle_batch_size=None
             ):
         self.cosmo_exp = cosmo_exp
+        
+        # Store seed parameter for later use (may be overridden by eig_file_path)
+        self.seed = seed
+        
         # Set MLflow tracking URI based on cosmo_exp
         mlflow.set_tracking_uri("file:" + os.environ["SCRATCH"] + f"/bed/BED_cosmo/{self.cosmo_exp}/mlruns")
         
@@ -58,22 +59,33 @@ class Evaluator:
         self.exp_id = run_data['exp_id']
         self.storage_path = os.environ["SCRATCH"] + f"/bed/BED_cosmo/{self.cosmo_exp}"
         self.save_path = f"{self.storage_path}/mlruns/{self.exp_id}/{self.run_id}/artifacts"
+        
+        self.n_evals = n_evals
+        self.n_particles = n_particles
+        self.particle_batch_size = particle_batch_size
+        self.seed = seed
+        # Load eig_file_path early if provided, to get the seed that was used previously
+        # This ensures we use the same seed for reproducibility
+        self.eig_file_path = eig_file_path
+        self._init_eig_data()
+        
+        # Set seed NOW before any operations that might use randomness (like init_experiment)
+        auto_seed(self.seed)
         self.guide_samples = guide_samples
         # Normalize levels to always be a list
         if isinstance(levels, (int, float)):
             self.levels = [levels]
         else:
             self.levels = levels
-        self.seed = seed
-        auto_seed(self.seed) # fix random seed
         self.device = device
         self.global_rank = global_rank
-        self.n_evals = n_evals
-        self.n_particles = n_particles
         self.display_run = display_run
         self.verbose = verbose
         self.profile = profile
         self.design_chunk_size = design_chunk_size  # Number of designs per chunk (None = use all)
+        self.sort = sort
+        self.include_nominal = include_nominal
+        self.batch_size = batch_size  # Batch size for sample_posterior to reduce memory usage
         
         # Store design arguments
         self.design_args = {
@@ -106,11 +118,6 @@ class Evaluator:
         
         # Cache for EIG calculations to avoid redundant computations
         self._eig_cache = {}
-        
-        # Initialize eig_data to be populated throughout evaluation
-        self.eig_data = {}
-        self.eig_data['n_evals'] = int(self.n_evals)
-        self.eig_data['n_particles'] = int(self.n_particles)
 
         self.param_space = param_space
         if self.param_space == 'physical':
@@ -141,6 +148,43 @@ class Evaluator:
         seconds = int(session_runtime % 60)
         print(f"Evaluation runtime: {hours}h {minutes}m {seconds}s")
 
+    def _init_eig_data(self):
+        if self.eig_file_path is not None:
+            with open(self.eig_file_path, 'r') as f:
+                self.loaded_eig_data = json.load(f)
+            self.eig_data = self.loaded_eig_data
+            # Override seed from loaded data to ensure reproducibility
+            self.seed = self.eig_data.get('seed', self.seed)
+            self.n_particles = self.eig_data.get('n_particles', self.n_particles)
+            self.particle_batch_size = self.eig_data.get('particle_batch_size', self.particle_batch_size)
+            self.n_evals = self.eig_data.get('n_evals', self.n_evals)
+            self.restore_path = self.eig_data.get('rng_state_path', None)
+            print(f"Loaded EIG data from {self.eig_file_path} using seed {self.seed} from file")
+        else:
+            self.eig_data = {}
+            self.loaded_eig_data = {}
+            self.eig_data['seed'] = self.seed
+            self.eig_data['n_evals'] = int(self.n_evals)
+            self.eig_data['n_particles'] = int(self.n_particles)
+            self.eig_data['particle_batch_size'] = int(self.particle_batch_size)
+            self.restore_path = None
+
+    def _save_rng_state(self):
+        # Save RNG state after each evaluation for resuming capability
+        # This allows us to restore the exact random state when continuing from a partial evaluation
+        # Save only the latest RNG state (overwrite previous) to avoid accumulating too many files
+        rng_state = get_rng_state()
+        rng_state_path = f"{self.save_path}/eval_rng_state_{getattr(self, 'timestamp', None)}.pkl"
+        if 'rng_state_path' not in self.eig_data and os.path.exists(rng_state_path):
+            self.eig_data['rng_state_path'] = rng_state_path
+
+        try:
+            with open(rng_state_path, 'wb') as f:
+                pickle.dump(rng_state, f)
+        except Exception as e:
+            print(f"  Warning: Could not save RNG state to {rng_state_path}: {e}")
+
+    @profile_method
     def _sample_rank_step(self, rank, step, design, nominal_design=False):
         """
         Generates samples from a single rank.
@@ -180,16 +224,38 @@ class Evaluator:
         """
         Generates samples given the nominal context (nominal design + central values).
         Args:
-            step (int): Step to calculate the nominal samples for.
+            step (int or str): Step to calculate the nominal samples for. Can be 'last' or an integer.
         """
+        # Resolve step to actual step number (handles 'last' and other special values)
+        _, selected_step = load_model(
+            self.experiment, step, self.run_obj, 
+            self.run_args, self.device, 
+            global_rank=self.global_rank
+        )
+        
         # Determine which design to use
         if self.fixed_design is not False:
             design = self.fixed_design
         elif nominal_design:
             design = self.experiment.nominal_design
         else:
-            eigs, _ = self.get_eig(step, nominal_design=False)
-            design = self.experiment.designs[np.argmax(eigs)]
+            # Check if we have EIG data for this step in the loaded file
+            step_key = f'step_{selected_step}'
+            if self.eig_file_path is not None and step_key in self.eig_data:
+                step_dict = self.eig_data[step_key]
+                step_data = step_dict.get('variable', {})
+                if 'eigs_avg' in step_data:
+                    print(f"  Using pre-calculated EIG data for step {selected_step} from {self.eig_file_path} to find optimal design")
+                    eigs = np.array(step_data['eigs_avg'])
+                    design = self.experiment.designs[np.argmax(eigs)]
+                else:
+                    # Fall back to calculating EIG
+                    eigs, _ = self.get_eig(selected_step, nominal_design=False)
+                    design = self.experiment.designs[np.argmax(eigs)]
+            else:
+                # No cached data, calculate EIG
+                eigs, _ = self.get_eig(selected_step, nominal_design=False)
+                design = self.experiment.designs[np.argmax(eigs)]
 
         # Generate samples
         samples = self._sample_rank_step(self.global_rank, step, design, nominal_design)
@@ -283,7 +349,7 @@ class Evaluator:
         save_figure(f"{self.save_path}/plots/posterior_eval_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{self.param_space}.png", fig=g.fig, dpi=400)
     
     @profile_method
-    def sample_posterior(self, step, levels, num_data_samples=10, global_rank=0, central=True):
+    def sample_posterior(self, step, levels, num_data_samples=10, global_rank=0, central=True, batch_size=1):
         # Normalize levels to always be a list
         if isinstance(levels, (int, float)):
             levels = [levels]
@@ -310,14 +376,39 @@ class Evaluator:
         for design_type, color, design in inputs:
             data_idxs = np.arange(1, num_data_samples) # sample N data points
             
-            samples_array = self.experiment.sample_params_from_data_samples(
-                design.unsqueeze(0), 
-                posterior_flow, 
-                num_data_samples=num_data_samples, 
-                num_param_samples=self.guide_samples,
-                central=central,
-                transform_output=self.nf_transform_output
-            )
+            # Process in batches to reduce memory usage
+            all_batch_samples = []
+            num_batches = (num_data_samples + batch_size - 1) // batch_size
+            
+            print(f"  Processing {num_data_samples} data samples in {num_batches} batch(es) of size {batch_size}...")
+            for batch_idx in range(num_batches):
+                batch_start = batch_idx * batch_size
+                batch_end = min(batch_start + batch_size, num_data_samples)
+                batch_size_actual = batch_end - batch_start
+                
+                print(f"    Batch {batch_idx + 1}/{num_batches}: processing samples {batch_start} to {batch_end - 1}")
+                
+                # Sample for this batch
+                batch_samples_array = self.experiment.sample_params_from_data_samples(
+                    design.unsqueeze(0), 
+                    posterior_flow, 
+                    num_data_samples=batch_size_actual, 
+                    num_param_samples=self.guide_samples,
+                    central=central,
+                    transform_output=self.nf_transform_output
+                )
+                
+                # Convert to numpy if it's a torch tensor
+                if isinstance(batch_samples_array, torch.Tensor):
+                    batch_samples_array = batch_samples_array.cpu().numpy()
+                all_batch_samples.append(batch_samples_array)
+                
+                # Clear GPU cache after each batch
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            
+            # Concatenate all batches
+            samples_array = np.concatenate(all_batch_samples, axis=0)  # Shape: [num_data_samples, num_param_samples, num_params]
 
             pair_avg_areas = []
             pair_avg_areas_std = []
@@ -438,20 +529,31 @@ class Evaluator:
         # Ensure designs are on the correct device
         designs = designs.to(device_obj)
         
+        # Clear GPU cache before creating dataset to ensure clean state
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+        
         # Create dataset with explicit device - this creates Pyro trace
         # Each call samples from p(y|θ,d) using Pyro's RNG, which advances state.
         # This means different ranks (or multiple calls) get different likelihood samples,
         # causing Monte Carlo variance in EIG that decreases with n_particles.
+        # Process particles in batches to reduce memory usage
         dataset_result = LikelihoodDataset(
             experiment=self.experiment,
             n_particles_per_device=self.n_particles,
             device=self.device,
             evaluation=True,
-            designs=designs
+            designs=designs,
+            particle_batch_size=self.particle_batch_size
         )[0]
         
         samples, context, log_probs = dataset_result
         
+        # Clear GPU cache after dataset creation to free memory from trace operations
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
         # Ensure all tensors are on the correct device
         samples = samples.to(device_obj)
         context = context.to(device_obj)
@@ -468,8 +570,15 @@ class Evaluator:
                 rank=0,
                 verbose_shapes=False,
                 log_probs=log_probs,
-                evaluation=True
+                evaluation=True,
+                chunk_size=(self.n_particles // 10)
             )
+        eigs = eigs.detach().cpu()  # Move to CPU immediately to free GPU memory
+        # release temporary tensors to avoid graph retention and free GPU caches after each chunk
+        del dataset_result, samples, context, log_probs
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()  # Ensure all operations complete before clearing cache
 
         return eigs
 
@@ -489,7 +598,6 @@ class Evaluator:
                 - result: If nominal_design=True, float; else np.ndarray (mean over n_evals)
                 - result_std: If nominal_design=True, float; else np.ndarray (std over n_evals)
         """
-        
         cache_key = f"step_{step}_particles_{self.n_particles}_nominal_{nominal_design}_evals_{self.n_evals}"
         
         # Check for cached result
@@ -517,13 +625,45 @@ class Evaluator:
             else:
                 return cached_result
 
-        # Load model
-        flow_model, _ = load_model(
+        # Load model to resolve actual checkpoint step
+        flow_model, selected_step = load_model(
             self.experiment, step, self.run_obj, 
             self.run_args, self.device, 
             global_rank=self.global_rank
         )
+        step_key = f"step_{selected_step}"
+        
+        # Check if we have precomputed EIG data for this step
+        if step_key in self.eig_data:
+            step_dict = self.eig_data[step_key]
+            if nominal_design:
+                step_data = step_dict.get('nominal', {})
+                if 'eigs_avg' in step_data and step_data['eigs_avg'] is not None:
+                    print(f"Using pre-calculated nominal EIG for {step_key}")
+                    result = float(step_data['eigs_avg'])
+                    result_std = float(step_data.get('eigs_std', 0.0))
+                    self._eig_cache[cache_key] = (result, result_std)
+                    return (result, result_std)
+            else:
+                step_data = step_dict.get('variable', {})
+                if 'eigs_avg' in step_data and step_data['eigs_avg'] is not None:
+                    print(f"Using pre-calculated EIG values for {step_key}")
+                    result = np.array(step_data['eigs_avg'], dtype=float)
+                    if 'eigs_std' in step_data and step_data['eigs_std'] is not None:
+                        result_std = np.array(step_data['eigs_std'], dtype=float)
+                    else:
+                        result_std = np.zeros_like(result)
+                    self._eig_cache[cache_key] = (result, result_std)
+                    return (result, result_std)
+        
         flow_model = flow_model.to(self.device)
+        flow_model.eval()  # Ensure model is in eval mode
+        
+        # Clear memory before starting evaluation to ensure clean state
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+        gc.collect()
         
         # Determine which designs to evaluate
         if nominal_design:
@@ -549,16 +689,115 @@ class Evaluator:
                 chunk_indices = list(range(i, min(i + chunk_size, num_designs)))
                 design_chunks.append(chunk_indices)
         
-        if self.verbose:
-            print(f"  Evaluating {num_designs} design(s) in {len(design_chunks)} chunk(s) with {self.n_evals} evaluation(s)")
+        # Get target n_evals from eig_data (may have been loaded from file)
+        target_n_evals = int(self.eig_data.get('n_evals', self.n_evals))
         
-        # Store all evaluations for averaging
+        if self.verbose:
+            print(f"  Evaluating {num_designs} design(s) in {len(design_chunks)} chunk(s) with {target_n_evals} evaluation(s)")
+        
+        # Persist results in eig_data for future reuse
+        # Use nested structure: step_key -> 'nominal' or 'optimal' -> data
+        step_dict = self.eig_data.setdefault(step_key, {})
+        if nominal_design:
+            step_data = step_dict.setdefault('nominal', {})
+        else:
+            step_data = step_dict.setdefault('variable', {})
+        
+        # Check if we have existing partial results to resume from
         all_eval_results = []
         
-        # Loop over n_evals
-        for eval_idx in range(self.n_evals):
+        if 'eigs' in step_data and step_data['eigs'] is not None:
+            existing_results = step_data['eigs']
+            if isinstance(existing_results, list) and len(existing_results) > 0:
+                # Convert to numpy arrays (JSON loads as lists, but we need arrays for computation)
+                # Handle both list-of-lists (from JSON) and list-of-arrays (in-memory) cases
+                all_eval_results = []
+                expected_len = 1 if nominal_design else num_designs
+                for idx, r in enumerate(existing_results):
+                    if isinstance(r, np.ndarray):
+                        arr = r
+                    elif isinstance(r, list):
+                        arr = np.array(r)
+                    else:
+                        # Single scalar case - for nominal design, this is expected
+                        # Convert scalar to array of length 1
+                        arr = np.array([r])
+                    
+                    # Validate that each entry has the correct length
+                    # Ensure array is 1D
+                    arr = np.atleast_1d(arr)
+                    if len(arr) != expected_len:
+                        print(f"  Warning: Evaluation {idx+1} has length {len(arr)}, expected {expected_len}. Skipping this entry.")
+                        continue
+                    
+                    all_eval_results.append(arr)
+                
+                num_existing = len(all_eval_results)
+                if num_existing < target_n_evals:
+                    print(f"  Found {num_existing} existing evaluations, continuing from evaluation {num_existing + 1} to {target_n_evals}")
+                elif num_existing >= target_n_evals:
+                    print(f"  Found {num_existing} existing evaluations (>= {target_n_evals} required), using existing results")
+                    # Use only the first target_n_evals results
+                    all_eval_results = all_eval_results[:target_n_evals]
+                    step_data['eigs'] = [r.tolist() if isinstance(r, np.ndarray) else r for r in all_eval_results]
+                    # Recompute averages and return
+                    result = np.mean(np.array(all_eval_results), axis=0)
+                    result_std = np.std(np.array(all_eval_results), axis=0)
+                    if nominal_design:
+                        result = result[0]
+                        result_std = result_std[0]
+                    self._eig_cache[cache_key] = (result, result_std)
+                    if nominal_design:
+                        step_data['eigs_avg'] = float(result)
+                        step_data['eigs_std'] = float(result_std)
+                    else:
+                        result_array = np.atleast_1d(np.array(result, dtype=float))
+                        result_std_array = np.atleast_1d(np.array(result_std, dtype=float))
+                        sorted_idx = np.argsort(result_array)[::-1]
+                        eigs_avg = result_array.tolist()
+                        eigs_std = result_std_array.tolist()
+                        optimal_idx = int(sorted_idx[0]) if len(sorted_idx) > 0 else 0
+                        designs_source = (
+                            self.fixed_design.unsqueeze(0) if self.fixed_design is not False else self.experiment.designs
+                        )
+                        optimal_design = designs_source[optimal_idx].detach().cpu().numpy().tolist()
+                        step_data['eigs_avg'] = eigs_avg
+                        step_data['eigs_std'] = eigs_std
+                        step_data['optimal_eig'] = float(result_array[optimal_idx])
+                        step_data['optimal_eig_std'] = float(result_std_array[optimal_idx]) if len(result_std_array) > optimal_idx else 0.0
+                        step_data['optimal_design'] = optimal_design
+                    timestamp = getattr(self, 'timestamp', None) or datetime.now().strftime('%Y%m%d_%H%M')
+                    eig_data_save_path = f"{self.save_path}/eig_data_{timestamp}.json"
+                    with open(eig_data_save_path, "w") as f:
+                        json.dump(self.eig_data, f, indent=2)
+                    return (result, result_std)
+        
+        # Loop over remaining n_evals (starting from where we left off)
+        start_idx = len(all_eval_results)
+        
+        # Restore RNG state from the last completed evaluation if resuming
+        if start_idx > 0:
+            # Try to restore RNG state from the last completed evaluation
+            if self.restore_path is not None and os.path.exists(self.restore_path):
+                try:
+                    with open(self.restore_path, 'rb') as f:
+                        rng_state = pickle.load(f)
+                    # Create a checkpoint-like dictionary for restore_rng_state
+                    checkpoint = {'rng_state': rng_state}
+                    # Use the restore_rng_state function from util.py
+                    restore_rng_state(checkpoint, self.global_rank)
+                    print(f"  Restored RNG state from last completed evaluation (evaluation {start_idx})")
+                except Exception as e:
+                    print(f"  Warning: Could not restore RNG state from {self.restore_path}: {e}")
+                    print(f"  Continuing with current RNG state (results may not be exactly reproducible)")
+        
+        for eval_idx in range(start_idx, target_n_evals):
             if self.verbose:
-                print(f"  Evaluation {eval_idx+1}/{self.n_evals}")
+                print(f"  Evaluation {eval_idx+1}/{target_n_evals}")
+            
+            # Clear memory before each evaluation to prevent accumulation
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
             
             # Evaluate each chunk and combine results for this evaluation
             full_eigs = np.zeros(num_designs)
@@ -574,8 +813,8 @@ class Evaluator:
                     designs=chunk_designs
                 )
                 
-                # Store results for this chunk
-                eig_array = eig_result.cpu().numpy() / np.log(2)
+                # Store results for this chunk (eig_result is already on CPU)
+                eig_array = eig_result.numpy() / np.log(2)
                 if len(design_indices) == 1:
                     # Single design case
                     if nominal_design or self.fixed_design is not False:
@@ -588,11 +827,30 @@ class Evaluator:
                         full_eigs[idx] = eig_val
             
             all_eval_results.append(full_eigs)
+            # Save to step_data, converting numpy arrays to lists for JSON serialization
+            step_data['eigs'] = [r.tolist() if isinstance(r, np.ndarray) else r for r in all_eval_results]
+
+            # Save EIG data to file
+            timestamp = getattr(self, 'timestamp', None) or datetime.now().strftime('%Y%m%d_%H%M')
+            eig_data_save_path = f"{self.save_path}/eig_data_{timestamp}.json"
+            with open(eig_data_save_path, "w") as f:
+                json.dump(self.eig_data, f, indent=2)
+            
+            # Save RNG state for resuming
+            self._save_rng_state()
+            
+            # Clear memory between evaluations to prevent accumulation
+            # This is important because log_prob computations can create large computation graphs
+            del eig_result, eig_array, chunk_designs, full_eigs
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()  # Ensure all operations complete
+            gc.collect()  # Force Python garbage collection
         
         # Average over evaluations and compute std
         all_eval_results = np.array(all_eval_results)
-        result = np.mean(all_eval_results, axis=0)
-        result_std = np.std(all_eval_results, axis=0)
+        result = np.mean(all_eval_results, axis=0)  # Shape: (num_designs,)
+        result_std = np.std(all_eval_results, axis=0)  # Shape: (num_designs,)
         
         # Handle scalar case for nominal design
         if nominal_design:
@@ -601,7 +859,37 @@ class Evaluator:
         
         # Cache result and std
         self._eig_cache[cache_key] = (result, result_std)
-        
+
+        if nominal_design:
+            step_data['eigs_avg'] = float(result)
+            step_data['eigs_std'] = float(result_std)
+            step_data['nominal_design'] = self.experiment.nominal_design.cpu().numpy().tolist()
+        else:
+            result_array = np.atleast_1d(np.array(result, dtype=float))
+            result_std_array = np.atleast_1d(np.array(result_std, dtype=float))
+            sorted_idx = np.argsort(result_array)[::-1]
+            eigs_avg = result_array.tolist()
+            eigs_std = result_std_array.tolist()
+            optimal_idx = int(sorted_idx[0]) if len(sorted_idx) > 0 else 0
+
+            designs_source = (
+                self.fixed_design.unsqueeze(0) if self.fixed_design is not False else self.experiment.designs
+            )
+            optimal_design = designs_source[optimal_idx].detach().cpu().numpy().tolist()
+
+            step_data['eigs_avg'] = eigs_avg
+            step_data['eigs_std'] = eigs_std
+            step_data['designs'] = designs_source.cpu().numpy().tolist()
+            step_data['optimal_eig'] = float(result_array[optimal_idx])
+            step_data['optimal_eig_std'] = float(result_std_array[optimal_idx]) if len(result_std_array) > optimal_idx else 0.0
+            step_data['optimal_design'] = optimal_design
+
+        timestamp = getattr(self, 'timestamp', None) or datetime.now().strftime('%Y%m%d_%H%M')
+        eig_data_save_path = f"{self.save_path}/eig_data_{timestamp}.json"
+        with open(eig_data_save_path, "w") as f:
+            json.dump(self.eig_data, f, indent=2)
+        print(f"Saved EIG data to {eig_data_save_path}")
+
         return (result, result_std)
 
     @profile_method
@@ -956,32 +1244,35 @@ class Evaluator:
         
         print(f"  Sorting designs by step: {sort_step}")
         
-        # Create color gradient for multiple steps (yellow to orange)
+        # Create color gradient for multiple steps (light gray to black)
         if len(steps) > 1:
             from matplotlib.colors import LinearSegmentedColormap
-            tab_orange = np.array([1.0, 0.498, 0.055])  # RGB for tab:orange
-            yellow = np.array([1.0, 0.933, 0.0])         # RGB for bright yellow
+            light_gray = np.array([0.7, 0.7, 0.7])  # RGB for light gray
+            black = np.array([0.0, 0.0, 0.0])        # RGB for black
             
             n_steps = len(steps)
-            colors = np.array([yellow * (1 - i/(n_steps-1)) + tab_orange * (i/(n_steps-1)) 
+            colors = np.array([light_gray * (1 - i/(n_steps-1)) + black * (i/(n_steps-1)) 
                               for i in range(n_steps)])
         else:
-            colors = [np.array([1.0, 0.498, 0.055])]  # Just tab:orange for single step
+            colors = [np.array([0.0, 0.0, 0.0])]  # Just black for single step
         
         # Store EIG data for all steps
         all_steps_data = []
         sorted_eigs_idx = None
         
         for step_idx, s in enumerate(steps):
-            # Use first rank's pre-initialized experiment to get selected_step (just for step resolution)
+            # Calculate/get EIG data for this step (get_eig handles caching and storage)
+            print(f"  Getting EIG data for step {s}...")
+            eigs_avg, eigs_std = self.get_eig(s, nominal_design=False)
+            eigs_avg = np.atleast_1d(eigs_avg)
+            eigs_std = np.atleast_1d(eigs_std)
+            
+            # Get the actual step number that was resolved (needed for step_key)
             _, selected_step = load_model(
                 self.experiment, s, self.run_obj, 
                 self.run_args, self.device, 
                 global_rank=self.global_rank
             )
-            
-            # Get EIG results (with std for error bars)
-            eigs_avg, eigs_std = self.get_eig(selected_step, nominal_design=False)
             
             # Store data for this step
             data_dict = {
@@ -991,9 +1282,11 @@ class Evaluator:
                 'eigs_std': eigs_std,
                 'color': colors[step_idx]
             }
+            
             if include_nominal:
-                nominal_eig, _ = self.get_eig(selected_step, nominal_design=True)
-                data_dict['nominal'] = nominal_eig
+                # Get nominal EIG (get_eig handles caching and storage)
+                nominal_eig, _ = self.get_eig(s, nominal_design=True)
+                data_dict['nominal'] = float(nominal_eig)
                 
             all_steps_data.append(data_dict)
             
@@ -1037,28 +1330,31 @@ class Evaluator:
         # Create figure with subplots and space for colorbar
         if is_1d_design and not sort:
             # For 1D designs without sorting, plot EIG directly against design variable (no second subplot needed)
-            fig, ax0 = plt.subplots(figsize=(22, 6))
+            fig, ax0 = plt.subplots(figsize=(16, 6))
             ax1 = None
-            cbar_ax = None
         else:
             # For sorted 1D or multi-dimensional designs, align heatmap beneath line plot and add a vertical colorbar
             if is_1d_design and sort:
                 height_ratios = [0.65, 0.15]
-                width_ratios = [1, 0.025]
             else:
                 height_ratios = [0.6, 0.2]
-                width_ratios = [1, 0.04]
-            fig = plt.figure(figsize=(22, 6))
+            fig = plt.figure(figsize=(16, 6))
             gs = gridspec.GridSpec(
-                2, 2,
+                2, 1,
                 height_ratios=height_ratios,
-                width_ratios=width_ratios,
-                hspace=0.0,
-                wspace=0.1
+                hspace=0.0
             )
             ax0 = fig.add_subplot(gs[0, 0])  # Top plot for EIG
             ax1 = fig.add_subplot(gs[1, 0], sharex=ax0)  # Bottom plot for heatmap shares x-axis
-            cbar_ax = fig.add_subplot(gs[:, 1])  # Colorbar spanning both plots
+            # Reserve a dedicated colorbar axis on the right that spans both subplots
+            fig.subplots_adjust(left=0.06, right=0.92)
+            bbox = ax1.get_position()
+            cbar_width = 0.015
+            cbar_gap = 0.02  # maintain a small gap between plots and colorbar
+            cbar_left = min(0.985 - cbar_width, bbox.x1 + cbar_gap)
+            cbar_height = 0.6
+            cbar_bottom = 0.5 - cbar_height / 2  # vertically center the colorbar
+            cbar_ax = fig.add_axes([cbar_left, cbar_bottom, cbar_width, cbar_height])
             plt.setp(ax0.get_xticklabels(), visible=False)
             ax0.tick_params(axis='x', which='both', length=0)
         
@@ -1094,22 +1390,47 @@ class Evaluator:
                 else:
                     line_label = f"EIG"
             
+            # Convert color array to tuple for matplotlib
+            plot_color = tuple(step_data['color']) if isinstance(step_data['color'], np.ndarray) else step_data['color']
             ax0.plot(x_vals, sorted_eigs_avg, label=line_label, 
-                    color=step_data['color'], linestyle='-', linewidth=2.5, alpha=1.0 if step_data['step_label'] == sort_step else 0.6, zorder=5)
+                    color=plot_color, linestyle='-', linewidth=2.5, alpha=1.0 if step_data['step_label'] == sort_step else 0.6, zorder=5)
             
             # Plot nominal EIG for the sorting step
             if step_data['step_label'] == sort_step and include_nominal:
                 ax0.axhline(y=step_data['nominal'], color='tab:blue', linestyle='--', 
                            label='Nominal EIG', linewidth=2, zorder=10)
         
+        # Add vertical orange dotted line and orange dot at optimal EIG
+        # Get the data for the sort_step to find optimal EIG
+        sort_step_data = next((d for d in all_steps_data if d['step_label'] == sort_step), None)
+        if sort_step_data is not None:
+            sorted_eigs_avg = sort_step_data['eigs_avg'][sorted_eigs_idx]
+            # Determine x_vals for the sort_step
+            if is_1d_design and not sort:
+                x_vals_optimal = sorted_designs[:, 0]
+            else:
+                x_vals_optimal = np.arange(len(sorted_eigs_avg))
+            
+            # Find optimal EIG position
+            optimal_idx = np.argmax(sorted_eigs_avg)
+            optimal_x = x_vals_optimal[optimal_idx]
+            optimal_y = sorted_eigs_avg[optimal_idx]
+            
+            # Plot vertical orange dotted line
+            ax0.axvline(optimal_x, color='tab:orange', linestyle=':', linewidth=2, 
+                       zorder=8)
+            # Plot orange dot at optimal position
+            ax0.plot(optimal_x, optimal_y, 'o', color='tab:orange', markersize=8, zorder=9, 
+                    label='Optimal Design')
+        
         # Set x-axis label and limits based on design dimensionality and sorting
         if is_1d_design and not sort:
-            ax0.set_xlabel(self.experiment.design_labels[0], fontsize=11)
+            ax0.set_xlabel(f'${self.experiment.design_labels[0]}$', fontsize=12, weight='bold')
             ax0.set_xlim(x_vals.min(), x_vals.max())
         else:
             ax0.set_xlim(-0.5, len(sorted_eigs_avg) - 0.5)
         
-        ax0.set_ylabel("Expected Information Gain [bits]", fontsize=11)
+        ax0.set_ylabel("Expected Information Gain [bits]", fontsize=12, weight='bold')
         '''
         if nominal_sorted_pos is not None:
             if is_1d_design and not sort:
@@ -1125,7 +1446,7 @@ class Evaluator:
             im = ax1.imshow(sorted_designs.T, aspect='auto', cmap='viridis')
             ax1.set_ylabel('')
             ax1.set_yticks([0])
-            ax1.set_yticklabels([self.experiment.design_labels[0]])
+            ax1.set_yticklabels([f'${self.experiment.design_labels[0]}$'])
             ax1.tick_params(axis='y', length=0)
             ax1.spines['top'].set_visible(False)
             ax1.spines['right'].set_visible(True)
@@ -1137,13 +1458,13 @@ class Evaluator:
                 xlabel = f"Design Index (sorted by reference step {sort_step_number} EIG)"
             else:
                 xlabel = "Design Index (sorted by EIG)"
-            ax1.set_xlabel(xlabel, fontsize=11)
+            ax1.set_xlabel(xlabel, fontsize=12, weight='bold')
             ax1.margins(x=0)
             plt.setp(ax1.get_xticklabels(), rotation=0)
             if nominal_sorted_pos is not None:
                 ax1.axvline(nominal_sorted_pos, color='black', linestyle=':', linewidth=1.5)
-            cbar = plt.colorbar(im, cax=cbar_ax)
-            cbar.set_label('Design Value')
+            cbar = fig.colorbar(im, cax=cbar_ax)
+            cbar.set_label('Design Value', labelpad=10, fontsize=12, weight='bold')
             ax0.spines['bottom'].set_visible(False)
             ax1.spines['bottom'].set_visible(True)
         elif not is_1d_design:
@@ -1162,8 +1483,8 @@ class Evaluator:
                     xlabel = "Design Index (sorted by EIG)"
                 else:
                     xlabel = "Design Index"
-            ax1.set_xlabel(xlabel, fontsize=11)
-            ax1.set_yticks(np.arange(len(self.experiment.design_labels)), self.experiment.design_labels)
+            ax1.set_xlabel(xlabel, fontsize=12, weight='bold')
+            ax1.set_yticks(np.arange(len(self.experiment.design_labels)), [f'${label}$' for label in self.experiment.design_labels])
             ax1.spines['top'].set_visible(False)
             ax1.spines['right'].set_visible(True)
             ax1.spines['left'].set_visible(True)
@@ -1175,8 +1496,8 @@ class Evaluator:
             plt.setp(ax1.get_xticklabels(), rotation=0)
 
             # Add colorbar spanning the full height
-            cbar = plt.colorbar(im, cax=cbar_ax)
-            cbar.set_label('Design Value')
+            cbar = fig.colorbar(im, cax=cbar_ax)
+            cbar.set_label('Design Value', labelpad=10, fontsize=12, weight='bold')
             ax0.spines['bottom'].set_visible(False)
             ax1.spines['bottom'].set_visible(True)
         
@@ -1188,51 +1509,15 @@ class Evaluator:
             title = f'EIG per Design (N={self.n_evals} Evaluations)'
         if self.display_run:
             title += f' - Run: {self.run_id[:8]}'
-        fig.subplots_adjust(left=0.06, right=0.97)
+        if not (is_1d_design and not sort):
+            # Subplots already adjusted earlier
+            pass
+        else:
+            fig.subplots_adjust(left=0.06, right=0.98)
         fig.suptitle(title, fontsize=16, y=0.95, weight='bold')
         
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         save_figure(f"{self.save_path}/plots/eig_designs_{timestamp}.png", fig=fig, dpi=400)
-        
-        # Add generic metadata to top level of self.eig_data
-        sort_step_number = next((d['step'] for d in all_steps_data if d['step_label'] == sort_step), sort_step)
-        self.eig_data['design_labels'] = list(self.experiment.design_labels)
-        self.eig_data['sort_step'] = int(sort_step_number)
-        self.eig_data['sort_step_label'] = str(sort_step)
-        self.eig_data['sort'] = bool(sort)
-        self.eig_data['sorted_indices'] = sorted_eigs_idx.tolist()  # Design indices in sorted order
-        
-        # Store sorted and unsorted EIGs for each step (convert to lists for JSON)
-        for step_data in all_steps_data:
-            step_num = step_data['step']
-            
-            step_key = f'step_{step_num}'
-            self.eig_data[step_key] = {
-                'eigs_unsorted': step_data['eigs_avg'].tolist(),
-                'eigs_std_unsorted': step_data['eigs_std'].tolist(),
-            }
-            
-            # Sorted EIGs (in plotting order)
-            sorted_eigs = step_data['eigs_avg'][sorted_eigs_idx]
-            sorted_eigs_std = step_data['eigs_std'][sorted_eigs_idx]
-            self.eig_data[step_key]['eigs_sorted'] = sorted_eigs.tolist()
-            self.eig_data[step_key]['eigs_std_sorted'] = sorted_eigs_std.tolist()
-            
-            # Store nominal EIG if available
-            if 'nominal' in step_data:
-                self.eig_data[step_key]['nominal_eig'] = float(step_data['nominal'])
-        
-        # Store designs (sorted and unsorted, convert to lists for JSON)
-        self.eig_data['designs'] = {
-            'sorted': sorted_designs.tolist(),
-            'unsorted': designs.tolist()
-        }
-        
-        # Determine save path based on metrics step data (used for optimal EIG) or sort step
-        if metrics_step_data is not None and len(metrics_step_data['eigs_avg']) > 0:
-            save_step = metrics_step_data['step']
-        else:
-            save_step = int(sort_step_number) if isinstance(sort_step_number, (int, np.integer)) else sort_step_number
         
         plt.show()
 
@@ -1243,31 +1528,49 @@ class Evaluator:
         else:
             eval_step = int(eval_step)
         
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M')
+        self.timestamp = datetime.now().strftime('%Y%m%d_%H%M')
         # Initialize timing at start of run
         self._update_runtime()
 
-        print(f"Computing EIG input designs at step {eval_step}...")
+        step_key = f"step_{eval_step}"
+        step_dict = self.eig_data.get(step_key, {})
+        has_step_data = 'eigs_avg' in step_dict.get('variable', {})
+        if has_step_data:
+            print(f"Using existing EIG input designs at step {eval_step}...")
+        else:
+            print(f"Computing EIG input designs at step {eval_step}...")
+
         nominal_eig, nominal_eig_std = self.get_eig(step=eval_step, nominal_design=True)
         eigs, eigs_std = self.get_eig(step=eval_step, nominal_design=False)
-        optimal_design = self.experiment.designs[np.argmax(eigs)].cpu().numpy()
         eig_label = 'Optimal' if self.fixed_design is False else 'Fixed'
-        print(f"Nominal EIG: {nominal_eig}, {eig_label} EIG: {np.max(eigs)}, {eig_label} Design: {optimal_design.tolist()}")
-        
-        # Populate initial eig_data with optimal/fixed design value from initial get_eig evaluation
-        max_idx = int(np.argmax(eigs))
-        optimal_eig_value = float(eigs[max_idx])
-        optimal_eig_std_value = float(eigs_std[max_idx]) if isinstance(eigs_std, np.ndarray) else float(eigs_std)
-        
+
+        step_data = step_dict.get('variable', {})
+        max_idx = int(np.argmax(eigs)) if len(np.atleast_1d(eigs)) > 0 else 0
+        optimal_eig_value = float(step_data.get('optimal_eig', np.atleast_1d(eigs)[max_idx]))
+        if isinstance(eigs_std, np.ndarray):
+            optimal_eig_std_value = float(step_data.get('optimal_eig_std', eigs_std[max_idx]))
+        else:
+            optimal_eig_std_value = float(step_data.get('optimal_eig_std', eigs_std))
+        optimal_design = step_data.get('optimal_design')
+        if optimal_design is None:
+            if self.fixed_design is not False:
+                optimal_design_tensor = self.fixed_design.detach().cpu().numpy()
+            else:
+                optimal_design_tensor = self.experiment.designs[max_idx].cpu().numpy()
+            optimal_design = optimal_design_tensor.tolist()
+
+        print(f"Nominal EIG: {nominal_eig}, {eig_label} EIG: {optimal_eig_value}, {eig_label} Design: {optimal_design}")
+
         self.eig_data["eval_step"] = int(eval_step)
         self.eig_data["nominal_eig"] = float(nominal_eig)
         self.eig_data["nominal_eig_std"] = float(nominal_eig_std) if isinstance(nominal_eig_std, (int, float, np.number)) else 0.0
+        self.eig_data["nominal_design"] = self.experiment.nominal_design.cpu().numpy().tolist()
         self.eig_data["optimal_eig"] = optimal_eig_value
         self.eig_data["optimal_eig_std"] = optimal_eig_std_value
-        self.eig_data["optimal_design"] = optimal_design.tolist()
+        self.eig_data["optimal_design"] = optimal_design
         self.eig_data["design_type"] = eig_label.lower()  # 'optimal' or 'fixed'
 
-        eig_data_save_path = f"{self.save_path}/eig_data_{eval_step}_{timestamp}.json"
+        eig_data_save_path = f"{self.save_path}/eig_data_{self.timestamp}.json"
         with open(eig_data_save_path, "w") as f:
             json.dump(self.eig_data, f, indent=2)
         print(f"Saved EIG data to {eig_data_save_path}")
@@ -1276,19 +1579,21 @@ class Evaluator:
         self._update_runtime()
 
         try:
-            self.generate_posterior(step=eval_step, levels=self.levels)
+            if self.cosmo_exp == 'num_tracers':
+                self.generate_posterior(step=eval_step, levels=self.levels)
+                self._update_runtime()
             self._update_runtime()
         except Exception as e:
             traceback.print_exc()
 
         try:
-            self.posterior_steps(steps=[self.total_steps//4, self.total_steps//2, self.total_steps*3//4, 'last'])
+            #self.posterior_steps(steps=[self.total_steps//4, self.total_steps//2, self.total_steps*3//4, 'last'])
             self._update_runtime()
         except Exception as e:
             traceback.print_exc()
         
         try:
-            self.eig_designs(steps=['last'], sort=True, include_nominal=True)
+            self.eig_designs(steps=['last'], sort=self.sort, include_nominal=self.include_nominal)
             self._update_runtime()
         except Exception as e:
             traceback.print_exc()
@@ -1301,18 +1606,20 @@ class Evaluator:
             traceback.print_exc()
 
         try:
-            self.sample_posterior(step=eval_step, levels=[0.68], num_data_samples=20, central=True)
-            self._update_runtime()
+            if self.cosmo_exp == 'num_tracers':
+                self.sample_posterior(step=eval_step, levels=[0.68], num_data_samples=20, central=True, batch_size=self.batch_size)
+                self._update_runtime()
         except Exception as e:
             traceback.print_exc()
         
-        # Save combined eig_data at the end of run
-        eig_data_save_path = f"{self.save_path}/eig_data_{eval_step}_{timestamp}.json"
-        with open(eig_data_save_path, "w") as f:
-            json.dump(self.eig_data, f, indent=2)
-        print(f"Saved EIG data to {eig_data_save_path}")
-        
-        print(f"Evaluation completed successfully!")
+        if self.eig_file_path is None:
+            # Save combined eig_data at the end of run
+            eig_data_save_path = f"{self.save_path}/eig_data_{self.timestamp}.json"
+            with open(eig_data_save_path, "w") as f:
+                json.dump(self.eig_data, f, indent=2)
+            print(f"Saved EIG data to {eig_data_save_path}")
+            
+            print(f"Evaluation completed successfully!")
 
 if __name__ == "__main__":
 
@@ -1332,11 +1639,16 @@ if __name__ == "__main__":
     parser.add_argument('--design_chunk_size', type=int, default=None, help='Number of designs per chunk (None = use all designs)')
     parser.add_argument('--n_evals', type=int, default=5, help='Number of evaluations to average over')
     parser.add_argument('--device', type=str, default='cuda:0', help='Device to use for evaluation')
-    parser.add_argument('--eval_seed', type=int, default=1, help='Seed for evaluation')
+    parser.add_argument('--seed', type=int, default=1, help='Seed for evaluation')
     parser.add_argument('--param_space', type=str, default='physical', help='Parameter space to use for evaluation')
     parser.add_argument('--fixed_design', type=str, default=None, help='Evaluate a fixed design as a JSON list (default: None)')
     parser.add_argument('--profile', action='store_true', help='Enable profiling of methods')
     parser.add_argument('--verbose', action='store_true', help='Enable verbose output')
+    parser.add_argument('--no-sort', dest='sort', action='store_false', help='Disable sorting of designs by EIG (default: sorting enabled)')
+    parser.add_argument('--include_nominal', action='store_true', default=False, help='Include nominal EIG in eig_designs plot (default: False)')
+    parser.add_argument('--eig_file_path', type=str, default=None, help='Path to previously calculated eig_data JSON file to load instead of recalculating')
+    parser.add_argument('--batch_size', type=int, default=1, help='Batch size for sample_posterior to reduce memory usage (default: 1)')
+    parser.add_argument('--particle_batch_size', type=int, default=None, help='Batch size for processing particles in LikelihoodDataset to reduce memory usage (default: None to use all particles)')
 
     args = parser.parse_args()
 

@@ -193,9 +193,11 @@ class VariableRedshift:
         design_step=0.1,
         design_lower=0.0,
         design_upper=5.0,
+        n_redshifts=1,
         fixed_design=False,
         nominal_design=None,
         include_D_M=False,
+        error_scale=1.0,
         sigma_D_H=0.2,
         sigma_D_M=0.2,
         bijector_state=None,
@@ -217,6 +219,11 @@ class VariableRedshift:
         self.seed = seed
         self.verbose = verbose
         self.profile = profile
+        self.n_redshifts = int(n_redshifts)
+        if self.n_redshifts < 1:
+            raise ValueError("n_redshifts must be >= 1")
+        self.obs_per_redshift = 2 if include_D_M else 1
+        self.observation_dim = self.n_redshifts * self.obs_per_redshift
         if seed is not None:
             auto_seed(self.seed)
         
@@ -227,7 +234,9 @@ class VariableRedshift:
         self.include_D_M = include_D_M
 
         if os.path.exists(os.path.join(home_dir, "data", "variable_error.csv")):
-            print(f"Loading variable error from {os.path.join(home_dir, 'data', 'variable_error.csv')}")
+            self.error_scale = error_scale
+            if self.global_rank == 0:
+                print(f"Loading variable error from {os.path.join(home_dir, 'data', 'variable_error.csv')}")
             self.variable_error_df = pd.read_csv(os.path.join(home_dir, "data", "variable_error.csv"))
             self.variable_error = {
                 'z': torch.tensor(
@@ -236,14 +245,14 @@ class VariableRedshift:
                     dtype=torch.float64
                 ),
                 'D_H': torch.tensor(
-                    self.variable_error_df['DH_errors'].values,
+                    self.variable_error_df['DH_errors'].values * self.error_scale,
                     device=self.device,
                     dtype=torch.float64
                 )
             }
             if self.include_D_M:
                 self.variable_error['D_M'] = torch.tensor(
-                    self.variable_error_df['DM_errors'].values,
+                    self.variable_error_df['DM_errors'].values * self.error_scale,
                     device=self.device,
                     dtype=torch.float64
                 )
@@ -252,11 +261,7 @@ class VariableRedshift:
         
         # Context dimension calculation
         # Context = design (redshift) + observations
-        self.context_dim = 1  # redshift
-        if include_D_M:
-            self.context_dim += 2  # D_H and D_M
-        else:
-            self.context_dim += 1  # D_H only
+        self.context_dim = self.n_redshifts + self.observation_dim
         
         # Initialize the priors
         if priors_path is None:
@@ -297,12 +302,20 @@ class VariableRedshift:
             design_upper=design_upper
         )
         
-        self.design_labels = ["z"]
+        self.design_labels = [f"z_{i+1}" for i in range(self.n_redshifts)]
         
         if nominal_design is None:
-            self.nominal_design = torch.tensor([(design_upper-design_lower)/2.0 + design_lower], device=self.device)
+            if self.n_redshifts == 1:
+                nominal_values = torch.tensor([(design_upper - design_lower) / 2.0 + design_lower], device=self.device, dtype=torch.float64)
+            else:
+                nominal_values = torch.linspace(design_lower, design_upper, steps=self.n_redshifts, device=self.device, dtype=torch.float64)
         else:
-            self.nominal_design = nominal_design
+            nominal_values = torch.as_tensor(nominal_design, device=self.device, dtype=torch.float64)
+            if nominal_values.ndim == 0:
+                nominal_values = nominal_values.unsqueeze(0)
+        if nominal_values.shape[-1] != self.n_redshifts:
+            raise ValueError(f"nominal_design must have length {self.n_redshifts}, got {nominal_values.shape[-1]}")
+        self.nominal_design = nominal_values.reshape(-1)
         
         # Compute central values using fiducial cosmology
         self.central_val = self._compute_central_values()
@@ -327,19 +340,33 @@ class VariableRedshift:
             print(f"  Observation labels: {self.observation_labels}")
             print(f"  Context dimension: {self.context_dim}")
             print(f"  Include D_M: {self.include_D_M}")
+            print(f"  Number of redshifts: {self.n_redshifts}")
             print(f"  Number of designs: {self.designs.shape[0]}")
             print(f"  Nominal design: {self.nominal_design}")
 
     @profile_method
     def init_designs(self, fixed_design=False, design_step=0.1, design_lower=0.0, design_upper=5.0):
         """Initialize the redshift design grid."""
-        if fixed_design:
-            # Use a single fixed redshift
-            designs = torch.tensor([[2.5]], device=self.device)
+        if isinstance(fixed_design, torch.Tensor):
+            designs = fixed_design.to(self.device, dtype=torch.float64)
+        elif isinstance(fixed_design, (list, tuple, np.ndarray)):
+            designs = torch.as_tensor(fixed_design, device=self.device, dtype=torch.float64)
+        elif fixed_design:
+            # Use a single fixed redshift vector centered in the range
+            midpoint = (design_upper - design_lower) / 2.0 + design_lower
+            designs = torch.full((1, self.n_redshifts), midpoint, device=self.device, dtype=torch.float64)
         else:
-            # Create a grid of redshift values
-            z_values = torch.arange(design_lower, design_upper + design_step, design_step, device=self.device)
-            designs = z_values.unsqueeze(1)
+            # Create a grid of redshift values (build on CPU for cartesian_prod support)
+            z_values = torch.arange(design_lower, design_upper + design_step, design_step, device='cpu', dtype=torch.float64)
+            if self.n_redshifts == 1:
+                designs = z_values.unsqueeze(1)
+            else:
+                grid_inputs = [z_values for _ in range(self.n_redshifts)]
+                designs = torch.cartesian_prod(*grid_inputs)
+        if designs.ndim == 1:
+            designs = designs.unsqueeze(0)
+        if designs.shape[-1] != self.n_redshifts:
+            raise ValueError(f"Design dimension ({designs.shape[-1]}) must match n_redshifts ({self.n_redshifts})")
         
         self.designs = designs.to(self.device)
         
@@ -425,11 +452,13 @@ class VariableRedshift:
 
             return D_H_error
         else:
-            sigma_D_H_tensor = torch.tensor(self.sigma_D_H, device=self.device)
+            sigma_D_H_tensor = torch.as_tensor(self.sigma_D_H, device=self.device, dtype=D_H.dtype)
+            D_H_error = sigma_D_H_tensor.expand_as(D_H)
             if self.include_D_M:
-                sigma_D_M_tensor = torch.tensor(self.sigma_D_M, device=self.device)
-                return sigma_D_H_tensor, sigma_D_M_tensor
-            return sigma_D_H_tensor
+                sigma_D_M_tensor = torch.as_tensor(self.sigma_D_M, device=self.device, dtype=D_M.dtype)
+                D_M_error = sigma_D_M_tensor.expand_as(D_M)
+                return D_H_error, D_M_error
+            return D_H_error
 
     @profile_method
     def _compute_central_values(self):
@@ -466,24 +495,27 @@ class VariableRedshift:
         
         # Compute D_H at nominal redshift
         D_H_central = self.D_H_func(z_nominal, **params)
-        # Flatten to ensure 1D
-        D_H_val = D_H_central.flatten()
+        D_H_val = D_H_central.reshape(-1)
         
         if self.include_D_M:
             # Compute D_M at nominal redshift
             D_M_central = self.D_M_func(z_nominal, **params)
-            D_M_val = D_M_central.flatten()
-            # Concatenate to create [D_H, D_M] as 1D tensor
-            central_vals = torch.cat([D_H_val, D_M_val])
+            D_M_val = D_M_central.reshape(-1)
+            # Interleave [D_H(z_i), D_M(z_i)] for each redshift
+            central_vals = torch.stack([D_H_val, D_M_val], dim=-1).reshape(-1)
         else:
             # Just D_H as 1D tensor
             central_vals = D_H_val
         
         if self.global_rank == 0 and self.verbose:
-            print(f"Computed central values at z={z_nominal.item():.2f}:")
-            print(f"  D_H/r_d = {D_H_val[0].item():.4f}")
+            if z_nominal.numel() == 1:
+                print(f"Computed central values at z={z_nominal.item():.2f}:")
+            else:
+                z_list = [f"{z:.2f}" for z in z_nominal.detach().cpu().tolist()]
+                print(f"Computed central values at z={z_list}:")
+            print(f"  D_H/r_d = {D_H_val.reshape(-1)[0].item():.4f}")
             if self.include_D_M:
-                print(f"  D_M/r_d = {D_M_val[0].item():.4f}")
+                print(f"  D_M/r_d = {D_M_val.reshape(-1)[0].item():.4f}")
         
         return central_vals
 
@@ -832,18 +864,16 @@ class VariableRedshift:
             D_H_mean = self.D_H_func(z, **parameters)
             if self.include_D_M:
                 D_M_mean = self.D_M_func(z, **parameters)
-                means = torch.cat([D_H_mean, D_M_mean], dim=-1) # [batch, num_designs, 2]
-
-                # Compute errors for covariance matrix
                 D_H_error, D_M_error = self.error_func(z, D_H_mean, D_M_mean)
-                sigmas = torch.cat([D_H_error, D_M_error], dim=-1)
+                means_per_z = torch.cat([D_H_mean.unsqueeze(-1), D_M_mean.unsqueeze(-1)], dim=-1)
+                sigmas_per_z = torch.cat([D_H_error.unsqueeze(-1), D_M_error.unsqueeze(-1)], dim=-1)
             else:
-                means = D_H_mean
-
-                # Compute error for covariance matrix
                 D_H_error = self.error_func(z, D_H_mean)
-                sigmas = D_H_error
+                means_per_z = D_H_mean.unsqueeze(-1)
+                sigmas_per_z = D_H_error.unsqueeze(-1)
 
+            means = means_per_z.reshape(means_per_z.shape[:-2] + (-1,))
+            sigmas = sigmas_per_z.reshape(sigmas_per_z.shape[:-2] + (-1,))
             covariance_matrix = torch.diag_embed(sigmas ** 2)
             # Sample from MultivariateNormal
             return pyro.sample(self.observation_labels[0], dist.MultivariateNormal(means, covariance_matrix))
@@ -916,11 +946,10 @@ class VariableRedshift:
             
             # Create diagonal covariance matrix
             if self.include_D_M:
-                sigmas = torch.tensor([self.sigma_D_H, self.sigma_D_M], device=self.device)
-                covariance_matrix = torch.diag(sigmas ** 2)
+                sigmas = torch.tensor([self.sigma_D_H, self.sigma_D_M], device=self.device, dtype=torch.float64).repeat(self.n_redshifts)
             else:
-                sigmas = torch.tensor([self.sigma_D_H], device=self.device)
-                covariance_matrix = torch.diag(sigmas ** 2)
+                sigmas = torch.tensor([self.sigma_D_H], device=self.device, dtype=torch.float64).repeat(self.n_redshifts)
+            covariance_matrix = torch.diag(sigmas ** 2)
             
             # Sample from MultivariateNormal centered at central values
             with pyro.plate("data", num_samples):
@@ -937,6 +966,7 @@ class VariableRedshift:
     def sample_params_from_data_samples(self, designs, guide, num_data_samples=100, num_param_samples=1000, central=False, transform_output=True):
         """
         Sample parameters from the posterior distribution conditioned on data.
+        Vectorized version that batches all sampling operations for improved performance.
         
         Args:
             designs: redshift values (design variables)
@@ -955,17 +985,38 @@ class VariableRedshift:
         # data_samples is now always a tensor with shape (num_data_samples, num_observations)
         context = torch.cat([designs.expand(num_data_samples, -1), data_samples], dim=-1)
         
-        # Sample parameters for each data realization individually
-        param_samples_list = []
-        for i in range(num_data_samples):
-            # Get context for the i-th data sample
-            context_i = context[i]  # Shape: [context_dim]
-            # Sample parameters conditioned on this specific data sample
-            param_samples_i = self.get_guide_samples(guide, context_i, num_samples=num_param_samples, transform_output=transform_output)
-            param_samples_list.append(param_samples_i.samples)
+        # Vectorized sampling: expand contexts to (num_data_samples * num_param_samples, context_dim)
+        # Each context is repeated num_param_samples times
+        # Expand: [num_data_samples, context_dim] -> [num_data_samples, num_param_samples, context_dim] -> [num_data_samples * num_param_samples, context_dim]
+        expanded_context = context.unsqueeze(1).expand(-1, num_param_samples, -1).contiguous()
+        expanded_context = expanded_context.view(-1, expanded_context.shape[-1])  # [num_data_samples * num_param_samples, context_dim]
         
-        # Stack all parameter samples: [num_data_samples, num_param_samples, num_params]
-        param_samples_array = np.stack(param_samples_list, axis=0)
+        # Sample all parameters at once
+        with torch.no_grad():
+            param_samples = guide(expanded_context).sample(())  # Shape: [num_data_samples * num_param_samples, num_params]
+        
+        # Apply transformations if needed
+        if self.transform_input and transform_output:
+            param_samples = self.params_from_unconstrained(param_samples)
+        
+        # Apply multiplier for hrdrag if present
+        if self._idx_hr and hasattr(self, 'hrdrag_multiplier'):
+            param_samples[..., self._idx_hr[0]] *= self.hrdrag_multiplier
+        
+        # Reshape to [num_data_samples, num_param_samples, num_params]
+        param_samples = param_samples.view(num_data_samples, num_param_samples, -1)
+        
+        # Check for any constant columns and add tiny noise to prevent getdist from excluding them
+        for i in range(param_samples.shape[2]):
+            col = param_samples[:, :, i]
+            if torch.all(col == col[0, 0]):
+                if self.global_rank == 0:
+                    print(f"Column {i} ({self.cosmo_params[i]}) is constant with value {col[0, 0]}, adding tiny noise")
+                noise_scale = abs(col[0, 0]) * 1e-10 if col[0, 0] != 0 else 1e-10
+                param_samples[:, :, i] = col + torch.randn_like(col) * noise_scale
+        
+        # Convert to numpy array: [num_data_samples, num_param_samples, num_params]
+        param_samples_array = param_samples.cpu().numpy()
         
         return param_samples_array
 

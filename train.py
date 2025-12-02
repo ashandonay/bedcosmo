@@ -125,7 +125,8 @@ class Trainer:
         
         # Restore RNG state on resume
         if self.checkpoint is not None:
-            self._restore_state()
+            restore_rng_state(self.checkpoint, self.global_rank)
+            print(f"RNG state restored at step {self.start_step}")
 
         while step < self.run_args["total_steps"]:
             for samples, context in self.dataloader:         
@@ -720,53 +721,6 @@ class Trainer:
         
         tdist.broadcast_object_list(run_args_list_to_broadcast, src=0)
         self.run_args = run_args_list_to_broadcast[0] # All ranks now have the definitive run_args
-
-    def _restore_state(self):
-        # Restore RNG state at the beginning of each step if resuming from checkpoint
-        
-        # Handle Pyro's RNG state restoration (includes torch, random, and numpy)
-        try:
-            rng_state = self.checkpoint['rng_state']
-            pyro_state = rng_state['pyro']
-            if pyro_state is None:
-                if self.global_rank == 0:
-                    print("Warning: Pyro RNG state is None, skipping restoration")
-                return
-            
-            # Ensure the torch state in Pyro's state has the correct dtype and is on CPU
-            if isinstance(pyro_state, dict) and 'torch' in pyro_state:
-                torch_state = pyro_state['torch']
-                if isinstance(torch_state, torch.Tensor):
-                    # Move to CPU first, then ensure correct dtype
-                    torch_state = torch_state.cpu()
-                    if torch_state.dtype != torch.uint8:
-                        # Convert to uint8 if it's not already
-                        torch_state = torch_state.to(torch.uint8)
-                elif isinstance(torch_state, (list, np.ndarray)):
-                    # Convert from list/array to uint8 tensor on CPU
-                    torch_state = torch.tensor(torch_state, dtype=torch.uint8, device='cpu')
-                else:
-                    # If we can't convert, skip Pyro RNG restoration
-                    raise ValueError(f"Cannot convert torch state of type {type(torch_state)} to uint8 tensor")
-                pyro_state['torch'] = torch_state
-            
-            pyro.util.set_rng_state(pyro_state)  # Pyro's RNG state for deterministic sampling
-            
-            # Restore CUDA RNG states separately (not handled by Pyro)
-            if torch.cuda.is_available() and 'cuda' in rng_state and rng_state['cuda'] is not None:
-                torch.cuda.set_rng_state_all([state.cpu() for state in rng_state['cuda']])
-            
-            # Also restore Pyro's param store state if it exists in the checkpoint
-            if 'pyro_param_state' in rng_state:
-                pyro.get_param_store().set_state(rng_state['pyro_param_state'])
-
-            if self.global_rank == 0:
-                print(f"RNG state restored at step {self.start_step}")
-                
-        except Exception as e:
-            if self.global_rank == 0:
-                print(f"Warning: Could not restore RNG state: {e}. Continuing with current state.")
-                traceback.print_exc()
 
     def _save_priors_file(self):
         """Save priors file to artifacts."""

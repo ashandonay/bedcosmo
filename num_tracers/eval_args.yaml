@@ -4,13 +4,17 @@
 base:
   cosmo_model: base
   eval_step: last
-  levels: 0.68
-  guide_samples: 100000
-  n_particles: 5001
+  levels: [0.68, 0.95]
+  guide_samples: 1000000
+  n_particles: 100001
+  n_evals: 10
   param_space: physical
-  design_step: [0.01, 0.01, 0.01, 0.01]
+  design_step: [0.005, 0.01, 0.01, 0.005]
   design_lower: [0.02, 0.1, 0.1, 0.1]
-  design_chunk_size: 5
+  design_upper: [0.0585, 0.3820, 0.5, 0.3291]
+  design_sum_lower: 1.0
+  design_sum_upper: 1.0
+  design_chunk_size: 1
   profile: true
   verbose: true
 
@@ -18,12 +22,16 @@ base_omegak:
   cosmo_model: base_omegak
   eval_step: last
   levels: 0.68
-  guide_samples: 100000
-  n_particles: 5001
+  guide_samples: 1000000
+  n_particles: 10001
+  n_evals: 10
   param_space: physical
-  design_step: [0.025, 0.05, 0.05, 0.025]
-  design_lower: [0.025, 0.1, 0.1, 0.1]
-  design_chunk_size: 5
+  design_step: [0.005, 0.01, 0.01, 0.005]
+  design_lower: [0.02, 0.1, 0.1, 0.1]
+  design_upper: [0.0585, 0.3820, 0.5, 0.3291]
+  design_sum_lower: 1.0
+  design_sum_upper: 1.0
+  design_chunk_size: 1
   profile: true
   verbose: true
 
@@ -31,12 +39,16 @@ base_w:
   cosmo_model: base_w
   eval_step: last
   levels: 0.68
-  guide_samples: 100000
-  n_particles: 5001
+  guide_samples: 1000000
+  n_particles: 100000
+  n_evals: 10
   param_space: physical
-  design_step: [0.025, 0.05, 0.05, 0.025]
-  design_lower: [0.025, 0.1, 0.1, 0.1]
-  design_chunk_size: 5
+  design_step: [0.005, 0.01, 0.01, 0.005]
+  design_lower: [0.02, 0.1, 0.1, 0.1]
+  design_upper: [0.0585, 0.3820, 0.5, 0.3291]
+  design_sum_lower: 1.0
+  design_sum_upper: 1.0
+  design_chunk_size: 1
   profile: true
   verbose: true
 
@@ -44,12 +56,16 @@ base_w_wa:
   cosmo_model: base_w_wa
   eval_step: last
   levels: 0.68
-  guide_samples: 150000
-  n_particles: 5001
+  guide_samples: 500000
+  n_particles: 100000
+  n_evals: 10
   param_space: physical
-  design_step: [0.025, 0.05, 0.05, 0.025]
-  design_lower: [0.025, 0.1, 0.1, 0.1]
-  design_chunk_size: 5
+  design_step: [0.005, 0.01, 0.01, 0.005]
+  design_lower: [0.02, 0.1, 0.1, 0.1]
+  design_upper: [0.0585, 0.3820, 0.5, 0.3291]
+  design_sum_lower: 1.0
+  design_sum_upper: 1.0
+  design_chunk_size: 1
   profile: true
   verbose: true
 
@@ -57,17 +73,17 @@ base_omegak_w_wa:
   cosmo_model: base_omegak_w_wa
   eval_step: last
   levels: 0.68
-  guide_samples: 10000
-  n_particles: 1001
-  n_evals: 3
+  guide_samples: 500000
+  n_particles: 100000
+  n_evals: 10
   param_space: physical
   fixed_design: null
-  design_step: [0.01, 0.05, 0.05, 0.02]
+  design_step: [0.005, 0.01, 0.01, 0.005]
   design_lower: [0.02, 0.1, 0.1, 0.1]
   design_upper: [0.0585, 0.3820, 0.5, 0.3291]
   design_sum_lower: 1.0
-  design_sum_upper: 1.15
-  design_chunk_size: 5
+  design_sum_upper: 1.0
+  design_chunk_size: 1
   profile: true
   verbose: true
 

@@ -191,23 +191,38 @@ def _vnmc_eig_loss(model, guide, observation_labels, target_labels, contrastive=
     
     return loss_fn
 
-def nf_loss(samples, context, guide, experiment, rank=0, verbose_shapes=False, log_probs=None, evaluation=False):
+def nf_loss(
+    samples,
+    context,
+    guide,
+    experiment,
+    rank=0,
+    verbose_shapes=False,
+    log_probs=None,
+    evaluation=False,
+    chunk_size=None,
+):
     """
     Computes the negative log-probability loss for a normalizing flow model given pre-sampled data.
 
     Parameters:
+    - samples: Pre-sampled parameter values (theta).
     - context: The design tensor (batch of designs).
     - guide: The normalizing flow guide model (e.g., a Pyro or zuko flow).
-    - samples: Pre-sampled parameter values (theta).
+    - experiment: Object with transform_input, params_to_unconstrained, cosmo_params, etc.
     - rank: The rank of the current process.
     - verbose_shapes: Whether to print tensor shapes for debugging (default: False).
+    - log_probs: Dict of prior log-probs for evaluation mode.
+    - evaluation: If True, return EIG-style loss (prior_entropy - posterior_entropy).
+    - chunk_size: If not None, evaluate log_prob in chunks of this size along the
+                  flattened batch dimension to reduce peak memory usage.
 
     Returns:
     - agg_loss: Aggregated loss over all samples.
     - loss: Per-sample loss, reshaped to match the original design batch.
     """
     # Store original batch shape
-    batch_shape = samples.shape[:-1]  # [num_particles, num_designs]
+    batch_shape = samples.shape[:-1]  # e.g. [num_particles, num_designs]
     
     # Flatten samples and contexts for normalizing flow input
     flattened_samples = samples.view(-1, samples.shape[-1])
@@ -218,24 +233,38 @@ def nf_loss(samples, context, guide, experiment, rank=0, verbose_shapes=False, l
         print(f"Samples shape: {samples.shape}")
         print(f"Flattened samples shape: {flattened_samples.shape}")
         print(f"Flattened context shape: {flattened_context.shape}")
+        if chunk_size is not None:
+            print(f"Using chunk_size = {chunk_size}")
 
-    # Compute the negative log-probability
+    # Transform to unconstrained space if needed
     if experiment.transform_input:
         y_flat = experiment.params_to_unconstrained(flattened_samples)
     else:
         y_flat = flattened_samples
-    neg_log_prob = -guide(flattened_context).log_prob(y_flat)
-    
-    # Reshape back to original batch shape, just like posterior_loss does
+
+    # Compute the negative log-probability
+    if chunk_size is None:
+        neg_log_prob = -guide(flattened_context).log_prob(y_flat)
+    else:
+        # Chunk along the flattened batch dimension
+        neg_log_prob_chunks = []
+        for y_chunk, ctx_chunk in zip(
+            y_flat.split(chunk_size, dim=0),
+            flattened_context.split(chunk_size, dim=0),
+        ):
+            neg_log_prob_chunks.append(-guide(ctx_chunk).log_prob(y_chunk))
+        neg_log_prob = torch.cat(neg_log_prob_chunks, dim=0)
+
+    # Reshape back to original batch shape
     neg_log_prob = neg_log_prob.reshape(batch_shape)
 
     # Compute the aggregate loss
     agg_loss, loss = _safe_mean_terms(neg_log_prob)
 
-    if evaluation:  
+    if evaluation:
         if log_probs is None:
             raise ValueError("Log probabilities are not provided")
-        prior_entropy = -1*sum(log_probs[l].mean(dim=0) for l in experiment.cosmo_params)
+        prior_entropy = -1 * sum(log_probs[l].mean(dim=0) for l in experiment.cosmo_params)
         loss = prior_entropy - loss
 
     return agg_loss, loss
@@ -520,11 +549,15 @@ def _create_condition_input(design, y_dict, observation_labels, condition_design
         return torch.cat(ys[1:], dim=-1)
 
 class LikelihoodDataset(Dataset):
-    def __init__(self, experiment, n_particles_per_device, designs=None, device="cuda", evaluation=False):
+    def __init__(self, experiment, n_particles_per_device, designs=None, device="cuda", evaluation=False, particle_batch_size=None):
         self.experiment = experiment
         self.n_particles_per_device = n_particles_per_device
         self.device = device
         self.evaluation = evaluation
+        if particle_batch_size is None:
+            self.particle_batch_size = n_particles_per_device
+        else:
+            self.particle_batch_size = min(particle_batch_size, n_particles_per_device)
         if designs is None:
             self.designs = experiment.designs
         else:
@@ -535,8 +568,45 @@ class LikelihoodDataset(Dataset):
         return 1
 
     def __getitem__(self, idx):
+        # Process particles in batches to reduce memory usage
+        if self.particle_batch_size >= self.n_particles_per_device:
+            # No batching needed - process all particles at once
+            return self._process_particles(self.n_particles_per_device)
+        else:
+            # Process in batches and concatenate results
+            batch_results = []
+            n_batches = (self.n_particles_per_device + self.particle_batch_size - 1) // self.particle_batch_size
+            
+            for batch_idx in range(n_batches):
+                start_idx = batch_idx * self.particle_batch_size
+                end_idx = min(start_idx + self.particle_batch_size, self.n_particles_per_device)
+                n_particles_in_batch = end_idx - start_idx
+                
+                # Process this batch
+                batch_result = self._process_particles(n_particles_in_batch)
+                batch_results.append(batch_result)
+                
+                # Clear GPU cache between batches to free memory
+                if torch.cuda.is_available() and batch_idx < n_batches - 1:
+                    torch.cuda.empty_cache()
+            
+            # Concatenate results from all batches
+            samples_list, condition_input_list, log_probs_list = zip(*batch_results)
+            samples = torch.cat(samples_list, dim=0)
+            condition_input = torch.cat(condition_input_list, dim=0)
+            
+            if self.evaluation:
+                log_probs = {}
+                for key in log_probs_list[0].keys():
+                    log_probs[key] = torch.cat([lp[key] for lp in log_probs_list], dim=0)
+                return samples, condition_input, log_probs
+            else:
+                return samples, condition_input
+    
+    def _process_particles(self, n_particles):
+        """Process a batch of particles and return results."""
         # Dynamically expand the designs on each access
-        expanded_design = lexpand(self.designs, self.n_particles_per_device).to(self.device)
+        expanded_design = lexpand(self.designs, n_particles).to(self.device)
 
         # Generate samples from the NumTracers pyro model
         with torch.no_grad():
@@ -563,7 +633,11 @@ class LikelihoodDataset(Dataset):
                 trace.compute_log_prob()
                 # Extract log probabilities for cosmological parameters
                 log_probs = {l: trace.nodes[l]["log_prob"] for l in self.experiment.cosmo_params}
+                # Clean up trace to free memory
+                del trace, expanded_design, y_dict, theta_dict
                 return samples, condition_input, log_probs
             else:
+                # Clean up trace to free memory
+                del trace, expanded_design, y_dict, theta_dict
                 return samples, condition_input
 
