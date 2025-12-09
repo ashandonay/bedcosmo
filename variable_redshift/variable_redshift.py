@@ -194,7 +194,7 @@ class VariableRedshift:
         design_lower=0.0,
         design_upper=5.0,
         n_redshifts=1,
-        fixed_design=False,
+        input_designs=None,
         nominal_design=None,
         include_D_M=False,
         error_scale=1.0,
@@ -296,7 +296,7 @@ class VariableRedshift:
         
         # Initialize designs
         self.init_designs(
-            fixed_design=fixed_design, 
+            input_designs=input_designs, 
             design_step=design_step, 
             design_lower=design_lower, 
             design_upper=design_upper
@@ -345,16 +345,35 @@ class VariableRedshift:
             print(f"  Nominal design: {self.nominal_design}")
 
     @profile_method
-    def init_designs(self, fixed_design=False, design_step=0.1, design_lower=0.0, design_upper=5.0):
-        """Initialize the redshift design grid."""
-        if isinstance(fixed_design, torch.Tensor):
-            designs = fixed_design.to(self.device, dtype=torch.float64)
-        elif isinstance(fixed_design, (list, tuple, np.ndarray)):
-            designs = torch.as_tensor(fixed_design, device=self.device, dtype=torch.float64)
-        elif fixed_design:
-            # Use a single fixed redshift vector centered in the range
-            midpoint = (design_upper - design_lower) / 2.0 + design_lower
-            designs = torch.full((1, self.n_redshifts), midpoint, device=self.device, dtype=torch.float64)
+    def init_designs(self, input_designs=None, design_step=0.1, design_lower=0.0, design_upper=5.0):
+        """
+        Initialize the redshift design grid.
+        
+        Args:
+            input_designs: Can be:
+                - None: Generate design grid (default)
+                - list/array/tensor: Use specific design(s), shape should be (num_designs, n_redshifts)
+                  If 1D list with length == n_redshifts, it will be reshaped to (1, n_redshifts)
+                  Examples: [2.0] for single redshift design with n_redshifts=1
+                           [[2.0], [2.5]] for multiple single-redshift designs
+                           [[2.0, 2.5]] for single design with n_redshifts=2
+            design_step: Step size for design grid (ignored if input_design is provided)
+            design_lower: Lower bound for redshift grid (ignored if input_design is provided)
+            design_upper: Upper bound for redshift grid (ignored if input_design is provided)
+        """
+        if input_designs is not None:
+            if isinstance(input_designs, torch.Tensor):
+                designs = input_designs.to(self.device, dtype=torch.float64)
+            elif isinstance(input_designs, (list, tuple, np.ndarray)):
+                designs = torch.as_tensor(input_designs, device=self.device, dtype=torch.float64)
+            else:
+                raise ValueError(f"input_designs must be a list, array, or tensor, got {type(input_designs)}")
+            
+            # Handle 1D input (single design)
+            if designs.ndim == 1:
+                if len(designs) != self.n_redshifts:
+                    raise ValueError(f"Input design must have {self.n_redshifts} values, got {len(designs)}")
+                designs = designs.unsqueeze(0)
         else:
             # Create a grid of redshift values (build on CPU for cartesian_prod support)
             z_values = torch.arange(design_lower, design_upper + design_step, design_step, device='cpu', dtype=torch.float64)

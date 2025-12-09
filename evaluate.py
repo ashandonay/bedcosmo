@@ -5,6 +5,7 @@ import io
 import json
 import gc
 import pickle
+import re
 import matplotlib
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
@@ -33,7 +34,7 @@ class Evaluator:
     def __init__(
             self, run_id, guide_samples=1000, design_step=0.05, design_lower=0.05, design_upper=None,
             design_chunk_size=None, seed=1, cosmo_exp='num_tracers', levels=[0.68, 0.95], global_rank=0, eig_file_path=None,
-            n_evals=10, n_particles=1000, param_space='physical', fixed_design=None, design_sum_lower=1.0, design_sum_upper=1.0,
+            n_evals=10, n_particles=1000, param_space='physical', input_designs=None, design_sum_lower=1.0, design_sum_upper=1.0,
             display_run=False, verbose=False, device="cuda:0", profile=False, sort=True, include_nominal=False, batch_size=1,
             particle_batch_size=None
             ):
@@ -94,27 +95,26 @@ class Evaluator:
             "design_upper": design_upper,
             "design_sum_lower": design_sum_lower,
             "design_sum_upper": design_sum_upper,
-            "fixed_design": self.run_args["fixed_design"]
         }
         
-        # Initialize single experiment
+        # Add input_design if provided (otherwise it will be None, which triggers grid generation)
+        if input_designs is not None:
+            self.design_args["input_designs"] = input_designs
+        
+        # Initialize experiment - it will handle input_design and generate designs accordingly 
+        # (single design, multiple designs, or grid)
         self.experiment = init_experiment(
             self.run_obj, self.run_args, self.device, 
             design_args=self.design_args, global_rank=self.global_rank
         )
-        
-        # Handle fixed_design
-        if fixed_design is not None:
-            self.fixed_design = torch.tensor(fixed_design, device=self.device)
-        elif self.run_args['fixed_design']:
-            if type(self.run_args['fixed_design']) == list:
-                self.fixed_design = torch.tensor(self.run_args['fixed_design'], device=self.device)
-            elif self.run_args['fixed_design'] == True:
-                self.fixed_design = self.experiment.nominal_design
-            else:
-                self.fixed_design = False
+        if self.eig_file_path is not None and 'input_designs' in self.eig_data:
+            self.input_designs = torch.tensor(self.eig_data['input_designs'], device=self.device, dtype=torch.float64)
         else:
-            self.fixed_design = False
+            self.input_designs = self.experiment.designs
+            # save to eig_data object
+            self.eig_data['input_designs'] = self.input_designs.cpu().numpy().tolist()
+            self.eig_data['nominal_design'] = self.experiment.nominal_design.cpu().numpy().tolist()
+            
         
         # Cache for EIG calculations to avoid redundant computations
         self._eig_cache = {}
@@ -166,7 +166,8 @@ class Evaluator:
             self.eig_data['seed'] = self.seed
             self.eig_data['n_evals'] = int(self.n_evals)
             self.eig_data['n_particles'] = int(self.n_particles)
-            self.eig_data['particle_batch_size'] = int(self.particle_batch_size)
+            if self.particle_batch_size is not None:
+                self.eig_data['particle_batch_size'] = int(self.particle_batch_size)
             self.restore_path = None
 
     def _save_rng_state(self):
@@ -234,9 +235,7 @@ class Evaluator:
         )
         
         # Determine which design to use
-        if self.fixed_design is not False:
-            design = self.fixed_design
-        elif nominal_design:
+        if nominal_design:
             design = self.experiment.nominal_design
         else:
             # Check if we have EIG data for this step in the loaded file
@@ -247,15 +246,15 @@ class Evaluator:
                 if 'eigs_avg' in step_data:
                     print(f"  Using pre-calculated EIG data for step {selected_step} from {self.eig_file_path} to find optimal design")
                     eigs = np.array(step_data['eigs_avg'])
-                    design = self.experiment.designs[np.argmax(eigs)]
+                    design = self.input_designs[np.argmax(eigs)]
                 else:
                     # Fall back to calculating EIG
                     eigs, _ = self.get_eig(selected_step, nominal_design=False)
-                    design = self.experiment.designs[np.argmax(eigs)]
+                    design = self.input_designs[np.argmax(eigs)]
             else:
                 # No cached data, calculate EIG
                 eigs, _ = self.get_eig(selected_step, nominal_design=False)
-                design = self.experiment.designs[np.argmax(eigs)]
+                design = self.input_designs[np.argmax(eigs)]
 
         # Generate samples
         samples = self._sample_rank_step(self.global_rank, step, design, nominal_design)
@@ -289,7 +288,11 @@ class Evaluator:
             all_colors.append('tab:blue')
             all_alphas.append(1.0)
         
-        if 'optimal' in display and self.fixed_design is False:
+        # Check if we have multiple designs (grid) or single/multiple input designs
+        # Only show "optimal" if we have a grid (multiple designs to choose from)
+        has_multiple_designs = len(self.input_designs) > 1
+        
+        if 'optimal' in display and has_multiple_designs:
             print(f"Generating posterior samples with optimal design...")
             optimal_samples = self._eval_step(step)
             all_samples.append(optimal_samples)
@@ -335,9 +338,15 @@ class Evaluator:
             custom_legend.append(
                 Line2D([0], [0], color='tab:blue', label=f'Nominal Design (NF)', linewidth=1.2)
             )
-        if 'optimal' in display and self.fixed_design is False:
+        # Check if we have multiple designs (grid) - only show optimal if we have multiple
+        has_multiple_designs = len(self.input_designs) > 1
+        if 'optimal' in display and has_multiple_designs:
             custom_legend.append(
                 Line2D([0], [0], color='tab:orange', label=f'Optimal Design (NF)', linewidth=1.2)
+            )
+        elif 'optimal' in display and not has_multiple_designs:
+            custom_legend.append(
+                Line2D([0], [0], color='tab:orange', label=f'Input Design (NF)', linewidth=1.2)
             )
         if ref_contour:
             custom_legend.append(
@@ -364,7 +373,7 @@ class Evaluator:
 
         # Get optimal design based on EIGs across ranks
         eigs, _ = self.get_eig(step, nominal_design=False)
-        optimal_design = self.experiment.designs[np.argmax(eigs)]
+        optimal_design = self.input_designs[np.argmax(eigs)]
         
         # Generate all unique parameter pairs
         params = self.experiment.cosmo_params
@@ -511,7 +520,7 @@ class Evaluator:
             step (int): Step for reference
             flow_model (torch.nn.Module): The flow model to evaluate.
             nominal_design (bool): Whether to evaluate the nominal design.
-            designs: Tensor of designs to evaluate. If None, determines from nominal_design/fixed_design.
+            designs: Tensor of designs to evaluate. If None, determines from nominal_design or self.input_designs.
         Returns:
             eigs (torch.Tensor): The EIGs for each design.
         """
@@ -521,10 +530,8 @@ class Evaluator:
         if designs is None:
             if nominal_design:
                 designs = self.experiment.nominal_design.unsqueeze(0)
-            elif self.fixed_design is not False:
-                designs = self.fixed_design.unsqueeze(0)
             else:
-                designs = self.experiment.designs
+                designs = self.input_designs
         
         # Ensure designs are on the correct device
         designs = designs.to(device_obj)
@@ -591,7 +598,7 @@ class Evaluator:
         Args:
             step (int): Step for caching key and to load the model.
             nominal_design (bool): If True, calculate EIG for nominal design only.
-                                 If False, calculate EIGs for all designs (or fixed_design if set).
+                                 If False, calculate EIGs for all designs in self.experiment.designs.
 
         Returns:
             tuple: (result, result_std)
@@ -669,11 +676,8 @@ class Evaluator:
         if nominal_design:
             all_designs = self.experiment.nominal_design.unsqueeze(0)
             num_designs = 1
-        elif self.fixed_design is not False:
-            all_designs = self.fixed_design.unsqueeze(0)
-            num_designs = 1
         else:
-            all_designs = self.experiment.designs
+            all_designs = self.input_designs
             num_designs = len(all_designs)
         
         # Chunk design space if chunk size is specified (for memory constraints)
@@ -757,9 +761,7 @@ class Evaluator:
                         eigs_avg = result_array.tolist()
                         eigs_std = result_std_array.tolist()
                         optimal_idx = int(sorted_idx[0]) if len(sorted_idx) > 0 else 0
-                        designs_source = (
-                            self.fixed_design.unsqueeze(0) if self.fixed_design is not False else self.experiment.designs
-                        )
+                        designs_source = self.input_designs
                         optimal_design = designs_source[optimal_idx].detach().cpu().numpy().tolist()
                         step_data['eigs_avg'] = eigs_avg
                         step_data['eigs_std'] = eigs_std
@@ -817,7 +819,7 @@ class Evaluator:
                 eig_array = eig_result.numpy() / np.log(2)
                 if len(design_indices) == 1:
                     # Single design case
-                    if nominal_design or self.fixed_design is not False:
+                    if nominal_design or num_designs == 1:
                         full_eigs[design_indices[0]] = eig_array.item()
                     else:
                         full_eigs[design_indices[0]] = eig_array if isinstance(eig_array, (int, float, np.number)) else eig_array[0]
@@ -863,7 +865,6 @@ class Evaluator:
         if nominal_design:
             step_data['eigs_avg'] = float(result)
             step_data['eigs_std'] = float(result_std)
-            step_data['nominal_design'] = self.experiment.nominal_design.cpu().numpy().tolist()
         else:
             result_array = np.atleast_1d(np.array(result, dtype=float))
             result_std_array = np.atleast_1d(np.array(result_std, dtype=float))
@@ -872,14 +873,11 @@ class Evaluator:
             eigs_std = result_std_array.tolist()
             optimal_idx = int(sorted_idx[0]) if len(sorted_idx) > 0 else 0
 
-            designs_source = (
-                self.fixed_design.unsqueeze(0) if self.fixed_design is not False else self.experiment.designs
-            )
+            designs_source = self.input_designs
             optimal_design = designs_source[optimal_idx].detach().cpu().numpy().tolist()
 
             step_data['eigs_avg'] = eigs_avg
             step_data['eigs_std'] = eigs_std
-            step_data['designs'] = designs_source.cpu().numpy().tolist()
             step_data['optimal_eig'] = float(result_array[optimal_idx])
             step_data['optimal_eig_std'] = float(result_std_array[optimal_idx]) if len(result_std_array) > optimal_idx else 0.0
             step_data['optimal_design'] = optimal_design
@@ -905,13 +903,16 @@ class Evaluator:
         """
         print(f"Generating design comparison plot...")
         
-        if self.fixed_design is not False:
-            design = self.fixed_design.cpu().numpy()
-        else:
+        # Determine which design to use
+        # If we have multiple designs, find optimal; otherwise use the first (and only) design
+        if len(self.input_designs) > 1:
             # Get EIGs and optimal design
             eigs, _ = self.get_eig(step, nominal_design=False)
-            optimal_design = self.experiment.designs[np.argmax(eigs)]
+            optimal_design = self.input_designs[np.argmax(eigs)]
             design = optimal_design.cpu().numpy()
+        else:
+            # Single design case - use the only available design
+            design = self.input_designs[0].cpu().numpy()
         
         # Get nominal design and total observations
         nominal_design_cpu = self.experiment.nominal_design.cpu().numpy()
@@ -959,7 +960,10 @@ class Evaluator:
             ax.plot([x_right, x_right], [0, y_top], 'k:', linewidth=1.5, alpha=0.7)
         
         bars1 = ax.bar(x - width/2, nominal_design_plot, width, label='Nominal Design', color='tab:blue')
-        bars2 = ax.bar(x + width/2, design_plot, width, label=f'Optimal Design' if self.fixed_design is False else 'Input Design', color='tab:orange')
+        # Determine label based on whether we have multiple designs or a single input design
+        has_multiple_designs = len(self.input_designs) > 1
+        design_label = 'Optimal Design' if has_multiple_designs else 'Input Design'
+        bars2 = ax.bar(x + width/2, design_plot, width, label=design_label, color='tab:orange')
         
         # Add label for max possible tracers (manually since we used patches)
         max_label = 'Max Possible Tracers' if not use_fractional else 'Max Possible Fraction'
@@ -994,14 +998,14 @@ class Evaluator:
             step: The step to evaluate
         """
         print(f"Running EIG grid evaluation...")
-        # Get reference experiment
-        if self.fixed_design is not False:
-            print("Warning: Fixed design was used for training, skipping EIG grid plot.")
+        # Only generate grid plot if we have multiple designs (grid case)
+        if len(self.input_designs) <= 1:
+            print("Warning: Single or no designs available, skipping EIG grid plot.")
             return
 
         # Get EIGs, nominal EIG, and optimal design (handles all ranks internally)
         eigs, _ = self.get_eig(step, nominal_design=False)
-        optimal_design_tensor = self.experiment.designs[np.argmax(eigs)]
+        optimal_design_tensor = self.input_designs[np.argmax(eigs)]
         optimal_design = optimal_design_tensor.cpu().numpy()
         
         # Determine label suffix
@@ -1018,7 +1022,7 @@ class Evaluator:
         cbar_ax_bottom = fig.add_subplot(gs[1, 1])
 
         # Get design variables
-        designs = self.experiment.designs.cpu().numpy()
+        designs = self.input_designs.cpu().numpy()
         nominal_design = self.experiment.nominal_design.cpu().numpy()
         # optimal_design is already a numpy array from the combination step above
 
@@ -1221,8 +1225,9 @@ class Evaluator:
         
         print(f"Generating EIG designs plot for step(s) {steps}...")
         
-        if self.fixed_design is not False:
-            print("Warning: Fixed design was used for training, skipping sorted EIG plot.")
+        # Only generate sorted EIG plot if we have multiple designs (grid case)
+        if len(self.input_designs) <= 1:
+            print("Warning: Single or no designs available, skipping sorted EIG plot.")
             return
         
         # Determine which step to use for sorting
@@ -1299,7 +1304,7 @@ class Evaluator:
                     sorted_eigs_idx = np.arange(len(eigs_avg))
         
         # Get designs and order them according to sorted_eigs_idx (use reference experiment)
-        designs = self.experiment.designs.cpu().numpy()
+        designs = self.input_designs.cpu().numpy()
         if sorted_eigs_idx is None:
             sorted_eigs_idx = np.arange(len(designs))
         sorted_designs = designs[sorted_eigs_idx]
@@ -1469,7 +1474,35 @@ class Evaluator:
             ax1.spines['bottom'].set_visible(True)
         elif not is_1d_design:
             # For multi-dimensional designs, use heatmap with colorbar
-            im = ax1.imshow(sorted_designs.T, aspect='auto', cmap='viridis')
+            # Use ratio to nominal design colormapping (same as compare_best_designs)
+            nominal_design = self.experiment.nominal_design.cpu().numpy()
+            
+            # Check for zeros in nominal_design to avoid division by zero
+            if np.any(nominal_design == 0):
+                # Fallback to absolute values if nominal has zeros
+                plot_data = sorted_designs.T
+                use_relative_colors = False
+                cmap = 'viridis'
+            else:
+                # Simple ratio: designs / nominal_design
+                # Ratio > 1.0 means larger than nominal, Ratio < 1.0 means smaller than nominal
+                # Ensure proper broadcasting: sorted_designs is (n_designs, n_dims), nominal_design is (n_dims,)
+                plot_data = sorted_designs / nominal_design[np.newaxis, :]
+                plot_data = plot_data.T  # Transpose for imshow
+                use_relative_colors = True
+                cmap = 'RdBu'  # Red for larger ratios (>1.0), Blue for smaller ratios (<1.0)
+            
+            if use_relative_colors:
+                # Use TwoSlopeNorm to center the colormap at 1.0
+                from matplotlib.colors import TwoSlopeNorm
+                vmin = plot_data.min()
+                vmax = plot_data.max()
+                norm = TwoSlopeNorm(vmin=vmin, vcenter=1.0, vmax=vmax)
+                
+                im = ax1.imshow(plot_data, aspect='auto', cmap=cmap, norm=norm)
+            else:
+                im = ax1.imshow(plot_data, aspect='auto', cmap=cmap)
+            
             if len(all_steps_data) > 1:
                 # Find the actual step number used for sorting
                 sort_step_number = next((step_data['step'] for step_data in all_steps_data 
@@ -1497,7 +1530,10 @@ class Evaluator:
 
             # Add colorbar spanning the full height
             cbar = fig.colorbar(im, cax=cbar_ax)
-            cbar.set_label('Design Value', labelpad=10, fontsize=12, weight='bold')
+            if use_relative_colors:
+                cbar.set_label('Ratio to Nominal Design', labelpad=10, fontsize=12, weight='bold')
+            else:
+                cbar.set_label('Design Value', labelpad=10, fontsize=12, weight='bold')
             ax0.spines['bottom'].set_visible(False)
             ax1.spines['bottom'].set_visible(True)
         
@@ -1542,7 +1578,9 @@ class Evaluator:
 
         nominal_eig, nominal_eig_std = self.get_eig(step=eval_step, nominal_design=True)
         eigs, eigs_std = self.get_eig(step=eval_step, nominal_design=False)
-        eig_label = 'Optimal' if self.fixed_design is False else 'Fixed'
+        # Determine label based on whether we have multiple designs or a single input design
+        has_multiple_designs = len(self.input_designs) > 1
+        eig_label = 'Optimal' if has_multiple_designs else 'Input'
 
         step_data = step_dict.get('variable', {})
         max_idx = int(np.argmax(eigs)) if len(np.atleast_1d(eigs)) > 0 else 0
@@ -1553,10 +1591,11 @@ class Evaluator:
             optimal_eig_std_value = float(step_data.get('optimal_eig_std', eigs_std))
         optimal_design = step_data.get('optimal_design')
         if optimal_design is None:
-            if self.fixed_design is not False:
-                optimal_design_tensor = self.fixed_design.detach().cpu().numpy()
+            # If we have multiple designs, use the one with max EIG; otherwise use the single design
+            if len(self.input_designs) > 1:
+                optimal_design_tensor = self.input_designs[max_idx].cpu().numpy()
             else:
-                optimal_design_tensor = self.experiment.designs[max_idx].cpu().numpy()
+                optimal_design_tensor = self.input_designs[0].cpu().numpy()
             optimal_design = optimal_design_tensor.tolist()
 
         print(f"Nominal EIG: {nominal_eig}, {eig_label} EIG: {optimal_eig_value}, {eig_label} Design: {optimal_design}")
@@ -1641,7 +1680,7 @@ if __name__ == "__main__":
     parser.add_argument('--device', type=str, default='cuda:0', help='Device to use for evaluation')
     parser.add_argument('--seed', type=int, default=1, help='Seed for evaluation')
     parser.add_argument('--param_space', type=str, default='physical', help='Parameter space to use for evaluation')
-    parser.add_argument('--fixed_design', type=str, default=None, help='Evaluate a fixed design as a JSON list (default: None)')
+    parser.add_argument('--input_designs', type=str, default=None, help='Evaluate specific design(s). Can be: 1) A JSON file path (e.g., designs.json), 2) A JSON string with single design [x1,...,xn] or multiple designs [[x1,...,xn], [y1,...,yn], ...]. If provided, overrides grid generation parameters (default: None)')
     parser.add_argument('--profile', action='store_true', help='Enable profiling of methods')
     parser.add_argument('--verbose', action='store_true', help='Enable verbose output')
     parser.add_argument('--no-sort', dest='sort', action='store_false', help='Disable sorting of designs by EIG (default: sorting enabled)')
@@ -1655,9 +1694,48 @@ if __name__ == "__main__":
     valid_params = inspect.signature(Evaluator.__init__).parameters.keys()
     valid_params = [k for k in valid_params if k != 'self']
     eval_args = {k: v for k, v in vars(args).items() if k in valid_params}
-    if eval_args['fixed_design'] is not None:
-        parsed_value = json.loads(eval_args['fixed_design'])
-        eval_args['fixed_design'] = parsed_value
+    if eval_args['input_designs'] is not None:
+        # Handle input_design - can be a JSON file path, JSON string, or already parsed
+        if isinstance(eval_args['input_designs'], str):
+            input_design_str = eval_args['input_designs'].strip()
+            
+            # Check if it's a file path (ends with .json and file exists, or just a valid file path)
+            if (input_design_str.endswith('.json') or input_design_str.endswith('.JSON')) and os.path.isfile(input_design_str):
+                # Read from JSON file
+                try:
+                    with open(input_design_str, 'r') as f:
+                        parsed_value = json.load(f)
+                    eval_args['input_designs'] = parsed_value
+                    print(f"Loaded input_designs from file: {input_design_str}")
+                except json.JSONDecodeError as e:
+                    raise ValueError(f"Failed to parse JSON file {input_design_str}: {e}")
+                except Exception as e:
+                    raise ValueError(f"Failed to read file {input_design_str}: {e}")
+            else:
+                # Try to parse as JSON string
+                # Replace newlines and multiple spaces with single spaces for better JSON parsing
+                input_design_str = re.sub(r'\s+', ' ', input_design_str)
+                try:
+                    parsed_value = json.loads(input_design_str)
+                    eval_args['input_designs'] = parsed_value
+                except json.JSONDecodeError as e:
+                    # Show more context in error message
+                    error_pos = e.pos if hasattr(e, 'pos') else 'unknown'
+                    context_start = max(0, error_pos - 50)
+                    context_end = min(len(input_design_str), error_pos + 50)
+                    context = input_design_str[context_start:context_end]
+                    raise ValueError(
+                        f"Failed to parse input_designs as JSON at position {error_pos}.\n"
+                        f"Error: {e.msg}\n"
+                        f"Context: ...{context}...\n"
+                        f"Full input (first 500 chars): {input_design_str[:500]}\n"
+                        f"Note: If you intended to pass a file path, make sure the file exists and ends with .json"
+                    )
+        # If it's already a list/dict, use it as-is
+        elif isinstance(eval_args['input_designs'], (list, dict)):
+            pass  # Already parsed, use as-is
+        else:
+            raise ValueError(f"input_designs must be a JSON file path, JSON string, list, or dict, got {type(eval_args['input_designs'])}")
     
     print(f"Evaluating with parameters:")
     print(json.dumps(eval_args, indent=2))

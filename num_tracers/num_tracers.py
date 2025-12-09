@@ -198,7 +198,7 @@ class NumTracers:
         design_upper=None,
         design_sum_lower=1.0,
         design_sum_upper=1.0,
-        fixed_design=False, 
+        input_designs=None, 
         nominal_design=None,
         include_D_M=True, 
         include_D_V=True,
@@ -285,50 +285,47 @@ class NumTracers:
         self._idx_hr = [self.cosmo_params.index('hrdrag')] if 'hrdrag' in self.cosmo_params else []
         self.observation_labels = ["y"]
         self.init_designs(
-            fixed_design=fixed_design, step_size=design_step, range_lower=design_lower, 
+            input_designs=input_designs, step_size=design_step, range_lower=design_lower, 
             range_upper=design_upper, sum_lower=design_sum_lower, sum_upper=design_sum_upper
             )
 
     @profile_method
-    def init_designs(self, fixed_design=False, step_size=0.05, range_lower=0.05, range_upper=None, sum_lower=1.0, sum_upper=1.0, tol=1e-3):
+    def init_designs(self, input_designs=None, step_size=0.05, range_lower=0.05, range_upper=None, sum_lower=1.0, sum_upper=1.0, tol=1e-3):
         """
         Initialize design space.
         
         Args:
-            fixed_design: Can be:
-                - False: Generate design grid (default)
-                - True: Use nominal design only
+            input_designs: Can be:
+                - None: Generate design grid (default)
                 - list/array: Use specific design(s), shape should be (num_designs, num_targets)
                   If 1D list with length == num_targets, it will be reshaped to (1, num_targets)
-            design_step: Step size(s) for design grid (ignored if fixed_design is True or list)
-            range_lower: Lower bound(s) for each design variable
-            range_upper: Upper bound(s) for each design variable
+                  Examples: [0.2, 0.3, 0.3, 0.2] for single design
+                           [[0.2, 0.3, 0.3, 0.2], [0.25, 0.25, 0.25, 0.25]] for multiple designs
+            design_step: Step size(s) for design grid (ignored if input_designs is provided)
+            range_lower: Lower bound(s) for each design variable (ignored if input_designs is provided)
+            range_upper: Upper bound(s) for each design variable (ignored if input_designs is provided)
             sum_lower: Lower bound on sum of design variables (default: 1.0)
             sum_upper: Upper bound on sum of design variables (default: 1.0)
             tol: Tolerance for sum constraint (default: 1e-3)
 
         """
-        if isinstance(fixed_design, (list, tuple, np.ndarray, torch.Tensor)):
+        if input_designs is not None:
             # User provided specific design(s)
-            design_array = np.array(fixed_design)
+            design_array = np.array(input_designs)
             
             # Handle 1D input (single design)
             if design_array.ndim == 1:
                 if len(design_array) != len(self.design_labels):
-                    raise ValueError(f"Fixed design must have {len(self.design_labels)} values, got {len(design_array)}")
+                    raise ValueError(f"Input design must have {len(self.design_labels)} values, got {len(design_array)}")
                 design_array = design_array.reshape(1, -1)
             elif design_array.ndim == 2:
                 if design_array.shape[1] != len(self.design_labels):
-                    raise ValueError(f"Fixed design must have {len(self.design_labels)} columns, got {design_array.shape[1]}")
+                    raise ValueError(f"Input design must have {len(self.design_labels)} columns, got {design_array.shape[1]}")
             else:
-                raise ValueError(f"Fixed design must be 1D or 2D, got shape {design_array.shape}")
+                raise ValueError(f"Input design must be 1D or 2D, got shape {design_array.shape}")
             
             designs = torch.tensor(design_array, device=self.device, dtype=torch.float64)
-            
-        elif fixed_design is True or fixed_design == 1:
-            # Use nominal design
-            designs = self.nominal_design.unsqueeze(0).to(self.device)
-        elif fixed_design is False or fixed_design == 0:
+        else:
             # Generate design grid
             if type(step_size) == float:
                 design_steps = [step_size]*len(self.design_labels)
@@ -397,9 +394,6 @@ class NumTracers:
             for name in grid_designs.names[1:]:
                 design_tensor = torch.tensor(getattr(grid_designs, name).squeeze(), device=self.device).unsqueeze(1)
                 designs = torch.cat((designs, design_tensor), dim=1)
-        else:
-            raise ValueError(f"Invalid value for fixed_design: {fixed_design}. "
-                           "Must be False (generate grid), True (use nominal), or a list/array of designs. ")
                 
         self.designs = designs.to(self.device)
 
@@ -411,8 +405,8 @@ class NumTracers:
                 f"upper range: {range_upper}\n"
                 )
             print(f"Designs shape: {self.designs.shape}")
-            if fixed_design:
-                print(f"Fixed design (nominal default): {self.designs}" if fixed_design is True else f"Fixed design: {self.designs}")
+            if input_designs is not None:
+                print(f"Input design(s): {self.designs}")
             print(f"Nominal design: {self.nominal_design}\n")
     def design_plot(self):
         """

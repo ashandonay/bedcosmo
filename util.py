@@ -15,6 +15,7 @@ import json
 import contextlib
 import io
 import matplotlib.pyplot as plt
+import matplotlib.colors as colors
 from pyro.contrib.util import lexpand
 import subprocess
 from torch.nn.parallel import DistributedDataParallel as DDP
@@ -28,6 +29,7 @@ import warnings
 from itertools import combinations
 from PIL import Image, ImageDraw, ImageFont
 import glob
+import argparse
 
 torch.set_default_dtype(torch.float64)
 
@@ -1909,7 +1911,7 @@ def create_gif(run_id, fps=1, add_labels=True, label_position='top-right', text_
 def convert_color(c):
     if isinstance(c, np.ndarray):
         # Convert RGBA array to hex color string
-        return matplotlib.colors.to_hex(c)
+        return colors.to_hex(c)
     elif isinstance(c, str):
         return c
     else:
