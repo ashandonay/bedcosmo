@@ -1,7 +1,7 @@
 #!/bin/bash
 
-# Helper script to validate arguments, load config defaults, and run training/eval jobs
-# Usage: ./submit.sh <job_type> --cosmo_exp <value> --cosmo_model <value> [arguments...]
+# Helper script to validate arguments, load config defaults, and run training/eval jobs locally via torchrun
+# Usage: ./submit.sh <job_type> [cosmo_exp] [id] [arguments...]
 
 set -e  # Exit on error
 
@@ -12,7 +12,7 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 if [ $# -eq 0 ]; then
     echo "Error: Job type is required"
     echo ""
-    echo "Usage: ./submit.sh <job_type> --cosmo_exp <value> --cosmo_model <value> [arguments...]"
+    echo "Usage: ./submit.sh <job_type> [cosmo_exp] [model_or_id] [arguments...]"
     echo ""
     echo "Available job types:"
     echo "  train                - Training job"
@@ -20,7 +20,6 @@ if [ $# -eq 0 ]; then
     echo "  debug                - Debug training job"
     echo "  resume               - Resume training job"
     echo "  restart              - Restart training job"
-    echo "  variable_redshift    - Variable redshift job"
     echo ""
     echo "Available cosmo_models:"
     echo "  base, base_omegak, base_w, base_w_wa, base_omegak_w_wa"
@@ -29,14 +28,15 @@ if [ $# -eq 0 ]; then
     echo "for the specified cosmo_model. Command-line arguments will override YAML defaults."
     echo ""
     echo "Examples:"
-    echo "  ./submit.sh train --cosmo_exp num_tracers --cosmo_model base"
+    echo "  ./submit.sh train num_tracers base"
     echo "  ./submit.sh train --cosmo_exp num_tracers --cosmo_model base_w_wa --initial_lr 0.0001 --gpus 2"
-    echo "  ./submit.sh debug --cosmo_exp num_tracers --cosmo_model base --profile"
-    echo "  ./submit.sh eval --cosmo_exp num_tracers --run_id abc123"
-    echo "  ./submit.sh resume --cosmo_exp num_tracers --resume_id abc123 --resume_step 5000"
-    echo "  ./submit.sh restart --cosmo_exp num_tracers --restart_id abc123 --restart_step 10000"
+    echo "  ./submit.sh debug num_tracers --cosmo_model base --profile"
+    echo "  ./submit.sh eval num_tracers abc123"
+    echo "  ./submit.sh resume num_tracers abc123 5000"
+    echo "  ./submit.sh restart num_tracers abc123 10000"
     echo ""
     echo "Optional flags: --gpus <N> (default: 2), --omp_threads <N> (default: 32)"
+    echo "                --log_usage, --profile, --restart_optimizer"
     echo "Note: 'eval', 'resume', and 'restart' jobs do not require --cosmo_model (inferred from MLflow run)"
     exit 1
 fi
@@ -45,6 +45,7 @@ JOB_TYPE=$1
 shift  # Remove job type from arguments
 
 # Initialize variables
+DEFAULT_COSMO_EXP="num_tracers"
 COSMO_EXP=""
 COSMO_MODEL=""
 RUN_ID=""
@@ -53,10 +54,14 @@ RESTART_ID=""
 RESUME_STEP=""
 RESTART_STEP=""
 RESTART_CHECKPOINT=""
+LOG_USAGE=false
+PROFILE=false
 RESTART_OPTIMIZER=false
 GPUS=2  # Default GPU count
 OMP_THREADS=32  # Default OMP threads
+
 declare -A CLI_ARGS  # Associative array for command-line arguments
+POSITIONAL_ARGS=()
 
 # Parse named arguments
 while [[ $# -gt 0 ]]; do
@@ -101,6 +106,14 @@ while [[ $# -gt 0 ]]; do
             OMP_THREADS="$2"
             shift 2
             ;;
+        --log_usage)
+            LOG_USAGE=true
+            shift 1
+            ;;
+        --profile)
+            PROFILE=true
+            shift 1
+            ;;
         --restart_optimizer)
             RESTART_OPTIMIZER=true
             shift 1
@@ -119,32 +132,87 @@ while [[ $# -gt 0 ]]; do
             fi
             ;;
         *)
-            echo "Error: Unknown argument format: $1"
-            echo "Use --key value format for all arguments"
-            exit 1
+            POSITIONAL_ARGS+=("$1")
+            shift 1
             ;;
     esac
 done
 
+# Fill positional fallbacks where appropriate
+if [ -z "$COSMO_EXP" ] && [ ${#POSITIONAL_ARGS[@]} -gt 0 ]; then
+    COSMO_EXP="${POSITIONAL_ARGS[0]}"
+    POSITIONAL_ARGS=("${POSITIONAL_ARGS[@]:1}")
+fi
+
+case $JOB_TYPE in
+    eval)
+        if [ -z "$RUN_ID" ] && [ ${#POSITIONAL_ARGS[@]} -gt 0 ]; then
+            RUN_ID="${POSITIONAL_ARGS[0]}"
+            POSITIONAL_ARGS=("${POSITIONAL_ARGS[@]:1}")
+        fi
+        ;;
+    resume)
+        if [ -z "$RESUME_ID" ] && [ ${#POSITIONAL_ARGS[@]} -gt 0 ]; then
+            RESUME_ID="${POSITIONAL_ARGS[0]}"
+            POSITIONAL_ARGS=("${POSITIONAL_ARGS[@]:1}")
+        fi
+        if [ -z "$RESUME_STEP" ] && [ ${#POSITIONAL_ARGS[@]} -gt 0 ]; then
+            RESUME_STEP="${POSITIONAL_ARGS[0]}"
+            POSITIONAL_ARGS=("${POSITIONAL_ARGS[@]:1}")
+        fi
+        ;;
+    restart)
+        if [ -z "$RESTART_ID" ] && [ ${#POSITIONAL_ARGS[@]} -gt 0 ]; then
+            RESTART_ID="${POSITIONAL_ARGS[0]}"
+            POSITIONAL_ARGS=("${POSITIONAL_ARGS[@]:1}")
+        fi
+        if [ -z "$RESTART_STEP" ] && [ -z "$RESTART_CHECKPOINT" ] && [ ${#POSITIONAL_ARGS[@]} -gt 0 ]; then
+            candidate="${POSITIONAL_ARGS[0]}"
+            if [[ "$candidate" == *.pt ]] || [[ "$candidate" == *checkpoint* ]] || [[ "$candidate" == */* ]]; then
+                RESTART_CHECKPOINT="$candidate"
+            else
+                RESTART_STEP="$candidate"
+            fi
+            POSITIONAL_ARGS=("${POSITIONAL_ARGS[@]:1}")
+        fi
+        ;;
+    *)
+        # No additional positional handling required
+        ;;
+esac
+
+# Allow positional cosmo_model for job types that require it
+if [ -z "$COSMO_MODEL" ] && [ "$JOB_TYPE" != "eval" ] && [ "$JOB_TYPE" != "resume" ] && [ "$JOB_TYPE" != "restart" ] && [ ${#POSITIONAL_ARGS[@]} -gt 0 ]; then
+    COSMO_MODEL="${POSITIONAL_ARGS[0]}"
+    POSITIONAL_ARGS=("${POSITIONAL_ARGS[@]:1}")
+fi
+
+if [ -z "$COSMO_EXP" ]; then
+    COSMO_EXP="$DEFAULT_COSMO_EXP"
+fi
+
+if [ ${#POSITIONAL_ARGS[@]} -gt 0 ]; then
+    echo "Error: Unexpected positional arguments: ${POSITIONAL_ARGS[*]}"
+    echo "Usage: ./submit.sh $JOB_TYPE [cosmo_exp] [id] [additional args...]"
+    exit 1
+fi
+
 # Validate required arguments
 if [ -z "$COSMO_EXP" ]; then
-    echo "Error: --cosmo_exp is required"
-    echo "Usage: ./submit.sh $JOB_TYPE --cosmo_exp <value> --cosmo_model <value> [additional args...]"
+    echo "Error: cosmo_exp is required"
+    echo "Usage: ./submit.sh $JOB_TYPE [cosmo_exp] [cosmo_model] [additional args...]"
     exit 1
 fi
 
 # cosmo_model is NOT required for eval/resume/restart (inferred from MLflow run)
 if [ -z "$COSMO_MODEL" ] && [ "$JOB_TYPE" != "eval" ] && [ "$JOB_TYPE" != "resume" ] && [ "$JOB_TYPE" != "restart" ]; then
     echo "Error: --cosmo_model is required for $JOB_TYPE jobs"
-    echo "Usage: ./submit.sh $JOB_TYPE --cosmo_exp <value> --cosmo_model <value> [additional args...]"
+    echo "Usage: ./submit.sh $JOB_TYPE [cosmo_exp] [cosmo_model] [additional args...]"
     echo "Available models: base, base_omegak, base_w, base_w_wa, base_omegak_w_wa"
-    echo ""
-    echo "Note: --cosmo_model is not needed for 'eval', 'resume', or 'restart' jobs (inferred from MLflow run)"
     exit 1
 fi
 
 # Activate conda environment early (needed for MLflow and YAML parsing)
-# Try multiple methods to activate conda
 if [ -f "$HOME/.bashrc" ] && grep -q "conda" "$HOME/.bashrc"; then
     source "$HOME/.bashrc"
 fi
@@ -169,7 +237,7 @@ fi
 # For eval jobs, infer cosmo_model from MLflow run
 if [ "$JOB_TYPE" = "eval" ] && [ -z "$COSMO_MODEL" ]; then
     echo "Inferring cosmo_model from MLflow run ${RUN_ID}..."
-    COSMO_MODEL=$(python -c "
+    COSMO_MODEL=$(python3 -c "
 import mlflow
 import os
 import sys
@@ -217,11 +285,10 @@ elif [ -n "$CONFIG_FILE" ]; then
     echo "Using model: $COSMO_MODEL"
     
     # Parse YAML and extract config for specified model
-    # Using Python to parse YAML reliably
     YAML_ARGS=()
     
     # Create a Python script to extract the model config
-    YAML_OUTPUT=$(python -c "
+    YAML_OUTPUT=$(python3 -c "
 import yaml
 import sys
 import json
@@ -257,35 +324,47 @@ except Exception as e:
             continue
         fi
         
-        # Handle different value types
-        if [ "$value" != "null" ] && [ -n "$value" ]; then
-            # Handle boolean values
-            if [ "$value" = "true" ] || [ "$value" = "True" ]; then
-                YAML_ARGS+=("--$key")
-            elif [ "$value" = "false" ] || [ "$value" = "False" ]; then
-                # Skip false boolean flags
-                continue
-            # Handle arrays (keep as JSON-like format)
-            elif [[ "$value" == \[*\] ]]; then
-                YAML_ARGS+=("--$key" "$value")
-            # Handle numbers and strings
-            else
-                YAML_ARGS+=("--$key" "$value")
+        # Skip null/None values (explicitly check for both JSON null and Python None string)
+        # Exception: for eval jobs, include fixed_design even if null (evaluate.py accepts it)
+        if [ "$value" = "null" ] || [ "$value" = "None" ] || [ -z "$value" ]; then
+            # For eval jobs, pass fixed_design even if null (evaluate.py will parse "null" as None)
+            if [ "$JOB_TYPE" = "eval" ] && [ "$key" = "fixed_design" ]; then
+                YAML_ARGS+=("--$key" "null")
             fi
+            continue
         fi
-    done < <(echo "$YAML_OUTPUT" | python -c "
+        
+        # Handle boolean values
+        if [ "$value" = "true" ]; then
+            YAML_ARGS+=("--$key")
+        elif [ "$value" = "false" ]; then
+            # Skip false boolean flags
+            continue
+        # Handle arrays (keep as JSON-like format)
+        elif [[ "$value" == \[*\] ]]; then
+            YAML_ARGS+=("--$key" "$value")
+        # Handle numbers and strings
+        else
+            YAML_ARGS+=("--$key" "$value")
+        fi
+    done < <(echo "$YAML_OUTPUT" | python3 -c "
 import json
 import sys
 
 data = json.load(sys.stdin)
 for key, value in data.items():
-    if isinstance(value, list):
-        # Format lists as quoted JSON-like strings (avoid space splitting)
-        formatted = json.dumps(value).replace(',', ', ')
+    if value is None:
+        # Explicitly output 'null' for None values (JSON null)
+        print(f'{key}=null')
+    elif isinstance(value, list):
+        # Format lists as JSON-like strings
+        formatted = '[' + ', '.join(str(v) for v in value) + ']'
         print(f'{key}={formatted}')
     elif isinstance(value, bool):
-        print(f'{key}={str(value)}')
+        # Output lowercase boolean for consistency
+        print(f'{key}={str(value).lower()}')
     else:
+        # Output as-is (numbers and strings)
         print(f'{key}={value}')
 ")
 fi
@@ -301,7 +380,7 @@ for key in "${!CLI_ARGS[@]}"; do
     fi
 done
 
-# For debug jobs, filter out mlflow_exp from YAML_ARGS (will be set to "debug")
+# For debug jobs, filter out mlflow_exp from YAML_ARGS (debug.sh sets it to "debug")
 # For eval jobs, filter out cosmo_model from YAML_ARGS (evaluate.py doesn't accept it)
 if [ "$JOB_TYPE" = "debug" ] || [ "$JOB_TYPE" = "eval" ]; then
     FILTERED_ARGS=()
@@ -330,7 +409,7 @@ export OMP_NUM_THREADS=$OMP_THREADS
 
 # Validate and build command based on job type
 case $JOB_TYPE in
-    train|debug|variable_redshift)
+    train|debug)
         PYTHON_SCRIPT="train.py"
         FINAL_ARGS=("--cosmo_exp" "$COSMO_EXP" "${YAML_ARGS[@]}")
         
@@ -338,13 +417,20 @@ case $JOB_TYPE in
         if [ "$JOB_TYPE" = "debug" ]; then
             FINAL_ARGS+=("--mlflow_exp" "debug")
         fi
+        # Add optional boolean flags
+        if [ "$LOG_USAGE" = true ]; then
+            FINAL_ARGS+=("--log_usage")
+        fi
+        if [ "$PROFILE" = true ]; then
+            FINAL_ARGS+=("--profile")
+        fi
         ;;
     
     eval)
         PYTHON_SCRIPT="evaluate.py"
         if [ -z "$RUN_ID" ]; then
-            echo "Error: --run_id is required for eval"
-            echo "Usage: ./submit.sh eval --cosmo_exp <value> --run_id <value> [additional args...]"
+            echo "Error: run_id is required for eval"
+            echo "Usage: ./submit.sh eval [cosmo_exp] [run_id] [additional args...]"
             exit 1
         fi
         FINAL_ARGS=("--cosmo_exp" "$COSMO_EXP" "--run_id" "$RUN_ID" "${YAML_ARGS[@]}")
@@ -353,13 +439,13 @@ case $JOB_TYPE in
     resume)
         PYTHON_SCRIPT="train.py"
         if [ -z "$RESUME_ID" ]; then
-            echo "Error: --resume_id is required for resume"
-            echo "Usage: ./submit.sh resume --cosmo_exp <value> --resume_id <value> --resume_step <value> [additional args...]"
+            echo "Error: resume_id is required for resume"
+            echo "Usage: ./submit.sh resume [cosmo_exp] [resume_id] [resume_step] [additional args...]"
             exit 1
         fi
         if [ -z "$RESUME_STEP" ]; then
-            echo "Error: --resume_step is required for resume"
-            echo "Usage: ./submit.sh resume --cosmo_exp <value> --resume_id <value> --resume_step <value> [additional args...]"
+            echo "Error: resume_step is required for resume"
+            echo "Usage: ./submit.sh resume [cosmo_exp] [resume_id] [resume_step] [additional args...]"
             exit 1
         fi
         
@@ -369,7 +455,7 @@ case $JOB_TYPE in
             echo "=========================================="
             echo "Step 1: Truncating metrics to resume step..."
             echo "=========================================="
-            python "$TRUNCATE_SCRIPT" --run_id "$RESUME_ID" --resume_step "$RESUME_STEP"
+            python3 "$TRUNCATE_SCRIPT" --run_id "$RESUME_ID" --resume_step "$RESUME_STEP"
             
             if [[ $? -eq 0 ]]; then
                 echo "Metrics truncation completed successfully!"
@@ -384,19 +470,26 @@ case $JOB_TYPE in
         echo "=========================================="
         
         FINAL_ARGS=("--resume_id" "$RESUME_ID" "--resume_step" "$RESUME_STEP" "${YAML_ARGS[@]}")
+        # Add optional boolean flags
+        if [ "$LOG_USAGE" = true ]; then
+            FINAL_ARGS+=("--log_usage")
+        fi
+        if [ "$PROFILE" = true ]; then
+            FINAL_ARGS+=("--profile")
+        fi
         ;;
     
     restart)
         PYTHON_SCRIPT="train.py"
         if [ -z "$RESTART_ID" ]; then
-            echo "Error: --restart_id is required for restart"
-            echo "Usage: ./submit.sh restart --cosmo_exp <value> --restart_id <value> [--restart_step <value> | --restart_checkpoint <value>] [additional args...]"
+            echo "Error: restart_id is required for restart"
+            echo "Usage: ./submit.sh restart [cosmo_exp] [restart_id] [restart_step|restart_checkpoint] [additional args...]"
             exit 1
         fi
         # Either restart_step OR restart_checkpoint must be specified
         if [ -z "$RESTART_STEP" ] && [ -z "$RESTART_CHECKPOINT" ]; then
             echo "Error: Either --restart_step or --restart_checkpoint is required for restart"
-            echo "Usage: ./submit.sh restart --cosmo_exp <value> --restart_id <value> [--restart_step <value> | --restart_checkpoint <value>] [additional args...]"
+            echo "Usage: ./submit.sh restart [cosmo_exp] [restart_id] [restart_step|restart_checkpoint] [additional args...]"
             exit 1
         fi
         FINAL_ARGS=("--restart_id" "$RESTART_ID")
@@ -410,12 +503,19 @@ case $JOB_TYPE in
             FINAL_ARGS+=("--restart_optimizer")
         fi
         FINAL_ARGS+=("${YAML_ARGS[@]}")
+        # Add optional boolean flags
+        if [ "$LOG_USAGE" = true ]; then
+            FINAL_ARGS+=("--log_usage")
+        fi
+        if [ "$PROFILE" = true ]; then
+            FINAL_ARGS+=("--profile")
+        fi
         ;;
     
     *)
         echo "Error: Unknown job type: $JOB_TYPE"
         echo ""
-        echo "Available job types: train, eval, debug, resume, restart, variable_redshift"
+        echo "Available job types: train, eval, debug, resume, restart"
         exit 1
         ;;
 esac
@@ -468,8 +568,18 @@ echo ""
 # Change to project root to run the command
 cd "$PROJECT_ROOT"
 
+# Setup logging directory and file
+LOG_BASE_DIR="/home/ashandonay/scratch/bed/BED_cosmo/${COSMO_EXP}/logs"
+mkdir -p "$LOG_BASE_DIR"
+TIMESTAMP=$(date +"%Y-%m-%d_%H-%M-%S")
+LOG_FILE="${LOG_BASE_DIR}/train_${TIMESTAMP}.log"
+
+echo "Logging output to: $LOG_FILE"
+echo ""
+
 # Execute the command
 echo "Executing: torchrun --nproc_per_node=$GPUS $PYTHON_SCRIPT [${#FINAL_ARGS[@]} arguments]"
+echo "Output will be logged to: $LOG_FILE"
 echo ""
-torchrun --nproc_per_node=$GPUS "$PYTHON_SCRIPT" "${FINAL_ARGS[@]}"
-
+# Redirect both stdout and stderr to log file only (no terminal output)
+torchrun --nproc_per_node=$GPUS "$PYTHON_SCRIPT" "${FINAL_ARGS[@]}" > "$LOG_FILE" 2>&1

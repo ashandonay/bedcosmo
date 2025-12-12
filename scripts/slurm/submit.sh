@@ -20,7 +20,6 @@ if [ $# -eq 0 ]; then
     echo "  debug                - Debug training job"
     echo "  resume               - Resume training job"
     echo "  restart              - Restart training job"
-    echo "  variable_reshift_debug - Variable redshift debug job"
     echo ""
     echo "Available cosmo_models:"
     echo "  base, base_omegak, base_w, base_w_wa, base_omegak_w_wa"
