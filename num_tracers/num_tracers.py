@@ -198,7 +198,7 @@ class NumTracers:
         design_upper=None,
         design_sum_lower=1.0,
         design_sum_upper=1.0,
-        fixed_design=False, 
+        input_designs=None, 
         nominal_design=None,
         include_D_M=True, 
         include_D_V=True,
@@ -285,50 +285,47 @@ class NumTracers:
         self._idx_hr = [self.cosmo_params.index('hrdrag')] if 'hrdrag' in self.cosmo_params else []
         self.observation_labels = ["y"]
         self.init_designs(
-            fixed_design=fixed_design, step_size=design_step, range_lower=design_lower, 
+            input_designs=input_designs, step_size=design_step, range_lower=design_lower, 
             range_upper=design_upper, sum_lower=design_sum_lower, sum_upper=design_sum_upper
             )
 
     @profile_method
-    def init_designs(self, fixed_design=False, step_size=0.05, range_lower=0.05, range_upper=None, sum_lower=1.0, sum_upper=1.0, tol=1e-3):
+    def init_designs(self, input_designs=None, step_size=0.05, range_lower=0.05, range_upper=None, sum_lower=1.0, sum_upper=1.0, tol=1e-3):
         """
         Initialize design space.
         
         Args:
-            fixed_design: Can be:
-                - False: Generate design grid (default)
-                - True: Use nominal design only
+            input_designs: Can be:
+                - None: Generate design grid (default)
                 - list/array: Use specific design(s), shape should be (num_designs, num_targets)
                   If 1D list with length == num_targets, it will be reshaped to (1, num_targets)
-            design_step: Step size(s) for design grid (ignored if fixed_design is True or list)
-            range_lower: Lower bound(s) for each design variable
-            range_upper: Upper bound(s) for each design variable
+                  Examples: [0.2, 0.3, 0.3, 0.2] for single design
+                           [[0.2, 0.3, 0.3, 0.2], [0.25, 0.25, 0.25, 0.25]] for multiple designs
+            design_step: Step size(s) for design grid (ignored if input_designs is provided)
+            range_lower: Lower bound(s) for each design variable (ignored if input_designs is provided)
+            range_upper: Upper bound(s) for each design variable (ignored if input_designs is provided)
             sum_lower: Lower bound on sum of design variables (default: 1.0)
             sum_upper: Upper bound on sum of design variables (default: 1.0)
             tol: Tolerance for sum constraint (default: 1e-3)
 
         """
-        if isinstance(fixed_design, (list, tuple, np.ndarray, torch.Tensor)):
+        if input_designs is not None:
             # User provided specific design(s)
-            design_array = np.array(fixed_design)
+            design_array = np.array(input_designs)
             
             # Handle 1D input (single design)
             if design_array.ndim == 1:
                 if len(design_array) != len(self.design_labels):
-                    raise ValueError(f"Fixed design must have {len(self.design_labels)} values, got {len(design_array)}")
+                    raise ValueError(f"Input design must have {len(self.design_labels)} values, got {len(design_array)}")
                 design_array = design_array.reshape(1, -1)
             elif design_array.ndim == 2:
                 if design_array.shape[1] != len(self.design_labels):
-                    raise ValueError(f"Fixed design must have {len(self.design_labels)} columns, got {design_array.shape[1]}")
+                    raise ValueError(f"Input design must have {len(self.design_labels)} columns, got {design_array.shape[1]}")
             else:
-                raise ValueError(f"Fixed design must be 1D or 2D, got shape {design_array.shape}")
+                raise ValueError(f"Input design must be 1D or 2D, got shape {design_array.shape}")
             
             designs = torch.tensor(design_array, device=self.device, dtype=torch.float64)
-            
-        elif fixed_design is True or fixed_design == 1:
-            # Use nominal design
-            designs = self.nominal_design.unsqueeze(0).to(self.device)
-        elif fixed_design is False or fixed_design == 0:
+        else:
             # Generate design grid
             if type(step_size) == float:
                 design_steps = [step_size]*len(self.design_labels)
@@ -397,9 +394,6 @@ class NumTracers:
             for name in grid_designs.names[1:]:
                 design_tensor = torch.tensor(getattr(grid_designs, name).squeeze(), device=self.device).unsqueeze(1)
                 designs = torch.cat((designs, design_tensor), dim=1)
-        else:
-            raise ValueError(f"Invalid value for fixed_design: {fixed_design}. "
-                           "Must be False (generate grid), True (use nominal), or a list/array of designs. ")
                 
         self.designs = designs.to(self.device)
 
@@ -411,8 +405,8 @@ class NumTracers:
                 f"upper range: {range_upper}\n"
                 )
             print(f"Designs shape: {self.designs.shape}")
-            if fixed_design:
-                print(f"Fixed design (nominal default): {self.designs}" if fixed_design is True else f"Fixed design: {self.designs}")
+            if input_designs is not None:
+                print(f"Input design(s): {self.designs}")
             print(f"Nominal design: {self.nominal_design}\n")
     def design_plot(self):
         """
@@ -706,199 +700,6 @@ class NumTracers:
             passed_ratio = obs_ratio*efficiency
 
             return passed_ratio
-
-    @profile_method
-    def D_H_func_old(self, z_eff, Om, Ok=None, w0=None, wa=None, hrdrag=None):
-        """
-        Hubble distance divided by the sound horizon D_H/r_d
-        """
-        z = z_eff.reshape((len(self.cosmo_params))*[1] + [-1])
-        if self.cosmo_model == 'base':
-            return (self.c/(self.hrdrag_multiplier*hrdrag)) * 1 / torch.sqrt(
-                Om * (1+z)**3 + 
-                (1-Om)
-                )
-        
-        elif self.cosmo_model == 'base_omegak':
-            return (self.c/(self.hrdrag_multiplier*hrdrag)) * 1 / torch.sqrt(
-                Om * (1+z)**3 + 
-                Ok * (1+z)**2 + 
-                (1 - Om - Ok)
-                )
-
-        elif self.cosmo_model == 'base_w':
-            return (self.c/(self.hrdrag_multiplier*hrdrag)) * 1 / torch.sqrt(
-                Om * (1+z)**3 + 
-                (1-Om) * (1+z)**(3*(1+w0))
-                )
-        
-        elif self.cosmo_model == 'base_w_wa':
-            return (self.c/(self.hrdrag_multiplier*hrdrag)) * 1 / torch.sqrt(
-                Om * (1+z)**3 + 
-                (1 - Om) * (1 + z)**(3 * (1 + w0 + wa)) * torch.exp(-3 * wa * (z / (1 + z)))
-                )
-        
-        elif self.cosmo_model == 'base_omegak_w_wa':
-            return (self.c/(self.hrdrag_multiplier*hrdrag)) * 1 / torch.sqrt(
-                Om * (1+z)**3 + Ok * (1+z)**2 + 
-                (1 - Om - Ok) * (1 + z)**(3 * (1 + w0 + wa)) * torch.exp(-3 * wa * (z / (1 + z)))
-                )
-
-    @profile_method
-    def D_M_func_old(self, z_eff, Om, Ok=None, w0=None, wa=None, hrdrag=None):
-        """
-        Transverse comoving distance divided by the sound horizon D_M/r_d
-        """
-        z_array = z_eff.unsqueeze(-1) * torch.linspace(0, 1, 100, device=self.device).view(1, -1)
-        z = z_array.expand((len(self.cosmo_params)-1)*[1] + [-1, -1])
-        if self.cosmo_model == 'base':
-            # calculates the transverse comoving distance for a lambdaCDM cosmology 
-            result = (self.c/(self.hrdrag_multiplier*hrdrag)) * trapezoid(
-                (1 / torch.sqrt(
-                    Om.unsqueeze(-1) * (1 + z)**3 + 
-                    (1 - Om.unsqueeze(-1))
-                    )), 
-                z, 
-                axis=-1)
-            return result
-
-        elif self.cosmo_model == 'base_omegak':
-            # piecewise function that calculates the transverse comoving distance for a constant dark energy density cosmology 
-            # using sinh and sin based on the samples of Ok
-            output_shape = Om.shape[:2] + (z.shape[-2],)
-            result = torch.zeros(output_shape, device=self.device).flatten(0, 1)
-            Om = Om.flatten(0, 1)
-            Ok = Ok.flatten(0, 1)
-            hrdrag = hrdrag.flatten(0, 1)
-            z = z.flatten(0, 1)
-
-            neg_mask = Ok.flatten() < 0 # Ok < 0
-            if neg_mask.any():
-                result[neg_mask, :] = ((self.c/(self.hrdrag_multiplier*hrdrag[neg_mask])/torch.sqrt(-Ok[neg_mask])) * torch.sin(
-                    torch.sqrt(-Ok[neg_mask]) * trapezoid(
-                        (1 / torch.sqrt(
-                            Om[neg_mask].unsqueeze(-1) * (1 + z)**3 + 
-                            Ok[neg_mask].unsqueeze(-1) * (1 + z)**2 + 
-                            (1 - Om[neg_mask].unsqueeze(-1) - Ok[neg_mask].unsqueeze(-1))
-                        )),
-                        z,
-                        axis=-1
-                    )
-                ))
-
-            pos_mask = Ok.flatten() > 0 # Ok > 0
-            if pos_mask.any():
-                result[pos_mask, :] = ((self.c/(self.hrdrag_multiplier*hrdrag[pos_mask])/torch.sqrt(Ok[pos_mask])) * torch.sinh(
-                    torch.sqrt(Ok[pos_mask]) * trapezoid(
-                        (1 / torch.sqrt(
-                            Om[pos_mask].unsqueeze(-1) * (1 + z)**3 + 
-                            Ok[pos_mask].unsqueeze(-1) * (1 + z)**2 + 
-                            (1 - Om[pos_mask].unsqueeze(-1) - Ok[pos_mask].unsqueeze(-1))
-                        )),
-                        z,
-                        axis=-1
-                    )
-                ))
-
-            zero_mask = Ok.flatten() == 0 # Ok = 0
-            if zero_mask.any():
-                result[zero_mask, :] = ((self.c/(self.hrdrag_multiplier*hrdrag[zero_mask])) * trapezoid(
-                    (1 / torch.sqrt(
-                        Om[zero_mask].unsqueeze(-1) * (1 + z)**3 + 
-                        (1 - Om[zero_mask].unsqueeze(-1))
-                    )),
-                    z,
-                    axis=-1
-                ))
-
-            return result.reshape(output_shape)
-
-        elif self.cosmo_model == 'base_w':
-            result = (self.c/(self.hrdrag_multiplier*hrdrag)) * trapezoid(
-                (1 / torch.sqrt(
-                    Om.unsqueeze(-1) * (1 + z)**3 + 
-                    (1 - Om.unsqueeze(-1)) * (1 + z)**(3 * (1 + w0.unsqueeze(-1)))
-                )), 
-                z, 
-                axis=-1)
-            return result
-        
-        elif self.cosmo_model == 'base_w_wa':
-            result = (self.c/(self.hrdrag_multiplier*hrdrag)) * trapezoid(
-                (1 / torch.sqrt(
-                    Om.unsqueeze(-1) * (1 + z)**3 + 
-                    (1 - Om.unsqueeze(-1)) * (1 + z)**(3 * (1 + w0.unsqueeze(-1) + wa.unsqueeze(-1))) * 
-                    torch.exp(-3 * wa.unsqueeze(-1) * (z / (1 + z)))
-                    )), 
-                z, 
-                axis=-1)
-            return result
-        
-        elif self.cosmo_model == 'base_omegak_w_wa':
-            # piecewise function that calculates the transverse comoving distance for a w0 and wa cosmology 
-            # using sinh and sin based on the samples of Ok 
-            output_shape = Om.shape[:2] + (z.shape[-2],)
-            result = torch.zeros(output_shape, device=self.device).flatten(0, 1)
-            Om = Om.flatten(0, 1)
-            Ok = Ok.flatten(0, 1)
-            w0 = w0.flatten(0, 1)
-            wa = wa.flatten(0, 1)
-            hrdrag = hrdrag.flatten(0, 1)
-            z = z.flatten(0, 1)
-
-            neg_mask = Ok.flatten() < 0 # Ok < 0
-            if neg_mask.any():
-                result[neg_mask, :] = ((self.c/(self.hrdrag_multiplier*hrdrag[neg_mask])/torch.sqrt(-Ok[neg_mask])) * torch.sin(
-                    torch.sqrt(-Ok[neg_mask]) * trapezoid(
-                        (1 / torch.sqrt(
-                            Om[neg_mask].unsqueeze(-1) * (1 + z)**3 + 
-                            Ok[neg_mask].unsqueeze(-1) * (1 + z)**2 + 
-                            (1 - Om[neg_mask].unsqueeze(-1) - Ok[neg_mask].unsqueeze(-1)) * 
-                            (1 + z)**(3 * (1 + w0[neg_mask].unsqueeze(-1) + wa[neg_mask].unsqueeze(-1))) * 
-                            torch.exp(-3 * wa[neg_mask].unsqueeze(-1) * (z / (1 + z)))
-                        )),
-                        z,
-                        axis=-1
-                    )
-                ))
-
-            pos_mask = Ok.flatten() > 0 # Ok > 0
-            if pos_mask.any():
-                result[pos_mask, :] = ((self.c/(self.hrdrag_multiplier*hrdrag[pos_mask])/torch.sqrt(Ok[pos_mask])) * torch.sinh(
-                    torch.sqrt(Ok[pos_mask]) * trapezoid(
-                        (1 / torch.sqrt(
-                            Om[pos_mask].unsqueeze(-1) * (1 + z)**3 + 
-                            Ok[pos_mask].unsqueeze(-1) * (1 + z)**2 + 
-                            (1 - Om[pos_mask].unsqueeze(-1) - Ok[pos_mask].unsqueeze(-1)) * 
-                            (1 + z)**(3 * (1 + w0[pos_mask].unsqueeze(-1) + wa[pos_mask].unsqueeze(-1))) * 
-                            torch.exp(-3 * wa[pos_mask].unsqueeze(-1) * (z / (1 + z)))
-                        )),
-                        z,
-                        axis=-1
-                    )
-                ))
-
-            zero_mask = Ok.flatten() == 0 # Ok = 0
-            if zero_mask.any():
-                result[zero_mask, :] = ((self.c/(self.hrdrag_multiplier*hrdrag[zero_mask])) * trapezoid(
-                    (1 / torch.sqrt(
-                        Om[zero_mask].unsqueeze(-1) * (1 + z)**3 + 
-                        (1 - Om[zero_mask].unsqueeze(-1)) *
-                        (1 + z)**(3 * (1 + w0[zero_mask].unsqueeze(-1) + wa[zero_mask].unsqueeze(-1))) * 
-                        torch.exp(-3 * wa[zero_mask].unsqueeze(-1) * (z / (1 + z)))
-                    )),
-                    z,
-                    axis=-1
-                ))
-
-            return result.reshape(output_shape)
-
-    @profile_method
-    def D_V_func_old(self, z_eff, Om, Ok=None, w0=None, wa=None, hrdrag=None):
-        """
-        The angle-averaged distance D_V/r_d = (z * (D_M/r_d)^2 * (D_H/r_d))^(1/3) divided by the sound horizon D_V/r_d
-        """
-        return (z_eff.reshape((len(self.cosmo_params))*[1] + [-1]) * self.D_M_func(z_eff, Om, Ok, w0, wa, hrdrag)**2 * self.D_H_func(z_eff, Om, Ok, w0, wa, hrdrag))**(1/3)
 
     def _E_of_z(self, z, Om, Ok, w0, wa, Or, Onu0, Ode0, n_massive, cache):
         """
@@ -1227,6 +1028,7 @@ class NumTracers:
     def sample_params_from_data_samples(self, tracer_ratio, guide, num_data_samples=100, num_param_samples=1000, central=True, transform_output=True):
         """
         Samples parameters from the posterior distribution conditioned on the data sampled from the likelihood.
+        Vectorized version that batches all sampling operations for improved performance.
         Args:
             tracer_ratio (torch.Tensor): The tracer ratio (design variables).
             guide (pyro.infer.guide.Guide): The guide to sample from.
@@ -1244,18 +1046,36 @@ class NumTracers:
             expanded_tracer_ratio = tracer_ratio.expand(num_data_samples, -1, -1)
         context = torch.cat([expanded_tracer_ratio, data_samples], dim=-1)
         
-        # Sample parameters for each data realization individually
-        # This is cleaner and avoids tensor shape complications
-        param_samples_list = []
-        for i in range(num_data_samples):
-            # Get context for the i-th data sample
-            context_i = context[i]  # Shape: [context_dim] or [1, context_dim]
-            # Sample parameters conditioned on this specific data sample
-            param_samples_i = self.get_guide_samples(guide, context_i, num_samples=num_param_samples, transform_output=transform_output)
-            param_samples_list.append(param_samples_i.samples)
+        # Vectorized sampling: expand contexts to (num_data_samples * num_param_samples, context_dim)
+        # Each context is repeated num_param_samples times
+        context_squeezed = context.squeeze(1) if context.dim() == 3 else context  # Shape: [num_data_samples, context_dim]
+        # Expand: [num_data_samples, context_dim] -> [num_data_samples, num_param_samples, context_dim] -> [num_data_samples * num_param_samples, context_dim]
+        expanded_context = context_squeezed.unsqueeze(1).expand(-1, num_param_samples, -1).contiguous()
+        expanded_context = expanded_context.view(-1, expanded_context.shape[-1])  # [num_data_samples * num_param_samples, context_dim]
         
-        # Stack all parameter samples: [num_data_samples, num_param_samples, num_params]
-        param_samples_array = np.stack(param_samples_list, axis=0)
+        # Sample all parameters at once
+        with torch.no_grad():
+            param_samples = guide(expanded_context).sample(())  # Shape: [num_data_samples * num_param_samples, num_params]
+        
+        # Apply transformations if needed
+        if self.transform_input and transform_output:
+            param_samples = self.params_from_unconstrained(param_samples)
+        param_samples[..., -1] *= self.hrdrag_multiplier
+        
+        # Reshape to [num_data_samples, num_param_samples, num_params]
+        param_samples = param_samples.view(num_data_samples, num_param_samples, -1)
+        
+        # Check for any constant columns and add tiny noise to prevent getdist from excluding them
+        for i in range(param_samples.shape[2]):
+            col = param_samples[:, :, i]
+            if torch.all(col == col[0, 0]):
+                if self.global_rank == 0:
+                    print(f"Column {i} ({self.cosmo_params[i]}) is constant with value {col[0, 0]}, adding tiny noise")
+                noise_scale = abs(col[0, 0]) * 1e-10
+                param_samples[:, :, i] = col + torch.randn_like(col) * noise_scale
+        
+        # Convert to numpy array: [num_data_samples, num_param_samples, num_params]
+        param_samples_array = param_samples.cpu().numpy()
         
         return param_samples_array
 

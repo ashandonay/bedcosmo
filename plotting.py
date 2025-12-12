@@ -20,13 +20,16 @@ from util import *
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 from matplotlib.path import Path
+from matplotlib.patches import Rectangle
 from scipy.spatial import ConvexHull
+from scipy.interpolate import griddata
 import matplotlib.colors
 import warnings
 from datetime import datetime
 from pyro_oed_src import posterior_loss
 import json
 from IPython.display import display
+import glob
 
 home_dir = os.environ["HOME"]
 sys.path.insert(0, home_dir + '/desi-y1-kp/')
@@ -104,16 +107,6 @@ def plot_posterior(
         colors = [colors]
     if type(legend_labels) != list and legend_labels is not None:
         legend_labels = [legend_labels]
-
-    # Convert colors to proper format
-    def convert_color(c):
-        if isinstance(c, np.ndarray):
-            # Convert RGBA array to hex color string
-            return matplotlib.colors.to_hex(c)
-        elif isinstance(c, str):
-            return c
-        else:
-            return str(c)
 
     colors = [convert_color(c) for c in colors]
 
@@ -793,9 +786,9 @@ def compare_posterior(
 def compare_eigs(
         mlflow_exp=None,
         run_ids=None,
-        excluded_runs=[],
+        excluded_runs=None,
         cosmo_exp='num_tracers',
-        labels=None,
+        run_labels=None,
         step_key=None,
         use_sorted=True,
         save_path=None,
@@ -805,38 +798,39 @@ def compare_eigs(
         show_optimal=True,
         show_nominal=True,
         title=None,
-        x_label=None
+        sort=True,
+        sort_reference=None,
+        normalize=False,
+        show_errorbars=True
     ):
     """
-    Compare EIG values across multiple runs by loading JSON files.
-    Can take either an experiment name or a list of run IDs.
-    
+    Compare EIG values across multiple runs using the same layout as `evaluate.py::eig_designs`.
+
     Args:
-        mlflow_exp (str, optional): Name of the MLflow experiment. If provided, all runs in this experiment will be used.
-        run_ids (list, optional): List of MLflow run IDs to compare. If provided, mlflow_exp is ignored.
-        excluded_runs (list): List of run IDs to exclude.
-        cosmo_exp (str): Cosmological experiment name (default: 'num_tracers')
-        labels (list, optional): Labels for each run. If None, uses run IDs (first 8 chars)
-        step_key (str or int, optional): Which step to use. If None, finds most recent eig_data file
-        use_sorted (bool): If True, plot sorted EIGs. If False, plot unsorted EIGs
-        save_path (str, optional): Path to save the comparison plot. If None, doesn't save
-        figsize (tuple): Figure size (width, height)
-        dpi (int): Resolution for saved figure
-        colors (list, optional): Colors for each run. If None, uses default color cycle
-        show_optimal (bool): If True, mark optimal EIG for each run
-        show_nominal (bool): If True, mark nominal EIG for each run
-        title (str, optional): Custom title for the plot. If None, generates default title
-        x_label (str, optional): Custom x-axis label. If None, uses design label for 1D designs or "Design Index" for multi-dimensional
-    
-    Returns:
-        fig, ax: Matplotlib figure and axes objects
+        mlflow_exp (str, optional): MLflow experiment name. Ignored when `run_ids` is provided.
+        run_ids (list, optional): Explicit run IDs to load.
+        excluded_runs (list, optional): Run IDs to skip.
+        cosmo_exp (str): Cosmological experiment directory name.
+        run_labels (list, optional): Custom legend labels per run.
+        step_key (str or int, optional): Step identifier (if omitted the most recent step is used).
+        use_sorted (bool): Select sorted or unsorted arrays from the stored JSON payload.
+        save_path (str, optional): File path to persist the figure.
+        figsize (tuple): Matplotlib figure size.
+        dpi (int): Save resolution.
+        colors (list, optional): Explicit colors for each run. Must be the same length as `run_ids`.
+        show_optimal (bool): If True, highlight each run's optimal EIG point when available.
+        show_nominal (bool): If True, draw horizontal lines for nominal EIGs when available.
+        title (str, optional): Custom figure title.
+        sort (bool): Whether to reorder designs by descending EIG using the reference run.
+        sort_reference (str, optional): Run ID or label that defines the sorting EIG. Required when `sort=True`.
+        normalize (bool): If True, subtract each run's nominal EIG so curves are relative to nominal.
+        show_errorbars (bool): If True, draw the filled std bands for each run.
     """
-    import glob
-    
-    # Set MLflow tracking URI
+
+    excluded_runs = excluded_runs or []
+
     storage_path = os.environ["SCRATCH"] + f"/bed/BED_cosmo/{cosmo_exp}"
-    
-    # Get run data - can use either mlflow_exp or run_ids
+
     run_data_list, experiment_id_for_save_path, actual_mlflow_exp_for_title = get_runs_data(
         mlflow_exp=mlflow_exp,
         run_ids=run_ids,
@@ -846,251 +840,369 @@ def compare_eigs(
     )
     if not run_data_list:
         raise ValueError(f"No runs found in experiment {cosmo_exp}")
-    
-    # Extract run_ids from run_data_list
+
     run_ids = [run_data['run_id'] for run_data in run_data_list]
-    
-    # Build a map from run_id to exp_id
     run_id_to_exp_id = {run_data['run_id']: run_data['exp_id'] for run_data in run_data_list}
-    
-    # Find and load JSON files for each run
+
     all_data = []
     found_run_ids = []
-    json_paths = []
-    
+
     for run_id in run_ids:
-        if run_id not in run_id_to_exp_id:
+        exp_id = run_id_to_exp_id.get(run_id)
+        if exp_id is None:
             print(f"Warning: Run {run_id} not found in experiment {cosmo_exp}, skipping...")
             continue
-        
-        exp_id = run_id_to_exp_id[run_id]
+
         artifacts_dir = f"{storage_path}/mlruns/{exp_id}/{run_id}/artifacts"
-        
         if not os.path.exists(artifacts_dir):
             print(f"Warning: Artifacts directory not found for run {run_id}, skipping...")
             continue
-        
-        # Find eig_data JSON files
+
         eig_files = glob.glob(f"{artifacts_dir}/eig_data_*.json")
-        
         if len(eig_files) == 0:
             print(f"Warning: No eig_data JSON files found for run {run_id}, skipping...")
             continue
-        
-        # Filter by step_key if specified
+
         if step_key is not None:
             step_str = str(step_key)
-            filtered_files = [f for f in eig_files if f"eig_data_{step_str}_" in os.path.basename(f)]
-            if len(filtered_files) == 0:
+            eig_files = [f for f in eig_files if f"eig_data_{step_str}_" in os.path.basename(f)]
+            if len(eig_files) == 0:
                 print(f"Warning: No eig_data files for step {step_key} found for run {run_id}, skipping...")
                 continue
-            eig_files = filtered_files
-        
-        # Use most recent file (sort by timestamp in filename)
+
         eig_files.sort(key=lambda x: os.path.basename(x), reverse=True)
         json_path = eig_files[0]
-        
-        # Load JSON file
+
         try:
             with open(json_path, 'r') as f:
                 data = json.load(f)
-                all_data.append(data)
-                found_run_ids.append(run_id)
-                json_paths.append(json_path)
-        except Exception as e:
-            print(f"Warning: Error loading {json_path}: {e}, skipping...")
+        except Exception as exc:
+            print(f"Warning: Error loading {json_path}: {exc}, skipping...")
             continue
-    
-    if len(all_data) == 0:
+
+        all_data.append(data)
+        found_run_ids.append(run_id)
+
+    if not all_data:
         raise ValueError("No valid EIG data files found to compare")
-    
-    # Generate labels if not provided
-    if labels is None:
-        labels = [run_id[:8] for run_id in found_run_ids]
-    
-    if len(labels) != len(all_data):
-        labels = labels[:len(all_data)]
-    
-    # Determine which step to use for each run and filter valid data
-    valid_indices = []
+
+    if run_labels is None:
+        run_labels = [run_id[:8] for run_id in found_run_ids]
+    if len(run_labels) != len(found_run_ids):
+        raise ValueError("run_labels must match the number of discovered runs")
+
     step_numbers = []
-    for i, data in enumerate(all_data):
-        # If step_key was provided, we already filtered files by that step, so use it
+    for data, run_label in zip(all_data, run_labels):
         if step_key is not None:
-            step_num = int(step_key) if isinstance(step_key, str) else step_key
+            selected_step = int(step_key) if isinstance(step_key, str) else step_key
         else:
-            # Use sort_step from metadata
-            step_num = data.get('metadata', {}).get('sort_step', None)
-            
-            if step_num is None:
-                # Try to find any available step
-                step_keys = [k for k in data.keys() if k.startswith('step_')]
-                if step_keys:
-                    # Extract step number from first available step key
-                    step_num = int(step_keys[0].split('_')[1])
-                else:
-                    print(f"Warning: Could not determine step for run {labels[i] if i < len(labels) else i}, skipping...")
+            step_keys = [k for k in data.keys() if k.startswith('step_')]
+            if not step_keys:
+                raise ValueError(f"No step_* entries found in eig_data for {run_label}")
+            step_numbers_in_file = []
+            for key in step_keys:
+                try:
+                    step_num = int(key.split('_')[1])
+                    step_numbers_in_file.append((step_num, key))
+                except (ValueError, IndexError):
                     continue
-        
-        valid_indices.append(i)
-        step_numbers.append(step_num)
-    
-    # Filter data, labels, and colors to only include valid runs
-    all_data = [all_data[i] for i in valid_indices]
-    labels = [labels[i] for i in valid_indices]
-    colors = [colors[i] for i in valid_indices] if colors is not None else None
-    
-    # Generate colors if not provided (after filtering)
-    if colors is None:
-        prop_cycle = plt.rcParams['axes.prop_cycle']
-        colors = [prop_cycle.by_key()['color'][i % len(prop_cycle.by_key()['color'])] 
-                 for i in range(len(all_data))]
-    
-    # Check if designs are 1D (use first valid data to determine)
-    is_1d_design = False
-    design_label = None
-    if len(all_data) > 0:
-        first_data = all_data[0]
-        if 'designs' in first_data:
-            designs = np.array(first_data['designs']['sorted' if use_sorted else 'unsorted'])
-            # Check if designs are 1D (shape should be (n_designs, 1) or (n_designs,))
-            if len(designs.shape) == 1 or (len(designs.shape) == 2 and designs.shape[1] == 1):
-                is_1d_design = True
-                # Get design label from metadata if available
-                if 'metadata' in first_data and isinstance(first_data.get('metadata'), dict) and 'design_labels' in first_data['metadata']:
-                    design_labels = first_data['metadata']['design_labels']
-                    if len(design_labels) > 0:
-                        design_label = design_labels[0]
-    
-    # Create figure
-    fig, ax = plt.subplots(figsize=figsize)
-    
-    # Plot EIGs for each run
-    for i, (data, label, color) in enumerate(zip(all_data, labels, colors)):
-        step_num = step_numbers[i]
-        step_key_name = f'step_{step_num}'
-        
-        if step_key_name not in data:
-            print(f"Warning: Step {step_num} not found in {labels[i]}, skipping...")
-            continue
-        
-        step_data = data[step_key_name]
-        
-        # Get EIG values (sorted or unsorted)
-        if use_sorted:
-            eigs = np.array(step_data.get('eigs_sorted', []))
-            eigs_std = np.array(step_data.get('eigs_std_sorted', []))
-            sorted_indices = data.get('sorted_indices', [])
-        else:
-            eigs = np.array(step_data.get('eigs_unsorted', []))
-            eigs_std = np.array(step_data.get('eigs_std_unsorted', []))
-        
-        # Determine x-axis values
-        if is_1d_design and 'designs' in data:
-            designs = np.array(data['designs']['sorted' if use_sorted else 'unsorted'])
-            # Extract 1D design values
-            if len(designs.shape) == 1:
-                x_vals = designs
+            if step_numbers_in_file:
+                selected_step = max(step_numbers_in_file, key=lambda x: x[0])[0]
             else:
-                x_vals = designs[:, 0]  # First (and only) column
-        else:
-            x_vals = np.arange(len(eigs))
-        
-        if len(eigs) == 0:
-            print(f"Warning: No EIG data found for {label}, skipping...")
+                selected_step = int(step_keys[0].split('_')[1])
+        step_numbers.append(selected_step)
+
+    if colors is not None:
+        if len(colors) != len(found_run_ids):
+            raise ValueError("When provided, colors must match the number of run_ids.")
+        color_list = [convert_color(c) for c in colors]
+    else:
+        prop_cycle = plt.rcParams['axes.prop_cycle'].by_key()['color']
+        color_list = [convert_color(c) for c in prop_cycle]
+
+    design_shape = None
+    design_labels = None
+    run_records = []
+
+    for data, run_id, run_label, color, step_num in zip(all_data, found_run_ids, run_labels, color_list, step_numbers):
+        step_key_name = f"step_{int(step_num)}"
+        if step_key_name not in data:
+            print(f"Warning: Step {step_num} not found for run {run_id}, skipping...")
             continue
+        step_payload = data[step_key_name]
         
-        # Plot EIG line
-        ax.plot(x_vals, eigs, label=label, color=color, linewidth=2, alpha=0.8)
-        
-        # Plot error bars (filled region)
-        if len(eigs_std) > 0 and np.any(eigs_std > 0):
-            ax.fill_between(
+        # Access nested structure: step_payload['variable'] and step_payload['nominal']
+        variable_data = step_payload.get('variable', {})
+        nominal_data = step_payload.get('nominal', {})
+
+        # Get designs from top-level input_designs
+        designs_root = data.get('input_designs')
+        if designs_root is None:
+            raise ValueError(f"`input_designs` missing in eig_data for run {run_id}")
+
+        if isinstance(designs_root, dict):
+            design_key = 'sorted' if use_sorted else 'unsorted'
+            if design_key not in designs_root:
+                raise ValueError(f"`{design_key}` designs missing for run {run_id}")
+            designs_arr = np.array(designs_root[design_key])
+        else:
+            designs_arr = np.array(designs_root)
+
+        if designs_arr.ndim == 1:
+            designs_arr = designs_arr.reshape(-1, 1)
+        if design_shape is None:
+            design_shape = designs_arr.shape
+        elif designs_arr.shape != design_shape:
+            raise ValueError("Design arrays must have identical shapes across runs to enable comparison.")
+
+        if design_labels is None:
+            metadata = data.get('metadata', {})
+            design_labels = metadata.get('design_labels', None)
+            if design_labels is None or len(design_labels) != designs_arr.shape[1]:
+                design_labels = [f'$f_{i}$' for i in range(designs_arr.shape[1])]
+
+        eig_values_raw = variable_data.get('eigs_avg')
+        if eig_values_raw is None:
+            raise ValueError(f"`eigs_avg` missing in eig_data for run {run_id}")
+
+        eig_values = np.array(eig_values_raw, dtype=float)
+        eig_std_raw = variable_data.get('eigs_std')
+        eig_std_values = np.array(eig_std_raw, dtype=float) if eig_std_raw is not None else np.zeros_like(eig_values)
+
+        if eig_values.size == 0:
+            print(f"Warning: No EIG data found for {run_id}, skipping...")
+            continue
+
+        # Get nominal_eig from nominal subdict (scalar value from eigs_avg)
+        nominal_eig = nominal_data.get('eigs_avg')
+        if nominal_eig is not None and isinstance(nominal_eig, list):
+            nominal_eig = nominal_eig[0] if len(nominal_eig) > 0 else None
+        optimal_eig = variable_data.get('optimal_eig')
+        optimal_design = variable_data.get('optimal_design')
+
+        run_records.append({
+            'run_id': run_id,
+            'run_label': run_label,
+            'color': color,
+            'designs': designs_arr,
+            'eigs_avg': eig_values,
+            'eigs_std': eig_std_values if eig_std_values.shape == eig_values.shape else np.zeros_like(eig_values),
+            'nominal_eig': nominal_eig,
+            'optimal_eig': optimal_eig,
+            'optimal_design': np.array(optimal_design) if optimal_design is not None else None
+        })
+
+    if not run_records:
+        raise ValueError("No runs with valid design/eig data to plot.")
+
+    num_designs, num_dims = design_shape
+
+    reference_record = None
+    global_sort_idx = None
+    show_heatmap = not (sort and sort_reference is None)
+
+    if sort:
+        if sort_reference is not None:
+            reference_record = next(
+                (rec for rec in run_records if rec['run_id'] == sort_reference or rec['run_label'] == sort_reference),
+                None
+            )
+            if reference_record is None:
+                raise ValueError(f"sort_reference '{sort_reference}' not found among provided run_ids or labels.")
+            global_sort_idx = np.argsort(reference_record['eigs_avg'])[::-1]
+        else:
+            for rec in run_records:
+                rec['sort_idx'] = np.argsort(rec['eigs_avg'])[::-1]
+    else:
+        global_sort_idx = np.arange(num_designs)
+
+    sorted_designs = None
+    if show_heatmap:
+        if global_sort_idx is not None:
+            idx_for_heatmap = global_sort_idx
+        else:
+            idx_for_heatmap = np.arange(num_designs)
+        sorted_designs = run_records[0]['designs'][idx_for_heatmap]
+
+    if num_dims == 1 and not sort:
+        x_vals = sorted_designs[:, 0]
+        x_label = design_labels[0]
+    else:
+        x_vals = np.arange(num_designs)
+        if sort_reference is not None:
+            x_label_suffix = f" (sorted by {reference_record['run_label']})"
+        elif sort:
+            x_label_suffix = " (sorted per run)"
+        else:
+            x_label_suffix = ""
+        x_label = f"Design Index{x_label_suffix}"
+
+    if show_heatmap:
+        fig, (ax_line, ax_heat) = plt.subplots(
+            2,
+            1,
+            figsize=figsize,
+            gridspec_kw={'height_ratios': [0.65, 0.35], 'hspace': 0.05},
+            sharex=True
+        )
+
+        fig.subplots_adjust(left=0.08, right=0.94)
+        bbox = ax_heat.get_position()
+        cbar_width = 0.02
+        cbar_gap = 0.02
+        cbar_left = min(0.985 - cbar_width, bbox.x1 + cbar_gap)
+        cbar_height = 0.6
+        cbar_bottom = 0.5 - cbar_height / 2
+        cbar_ax = fig.add_axes([cbar_left, cbar_bottom, cbar_width, cbar_height])
+    else:
+        fig, ax_line = plt.subplots(figsize=figsize)
+        ax_heat = None
+        cbar_ax = None
+
+    nominal_line_drawn = False
+
+    ax_line.margins(x=0)
+
+    handles_for_legend = []
+    nominal_handle = None
+
+    for record in run_records:
+        if global_sort_idx is not None:
+            sort_idx = global_sort_idx
+        else:
+            sort_idx = record.get('sort_idx', np.arange(num_designs))
+
+        eig_vals = record['eigs_avg'][sort_idx]
+        eig_std_vals = record['eigs_std'][sort_idx]
+        color = record['color']
+
+        baseline = 0.0
+        if normalize:
+            if record['nominal_eig'] is None:
+                raise ValueError(f"normalize=True requires nominal_eig for run {record['run_id']}")
+            baseline = record['nominal_eig']
+
+        eig_vals_plot = eig_vals - baseline
+
+        line = ax_line.plot(x_vals, eig_vals_plot, color=color, linewidth=2, label=record['run_label'])[0]
+        handles_for_legend.append(line)
+        if show_errorbars and np.any(eig_std_vals > 0):
+            ax_line.fill_between(
                 x_vals,
-                eigs - eigs_std,
-                eigs + eigs_std,
+                eig_vals_plot - eig_std_vals,
+                eig_vals_plot + eig_std_vals,
                 color=color,
                 alpha=0.2
             )
-        
-        # Mark optimal EIG if available and requested (new flat structure)
-        if show_optimal and 'optimal_eig' in data and isinstance(data['optimal_eig'], (int, float)):
-            optimal_eig = data['optimal_eig']
-            optimal_design = data.get('optimal_design', [])
-            
-            if optimal_eig is not None and optimal_design and 'designs' in data:
-                designs = np.array(data['designs']['sorted' if use_sorted else 'unsorted'])
-                # Find matching design index
+
+        if show_nominal:
+            if normalize:
+                if not nominal_line_drawn:
+                    nominal_handle = ax_line.axhline(0, linestyle='--', color='gray', alpha=0.6, linewidth=1.2, label='Nominal (all runs)')
+                    nominal_line_drawn = True
+            elif record['nominal_eig'] is not None:
+                ax_line.axhline(record['nominal_eig'], linestyle='--', color=color, alpha=0.6, linewidth=1.2)
+
+        if show_heatmap and show_optimal:
+            point_y = None
+            point_x = None
+            is_reference_run = bool(sort_reference) and reference_record and record['run_id'] == reference_record['run_id']
+
+            if record['optimal_design'] is not None and record['optimal_eig'] is not None and not is_reference_run:
                 optimal_idx = None
-                for idx, design in enumerate(designs):
-                    if np.allclose(design, optimal_design, rtol=1e-5):
+                for idx, design_row in enumerate(record['designs']):
+                    if np.allclose(design_row, record['optimal_design'], rtol=1e-5, atol=1e-8):
                         optimal_idx = idx
                         break
                 if optimal_idx is not None:
-                    # Determine x-value for optimal point
-                    if is_1d_design and 'designs' in data:
-                        designs = np.array(data['designs']['sorted' if use_sorted else 'unsorted'])
-                        if len(designs.shape) == 1:
-                            optimal_x = designs[optimal_idx]
-                        else:
-                            optimal_x = designs[optimal_idx, 0]
-                    else:
-                        optimal_x = optimal_idx
-                    
-                    # Draw vertical line at optimal design
-                    ax.axvline(x=optimal_x, color=color, linestyle=':', 
-                              linewidth=1.5, alpha=0.6, zorder=5)
-                    # Add dot at the optimal point (intersection of vertical line and optimal EIG value)
-                    ax.scatter([optimal_x], [optimal_eig], 
-                              color=color, marker='o', s=100, 
-                              edgecolor='black', linewidth=1.5, zorder=10)
-        
-        # Mark nominal EIG if available and requested
-        # Check both top level (new flat structure) and step_data (old structure)
-        nominal_eig = None
-        if show_nominal:
-            if 'nominal_eig' in data and isinstance(data['nominal_eig'], (int, float)):
-                nominal_eig = data['nominal_eig']
-            elif 'nominal_eig' in step_data:
-                nominal_eig = step_data['nominal_eig']
-        
-        if nominal_eig is not None:
-            ax.axhline(y=nominal_eig, color=color, linestyle='--', 
-                      linewidth=1.5, alpha=0.6)
-    
-    # Format plot
-    # Determine x-axis label
-    if x_label is not None:
-        x_axis_label = x_label
-    elif is_1d_design and design_label is not None:
-        x_axis_label = design_label
+                    sorted_pos = np.where(sort_idx == optimal_idx)[0][0]
+                    point_x = x_vals[sorted_pos]
+                    point_y = eig_vals_plot[sorted_pos]
+
+            if (point_x is None or point_y is None) and is_reference_run:
+                extremum_idx = np.argmax(eig_vals_plot)
+                point_x = x_vals[extremum_idx]
+                point_y = eig_vals_plot[extremum_idx]
+
+            if point_x is not None and point_y is not None:
+                ax_line.scatter(
+                    point_x,
+                    point_y,
+                    color=color,
+                    edgecolor='black',
+                    zorder=5,
+                    s=60
+                )
+
+    y_label = 'Expected Information Gain [bits]'
+    if normalize:
+        y_label = 'EIG Relative to Nominal Design [bits]'
+    ax_line.set_ylabel(y_label, fontsize=12, weight='bold')
+    ax_line.grid(True, alpha=0.3)
+    legend_handles = []
+    legend_labels = []
+    if nominal_handle is not None:
+        legend_handles.append(nominal_handle)
+        legend_labels.append(nominal_handle.get_label())
+    legend_handles.extend(handles_for_legend)
+    legend_labels.extend([h.get_label() for h in handles_for_legend])
+    ax_line.legend(legend_handles, legend_labels, loc='best', framealpha=0.9)
+    plt.setp(ax_line.get_xticklabels(), visible=False)
+    ax_line.tick_params(axis='x', which='both', length=0)
+
+    if show_heatmap:
+        if num_dims == 1 and not sort:
+            extent = [x_vals.min(), x_vals.max(), -0.5, 0.5]
+            im = ax_heat.imshow(
+                sorted_designs.T,
+                aspect='auto',
+                cmap='viridis',
+                origin='lower',
+                extent=extent
+            )
+            ax_heat.set_xlim(x_vals.min(), x_vals.max())
+            ax_line.set_xlim(x_vals.min(), x_vals.max())
+            ax_heat.set_yticks([0])
+            ax_heat.set_yticklabels([design_labels[0]])
+        else:
+            im = ax_heat.imshow(
+                sorted_designs.T,
+                aspect='auto',
+                cmap='viridis',
+                origin='upper'
+            )
+            ax_heat.set_xlim(-0.5, num_designs - 0.5)
+            ax_line.set_xlim(-0.5, num_designs - 0.5)
+            ax_heat.set_yticks(np.arange(num_dims))
+            ax_heat.set_yticklabels(design_labels)
+
+        ax_heat.set_xlabel(x_label, fontsize=12, weight='bold')
+        ax_heat.set_ylabel('')
+        ax_heat.tick_params(axis='x', which='both', labelsize=10)
+        ax_heat.margins(x=0)
+
+        cbar = fig.colorbar(im, cax=cbar_ax)
+        cbar.set_label('Design Value', fontsize=11, weight='bold')
     else:
-        x_axis_label = 'Design Index' + (' (Sorted)' if use_sorted else '')
-    
-    ax.set_xlabel(x_axis_label, fontsize=14, weight='bold')
-    ax.set_ylabel('Expected Information Gain [bits]', fontsize=14, weight='bold')
-    ax.grid(True, alpha=0.3)
-    ax.legend(loc='best', fontsize=14, framealpha=0.9)
-    
-    # Set title
+        ax_line.set_xlabel(x_label, fontsize=12, weight='bold')
+        ax_line.set_xlim(-0.5, num_designs - 0.5)
+
     if title is None:
         if mlflow_exp and actual_mlflow_exp_for_title:
             title = f'EIG per Design - {actual_mlflow_exp_for_title}'
         elif mlflow_exp:
             title = f'EIG per Design - {mlflow_exp}'
         else:
-            title = 'EIG per Design'
-    ax.set_title(title, fontsize=16, weight='bold', pad=10)
-    
-    plt.tight_layout()
-    
-    # Save if requested
+            title = 'EIG per Design Comparison'
+    fig.suptitle(title, fontsize=16, weight='bold')
+    fig.tight_layout(rect=[0, 0, 1, 0.98])
+
     if save_path is not None:
         os.makedirs(os.path.dirname(save_path) if os.path.dirname(save_path) else '.', exist_ok=True)
         save_figure(save_path, fig=fig, dpi=dpi)
         print(f"Saved comparison plot to {save_path}")
-    
-    return fig, ax
+
+    return fig, (ax_line, ax_heat)
 
 def compare_increasing_design(
         mlflow_exp=None,
@@ -1132,8 +1244,6 @@ def compare_increasing_design(
     Returns:
         fig, ax: Matplotlib figure and axes objects
     """
-    import glob
-    
     # Set MLflow tracking URI
     storage_path = os.environ["SCRATCH"] + f"/bed/BED_cosmo/{cosmo_exp}"
     
@@ -1165,56 +1275,73 @@ def compare_increasing_design(
                     # Find eig_data JSON files
                     ref_eig_files = glob.glob(f"{ref_artifacts_dir}/eig_data_*.json")
                     
-                    if step_key is not None:
-                        step_str = str(step_key)
-                        filtered_files = [f for f in ref_eig_files if f"eig_data_{step_str}_" in os.path.basename(f)]
-                        if len(filtered_files) > 0:
-                            ref_eig_files = filtered_files
-                    
                     if len(ref_eig_files) > 0:
+                        # Use most recent file (sort by timestamp in filename)
                         ref_eig_files.sort(key=lambda x: os.path.basename(x), reverse=True)
                         ref_json_path = ref_eig_files[0]
                         
                         with open(ref_json_path, 'r') as f:
                             ref_data = json.load(f)
+                        print(f"Loaded reference EIG data from {ref_json_path}")
                         
-                        # Extract nominal_eig, optimal_eig, and optimal_design
-                        if 'nominal_eig' in ref_data and isinstance(ref_data['nominal_eig'], (int, float)):
-                            ref_nominal_eig = ref_data['nominal_eig']
-                        elif 'step_data' in ref_data and isinstance(ref_data['step_data'], dict) and 'nominal_eig' in ref_data['step_data']:
-                            ref_nominal_eig = ref_data['step_data']['nominal_eig']
+                        # Determine which step to use
+                        if step_key is not None:
+                            step_str = f"step_{step_key}"
+                        else:
+                            # Find the highest available step key
+                            step_keys = [k for k in ref_data.keys() if k.startswith('step_')]
+                            if step_keys:
+                                # Extract step numbers and find the highest
+                                step_numbers = []
+                                for k in step_keys:
+                                    try:
+                                        step_num = int(k.split('_')[1])
+                                        step_numbers.append((step_num, k))
+                                    except (ValueError, IndexError):
+                                        continue
+                                if step_numbers:
+                                    step_str = max(step_numbers, key=lambda x: x[0])[1]
+                                else:
+                                    step_str = step_keys[0]  # Fallback to first if parsing fails
+                            else:
+                                print(f"Warning: No step data found in reference file {ref_json_path}")
+                                step_str = None
                         
-                        if 'nominal_eig_std' in ref_data and isinstance(ref_data['nominal_eig_std'], (int, float)):
-                            ref_nominal_eig_std = ref_data['nominal_eig_std']
-                        elif 'step_data' in ref_data and isinstance(ref_data['step_data'], dict) and 'nominal_eig_std' in ref_data['step_data']:
-                            ref_nominal_eig_std = ref_data['step_data']['nominal_eig_std']
+                        if step_str and step_str in ref_data:
+                            step_data = ref_data[step_str]
+                            
+                            # Access nested structure
+                            variable_data = step_data.get('variable', {})
+                            nominal_data = step_data.get('nominal', {})
+                            
+                            # Extract nominal_eig from nominal subdict (scalar value from eigs_avg)
+                            nominal_eig_val = nominal_data.get('eigs_avg')
+                            if nominal_eig_val is not None:
+                                if isinstance(nominal_eig_val, list) and len(nominal_eig_val) > 0:
+                                    nominal_eig_val = nominal_eig_val[0]
+                                if isinstance(nominal_eig_val, (int, float)):
+                                    ref_nominal_eig = nominal_eig_val
+                            
+                            nominal_eig_std_val = nominal_data.get('eigs_std')
+                            if nominal_eig_std_val is not None:
+                                if isinstance(nominal_eig_std_val, list) and len(nominal_eig_std_val) > 0:
+                                    nominal_eig_std_val = nominal_eig_std_val[0]
+                                if isinstance(nominal_eig_std_val, (int, float)):
+                                    ref_nominal_eig_std = nominal_eig_std_val
+                            
+                            if 'optimal_eig' in variable_data:
+                                ref_optimal_eig = variable_data['optimal_eig']
+                            
+                            if 'optimal_eig_std' in variable_data and isinstance(variable_data['optimal_eig_std'], (int, float)):
+                                ref_optimal_eig_std = variable_data['optimal_eig_std']
+                            
+                            if 'optimal_design' in variable_data:
+                                ref_optimal_design = np.array(variable_data['optimal_design'])
                         
-                        if 'optimal_eig' in ref_data:
-                            ref_optimal_eig = ref_data['optimal_eig']
-                        
-                        if 'optimal_eig_std' in ref_data and isinstance(ref_data['optimal_eig_std'], (int, float)):
-                            ref_optimal_eig_std = ref_data['optimal_eig_std']
-                        elif 'step_data' in ref_data and isinstance(ref_data['step_data'], dict) and 'optimal_eig_std' in ref_data['step_data']:
-                            ref_optimal_eig_std = ref_data['step_data']['optimal_eig_std']
-                        
-                        if 'optimal_design' in ref_data:
-                            ref_optimal_design = np.array(ref_data['optimal_design'])
-                        
-                        # Get nominal design from experiment initialization
+                        # Use nominal_design stored in the reference eig_data without initializing an experiment
                         if include_nominal:
-                            try:
-                                device = "cuda:0"
-                                experiment = init_experiment(
-                                    ref_run_data['run_obj'], 
-                                    ref_run_data['params'], 
-                                    device, 
-                                    design_args={}, 
-                                    global_rank=0
-                                )
-                                if hasattr(experiment, 'nominal_design'):
-                                    ref_nominal_design = experiment.nominal_design.cpu().numpy()
-                            except Exception as e:
-                                print(f"Warning: Could not initialize experiment to get nominal design from ref_id: {e}")
+                            if 'nominal_design' in ref_data:
+                                ref_nominal_design = np.array(ref_data['nominal_design'])
                 else:
                     print(f"Warning: Artifacts directory not found for reference run {ref_id}")
         except Exception as e:
@@ -1265,15 +1392,6 @@ def compare_increasing_design(
             print(f"Warning: No eig_data JSON files found for run {run_id}, skipping...")
             continue
         
-        # Filter by step_key if specified
-        if step_key is not None:
-            step_str = str(step_key)
-            filtered_files = [f for f in eig_files if f"eig_data_{step_str}_" in os.path.basename(f)]
-            if len(filtered_files) == 0:
-                print(f"Warning: No eig_data files for step {step_key} found for run {run_id}, skipping...")
-                continue
-            eig_files = filtered_files
-        
         # Use most recent file (sort by timestamp in filename)
         eig_files.sort(key=lambda x: os.path.basename(x), reverse=True)
         json_path = eig_files[0]
@@ -1282,12 +1400,46 @@ def compare_increasing_design(
         try:
             with open(json_path, 'r') as f:
                 data = json.load(f)
+            print(f"Loaded EIG data from {json_path}")
+            
+            # Determine which step to use
+            if step_key is not None:
+                step_str = f"step_{step_key}"
+            else:
+                # Find the highest available step key
+                step_keys = [k for k in data.keys() if k.startswith('step_')]
+                if step_keys:
+                    # Extract step numbers and find the highest
+                    step_numbers = []
+                    for k in step_keys:
+                        try:
+                            step_num = int(k.split('_')[1])
+                            step_numbers.append((step_num, k))
+                        except (ValueError, IndexError):
+                            continue
+                    if step_numbers:
+                        step_str = max(step_numbers, key=lambda x: x[0])[1]
+                    else:
+                        step_str = step_keys[0]  # Fallback to first if parsing fails
+                else:
+                    print(f"Warning: No step data found in {json_path}, skipping...")
+                    continue
+            
+            if step_str not in data:
+                print(f"Warning: Step {step_str} not found in {json_path}, skipping...")
+                continue
+            
+            step_data = data[step_str]
+            
+            # Access nested structure
+            variable_data = step_data.get('variable', {})
+            nominal_data = step_data.get('nominal', {})
                 
-            # Extract optimal design and EIG (new flat structure)
-            if 'optimal_design' in data and 'optimal_eig' in data:
-                optimal_design = np.array(data['optimal_design'])
-                optimal_eig_value = data.get('optimal_eig', None)
-                optimal_eig_std_value = data.get('optimal_eig_std', None)
+            # Extract optimal design and EIG from variable subdict
+            if 'optimal_design' in variable_data and 'optimal_eig' in variable_data:
+                optimal_design = np.array(variable_data['optimal_design'])
+                optimal_eig_value = variable_data.get('optimal_eig', None)
+                optimal_eig_std_value = variable_data.get('optimal_eig_std', None)
                 if not isinstance(optimal_eig_std_value, (int, float)):
                     optimal_eig_std_value = None
                 optimal_designs.append(optimal_design)
@@ -1295,25 +1447,28 @@ def compare_increasing_design(
                 optimal_eig_stds.append(optimal_eig_std_value)
                 found_run_ids.append(run_id)
                 
-                # Get design labels from metadata (use first run's labels as reference)
-                if design_labels is None and 'metadata' in data and isinstance(data.get('metadata'), dict) and 'design_labels' in data['metadata']:
-                    design_labels = data['metadata']['design_labels']
+                # Get design labels from experiment (will be initialized later if needed)
+                # For now, we'll get them from the experiment initialization below
                 
                 # Extract nominal_eig from first run's data (for scatter plot in compare_increasing_design)
                 # Only do this in compare_increasing_design - check if include_nominal is in scope
                 if 'include_nominal' in locals() and include_nominal:
-                    if 'nominal_eig' in data and isinstance(data['nominal_eig'], (int, float)):
-                        if nominal_eig is None:
-                            nominal_eig = data['nominal_eig']
-                        if nominal_eig_std is None and 'nominal_eig_std' in data and isinstance(data['nominal_eig_std'], (int, float)):
-                            nominal_eig_std = data['nominal_eig_std']
-                    elif 'step_data' in data and isinstance(data['step_data'], dict) and 'nominal_eig' in data['step_data']:
-                        if nominal_eig is None:
-                            nominal_eig = data['step_data']['nominal_eig']
-                        if nominal_eig_std is None and 'nominal_eig_std' in data['step_data'] and isinstance(data['step_data']['nominal_eig_std'], (int, float)):
-                            nominal_eig_std = data['step_data']['nominal_eig_std']
+                    nominal_eig_val = nominal_data.get('eigs_avg')
+                    if nominal_eig_val is not None:
+                        if isinstance(nominal_eig_val, list) and len(nominal_eig_val) > 0:
+                            nominal_eig_val = nominal_eig_val[0]
+                        if isinstance(nominal_eig_val, (int, float)):
+                            if nominal_eig is None:
+                                nominal_eig = nominal_eig_val
+                    nominal_eig_std_val = nominal_data.get('eigs_std')
+                    if nominal_eig_std_val is not None:
+                        if isinstance(nominal_eig_std_val, list) and len(nominal_eig_std_val) > 0:
+                            nominal_eig_std_val = nominal_eig_std_val[0]
+                        if isinstance(nominal_eig_std_val, (int, float)):
+                            if nominal_eig_std is None:
+                                nominal_eig_std = nominal_eig_std_val
             else:
-                print(f"Warning: No optimal_design data found in {json_path}, skipping...")
+                print(f"Warning: No optimal_design data found in {json_path} for {step_str}, skipping...")
                 continue
                 
         except Exception as e:
@@ -1366,7 +1521,6 @@ def compare_increasing_design(
                 run_data_for_init = run_data_list[0]
             
             device = "cuda:0"
-            # Override fixed_design to False to avoid validation errors when we just need nominal_total_obs
             # We don't need to initialize designs, just need the experiment object
             experiment = init_experiment(
                 run_data_for_init['run_obj'], 
@@ -1637,7 +1791,7 @@ def compare_increasing_design(
                     ref_optimal_eig,
                     f'{x_pct:+.1f}%',
                     color='red',
-                    fontsize=14,
+                    fontsize=17,
                     fontweight='bold',
                     ha='left',
                     va='bottom',
@@ -1720,8 +1874,6 @@ def compare_optimal_design(
     Returns:
         fig, ax: Matplotlib figure and axes objects
     """
-    import glob
-    
     # Set MLflow tracking URI
     storage_path = os.environ["SCRATCH"] + f"/bed/BED_cosmo/{cosmo_exp}"
     
@@ -1768,15 +1920,6 @@ def compare_optimal_design(
             print(f"Warning: No eig_data JSON files found for run {run_id}, skipping...")
             continue
         
-        # Filter by step_key if specified
-        if step_key is not None:
-            step_str = str(step_key)
-            filtered_files = [f for f in eig_files if f"eig_data_{step_str}_" in os.path.basename(f)]
-            if len(filtered_files) == 0:
-                print(f"Warning: No eig_data files for step {step_key} found for run {run_id}, skipping...")
-                continue
-            eig_files = filtered_files
-        
         # Use most recent file (sort by timestamp in filename)
         eig_files.sort(key=lambda x: os.path.basename(x), reverse=True)
         json_path = eig_files[0]
@@ -1785,21 +1928,52 @@ def compare_optimal_design(
         try:
             with open(json_path, 'r') as f:
                 data = json.load(f)
+            
+            # Determine which step to use
+            if step_key is not None:
+                step_str = f"step_{step_key}"
+            else:
+                # Find the highest available step key
+                step_keys = [k for k in data.keys() if k.startswith('step_')]
+                if step_keys:
+                    # Extract step numbers and find the highest
+                    step_numbers = []
+                    for k in step_keys:
+                        try:
+                            step_num = int(k.split('_')[1])
+                            step_numbers.append((step_num, k))
+                        except (ValueError, IndexError):
+                            continue
+                    if step_numbers:
+                        step_str = max(step_numbers, key=lambda x: x[0])[1]
+                    else:
+                        step_str = step_keys[0]  # Fallback to first if parsing fails
+                else:
+                    print(f"Warning: No step data found in {json_path}, skipping...")
+                    continue
+            
+            if step_str not in data:
+                print(f"Warning: Step {step_str} not found in {json_path}, skipping...")
+                continue
+            
+            step_data = data[step_str]
+            
+            # Access nested structure
+            variable_data = step_data.get('variable', {})
                 
-            # Extract optimal design and EIG (new flat structure)
-            if 'optimal_design' in data and 'optimal_eig' in data:
-                optimal_design = np.array(data['optimal_design'])
-                optimal_eig_value = data.get('optimal_eig', None)
+            # Extract optimal design and EIG from variable subdict
+            if 'optimal_design' in variable_data and 'optimal_eig' in variable_data:
+                optimal_design = np.array(variable_data['optimal_design'])
+                optimal_eig_value = variable_data.get('optimal_eig', None)
                 optimal_designs.append(optimal_design)
                 optimal_eigs.append(optimal_eig_value)
                 found_run_ids.append(run_id)
-                
-                # Get design labels from metadata (use first run's labels as reference)
-                if design_labels is None and 'metadata' in data and isinstance(data.get('metadata'), dict) and 'design_labels' in data['metadata']:
-                    design_labels = data['metadata']['design_labels']
             else:
-                print(f"Warning: No optimal_design data found in {json_path}, skipping...")
+                print(f"Warning: No optimal_design data found in {json_path} for {step_str}, skipping...")
                 continue
+                
+            # Get design labels from experiment (will be initialized later if needed)
+            # For now, we'll get them from the experiment initialization below
                 
         except Exception as e:
             print(f"Warning: Error loading {json_path}: {e}, skipping...")
@@ -1826,6 +2000,9 @@ def compare_optimal_design(
         else:
             colors = colors[:len(optimal_designs)]
     
+    # Convert all colors to proper format (handles hex codes, numpy arrays, etc.)
+    colors = [convert_color(c) for c in colors]
+    
     # Initialize experiment from first run to get nominal_total_obs, nominal_design, and design labels if needed
     nominal_total_obs = None
     nominal_design = None
@@ -1835,8 +2012,7 @@ def compare_optimal_design(
         try:
             first_run_data = run_data_list[0]
             device = "cuda:0"
-            # Override fixed_design to False to avoid validation errors when we just need nominal_total_obs
-            # We don't need to initialize designs, just need the experiment object
+            
             experiment = init_experiment(
                 first_run_data['run_obj'], 
                 first_run_data['params'], 
@@ -1909,7 +2085,7 @@ def compare_optimal_design(
             plot_colors = ['tab:blue'] + plot_colors
         
         x_pos = np.arange(len(design_values))
-        bars = ax.bar(x_pos, design_values, color=plot_colors, alpha=0.7, edgecolor='black', linewidth=1.5)
+        bars = ax.bar(x_pos, design_values, color=plot_colors, alpha=0.7, linewidth=1.5)
         
         ax.set_xlabel('Run', fontsize=12, weight='bold')
         ax.set_ylabel(ylabel, fontsize=12, weight='bold')
@@ -1938,13 +2114,63 @@ def compare_optimal_design(
         n_designs_to_plot = len(plot_designs)
         width = 0.8 / n_designs_to_plot  # Width of bars
         
+        '''
+        # Get max possible tracers if experiment is available
+        max_tracers = None
+        if experiment is not None and hasattr(experiment, 'num_targets') and hasattr(experiment, 'design_labels'):
+            try:
+                # Use design_labels (which should match experiment.design_labels when available)
+                # to ensure correct ordering
+                if design_labels == experiment.design_labels:
+                    # design_labels matches experiment.design_labels, use them directly
+                    target_labels = design_labels
+                else:
+                    # Fall back to experiment.design_labels
+                    target_labels = experiment.design_labels
+                
+                if use_fractional:
+                    # Get maximum possible tracers as fractions
+                    max_tracers = np.array([experiment.num_targets[target] for target in target_labels])
+                    max_tracers = max_tracers / nominal_total_obs if nominal_total_obs is not None else max_tracers
+                else:
+                    # Get maximum possible tracers for each class
+                    max_tracers = np.array([experiment.num_targets[target] for target in target_labels])
+            except (KeyError, AttributeError) as e:
+                print(f"Warning: Could not get max tracers from experiment: {e}")
+                max_tracers = None
+        
+        # Add gray bars with dotted edges for maximum possible tracers (if available)
+        if max_tracers is not None and len(max_tracers) == len(design_labels):
+            # Use a reference width for max tracers bars (use the full width available)
+            max_width = 0.8
+            for i, max_val in enumerate(max_tracers):
+                # Draw filled gray rectangle
+                rect = Rectangle((x[i] - max_width/2, 0), max_width, max_val,
+                               facecolor='gray', alpha=0.3, edgecolor='none', zorder=0)
+                ax.add_patch(rect)
+                # Manually draw dotted edges
+                x_left = x[i] - max_width/2
+                x_right = x[i] + max_width/2
+                y_top = max_val
+                # Top edge
+                ax.plot([x_left, x_right], [y_top, y_top], 'k:', linewidth=1.5, alpha=0.7, zorder=1)
+                # Left edge
+                ax.plot([x_left, x_left], [0, y_top], 'k:', linewidth=1.5, alpha=0.7, zorder=1)
+                # Right edge
+                ax.plot([x_right, x_right], [0, y_top], 'k:', linewidth=1.5, alpha=0.7, zorder=1)
+        '''
         # Plot bars for each design
         for i, (design, label, color) in enumerate(zip(plot_designs, plot_labels, plot_colors)):
             offset = (i - n_designs_to_plot/2 + 0.5) * width
-            bars = ax.bar(x + offset, design, width, label=label, color=color, alpha=0.7, edgecolor='black', linewidth=1.5)
-            
+            bars = ax.bar(x + offset, design, width, label=label, color=color, alpha=0.7, linewidth=1.5, zorder=2)
         
-        ax.set_xlabel('Design Dimension', fontsize=12, weight='bold')
+        '''
+        # Add label for max possible tracers (manually since we used patches)
+        if max_tracers is not None:
+            max_label = 'Max Possible Tracers' if not use_fractional else 'Max Possible Fraction'
+            ax.plot([], [], 'k:', linewidth=1.5, alpha=0.7, label=max_label)
+        '''
+        ax.set_xlabel('Tracer Class', fontsize=12, weight='bold')
         ax.set_ylabel(ylabel, fontsize=12, weight='bold')
         ax.set_xticks(x)
         ax.set_xticklabels(design_labels, fontsize=11)
@@ -1972,6 +2198,634 @@ def compare_optimal_design(
         print(f"Saved comparison plot to {save_path}")
     
     return fig, ax
+
+def compare_best_designs(
+        mlflow_exp=None,
+        run_ids=None,
+        excluded_runs=[],
+        cosmo_exp='num_tracers',
+        run_labels=None,
+        step_key=None,
+        top_n=5,
+        save_path=None,
+        figsize=(14, 8),
+        dpi=400,
+        design_labels=None,
+        title=None,
+        cmap='viridis',
+        nominal_design=None
+    ):
+    """
+    Compare top N best designs across multiple runs by loading eig_data JSON files.
+    Designs are sorted by EIG and displayed as a heatmap using imshow, with visual
+    separation between runs.
+    
+    Args:
+        mlflow_exp (str, optional): Name of the MLflow experiment. If provided, all runs in this experiment will be used.
+        run_ids (list, optional): List of MLflow run IDs to compare. If provided, mlflow_exp is ignored.
+        excluded_runs (list): List of run IDs to exclude.
+        cosmo_exp (str): Cosmological experiment name (default: 'num_tracers')
+        run_labels (list, optional): Labels for each run. If None, uses run IDs (first 8 chars)
+        step_key (str or int, optional): Which step to use. If None, finds most recent eig_data file
+        top_n (int): Number of top designs to plot from each run (default: 5)
+        save_path (str, optional): Path to save the comparison plot. If None, doesn't save
+        figsize (tuple): Figure size (width, height)
+        dpi (int): Resolution for saved figure
+        design_labels (list, optional): Labels for each design dimension. If None, tries to infer from experiment or uses generic labels
+        title (str, optional): Custom title for the plot. If None, generates default title
+        cmap (str): Colormap to use for the heatmap (default: 'viridis'). If nominal_design is provided, a diverging colormap will be used.
+        nominal_design (list, optional): Nominal design as a list of floats. If provided, colors will be plotted as ratios relative to this nominal design in each class/dimension (ratio = design_value / nominal_value). A ratio of 1.0 means equal to nominal.
+    
+    Returns:
+        fig, ax: Matplotlib figure and axes objects
+    """
+    # Set MLflow tracking URI
+    storage_path = os.environ["SCRATCH"] + f"/bed/BED_cosmo/{cosmo_exp}"
+    
+    # Get run data - can use either mlflow_exp or run_ids
+    run_data_list, experiment_id_for_save_path, actual_mlflow_exp_for_title = get_runs_data(
+        mlflow_exp=mlflow_exp,
+        run_ids=run_ids,
+        excluded_runs=excluded_runs,
+        parse_params=True,
+        cosmo_exp=cosmo_exp
+    )
+    if not run_data_list:
+        raise ValueError(f"No runs found in experiment {cosmo_exp}")
+    
+    # Extract run_ids from run_data_list
+    run_ids = [run_data['run_id'] for run_data in run_data_list]
+    
+    # Build a map from run_id to exp_id
+    run_id_to_exp_id = {run_data['run_id']: run_data['exp_id'] for run_data in run_data_list}
+    
+    # Find and load JSON files for each run
+    all_run_top_designs = []  # List of lists: each inner list contains top N designs for that run
+    found_run_ids = []
+    run_boundaries = []  # Track where each run's designs start/end for visual separation
+    
+    for run_id in run_ids:
+        if run_id not in run_id_to_exp_id:
+            print(f"Warning: Run {run_id} not found in experiment {cosmo_exp}, skipping...")
+            continue
+        
+        exp_id = run_id_to_exp_id[run_id]
+        artifacts_dir = f"{storage_path}/mlruns/{exp_id}/{run_id}/artifacts"
+        
+        if not os.path.exists(artifacts_dir):
+            print(f"Warning: Artifacts directory not found for run {run_id}, skipping...")
+            continue
+        
+        # Find eig_data JSON files
+        eig_files = glob.glob(f"{artifacts_dir}/eig_data_*.json")
+        
+        if len(eig_files) == 0:
+            print(f"Warning: No eig_data JSON files found for run {run_id}, skipping...")
+            continue
+        
+        # Use most recent file (sort by timestamp in filename)
+        eig_files.sort(key=lambda x: os.path.basename(x), reverse=True)
+        json_path = eig_files[0]
+        
+        # Load JSON file
+        try:
+            with open(json_path, 'r') as f:
+                data = json.load(f)
+            
+            # Determine which step to use
+            if step_key is not None:
+                step_str = f"step_{step_key}"
+            else:
+                # Find the highest available step key
+                step_keys = [k for k in data.keys() if k.startswith('step_')]
+                if step_keys:
+                    # Extract step numbers and find the highest
+                    step_numbers = []
+                    for k in step_keys:
+                        try:
+                            step_num = int(k.split('_')[1])
+                            step_numbers.append((step_num, k))
+                        except (ValueError, IndexError):
+                            continue
+                    if step_numbers:
+                        step_str = max(step_numbers, key=lambda x: x[0])[1]
+                    else:
+                        step_str = step_keys[0]  # Fallback to first if parsing fails
+                else:
+                    print(f"Warning: No step data found in {json_path}, skipping...")
+                    continue
+            
+            if step_str not in data:
+                print(f"Warning: Step {step_str} not found in {json_path}, skipping...")
+                continue
+            
+            step_data = data[step_str]
+            
+            # Access nested structure
+            variable_data = step_data.get('variable', {})
+            
+            # Extract designs from top-level input_designs and EIGs from variable subdict
+            if 'input_designs' not in data:
+                print(f"Warning: No input_designs found in {json_path}, skipping...")
+                continue
+            
+            if 'eigs_avg' not in variable_data:
+                print(f"Warning: No eigs_avg data found in {json_path} for {step_str}, skipping...")
+                continue
+            
+            designs = np.array(data['input_designs'])
+            eigs = np.array(variable_data['eigs_avg'])
+            
+            # Check if designs and eigs have matching lengths
+            if len(designs) != len(eigs):
+                print(f"Warning: Mismatch - {len(designs)} designs but {len(eigs)} EIG values for run {run_id}")
+            
+            # Sort designs by EIG (descending) and take top N
+            sorted_indices = np.argsort(eigs)[::-1]
+            top_n_indices = sorted_indices[:min(top_n, len(designs))]
+            top_designs = designs[top_n_indices]
+            
+            # Ensure designs are 2D (n_designs, n_dims)
+            if top_designs.ndim == 1:
+                top_designs = top_designs.reshape(1, -1)
+            
+            all_run_top_designs.append(top_designs)
+            found_run_ids.append(run_id)
+                
+        except Exception as e:
+            print(f"Warning: Error loading {json_path}: {e}, skipping...")
+            continue
+    
+    if len(all_run_top_designs) == 0:
+        raise ValueError("No valid design data found to compare")
+    
+    # Combine all designs into a single array
+    combined_designs = np.concatenate(all_run_top_designs, axis=0)
+    
+    # Calculate run boundaries for visual separation
+    current_idx = 0
+    for i, run_designs in enumerate(all_run_top_designs):
+        run_boundaries.append((current_idx, current_idx + len(run_designs)))
+        current_idx += len(run_designs)
+    
+    # Generate labels if not provided
+    if run_labels is None:
+        run_labels = [run_id[:8] for run_id in found_run_ids]
+    
+    if len(run_labels) != len(all_run_top_designs):
+        run_labels = run_labels[:len(all_run_top_designs)]
+    
+    # Determine design labels
+    if design_labels is None:
+        # Try to infer from first run's experiment
+        try:
+            first_run_data = run_data_list[0]
+            device = "cuda:0"
+            experiment = init_experiment(
+                first_run_data['run_obj'], 
+                first_run_data['params'], 
+                device, 
+                design_args={}, 
+                global_rank=0
+            )
+            if hasattr(experiment, 'design_labels'):
+                design_labels = experiment.design_labels
+        except Exception as e:
+            print(f"Warning: Could not initialize experiment to get design labels: {e}")
+    
+    # Use generic labels if still None
+    if design_labels is None:
+        n_dims = combined_designs.shape[1]
+        design_labels = [f'$f_{i}$' for i in range(n_dims)]
+    
+    if len(design_labels) != combined_designs.shape[1]:
+        raise ValueError(f"design_labels length ({len(design_labels)}) must match number of design dimensions ({combined_designs.shape[1]})")
+    
+    # Handle nominal design if provided
+    plot_data = combined_designs.copy()
+    use_relative_colors = False
+    if nominal_design is not None:
+        nominal_design = np.array(nominal_design)
+        if len(nominal_design) != combined_designs.shape[1]:
+            raise ValueError(f"nominal_design length ({len(nominal_design)}) must match number of design dimensions ({combined_designs.shape[1]})")
+        
+        # Check for zeros in nominal_design to avoid division by zero
+        if np.any(nominal_design == 0):
+            raise ValueError("nominal_design cannot contain zero values (division by zero)")
+        
+        # Compute ratios relative to nominal for each dimension
+        # Ensure proper broadcasting: combined_designs is (n_designs, n_dims), nominal_design is (n_dims,)
+        # This will broadcast correctly: each row of combined_designs is divided element-wise by nominal_design
+        # Ratio = design_value / nominal_value
+        # Ratio > 1.0 means design is larger than nominal, Ratio < 1.0 means design is smaller than nominal
+        plot_data = combined_designs / nominal_design[np.newaxis, :]
+        use_relative_colors = True
+        
+        # Use a diverging colormap if not explicitly overridden
+        if cmap == 'viridis':  # Only change default, allow user override
+            cmap = 'RdBu'  # Red for larger ratios (>1.0), Blue for smaller ratios (<1.0)
+    
+    # Create figure with space for colorbar
+    fig = plt.figure(figsize=figsize)
+    fig.subplots_adjust(left=0.06, right=0.99)
+    
+    ax = fig.add_subplot(111)
+    
+    # Plot heatmap using imshow (transpose so each column is a design, rows are dimensions)
+    if use_relative_colors:
+        # Simple ratio: designs / nominal_design
+        # Ratio > 1.0 means larger than nominal, Ratio < 1.0 means smaller than nominal
+        # Use TwoSlopeNorm to center the colormap at 1.0
+        from matplotlib.colors import TwoSlopeNorm
+        vmin = plot_data.min()
+        vmax = plot_data.max()
+        norm = TwoSlopeNorm(vmin=vmin, vcenter=1.0, vmax=vmax)
+        
+        im = ax.imshow(plot_data.T, aspect='auto', cmap=cmap, norm=norm)
+    else:
+        im = ax.imshow(plot_data.T, aspect='auto', cmap=cmap)
+    
+    # Add vertical lines to separate runs
+    for start_idx, end_idx in run_boundaries:
+        if start_idx > 0:  # Don't draw line at the very beginning
+            ax.axvline(start_idx - 0.5, color='white', linewidth=2, linestyle='-', alpha=0.8)
+    
+    # Set y-axis labels (use design_labels as-is - user can format with $ for LaTeX if desired)
+    ax.set_yticks(np.arange(len(design_labels)))
+    ax.set_yticklabels(design_labels, fontsize=14)
+    ax.set_ylabel('Design Dimension', fontsize=12, weight='bold')
+    
+    # Set x-axis ticks and labels for run groups
+    x_tick_positions = []
+    x_tick_labels = []
+    for i, (start_idx, end_idx) in enumerate(run_boundaries):
+        # Position tick at the middle of each run's chunk
+        tick_pos = (start_idx + end_idx - 1) / 2
+        x_tick_positions.append(tick_pos)
+        x_tick_labels.append(run_labels[i] if i < len(run_labels) else found_run_ids[i][:8])
+    
+    ax.set_xticks(x_tick_positions)
+    ax.set_xticklabels(x_tick_labels, rotation=45, ha='right')
+    
+    # Set x-axis limits
+    ax.set_xlim(-0.5, len(combined_designs) - 0.5)
+    
+    # Add colorbar (let matplotlib manage placement)
+    cbar = fig.colorbar(im, ax=ax, fraction=0.03, pad=0.02)
+    if use_relative_colors:
+        cbar.set_label('Ratio to Nominal Design', labelpad=10, fontsize=12, weight='bold')
+    else:
+        cbar.set_label('Design Value', labelpad=10, fontsize=12, weight='bold')
+    
+    # Configure axis appearance
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(True)
+    ax.spines['left'].set_visible(True)
+    ax.tick_params(axis='y', length=0)
+    ax.margins(x=0)
+    
+    # Set title
+    if title is None:
+        if mlflow_exp and actual_mlflow_exp_for_title:
+            title = f'Top {top_n} Designs Comparison - {actual_mlflow_exp_for_title}'
+        elif mlflow_exp:
+            title = f'Top {top_n} Designs Comparison - {mlflow_exp}'
+        else:
+            title = f'Top {top_n} Designs Comparison Across Runs'
+    ax.set_title(title, fontsize=14, weight='bold', pad=20)
+    
+    plt.tight_layout()
+    
+    # Save if requested
+    if save_path is not None:
+        os.makedirs(os.path.dirname(save_path) if os.path.dirname(save_path) else '.', exist_ok=True)
+        save_figure(save_path, fig=fig, dpi=dpi)
+        print(f"Saved comparison plot to {save_path}")
+    
+    return fig, ax
+
+def plot_design_dim_by_eig(
+        mlflow_exp=None,
+        run_ids=None,
+        excluded_runs=[],
+        cosmo_exp='num_tracers',
+        run_labels=None,
+        step_key=None,
+        save_path=None,
+        figsize=(16, 10),
+        dpi=400,
+        design_labels=None,
+        title=None,
+        nominal_design=None,
+        colors=None,
+        moving_avg_window=50,
+        top_n=None,
+        ratio=False,
+        show_nominal=False
+    ):
+    """
+    Plot eig values for each design dimension across multiple runs, sorted by EIG.
+    Creates one subplot per dimension showing the eig values.
+    
+    Args:
+        mlflow_exp (str, optional): Name of the MLflow experiment. If provided, all runs in this experiment will be used.
+        run_ids (list, optional): List of MLflow run IDs to compare. If provided, mlflow_exp is ignored.
+        excluded_runs (list): List of run IDs to exclude.
+        cosmo_exp (str): Cosmological experiment name (default: 'num_tracers')
+        run_labels (list, optional): Labels for each run. If None, uses run IDs (first 8 chars)
+        step_key (str or int, optional): Which step to use. If None, finds most recent eig_data file
+        save_path (str, optional): Path to save the plot. If None, doesn't save
+        figsize (tuple): Figure size (width, height)
+        dpi (int): Resolution for saved figure
+        design_labels (list, optional): Labels for each design dimension. If None, tries to infer from experiment or uses generic labels
+        title (str, optional): Custom title for the plot. If None, generates default title
+        nominal_design (list, optional): Nominal design as a list of floats. Required if ratio=True.
+        colors (list, optional): Colors for each run. If None, uses default color cycle
+        moving_avg_window (int): Window size for moving average smoothing. If None or 0, no smoothing is applied. Default: 50
+        top_n (int, optional): If specified, only plot the top N designs (by EIG) from each run. If None, plots all designs. Default: None
+        ratio (bool): If True, plot ratios to nominal design. If False, plot actual design fractions. Default: False
+        show_nominal (bool): If True, show a horizontal line at the nominal value (1.0 for ratios, or actual nominal value for fractions). Default: False
+    
+    Returns:
+        fig, axes: Matplotlib figure and axes objects (one axis per tracer)
+    """
+    if ratio and nominal_design is None:
+        raise ValueError("nominal_design is required when ratio=True")
+    
+    # Set MLflow tracking URI
+    storage_path = os.environ["SCRATCH"] + f"/bed/BED_cosmo/{cosmo_exp}"
+    
+    # Get run data - can use either mlflow_exp or run_ids
+    run_data_list, experiment_id_for_save_path, actual_mlflow_exp_for_title = get_runs_data(
+        mlflow_exp=mlflow_exp,
+        run_ids=run_ids,
+        excluded_runs=excluded_runs,
+        parse_params=True,
+        cosmo_exp=cosmo_exp
+    )
+    if not run_data_list:
+        raise ValueError(f"No runs found in experiment {cosmo_exp}")
+    
+    # Extract run_ids from run_data_list
+    run_ids = [run_data['run_id'] for run_data in run_data_list]
+    
+    # Build a map from run_id to exp_id
+    run_id_to_exp_id = {run_data['run_id']: run_data['exp_id'] for run_data in run_data_list}
+    
+    # Find and load JSON files for each run
+    all_run_data = []  # List of dicts: each dict contains designs, eigs, and run_id for that run
+    found_run_ids = []
+    
+    for run_id in run_ids:
+        if run_id not in run_id_to_exp_id:
+            print(f"Warning: Run {run_id} not found in experiment {cosmo_exp}, skipping...")
+            continue
+        
+        exp_id = run_id_to_exp_id[run_id]
+        artifacts_dir = f"{storage_path}/mlruns/{exp_id}/{run_id}/artifacts"
+        
+        if not os.path.exists(artifacts_dir):
+            print(f"Warning: Artifacts directory not found for run {run_id}, skipping...")
+            continue
+        
+        # Find eig_data JSON files
+        eig_files = glob.glob(f"{artifacts_dir}/eig_data_*.json")
+        
+        if len(eig_files) == 0:
+            print(f"Warning: No eig_data JSON files found for run {run_id}, skipping...")
+            continue
+        
+        # Use most recent file (sort by timestamp in filename)
+        eig_files.sort(key=lambda x: os.path.basename(x), reverse=True)
+        json_path = eig_files[0]
+        
+        # Load JSON file
+        try:
+            with open(json_path, 'r') as f:
+                data = json.load(f)
+            
+            # Determine which step to use
+            if step_key is not None:
+                step_str = f"step_{step_key}"
+            else:
+                # Find the highest available step key
+                step_keys = [k for k in data.keys() if k.startswith('step_')]
+                if step_keys:
+                    # Extract step numbers and find the highest
+                    step_numbers = []
+                    for k in step_keys:
+                        try:
+                            step_num = int(k.split('_')[1])
+                            step_numbers.append((step_num, k))
+                        except (ValueError, IndexError):
+                            continue
+                    if step_numbers:
+                        step_str = max(step_numbers, key=lambda x: x[0])[1]
+                    else:
+                        step_str = step_keys[0]  # Fallback to first if parsing fails
+                else:
+                    print(f"Warning: No step data found in {json_path}, skipping...")
+                    continue
+            
+            if step_str not in data:
+                print(f"Warning: Step {step_str} not found in {json_path}, skipping...")
+                continue
+            
+            step_data = data[step_str]
+            
+            # Access nested structure
+            variable_data = step_data.get('variable', {})
+            
+            # Extract designs from top-level input_designs and EIGs from variable subdict
+            if 'input_designs' not in data:
+                print(f"Warning: No input_designs found in {json_path}, skipping...")
+                continue
+            
+            if 'eigs_avg' not in variable_data:
+                print(f"Warning: No eigs_avg data found in {json_path} for {step_str}, skipping...")
+                continue
+            
+            designs = np.array(data['input_designs'])
+            eigs = np.array(variable_data['eigs_avg'])
+            
+            # Check if designs and eigs have matching lengths
+            if len(designs) != len(eigs):
+                print(f"Warning: Mismatch - {len(designs)} designs but {len(eigs)} EIG values for run {run_id}")
+                continue
+            
+            # Ensure designs are 2D (n_designs, n_dims)
+            if designs.ndim == 1:
+                designs = designs.reshape(-1, 1)
+            
+            all_run_data.append({
+                'run_id': run_id,
+                'designs': designs,
+                'eigs': eigs
+            })
+            found_run_ids.append(run_id)
+                
+        except Exception as e:
+            print(f"Warning: Error loading {json_path}: {e}, skipping...")
+            continue
+    
+    if len(all_run_data) == 0:
+        raise ValueError("No valid design data found to compare")
+    
+    # Determine design labels
+    if design_labels is None:
+        # Try to infer from first run's experiment
+        try:
+            first_run_data = run_data_list[0]
+            device = "cuda:0"
+            experiment = init_experiment(
+                first_run_data['run_obj'], 
+                first_run_data['params'], 
+                device, 
+                design_args={}, 
+                global_rank=0
+            )
+            if hasattr(experiment, 'design_labels'):
+                design_labels = experiment.design_labels
+        except Exception as e:
+            print(f"Warning: Could not initialize experiment to get design labels: {e}")
+    
+    # Use generic labels if still None
+    if design_labels is None:
+        n_dims = all_run_data[0]['designs'].shape[1]
+        design_labels = [f'$f_{i}$' for i in range(n_dims)]
+    
+    # Verify all runs have the same number of dimensions
+    n_dims = all_run_data[0]['designs'].shape[1]
+    for run_data in all_run_data:
+        if run_data['designs'].shape[1] != n_dims:
+            raise ValueError(f"Design dimension mismatch: run {run_data['run_id']} has {run_data['designs'].shape[1]} dimensions, expected {n_dims}")
+    
+    if len(design_labels) != n_dims:
+        raise ValueError(f"design_labels length ({len(design_labels)}) must match number of design dimensions ({n_dims})")
+    
+    # Validate nominal_design if ratio is True
+    if ratio:
+        nominal_design = np.array(nominal_design)
+        if len(nominal_design) != n_dims:
+            raise ValueError(f"nominal_design length ({len(nominal_design)}) must match number of design dimensions ({n_dims})")
+        
+        if np.any(nominal_design == 0):
+            raise ValueError("nominal_design cannot contain zero values (division by zero)")
+    
+    # Generate labels if not provided
+    if run_labels is None:
+        run_labels = [run_id[:8] for run_id in found_run_ids]
+    
+    if len(run_labels) != len(all_run_data):
+        run_labels = run_labels[:len(all_run_data)]
+    
+    # Generate colors if not provided
+    if colors is None:
+        colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
+        # Cycle colors if we have more runs than colors
+        colors = [colors[i % len(colors)] for i in range(len(all_run_data))]
+    elif len(colors) < len(all_run_data):
+        colors = [colors[i % len(colors)] for i in range(len(all_run_data))]
+    else:
+        colors = colors[:len(all_run_data)]
+    
+    # Sort designs by EIG within each run and compute ratios
+    sorted_run_data = []
+    for run_data in all_run_data:
+        designs = run_data['designs']
+        eigs = run_data['eigs']
+        
+        # Sort by EIG (descending) within this run
+        sorted_indices = np.argsort(eigs)[::-1]
+        
+        # If top_n is specified, only take top N designs
+        if top_n is not None and top_n > 0:
+            sorted_indices = sorted_indices[:min(top_n, len(sorted_indices))]
+        
+        sorted_designs = designs[sorted_indices]
+        
+        # Compute ratios or use actual design values
+        if ratio:
+            plot_values = sorted_designs / nominal_design[np.newaxis, :]
+        else:
+            plot_values = sorted_designs
+        
+        sorted_run_data.append({
+            'plot_values': plot_values,
+            'eigs': eigs[sorted_indices]
+        })
+    
+    # Create figure with subplots - one per tracer/dimension
+    n_cols = min(2, n_dims)  # 2 columns
+    n_rows = (n_dims + n_cols - 1) // n_cols  # Ceiling division
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=figsize, squeeze=False)
+    axes = axes.flatten()
+    
+    # Plot each tracer/dimension
+    for dim_idx in range(n_dims):
+        ax = axes[dim_idx]
+        
+        # Plot each run as a line
+        for run_idx, run_sorted_data in enumerate(sorted_run_data):
+            plot_values = run_sorted_data['plot_values'][:, dim_idx]
+            n_designs = len(plot_values)
+            design_indices = np.arange(n_designs)
+            
+            # Apply moving average if window size is specified
+            if moving_avg_window is not None and moving_avg_window > 0 and n_designs > moving_avg_window:
+                # Use manual moving average that handles edges properly
+                # At each point, use the available window (may be smaller at edges)
+                values_smoothed = np.zeros_like(plot_values)
+                half_window = moving_avg_window // 2
+                
+                for i in range(n_designs):
+                    # Determine the actual window bounds for this point
+                    start_idx = max(0, i - half_window)
+                    end_idx = min(n_designs, i + half_window + 1)
+                    # Compute average over the available window
+                    values_smoothed[i] = np.mean(plot_values[start_idx:end_idx])
+            else:
+                values_smoothed = plot_values
+            
+            ax.plot(
+                design_indices,
+                values_smoothed,
+                label=run_labels[run_idx],
+                color=colors[run_idx],
+                linewidth=2,
+                alpha=0.8
+            )
+        
+        # Add horizontal line at ratio = 1.0 (nominal) or nominal value if ratio mode
+        if show_nominal:
+            if ratio:
+                ax.axhline(y=1.0, color='black', linestyle='--', linewidth=1.5, alpha=0.7, label='Nominal' if dim_idx == 0 else '')
+            elif nominal_design is not None:
+                nominal_value = np.array(nominal_design)[dim_idx]
+                ax.axhline(y=nominal_value, color='black', linestyle='--', linewidth=1.5, alpha=0.7, label='Nominal' if dim_idx == 0 else '')
+        
+        ax.set_xlabel('Design Index (sorted by EIG per run)', fontsize=12, weight='bold')
+        if ratio:
+            ax.set_ylabel(f'Ratio to Nominal', fontsize=12, weight='bold')
+        else:
+            ax.set_ylabel(f'Design Fraction', fontsize=12, weight='bold')
+        ax.set_title(f'{design_labels[dim_idx]}', fontsize=14, weight='bold')
+        ax.grid(True, alpha=0.3)
+        ax.legend(loc='best', fontsize=9)
+    
+    # Hide unused subplots
+    for dim_idx in range(n_dims, len(axes)):
+        axes[dim_idx].set_visible(False)
+    
+    plt.tight_layout()
+    
+    # Save if requested
+    if save_path is not None:
+        os.makedirs(os.path.dirname(save_path) if os.path.dirname(save_path) else '.', exist_ok=True)
+        save_figure(save_path, fig=fig, dpi=dpi)
+        print(f"Saved plot to {save_path}")
+    
+    return fig, axes
     
 def compare_training(
         mlflow_exp=None,
@@ -2846,158 +3700,358 @@ def plot_designs_parallel_coords(run_id, cosmo_exp='num_tracers', alpha=0.6, lin
         _display_figure(fig)
     plt.close(fig)
 
-def plot_designs_3d(run_id, cosmo_exp='num_tracers', figsize=(10, 8), 
-                   cmap='viridis', s=60, alpha=0.8, save_path=None, 
-                   show_nominal=True, dim_mapping=(1, 2, 3, 0), labels=None):
+def plot_design_pts(
+    designs_file=None,
+    run_id=None,
+    cosmo_exp='num_tracers',
+    figsize=(10, 8),
+    marker_size=60,
+    alpha=0.9,
+    cmap='viridis',
+    labels=None,
+    save_path=None,
+    title=None
+):
     """
-    Plot design space in 3D with customizable axis and color mappings.
+    Plot designs loaded from a Python file (`designs.py`) in up to 4 dimensions.
+
+    Depending on the number of design dimensions, the function renders:
+        - 1D: Line plot with black markers.
+        - 2D: Scatter plot (grid) with black markers.
+        - 3D: 3D scatter plot with black markers.
+        - 4D: 3D scatter plot where the 4th dimension is encoded by color.
+
+    Args:
+        designs_file (str, optional): Path to a .npy file containing the designs array.
+                                      If not provided, run_id must be supplied.
+        run_id (str, optional): MLflow run ID whose artifacts include `designs.npy`.
+        cosmo_exp (str): Cosmology experiment name when resolving run artifacts.
+        figsize (tuple): Figure size.
+        marker_size (int/float): Size of the plotted markers.
+        alpha (float): Alpha for markers (used in 3D/4D plots).
+        cmap (str): Colormap to use when encoding the 4th dimension.
+        labels (list/tuple): Optional axis labels for each dimension.
+        save_path (str, optional): Optional path to save the resulting figure.
+        title (str, optional): Optional figure title. Defaults to the filename.
+
+    Returns:
+        matplotlib.figure.Figure: The created figure.
+    """
+    if designs_file is None:
+        if run_id is None:
+            raise ValueError("Provide either designs_file or run_id.")
+        run_data_list, _, _ = get_runs_data(run_ids=run_id, parse_params=False, cosmo_exp=cosmo_exp)
+        if not run_data_list:
+            raise ValueError(f"Run {run_id} not found in experiment {cosmo_exp}")
+        exp_id = run_data_list[0]['exp_id']
+        storage_path = os.environ["SCRATCH"] + f"/bed/BED_cosmo/{cosmo_exp}"
+        designs_file = os.path.join(storage_path, "mlruns", exp_id, run_id, "artifacts", "designs.npy")
+    resolved_path = designs_file if os.path.isabs(designs_file) else os.path.abspath(designs_file)
+    if not os.path.exists(resolved_path):
+        raise FileNotFoundError(f"Designs file not found: {resolved_path}")
+    designs = np.load(resolved_path)
+    if not isinstance(designs, np.ndarray):
+        designs = np.asarray(designs)
+    if designs.ndim == 1:
+        designs = designs.reshape(-1, 1)
+    elif designs.ndim != 2:
+        raise ValueError("Designs must be 1D or 2D (n_designs, n_dims).")
+    if designs.shape[0] == 0:
+        raise ValueError("No designs found in the supplied designs file.")
+    n_designs, n_dims = designs.shape
+    if labels is None:
+        axes_labels = [f'Dim {i+1}' for i in range(n_dims)]
+    else:
+        if not isinstance(labels, (list, tuple)):
+            raise ValueError("labels must be a list or tuple")
+        if len(labels) != n_dims:
+            raise ValueError(f"labels must contain {n_dims} entries, received {len(labels)}.")
+        axes_labels = list(labels)
+    if n_dims < 1 or n_dims > 4:
+        raise ValueError(f"plot_designs only supports 1D to 4D designs. Found {n_dims} dimensions.")
     
-    Creates a 3D scatter plot where you can specify which dimension maps to each axis and color.
+    figure_title = title or f"Design Space"
+    
+    if n_dims == 1:
+        fig, ax = plt.subplots(figsize=figsize)
+        x = designs[:, 0]
+        y = np.zeros_like(x)
+        ax.axhline(0, color='black', linewidth=1.0, alpha=0.5)
+        ax.scatter(x, y, color='black', s=marker_size)
+        ax.set_xlabel(axes_labels[0])
+        ax.set_yticks([])
+        ax.set_ylim(-1, 1)
+        ax.set_title(figure_title, fontsize=14, weight='bold')
+        ax.grid(False)
+    elif n_dims == 2:
+        fig, ax = plt.subplots(figsize=figsize)
+        ax.scatter(designs[:, 0], designs[:, 1], color='black', s=marker_size)
+        ax.set_xlabel(axes_labels[0])
+        ax.set_ylabel(axes_labels[1])
+        ax.set_aspect('equal', adjustable='box')
+        ax.grid(True, alpha=0.3, linestyle='--')
+        ax.set_title(figure_title, fontsize=14, weight='bold')
+    else:
+        fig = plt.figure(figsize=figsize)
+        ax = fig.add_subplot(111, projection='3d')
+        if n_dims == 3:
+            ax.scatter(
+                designs[:, 0],
+                designs[:, 1],
+                designs[:, 2],
+                color='black',
+                s=marker_size,
+                alpha=alpha
+            )
+        else:  # 4D
+            color_values = designs[:, 3]
+            scatter = ax.scatter(
+                designs[:, 0],
+                designs[:, 1],
+                designs[:, 2],
+                c=color_values,
+                              cmap=cmap,
+                s=marker_size,
+                alpha=alpha
+            )
+            cbar = fig.colorbar(scatter, ax=ax, shrink=0.8, aspect=20, pad=0.1)
+            cbar.set_label(axes_labels[3], fontsize=12)
+        ax.set_xlabel(axes_labels[0])
+        ax.set_ylabel(axes_labels[1])
+        ax.set_zlabel(axes_labels[2])
+        ax.set_title(figure_title, fontsize=14, weight='bold', pad=10)
+        ax.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    
+    if save_path:
+        os.makedirs(os.path.dirname(save_path) if os.path.dirname(save_path) else '.', exist_ok=True)
+        save_figure(save_path, fig=fig, dpi=300, display_fig=False, close_fig=False)
+    
+    return fig
+
+
+def plot_2d_eig(
+    run_id,
+    step_key=None,
+    use_sorted=True,
+    cosmo_exp='num_tracers',
+    save_path=None,
+    figsize=(10, 8),
+    dpi=400,
+    cmap='viridis',
+    show_optimal=True,
+    show_nominal=False,
+    title=None
+):
+    """
+    Plot 2D design space with EIG values as a colormap.
     
     Args:
         run_id (str): MLflow run ID
-        cosmo_exp (str): Cosmology experiment name (default: 'num_tracers')
-        figsize (tuple): Figure size (default: (10, 8))
-        cmap (str): Colormap for color dimension (default: 'viridis')
-        s (float): Size of scatter points (default: 60)
-        alpha (float): Transparency of points (default: 0.8)
-        save_path (str, optional): Path to save the figure. If None, displays the figure.
-        show_nominal (bool): Whether to show nominal design marker (default: True)
-        dim_mapping (tuple): Tuple of 4 indices (x_idx, y_idx, z_idx, color_idx) specifying which
-                           dimension (0-3) maps to x-axis, y-axis, z-axis, and color.
-                           Default: (1, 2, 3, 0) means x=dim1, y=dim2, z=dim3, color=dim0
-                           Example: (0, 1, 2, 3) means x=dim0, y=dim1, z=dim2, color=dim3
-                           Example: (1, 2, 0, 3) means x=dim1, y=dim2, z=dim0, color=dim3
-        labels (tuple/list, optional): Custom labels for each dimension. If None, uses generic
-                                      labels like f_0, f_1, etc. Example: ('f_BGS', 'f_LRG', 'f_ELG', 'f_QSO')
+        step_key (str or int, optional): Step key to filter eig_data files (e.g., 50000 or 'last').
+                                        If None, uses most recent file.
+        use_sorted (bool): Whether to use sorted designs and EIGs. Default True.
+        cosmo_exp (str): Cosmology experiment name. Default 'num_tracers'.
+        save_path (str, optional): Path to save the figure. If None, doesn't save.
+        figsize (tuple): Figure size. Default (10, 8).
+        dpi (int): DPI for saved figure. Default 400.
+        cmap (str): Colormap name. Default 'viridis'.
+        show_optimal (bool): Whether to mark the optimal design. Default True.
+        show_nominal (bool): Whether to mark the nominal design. Default False.
+        title (str, optional): Custom title for the plot. If None, auto-generates.
     
     Returns:
-        fig: Matplotlib figure object
+        matplotlib.figure.Figure: The created figure.
     """
+    # Set storage path
+    storage_path = os.environ["SCRATCH"] + f"/bed/BED_cosmo/{cosmo_exp}"
+    
     # Get run data to find exp_id
-    run_data_list, _, _ = get_runs_data(run_ids=run_id, cosmo_exp=cosmo_exp)
+    run_data_list, experiment_id, _ = get_runs_data(
+        run_ids=run_id,
+        parse_params=False,
+        cosmo_exp=cosmo_exp
+    )
+    
     if not run_data_list:
         raise ValueError(f"Run {run_id} not found in experiment {cosmo_exp}")
     
     run_data = run_data_list[0]
     exp_id = run_data['exp_id']
-    run_obj = run_data['run_obj']
-    run_args = run_data['params']
-    device = "cuda:0"
-    experiment = init_experiment(
-        run_obj, run_args, device, 
-        design_args={}, global_rank=0
+    
+    # Find artifacts directory
+    artifacts_dir = f"{storage_path}/mlruns/{exp_id}/{run_id}/artifacts"
+    
+    if not os.path.exists(artifacts_dir):
+        raise ValueError(f"Artifacts directory not found for run {run_id}")
+    
+    # Find eig_data JSON files
+    eig_files = glob.glob(f"{artifacts_dir}/eig_data_*.json")
+    
+    if len(eig_files) == 0:
+        raise ValueError(f"No eig_data JSON files found for run {run_id}")
+    
+    # Use most recent file (sort by timestamp in filename)
+    eig_files.sort(key=lambda x: os.path.basename(x), reverse=True)
+    json_path = eig_files[0]
+    
+    # Load JSON file
+    try:
+        with open(json_path, 'r') as f:
+            eig_data = json.load(f)
+    except Exception as e:
+        raise ValueError(f"Error loading eig_data from {json_path}: {e}")
+    
+    # Determine which step to use
+    if step_key is not None:
+        step_str = f"step_{step_key}"
+    else:
+        # Find the highest available step key
+        step_keys = [k for k in eig_data.keys() if k.startswith('step_')]
+        if len(step_keys) == 0:
+            raise ValueError("No step data found in eig_data")
+        # Extract step numbers and find the highest
+        step_numbers = []
+        for k in step_keys:
+            try:
+                step_num = int(k.split('_')[1])
+                step_numbers.append((step_num, k))
+            except (ValueError, IndexError):
+                continue
+        if step_numbers:
+            step_str = max(step_numbers, key=lambda x: x[0])[1]
+        else:
+            step_str = step_keys[0]  # Fallback to first if parsing fails
+    
+    if step_str not in eig_data:
+        raise ValueError(f"Step {step_str} not found in eig_data")
+    
+    step_data = eig_data[step_str]
+    
+    # Access nested structure
+    variable_data = step_data.get('variable', {})
+    
+    # Extract designs and EIG values from variable subdict
+    if 'designs' not in variable_data:
+        raise ValueError(f"No designs found in {step_str}")
+    designs = np.array(variable_data['designs'])
+    
+    # Get EIG values
+    if 'eigs_avg' not in variable_data:
+        raise ValueError(f"No eigs_avg found in {step_str}")
+    eigs = np.array(variable_data['eigs_avg'])
+    
+    # Sort if requested
+    if use_sorted:
+        sorted_idx = np.argsort(eigs)[::-1]
+        designs = designs[sorted_idx]
+        eigs = eigs[sorted_idx]
+    
+    # Validate that designs are 2D
+    if designs.shape[1] != 2:
+        raise ValueError(f"Expected 2D designs, but got {designs.shape[1]}D designs")
+    
+    # Extract design labels (try metadata first, then default)
+    design_labels = ['z_1', 'z_2']  # Default
+    if 'metadata' in eig_data and isinstance(eig_data.get('metadata'), dict):
+        if 'design_labels' in eig_data['metadata']:
+            design_labels = eig_data['metadata']['design_labels']
+    if len(design_labels) < 2:
+        design_labels = ['z_1', 'z_2']
+    
+    # Create figure
+    fig, ax = plt.subplots(figsize=figsize)
+    
+    # Create regular grid for interpolation
+    x_min, x_max = designs[:, 0].min(), designs[:, 0].max()
+    y_min, y_max = designs[:, 1].min(), designs[:, 1].max()
+    
+    # Create grid (use reasonable resolution, e.g., 200x200)
+    grid_resolution = 200
+    xi = np.linspace(x_min, x_max, grid_resolution)
+    yi = np.linspace(y_min, y_max, grid_resolution)
+    xi_grid, yi_grid = np.meshgrid(xi, yi)
+    
+    # Interpolate EIG values onto the grid
+    # Try cubic first, fallback to linear if not enough points
+    try:
+        zi = griddata(
+            (designs[:, 0], designs[:, 1]),
+            eigs,
+            (xi_grid, yi_grid),
+            method='cubic',
+            fill_value=np.nan
+        )
+    except ValueError:
+        # Fallback to linear interpolation if cubic fails (not enough points)
+        zi = griddata(
+            (designs[:, 0], designs[:, 1]),
+            eigs,
+            (xi_grid, yi_grid),
+            method='linear',
+            fill_value=np.nan
+        )
+    
+    # Use imshow for continuous colormap
+    # Note: imshow expects (y, x) ordering and origin='lower' for proper orientation
+    extent = [x_min, x_max, y_min, y_max]
+    im = ax.imshow(
+        zi,
+        extent=extent,
+        origin='lower',
+        cmap=cmap,
+        aspect='auto',
+        interpolation='bilinear'
     )
     
-    # Build path to designs.npy
-    storage_path = os.environ["SCRATCH"] + f"/bed/BED_cosmo/{cosmo_exp}"
-    designs_path = f"{storage_path}/mlruns/{exp_id}/{run_id}/artifacts/designs.npy"
-    
-    # Load designs
-    if not os.path.exists(designs_path):
-        raise FileNotFoundError(f"Designs file not found: {designs_path}")
-    
-    designs = np.load(designs_path)
-    
-    # Ensure designs is a numpy array
-    if not isinstance(designs, np.ndarray):
-        designs = np.array(designs)
-    
-    # Validate and extract dimension mapping
-    if not isinstance(dim_mapping, (tuple, list)) or len(dim_mapping) != 4:
-        raise ValueError(f"dim_mapping must be a tuple/list of 4 indices, got {dim_mapping}")
-    
-    x_idx, y_idx, z_idx, color_idx = dim_mapping
-    
-    # Validate indices are in range (will check against actual design dimensions later)
-    n_dims = designs.shape[1]
-    for idx, name in zip([x_idx, y_idx, z_idx, color_idx], ['x', 'y', 'z', 'color']):
-        if not isinstance(idx, int) or idx not in range(n_dims):
-            raise ValueError(f"{name}_idx must be an integer 0-{n_dims-1}, got {idx}")
-    
-    # Check that x, y, z axes are all different (color can match one of them)
-    axis_indices = [x_idx, y_idx, z_idx]
-    if len(set(axis_indices)) < 3:
-        raise ValueError(f"X, Y, and Z axes must be different. "
-                        f"Got: x_idx={x_idx}, y_idx={y_idx}, z_idx={z_idx}")
-    
-    # Extract dimension data
-    n_dims = designs.shape[1]
-    dim_data = {i: designs[:, i] for i in range(n_dims)}
-    
-    # Get data for each axis and color
-    x_data = dim_data[x_idx]
-    y_data = dim_data[y_idx]
-    z_data = dim_data[z_idx]
-    color_data = dim_data[color_idx]
-    
-    # Validate and set labels
-    if labels is not None:
-        if not isinstance(labels, (tuple, list)) or len(labels) != n_dims:
-            raise ValueError(f"labels must be a tuple/list of length {n_dims}, got {labels}")
-        # Use provided labels as-is (user can format with $ for LaTeX if desired)
-        dim_labels = list(labels)
-    else:
-        # Create generic labels
-        dim_labels = [f'$f_{i}$' for i in range(n_dims)]
-    
-    # Create 3D figure
-    fig = plt.figure(figsize=figsize)
-    ax_3d = fig.add_subplot(111, projection='3d')
-    
-    # Set colorbar limits
-    cbar_min = color_data.min()
-    cbar_max = color_data.max()
-    
-    # 3D scatter plot with customizable mappings
-    scatter_3d = ax_3d.scatter(x_data, y_data, z_data,
-                              c=color_data,
-                              cmap=cmap,
-                              s=s,
-                              alpha=alpha,
-                              marker='o',
-                              vmin=cbar_min,
-                              vmax=cbar_max)
-    
-    # Plot nominal design if requested
-    if show_nominal:
-        nominal_design = experiment.nominal_design.cpu().numpy()
-        # Nominal design should have same number of dimensions as designs
-        if len(nominal_design) == n_dims:
-            ax_3d.scatter(nominal_design[x_idx], nominal_design[y_idx], nominal_design[z_idx],
-                        c=nominal_design[color_idx],
-                        cmap=cmap,
-                        s=s*1.5,
-                        alpha=1.0,
-                        vmin=cbar_min,
-                        vmax=cbar_max,
-                        marker='*',
-                        label='Nominal Design',
-                        edgecolors='black',
-                        linewidths=1)
-            ax_3d.legend(fontsize=12)
-    
-    # Configure 3D plot - use fig.suptitle to center title on entire figure (including colorbar)
-    fig.suptitle('Design Space', fontsize=16, y=0.88, weight='bold')
-    ax_3d.set_xlabel(dim_labels[x_idx], fontsize=14)
-    ax_3d.set_ylabel(dim_labels[y_idx], fontsize=14)
-    ax_3d.set_zlabel(dim_labels[z_idx], fontsize=14)
-    ax_3d.grid(True, alpha=0.3)
-    
     # Add colorbar
-    cbar = plt.colorbar(scatter_3d, ax=ax_3d, shrink=0.8, aspect=20)
-    cbar.set_label(dim_labels[color_idx], fontsize=14)
+    cbar = plt.colorbar(im, ax=ax)
+    cbar.set_label('Expected Information Gain [bits]', fontsize=12, weight='bold')
     
-    plt.tight_layout(rect=[0, 0, 1, 0.96])  # Adjust top margin to accommodate suptitle
+    # Mark optimal design if available and requested
+    if show_optimal:
+        if 'optimal_design' in variable_data:
+            optimal_design = np.array(variable_data['optimal_design'])
+        else:
+            optimal_design = None
+        
+        if optimal_design is not None and len(optimal_design) == 2:
+            ax.scatter(
+                optimal_design[0],
+                optimal_design[1],
+                marker='o',
+                s=100,
+                color='tab:orange',
+                edgecolors='none',
+                label='Optimal Design',
+                zorder=5
+            )
+    
+    # Mark nominal design if available and requested
+    # Note: nominal_design is not stored in step_data, would need to get from experiment
+    # For now, skip this if not available
+    if show_nominal:
+        # Try to get from experiment if needed, or skip
+        pass
+    
+    # Set labels
+    ax.set_xlabel(f'${design_labels[0]}$', fontsize=14)
+    ax.set_ylabel(f'${design_labels[1]}$', fontsize=14)
+    
+    ax.grid(True, alpha=0.3)
+    
+    # Add legend on the plot if we have markers
+    if (show_optimal and 'optimal_design' in variable_data):
+        ax.legend(loc='upper right', fontsize=10, frameon=True)
+    
+    plt.tight_layout()
     
     # Save if path provided
     if save_path:
-        _save_figure(fig, save_path, dpi=300)
+        save_figure(save_path, fig=fig, dpi=dpi, close_fig=False)
     
-    # Display figure in interactive environment
-    if _is_interactive_environment():
-        _display_figure(fig)
-    plt.close(fig)
+    return fig
 
 
 def save_figure(save_path, fig=None, close_fig=True, display_fig=True, dpi=300):

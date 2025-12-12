@@ -18,7 +18,7 @@ base_om:
   mnn_signal: 32
   nf_transform: affine
   spline_bins: 16
-  fixed_design: false
+  input_design: false
   design_step: 0.1
   design_lower: 0.0
   design_upper: 4.0
@@ -56,13 +56,14 @@ base:
   mnn_signal: 32
   nf_transform: affine
   spline_bins: 16
-  fixed_design: false
+  input_designs: null
   design_step: 0.1
   design_lower: 0.1
   design_upper: 3.5
+  n_redshifts: 2
   sigma_D_H: 0.2
   sigma_D_M: 0.2
-  total_steps: 50000
+  total_steps: 100000
   optimizer: Adam
   initial_lr: 0.0001
   final_lr: 0.0
@@ -73,7 +74,7 @@ base:
   gamma: 0.1
   step_freq: 1
   checkpoint_step_freq: 1000
-  n_particles_per_device: 201
+  n_particles_per_device: 101
   include_D_M: true
   verbose: true
 
@@ -94,7 +95,7 @@ base_omegak:
   mnn_signal: 32
   nf_transform: affine
   spline_bins: 16
-  fixed_design: false
+  input_designs: null
   design_step: 0.1
   design_lower: 0.0
   design_upper: 4.0
@@ -110,9 +111,9 @@ base_omegak:
   n_cycles: 1
   gamma: 0.1
   step_freq: 1
-  checkpoint_step_freq: 1000
-  n_particles_per_device: 201
-  include_D_M: false
+  checkpoint_step_freq: 5000
+  n_particles_per_device: 501
+  include_D_M: true
   verbose: true
 
 base_w:
@@ -132,7 +133,7 @@ base_w:
   mnn_signal: 32
   nf_transform: affine
   spline_bins: 16
-  fixed_design: false
+  input_designs: null
   design_step: 0.1
   design_lower: 0.0
   design_upper: 4.0
@@ -148,9 +149,9 @@ base_w:
   n_cycles: 1
   gamma: 0.1
   step_freq: 1
-  checkpoint_step_freq: 1000
+  checkpoint_step_freq: 5000
   n_particles_per_device: 201
-  include_D_M: false
+  include_D_M: true
   verbose: true
 
 base_w_wa:
@@ -170,13 +171,14 @@ base_w_wa:
   mnn_signal: 32
   nf_transform: affine
   spline_bins: 16
-  fixed_design: false
+  input_designs: null
   design_step: 0.1
-  design_lower: 0.0
-  design_upper: 4.0
+  design_lower: 0.1
+  design_upper: 3.5
+  n_redshifts: 2
   sigma_D_H: 0.2
   sigma_D_M: 0.2
-  total_steps: 50000
+  total_steps: 100000
   optimizer: Adam
   initial_lr: 0.0001
   final_lr: 0.0
@@ -186,9 +188,9 @@ base_w_wa:
   n_cycles: 1
   gamma: 0.1
   step_freq: 1
-  checkpoint_step_freq: 1000
+  checkpoint_step_freq: 5000
   n_particles_per_device: 201
-  include_D_M: false
+  include_D_M: true
   verbose: true
 
 base_omegak_w_wa:
@@ -208,13 +210,15 @@ base_omegak_w_wa:
   mnn_signal: 32
   nf_transform: affine
   spline_bins: 16
-  fixed_design: false
-  design_step: 0.1
-  design_lower: 0.0
-  design_upper: 4.0
+  input_designs: null
+  design_step: 0.2
+  design_lower: 0.1
+  design_upper: 3.5
+  n_redshifts: 2
   sigma_D_H: 0.2
   sigma_D_M: 0.2
-  total_steps: 50000
+  error_scale: 1.0
+  total_steps: 100000
   optimizer: Adam
   initial_lr: 0.0001
   final_lr: 0.0
@@ -224,8 +228,8 @@ base_omegak_w_wa:
   n_cycles: 1
   gamma: 0.1
   step_freq: 1
-  checkpoint_step_freq: 1000
+  checkpoint_step_freq: 5000
   n_particles_per_device: 201
-  include_D_M: false
+  include_D_M: true
   verbose: true
 

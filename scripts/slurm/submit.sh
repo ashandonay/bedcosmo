@@ -62,6 +62,7 @@ PROFILE=false
 RESTART_OPTIMIZER=false
 declare -A CLI_ARGS  # Associative array for command-line arguments
 POSITIONAL_ARGS=()
+SBATCH_ARGS=()
 
 # Parse named arguments
 while [[ $# -gt 0 ]]; do
@@ -109,6 +110,10 @@ while [[ $# -gt 0 ]]; do
         --restart_optimizer)
             RESTART_OPTIMIZER=true
             shift 1
+            ;;
+        --exclude)
+            SBATCH_ARGS+=("--exclude=$2")
+            shift 2
             ;;
         --*)
             # Store CLI argument (will override YAML defaults)
@@ -296,27 +301,35 @@ except Exception as e:
     fi
     
     # Parse the JSON output and build argument list
+    # Use a more robust approach: read all key-value pairs into YAML_ARGS array
     while IFS="=" read -r key value; do
         # Skip if this key was provided via CLI (CLI overrides YAML)
         if [[ -v CLI_ARGS["$key"] ]]; then
             continue
         fi
         
-        # Handle different value types
-        if [ "$value" != "null" ] && [ -n "$value" ]; then
-            # Handle boolean values
-            if [ "$value" = "true" ] || [ "$value" = "True" ]; then
-                YAML_ARGS+=("--$key")
-            elif [ "$value" = "false" ] || [ "$value" = "False" ]; then
-                # Skip false boolean flags
-                continue
-            # Handle arrays (keep as JSON-like format)
-            elif [[ "$value" == \[*\] ]]; then
-                YAML_ARGS+=("--$key" "$value")
-            # Handle numbers and strings
-            else
-                YAML_ARGS+=("--$key" "$value")
+        # Skip null/None values (explicitly check for both JSON null and Python None string)
+        # Exception: for eval jobs, include fixed_design even if null (evaluate.py accepts it)
+        if [ "$value" = "null" ] || [ "$value" = "None" ] || [ -z "$value" ]; then
+            # For eval jobs, pass fixed_design even if null (evaluate.py will parse "null" as None)
+            if [ "$JOB_TYPE" = "eval" ] && [ "$key" = "fixed_design" ]; then
+                YAML_ARGS+=("--$key" "null")
             fi
+            continue
+        fi
+        
+        # Handle boolean values (now consistently lowercase from Python)
+        if [ "$value" = "true" ]; then
+            YAML_ARGS+=("--$key")
+        elif [ "$value" = "false" ]; then
+            # Skip false boolean flags
+            continue
+        # Handle arrays (keep as JSON-like format)
+        elif [[ "$value" == \[*\] ]]; then
+            YAML_ARGS+=("--$key" "$value")
+        # Handle numbers and strings
+        else
+            YAML_ARGS+=("--$key" "$value")
         fi
     done < <(echo "$YAML_OUTPUT" | python3 -c "
 import json
@@ -324,13 +337,18 @@ import sys
 
 data = json.load(sys.stdin)
 for key, value in data.items():
-    if isinstance(value, list):
+    if value is None:
+        # Explicitly output 'null' for None values (JSON null)
+        print(f'{key}=null')
+    elif isinstance(value, list):
         # Format lists as JSON-like strings
         formatted = '[' + ', '.join(str(v) for v in value) + ']'
         print(f'{key}={formatted}')
     elif isinstance(value, bool):
-        print(f'{key}={str(value)}')
+        # Output lowercase boolean for consistency
+        print(f'{key}={str(value).lower()}')
     else:
+        # Output as-is (numbers and strings)
         print(f'{key}={value}')
 ")
 fi
@@ -485,6 +503,7 @@ if [ -n "$RESTART_STEP" ]; then
     echo "Restart step: $RESTART_STEP"
 fi
 echo ""
+
 # Count actual number of arguments (each --key counts as 1, regardless of whether it has a value)
 arg_count=0
 i=0
@@ -529,7 +548,7 @@ done
 echo "=========================================="
 echo ""
 
-sbatch "$SCRIPT_DIR/$SCRIPT_FILE" "${FINAL_ARGS[@]}"
+sbatch "${SBATCH_ARGS[@]}" "$SCRIPT_DIR/$SCRIPT_FILE" "${FINAL_ARGS[@]}"
 
 echo ""
 echo "Job submitted successfully!"
