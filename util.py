@@ -6,19 +6,15 @@ import mlflow
 import zuko
 import random
 import numpy as np
-import pandas as pd
 from mlflow.tracking import MlflowClient
-import getdist
 from pyro import distributions as dist
 from pyro_oed_src import _safe_mean_terms, posterior_loss
 import json
 import contextlib
-import io
 import matplotlib.pyplot as plt
 import matplotlib.colors as colors
 from pyro.contrib.util import lexpand
 import subprocess
-from torch.nn.parallel import DistributedDataParallel as DDP
 from datetime import datetime, timedelta
 import traceback
 import functools
@@ -26,10 +22,12 @@ import time
 import inspect
 import concurrent.futures
 import warnings
+import threading
 from itertools import combinations
 from PIL import Image, ImageDraw, ImageFont
 import glob
 import argparse
+import psutil
 
 torch.set_default_dtype(torch.float64)
 
@@ -378,17 +376,55 @@ class Bijector:
 
         return torch.exp(y / s + c)
 
+def get_profile_depth():
+    """Get current profile nesting depth for indentation."""
+    if not hasattr(_profile_depth, 'depth'):
+        return 0
+    return _profile_depth.depth
+    
+def _get_memory_usage():
+    """Get current memory usage in MB. Returns None if unavailable."""
+    try:
+        process = psutil.Process(os.getpid())
+        mem_info = process.memory_info()
+        return mem_info.rss / (1024 * 1024)
+    except Exception:
+        return None
+
+# Thread-local storage for tracking profile nesting depth
+_profile_depth = threading.local()
+
 def profile_method(func):
-    """Decorator to profile method execution time - checks self.profile"""
+    """Decorator to profile method execution time and memory usage - checks self.profile"""
     @functools.wraps(func)
     def wrapper(*args, **kwargs):
-        # Check if the instance has profile
         if hasattr(args[0], 'profile') and args[0].profile:
+            # Only print on rank 0 to avoid duplicate output in distributed training
+            print_profile = not hasattr(args[0], 'global_rank') or args[0].global_rank == 0
+            
+            # Track nesting depth for indentation
+            if not hasattr(_profile_depth, 'depth'):
+                _profile_depth.depth = 0
+            _profile_depth.depth += 1
+            indent = "  " * (_profile_depth.depth - 1)
+            
             start_time = time.time()
+            start_memory = _get_memory_usage()
             result = func(*args, **kwargs)
             end_time = time.time()
+            end_memory = _get_memory_usage()
             execution_time = end_time - start_time
-            print(f"⏱️  {func.__name__} took {execution_time:.5f} seconds")
+            
+            if print_profile:
+                if start_memory is not None and end_memory is not None:
+                    memory_diff = end_memory - start_memory
+                    print(f"{indent}{func.__name__} took {execution_time:.5f} seconds, memory: {end_memory:.2f} MB (Δ: {memory_diff:+.2f} MB)")
+                elif end_memory is not None:
+                    print(f"{indent}{func.__name__} took {execution_time:.5f} seconds, memory: {end_memory:.2f} MB")
+                else:
+                    print(f"{indent}{func.__name__} took {execution_time:.5f} seconds")
+            
+            _profile_depth.depth -= 1
             return result
         else:
             # No profiling overhead when disabled

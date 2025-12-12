@@ -110,78 +110,163 @@ class Trainer:
         self._init_optimizer()
         self._init_scheduler()
         self._init_dataloader()
+    
+    @profile_method
+    def loss(self, samples, context):
+        agg_loss, loss = nf_loss(
+            samples, context, self.posterior_flow, self.experiment, 
+            rank=self.global_rank, verbose_shapes=self.verbose, evaluation=False
+            )
+        return loss, agg_loss
+
+    @profile_method
+    def step(self, samples, context, current_step):
+        # Time the step if we're in the first 100 steps
+        start_time = time.time() if current_step < 100 else None
         
+        # Profile optimizer zero_grad
+        if self.profile and (not hasattr(self, 'global_rank') or self.global_rank == 0):
+            zero_grad_start = time.time()
+        self.optimizer.zero_grad()
+        if self.profile and (not hasattr(self, 'global_rank') or self.global_rank == 0):
+            zero_grad_time = time.time() - zero_grad_start
+            indent = "  " * get_profile_depth()
+            print(f"{indent}  optimizer.zero_grad took {zero_grad_time:.5f} seconds")
+
+        if current_step > 0:
+            self.verbose = False  
+        # Compute the loss using nf_loss
+        loss, agg_loss = self.loss(samples, context)
+        
+        # Prepare tensors for aggregation (reduce to scalars to minimize communication)
+        loss_tensor = loss.mean().detach()
+        agg_loss_tensor = agg_loss.mean().detach()  # Reduce to scalar before all_reduce
+        
+        # Profile aggregation operations
+        if self.profile and (not hasattr(self, 'global_rank') or self.global_rank == 0):
+            agg_start = time.time()
+        # Synchronous all_reduce (async doesn't work as expected with NCCL)
+        if self.profile and (not hasattr(self, 'global_rank') or self.global_rank == 0):
+            allreduce_start = time.time()
+        tdist.all_reduce(loss_tensor, op=tdist.ReduceOp.SUM)
+        tdist.all_reduce(agg_loss_tensor, op=tdist.ReduceOp.SUM)
+        if self.profile and (not hasattr(self, 'global_rank') or self.global_rank == 0):
+            allreduce_time = time.time() - allreduce_start
+            indent = "  " * get_profile_depth()
+            print(f"{indent}  all_reduce took {allreduce_time:.5f} seconds")
+
+        # Profile backpropagation
+        if self.profile and (not hasattr(self, 'global_rank') or self.global_rank == 0):
+            backward_start = time.time()
+        # Backpropagation
+        agg_loss.backward()
+        # Synchronize to measure actual backward computation time
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        if self.profile and (not hasattr(self, 'global_rank') or self.global_rank == 0):
+            backward_time = time.time() - backward_start
+            indent = "  " * get_profile_depth()
+            print(f"{indent}  backward took {backward_time:.5f} seconds")
+        
+        if self.profile and (not hasattr(self, 'global_rank') or self.global_rank == 0):
+            agg_time = time.time() - agg_start
+            indent = "  " * get_profile_depth()
+            print(f"{indent}  aggregation total: {agg_time:.5f} seconds")
+        
+        global_loss = loss_tensor.item() / tdist.get_world_size()
+        global_agg_loss = agg_loss_tensor.item() / tdist.get_world_size()
+
+        # Optional gradient clipping for stability
+        grad_clip = self.run_args.get("grad_clip", 0.0)
+        if grad_clip > 0:
+            print(f"Clipping gradients to {grad_clip}")
+            torch.nn.utils.clip_grad_norm_(self.posterior_flow.parameters(), max_norm=float(grad_clip))
+
+        # Profile optimizer step
+        if self.profile and (not hasattr(self, 'global_rank') or self.global_rank == 0):
+            opt_start = time.time()
+        # Optimizer step
+        self.optimizer.step()
+        # Ensure optimizer step completes
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        if self.profile and (not hasattr(self, 'global_rank') or self.global_rank == 0):
+            opt_time = time.time() - opt_start
+            indent = "  " * get_profile_depth()
+            print(f"{indent}  optimizer.step took {opt_time:.5f} seconds")
+        current_step += 1
+    
+        # Profile barrier synchronization
+        if self.profile and (not hasattr(self, 'global_rank') or self.global_rank == 0):
+            barrier_start = time.time()
+        # Synchronize across ranks before scheduler step
+        tdist.barrier()
+        if self.profile and (not hasattr(self, 'global_rank') or self.global_rank == 0):
+            barrier_time = time.time() - barrier_start
+            indent = "  " * get_profile_depth()
+            print(f"{indent}  barrier took {barrier_time:.5f} seconds")
+
+        # Update scheduler every step_freq steps
+        if current_step % self.run_args.get("step_freq", 1) == 0:
+            if self.profile and (not hasattr(self, 'global_rank') or self.global_rank == 0):
+                scheduler_start = time.time()
+            self.scheduler.step()
+            if self.profile and (not hasattr(self, 'global_rank') or self.global_rank == 0):
+                scheduler_time = time.time() - scheduler_start
+                indent = "  " * get_profile_depth()
+                print(f"{indent}  scheduler.step took {scheduler_time:.5f} seconds")
+
+        # Calculate step time if we were timing
+        step_time = (time.time() - start_time) if start_time is not None else None
+
+        return loss, agg_loss, global_loss, global_agg_loss, current_step, step_time
 
     @profile_method
     def run(self):
 
-        step = self.start_step
         # Initialize pbar as None by default
         if self.is_tty and self.global_rank == 0 and not self.profile:
-            pbar = tqdm(total=self.run_args["total_steps"] - self.start_step, desc="Training Progress", position=0, leave=True)
+            self.pbar = tqdm(total=self.run_args["total_steps"] - self.start_step, desc="Training Progress", position=0, leave=True)
 
         # Initialize session start time for runtime tracking
-        self._update_cumulative_runtime(step)
+        self._update_cumulative_runtime(self.start_step)
         
         # Restore RNG state on resume
         if self.checkpoint is not None:
             restore_rng_state(self.checkpoint, self.global_rank)
             print(f"RNG state restored at step {self.start_step}")
 
-        while step < self.run_args["total_steps"]:
-            for samples, context in self.dataloader:         
-                self.optimizer.zero_grad()
-
-                if step > 0:
-                    self.verbose = False  
-                # Compute the loss using nf_loss
-                agg_loss, loss = nf_loss(
-                    samples, context, self.posterior_flow, self.experiment, 
-                    rank=self.global_rank, verbose_shapes=self.verbose, evaluation=False
-                    )
-                # Aggregate global loss and agg_loss across all ranks
-                loss_tensor = loss.mean().detach()
-                agg_loss_tensor = agg_loss.detach()
-                tdist.all_reduce(loss_tensor, op=tdist.ReduceOp.SUM)
-                tdist.all_reduce(agg_loss_tensor, op=tdist.ReduceOp.SUM)
-                global_loss = loss_tensor.item() / tdist.get_world_size()
-                global_agg_loss = agg_loss_tensor.item() / tdist.get_world_size()
-
-                # Check for NaN loss values
+        step_times = []
+        current_step = self.start_step
+        while current_step < self.run_args["total_steps"]:
+            for samples, context in self.dataloader:
+                loss, agg_loss, global_loss, global_agg_loss, current_step, step_time = self.step(samples, context, current_step)
+                
+                # Check for NaN loss values (moved outside step to allow communication/computation overlap)
                 if np.isnan(global_loss) or np.isnan(global_agg_loss) or np.isinf(global_loss) or np.isinf(global_agg_loss):
                     if self.global_rank == 0:
-                        print(f"\nERROR: NaN/Inf loss detected at step {step}. Stopping training.")
+                        print(f"\nERROR: NaN/Inf loss detected at step {current_step}. Stopping training.")
                         if self.is_tty and not self.profile:
-                            pbar.close()
+                            self.pbar.close()
                     tdist.barrier()
-                    return
-
-                # Backpropagation
-                agg_loss.backward()
-
-                # Optional gradient clipping for stability
-                grad_clip = self.run_args.get("grad_clip", 0.0)
-                if grad_clip > 0:
-                    print(f"Clipping gradients to {grad_clip}")
-                    torch.nn.utils.clip_grad_norm_(self.posterior_flow.parameters(), max_norm=float(grad_clip))
-
-                # Optimizer step
-                self.optimizer.step()
-                step += 1
-            
-                # Synchronize across ranks before scheduler step
-                tdist.barrier()
-
-                # Update scheduler every step_freq steps
-                if step % self.run_args.get("step_freq", 1) == 0:
-                    self.scheduler.step()
-
-                if step % self.run_args.get("checkpoint_step_freq", 1000) == 0:
+                    break
+                
+                # Collect step times for the first 100 steps
+                if step_time is not None:
+                    step_times.append(step_time)
+                
+                # After 100 steps, calculate and log average step time once
+                if current_step == 100 and self.global_rank == 0:
+                    avg_step_time = np.mean(step_times)
+                    mlflow.log_metric("avg_step_time", avg_step_time, step=100)
+                    if self.verbose:
+                        print(f"Average step time from the first 100 steps: {avg_step_time:.4f}s")
+                if current_step % self.run_args.get("checkpoint_step_freq", 1000) == 0:
                     # Update cumulative runtime at each checkpoint
-                    self._update_cumulative_runtime(step)
+                    self._update_cumulative_runtime(current_step)
                     
                     if self.run_args.get("log_usage", False):
-                        log_usage_metrics(self.device, self.process, step, self.global_rank)
+                        log_usage_metrics(self.device, self.process, current_step, self.global_rank)
                     
                     # Perform all RNG operations (plotting, etc.) BEFORE saving checkpoint
                     # This ensures the saved RNG state is ready for the next training step
@@ -211,12 +296,12 @@ class Trainer:
                             show_scatter=plot_scatter,
                             ranges=ranges
                             )
-                        plt.savefig(f"{self.run_path}/artifacts/plots/rank_{self.global_rank}/posterior/{step}.png", dpi=400)
+                        plt.savefig(f"{self.run_path}/artifacts/plots/rank_{self.global_rank}/posterior/{current_step}.png", dpi=400)
                         plt.close('all')
                         local_nominal_areas = get_contour_area(nf_samples, 0.68, *self.experiment.cosmo_params, global_rank=self.global_rank, design_type='nominal')[0]
                         
                         # Log metrics per rank with tags instead of rank labels
-                        mlflow.log_metrics(local_nominal_areas, step=step)
+                        mlflow.log_metrics(local_nominal_areas, step=current_step)
                         
                         # Aggregate the nominal areas across all ranks
                         # Sort keys consistently across ranks to ensure proper aggregation
@@ -231,24 +316,24 @@ class Trainer:
                             for i, pair_key in enumerate(sorted_keys):
                                 pair_name = pair_key.replace('nominal_area_0_', '')  # Remove rank prefix for metric name
                                 global_value = global_nominal_areas_tensor[i].item()
-                                mlflow.log_metric(f"nominal_area_avg_{pair_name}", global_value, step=step)
+                                mlflow.log_metric(f"nominal_area_avg_{pair_name}", global_value, step=current_step)
                                 if global_value < self.best_nominal_area:
                                     # Save checkpoint if the mean area is the best so far
                                     self.best_nominal_area = global_value
-                                    mlflow.log_metric("best_avg_nominal_area", self.best_nominal_area, step=step)
-                                    mlflow.log_metric(f"best_nominal_area_{pair_name}", self.best_nominal_area, step=step)
+                                    mlflow.log_metric("best_avg_nominal_area", self.best_nominal_area, step=current_step)
+                                    mlflow.log_metric(f"best_nominal_area_{pair_name}", self.best_nominal_area, step=current_step)
                                     # Save the best nominal area checkpoint
-                                    checkpoint_path = f"{self.run_path}/artifacts/checkpoints/checkpoint_nominal_area_{step}.pt"
-                                    self.save_checkpoint(checkpoint_path, step=step, artifact_path="checkpoints", scheduler=self.scheduler, global_rank=self.global_rank)
+                                    checkpoint_path = f"{self.run_path}/artifacts/checkpoints/checkpoint_nominal_area_{current_step}.pt"
+                                    self.save_checkpoint(checkpoint_path, step=current_step, artifact_path="checkpoints", scheduler=self.scheduler, global_rank=self.global_rank)
 
                                     # Save the last best area checkpoint
                                     checkpoint_path = f"{self.run_path}/artifacts/checkpoints/checkpoint_nominal_area_best.pt"
-                                    self.save_checkpoint(checkpoint_path, step=step, artifact_path="checkpoints", scheduler=self.scheduler, global_rank=self.global_rank)
+                                    self.save_checkpoint(checkpoint_path, step=current_step, artifact_path="checkpoints", scheduler=self.scheduler, global_rank=self.global_rank)
 
                     # Save rank-specific checkpoint after all RNG operations complete
                     self.save_checkpoint(
-                        f"{self.run_path}/artifacts/checkpoints/checkpoint_rank_{self.global_rank}_{step}.pt", 
-                        step=step, 
+                        f"{self.run_path}/artifacts/checkpoints/checkpoint_rank_{self.global_rank}_{current_step}.pt", 
+                        step=current_step, 
                         artifact_path="checkpoints", 
                         scheduler=self.scheduler, 
                         global_rank=self.global_rank, 
@@ -263,45 +348,45 @@ class Trainer:
                     # Log the global nominal area on rank 0
                     if self.global_rank == 0:
                         if self.verbose:
-                            print_training_state(self.posterior_flow, self.optimizer, step)
+                            print_training_state(self.posterior_flow, self.optimizer, current_step)
                         if global_loss < self.best_loss:
                             self.best_loss = global_loss
-                            checkpoint_path = f"{self.run_path}/artifacts/checkpoints/checkpoint_loss_{step}.pt"
-                            self.save_checkpoint(checkpoint_path, step=step, artifact_path="checkpoints", scheduler=self.scheduler, global_rank=self.global_rank)
+                            checkpoint_path = f"{self.run_path}/artifacts/checkpoints/checkpoint_loss_{current_step}.pt"
+                            self.save_checkpoint(checkpoint_path, step=current_step, artifact_path="checkpoints", scheduler=self.scheduler, global_rank=self.global_rank)
                             checkpoint_path = f"{self.run_path}/artifacts/checkpoints/checkpoint_loss_best.pt"
-                            self.save_checkpoint(checkpoint_path, step=step, artifact_path="checkpoints", scheduler=self.scheduler, global_rank=self.global_rank)
-                            mlflow.log_metric("best_loss", self.best_loss, step=step)
+                            self.save_checkpoint(checkpoint_path, step=current_step, artifact_path="checkpoints", scheduler=self.scheduler, global_rank=self.global_rank)
+                            mlflow.log_metric("best_loss", self.best_loss, step=current_step)
 
                 # Update progress bar or print status
-                if step % 10 == 0:
-                    mlflow.log_metric(f"loss_rank_{self.global_rank}", loss.mean().detach().item(), step=step)
-                    mlflow.log_metric(f"agg_loss_rank_{self.global_rank}", agg_loss.detach().item(), step=step)
+                if current_step % 10 == 0:
+                    mlflow.log_metric(f"loss_rank_{self.global_rank}", loss.mean().detach().item(), step=current_step)
+                    mlflow.log_metric(f"agg_loss_rank_{self.global_rank}", agg_loss.detach().item(), step=current_step)
                     if self.global_rank == 0:
-                        mlflow.log_metric("loss", global_loss, step=step)
-                        mlflow.log_metric("agg_loss", global_agg_loss, step=step)
+                        mlflow.log_metric("loss", global_loss, step=current_step)
+                        mlflow.log_metric("agg_loss", global_agg_loss, step=current_step)
                         for param_group in self.optimizer.param_groups:
-                            mlflow.log_metric("lr", param_group['lr'], step=step)
+                            mlflow.log_metric("lr", param_group['lr'], step=current_step)
                         if self.is_tty and not self.profile:
-                            pbar.update(10)
-                            pbar.set_description(f"Loss: {global_loss:.3f}")
+                            self.pbar.update(10)
+                            self.pbar.set_description(f"Loss: {global_loss:.3f}")
                         else:
-                            print(f"Step {step}, Loss: {global_loss:.3f}")
+                            print(f"Step {current_step}, Loss: {global_loss:.3f}")
 
                 tdist.barrier()
 
-                if step >= self.run_args["total_steps"]:
+                if current_step >= self.run_args["total_steps"]:
                     break
 
         # Ensure progress bar closes cleanly
         if self.global_rank == 0 and self.is_tty and not self.profile:
-            pbar.close()
+            self.pbar.close()
 
         # Save last rank-specific checkpoint for all ranks (default behavior)
         last_checkpoint_path = f"{self.run_path}/artifacts/checkpoints/checkpoint_rank_{self.global_rank}_last.pt"
         self.save_checkpoint(last_checkpoint_path, step=self.run_args.get("total_steps", 0), artifact_path="checkpoints", scheduler=self.scheduler, global_rank=self.global_rank, additional_state={
             'rank': self.global_rank,
             'world_size': tdist.get_world_size(),
-            'last_step': step,
+            'last_step': current_step,
             'training_completed': True
         })
         if self.global_rank == 0:
@@ -331,7 +416,7 @@ class Trainer:
             print("Run", self.run_obj.info.experiment_id + "/" + self.run_obj.info.run_id, "completed.")
         
         # Final cumulative runtime update
-        final_step = self.run_args.get("total_steps", step)
+        final_step = self.run_args.get("total_steps", current_step)
         self._update_cumulative_runtime(final_step)
         
         # Final memory logging
