@@ -275,7 +275,7 @@ class VariableRedshift:
         self.transform_input = transform_input
         if self.transform_input:
             # Initialize bijector for parameter transformation
-            self.param_bijector = Bijector(self, cdf_bins=5000, cdf_samples=3e7)
+            self.param_bijector = Bijector(self, cdf_bins=5000, cdf_samples=1e7)
             if bijector_state is not None:
                 if self.global_rank == 0:
                     print(f"Restoring bijector state from checkpoint.")
@@ -345,7 +345,7 @@ class VariableRedshift:
             print(f"  Nominal design: {self.nominal_design}")
 
     @profile_method
-    def init_designs(self, input_designs=None, design_step=0.1, design_lower=0.0, design_upper=5.0):
+    def init_designs(self, input_designs=None, design_step=0.1, design_lower=0.0, design_upper=5.0, perm_invar=True):
         """
         Initialize the redshift design grid.
         
@@ -360,6 +360,7 @@ class VariableRedshift:
             design_step: Step size for design grid (ignored if input_design is provided)
             design_lower: Lower bound for redshift grid (ignored if input_design is provided)
             design_upper: Upper bound for redshift grid (ignored if input_design is provided)
+            perm_invar: Enforce permutation invariance by removing duplicate permutations (default: True)
         """
         if input_designs is not None:
             if isinstance(input_designs, torch.Tensor):
@@ -386,6 +387,15 @@ class VariableRedshift:
             designs = designs.unsqueeze(0)
         if designs.shape[-1] != self.n_redshifts:
             raise ValueError(f"Design dimension ({designs.shape[-1]}) must match n_redshifts ({self.n_redshifts})")
+        
+        # Enforce permutation invariance: remove duplicate permutations
+        # Sort each row to normalize order, then find unique combinations
+        if perm_invar and self.n_redshifts > 1:
+            designs_sorted = torch.sort(designs, dim=-1)[0]
+            # Find unique sorted combinations (this gives us the canonical sorted representation)
+            unique_sorted, inverse_indices = torch.unique(designs_sorted, dim=0, return_inverse=True)
+            # Use the sorted (canonical) version of each unique combination
+            designs = unique_sorted
         
         self.designs = designs.to(self.device)
         

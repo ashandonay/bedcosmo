@@ -19,11 +19,12 @@ base_om:
   nf_transform: affine
   spline_bins: 16
   input_design: false
-  design_step: 0.1
+  design_step: 0.2
   design_lower: 0.0
   design_upper: 4.0
   sigma_D_H: 0.2
   sigma_D_M: 0.2
+  error_scale: 1.0
   total_steps: 20000
   optimizer: Adam
   initial_lr: 0.0001
@@ -34,7 +35,7 @@ base_om:
   n_cycles: 1
   gamma: 0.1
   step_freq: 1
-  checkpoint_step_freq: 1000
+  checkpoint_step_freq: 5000
   n_particles_per_device: 201
   include_D_M: false
   verbose: true
@@ -57,12 +58,13 @@ base:
   nf_transform: affine
   spline_bins: 16
   input_designs: null
-  design_step: 0.1
+  design_step: 0.2
   design_lower: 0.1
   design_upper: 3.5
   n_redshifts: 2
   sigma_D_H: 0.2
   sigma_D_M: 0.2
+  error_scale: 1.0
   total_steps: 100000
   optimizer: Adam
   initial_lr: 0.0001
@@ -73,7 +75,7 @@ base:
   n_cycles: 1
   gamma: 0.1
   step_freq: 1
-  checkpoint_step_freq: 1000
+  checkpoint_step_freq: 5000
   n_particles_per_device: 101
   include_D_M: true
   verbose: true
@@ -96,11 +98,12 @@ base_omegak:
   nf_transform: affine
   spline_bins: 16
   input_designs: null
-  design_step: 0.1
+  design_step: 0.2
   design_lower: 0.0
   design_upper: 4.0
   sigma_D_H: 0.2
   sigma_D_M: 0.2
+  error_scale: 1.0
   total_steps: 50000
   optimizer: Adam
   initial_lr: 0.0001
@@ -134,11 +137,12 @@ base_w:
   nf_transform: affine
   spline_bins: 16
   input_designs: null
-  design_step: 0.1
+  design_step: 0.2
   design_lower: 0.0
   design_upper: 4.0
   sigma_D_H: 0.2
   sigma_D_M: 0.2
+  error_scale: 1.0
   total_steps: 60000
   optimizer: Adam
   initial_lr: 0.0001
@@ -172,12 +176,13 @@ base_w_wa:
   nf_transform: affine
   spline_bins: 16
   input_designs: null
-  design_step: 0.1
+  design_step: 0.2
   design_lower: 0.1
   design_upper: 3.5
   n_redshifts: 2
   sigma_D_H: 0.2
   sigma_D_M: 0.2
+  error_scale: 1.0
   total_steps: 100000
   optimizer: Adam
   initial_lr: 0.0001
