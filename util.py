@@ -35,6 +35,8 @@ home_dir = os.environ["HOME"]
 if home_dir + "/bed/BED_cosmo" not in sys.path:
     sys.path.insert(0, home_dir + "/bed/BED_cosmo")
 sys.path.insert(0, home_dir + "/bed/BED_cosmo/num_tracers")
+sys.path.insert(0, home_dir + "/bed/BED_cosmo/variable_redshift")
+sys.path.insert(0, home_dir + "/bed/BED_cosmo/num_visits")
 
 
 class Bijector:
@@ -975,7 +977,7 @@ def init_experiment(
         experiment = NumTracers(**exp_args)
     
     elif cosmo_exp == 'variable_redshift':
-        from variable_redshift.variable_redshift import VariableRedshift
+        from variable_redshift import VariableRedshift
         valid_params = inspect.signature(VariableRedshift.__init__).parameters.keys()
         valid_params = [k for k in valid_params if k != 'self']
         
@@ -986,8 +988,21 @@ def init_experiment(
             exp_args['bijector_state'] = checkpoint['bijector_state']
         experiment = VariableRedshift(**exp_args)
     
+    elif cosmo_exp == 'num_visits':
+        from num_visits import NumVisits
+        valid_params = inspect.signature(NumVisits.__init__).parameters.keys()
+        valid_params = [k for k in valid_params if k != 'self']
+        exp_args = {k: v for k, v in run_args.items() if k in valid_params}
+        exp_args['global_rank'] = global_rank
+        if checkpoint is not None and 'bijector_state' in checkpoint.keys():
+            exp_args['bijector_state'] = checkpoint['bijector_state']
+        experiment = NumVisits(**exp_args)
+    
     else:
-        raise ValueError(f"Experiment '{cosmo_exp}' not supported. Supported experiments: 'num_tracers', 'variable_redshift'")
+        raise ValueError(
+            f"Experiment '{cosmo_exp}' not supported. "
+            "Supported experiments: 'num_tracers', 'variable_redshift', 'num_visits'"
+        )
     
     return experiment
     
