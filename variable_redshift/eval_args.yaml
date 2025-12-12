@@ -80,8 +80,9 @@ base_omegak_w_wa:
   eval_step: last
   levels: 0.68
   guide_samples: 100000
-  n_particles: 50001
-  n_evals: 10
+  n_particles: 200001
+  particle_batch_size: 50000
+  n_evals: 50
   param_space: physical
   design_step: 0.1
   design_lower: 0.1

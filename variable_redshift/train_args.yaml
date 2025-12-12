@@ -111,7 +111,7 @@ base_omegak:
   n_cycles: 1
   gamma: 0.1
   step_freq: 1
-  checkpoint_step_freq: 1000
+  checkpoint_step_freq: 5000
   n_particles_per_device: 501
   include_D_M: true
   verbose: true
@@ -149,7 +149,7 @@ base_w:
   n_cycles: 1
   gamma: 0.1
   step_freq: 1
-  checkpoint_step_freq: 1000
+  checkpoint_step_freq: 5000
   n_particles_per_device: 201
   include_D_M: true
   verbose: true
@@ -188,7 +188,7 @@ base_w_wa:
   n_cycles: 1
   gamma: 0.1
   step_freq: 1
-  checkpoint_step_freq: 1000
+  checkpoint_step_freq: 5000
   n_particles_per_device: 201
   include_D_M: true
   verbose: true
@@ -211,7 +211,7 @@ base_omegak_w_wa:
   nf_transform: affine
   spline_bins: 16
   input_designs: null
-  design_step: 0.1
+  design_step: 0.2
   design_lower: 0.1
   design_upper: 3.5
   n_redshifts: 2
@@ -228,7 +228,7 @@ base_omegak_w_wa:
   n_cycles: 1
   gamma: 0.1
   step_freq: 1
-  checkpoint_step_freq: 1000
+  checkpoint_step_freq: 5000
   n_particles_per_device: 201
   include_D_M: true
   verbose: true
