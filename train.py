@@ -1184,14 +1184,51 @@ if __name__ == '__main__':
                 # Special handling for input_designs
                 if key == 'input_designs':
                     if isinstance(value, str):
-                        # JSON string passed → parse as list/array
-                        try:
-                            parsed_value = json.loads(value)
-                            run_args[key] = parsed_value
-                        except json.JSONDecodeError as e:
-                            if os.environ.get('RANK', '0') == '0':
-                                print(f"Warning: Could not parse 'input_designs' as JSON: {e}. Using as-is.")
-                            run_args[key] = value
+                        input_design_str = value.strip()
+                        
+                        # Check if it's the special "nominal" keyword
+                        if input_design_str.lower() == 'nominal':
+                            run_args[key] = 'nominal'
+                            continue
+                        
+                        # Check if it's a file path (ends with .json and file exists)
+                        if (input_design_str.endswith('.json') or input_design_str.endswith('.JSON')):
+                            # Try current directory first, then project root
+                            file_path = input_design_str
+                            if not os.path.isfile(file_path) and not os.path.isabs(file_path):
+                                # Try relative to project root (script_dir)
+                                file_path = os.path.join(script_dir, input_design_str)
+                            
+                            if os.path.isfile(file_path):
+                                # Read from JSON file
+                                try:
+                                    with open(file_path, 'r') as f:
+                                        parsed_value = json.load(f)
+                                    run_args[key] = parsed_value
+                                    if os.environ.get('RANK', '0') == '0':
+                                        print(f"Loaded input_designs from file: {file_path}")
+                                except json.JSONDecodeError as e:
+                                    raise ValueError(f"Failed to parse JSON file {file_path}: {e}")
+                                except Exception as e:
+                                    raise ValueError(f"Failed to read file {file_path}: {e}")
+                            else:
+                                # File doesn't exist, try to parse as JSON string
+                                try:
+                                    parsed_value = json.loads(input_design_str)
+                                    run_args[key] = parsed_value
+                                except json.JSONDecodeError as e:
+                                    if os.environ.get('RANK', '0') == '0':
+                                        print(f"Warning: Could not parse 'input_designs' as JSON and file not found: {input_design_str}. Using as-is.")
+                                    run_args[key] = value
+                        else:
+                            # Try to parse as JSON string
+                            try:
+                                parsed_value = json.loads(input_design_str)
+                                run_args[key] = parsed_value
+                            except json.JSONDecodeError as e:
+                                if os.environ.get('RANK', '0') == '0':
+                                    print(f"Warning: Could not parse 'input_designs' as JSON: {e}. Using as-is.")
+                                run_args[key] = value
                     else:
                         run_args[key] = value
                 elif isinstance(run_args_dict[key], bool) and isinstance(value, bool):

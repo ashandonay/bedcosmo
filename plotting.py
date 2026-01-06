@@ -18,6 +18,7 @@ import numpy as np
 from getdist import plots
 from util import *
 import matplotlib.pyplot as plt
+import matplotlib.gridspec as gridspec
 from matplotlib.lines import Line2D
 from matplotlib.path import Path
 from matplotlib.patches import Rectangle
@@ -463,7 +464,7 @@ def plot_training(
                 line_color = area_line_colors[area_idx % len(area_line_colors)]
 
                 try:
-                    nominal_samples, target_labels, latex_labels = load_nominal_samples(run_params['cosmo_exp'], run_params['cosmo_model'])
+                    nominal_samples, target_labels, latex_labels = load_nominal_samples(run_params['cosmo_exp'], run_params['cosmo_model'], dataset=run_params['dataset'])
                     with contextlib.redirect_stdout(io.StringIO()):
                         nominal_samples_gd = getdist.MCSamples(samples=nominal_samples, names=target_labels, labels=latex_labels)
                     # Get all area pairs from DESI samples
@@ -721,7 +722,7 @@ def compare_posterior(
         return
     
     # Add DESI samples
-    nominal_samples, target_labels, latex_labels = load_nominal_samples(cosmo_exp, cosmo_model_for_desi)
+    nominal_samples, target_labels, latex_labels = load_nominal_samples(cosmo_exp, cosmo_model_for_desi, dataset=run_data_list[0]['params']['dataset'])
     with contextlib.redirect_stdout(io.StringIO()):
         nominal_samples_gd = getdist.MCSamples(samples=nominal_samples, names=target_labels, labels=latex_labels)
     nominal_label = f'Nominal ({cosmo_model_for_desi})'
@@ -789,19 +790,23 @@ def compare_eigs(
         excluded_runs=None,
         cosmo_exp='num_tracers',
         run_labels=None,
+        var=None,
         step_key=None,
-        use_sorted=True,
         save_path=None,
         figsize=(14, 8),
         dpi=400,
         colors=None,
-        show_optimal=True,
-        show_nominal=True,
+        x_lim=None,
+        y_lim=None,
+        show_optimal=False,
+        show_nominal=False,
         title=None,
         sort=True,
         sort_reference=None,
         normalize=False,
-        show_errorbars=True
+        show_errorbars=True,
+        plot_input_design=False,
+        design_labels=None
     ):
     """
     Compare EIG values across multiple runs using the same layout as `evaluate.py::eig_designs`.
@@ -812,12 +817,15 @@ def compare_eigs(
         excluded_runs (list, optional): Run IDs to skip.
         cosmo_exp (str): Cosmological experiment directory name.
         run_labels (list, optional): Custom legend labels per run.
+        var (str or list, optional): Parameter(s) from MLflow run params to include in the label.
+                                    If provided and run_labels is None, labels will be generated from these parameters.
         step_key (str or int, optional): Step identifier (if omitted the most recent step is used).
-        use_sorted (bool): Select sorted or unsorted arrays from the stored JSON payload.
         save_path (str, optional): File path to persist the figure.
         figsize (tuple): Matplotlib figure size.
         dpi (int): Save resolution.
         colors (list, optional): Explicit colors for each run. Must be the same length as `run_ids`.
+        x_lim (tuple, optional): X-axis limits.
+        y_lim (tuple, optional): Y-axis limits.
         show_optimal (bool): If True, highlight each run's optimal EIG point when available.
         show_nominal (bool): If True, draw horizontal lines for nominal EIGs when available.
         title (str, optional): Custom figure title.
@@ -825,17 +833,22 @@ def compare_eigs(
         sort_reference (str, optional): Run ID or label that defines the sorting EIG. Required when `sort=True`.
         normalize (bool): If True, subtract each run's nominal EIG so curves are relative to nominal.
         show_errorbars (bool): If True, draw the filled std bands for each run.
+        plot_input_design (bool): If True, plot scatter points for input_designs from MLflow params on the heatmap.
+                                Only plots if they match the evaluation designs. Default False.
+        design_labels (list, optional): Custom labels for each design dimension. Must be the same length as the number of design dimensions.
     """
 
     excluded_runs = excluded_runs or []
 
     storage_path = os.environ["SCRATCH"] + f"/bed/BED_cosmo/{cosmo_exp}"
 
+    # Parse params if we need them for var labels or plot_input_design
+    need_params = plot_input_design or (var is not None and run_labels is None)
     run_data_list, experiment_id_for_save_path, actual_mlflow_exp_for_title = get_runs_data(
         mlflow_exp=mlflow_exp,
         run_ids=run_ids,
         excluded_runs=excluded_runs,
-        parse_params=False,
+        parse_params=need_params,
         cosmo_exp=cosmo_exp
     )
     if not run_data_list:
@@ -886,8 +899,29 @@ def compare_eigs(
     if not all_data:
         raise ValueError("No valid EIG data files found to compare")
 
+    # Generate run_labels from var if provided and run_labels is None
     if run_labels is None:
-        run_labels = [run_id[:8] for run_id in found_run_ids]
+        if var is not None:
+            # Generate labels from var parameters
+            vars_list = var if isinstance(var, list) else [var]
+            run_labels = []
+            for run_id in found_run_ids:
+                # Find the corresponding run_data to get params
+                run_data_item = next((r for r in run_data_list if r['run_id'] == run_id), None)
+                if run_data_item and 'params' in run_data_item:
+                    run_params = run_data_item['params']
+                    label_parts = []
+                    for v_key in vars_list:
+                        if v_key in run_params:
+                            label_parts.append(f"{v_key}={run_params[v_key]}")
+                    if label_parts:
+                        run_labels.append(", ".join(label_parts))
+                    else:
+                        run_labels.append(run_id[:8])
+                else:
+                    run_labels.append(run_id[:8])
+        else:
+            run_labels = [run_id[:8] for run_id in found_run_ids]
     if len(run_labels) != len(found_run_ids):
         raise ValueError("run_labels must match the number of discovered runs")
 
@@ -921,7 +955,6 @@ def compare_eigs(
         color_list = [convert_color(c) for c in prop_cycle]
 
     design_shape = None
-    design_labels = None
     run_records = []
 
     for data, run_id, run_label, color, step_num in zip(all_data, found_run_ids, run_labels, color_list, step_numbers):
@@ -940,13 +973,8 @@ def compare_eigs(
         if designs_root is None:
             raise ValueError(f"`input_designs` missing in eig_data for run {run_id}")
 
-        if isinstance(designs_root, dict):
-            design_key = 'sorted' if use_sorted else 'unsorted'
-            if design_key not in designs_root:
-                raise ValueError(f"`{design_key}` designs missing for run {run_id}")
-            designs_arr = np.array(designs_root[design_key])
-        else:
-            designs_arr = np.array(designs_root)
+        # input_designs is now always an array, not a dict with sorted/unsorted keys
+        designs_arr = np.array(designs_root)
 
         if designs_arr.ndim == 1:
             designs_arr = designs_arr.reshape(-1, 1)
@@ -959,7 +987,10 @@ def compare_eigs(
             metadata = data.get('metadata', {})
             design_labels = metadata.get('design_labels', None)
             if design_labels is None or len(design_labels) != designs_arr.shape[1]:
-                design_labels = [f'$f_{i}$' for i in range(designs_arr.shape[1])]
+                design_labels = [f'$d_{i}$' for i in range(designs_arr.shape[1])]
+        else:
+            if isinstance(design_labels, str):
+                design_labels = [design_labels]
 
         eig_values_raw = variable_data.get('eigs_avg')
         if eig_values_raw is None:
@@ -980,6 +1011,26 @@ def compare_eigs(
         optimal_eig = variable_data.get('optimal_eig')
         optimal_design = variable_data.get('optimal_design')
 
+        # Get input_designs from MLflow params if requested
+        input_designs_from_params = None
+        if plot_input_design:
+            # Find the corresponding run_data to get run_obj
+            run_data_item = next((r for r in run_data_list if r['run_id'] == run_id), None)
+            if run_data_item and run_data_item.get('run_obj') is not None:
+                try:
+                    input_designs_param = run_data_item['run_obj'].data.params.get('input_designs')
+                    if input_designs_param is not None:
+                        input_designs_list = json.loads(input_designs_param)
+                        input_designs_from_params = np.array(input_designs_list)
+                        if input_designs_from_params.ndim == 1:
+                            input_designs_from_params = input_designs_from_params.reshape(-1, 1)
+                        # Check if design dimensionality matches (allow different number of designs)
+                        if input_designs_from_params.shape[1] != designs_arr.shape[1]:
+                            print(f"Warning: input_designs from params for run {run_id} has {input_designs_from_params.shape[1]} dimensions, but evaluation designs have {designs_arr.shape[1]} dimensions. Skipping.")
+                            input_designs_from_params = None
+                except Exception as e:
+                    print(f"Warning: Error loading input_designs from params for run {run_id}: {e}")
+
         run_records.append({
             'run_id': run_id,
             'run_label': run_label,
@@ -989,7 +1040,8 @@ def compare_eigs(
             'eigs_std': eig_std_values if eig_std_values.shape == eig_values.shape else np.zeros_like(eig_values),
             'nominal_eig': nominal_eig,
             'optimal_eig': optimal_eig,
-            'optimal_design': np.array(optimal_design) if optimal_design is not None else None
+            'optimal_design': np.array(optimal_design) if optimal_design is not None else None,
+            'input_designs_from_params': input_designs_from_params
         })
 
     if not run_records:
@@ -997,9 +1049,11 @@ def compare_eigs(
 
     num_designs, num_dims = design_shape
 
+    # Check if designs are 1D or multi-dimensional (matching eig_designs logic)
+    is_1d_design = (num_dims == 1)
+
     reference_record = None
     global_sort_idx = None
-    show_heatmap = not (sort and sort_reference is None)
 
     if sort:
         if sort_reference is not None:
@@ -1016,18 +1070,47 @@ def compare_eigs(
     else:
         global_sort_idx = np.arange(num_designs)
 
-    sorted_designs = None
-    if show_heatmap:
-        if global_sort_idx is not None:
-            idx_for_heatmap = global_sort_idx
-        else:
-            idx_for_heatmap = np.arange(num_designs)
-        sorted_designs = run_records[0]['designs'][idx_for_heatmap]
+    # Get sorted designs for heatmap (use reference run or first run)
+    if global_sort_idx is not None:
+        idx_for_heatmap = global_sort_idx
+    else:
+        idx_for_heatmap = np.arange(num_designs)
+    sorted_designs = run_records[0]['designs'][idx_for_heatmap]
 
-    if num_dims == 1 and not sort:
+    if is_1d_design and not sort:
+        # For 1D designs without sorting, plot EIG directly against design variable (no second subplot needed)
+        fig, ax_line = plt.subplots(figsize=figsize)
+        ax_heat = None
+        cbar_ax = None
         x_vals = sorted_designs[:, 0]
         x_label = design_labels[0]
     else:
+        # For sorted 1D or multi-dimensional designs, align heatmap beneath line plot and add a vertical colorbar
+        if is_1d_design and sort:
+            height_ratios = [0.65, 0.15]
+        else:
+            height_ratios = [0.6, 0.2]
+        fig = plt.figure(figsize=figsize)
+        gs = gridspec.GridSpec(
+            2, 1,
+            height_ratios=height_ratios,
+            hspace=0.0
+        )
+        ax_line = fig.add_subplot(gs[0, 0])  # Top plot for EIG
+        ax_heat = fig.add_subplot(gs[1, 0], sharex=ax_line)  # Bottom plot for heatmap shares x-axis
+        # Reserve a dedicated colorbar axis on the right that spans both subplots
+        fig.subplots_adjust(left=0.06, right=0.92)
+        bbox = ax_heat.get_position()
+        cbar_width = 0.015
+        cbar_gap = 0.02  # maintain a small gap between plots and colorbar
+        cbar_left = min(0.985 - cbar_width, bbox.x1 + cbar_gap)
+        cbar_height = 0.6
+        cbar_bottom = 0.5 - cbar_height / 2  # vertically center the colorbar
+        cbar_ax = fig.add_axes([cbar_left, cbar_bottom, cbar_width, cbar_height])
+        plt.setp(ax_line.get_xticklabels(), visible=False)
+        ax_line.tick_params(axis='x', which='both', length=0)
+        
+        # Set x_vals and x_label for sorted/multi-dimensional case
         x_vals = np.arange(num_designs)
         if sort_reference is not None:
             x_label_suffix = f" (sorted by {reference_record['run_label']})"
@@ -1036,28 +1119,6 @@ def compare_eigs(
         else:
             x_label_suffix = ""
         x_label = f"Design Index{x_label_suffix}"
-
-    if show_heatmap:
-        fig, (ax_line, ax_heat) = plt.subplots(
-            2,
-            1,
-            figsize=figsize,
-            gridspec_kw={'height_ratios': [0.65, 0.35], 'hspace': 0.05},
-            sharex=True
-        )
-
-        fig.subplots_adjust(left=0.08, right=0.94)
-        bbox = ax_heat.get_position()
-        cbar_width = 0.02
-        cbar_gap = 0.02
-        cbar_left = min(0.985 - cbar_width, bbox.x1 + cbar_gap)
-        cbar_height = 0.6
-        cbar_bottom = 0.5 - cbar_height / 2
-        cbar_ax = fig.add_axes([cbar_left, cbar_bottom, cbar_width, cbar_height])
-    else:
-        fig, ax_line = plt.subplots(figsize=figsize)
-        ax_heat = None
-        cbar_ax = None
 
     nominal_line_drawn = False
 
@@ -1084,16 +1145,23 @@ def compare_eigs(
 
         eig_vals_plot = eig_vals - baseline
 
-        line = ax_line.plot(x_vals, eig_vals_plot, color=color, linewidth=2, label=record['run_label'])[0]
+        if sorted_designs.shape[0] == 1:
+            line = ax_line.scatter(x_vals, eig_vals_plot, color=color, zorder=5, label=record['run_label'])
+        else:
+            line = ax_line.plot(x_vals, eig_vals_plot, color=color, linewidth=2, label=record['run_label'])[0]
+            
         handles_for_legend.append(line)
         if show_errorbars and np.any(eig_std_vals > 0):
-            ax_line.fill_between(
-                x_vals,
-                eig_vals_plot - eig_std_vals,
-                eig_vals_plot + eig_std_vals,
-                color=color,
-                alpha=0.2
-            )
+            if sorted_designs.shape[0] == 1:
+                ax_line.errorbar(x_vals, eig_vals_plot, yerr=eig_std_vals, color=color, zorder=5, fmt='o', capsize=5, label=record['run_label'])
+            else:
+                ax_line.fill_between(
+                    x_vals,
+                    eig_vals_plot - eig_std_vals,
+                    eig_vals_plot + eig_std_vals,
+                    color=color,
+                    alpha=0.2
+                )
 
         if show_nominal:
             if normalize:
@@ -1103,7 +1171,7 @@ def compare_eigs(
             elif record['nominal_eig'] is not None:
                 ax_line.axhline(record['nominal_eig'], linestyle='--', color=color, alpha=0.6, linewidth=1.2)
 
-        if show_heatmap and show_optimal:
+        if ax_heat is not None and show_optimal:
             point_y = None
             point_x = None
             is_reference_run = bool(sort_reference) and reference_record and record['run_id'] == reference_record['run_id']
@@ -1133,6 +1201,40 @@ def compare_eigs(
                     zorder=5,
                     s=60
                 )
+        
+        # Plot input_designs from MLflow params if requested
+        if plot_input_design and record.get('input_designs_from_params') is not None:
+            input_designs = record['input_designs_from_params']
+            # Match each input_design to the corresponding evaluation design
+            scatter_x = []
+            scatter_y = []
+            
+            for input_design in input_designs:
+                # Find the index in the original (unsorted) designs array
+                match_idx = None
+                for idx, eval_design in enumerate(record['designs']):
+                    if np.allclose(eval_design, input_design, rtol=1e-5, atol=1e-8):
+                        match_idx = idx
+                        break
+                
+                if match_idx is not None:
+                    # Find the position in the sorted array
+                    sorted_pos = np.where(sort_idx == match_idx)[0][0]
+                    scatter_x.append(x_vals[sorted_pos])
+                    scatter_y.append(eig_vals_plot[sorted_pos])
+            
+            if scatter_x:
+                # Plot scatter points for this run with its color (no label to exclude from legend)
+                ax_line.scatter(
+                    scatter_x,
+                    scatter_y,
+                    marker='x',
+                    s=100,
+                    color=color,
+                    linewidths=2.5,
+                    zorder=6,
+                    alpha=0.9
+                )
 
     y_label = 'Expected Information Gain [bits]'
     if normalize:
@@ -1147,11 +1249,10 @@ def compare_eigs(
     legend_handles.extend(handles_for_legend)
     legend_labels.extend([h.get_label() for h in handles_for_legend])
     ax_line.legend(legend_handles, legend_labels, loc='best', framealpha=0.9)
-    plt.setp(ax_line.get_xticklabels(), visible=False)
-    ax_line.tick_params(axis='x', which='both', length=0)
-
-    if show_heatmap:
-        if num_dims == 1 and not sort:
+    
+    # Plot sorted designs (heatmap) if ax_heat exists
+    if ax_heat is not None:
+        if is_1d_design and not sort:
             extent = [x_vals.min(), x_vals.max(), -0.5, 0.5]
             im = ax_heat.imshow(
                 sorted_designs.T,
@@ -1183,9 +1284,20 @@ def compare_eigs(
 
         cbar = fig.colorbar(im, cax=cbar_ax)
         cbar.set_label('Design Value', fontsize=11, weight='bold')
+        ax_line.spines['bottom'].set_visible(False)
+        ax_heat.spines['bottom'].set_visible(True)
     else:
+        # Single plot case: show x-label on ax_line
         ax_line.set_xlabel(x_label, fontsize=12, weight='bold')
-        ax_line.set_xlim(-0.5, num_designs - 0.5)
+        if x_lim is not None:
+            ax_line.set_xlim(x_lim)
+        elif is_1d_design and not sort:
+            ax_line.set_xlim(x_vals.min(), x_vals.max())
+        else:
+            ax_line.set_xlim(-0.5, num_designs - 0.5)
+
+    if y_lim is not None:
+        ax_line.set_ylim(y_lim)
 
     if title is None:
         if mlflow_exp and actual_mlflow_exp_for_title:
@@ -3199,7 +3311,7 @@ def compare_training(
 
                     # Get nominal samples and area for comparison
                     try:
-                        nominal_samples, target_labels, latex_labels = load_nominal_samples(run_params['cosmo_exp'], run_params['cosmo_model'])
+                        nominal_samples, target_labels, latex_labels = load_nominal_samples(run_params['cosmo_exp'], run_params['cosmo_model'], dataset=run_params['dataset'])
                         with contextlib.redirect_stdout(io.StringIO()):
                             nominal_samples_gd = getdist.MCSamples(samples=nominal_samples, names=target_labels, labels=latex_labels)
                         nominal_area = get_contour_area([nominal_samples_gd], 0.68, param1, param2)[0]["nominal_area_"+f"{param1}_{param2}"]
@@ -3834,7 +3946,6 @@ def plot_design_pts(
 def plot_2d_eig(
     run_id,
     step_key=None,
-    use_sorted=True,
     cosmo_exp='num_tracers',
     save_path=None,
     figsize=(10, 8),
@@ -3851,7 +3962,6 @@ def plot_2d_eig(
         run_id (str): MLflow run ID
         step_key (str or int, optional): Step key to filter eig_data files (e.g., 50000 or 'last').
                                         If None, uses most recent file.
-        use_sorted (bool): Whether to use sorted designs and EIGs. Default True.
         cosmo_exp (str): Cosmology experiment name. Default 'num_tracers'.
         save_path (str, optional): Path to save the figure. If None, doesn't save.
         figsize (tuple): Figure size. Default (10, 8).
@@ -3932,21 +4042,15 @@ def plot_2d_eig(
     # Access nested structure
     variable_data = step_data.get('variable', {})
     
-    # Extract designs and EIG values from variable subdict
-    if 'designs' not in variable_data:
-        raise ValueError(f"No designs found in {step_str}")
-    designs = np.array(variable_data['designs'])
+    # Extract designs from top-level input_designs and EIG values from variable subdict
+    if 'input_designs' not in eig_data:
+        raise ValueError(f"No input_designs found in eig_data")
+    designs = np.array(eig_data['input_designs'])
     
     # Get EIG values
     if 'eigs_avg' not in variable_data:
         raise ValueError(f"No eigs_avg found in {step_str}")
     eigs = np.array(variable_data['eigs_avg'])
-    
-    # Sort if requested
-    if use_sorted:
-        sorted_idx = np.argsort(eigs)[::-1]
-        designs = designs[sorted_idx]
-        eigs = eigs[sorted_idx]
     
     # Validate that designs are 2D
     if designs.shape[1] != 2:

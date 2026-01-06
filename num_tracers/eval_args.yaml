@@ -7,11 +7,12 @@ base:
   levels: [0.68, 0.95]
   guide_samples: 1000000
   n_particles: 100001
+  particle_batch_size: 50000  
   n_evals: 10
   param_space: physical
-  design_step: [0.005, 0.01, 0.01, 0.005]
-  design_lower: [0.02, 0.1, 0.1, 0.1]
-  design_upper: [0.0585, 0.3820, 0.5, 0.3291]
+  design_step: [0.01, 0.01, 0.01, 0.01]
+  design_lower: [0.02, 0.1, 0.1, 0.15]
+  design_upper: [0.0856, 0.294, 0.5, 0.2323]
   design_sum_lower: 1.0
   design_sum_upper: 1.0
   design_chunk_size: 1
@@ -24,11 +25,12 @@ base_omegak:
   levels: 0.68
   guide_samples: 1000000
   n_particles: 10001
+  particle_batch_size: 50000  
   n_evals: 10
   param_space: physical
-  design_step: [0.005, 0.01, 0.01, 0.005]
-  design_lower: [0.02, 0.1, 0.1, 0.1]
-  design_upper: [0.0585, 0.3820, 0.5, 0.3291]
+  design_step: [0.01, 0.01, 0.01, 0.01]
+  design_lower: [0.02, 0.1, 0.1, 0.15]
+  design_upper: [0.0856, 0.294, 0.5, 0.2323]
   design_sum_lower: 1.0
   design_sum_upper: 1.0
   design_chunk_size: 1
@@ -41,11 +43,12 @@ base_w:
   levels: 0.68
   guide_samples: 1000000
   n_particles: 100000
+  particle_batch_size: 50000  
   n_evals: 10
   param_space: physical
-  design_step: [0.005, 0.01, 0.01, 0.005]
-  design_lower: [0.02, 0.1, 0.1, 0.1]
-  design_upper: [0.0585, 0.3820, 0.5, 0.3291]
+  design_step: [0.01, 0.01, 0.01, 0.01]
+  design_lower: [0.02, 0.1, 0.1, 0.15]
+  design_upper: [0.0856, 0.294, 0.5, 0.2323]
   design_sum_lower: 1.0
   design_sum_upper: 1.0
   design_chunk_size: 1
@@ -58,11 +61,12 @@ base_w_wa:
   levels: 0.68
   guide_samples: 500000
   n_particles: 100000
+  particle_batch_size: 50000  
   n_evals: 10
   param_space: physical
-  design_step: [0.005, 0.01, 0.01, 0.005]
-  design_lower: [0.02, 0.1, 0.1, 0.1]
-  design_upper: [0.0585, 0.3820, 0.5, 0.3291]
+  design_step: [0.01, 0.01, 0.01, 0.01]
+  design_lower: [0.02, 0.1, 0.1, 0.15]
+  design_upper: [0.0856, 0.294, 0.5, 0.2323]
   design_sum_lower: 1.0
   design_sum_upper: 1.0
   design_chunk_size: 1
@@ -75,12 +79,13 @@ base_omegak_w_wa:
   levels: 0.68
   guide_samples: 500000
   n_particles: 100000
+  particle_batch_size: 50000  
   n_evals: 10
   param_space: physical
   input_designs: null
-  design_step: [0.005, 0.01, 0.01, 0.005]
-  design_lower: [0.02, 0.1, 0.1, 0.1]
-  design_upper: [0.0585, 0.3820, 0.5, 0.3291]
+  design_step: [0.01, 0.01, 0.01, 0.01]
+  design_lower: [0.02, 0.1, 0.1, 0.15]
+  design_upper: [0.0856, 0.294, 0.5, 0.2323]
   design_sum_lower: 1.0
   design_sum_upper: 1.0
   design_chunk_size: 1

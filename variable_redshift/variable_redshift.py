@@ -352,6 +352,7 @@ class VariableRedshift:
         Args:
             input_designs: Can be:
                 - None: Generate design grid (default)
+                - "nominal": Use the nominal design as the input design
                 - list/array/tensor: Use specific design(s), shape should be (num_designs, n_redshifts)
                   If 1D list with length == n_redshifts, it will be reshaped to (1, n_redshifts)
                   Examples: [2.0] for single redshift design with n_redshifts=1
@@ -362,7 +363,15 @@ class VariableRedshift:
             design_upper: Upper bound for redshift grid (ignored if input_design is provided)
             perm_invar: Enforce permutation invariance by removing duplicate permutations (default: True)
         """
-        if input_designs is not None:
+        # Check if input_designs is the special "nominal" keyword
+        if input_designs == "nominal":
+            # Compute nominal design (same logic as in __init__)
+            if self.n_redshifts == 1:
+                nominal_values = torch.tensor([(design_upper - design_lower) / 2.0 + design_lower], device=self.device, dtype=torch.float64)
+            else:
+                nominal_values = torch.linspace(design_lower, design_upper, steps=self.n_redshifts, device=self.device, dtype=torch.float64)
+            designs = nominal_values.unsqueeze(0)  # Add batch dimension
+        elif input_designs is not None:
             if isinstance(input_designs, torch.Tensor):
                 designs = input_designs.to(self.device, dtype=torch.float64)
             elif isinstance(input_designs, (list, tuple, np.ndarray)):

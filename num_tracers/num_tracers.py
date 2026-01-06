@@ -189,7 +189,7 @@ def _cumsimpson(x, y, dim=-1):
 class NumTracers:
     def __init__(
         self, 
-        data_path="data/desi/tracers_v3/", 
+        dataset="dr2", 
         cosmo_model="base",
         priors_path=None,
         flow_type="MAF",
@@ -213,11 +213,12 @@ class NumTracers:
     ):
 
         self.name = 'num_tracers'
-        self.desi_data = pd.read_csv(os.path.join(home_dir, data_path, 'desi_data.csv'))
-        self.desi_tracers = pd.read_csv(os.path.join(home_dir, data_path, 'desi_tracers.csv'))
+        self.dataset = dataset
+        self.desi_data = pd.read_csv(os.path.join(home_dir, f"data/desi/bao_{self.dataset}", 'desi_data.csv'))
+        self.desi_tracers = pd.read_csv(os.path.join(home_dir, f"data/desi/bao_{self.dataset}", 'desi_tracers.csv'))
         if priors_path is None:
-            priors_path = os.path.join(home_dir, data_path, 'priors.yaml')
-        self.nominal_cov = np.load(os.path.join(home_dir, data_path, 'desi_cov.npy'))
+            priors_path = os.path.join(home_dir, f"data/desi/bao_{self.dataset}", 'priors.yaml')
+        self.nominal_cov = np.load(os.path.join(home_dir, f"data/desi/bao_{self.dataset}", 'desi_cov.npy'))
         self.DH_idx = np.where(self.desi_data["quantity"] == "DH_over_rs")[0]
         self.DM_idx = np.where(self.desi_data["quantity"] == "DM_over_rs")[0]
         self.DV_idx = np.where(self.desi_data["quantity"] == "DV_over_rs")[0]
@@ -245,11 +246,6 @@ class NumTracers:
         # Create dictionary with upper limits and lower limit lists for each class
         self.design_labels = ["BGS", "LRG", "ELG", "QSO"]
         self.num_targets = self.desi_tracers.groupby('class').sum()['targets'].reindex(self.design_labels)
-        self.context_dim = len(self.design_labels) + 5
-        if include_D_M:
-            self.context_dim += 5
-        if include_D_V:
-            self.context_dim += 2
         if nominal_design is None:
             self.nominal_design = torch.tensor(self.desi_tracers.groupby('class').sum()['observed'].reindex(self.design_labels).values, device=self.device)
         else:
@@ -258,12 +254,15 @@ class NumTracers:
             self.nominal_design, 
             self.central_val if self.include_D_M else self.central_val[1::2]
             ], dim=-1)
+        # Compute context_dim dynamically from the actual nominal_context size
+        # This ensures it matches the actual data structure regardless of flags
+        self.context_dim = self.nominal_context.shape[-1]
         
         # initialize the priors
         with open(priors_path, 'r') as file:
             self.prior_data = yaml.safe_load(file)
         self.priors, self.param_constraints, self.latex_labels = self.get_priors(priors_path)
-        self.desi_priors, _, _ = self.get_priors(os.path.join(home_dir, data_path, 'priors.yaml'))
+        self.desi_priors, _, _ = self.get_priors(os.path.join(home_dir, f"data/desi/bao_{self.dataset}", 'priors.yaml'))
         self.cosmo_params = list(self.priors.keys())
         self.param_bijector = Bijector(self, cdf_bins=5000, cdf_samples=1e7)
         if bijector_state is not None:
@@ -297,6 +296,7 @@ class NumTracers:
         Args:
             input_designs: Can be:
                 - None: Generate design grid (default)
+                - "nominal": Use the nominal design as the input design
                 - list/array: Use specific design(s), shape should be (num_designs, num_targets)
                   If 1D list with length == num_targets, it will be reshaped to (1, num_targets)
                   Examples: [0.2, 0.3, 0.3, 0.2] for single design
@@ -309,7 +309,10 @@ class NumTracers:
             tol: Tolerance for sum constraint (default: 1e-3)
 
         """
-        if input_designs is not None:
+        # Check if input_designs is the special "nominal" keyword
+        if input_designs == "nominal":
+            designs = self.nominal_design.unsqueeze(0)  # Add batch dimension
+        elif input_designs is not None:
             # User provided specific design(s)
             design_array = np.array(input_designs)
             
@@ -405,7 +408,9 @@ class NumTracers:
                 f"upper range: {range_upper}\n"
                 )
             print(f"Designs shape: {self.designs.shape}")
-            if input_designs is not None:
+            if input_designs == "nominal":
+                print(f"Using nominal design as input design: {self.designs}")
+            elif input_designs is not None:
                 print(f"Input design(s): {self.designs}")
             print(f"Nominal design: {self.nominal_design}\n")
     def design_plot(self):
@@ -966,7 +971,7 @@ class NumTracers:
         return param_samples_gd
     
     def get_nominal_samples(self, num_samples=100000, params=None, transform_output=False):
-        param_samples, target_labels, latex_labels = load_nominal_samples('num_tracers', self.cosmo_model)
+        param_samples, target_labels, latex_labels = load_nominal_samples('num_tracers', self.cosmo_model, dataset=self.dataset)
         param_samples = param_samples[:num_samples]
         if transform_output:
             param_samples = torch.tensor(param_samples, device=self.device)

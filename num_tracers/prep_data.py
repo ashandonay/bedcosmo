@@ -7,34 +7,81 @@ home_dir = os.environ["HOME"]
 
 # set to a new version when updating the data
 data_version = 4
+data_release = 2
 os.makedirs(os.path.join(home_dir, 'data/desi/tracers_v' + str(data_version)), exist_ok=True)
 
-# efficiencies from this paper: https://arxiv.org/pdf/2411.12020 (Table 2)
-eff_BGS = 0.989
-eff_LRG = 0.991
-# assume the VLO efficiency is 95% and the LOP efficiency is 70% (https://arxiv.org/pdf/2306.06307)
-#eff_ELG_VLO = 0.95
-#eff_ELG_LOP = 0.7
-eff_ELG = 0.727
-eff_QSO = 0.668
-eff_LyaQSO = 0.668
+if data_release == 1:
 
-comp_BGS = 0.636
-comp_LRG = 0.693
-comp_ELG = 0.352
-comp_QSO = 0.874
-comp_LyaQSO = 0.874
+    # efficiencies from this paper: https://arxiv.org/pdf/2411.12020 (Table 2)
+    eff_BGS = 0.989
+    eff_LRG = 0.991
+    # assume the VLO efficiency is 95% and the LOP efficiency is 70% (https://arxiv.org/pdf/2306.06307)
+    #eff_ELG_VLO = 0.95
+    #eff_ELG_LOP = 0.7
+    eff_ELG = 0.727
+    eff_QSO = 0.668
+    eff_LyaQSO = 0.668
 
-# from table 3
-passed_BGS = 300017
-passed_LRG1 = 506911
-passed_LRG2 = 771894
-passed_LRG3 = 859822
-passed_ELG1 = 1016365
-passed_ELG2 = 1415707
-passed_QSO = 856652
-passed_LyaQSO = 709565
-passed_LRG3ELG1 = passed_LRG3 + passed_ELG1
+    comp_BGS = 0.636
+    comp_LRG = 0.693
+    comp_ELG = 0.352
+    comp_QSO = 0.874
+    comp_LyaQSO = 0.874
+
+    # from table 1 (DR1 paper)
+    passed_BGS = 300017
+    passed_LRG1 = 506911
+    passed_LRG2 = 771894
+    passed_LRG3 = 859822
+    passed_ELG1 = 1016365
+    passed_ELG2 = 1415707
+    passed_QSO = 856652
+    passed_LyaQSO = 709565
+
+    # from table 1 (DR1 paper)
+    zeff_BGS = 0.295
+    zeff_LRG1 = 0.510
+    zeff_LRG2 = 0.706
+    zeff_LRG3ELG1 = 0.930
+    zeff_ELG2 = 1.317
+    zeff_QSO = 1.491
+    zeff_LyaQSO = 2.330
+
+elif data_release == 2:
+    # All data is gathered from tables in the DR2 paper (https://arxiv.org/html/2503.14738v1)
+
+    # from table 2
+    eff_BGS = 0.988
+    eff_LRG = 0.990
+    eff_ELG = 0.739
+    eff_QSO = 0.680
+    eff_LyaQSO = 0.680
+
+    # from table 2
+    comp_BGS = 0.755
+    comp_LRG = 0.826
+    comp_ELG = 0.537
+    comp_QSO = 0.936
+    comp_LyaQSO = 0.936
+
+    # from table 3
+    passed_BGS = 1188526
+    passed_LRG1 = 1052151
+    passed_LRG2 = 1613562
+    passed_LRG3 = 1802770
+    passed_ELG1 = 2737573
+    passed_ELG2 = 3797271
+    passed_QSO = 1461588
+    passed_LyaQSO = 1289874
+
+    # from table 4
+    zeff_BGS = 0.295
+    zeff_LRG1 = 0.510
+    zeff_LRG2 = 0.706
+    zeff_LRG3ELG1 = 0.934
+    zeff_ELG2 = 1.321
+    zeff_QSO = 1.484
+    zeff_LyaQSO = 2.330
 
 obs_BGS = passed_BGS / eff_BGS
 obs_LRG1 = passed_LRG1 / eff_LRG
@@ -46,13 +93,14 @@ obs_QSO = passed_QSO / eff_QSO
 obs_LyaQSO = passed_LyaQSO / eff_QSO
 obs_LRG3ELG1 = obs_LRG3 + obs_ELG1
 
+passed_LRG3ELG1 = passed_LRG3 + passed_ELG1
 eff_LRG3ELG1 = (obs_LRG3 / obs_LRG3ELG1) * eff_LRG + (obs_ELG1 / obs_LRG3ELG1) * eff_ELG
 obs_LRG3ELG1 = passed_LRG3ELG1 / eff_LRG3ELG1
 
 #desi_data = '/home/ashandonay/cobaya/packages/data/bao_data/desi_2024_gaussian_bao_ALL_GCcomb_mean.txt'
 #cov_matrix = np.loadtxt('/home/ashandonay/cobaya/packages/data/bao_data/desi_2024_gaussian_bao_ALL_GCcomb_cov.txt')
-desi_data = home_dir + '/data/desi/bao_data/desi_2024_gaussian_bao_ALL_GCcomb_mean.txt'
-cov_matrix = np.loadtxt(home_dir + '/data/desi/bao_data/desi_2024_gaussian_bao_ALL_GCcomb_cov.txt')
+desi_data = home_dir + f'/data/desi/bao_dr{data_release}/desi_gaussian_bao_ALL_GCcomb_mean.txt'
+cov_matrix = np.loadtxt(home_dir + f'/data/desi/bao_dr{data_release}/desi_gaussian_bao_ALL_GCcomb_cov.txt')
 
 column_names = ['z', 'value_at_z', 'quantity']
 desi_df = pd.read_csv(desi_data, delimiter=' ', names=column_names, comment='#')
@@ -74,14 +122,13 @@ desi_df.insert(5, 'std', 0.0)
 # add the diagonal of the cov matrix to the dataframe
 desi_df.loc[:, 'std'] = np.sqrt(np.diag(cov_matrix))
 
-# data from table 1 of https://arxiv.org/pdf/2404.03002
-desi_df.loc[desi_df['z'] == 0.295, ["tracer", "passed", "observed"]] = "BGS", passed_BGS, obs_BGS
-desi_df.loc[desi_df['z'] == 0.51, ["tracer", "passed", "observed"]] = "LRG1", passed_LRG1, obs_LRG1
-desi_df.loc[desi_df['z'] == 0.706, ["tracer", "passed", "observed"]] = "LRG2", passed_LRG2, obs_LRG2
-desi_df.loc[desi_df['z'] == 0.930, ["tracer", "passed", "observed"]] = "LRG3+ELG1", passed_LRG3ELG1, obs_LRG3ELG1
-desi_df.loc[desi_df['z'] == 1.317, ["tracer", "passed", "observed"]] = "ELG2", passed_ELG2, obs_ELG2
-desi_df.loc[desi_df['z'] == 1.491, ["tracer", "passed", "observed"]] = "QSO", passed_QSO, obs_QSO
-desi_df.loc[desi_df['z'] == 2.330, ["tracer", "passed", "observed"]] = "Lya QSO", passed_LyaQSO, obs_LyaQSO
+desi_df.loc[desi_df['z'] == zeff_BGS, ["tracer", "passed", "observed"]] = "BGS", passed_BGS, obs_BGS
+desi_df.loc[desi_df['z'] == zeff_LRG1, ["tracer", "passed", "observed"]] = "LRG1", passed_LRG1, obs_LRG1
+desi_df.loc[desi_df['z'] == zeff_LRG2, ["tracer", "passed", "observed"]] = "LRG2", passed_LRG2, obs_LRG2
+desi_df.loc[desi_df['z'] == zeff_LRG3ELG1, ["tracer", "passed", "observed"]] = "LRG3+ELG1", passed_LRG3ELG1, obs_LRG3ELG1
+desi_df.loc[desi_df['z'] == zeff_ELG2, ["tracer", "passed", "observed"]] = "ELG2", passed_ELG2, obs_ELG2
+desi_df.loc[desi_df['z'] == zeff_QSO, ["tracer", "passed", "observed"]] = "QSO", passed_QSO, obs_QSO
+desi_df.loc[desi_df['z'] == zeff_LyaQSO, ["tracer", "passed", "observed"]] = "Lya QSO", passed_LyaQSO, obs_LyaQSO
 
 
 """
@@ -131,15 +178,15 @@ eff_comb_ELG2 = (ELG2_VLO / (ELG2_VLO + ELG2_LOP)) * eff_ELG_VLO + (ELG2_LOP / (
 
 """
 
-desi_df.loc[desi_df['z'] == 0.295, "efficiency"] = eff_BGS
-desi_df.loc[desi_df['z'] == 0.51, "efficiency"] =  eff_LRG
-desi_df.loc[desi_df['z'] == 0.706, "efficiency"] = eff_LRG
-desi_df.loc[desi_df['z'] == 0.930, "efficiency"] = eff_LRG3ELG1
-desi_df.loc[desi_df['z'] == 1.317, "efficiency"] = eff_ELG
+desi_df.loc[desi_df['z'] == zeff_BGS, "efficiency"] = eff_BGS
+desi_df.loc[desi_df['z'] == zeff_LRG1, "efficiency"] =  eff_LRG
+desi_df.loc[desi_df['z'] == zeff_LRG2, "efficiency"] = eff_LRG
+desi_df.loc[desi_df['z'] == zeff_LRG3ELG1, "efficiency"] = eff_LRG3ELG1
+desi_df.loc[desi_df['z'] == zeff_ELG2, "efficiency"] = eff_ELG
 #desi_df.loc[desi_df['z'] == 0.930, "efficiency"] = (num_ELG1 / num_LRG3ELG1) * ((ELG1_VLO / (ELG1_VLO + ELG1_LOP)) * eff_ELG_VLO + (ELG1_LOP / (ELG1_VLO + ELG1_LOP)) * eff_ELG_LOP) + (1 - (num_ELG1 / num_LRG3ELG1)) * eff_LRG
 #desi_df.loc[desi_df['z'] == 1.317, "efficiency"] = (ELG2_VLO / (ELG2_VLO + ELG2_LOP)) * eff_ELG_VLO + (ELG2_LOP / (ELG2_VLO + ELG2_LOP)) * eff_ELG_LOP
-desi_df.loc[desi_df['z'] == 1.491, "efficiency"] = eff_QSO
-desi_df.loc[desi_df['z'] == 2.330, "efficiency"] = eff_LyaQSO
+desi_df.loc[desi_df['z'] == zeff_QSO, "efficiency"] = eff_QSO
+desi_df.loc[desi_df['z'] == zeff_LyaQSO, "efficiency"] = eff_LyaQSO
 data_path = os.path.join(home_dir, 'data/desi/tracers_v' + str(data_version), 'desi_data.csv')
 print(f"Saving data to {data_path}")
 desi_df.to_csv(data_path, index=False)

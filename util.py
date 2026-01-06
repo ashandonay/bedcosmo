@@ -1216,9 +1216,9 @@ def calc_entropy(design, posterior_flow, experiment, num_samples):
     _, entropy = _safe_mean_terms(samples)
     return entropy
 
-def load_nominal_samples(cosmo_exp, cosmo_model):
+def load_nominal_samples(cosmo_exp, cosmo_model, dataset='dr2'):
     if cosmo_exp == 'num_tracers':
-        nominal_samples = np.load(f"{home_dir}/data/desi/mcmc_samples/{cosmo_model}.npy")
+        nominal_samples = np.load(f"{home_dir}/data/desi/bao_{dataset}/mcmc_samples/{cosmo_model}.npy")
         if cosmo_model == 'base':
             target_labels = ['Om', 'hrdrag']
             latex_labels = ['\Omega_m', 'H_0r_d']

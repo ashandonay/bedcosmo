@@ -7,7 +7,7 @@ base:
   pyro_seed: 1
   nf_seed: 1
   priors_path: num_tracers/priors_hrdrag.yaml
-  data_path: data/desi/tracers_v3/
+  dataset: dr2
   flow_type: NAF
   transform_input: false
   activation: elu
@@ -19,10 +19,10 @@ base:
   mnn_signal: 64
   nf_transform: affine
   spline_bins: 20
-  input_design: false
-  design_step: [0.01, 0.02, 0.02, 0.01]
-  design_lower: [0.02, 0.1, 0.1, 0.1]
-  design_upper: [0.0585, 0.3820, 0.5, 0.3291]
+  input_designs: null
+  design_step: [0.01, 0.01, 0.01, 0.01]
+  design_lower: [0.02, 0.1, 0.1, 0.15]
+  design_upper: [0.0856, 0.294, 0.5, 0.2323]
   design_sum_lower: 1.0
   design_sum_upper: 1.0
   total_steps: 200000
@@ -48,7 +48,7 @@ base_omegak:
   pyro_seed: 1
   nf_seed: 1
   priors_path: num_tracers/priors.yaml
-  data_path: data/desi/tracers_v3/
+  dataset: dr2
   flow_type: NAF
   transform_input: true
   activation: elu
@@ -60,7 +60,7 @@ base_omegak:
   mnn_signal: 64
   nf_transform: affine
   spline_bins: 20
-  input_design: false
+  input_designs: null
   design_step: [0.01, 0.02, 0.02, 0.01]
   design_lower: [0.02, 0.1, 0.1, 0.1]
   design_upper: [0.0585, 0.3820, 0.5, 0.3291]
@@ -89,7 +89,7 @@ base_w:
   pyro_seed: 1
   nf_seed: 1
   priors_path: num_tracers/priors.yaml
-  data_path: data/desi/tracers_v3/
+  dataset: dr2
   flow_type: NAF
   transform_input: true
   activation: elu
@@ -101,7 +101,7 @@ base_w:
   mnn_signal: 64
   nf_transform: affine
   spline_bins: 20
-  input_design: false
+  input_designs: null
   design_step: [0.01, 0.02, 0.02, 0.01]
   design_lower: [0.02, 0.1, 0.1, 0.1]
   design_upper: [0.0585, 0.3820, 0.5, 0.3291]
@@ -130,7 +130,7 @@ base_w_wa:
   pyro_seed: 1
   nf_seed: 1
   priors_path: num_tracers/priors.yaml
-  data_path: data/desi/tracers_v3/
+  dataset: dr2
   flow_type: NAF
   transform_input: true
   activation: elu
@@ -142,7 +142,7 @@ base_w_wa:
   mnn_signal: 64
   nf_transform: affine
   spline_bins: 20
-  input_design: false
+  input_designs: null
   design_step: [0.01, 0.02, 0.02, 0.01]
   design_lower: [0.02, 0.1, 0.1, 0.1]
   design_upper: [0.0585, 0.3820, 0.5, 0.3291]
@@ -171,7 +171,7 @@ base_omegak_w_wa:
   pyro_seed: 1
   nf_seed: 1
   priors_path: num_tracers/priors.yaml
-  data_path: data/desi/tracers_v3/
+  dataset: dr2
   flow_type: NAF
   transform_input: true
   activation: elu
@@ -183,10 +183,10 @@ base_omegak_w_wa:
   mnn_signal: 64
   nf_transform: affine
   spline_bins: 20
-  input_designs: false
-  design_step: [0.01, 0.02, 0.02, 0.01]
-  design_lower: [0.02, 0.1, 0.1, 0.1]
-  design_upper: [0.0585, 0.3820, 0.5, 0.3291]
+  input_designs: null
+  design_step: [0.01, 0.01, 0.01, 0.01]
+  design_lower: [0.02, 0.1, 0.1, 0.15]
+  design_upper: [0.0856, 0.294, 0.5, 0.2323]
   design_sum_lower: 1.0
   design_sum_upper: 1.0
   total_steps: 200000

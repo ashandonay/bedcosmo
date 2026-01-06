@@ -321,7 +321,7 @@ class Evaluator:
         # Use additive sqrt scaling with reduced coefficients for better balance
         base_fontsize = max(6, min(18, plot_width * (0.2 + 0.42 * np.sqrt(n_params))))
         title_fontsize = base_fontsize * 1.15  # Title slightly larger than base
-        legend_fontsize = base_fontsize * 0.80  # Legend smaller than base
+        legend_fontsize = base_fontsize * 0.65  # Legend smaller than base
         
         if self.display_run:
             title = f"Posterior Comparison - Run: {self.run_id[:8]}"
@@ -329,24 +329,45 @@ class Evaluator:
             title = f"Posterior Comparison"
         g.fig.suptitle(title, fontsize=title_fontsize, weight='bold')
 
+        # Get EIG values for legend
+        nominal_eig = None
+        optimal_eig = None
+        if 'nominal' in display:
+            try:
+                nominal_eig, _ = self.get_eig(step, nominal_design=True)
+            except Exception as e:
+                print(f"Warning: Could not get EIG for nominal design: {e}")
+        if 'optimal' in display:
+            try:
+                eigs, _ = self.get_eig(step, nominal_design=False)
+                if len(self.input_designs) > 1:
+                    optimal_eig = np.max(eigs)
+                else:
+                    optimal_eig = eigs[0] if isinstance(eigs, np.ndarray) else eigs
+            except Exception as e:
+                print(f"Warning: Could not get EIG for optimal design: {e}")
+
         # Create custom legend
         if g.fig.legends:
             for legend in g.fig.legends:
                 legend.remove()
         custom_legend = []
         if 'nominal' in display:
+            eig_str = f", EIG: {nominal_eig:.3f} bits" if nominal_eig is not None else ""
             custom_legend.append(
-                Line2D([0], [0], color='tab:blue', label=f'Nominal Design (NF)', linewidth=1.2)
+                Line2D([0], [0], color='tab:blue', label=f'Nominal Design (NF){eig_str}', linewidth=1.2)
             )
         # Check if we have multiple designs (grid) - only show optimal if we have multiple
         has_multiple_designs = len(self.input_designs) > 1
         if 'optimal' in display and has_multiple_designs:
+            eig_str = f", EIG: {optimal_eig:.3f} bits" if optimal_eig is not None else ""
             custom_legend.append(
-                Line2D([0], [0], color='tab:orange', label=f'Optimal Design (NF)', linewidth=1.2)
+                Line2D([0], [0], color='tab:orange', label=f'Optimal Design (NF){eig_str}', linewidth=1.2)
             )
         elif 'optimal' in display and not has_multiple_designs:
+            eig_str = f", EIG: {optimal_eig:.3f} bits" if optimal_eig is not None else ""
             custom_legend.append(
-                Line2D([0], [0], color='tab:orange', label=f'Input Design (NF)', linewidth=1.2)
+                Line2D([0], [0], color='tab:orange', label=f'Input Design (NF){eig_str}', linewidth=1.2)
             )
         if ref_contour:
             custom_legend.append(
@@ -905,14 +926,28 @@ class Evaluator:
         
         # Determine which design to use
         # If we have multiple designs, find optimal; otherwise use the first (and only) design
+        optimal_eig = None
+        nominal_eig = None
         if len(self.input_designs) > 1:
             # Get EIGs and optimal design
             eigs, _ = self.get_eig(step, nominal_design=False)
+            optimal_eig = np.max(eigs)
             optimal_design = self.input_designs[np.argmax(eigs)]
             design = optimal_design.cpu().numpy()
         else:
             # Single design case - use the only available design
+            try:
+                eigs, _ = self.get_eig(step, nominal_design=False)
+                optimal_eig = eigs[0] if isinstance(eigs, np.ndarray) else eigs
+            except Exception as e:
+                print(f"Warning: Could not get EIG for input design: {e}")
             design = self.input_designs[0].cpu().numpy()
+        
+        # Get EIG for nominal design
+        try:
+            nominal_eig, _ = self.get_eig(step, nominal_design=True)
+        except Exception as e:
+            print(f"Warning: Could not get EIG for nominal design: {e}")
         
         # Get nominal design and total observations
         nominal_design_cpu = self.experiment.nominal_design.cpu().numpy()
@@ -959,11 +994,19 @@ class Evaluator:
             # Right edge
             ax.plot([x_right, x_right], [0, y_top], 'k:', linewidth=1.5, alpha=0.7)
         
-        bars1 = ax.bar(x - width/2, nominal_design_plot, width, label='Nominal Design', color='tab:blue')
         # Determine label based on whether we have multiple designs or a single input design
         has_multiple_designs = len(self.input_designs) > 1
         design_label = 'Optimal Design' if has_multiple_designs else 'Input Design'
-        bars2 = ax.bar(x + width/2, design_plot, width, label=design_label, color='tab:orange')
+        # Add EIG values to labels
+        nominal_label = 'Nominal Design'
+        if nominal_eig is not None:
+            nominal_label += f', EIG: {nominal_eig:.3f} bits'
+        design_label_with_eig = design_label
+        if optimal_eig is not None:
+            design_label_with_eig += f', EIG: {optimal_eig:.3f} bits'
+        
+        bars1 = ax.bar(x - width/2, nominal_design_plot, width, label=nominal_label, color='tab:blue')
+        bars2 = ax.bar(x + width/2, design_plot, width, label=design_label_with_eig, color='tab:orange')
         
         # Add label for max possible tracers (manually since we used patches)
         max_label = 'Max Possible Tracers' if not use_fractional else 'Max Possible Fraction'
@@ -973,7 +1016,7 @@ class Evaluator:
         ax.set_ylabel(ylabel, fontsize=12, weight='bold')
         ax.set_xticks(x)
         ax.set_xticklabels(self.experiment.design_labels)
-        ax.legend()
+        ax.legend(fontsize=14)
         if log_scale:
             ax.set_yscale('log')
         if self.display_run:
@@ -1699,8 +1742,11 @@ if __name__ == "__main__":
         if isinstance(eval_args['input_designs'], str):
             input_design_str = eval_args['input_designs'].strip()
             
+            # Check if it's the special "nominal" keyword
+            if input_design_str.lower() == 'nominal':
+                eval_args['input_designs'] = 'nominal'
             # Check if it's a file path (ends with .json and file exists, or just a valid file path)
-            if (input_design_str.endswith('.json') or input_design_str.endswith('.JSON')) and os.path.isfile(input_design_str):
+            elif (input_design_str.endswith('.json') or input_design_str.endswith('.JSON')) and os.path.isfile(input_design_str):
                 # Read from JSON file
                 try:
                     with open(input_design_str, 'r') as f:
