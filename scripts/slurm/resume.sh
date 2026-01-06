@@ -7,7 +7,7 @@
 #SBATCH --ntasks-per-node=1     # 1 primary Slurm task per node
 #SBATCH --cpus-per-task=128     # CPUs for all DDP workers on the node (e.g., 4 workers * 32 cpus/worker)
 #SBATCH --gpus-per-node=4       # Number of GPUs to request per node
-#SBATCH --time=02:30:00
+#SBATCH --time=03:30:00
 #SBATCH --mail-type=ALL
 #SBATCH --mail-user=ashandon@uci.edu
 #SBATCH --output=/dev/null
@@ -107,8 +107,6 @@ mkdir -p "$LOG_DIR"
 JOB_LOG="${LOG_DIR}/${SLURM_JOB_ID}_${SLURM_JOB_NAME}.log"
 touch "$JOB_LOG"
 exec > >(tee -a "$JOB_LOG") 2>&1
-
-echo "Logs will be written to: $JOB_LOG"
 
 # Get the directory where this script is located
 TRUNCATE_SCRIPT="/global/homes/a/ashandon/bed/BED_cosmo/scripts/truncate_metrics.py"

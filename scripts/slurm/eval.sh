@@ -1,13 +1,13 @@
 #!/bin/bash
 #SBATCH -C gpu
-#SBATCH -q debug
+#SBATCH -q shared
 #SBATCH -A desi
 #SBATCH --job-name=eval
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1     # 1 primary Slurm task per node
 #SBATCH --cpus-per-task=32     # CPUs for all DDP workers on the node (e.g., 4 workers * 32 cpus/worker)
 #SBATCH --gpus-per-node=1       # Number of GPUs to request per node
-#SBATCH --time=00:30:00
+#SBATCH --time=2:00:00
 #SBATCH --output=/dev/null
 #SBATCH --error=/dev/null
 
@@ -61,8 +61,6 @@ JOB_LOG="${LOG_DIR}/${SLURM_JOB_ID}_${SLURM_JOB_NAME}.log"
 touch "$JOB_LOG"
 exec > >(tee -a "$JOB_LOG") 2>&1
 
-echo "Logs will be written to: $JOB_LOG"
-
 # Load conda first, then activate, then other GPU libraries
 module load conda
 conda activate bed-cosmo
@@ -75,6 +73,9 @@ export NCCL_NET_GDR_LEVEL=PHB # PCI Host Bridge to use GPUdirect
 export NCCL_CROSS_NIC=1
 export NCCL_SOCKET_IFNAME=hsn # high-speed network interface
 export NCCL_DEBUG=WARN
+
+# PyTorch CUDA memory allocation configuration to reduce fragmentation
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 srun torchrun \
     --nnodes=1 \

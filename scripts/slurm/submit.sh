@@ -220,11 +220,18 @@ conda activate bed-cosmo
 # For eval jobs, infer cosmo_model from MLflow run
 if [ "$JOB_TYPE" = "eval" ] && [ -z "$COSMO_MODEL" ]; then
     echo "Inferring cosmo_model from MLflow run ${RUN_ID}..."
+    # Capture stderr separately to avoid polluting COSMO_MODEL with warnings
+    # Use a temp file to capture stderr, then extract only the last line (the model name) from stdout
+    TEMP_STDERR=$(mktemp)
     COSMO_MODEL=$(python3 -c "
 import mlflow
 import os
 import sys
+import warnings
 from mlflow.tracking import MlflowClient
+
+# Suppress FutureWarning to stderr (will be shown separately)
+warnings.filterwarnings('ignore', category=FutureWarning)
 
 mlflow.set_tracking_uri('file:' + os.environ['SCRATCH'] + '/bed/BED_cosmo/${COSMO_EXP}/mlruns')
 client = MlflowClient()
@@ -235,13 +242,33 @@ try:
 except Exception as e:
     print(f'ERROR: {e}', file=sys.stderr)
     exit(1)
-" 2>&1)
+" 2>"$TEMP_STDERR")
+    PYTHON_EXIT_CODE=$?
+    STDERR_CONTENT=$(cat "$TEMP_STDERR" 2>/dev/null)
+    rm -f "$TEMP_STDERR"
     
-    if [ $? -ne 0 ]; then
+    # Show warnings if any (but don't fail on them)
+    if [ -n "$STDERR_CONTENT" ]; then
+        echo "Warning from MLflow (non-fatal):" >&2
+        echo "$STDERR_CONTENT" >&2
+    fi
+    
+    if [ $PYTHON_EXIT_CODE -ne 0 ]; then
         echo "Error: Failed to get cosmo_model from run ${RUN_ID}"
-        echo "$COSMO_MODEL"
+        if [ -n "$COSMO_MODEL" ]; then
+            echo "$COSMO_MODEL"
+        fi
         exit 1
     fi
+    
+    # Trim whitespace and extract only the model name (in case any output leaked through)
+    COSMO_MODEL=$(echo "$COSMO_MODEL" | tail -n 1 | xargs)
+    
+    if [ -z "$COSMO_MODEL" ]; then
+        echo "Error: Could not extract cosmo_model from MLflow run ${RUN_ID}"
+        exit 1
+    fi
+    
     echo "Inferred cosmo_model: $COSMO_MODEL"
 fi
 
@@ -270,10 +297,16 @@ elif [ -n "$CONFIG_FILE" ]; then
     YAML_ARGS=()
     
     # Create a Python script to extract the model config
+    # Capture stderr separately to avoid polluting output with warnings
+    TEMP_YAML_STDERR=$(mktemp)
     YAML_OUTPUT=$(python3 -c "
 import yaml
 import sys
 import json
+import warnings
+
+# Suppress warnings to stderr
+warnings.filterwarnings('ignore')
 
 try:
     with open('$CONFIG_FILE', 'r') as f:
@@ -291,11 +324,20 @@ try:
 except Exception as e:
     print(f'ERROR: Failed to parse YAML: {e}', file=sys.stderr)
     sys.exit(1)
-" 2>&1)
+" 2>"$TEMP_YAML_STDERR")
+    YAML_EXIT_CODE=$?
+    YAML_STDERR=$(cat "$TEMP_YAML_STDERR" 2>/dev/null)
+    rm -f "$TEMP_YAML_STDERR"
 
     # Check if Python command succeeded
-    if [ $? -ne 0 ]; then
-        echo "$YAML_OUTPUT"
+    if [ $YAML_EXIT_CODE -ne 0 ]; then
+        echo "Error: Failed to load YAML config for model '$COSMO_MODEL'"
+        if [ -n "$YAML_STDERR" ]; then
+            echo "$YAML_STDERR"
+        fi
+        if [ -n "$YAML_OUTPUT" ]; then
+            echo "Output: $YAML_OUTPUT"
+        fi
         exit 1
     fi
     
@@ -350,6 +392,8 @@ for key, value in data.items():
         # Output as-is (numbers and strings)
         print(f'{key}={value}')
 ")
+    
+    echo "Config loaded successfully (${#YAML_ARGS[@]} arguments from YAML)"
 fi
 
 # Add CLI arguments (these override YAML)
@@ -547,8 +591,30 @@ done
 echo "=========================================="
 echo ""
 
-sbatch "${SBATCH_ARGS[@]}" "$SCRIPT_DIR/$SCRIPT_FILE" "${FINAL_ARGS[@]}"
+# Capture sbatch output and exit code
+SBATCH_OUTPUT=$(sbatch "${SBATCH_ARGS[@]}" "$SCRIPT_DIR/$SCRIPT_FILE" "${FINAL_ARGS[@]}" 2>&1)
+SBATCH_EXIT_CODE=$?
+
+if [ $SBATCH_EXIT_CODE -ne 0 ]; then
+    echo ""
+    echo "ERROR: Failed to submit job to SLURM"
+    echo "Exit code: $SBATCH_EXIT_CODE"
+    echo "Error output:"
+    echo "$SBATCH_OUTPUT"
+    echo ""
+    echo "Please check:"
+    echo "  1. SLURM is available and accessible"
+    echo "  2. All required arguments are valid"
+    echo "  3. The script file exists: $SCRIPT_DIR/$SCRIPT_FILE"
+    if [ "$JOB_TYPE" = "eval" ]; then
+        echo "  4. The MLflow run ID exists: $RUN_ID"
+        echo "  5. The cosmo_exp directory exists: $PROJECT_ROOT/$COSMO_EXP"
+    fi
+    exit 1
+fi
 
 echo ""
 echo "Job submitted successfully!"
+echo "$SBATCH_OUTPUT"
+echo ""
 echo "Check status with: squeue -u $USER"
