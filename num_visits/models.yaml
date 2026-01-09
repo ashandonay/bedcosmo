@@ -1,0 +1,3 @@
+base:
+  parameters: ["z"]
+  latex_labels: ["z"]

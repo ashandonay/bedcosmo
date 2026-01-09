@@ -1,0 +1,13 @@
+parameters:
+  z:
+    distribution:
+      type: "uniform"
+      lower: 0.1
+      upper: 3.0
+    plot:
+      lower: 0.1
+      upper: 3.0
+    latex: "z"
+
+constraints: {}
+
