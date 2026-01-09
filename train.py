@@ -231,6 +231,9 @@ class Trainer:
         # Initialize session start time for runtime tracking
         self._update_cumulative_runtime(self.start_step)
         
+        # Track training start time for steps/sec calculation
+        training_start_time = time.time()
+        
         # Restore RNG state on resume
         if self.checkpoint is not None:
             restore_rng_state(self.checkpoint, self.global_rank)
@@ -366,11 +369,17 @@ class Trainer:
                         mlflow.log_metric("agg_loss", global_agg_loss, step=current_step)
                         for param_group in self.optimizer.param_groups:
                             mlflow.log_metric("lr", param_group['lr'], step=current_step)
+                        
+                        # Calculate seconds per step
+                        elapsed_time = time.time() - training_start_time
+                        steps_completed = current_step - self.start_step
+                        sec_per_step = elapsed_time / steps_completed if steps_completed > 0 else 0.0
+                        
                         if self.is_tty and not self.profile:
                             self.pbar.update(10)
-                            self.pbar.set_description(f"Loss: {global_loss:.3f}")
+                            self.pbar.set_description(f"Loss: {global_loss:.3f} | {sec_per_step:.3f} s/step")
                         else:
-                            print(f"Step {current_step}, Loss: {global_loss:.3f}")
+                            print(f"Step {current_step}, Loss: {global_loss:.3f}, {sec_per_step:.3f} s/step")
 
                 tdist.barrier()
 

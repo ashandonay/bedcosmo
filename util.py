@@ -1044,7 +1044,8 @@ def init_experiment(
     run_args.update(design_args)
     run_args["priors_path"] = run_obj.info.artifact_uri + "/priors.yaml"
     run_args["device"] = device
-    run_args["profile"] = profile
+    # Use profile from run_args if present, otherwise use the function parameter
+    run_args["profile"] = run_args.get("profile", profile)
     
     cosmo_exp = run_args.get("cosmo_exp")
     
@@ -1286,6 +1287,17 @@ def parse_mlflow_params(params_dict):
             # else: fall through to treat as plain string if it's just a JSON string like "\"hello\""
         except json.JSONDecodeError:
             pass # Not valid JSON
+
+        # 4b. Try Python literal_eval for Python-style literals (e.g., "['u', 'g', 'r']")
+        try:
+            import ast
+            parsed_value = ast.literal_eval(value_str)
+            # Only accept if it results in a list, dict, tuple, or other simple types
+            if isinstance(parsed_value, (dict, list, tuple)):
+                parsed_params[key] = parsed_value
+                continue
+        except (ValueError, SyntaxError):
+            pass # Not a valid Python literal
 
         # 5. Keep as String (Fallback)
         parsed_params[key] = value_str # Keep original string if no conversion worked
