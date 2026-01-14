@@ -6,7 +6,7 @@ base:
   pyro_seed: 1
   nf_seed: 1
   priors_path: num_visits/priors.yaml
-  flow_type: MAF
+  flow_type: NAF
   transform_input: false
   activation: elu
   n_transforms: 4

@@ -20,9 +20,9 @@ base:
   nf_transform: affine
   spline_bins: 20
   input_designs: null
-  design_step: [0.01, 0.01, 0.01, 0.01]
-  design_lower: [0.02, 0.1, 0.1, 0.15]
-  design_upper: [0.0856, 0.294, 0.5, 0.2323]
+  design_step: [0.05, 0.05, 0.05, 0.05]
+  design_lower: [0.05, 0.1, 0.1, 0.1]
+  design_upper: [1.0, 1.0, 1.0, 1.0]
   design_sum_lower: 1.0
   design_sum_upper: 1.0
   total_steps: 200000
@@ -36,7 +36,7 @@ base:
   gamma: 0.1
   step_freq: 1
   checkpoint_step_freq: 2000
-  n_particles_per_device: 50
+  n_particles_per_device: 100
   verbose: true
   log_nominal_area: true
   include_D_M: true
@@ -102,7 +102,7 @@ base_w:
   nf_transform: affine
   spline_bins: 20
   input_designs: null
-  design_step: [0.01, 0.02, 0.02, 0.01]
+  design_step: [0.01, 0.01, 0.01, 0.01]
   design_lower: [0.02, 0.1, 0.1, 0.1]
   design_upper: [0.0585, 0.3820, 0.5, 0.3291]
   design_sum_lower: 1.0

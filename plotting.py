@@ -743,14 +743,9 @@ def compare_posterior(
             legend.remove()
     
     # Set title
-    if var:
-        title_vars_str = ', '.join(vars_list)
-        title = f'Posterior comparison (levels: {levels}) grouped by {title_vars_str} ({len(run_data_list)} total runs), Step: {step}'
-    else:
-        plot_title_exp_part = actual_mlflow_exp_for_title if actual_mlflow_exp_for_title else "Selected Runs"
-        title = f'Posterior comparison (levels: {levels}) for {plot_title_exp_part}, Step: {step}'
-        if filter_string:
-            title += f' (filter: {filter_string})'
+    title = f'Posterior Comparison, Step: {step}'
+    if filter_string:
+        title += f' (filter: {filter_string})'
 
     g.fig.set_constrained_layout(True)
     leg = g.fig.legend(handles=legend_handles, loc='upper right', bbox_to_anchor=(0.99, 0.96))
@@ -783,6 +778,61 @@ def compare_posterior(
 
     if fig_to_close and fig_to_close in plt.get_fignums():
          plt.close(fig_to_close)
+
+def load_eig_data_file(artifacts_dir, step_key=None):
+    """
+    Load the most recent completed eig_data JSON file from the artifacts directory.
+    
+    Args:
+        artifacts_dir (str): Path to the artifacts directory containing eig_data files
+        step_key (str or int, optional): If provided, only load files matching this step
+    
+    Returns:
+        tuple: (json_path, data) where json_path is the path to the file and data is the loaded JSON.
+               Returns (None, None) if no valid file is found.
+    
+    Raises:
+        ValueError: If no completed eig_data files are found or if file cannot be loaded.
+    """
+    if not os.path.exists(artifacts_dir):
+        raise ValueError(f"Artifacts directory not found: {artifacts_dir}")
+    
+    # Find all eig_data JSON files
+    eig_files = glob.glob(f"{artifacts_dir}/eig_data_*.json")
+    
+    if len(eig_files) == 0:
+        raise ValueError(f"No eig_data JSON files found in {artifacts_dir}")
+    
+    # Filter by step_key if provided
+    if step_key is not None:
+        step_str = str(step_key)
+        eig_files = [f for f in eig_files if f"eig_data_{step_str}_" in os.path.basename(f)]
+        if len(eig_files) == 0:
+            raise ValueError(f"No eig_data files for step {step_key} found in {artifacts_dir}")
+    
+    # Sort by filename (most recent first)
+    eig_files.sort(key=lambda x: os.path.basename(x), reverse=True)
+    
+    # Check each file for completion status (most recent first)
+    for json_path in eig_files:
+        try:
+            with open(json_path, 'r') as f:
+                data = json.load(f)
+            
+            # Check if evaluation is completed using status field
+            status = data.get('status')
+            if status == 'complete':
+                return json_path, data
+            # Skip incomplete files or files with missing/unexpected status
+            continue
+                
+        except Exception as e:
+            # Skip files that can't be loaded and continue to next
+            print(f"Warning: Error loading {json_path}: {e}, skipping...")
+            continue
+    
+    # No completed files found
+    raise ValueError(f"No completed eig_data files found in {artifacts_dir}")
 
 def compare_eigs(
         mlflow_exp=None,
@@ -867,30 +917,14 @@ def compare_eigs(
             continue
 
         artifacts_dir = f"{storage_path}/mlruns/{exp_id}/{run_id}/artifacts"
-        if not os.path.exists(artifacts_dir):
-            print(f"Warning: Artifacts directory not found for run {run_id}, skipping...")
-            continue
-
-        eig_files = glob.glob(f"{artifacts_dir}/eig_data_*.json")
-        if len(eig_files) == 0:
-            print(f"Warning: No eig_data JSON files found for run {run_id}, skipping...")
-            continue
-
-        if step_key is not None:
-            step_str = str(step_key)
-            eig_files = [f for f in eig_files if f"eig_data_{step_str}_" in os.path.basename(f)]
-            if len(eig_files) == 0:
-                print(f"Warning: No eig_data files for step {step_key} found for run {run_id}, skipping...")
-                continue
-
-        eig_files.sort(key=lambda x: os.path.basename(x), reverse=True)
-        json_path = eig_files[0]
-
+        
         try:
-            with open(json_path, 'r') as f:
-                data = json.load(f)
-        except Exception as exc:
-            print(f"Warning: Error loading {json_path}: {exc}, skipping...")
+            json_path, data = load_eig_data_file(artifacts_dir, step_key=step_key)
+            if data is None:
+                print(f"Warning: No completed eig_data file found for run {run_id}, skipping...")
+                continue
+        except ValueError as e:
+            print(f"Warning: {e}, skipping run {run_id}...")
             continue
 
         all_data.append(data)
@@ -1384,76 +1418,76 @@ def compare_increasing_design(
                 ref_artifacts_dir = f"{storage_path}/mlruns/{ref_exp_id}/{ref_run_id}/artifacts"
                 
                 if os.path.exists(ref_artifacts_dir):
-                    # Find eig_data JSON files
-                    ref_eig_files = glob.glob(f"{ref_artifacts_dir}/eig_data_*.json")
-                    
-                    if len(ref_eig_files) > 0:
-                        # Use most recent file (sort by timestamp in filename)
-                        ref_eig_files.sort(key=lambda x: os.path.basename(x), reverse=True)
-                        ref_json_path = ref_eig_files[0]
-                        
-                        with open(ref_json_path, 'r') as f:
-                            ref_data = json.load(f)
-                        print(f"Loaded reference EIG data from {ref_json_path}")
-                        
-                        # Determine which step to use
-                        if step_key is not None:
-                            step_str = f"step_{step_key}"
-                        else:
-                            # Find the highest available step key
-                            step_keys = [k for k in ref_data.keys() if k.startswith('step_')]
-                            if step_keys:
-                                # Extract step numbers and find the highest
-                                step_numbers = []
-                                for k in step_keys:
-                                    try:
-                                        step_num = int(k.split('_')[1])
-                                        step_numbers.append((step_num, k))
-                                    except (ValueError, IndexError):
-                                        continue
-                                if step_numbers:
-                                    step_str = max(step_numbers, key=lambda x: x[0])[1]
-                                else:
-                                    step_str = step_keys[0]  # Fallback to first if parsing fails
+                    # Load completed reference eig_data file
+                    try:
+                        ref_json_path, ref_data = load_eig_data_file(ref_artifacts_dir, step_key=None)
+                        if ref_data is not None:
+                            print(f"Loaded reference EIG data from {ref_json_path}")
+                            
+                            # Determine which step to use
+                            if step_key is not None:
+                                step_str = f"step_{step_key}"
                             else:
-                                print(f"Warning: No step data found in reference file {ref_json_path}")
-                                step_str = None
-                        
-                        if step_str and step_str in ref_data:
-                            step_data = ref_data[step_str]
+                                # Find the highest available step key
+                                step_keys = [k for k in ref_data.keys() if k.startswith('step_')]
+                                if step_keys:
+                                    # Extract step numbers and find the highest
+                                    step_numbers = []
+                                    for k in step_keys:
+                                        try:
+                                            step_num = int(k.split('_')[1])
+                                            step_numbers.append((step_num, k))
+                                        except (ValueError, IndexError):
+                                            continue
+                                    if step_numbers:
+                                        step_str = max(step_numbers, key=lambda x: x[0])[1]
+                                    else:
+                                        step_str = step_keys[0]  # Fallback to first if parsing fails
+                                else:
+                                    print(f"Warning: No step data found in reference file {ref_json_path}")
+                                    step_str = None
                             
-                            # Access nested structure
-                            variable_data = step_data.get('variable', {})
-                            nominal_data = step_data.get('nominal', {})
-                            
-                            # Extract nominal_eig from nominal subdict (scalar value from eigs_avg)
-                            nominal_eig_val = nominal_data.get('eigs_avg')
-                            if nominal_eig_val is not None:
-                                if isinstance(nominal_eig_val, list) and len(nominal_eig_val) > 0:
-                                    nominal_eig_val = nominal_eig_val[0]
-                                if isinstance(nominal_eig_val, (int, float)):
-                                    ref_nominal_eig = nominal_eig_val
-                            
-                            nominal_eig_std_val = nominal_data.get('eigs_std')
-                            if nominal_eig_std_val is not None:
-                                if isinstance(nominal_eig_std_val, list) and len(nominal_eig_std_val) > 0:
-                                    nominal_eig_std_val = nominal_eig_std_val[0]
-                                if isinstance(nominal_eig_std_val, (int, float)):
-                                    ref_nominal_eig_std = nominal_eig_std_val
-                            
-                            if 'optimal_eig' in variable_data:
-                                ref_optimal_eig = variable_data['optimal_eig']
-                            
-                            if 'optimal_eig_std' in variable_data and isinstance(variable_data['optimal_eig_std'], (int, float)):
-                                ref_optimal_eig_std = variable_data['optimal_eig_std']
-                            
-                            if 'optimal_design' in variable_data:
-                                ref_optimal_design = np.array(variable_data['optimal_design'])
-                        
-                        # Use nominal_design stored in the reference eig_data without initializing an experiment
-                        if include_nominal:
-                            if 'nominal_design' in ref_data:
-                                ref_nominal_design = np.array(ref_data['nominal_design'])
+                            if step_str and step_str in ref_data:
+                                step_data = ref_data[step_str]
+                                
+                                # Access nested structure
+                                variable_data = step_data.get('variable', {})
+                                nominal_data = step_data.get('nominal', {})
+                                
+                                # Extract nominal_eig from nominal subdict (scalar value from eigs_avg)
+                                nominal_eig_val = nominal_data.get('eigs_avg')
+                                if nominal_eig_val is not None:
+                                    if isinstance(nominal_eig_val, list) and len(nominal_eig_val) > 0:
+                                        nominal_eig_val = nominal_eig_val[0]
+                                    if isinstance(nominal_eig_val, (int, float)):
+                                        ref_nominal_eig = nominal_eig_val
+                                
+                                nominal_eig_std_val = nominal_data.get('eigs_std')
+                                if nominal_eig_std_val is not None:
+                                    if isinstance(nominal_eig_std_val, list) and len(nominal_eig_std_val) > 0:
+                                        nominal_eig_std_val = nominal_eig_std_val[0]
+                                    if isinstance(nominal_eig_std_val, (int, float)):
+                                        ref_nominal_eig_std = nominal_eig_std_val
+                                
+                                if 'optimal_eig' in variable_data:
+                                    ref_optimal_eig = variable_data['optimal_eig']
+                                
+                                if 'optimal_eig_std' in variable_data and isinstance(variable_data['optimal_eig_std'], (int, float)):
+                                    ref_optimal_eig_std = variable_data['optimal_eig_std']
+                                
+                                if 'optimal_design' in variable_data:
+                                    ref_optimal_design = np.array(variable_data['optimal_design'])
+                                
+                                # Use nominal_design stored in the reference eig_data without initializing an experiment
+                                if include_nominal:
+                                    if 'nominal_design' in ref_data:
+                                        ref_nominal_design = np.array(ref_data['nominal_design'])
+                        else:
+                            print(f"Warning: No completed reference eig_data file found, skipping reference data...")
+                            ref_data = None
+                    except ValueError as e:
+                        print(f"Warning: {e}, skipping reference data...")
+                        ref_data = None
                 else:
                     print(f"Warning: Artifacts directory not found for reference run {ref_id}")
         except Exception as e:
@@ -1493,26 +1527,18 @@ def compare_increasing_design(
         exp_id = run_id_to_exp_id[run_id]
         artifacts_dir = f"{storage_path}/mlruns/{exp_id}/{run_id}/artifacts"
         
-        if not os.path.exists(artifacts_dir):
-            print(f"Warning: Artifacts directory not found for run {run_id}, skipping...")
-            continue
-        
-        # Find eig_data JSON files
-        eig_files = glob.glob(f"{artifacts_dir}/eig_data_*.json")
-        
-        if len(eig_files) == 0:
-            print(f"Warning: No eig_data JSON files found for run {run_id}, skipping...")
-            continue
-        
-        # Use most recent file (sort by timestamp in filename)
-        eig_files.sort(key=lambda x: os.path.basename(x), reverse=True)
-        json_path = eig_files[0]
-        
-        # Load JSON file
+        # Load completed eig_data file
         try:
-            with open(json_path, 'r') as f:
-                data = json.load(f)
+            json_path, data = load_eig_data_file(artifacts_dir, step_key=None)
+            if data is None:
+                print(f"Warning: No completed eig_data file found for run {run_id}, skipping...")
+                continue
             print(f"Loaded EIG data from {json_path}")
+        except ValueError as e:
+            print(f"Warning: {e}, skipping run {run_id}...")
+            continue
+        
+        try:
             
             # Determine which step to use
             if step_key is not None:
@@ -1960,7 +1986,7 @@ def compare_optimal_design(
         colors=None,
         title=None,
         log_scale=True,
-        use_fractional=False,
+        display_mode='absolute',
         include_nominal=False
     ):
     """
@@ -1980,12 +2006,18 @@ def compare_optimal_design(
         colors (list, optional): Colors for each run. If None, uses default color cycle
         title (str, optional): Custom title for the plot. If None, generates default title
         log_scale (bool): Whether to use log scale for y-axis (default: True)
-        use_fractional (bool): Whether to plot fractional values or absolute quantities (default: False)
+        display_mode (str): How to display design values. Options: 'absolute' (total number of tracers per class),
+            'fractional' (relative to total number), or 'ratio' (relative to nominal design values) (default: 'absolute')
         include_nominal (bool): Whether to include nominal design bars on the left (default: False)
     
     Returns:
         fig, ax: Matplotlib figure and axes objects
     """
+    # Validate display_mode
+    valid_modes = ['absolute', 'fractional', 'ratio']
+    if display_mode not in valid_modes:
+        raise ValueError(f"display_mode must be one of {valid_modes}, got '{display_mode}'")
+    
     # Set MLflow tracking URI
     storage_path = os.environ["SCRATCH"] + f"/bed/BED_cosmo/{cosmo_exp}"
     
@@ -2021,25 +2053,17 @@ def compare_optimal_design(
         exp_id = run_id_to_exp_id[run_id]
         artifacts_dir = f"{storage_path}/mlruns/{exp_id}/{run_id}/artifacts"
         
-        if not os.path.exists(artifacts_dir):
-            print(f"Warning: Artifacts directory not found for run {run_id}, skipping...")
-            continue
-        
-        # Find eig_data JSON files
-        eig_files = glob.glob(f"{artifacts_dir}/eig_data_*.json")
-        
-        if len(eig_files) == 0:
-            print(f"Warning: No eig_data JSON files found for run {run_id}, skipping...")
-            continue
-        
-        # Use most recent file (sort by timestamp in filename)
-        eig_files.sort(key=lambda x: os.path.basename(x), reverse=True)
-        json_path = eig_files[0]
-        
-        # Load JSON file
+        # Load completed eig_data file
         try:
-            with open(json_path, 'r') as f:
-                data = json.load(f)
+            json_path, data = load_eig_data_file(artifacts_dir, step_key=None)
+            if data is None:
+                print(f"Warning: No completed eig_data file found for run {run_id}, skipping...")
+                continue
+        except ValueError as e:
+            print(f"Warning: {e}, skipping run {run_id}...")
+            continue
+        
+        try:
             
             # Determine which step to use
             if step_key is not None:
@@ -2115,38 +2139,63 @@ def compare_optimal_design(
     # Convert all colors to proper format (handles hex codes, numpy arrays, etc.)
     colors = [convert_color(c) for c in colors]
     
-    # Initialize experiment from first run to get nominal_total_obs, nominal_design, and design labels if needed
-    nominal_total_obs = None
-    nominal_design = None
-    experiment = None
-    # Always initialize if use_fractional=False (need nominal_total_obs for conversion), design_labels missing, or include_nominal=True
-    if not use_fractional or design_labels is None or include_nominal:
-        try:
-            first_run_data = run_data_list[0]
-            device = "cuda:0"
+    # Initialize experiments for each run to get per-run nominal designs and other metadata
+    nominal_total_obs_list = []
+    nominal_designs = []
+    design_labels = None
+    needs_experiment = (display_mode in ['absolute', 'ratio'] or design_labels is None or include_nominal)
+    
+    if needs_experiment:
+        device = "cuda:0"
+        # Build a map from run_id to run_data for easy lookup
+        run_id_to_run_data = {run_data['run_id']: run_data for run_data in run_data_list}
+        
+        # Initialize experiment for each found run to get its nominal design
+        for run_id in found_run_ids:
+            if run_id not in run_id_to_run_data:
+                print(f"Warning: Run {run_id} not found in run_data_list, skipping experiment initialization...")
+                nominal_total_obs_list.append(None)
+                nominal_designs.append(None)
+                continue
             
-            experiment = init_experiment(
-                first_run_data['run_obj'], 
-                first_run_data['params'], 
-                device, 
-                design_args={}, 
-                global_rank=0
-            )
-            # Always get nominal_total_obs when use_fractional=False (needed for conversion)
-            # Also get it if design_labels is missing or include_nominal=True (needed for nominal design conversion)
-            if not use_fractional or design_labels is None or include_nominal:
-                nominal_total_obs = experiment.nominal_total_obs
-            # Get nominal_design if include_nominal is True
-            if include_nominal and hasattr(experiment, 'nominal_design'):
-                nominal_design = experiment.nominal_design.cpu().numpy()
-            if design_labels is None and hasattr(experiment, 'design_labels'):
-                design_labels = experiment.design_labels
-        except Exception as e:
-            print(f"Warning: Could not initialize experiment to get nominal_total_obs: {e}")
-            if not use_fractional:
-                print(f"Warning: Cannot convert to absolute quantities without nominal_total_obs. Designs will remain fractional.")
-            if include_nominal:
-                print(f"Warning: Cannot get nominal design. Skipping nominal design bars.")
+            run_data = run_id_to_run_data[run_id]
+            try:
+                experiment = init_experiment(
+                    run_data['run_obj'], 
+                    run_data['params'], 
+                    device, 
+                    design_args={}, 
+                    global_rank=0
+                )
+                
+                # Get nominal_total_obs for this run
+                if display_mode == 'absolute' or display_mode == 'ratio':
+                    nominal_total_obs_list.append(experiment.nominal_total_obs)
+                else:
+                    nominal_total_obs_list.append(None)
+                
+                # Get nominal_design for this run if needed
+                if (display_mode == 'ratio' or include_nominal) and hasattr(experiment, 'nominal_design'):
+                    nominal_designs.append(experiment.nominal_design.cpu().numpy())
+                else:
+                    nominal_designs.append(None)
+                
+                # Get design_labels from first successful experiment initialization
+                if design_labels is None and hasattr(experiment, 'design_labels'):
+                    design_labels = experiment.design_labels
+                    
+            except Exception as e:
+                print(f"Warning: Could not initialize experiment for run {run_id}: {e}")
+                nominal_total_obs_list.append(None)
+                nominal_designs.append(None)
+        
+        # Check if we got the required data
+        if display_mode == 'absolute' and all(nto is None for nto in nominal_total_obs_list):
+            print(f"Warning: Could not get nominal_total_obs for any run. Cannot convert to absolute quantities.")
+        if display_mode == 'ratio' and all(nd is None for nd in nominal_designs):
+            print(f"Warning: Could not get nominal_design for any run. Cannot compute ratios.")
+        if include_nominal and all(nd is None for nd in nominal_designs):
+            print(f"Warning: Could not get nominal designs. Skipping nominal design bars.")
     
     # Use generic labels if design_labels not found
     if design_labels is None:
@@ -2164,21 +2213,58 @@ def compare_optimal_design(
     else:
         is_1d = False
     
-    # Convert fractional values to absolute quantities if needed
-    # Note: nominal_design is stored as fractional (like optimal_designs), so convert it too
-    if not use_fractional and nominal_total_obs is not None:
-        optimal_designs = np.array(optimal_designs) * nominal_total_obs
-        if nominal_design is not None:
-            nominal_design = nominal_design * nominal_total_obs
+    # Convert design values based on display_mode
+    # Note: optimal_designs and nominal_designs are stored as fractional values
+    if display_mode == 'absolute':
+        # Convert fractional to absolute quantities using per-run nominal_total_obs
+        converted_designs = []
+        for i, design in enumerate(optimal_designs):
+            if i < len(nominal_total_obs_list) and nominal_total_obs_list[i] is not None:
+                converted_designs.append(design * nominal_total_obs_list[i])
+            else:
+                print(f"Warning: nominal_total_obs not available for run {found_run_ids[i]}, keeping fractional values.")
+                converted_designs.append(design)
+        optimal_designs = converted_designs
+        
+        # Convert nominal designs to absolute if including them
+        if include_nominal:
+            for i, nominal_design in enumerate(nominal_designs):
+                if nominal_design is not None and i < len(nominal_total_obs_list) and nominal_total_obs_list[i] is not None:
+                    nominal_designs[i] = nominal_design * nominal_total_obs_list[i]
+                    
+    elif display_mode == 'ratio':
+        # Convert to ratio relative to each run's nominal design
+        converted_designs = []
+        for i, design in enumerate(optimal_designs):
+            if i < len(nominal_designs) and nominal_designs[i] is not None:
+                # Avoid division by zero
+                nominal_design_safe = np.where(nominal_designs[i] == 0, np.nan, nominal_designs[i])
+                converted_designs.append(design / nominal_design_safe)
+            else:
+                print(f"Warning: nominal_design not available for run {found_run_ids[i]}, cannot compute ratio. Keeping fractional values.")
+                converted_designs.append(design)
+        optimal_designs = converted_designs
+        
+        # For nominal designs themselves in ratio mode, ratio is 1.0
+        if include_nominal:
+            for i, nominal_design in enumerate(nominal_designs):
+                if nominal_design is not None:
+                    nominal_designs[i] = np.ones_like(nominal_design)
+    
+    # For 'fractional' mode, no conversion needed
     
     # Determine y-axis label
     if is_1d:
         ylabel = design_labels[0] if design_labels else 'Design Value'
     else:
-        if use_fractional:
-            ylabel = 'Fraction of Total Tracers'
-        else:
+        if display_mode == 'absolute':
             ylabel = 'Number of Tracers'
+        elif display_mode == 'fractional':
+            ylabel = 'Fraction of Total Tracers'
+        elif display_mode == 'ratio':
+            ylabel = 'Ratio to Nominal Design'
+        else:
+            ylabel = 'Design Value'
     
     # Create figure
     if is_1d:
@@ -2190,11 +2276,20 @@ def compare_optimal_design(
         plot_labels = list(labels) if labels else [run_id[:8] for run_id in found_run_ids]
         plot_colors = list(colors) if colors else [plt.rcParams['axes.prop_cycle'].by_key()['color'][i % len(plt.rcParams['axes.prop_cycle'].by_key()['color'])] for i in range(len(optimal_designs))]
         
-        # Add nominal design if requested - prepend to lists
-        if include_nominal and nominal_design is not None:
-            design_values = [nominal_design[0]] + design_values
-            plot_labels = ['Nominal'] + plot_labels
-            plot_colors = ['tab:blue'] + plot_colors
+        # Add nominal designs if requested - prepend to lists
+        if include_nominal:
+            nominal_values = []
+            nominal_labels = []
+            for i, nominal_design in enumerate(nominal_designs):
+                if nominal_design is not None:
+                    nominal_values.append(nominal_design[0])
+                    nominal_labels.append(f'Nominal ({found_run_ids[i][:8]})')
+            if nominal_values:
+                design_values = nominal_values + design_values
+                plot_labels = nominal_labels + plot_labels
+                # Use a distinct color for nominal designs (light blue/gray)
+                nominal_colors = ['tab:blue'] * len(nominal_values)
+                plot_colors = nominal_colors + plot_colors
         
         x_pos = np.arange(len(design_values))
         bars = ax.bar(x_pos, design_values, color=plot_colors, alpha=0.7, linewidth=1.5)
@@ -2213,15 +2308,24 @@ def compare_optimal_design(
         
         x = np.arange(len(design_labels))  # Design dimension positions
         
-        # Prepare data for plotting - prepend nominal design if requested
+        # Prepare data for plotting - prepend nominal designs if requested
         plot_designs = list(optimal_designs)
         plot_labels = list(labels) if labels else [run_id[:8] for run_id in found_run_ids]
         plot_colors = list(colors) if colors else [plt.rcParams['axes.prop_cycle'].by_key()['color'][i % len(plt.rcParams['axes.prop_cycle'].by_key()['color'])] for i in range(len(optimal_designs))]
         
-        if include_nominal and nominal_design is not None:
-            plot_designs = [nominal_design] + plot_designs
-            plot_labels = ['Nominal'] + plot_labels
-            plot_colors = ['tab:blue'] + plot_colors
+        if include_nominal:
+            nominal_plot_designs = []
+            nominal_plot_labels = []
+            for i, nominal_design in enumerate(nominal_designs):
+                if nominal_design is not None:
+                    nominal_plot_designs.append(nominal_design)
+                    nominal_plot_labels.append(f'Nominal ({found_run_ids[i][:8]})')
+            if nominal_plot_designs:
+                plot_designs = nominal_plot_designs + plot_designs
+                plot_labels = nominal_plot_labels + plot_labels
+                # Use a distinct color for nominal designs
+                nominal_colors = ['tab:blue'] * len(nominal_plot_designs)
+                plot_colors = nominal_colors + plot_colors
         
         n_designs_to_plot = len(plot_designs)
         width = 0.8 / n_designs_to_plot  # Width of bars
@@ -2384,25 +2488,17 @@ def compare_best_designs(
         exp_id = run_id_to_exp_id[run_id]
         artifacts_dir = f"{storage_path}/mlruns/{exp_id}/{run_id}/artifacts"
         
-        if not os.path.exists(artifacts_dir):
-            print(f"Warning: Artifacts directory not found for run {run_id}, skipping...")
-            continue
-        
-        # Find eig_data JSON files
-        eig_files = glob.glob(f"{artifacts_dir}/eig_data_*.json")
-        
-        if len(eig_files) == 0:
-            print(f"Warning: No eig_data JSON files found for run {run_id}, skipping...")
-            continue
-        
-        # Use most recent file (sort by timestamp in filename)
-        eig_files.sort(key=lambda x: os.path.basename(x), reverse=True)
-        json_path = eig_files[0]
-        
-        # Load JSON file
+        # Load completed eig_data file
         try:
-            with open(json_path, 'r') as f:
-                data = json.load(f)
+            json_path, data = load_eig_data_file(artifacts_dir, step_key=None)
+            if data is None:
+                print(f"Warning: No completed eig_data file found for run {run_id}, skipping...")
+                continue
+        except ValueError as e:
+            print(f"Warning: {e}, skipping run {run_id}...")
+            continue
+        
+        try:
             
             # Determine which step to use
             if step_key is not None:
@@ -2696,25 +2792,17 @@ def plot_design_dim_by_eig(
         exp_id = run_id_to_exp_id[run_id]
         artifacts_dir = f"{storage_path}/mlruns/{exp_id}/{run_id}/artifacts"
         
-        if not os.path.exists(artifacts_dir):
-            print(f"Warning: Artifacts directory not found for run {run_id}, skipping...")
-            continue
-        
-        # Find eig_data JSON files
-        eig_files = glob.glob(f"{artifacts_dir}/eig_data_*.json")
-        
-        if len(eig_files) == 0:
-            print(f"Warning: No eig_data JSON files found for run {run_id}, skipping...")
-            continue
-        
-        # Use most recent file (sort by timestamp in filename)
-        eig_files.sort(key=lambda x: os.path.basename(x), reverse=True)
-        json_path = eig_files[0]
-        
-        # Load JSON file
+        # Load completed eig_data file
         try:
-            with open(json_path, 'r') as f:
-                data = json.load(f)
+            json_path, data = load_eig_data_file(artifacts_dir, step_key=None)
+            if data is None:
+                print(f"Warning: No completed eig_data file found for run {run_id}, skipping...")
+                continue
+        except ValueError as e:
+            print(f"Warning: {e}, skipping run {run_id}...")
+            continue
+        
+        try:
             
             # Determine which step to use
             if step_key is not None:
@@ -3730,6 +3818,13 @@ def plot_designs_parallel_coords(run_id, cosmo_exp='num_tracers', alpha=0.6, lin
         run_obj, run_args, device, 
         design_args={}, global_rank=0
     )
+
+    num_targets = experiment.desi_tracers.groupby('class').sum()['targets'].reindex(experiment.design_labels)
+    nominal_total_obs = int(experiment.desi_data.drop_duplicates(subset=['tracer'])['observed'].sum())
+    # Get maximum possible tracers as fractions
+    max_tracers = np.array([num_targets[target] for target in experiment.design_labels])
+    max_tracers = max_tracers / nominal_total_obs
+
     # Build path to designs.npy
     storage_path = os.environ["SCRATCH"] + f"/bed/BED_cosmo/{cosmo_exp}"
     designs_path = f"{storage_path}/mlruns/{exp_id}/{run_id}/artifacts/designs.npy"
@@ -3788,12 +3883,52 @@ def plot_designs_parallel_coords(run_id, cosmo_exp='num_tracers', alpha=0.6, lin
     
     ax.plot(x_positions, experiment.nominal_design.cpu().numpy(), color='black', alpha=1.0, linewidth=2, label='Nominal Design', zorder=3)
 
+    # Plot max_tracers as upward-pointing triangles to represent maximums
+    ax.scatter(x_positions, max_tracers, color='gray', s=50, zorder=10, marker='^', label='Max Tracers')
+    
+    # Try to load and plot the most recent eval JSON optimal design
+    artifacts_dir = f"{storage_path}/mlruns/{exp_id}/{run_id}/artifacts"
+    try:
+        json_path, eig_data = load_eig_data_file(artifacts_dir)
+        print(f"Loaded eval JSON: {json_path}")
+        if json_path is not None and eig_data is not None:
+            # Try to get optimal_design from top level first
+            optimal_design = eig_data.get('optimal_design')
+            
+            # If not at top level, try nested in step data
+            if optimal_design is None:
+                # Find the highest step
+                step_keys = [k for k in eig_data.keys() if k.startswith('step_')]
+                if step_keys:
+                    step_numbers = []
+                    for k in step_keys:
+                        try:
+                            step_num = int(k.split('_')[1])
+                            step_numbers.append((step_num, k))
+                        except (ValueError, IndexError):
+                            continue
+                    if step_numbers:
+                        step_str = max(step_numbers, key=lambda x: x[0])[1]
+                        step_data = eig_data.get(step_str, {})
+                        variable_data = step_data.get('variable', {})
+                        optimal_design = variable_data.get('optimal_design')
+            
+            # Plot if we found an optimal design
+            if optimal_design is not None:
+                optimal_design_array = np.array(optimal_design)
+                if len(optimal_design_array) == n_dims:
+                    ax.plot(x_positions, optimal_design_array, color='tab:orange', 
+                           linewidth=2, label='Optimal Design', zorder=4)
+    except Exception as e:
+        # Silently fail if we can't load the eval JSON
+        pass
+    
     # Set axis properties
     ax.set_xticks(x_positions)
     ax.set_xticklabels(axis_labels, fontsize=12)
     ax.set_ylabel('Tracer Fraction', fontsize=12)
-    ax.set_title(f'Design Space Displayed by Parallel Coordinates', fontsize=16, pad=5, weight='bold')
     ax.grid(True, alpha=0.3, linestyle='--')
+    plt.legend(loc='best')
     
     # Set y-axis limits to show full range
     all_values = np.concatenate([dim_data[j] for j in range(n_dims)])
@@ -3993,25 +4128,10 @@ def plot_2d_eig(
     # Find artifacts directory
     artifacts_dir = f"{storage_path}/mlruns/{exp_id}/{run_id}/artifacts"
     
-    if not os.path.exists(artifacts_dir):
-        raise ValueError(f"Artifacts directory not found for run {run_id}")
-    
-    # Find eig_data JSON files
-    eig_files = glob.glob(f"{artifacts_dir}/eig_data_*.json")
-    
-    if len(eig_files) == 0:
-        raise ValueError(f"No eig_data JSON files found for run {run_id}")
-    
-    # Use most recent file (sort by timestamp in filename)
-    eig_files.sort(key=lambda x: os.path.basename(x), reverse=True)
-    json_path = eig_files[0]
-    
-    # Load JSON file
-    try:
-        with open(json_path, 'r') as f:
-            eig_data = json.load(f)
-    except Exception as e:
-        raise ValueError(f"Error loading eig_data from {json_path}: {e}")
+    # Load completed eig_data file
+    json_path, eig_data = load_eig_data_file(artifacts_dir, step_key=None)
+    if eig_data is None:
+        raise ValueError(f"No completed eig_data file found for run {run_id}")
     
     # Determine which step to use
     if step_key is not None:
