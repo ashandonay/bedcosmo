@@ -241,7 +241,8 @@ class Trainer:
 
         step_times = []
         current_step = self.start_step
-        while current_step < self.run_args["total_steps"]:
+        break_loop = False
+        while current_step < self.run_args["total_steps"] and not break_loop:
             for samples, context in self.dataloader:
                 loss, agg_loss, global_loss, global_agg_loss, current_step, step_time = self.step(samples, context, current_step)
                 
@@ -252,6 +253,7 @@ class Trainer:
                         if self.is_tty and not self.profile:
                             self.pbar.close()
                     tdist.barrier()
+                    break_loop = True
                     break
                 
                 # Collect step times for the first 100 steps
@@ -385,6 +387,18 @@ class Trainer:
 
                 if current_step >= self.run_args["total_steps"]:
                     break
+
+        # If training stopped due to NaN/Inf, exit immediately without cleanup
+        if break_loop:
+            if "LOCAL_RANK" in os.environ:
+                tdist.barrier()
+                tdist.destroy_process_group()
+            if self.global_rank == 0:
+                try:
+                    mlflow.end_run(status="FAILED")
+                except Exception as e:
+                    print(f"Warning: Error ending MLflow run: {e}")
+            sys.exit(1)
 
         # Ensure progress bar closes cleanly
         if self.global_rank == 0 and self.is_tty and not self.profile:
@@ -532,7 +546,6 @@ class Trainer:
         # DDP initialization
         if device is None:
             if "LOCAL_RANK" in os.environ and torch.cuda.is_available():
-                local_rank = int(os.environ["LOCAL_RANK"]) # SLURM's local rank
                 self.global_rank = int(os.environ["RANK"])
                 
                 # When CUDA_VISIBLE_DEVICES isolates one GPU, PyTorch sees it as device 0.
@@ -561,7 +574,6 @@ class Trainer:
                 )
 
             else: # Not using DDP
-                local_rank = 0 # Placeholder, not a DDP local rank
                 self.global_rank = 0
                 print("Running without DDP (single-node, single-GPU/CPU)")
                 if torch.cuda.is_available():
@@ -710,8 +722,6 @@ class Trainer:
 
                 # Prepare tensors for broadcasting
                 tensors = self._prepare_broadcast_tensors()
-                print(f"Running with parameters for cosmo_model='{self.run_args['cosmo_model']}':")
-                print(json.dumps(self.run_args, indent=2))
             else:
                 # Initialize tensors on other ranks
                 tensors = {
@@ -805,6 +815,9 @@ class Trainer:
         os.makedirs(f"{self.run_path}/artifacts/plots/rank_{self.global_rank}/posterior", exist_ok=True)
         # Broadcast run_args from rank 0 to ensure consistency, especially for 'steps' when resuming with add_steps
         if self.global_rank == 0:
+            print(f"Run path: {self.run_path}")
+            print(f"Running with parameters for cosmo_model='{self.run_args['cosmo_model']}':")
+            print(json.dumps(self.run_args, indent=2))
             self.session_start_time = None
             run_args_list_to_broadcast = [self.run_args]
         else:
@@ -828,7 +841,6 @@ class Trainer:
             priors_artifact_path = f"{self.storage_path}/mlruns/{mlflow.active_run().info.experiment_id}/{mlflow.active_run().info.run_id}/artifacts/priors.yaml"
             shutil.copy2(self.priors_run_path, priors_artifact_path)
             mlflow.log_artifact(priors_artifact_path)
-            print(f"Saved priors file to artifacts: {priors_artifact_path}")
                 
             # Verify the file was saved correctly
             if not os.path.exists(priors_artifact_path):
