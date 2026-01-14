@@ -1,0 +1,6 @@
+# Design arguments for variable_redshift experiment
+labels: ["z_1", "z_2"]
+n_redshifts: 2
+step: 0.2
+lower: 0.1
+upper: 3.5

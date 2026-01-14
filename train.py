@@ -66,6 +66,7 @@ class Trainer:
         self.client = MlflowClient()
 
         self._init_device_settings(device)
+        self._load_design_args()
         self._init_run()
         self.experiment = init_experiment(self.run_obj, self.run_args, checkpoint=self.checkpoint, device=self.device, global_rank=self.global_rank)
 
@@ -622,6 +623,30 @@ class Trainer:
 
         # Initialize MLflow experiment and run info on rank 0
         self.device = f"cuda:{self.pytorch_device_idx}" if "LOCAL_RANK" in os.environ and torch.cuda.is_available() else (f"cuda:{self.effective_device_id}" if self.effective_device_id != -1 else "cpu")
+    
+    def _load_design_args(self):
+        """
+        Load design_args from separate file if design_args_path is specified in run_args.
+        Merges design_args into run_args.
+        """
+        if 'design_args_path' in self.run_args and self.run_args.get('design_args_path') is not None:
+            design_args_path = self.run_args['design_args_path']
+            # Handle both relative and absolute paths
+            if not os.path.isabs(design_args_path):
+                # If relative, assume it's relative to the project root (where train.py is)
+                design_args_path = os.path.join(script_dir, design_args_path)
+            
+            if not os.path.exists(design_args_path):
+                raise FileNotFoundError(f"Design args file not found: {design_args_path}")
+            
+            with open(design_args_path, 'r') as f:
+                design_args = yaml.safe_load(f)
+            
+            # Merge design_args into run_args as 'design_args'
+            self.run_args['design_args'] = design_args
+            
+            if self.global_rank == 0:
+                print(f"Loaded design args from {design_args_path}")
 
     def _init_dataloader(self, batch_size=1, num_workers=0):
         # Create dataset with designs on GPU

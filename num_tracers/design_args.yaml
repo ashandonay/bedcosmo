@@ -1,0 +1,7 @@
+# Design arguments for num_tracers experiment
+labels: ["BGS", "LRG", "ELG", "QSO"]
+step: [0.01, 0.01, 0.01, 0.01]
+lower: [0.02, 0.1, 0.1, 0.15]
+upper: [0.0856, 0.294, 0.5, 0.2323]
+sum_lower: 1.0
+sum_upper: 1.0

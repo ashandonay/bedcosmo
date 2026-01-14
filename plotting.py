@@ -29,6 +29,7 @@ import warnings
 from datetime import datetime
 from pyro_oed_src import posterior_loss
 import json
+import yaml
 from IPython.display import display
 import glob
 
@@ -3780,60 +3781,143 @@ def plot_lr_schedule(initial_lr, gamma, gamma_freq, steps=100000):
 
     return lr[-1]
 
-def plot_designs_parallel_coords(run_id, cosmo_exp='num_tracers', alpha=0.6, linewidth=0.8, 
+def plot_designs_parallel_coords(design_args=None, input_designs=None, cosmo_exp='num_tracers', run_id=None, alpha=0.6, linewidth=0.8, 
                                  figsize=(12, 6), cmap='viridis', save_path=None,
                                  color_dim=0, labels=None):
     """
     Plot design space using parallel coordinates.
     
-    Each line represents one design point, connecting the 4 tracer fractions.
+    Each line represents one design point, connecting the design dimensions.
     Lines are colored by the specified dimension index.
     
     Args:
-        run_id (str): MLflow run ID
+        design_args (dict or str, optional): Design arguments dictionary or path to YAML file containing design_args.
+                                            Required keys if input_designs is None: 'step', 'lower', 'upper', 'sum_lower', 'sum_upper', 'labels'
+                                            If input_designs is provided, only 'labels' is needed from design_args.
+        input_designs (None, str, list, or array, optional): Input designs to use. Takes precedence over design_args.
+                                                           Can be:
+                                                           - None: Generate design grid from design_args (default)
+                                                           - "nominal": Use the nominal design
+                                                           - list/array: Use specific design(s), shape (num_designs, num_dims) or (num_dims,)
         cosmo_exp (str): Cosmology experiment name (default: 'num_tracers')
+        run_id (str, optional): MLflow run ID. If provided, will plot nominal and optimal designs.
         alpha (float): Transparency of lines (default: 0.6)
         linewidth (float): Width of lines (default: 0.8)
         figsize (tuple): Figure size (default: (12, 6))
         cmap (str): Colormap for line colors (default: 'viridis')
         save_path (str, optional): Path to save the figure. If None, displays the figure.
-        color_dim (int): Dimension index (0-3) to use for coloring lines. Default: 0
-        labels (tuple/list, optional): Custom labels for each dimension. If None, uses generic
-                                      labels like f_0, f_1, etc. Example: ('f_BGS', 'f_LRG', 'f_ELG', 'f_QSO')
+        color_dim (int): Dimension index to use for coloring lines. Default: 0
+        labels (tuple/list, optional): Custom labels for each dimension. If None, uses labels from design_args or experiment.
     
     Returns:
         fig: Matplotlib figure object
     """
-    # Get run data to find exp_id
-    run_data_list, _, _ = get_runs_data(run_ids=run_id, cosmo_exp=cosmo_exp)
-    if not run_data_list:
-        raise ValueError(f"Run {run_id} not found in experiment {cosmo_exp}")
+    # If input_designs is provided, it takes precedence
+    # Otherwise, design_args is required
+    if input_designs is None and design_args is None:
+        raise ValueError("Either design_args or input_designs must be provided")
     
-    run_data = run_data_list[0]
-    exp_id = run_data['exp_id']
-    run_obj = run_data['run_obj']
-    run_args = run_data['params']
+    # Load design_args from YAML file if it's a string path
+    if design_args is not None and isinstance(design_args, str):
+        if not os.path.exists(design_args):
+            raise FileNotFoundError(f"Design args file not found: {design_args}")
+        with open(design_args, 'r') as f:
+            design_args = yaml.safe_load(f)
+    
+    # Validate design_args if provided
+    if design_args is not None:
+        if not isinstance(design_args, dict):
+            raise ValueError("design_args must be a dictionary or path to a YAML file")
+        
+        # If input_designs is None, we need full design_args to generate grid
+        if input_designs is None:
+            required_keys = ['step', 'lower', 'upper', 'sum_lower', 'sum_upper', 'labels']
+            for key in required_keys:
+                if key not in design_args:
+                    raise ValueError(f"design_args must contain '{key}' key when input_designs is None")
+        # If input_designs is provided, we only need labels from design_args (if not provided separately)
+        elif 'labels' not in design_args and labels is None:
+            # Try to get labels from experiment or use defaults
+            pass  # Will handle this later when we have the experiment
+    
     device = "cuda:0"
-    experiment = init_experiment(
-        run_obj, run_args, device, 
-        design_args={}, global_rank=0
-    )
-
-    num_targets = experiment.desi_tracers.groupby('class').sum()['targets'].reindex(experiment.design_labels)
-    nominal_total_obs = int(experiment.desi_data.drop_duplicates(subset=['tracer'])['observed'].sum())
-    # Get maximum possible tracers as fractions
-    max_tracers = np.array([num_targets[target] for target in experiment.design_labels])
-    max_tracers = max_tracers / nominal_total_obs
-
-    # Build path to designs.npy
-    storage_path = os.environ["SCRATCH"] + f"/bed/BED_cosmo/{cosmo_exp}"
-    designs_path = f"{storage_path}/mlruns/{exp_id}/{run_id}/artifacts/designs.npy"
+    experiment = None
+    nominal_design = None
+    optimal_design = None
     
-    # Load designs
-    if not os.path.exists(designs_path):
-        raise FileNotFoundError(f"Designs file not found: {designs_path}")
+    # If run_id is provided, load experiment to get nominal and optimal designs
+    if run_id is not None:
+        run_data_list, _, _ = get_runs_data(run_ids=run_id, cosmo_exp=cosmo_exp)
+        if not run_data_list:
+            raise ValueError(f"Run {run_id} not found in experiment {cosmo_exp}")
+        
+        run_data = run_data_list[0]
+        run_obj = run_data['run_obj']
+        run_args = run_data['params']
+        
+        # If input_designs is provided, it takes precedence - use it with design_args for labels
+        if input_designs is not None:
+            # Use design_args if provided (mainly for labels), otherwise use empty dict
+            exp_design_args = design_args if design_args is not None else {}
+            experiment = init_experiment(
+                run_obj, run_args, device, 
+                design_args=exp_design_args, global_rank=0
+            )
+            # Override with input_designs
+            if design_args is not None and 'labels' in design_args:
+                experiment.init_designs(input_designs=input_designs, labels=design_args['labels'])
+            else:
+                experiment.init_designs(input_designs=input_designs)
+        else:
+            # Use design_args to generate design space
+            experiment = init_experiment(
+                run_obj, run_args, device, 
+                design_args=design_args, global_rank=0
+            )
+        
+        nominal_design = experiment.nominal_design.cpu().numpy()
+        
+        # Try to load optimal design if available
+        storage_path = os.environ["SCRATCH"] + f"/bed/BED_cosmo/{cosmo_exp}"
+        exp_id = run_data['exp_id']
+        optimal_design_path = f"{storage_path}/mlruns/{exp_id}/{run_id}/artifacts/optimal_design.npy"
+        if os.path.exists(optimal_design_path):
+            optimal_design = np.load(optimal_design_path)
     
-    designs = np.load(designs_path)
+    # Create a minimal experiment to generate design space if not already created
+    if experiment is None:
+        if cosmo_exp == 'num_tracers':
+            from num_tracers import NumTracers
+            experiment = NumTracers(
+                design_args=design_args,
+                input_designs=input_designs,
+                device=device,
+                global_rank=0,
+                verbose=False
+            )
+        elif cosmo_exp == 'variable_redshift':
+            from variable_redshift import VariableRedshift
+            experiment = VariableRedshift(
+                design_args=design_args,
+                input_designs=input_designs,
+                device=device,
+                global_rank=0,
+                verbose=False
+            )
+        elif cosmo_exp == 'num_visits':
+            from num_visits import NumVisits
+            experiment = NumVisits(
+                design_args=design_args,
+                input_designs=input_designs,
+                device=device,
+                global_rank=0,
+                verbose=False
+            )
+        else:
+            raise ValueError(f"Unsupported cosmo_exp: {cosmo_exp}")
+    
+    # Get designs from experiment
+    designs = experiment.designs.cpu().numpy()
     
     # Ensure designs is a numpy array
     if not isinstance(designs, np.ndarray):
@@ -3854,11 +3938,16 @@ def plot_designs_parallel_coords(run_id, cosmo_exp='num_tracers', alpha=0.6, lin
     if labels is not None:
         if not isinstance(labels, (tuple, list)) or len(labels) != n_dims:
             raise ValueError(f"labels must be a tuple/list of length {n_dims}, got {labels}")
-        # Use provided labels as-is (user can format with $ for LaTeX if desired)
         axis_labels = list(labels)
     else:
-        # Create generic labels
-        axis_labels = [f'$f_{i}$' for i in range(n_dims)]
+        # Use labels from design_args or experiment
+        if hasattr(experiment, 'design_labels') and experiment.design_labels is not None:
+            axis_labels = [f'${label}$' if not label.startswith('$') else label for label in experiment.design_labels]
+        elif 'labels' in design_args:
+            axis_labels = [f'${label}$' if not label.startswith('$') else label for label in design_args['labels']]
+        else:
+            # Create generic labels
+            axis_labels = [f'$f_{i}$' for i in range(n_dims)]
     
     # Create figure
     fig, ax = plt.subplots(figsize=figsize)
@@ -3881,54 +3970,28 @@ def plot_designs_parallel_coords(run_id, cosmo_exp='num_tracers', alpha=0.6, lin
         values = [dim_data[j][i] for j in range(n_dims)]
         ax.plot(x_positions, values, color=colors[i], alpha=alpha, linewidth=linewidth)
     
-    ax.plot(x_positions, experiment.nominal_design.cpu().numpy(), color='black', alpha=1.0, linewidth=2, label='Nominal Design', zorder=3)
+    # Plot nominal design if available
+    if nominal_design is not None:
+        ax.plot(x_positions, nominal_design, color='black', alpha=1.0, linewidth=2, label='Nominal Design', zorder=3)
+    
+    # Plot optimal design if available
+    if optimal_design is not None:
+        ax.plot(x_positions, optimal_design, color='red', alpha=1.0, linewidth=2, linestyle='--', label='Optimal Design', zorder=3)
 
-    # Plot max_tracers as upward-pointing triangles to represent maximums
-    ax.scatter(x_positions, max_tracers, color='gray', s=50, zorder=10, marker='^', label='Max Tracers')
-    
-    # Try to load and plot the most recent eval JSON optimal design
-    artifacts_dir = f"{storage_path}/mlruns/{exp_id}/{run_id}/artifacts"
-    try:
-        json_path, eig_data = load_eig_data_file(artifacts_dir)
-        print(f"Loaded eval JSON: {json_path}")
-        if json_path is not None and eig_data is not None:
-            # Try to get optimal_design from top level first
-            optimal_design = eig_data.get('optimal_design')
-            
-            # If not at top level, try nested in step data
-            if optimal_design is None:
-                # Find the highest step
-                step_keys = [k for k in eig_data.keys() if k.startswith('step_')]
-                if step_keys:
-                    step_numbers = []
-                    for k in step_keys:
-                        try:
-                            step_num = int(k.split('_')[1])
-                            step_numbers.append((step_num, k))
-                        except (ValueError, IndexError):
-                            continue
-                    if step_numbers:
-                        step_str = max(step_numbers, key=lambda x: x[0])[1]
-                        step_data = eig_data.get(step_str, {})
-                        variable_data = step_data.get('variable', {})
-                        optimal_design = variable_data.get('optimal_design')
-            
-            # Plot if we found an optimal design
-            if optimal_design is not None:
-                optimal_design_array = np.array(optimal_design)
-                if len(optimal_design_array) == n_dims:
-                    ax.plot(x_positions, optimal_design_array, color='tab:orange', 
-                           linewidth=2, label='Optimal Design', zorder=4)
-    except Exception as e:
-        # Silently fail if we can't load the eval JSON
-        pass
-    
     # Set axis properties
     ax.set_xticks(x_positions)
     ax.set_xticklabels(axis_labels, fontsize=12)
     ax.set_ylabel('Tracer Fraction', fontsize=12)
     ax.grid(True, alpha=0.3, linestyle='--')
     plt.legend(loc='best')
+    
+    # Add legend if nominal or optimal designs are plotted
+    if nominal_design is not None or optimal_design is not None:
+        ax.legend()
+    
+    # Add legend if nominal or optimal designs are plotted
+    if nominal_design is not None or optimal_design is not None:
+        ax.legend()
     
     # Set y-axis limits to show full range
     all_values = np.concatenate([dim_data[j] for j in range(n_dims)])
@@ -3945,7 +4008,8 @@ def plot_designs_parallel_coords(run_id, cosmo_exp='num_tracers', alpha=0.6, lin
     # Display figure in interactive environment
     if _is_interactive_environment():
         _display_figure(fig)
-    plt.close(fig)
+    
+    return fig
 
 def plot_design_pts(
     designs_file=None,

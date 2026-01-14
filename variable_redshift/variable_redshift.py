@@ -190,11 +190,8 @@ class VariableRedshift:
         cosmo_model="base",
         priors_path=None,
         flow_type="MAF",
-        design_step=0.1,
-        design_lower=0.0,
-        design_upper=5.0,
-        n_redshifts=1,
         input_designs=None,
+        design_args=None,
         nominal_design=None,
         include_D_M=False,
         error_scale=1.0,
@@ -219,7 +216,13 @@ class VariableRedshift:
         self.seed = seed
         self.verbose = verbose
         self.profile = profile
-        self.n_redshifts = int(n_redshifts)
+        
+        # Extract n_redshifts from design_args (required)
+        # This needs to be done early as it's used in subsequent calculations
+        if design_args is not None and 'n_redshifts' in design_args:
+            self.n_redshifts = int(design_args['n_redshifts'])
+        else:
+            raise ValueError("n_redshifts must be provided in design_args")
         if self.n_redshifts < 1:
             raise ValueError("n_redshifts must be >= 1")
         self.obs_per_redshift = 2 if include_D_M else 1
@@ -294,15 +297,25 @@ class VariableRedshift:
         # Observation labels
         self.observation_labels = ["y"]  # Single observation label for MultivariateNormal
         
-        # Initialize designs
-        self.init_designs(
-            input_designs=input_designs, 
-            design_step=design_step, 
-            design_lower=design_lower, 
-            design_upper=design_upper
-        )
+        # Extract design parameters from design_args for nominal_design calculation
+        if design_args is not None:
+            design_lower = design_args.get('lower', 0.0)
+            design_upper = design_args.get('upper', 5.0)
+        else:
+            design_lower = 0.0
+            design_upper = 5.0
         
-        self.design_labels = [f"z_{i+1}" for i in range(self.n_redshifts)]
+        # Initialize designs
+        if design_args is not None:
+            self.init_designs(input_designs=input_designs, **design_args)
+        else:
+            self.init_designs(input_designs=input_designs)
+        
+        # Extract labels from design_args if provided, otherwise generate from n_redshifts
+        if design_args is not None and 'labels' in design_args:
+            self.design_labels = design_args['labels']
+        else:
+            self.design_labels = [f"z_{i+1}" for i in range(self.n_redshifts)]
         
         if nominal_design is None:
             if self.n_redshifts == 1:
@@ -345,7 +358,7 @@ class VariableRedshift:
             print(f"  Nominal design: {self.nominal_design}")
 
     @profile_method
-    def init_designs(self, input_designs=None, design_step=0.1, design_lower=0.0, design_upper=5.0, perm_invar=True):
+    def init_designs(self, input_designs=None, step=0.1, lower=0.0, upper=5.0, perm_invar=True, labels=None, n_redshifts=None):
         """
         Initialize the redshift design grid.
         
@@ -358,18 +371,18 @@ class VariableRedshift:
                   Examples: [2.0] for single redshift design with n_redshifts=1
                            [[2.0], [2.5]] for multiple single-redshift designs
                            [[2.0, 2.5]] for single design with n_redshifts=2
-            design_step: Step size for design grid (ignored if input_design is provided)
-            design_lower: Lower bound for redshift grid (ignored if input_design is provided)
-            design_upper: Upper bound for redshift grid (ignored if input_design is provided)
+            step: Step size for design grid (default: 0.1, ignored if input_design is provided)
+            lower: Lower bound for redshift grid (default: 0.0, ignored if input_design is provided)
+            upper: Upper bound for redshift grid (default: 5.0, ignored if input_design is provided)
             perm_invar: Enforce permutation invariance by removing duplicate permutations (default: True)
         """
         # Check if input_designs is the special "nominal" keyword
         if input_designs == "nominal":
             # Compute nominal design (same logic as in __init__)
             if self.n_redshifts == 1:
-                nominal_values = torch.tensor([(design_upper - design_lower) / 2.0 + design_lower], device=self.device, dtype=torch.float64)
+                nominal_values = torch.tensor([(upper - lower) / 2.0 + lower], device=self.device, dtype=torch.float64)
             else:
-                nominal_values = torch.linspace(design_lower, design_upper, steps=self.n_redshifts, device=self.device, dtype=torch.float64)
+                nominal_values = torch.linspace(lower, upper, steps=self.n_redshifts, device=self.device, dtype=torch.float64)
             designs = nominal_values.unsqueeze(0)  # Add batch dimension
         elif input_designs is not None:
             if isinstance(input_designs, torch.Tensor):
@@ -386,7 +399,7 @@ class VariableRedshift:
                 designs = designs.unsqueeze(0)
         else:
             # Create a grid of redshift values (build on CPU for cartesian_prod support)
-            z_values = torch.arange(design_lower, design_upper + design_step, design_step, device='cpu', dtype=torch.float64)
+            z_values = torch.arange(lower, upper + step, step, device='cpu', dtype=torch.float64)
             if self.n_redshifts == 1:
                 designs = z_values.unsqueeze(1)
             else:
@@ -409,7 +422,7 @@ class VariableRedshift:
         self.designs = designs.to(self.device)
         
         if self.global_rank == 0 and self.verbose:
-            print(f"Initialized {self.designs.shape[0]} redshift designs from z={design_lower} to z={design_upper}")
+            print(f"Initialized {self.designs.shape[0]} redshift designs from z={lower} to z={upper}")
 
     @profile_method
     def get_priors(self, prior_path):
