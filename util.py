@@ -28,6 +28,8 @@ from PIL import Image, ImageDraw, ImageFont
 import glob
 import argparse
 import psutil
+import pandas as pd
+import yaml
 
 torch.set_default_dtype(torch.float64)
 
@@ -1151,6 +1153,102 @@ def eval_eigs(
 
     optimal_design = experiment.designs[np.argmax(avg_eigs)]
     return avg_eigs, np.max(avg_eigs), avg_nominal_eig, optimal_design
+
+def load_prior_flow_from_file(prior_flow_path, prior_run_id, device, global_rank=0):
+    """
+    Load a prior flow model from a .pt checkpoint file.
+    
+    Args:
+        prior_flow_path (str): Path to the .pt checkpoint file
+        prior_run_id (str): MLflow run_id to fetch run_args from
+        device (str): Device to load model on
+        global_rank (int): Global rank for distributed training
+        
+    Returns:
+        tuple: (posterior_flow, prior_flow_metadata) where metadata is a dict with:
+            - transform_input: bool indicating if the prior flow was trained with transform_input
+            - nominal_context: torch.Tensor or None
+    """
+    if not os.path.exists(prior_flow_path):
+        raise FileNotFoundError(f"Prior flow file not found: {prior_flow_path}")
+    
+    if prior_run_id is None:
+        raise ValueError("prior_run_id must be specified")
+    
+    if global_rank == 0:
+        print(f"Loading prior flow from file: {prior_flow_path}")
+        print(f"Loading run_args from MLflow run_id: {prior_run_id}")
+    
+    # Load run_args from MLflow
+    # Determine cosmo_exp from the run_id by trying both common experiments
+    # We'll try to get it from the run itself
+    storage_paths = [
+        os.environ["SCRATCH"] + f"/bed/BED_cosmo/num_tracers",
+        os.environ["SCRATCH"] + f"/bed/BED_cosmo/num_visits",
+        os.environ["SCRATCH"] + f"/bed/BED_cosmo/variable_redshift"
+    ]
+    
+    prior_run_args = None
+    prior_run = None
+    for storage_path in storage_paths:
+        try:
+            mlflow.set_tracking_uri(storage_path + "/mlruns")
+            client = MlflowClient()
+            prior_run = client.get_run(prior_run_id)
+            prior_run_args = parse_mlflow_params(prior_run.data.params)
+            cosmo_exp = prior_run_args.get("cosmo_exp", "num_tracers")
+            if global_rank == 0:
+                print(f"Found run in {cosmo_exp} experiment")
+            break
+        except Exception:
+            continue
+    
+    if prior_run_args is None or prior_run is None:
+        raise ValueError(f"Could not find run_id {prior_run_id} in any experiment. Check that the run_id is correct.")
+    
+    # Initialize experiment to get dimensions
+    experiment = init_experiment(prior_run, prior_run_args, device, global_rank=global_rank)
+    input_dim = len(experiment.cosmo_params)
+    context_dim = experiment.context_dim
+    nominal_context = None
+
+    # Load checkpoint
+    checkpoint = torch.load(prior_flow_path, map_location=device, weights_only=False)
+    
+    # Initialize the flow model
+    posterior_flow = init_nf(
+        prior_run_args,
+        input_dim,
+        context_dim,
+        device,
+        seed=None
+    )
+    
+    # Load the state dict
+    if 'model_state_dict' in checkpoint:
+        posterior_flow.load_state_dict(checkpoint['model_state_dict'], strict=True)
+    elif 'model' in checkpoint:
+        posterior_flow.load_state_dict(checkpoint['model'], strict=True)
+    else:
+        raise ValueError("Checkpoint does not contain model state dict")
+    
+    posterior_flow.to(device)
+    posterior_flow.eval()
+    
+    # Store metadata in a dict to return alongside the flow
+    # This keeps training metadata separate from the model object
+    prior_flow_metadata = {
+        'transform_input': prior_run_args.get("transform_input", False),
+        'nominal_context': nominal_context if nominal_context is not None else None
+    }
+    
+    if global_rank == 0:
+        print(f"Successfully loaded prior flow from {prior_flow_path}")
+        print(f"  Input dim: {input_dim}, Context dim: {context_dim}")
+    
+    # Return both the flow and its metadata
+    return posterior_flow, prior_flow_metadata
+
 
 def load_model(experiment, step, run_obj, run_args, device, global_rank=0):
     """

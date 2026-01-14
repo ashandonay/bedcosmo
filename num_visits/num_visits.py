@@ -17,6 +17,7 @@ from speclite import filters as speclite_filters
 from astropy.constants import h, c
 from bed.grid import Grid
 import getdist
+from util import load_prior_flow_from_file
 
 # LSST photometric zeropoints (AB magnitudes that produce 1 count per second)
 # From SMTN-002 (v1.9 throughputs): https://smtn-002.lsst.io
@@ -181,6 +182,40 @@ class NumVisits:
         self.priors, self.latex_labels, self.prior_data = self.get_priors(priors_path)
         self.cosmo_params = list(self.priors.keys())
         self.z_prior = self.priors[self.cosmo_params[0]]
+        
+        # Check if prior_flow is specified in priors YAML
+        self.prior_flow = None
+        if 'prior_flow' in self.prior_data and self.prior_data['prior_flow'] is not None and self.prior_data['prior_flow'] != '':
+            prior_flow_path = self.prior_data['prior_flow']
+            # Handle relative paths - assume relative to priors_path directory
+            if not os.path.isabs(prior_flow_path):
+                prior_flow_path = os.path.join(os.path.dirname(priors_path), prior_flow_path)
+            
+            # prior_run_id is required to get metadata from MLflow
+            prior_run_id = self.prior_data.get('prior_run_id', None)
+            if prior_run_id is None:
+                raise ValueError("prior_run_id must be specified in priors.yaml when using prior_flow")
+            
+            
+            self.prior_flow, prior_flow_metadata = load_prior_flow_from_file(
+                prior_flow_path,
+                prior_run_id,
+                self.device,
+                self.global_rank
+            )
+            # Store metadata in experiment class, not on the flow model
+            self.prior_flow_transform_input = prior_flow_metadata['transform_input']
+            # Set nominal context for num_visits
+            # Context = design (nvisits per filter) + observations (magnitudes per filter)
+            if prior_flow_metadata['nominal_context'] is not None:
+                self.prior_flow_nominal_context = prior_flow_metadata['nominal_context']
+            else:
+                nominal_observations = torch.zeros(self.num_filters, device=self.device, dtype=torch.float64)
+                self.prior_flow_nominal_context = torch.cat([self.nominal_design, nominal_observations], dim=-1)
+            if self.global_rank == 0:
+                print("Using trained posterior model as prior for parameter sampling (loaded from priors.yaml)")
+                if prior_run_id:
+                    print(f"  Metadata loaded from MLflow run_id: {prior_run_id}")
 
         if nominal_design is None:
             self.nominal_design = torch.tensor(
@@ -660,12 +695,60 @@ class NumVisits:
             nvisits = nvisits.view(1, 1, -1)
 
         batch_shape = nvisits.shape[:-1]
-        z_dist = self.z_prior.expand(batch_shape).to_event(0)
-        z = pyro.sample("z", z_dist)
+        
+        # Check if we should use a posterior model as prior
+        if hasattr(self, 'prior_flow') and self.prior_flow is not None:
+            z = self._sample_z_from_prior_flow(batch_shape, nvisits)
+        else:
+            z_dist = self.z_prior.expand(batch_shape).to_event(0)
+            z = pyro.sample("z", z_dist)
+        
         means = self._calculate_magnitudes(z)
         sigmas = self._magnitude_errors(means, nvisits)
         covariance = torch.diag_embed(sigmas**2)
         return pyro.sample(self.observation_labels[0], dist.MultivariateNormal(means, covariance))
+    
+    def _sample_z_from_prior_flow(self, batch_shape, nvisits):
+        """
+        Sample z from a trained posterior model used as prior.
+        
+        The posterior model is conditional on context (design + observations),
+        so we sample at the nominal context (nominal design + zero observations).
+        """
+        # Get the total number of samples needed
+        total_samples = int(np.prod(batch_shape)) if batch_shape else 1
+        
+        # Get nominal context for sampling
+        nominal_context = getattr(self, 'prior_flow_nominal_context', None)
+        if nominal_context is None:
+            # Fallback: create nominal context
+            nominal_observations = torch.zeros(self.num_filters, device=self.device, dtype=torch.float64)
+            nominal_context = torch.cat([self.nominal_design, nominal_observations], dim=-1)
+        
+        # Expand context to match sample shape
+        expanded_context = nominal_context.unsqueeze(0).expand(total_samples, -1)
+        
+        # Sample from the posterior flow
+        with torch.no_grad():
+            posterior_dist = self.prior_flow(expanded_context)
+            samples = posterior_dist.sample()  # Shape: (total_samples, 1) for z
+        
+        # Transform from unconstrained to constrained space if needed
+        prior_transform_input = getattr(self, 'prior_flow_transform_input', False)
+        if prior_transform_input:
+            # Prior flow outputs unconstrained parameters, transform to constrained space
+            samples = self.params_from_unconstrained(samples)
+        
+        # Reshape to match batch_shape
+        if batch_shape:
+            z = samples.reshape(batch_shape + (1,)).squeeze(-1)
+        else:
+            z = samples.squeeze(-1)
+        
+        # Register with pyro.sample using Delta distribution
+        z = pyro.sample("z", dist.Delta(z))
+        
+        return z
 
     @profile_method
     def get_priors(self, prior_path):
