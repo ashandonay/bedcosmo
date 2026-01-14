@@ -19,9 +19,7 @@ base_om:
   nf_transform: affine
   spline_bins: 16
   input_design: false
-  design_step: 0.2
-  design_lower: 0.0
-  design_upper: 4.0
+  design_args_path: variable_redshift/design_args.yaml
   sigma_D_H: 0.2
   sigma_D_M: 0.2
   error_scale: 1.0
@@ -58,10 +56,7 @@ base:
   nf_transform: affine
   spline_bins: 16
   input_designs: null
-  design_step: 0.2
-  design_lower: 0.1
-  design_upper: 3.5
-  n_redshifts: 2
+  design_args_path: variable_redshift/design_args.yaml
   sigma_D_H: 0.2
   sigma_D_M: 0.2
   error_scale: 1.0
@@ -98,9 +93,7 @@ base_omegak:
   nf_transform: affine
   spline_bins: 16
   input_designs: null
-  design_step: 0.2
-  design_lower: 0.0
-  design_upper: 4.0
+  design_args_path: variable_redshift/design_args.yaml
   sigma_D_H: 0.2
   sigma_D_M: 0.2
   error_scale: 1.0
@@ -137,9 +130,7 @@ base_w:
   nf_transform: affine
   spline_bins: 16
   input_designs: null
-  design_step: 0.2
-  design_lower: 0.0
-  design_upper: 4.0
+  design_args_path: variable_redshift/design_args.yaml
   sigma_D_H: 0.2
   sigma_D_M: 0.2
   error_scale: 1.0
@@ -176,10 +167,7 @@ base_w_wa:
   nf_transform: affine
   spline_bins: 16
   input_designs: null
-  design_step: 0.2
-  design_lower: 0.1
-  design_upper: 3.5
-  n_redshifts: 2
+  design_args_path: variable_redshift/design_args.yaml
   sigma_D_H: 0.2
   sigma_D_M: 0.2
   error_scale: 1.0
@@ -216,10 +204,7 @@ base_omegak_w_wa:
   nf_transform: affine
   spline_bins: 16
   input_designs: null
-  design_step: 0.2
-  design_lower: 0.1
-  design_upper: 3.5
-  n_redshifts: 2
+  design_args_path: variable_redshift/design_args.yaml
   sigma_D_H: 0.2
   sigma_D_M: 0.2
   error_scale: 1.0

@@ -31,7 +31,7 @@
     "gamma": 0.1,
     "step_freq": 1,
     "checkpoint_step_freq": 2000,
-    "n_particles_per_device": 1000,
+    "n_particles_per_device": 101,
     "verbose": false, 
     "log_nominal_area": true,
     "include_D_M": true,

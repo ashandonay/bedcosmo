@@ -1,0 +1,7 @@
+# Design arguments for num_visits experiment
+labels: ["n_u", "n_g", "n_r", "n_i", "n_z", "n_y"]
+step: 20.0
+lower: [50.0, 80.0, 210.0, 210.0, 180.0, 180.0]
+upper: [90.0, 120.0, 250.0, 250.0, 220.0, 220.0]
+sum_lower: 1030
+sum_upper: 1030

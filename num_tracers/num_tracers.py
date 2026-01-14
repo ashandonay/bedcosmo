@@ -193,12 +193,8 @@ class NumTracers:
         cosmo_model="base",
         priors_path=None,
         flow_type="MAF",
-        design_step=[0.025, 0.05, 0.05, 0.025],
-        design_lower=[0.025, 0.1, 0.1, 0.1],
-        design_upper=None,
-        design_sum_lower=1.0,
-        design_sum_upper=1.0,
-        input_designs=None, 
+        input_designs=None,
+        design_args=None,
         nominal_design=None,
         include_D_M=True, 
         include_D_V=True,
@@ -244,7 +240,11 @@ class NumTracers:
         self.nominal_total_obs = int(self.desi_data.drop_duplicates(subset=['tracer'])['observed'].sum())
         self.nominal_passed_ratio = torch.tensor(self.desi_data['passed'].tolist(), device=self.device)/self.nominal_total_obs
         # Create dictionary with upper limits and lower limit lists for each class
-        self.design_labels = ["BGS", "LRG", "ELG", "QSO"]
+        # Extract labels from design_args if provided, otherwise use default
+        if design_args is not None and 'labels' in design_args:
+            self.design_labels = design_args['labels']
+        else:
+            self.design_labels = ["BGS", "LRG", "ELG", "QSO"]
         self.num_targets = self.desi_tracers.groupby('class').sum()['targets'].reindex(self.design_labels)
         if nominal_design is None:
             self.nominal_design = torch.tensor(self.desi_tracers.groupby('class').sum()['observed'].reindex(self.design_labels).values, device=self.device)
@@ -283,27 +283,29 @@ class NumTracers:
         self._idx_wa = [self.cosmo_params.index('wa')] if 'wa' in self.cosmo_params else []
         self._idx_hr = [self.cosmo_params.index('hrdrag')] if 'hrdrag' in self.cosmo_params else []
         self.observation_labels = ["y"]
-        self.init_designs(
-            input_designs=input_designs, step_size=design_step, range_lower=design_lower, 
-            range_upper=design_upper, sum_lower=design_sum_lower, sum_upper=design_sum_upper
-            )
+        
+        # Pass design_args using ** unpacking if provided, otherwise use defaults
+        if design_args is not None:
+            self.init_designs(input_designs=input_designs, **design_args)
+        else:
+            self.init_designs(input_designs=input_designs)
 
     @profile_method
-    def init_designs(self, input_designs=None, step_size=0.05, range_lower=0.05, range_upper=None, sum_lower=1.0, sum_upper=1.0, tol=1e-3):
+    def init_designs(self, input_designs=None, step=0.05, lower=0.05, upper=None, sum_lower=1.0, sum_upper=1.0, tol=1e-3, labels=None):
         """
         Initialize design space.
         
         Args:
             input_designs: Can be:
-                - None: Generate design grid (default)
+                - None: Generate design grid using design parameters (default)
                 - "nominal": Use the nominal design as the input design
                 - list/array: Use specific design(s), shape should be (num_designs, num_targets)
                   If 1D list with length == num_targets, it will be reshaped to (1, num_targets)
                   Examples: [0.2, 0.3, 0.3, 0.2] for single design
                            [[0.2, 0.3, 0.3, 0.2], [0.25, 0.25, 0.25, 0.25]] for multiple designs
-            design_step: Step size(s) for design grid (ignored if input_designs is provided)
-            range_lower: Lower bound(s) for each design variable (ignored if input_designs is provided)
-            range_upper: Upper bound(s) for each design variable (ignored if input_designs is provided)
+            step: Step size(s) for design grid (default: 0.05, only used if input_designs is None)
+            lower: Lower bound(s) for each design variable (default: 0.05, only used if input_designs is None)
+            upper: Upper bound(s) for each design variable (default: None, only used if input_designs is None)
             sum_lower: Lower bound on sum of design variables (default: 1.0)
             sum_upper: Upper bound on sum of design variables (default: 1.0)
             tol: Tolerance for sum constraint (default: 1e-3)
@@ -318,50 +320,50 @@ class NumTracers:
             
             # Handle 1D input (single design)
             if design_array.ndim == 1:
-                if len(design_array) != len(self.design_labels):
-                    raise ValueError(f"Input design must have {len(self.design_labels)} values, got {len(design_array)}")
+                if len(design_array) != len(labels):
+                    raise ValueError(f"Input design must have {len(labels)} values, got {len(design_array)}")
                 design_array = design_array.reshape(1, -1)
             elif design_array.ndim == 2:
-                if design_array.shape[1] != len(self.design_labels):
-                    raise ValueError(f"Input design must have {len(self.design_labels)} columns, got {design_array.shape[1]}")
+                if design_array.shape[1] != len(labels):
+                    raise ValueError(f"Input design must have {len(labels)} columns, got {design_array.shape[1]}")
             else:
                 raise ValueError(f"Input design must be 1D or 2D, got shape {design_array.shape}")
             
             designs = torch.tensor(design_array, device=self.device, dtype=torch.float64)
         else:
             # Generate design grid
-            if type(step_size) == float:
-                design_steps = [step_size]*len(self.design_labels)
-            elif type(step_size) == list:
-                design_steps = step_size
+            if type(step) == float:
+                design_steps = [step]*len(labels)
+            elif type(step) == list:
+                design_steps = step
             else:
-                raise ValueError("step_size must be a float or list")
+                raise ValueError("step must be a float or list")
             
-            if type(range_lower) == float:
-                lower_limits = [range_lower]*len(self.design_labels)
-            elif type(range_lower) == list:
-                lower_limits = range_lower
+            if type(lower) == float:
+                lower_limits = [lower]*len(labels)
+            elif type(lower) == list:
+                lower_limits = lower
             else:
-                raise ValueError("range_lower must be a float or list")
+                raise ValueError("lower must be a float or list")
             
-            if range_upper is None:
-                upper_limits = [self.num_targets[target] / self.nominal_total_obs for target in self.design_labels]
-            elif type(range_upper) == float:
-                upper_limits = [range_upper]*len(self.design_labels)
-            elif type(range_upper) == list:
-                upper_limits = range_upper
+            if upper is None:
+                upper_limits = [self.num_targets[target] / self.nominal_total_obs for target in labels]
+            elif type(upper) == float:
+                upper_limits = [upper]*len(labels)
+            elif type(upper) == list:
+                upper_limits = upper
             else:
-                raise ValueError("range_upper must be a float or list")
+                raise ValueError("upper must be a float or list")
                 
             designs_dict = {
                 f'N_{target}': np.arange(
                     lower_limits[i],
                     upper_limits[i],
                     design_steps[i]
-                ) for i, target in enumerate(self.design_labels)
+                ) for i, target in enumerate(labels)
             }
             
-            # Create constrained grid based on design_sum_lower and design_sum_upper
+            # Create constrained grid based on sum_lower and sum_upper
             if sum_lower is None and sum_upper is None:
                 # No constraint on sum
                 grid_designs = Grid(**designs_dict)
@@ -403,9 +405,11 @@ class NumTracers:
         if self.global_rank == 0 and self.verbose:
             print(
                 f"Designs initialized with the following parameters:\n",
-                f"step size: {step_size}\n",
-                f"lower range: {range_lower}\n",
-                f"upper range: {range_upper}\n"
+                f"step size: {step}\n",
+                f"lower range: {lower}\n",
+                f"upper range: {upper}\n",
+                f"sum lower: {sum_lower}\n",
+                f"sum upper: {sum_upper}\n"
                 )
             print(f"Designs shape: {self.designs.shape}")
             if input_designs == "nominal":

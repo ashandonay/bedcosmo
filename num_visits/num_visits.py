@@ -131,12 +131,8 @@ class NumVisits:
         filters_list=None,
         temperature=5000,
         z_prior_bounds=(0.1, 3.0),
-        design_step=20.0,
-        design_lower=10.0,
-        design_upper=250.0,
-        sum_lower=None,
-        sum_upper=None,
         fixed_design=False,
+        design_args=None,
         nominal_design=None,
         priors_path=None,
         pixel_scale=0.2,
@@ -161,7 +157,13 @@ class NumVisits:
 
         self.filters_list = list(filters_list) if filters_list else ["u", "g", "r", "i", "z", "y"]
         self.num_filters = len(self.filters_list)
-        self.design_labels = [f"n_{band}" for band in self.filters_list]
+        
+        # Extract labels from design_args if provided, otherwise generate from filters_list
+        if design_args is not None and 'labels' in design_args:
+            self.design_labels = design_args['labels']
+        else:
+            self.design_labels = [f"n_{band}" for band in self.filters_list]
+        
         self.observation_labels = ["magnitudes"]
         self.context_dim = len(self.design_labels) + self.num_filters
 
@@ -180,9 +182,6 @@ class NumVisits:
         self.cosmo_params = list(self.priors.keys())
         self.z_prior = self.priors[self.cosmo_params[0]]
 
-        self.design_lower = self._expand_to_filters(design_lower, "design_lower")
-        self.design_upper = self._expand_to_filters(design_upper, "design_upper")
-        self.design_step = self._expand_to_filters(design_step, "design_step")
         if nominal_design is None:
             self.nominal_design = torch.tensor(
                 [fiducial_nvisits[band] for band in self.filters_list], device=self.device, dtype=torch.float64
@@ -194,16 +193,6 @@ class NumVisits:
                     f"nominal_design must have shape ({self.num_filters},), got {nominal_array.shape}"
                 )
             self.nominal_design = torch.tensor(nominal_array, device=self.device, dtype=torch.float64)
-        self.sum_lower = (
-            float(sum_lower)
-            if sum_lower is not None
-            else float(self.nominal_design.sum())
-        )
-        self.sum_upper = (
-            float(sum_upper)
-            if sum_upper is not None
-            else float(self.nominal_design.sum())
-        )
 
         self.pixel_scale = pixel_scale
         self.stamp_size = stamp_size
@@ -279,7 +268,11 @@ class NumVisits:
         self._transmission_tensor = torch.tensor(transmission_array, device=self.device, dtype=torch.float64)  # (n_filters, n_wlen)
         self._wlen_over_hc_tensor = torch.tensor(wlen_over_hc_common, device=self.device, dtype=torch.float64)  # (n_wlen,)
 
-        self.init_designs(fixed_design=fixed_design)
+        # Pass design_args using ** unpacking if provided, otherwise use defaults
+        if design_args is not None:
+            self.init_designs(fixed_design=fixed_design, **design_args)
+        else:
+            self.init_designs(fixed_design=fixed_design)
 
         if self.global_rank == 0 and self.verbose:
             print(f"Num Visits Experiment Initialized")
@@ -329,7 +322,18 @@ class NumVisits:
         return image.array.copy()
 
     @profile_method
-    def init_designs(self, fixed_design=False):
+    def init_designs(self, fixed_design=False, step=20.0, lower=10.0, upper=250.0, sum_lower=None, sum_upper=None, labels=None):
+        # Expand parameters to filters if needed
+        design_step = self._expand_to_filters(step, "step")
+        design_lower = self._expand_to_filters(lower, "lower")
+        design_upper = self._expand_to_filters(upper, "upper")
+        
+        # Set sum_lower and sum_upper defaults if not provided
+        if sum_lower is None:
+            sum_lower = float(self.nominal_design.sum()) if hasattr(self, 'nominal_design') else None
+        if sum_upper is None:
+            sum_upper = float(self.nominal_design.sum()) if hasattr(self, 'nominal_design') else None
+        
         if isinstance(fixed_design, (list, tuple, np.ndarray, torch.Tensor)):
             designs_np = np.asarray(fixed_design, dtype=np.float64)
             if designs_np.ndim == 1:
@@ -341,29 +345,29 @@ class NumVisits:
             designs = torch.tensor(designs_np, device=self.device, dtype=torch.float64)
         elif fixed_design:
             midpoint = torch.tensor(
-                [[(lo + hi) / 2.0 for lo, hi in zip(self.design_lower, self.design_upper)]],
+                [[(lo + hi) / 2.0 for lo, hi in zip(design_lower, design_upper)]],
                 device=self.device,
                 dtype=torch.float64,
             )
             designs = midpoint
         else:
             design_axes = {}
-            for idx, label in enumerate(self.design_labels):
+            for idx, label in enumerate(labels):
                 design_axes[label] = np.arange(
-                    self.design_lower[idx],
-                    self.design_upper[idx] + 0.5 * self.design_step[idx],
-                    self.design_step[idx],
+                    design_lower[idx],
+                    design_upper[idx] + 0.5 * design_step[idx],
+                    design_step[idx],
                     dtype=np.float64,
                 )
 
             constraint = None
-            if self.sum_lower is not None or self.sum_upper is not None:
-                lower = self.sum_lower if self.sum_lower is not None else -np.inf
-                upper = self.sum_upper if self.sum_upper is not None else np.inf
+            if sum_lower is not None or sum_upper is not None:
+                lower_bound = sum_lower if sum_lower is not None else -np.inf
+                upper_bound = sum_upper if sum_upper is not None else np.inf
 
                 def _constraint(**kwargs):
                     total = sum(kwargs.values())
-                    within = np.logical_and(total >= lower - 1e-9, total <= upper + 1e-9)
+                    within = np.logical_and(total >= lower_bound - 1e-9, total <= upper_bound + 1e-9)
                     return within.astype(int)
 
                 constraint = _constraint
