@@ -159,6 +159,9 @@ class Evaluator:
             self.particle_batch_size = self.eig_data.get('particle_batch_size', self.particle_batch_size)
             self.n_evals = self.eig_data.get('n_evals', self.n_evals)
             self.restore_path = self.eig_data.get('rng_state_path', None)
+            # Ensure status field exists (default to 'incomplete' for old files without status)
+            if 'status' not in self.eig_data:
+                self.eig_data['status'] = 'incomplete'
             print(f"Loaded EIG data from {self.eig_file_path} using seed {self.seed} from file")
         else:
             self.eig_data = {}
@@ -168,6 +171,7 @@ class Evaluator:
             self.eig_data['n_particles'] = int(self.n_particles)
             if self.particle_batch_size is not None:
                 self.eig_data['particle_batch_size'] = int(self.particle_batch_size)
+            self.eig_data['status'] = 'incomplete'  # Mark as incomplete when first created
             self.restore_path = None
 
     def _save_rng_state(self):
@@ -790,6 +794,7 @@ class Evaluator:
                         step_data['optimal_eig_std'] = float(result_std_array[optimal_idx]) if len(result_std_array) > optimal_idx else 0.0
                         step_data['optimal_design'] = optimal_design
                     timestamp = getattr(self, 'timestamp', None) or datetime.now().strftime('%Y%m%d_%H%M')
+                    self.eig_data['status'] = 'incomplete'  # Mark as incomplete during evaluation
                     eig_data_save_path = f"{self.save_path}/eig_data_{timestamp}.json"
                     with open(eig_data_save_path, "w") as f:
                         json.dump(self.eig_data, f, indent=2)
@@ -855,6 +860,7 @@ class Evaluator:
 
             # Save EIG data to file
             timestamp = getattr(self, 'timestamp', None) or datetime.now().strftime('%Y%m%d_%H%M')
+            self.eig_data['status'] = 'incomplete'  # Mark as incomplete during evaluation
             eig_data_save_path = f"{self.save_path}/eig_data_{timestamp}.json"
             with open(eig_data_save_path, "w") as f:
                 json.dump(self.eig_data, f, indent=2)
@@ -904,6 +910,7 @@ class Evaluator:
             step_data['optimal_design'] = optimal_design
 
         timestamp = getattr(self, 'timestamp', None) or datetime.now().strftime('%Y%m%d_%H%M')
+        self.eig_data['status'] = 'incomplete'  # Mark as incomplete during evaluation
         eig_data_save_path = f"{self.save_path}/eig_data_{timestamp}.json"
         with open(eig_data_save_path, "w") as f:
             json.dump(self.eig_data, f, indent=2)
@@ -1575,6 +1582,51 @@ class Evaluator:
             cbar = fig.colorbar(im, cax=cbar_ax)
             if use_relative_colors:
                 cbar.set_label('Ratio to Nominal Design', labelpad=10, fontsize=12, weight='bold')
+                # Set symmetric tick marks around 1.0 for consistent display on both red and blue sides
+                # Calculate the maximum deviation from 1.0 to ensure symmetric range
+                max_deviation = max(abs(vmin - 1.0), abs(vmax - 1.0))
+                
+                # Create symmetric tick marks with consistent spacing on both sides
+                # Number of major ticks per side (excluding 1.0)
+                n_ticks_per_side = 4
+                
+                # Generate ticks symmetrically around 1.0
+                # Create evenly spaced ticks from 1.0 to the symmetric bounds
+                symmetric_min = max(vmin, 1.0 - max_deviation)
+                symmetric_max = min(vmax, 1.0 + max_deviation)
+                
+                # Generate ticks above 1.0
+                if symmetric_max > 1.0:
+                    positive_ticks = np.linspace(1.0, symmetric_max, n_ticks_per_side + 1)[1:]  # Exclude 1.0
+                    positive_ticks = positive_ticks[positive_ticks <= vmax]
+                else:
+                    positive_ticks = np.array([])
+                
+                # Generate ticks below 1.0 with the same spacing (mirrored)
+                if symmetric_min < 1.0:
+                    if len(positive_ticks) > 0:
+                        # Mirror the spacing: use the same interval size as positive side
+                        spacing = positive_ticks[0] - 1.0
+                        # Create the same number of negative ticks as positive ticks
+                        n_negative = len(positive_ticks)
+                        negative_ticks = 1.0 - np.arange(1, n_negative + 1) * spacing
+                        negative_ticks = negative_ticks[negative_ticks >= vmin]
+                    else:
+                        # If no positive ticks, create evenly spaced ticks below 1.0
+                        negative_ticks = np.linspace(symmetric_min, 1.0, n_ticks_per_side + 1)[:-1]  # Exclude 1.0
+                        negative_ticks = negative_ticks[negative_ticks >= vmin]
+                else:
+                    negative_ticks = np.array([])
+                
+                # Combine all ticks: negative, 1.0, and positive
+                all_ticks = np.concatenate([negative_ticks, [1.0], positive_ticks])
+                all_ticks = np.unique(all_ticks)  # Remove duplicates
+                all_ticks = np.clip(all_ticks, vmin, vmax)  # Ensure all ticks are within bounds
+                all_ticks = np.sort(all_ticks)  # Final sort
+                
+                # Format tick labels with appropriate precision
+                cbar.set_ticks(all_ticks)
+                cbar.set_ticklabels([f'{tick:.2f}' for tick in all_ticks])
             else:
                 cbar.set_label('Design Value', labelpad=10, fontsize=12, weight='bold')
             ax0.spines['bottom'].set_visible(False)
@@ -1651,6 +1703,7 @@ class Evaluator:
         self.eig_data["optimal_eig_std"] = optimal_eig_std_value
         self.eig_data["optimal_design"] = optimal_design
         self.eig_data["design_type"] = eig_label.lower()  # 'optimal' or 'fixed'
+        self.eig_data['status'] = 'incomplete'  # Mark as incomplete during evaluation
 
         eig_data_save_path = f"{self.save_path}/eig_data_{self.timestamp}.json"
         with open(eig_data_save_path, "w") as f:
@@ -1696,6 +1749,7 @@ class Evaluator:
         
         if self.eig_file_path is None:
             # Save combined eig_data at the end of run
+            self.eig_data['status'] = 'complete'  # Mark as complete when evaluation finishes
             eig_data_save_path = f"{self.save_path}/eig_data_{self.timestamp}.json"
             with open(eig_data_save_path, "w") as f:
                 json.dump(self.eig_data, f, indent=2)
