@@ -357,68 +357,128 @@ class NumVisits:
         return image.array.copy()
 
     @profile_method
-    def init_designs(self, fixed_design=False, step=20.0, lower=10.0, upper=250.0, sum_lower=None, sum_upper=None, labels=None):
-        # Expand parameters to filters if needed
-        design_step = self._expand_to_filters(step, "step")
-        design_lower = self._expand_to_filters(lower, "lower")
-        design_upper = self._expand_to_filters(upper, "upper")
+    def init_designs(
+        self, fixed_design=False, input_designs_path=None, input_type="variable", step=20.0, 
+        lower=10.0, upper=250.0, sum_lower=None, sum_upper=None, labels=None
+        ):
+        """
+        Initialize design space.
         
-        # Set sum_lower and sum_upper defaults if not provided
-        if sum_lower is None:
-            sum_lower = float(self.nominal_design.sum()) if hasattr(self, 'nominal_design') else None
-        if sum_upper is None:
-            sum_upper = float(self.nominal_design.sum()) if hasattr(self, 'nominal_design') else None
+        Args:
+            fixed_design: Legacy parameter for backward compatibility. Can be:
+                - False: Generate design grid (default)
+                - True: Use midpoint design
+                - list/array/tensor: Use specific design(s)
+            input_designs_path: Path to numpy file containing designs (assumed to be absolute)
+            input_type: Type of input designs ("nominal" or "variable")
+            step: Step size(s) for design grid. Can be:
+                - float: Same step size for all dimensions (default: 20.0)
+                - list/array: Different step size for each dimension (must have length num_filters)
+            lower: Lower bound(s) for each design variable. Can be:
+                - float: Same lower bound for all dimensions (default: 10.0)
+                - list/array: Different lower bound for each dimension (must have length num_filters)
+            upper: Upper bound(s) for each design variable. Can be:
+                - float: Same upper bound for all dimensions (default: 250.0)
+                - list/array: Different upper bound for each dimension (must have length num_filters)
+            sum_lower: Lower bound on sum of design variables (default: None)
+            sum_upper: Upper bound on sum of design variables (default: None)
+            labels: Labels for design variables (default: None)
+        """
+        # Check if input_type is "nominal"
+        if input_type == "nominal":
+            designs = self.nominal_design.unsqueeze(0)  # Add batch dimension
+        elif input_type == "variable":
+            # If input_designs_path is provided, load from path (assumed to be absolute)
+            if input_designs_path is not None:
+                if not os.path.isabs(input_designs_path):
+                    raise ValueError(f"input_designs_path must be an absolute path, got: {input_designs_path}")
+                if not os.path.exists(input_designs_path):
+                    raise FileNotFoundError(f"input_designs_path not found: {input_designs_path}")
+                
+                if self.global_rank == 0:
+                    print(f"Loading input designs from numpy file: {input_designs_path}")
+                input_designs_array = np.load(input_designs_path)
+                # Convert to tensor
+                if isinstance(input_designs_array, torch.Tensor):
+                    designs = input_designs_array.to(self.device, dtype=torch.float64)
+                elif isinstance(input_designs_array, (list, tuple, np.ndarray)):
+                    designs = torch.as_tensor(input_designs_array, device=self.device, dtype=torch.float64)
+                else:
+                    raise ValueError(f"input_designs must be a list, array, or tensor, got {type(input_designs_array)}")
+                
+                # Handle 1D input (single design)
+                if designs.ndim == 1:
+                    if len(designs) != self.num_filters:
+                        raise ValueError(f"Input design must have {self.num_filters} values, got {len(designs)}")
+                    designs = designs.reshape(1, -1)
+                elif designs.ndim == 2:
+                    if designs.shape[1] != self.num_filters:
+                        raise ValueError(f"Input design must have {self.num_filters} columns, got {designs.shape[1]}")
+                else:
+                    raise ValueError(f"Input design must be 1D or 2D, got shape {designs.shape}")
+            else:
+                # Expand parameters to filters if needed
+                design_step = self._expand_to_filters(step, "step")
+                design_lower = self._expand_to_filters(lower, "lower")
+                design_upper = self._expand_to_filters(upper, "upper")
+                
+                # Set sum_lower and sum_upper defaults if not provided
+                if sum_lower is None:
+                    sum_lower = float(self.nominal_design.sum()) if hasattr(self, 'nominal_design') else None
+                if sum_upper is None:
+                    sum_upper = float(self.nominal_design.sum()) if hasattr(self, 'nominal_design') else None
+                
+                # Legacy fixed_design support for backward compatibility
+                if isinstance(fixed_design, (list, tuple, np.ndarray, torch.Tensor)):
+                    designs_np = np.asarray(fixed_design, dtype=np.float64)
+                    if designs_np.ndim == 1:
+                        designs_np = designs_np.reshape(1, -1)
+                    if designs_np.shape[1] != self.num_filters:
+                        raise ValueError(
+                            f"fixed_design must have {self.num_filters} columns, got {designs_np.shape[1]}"
+                        )
+                    designs = torch.tensor(designs_np, device=self.device, dtype=torch.float64)
+                elif fixed_design:
+                    midpoint = torch.tensor(
+                        [[(lo + hi) / 2.0 for lo, hi in zip(design_lower, design_upper)]],
+                        device=self.device,
+                        dtype=torch.float64,
+                    )
+                    designs = midpoint
+                else:
+                    design_axes = {}
+                    for idx, label in enumerate(labels):
+                        design_axes[label] = np.arange(
+                            design_lower[idx],
+                            design_upper[idx] + 0.5 * design_step[idx],
+                            design_step[idx],
+                            dtype=np.float64,
+                        )
+
+                    constraint = None
+                    if sum_lower is not None or sum_upper is not None:
+                        lower_bound = sum_lower if sum_lower is not None else -np.inf
+                        upper_bound = sum_upper if sum_upper is not None else np.inf
+
+                        def _constraint(**kwargs):
+                            total = sum(kwargs.values())
+                            within = np.logical_and(total >= lower_bound - 1e-9, total <= upper_bound + 1e-9)
+                            return within.astype(int)
+
+                        constraint = _constraint
+
+                    grid = Grid(**design_axes, constraint=constraint) if constraint else Grid(**design_axes)
+
+                    designs = torch.tensor(
+                        getattr(grid, grid.names[0]).squeeze(), device=self.device, dtype=torch.float64
+                    ).unsqueeze(1)
+                    for name in grid.names[1:]:
+                        values = torch.tensor(
+                            getattr(grid, name).squeeze(), device=self.device, dtype=torch.float64
+                        ).unsqueeze(1)
+                        designs = torch.cat([designs, values], dim=1)
         
-        if isinstance(fixed_design, (list, tuple, np.ndarray, torch.Tensor)):
-            designs_np = np.asarray(fixed_design, dtype=np.float64)
-            if designs_np.ndim == 1:
-                designs_np = designs_np.reshape(1, -1)
-            if designs_np.shape[1] != self.num_filters:
-                raise ValueError(
-                    f"fixed_design must have {self.num_filters} columns, got {designs_np.shape[1]}"
-                )
-            designs = torch.tensor(designs_np, device=self.device, dtype=torch.float64)
-        elif fixed_design:
-            midpoint = torch.tensor(
-                [[(lo + hi) / 2.0 for lo, hi in zip(design_lower, design_upper)]],
-                device=self.device,
-                dtype=torch.float64,
-            )
-            designs = midpoint
-        else:
-            design_axes = {}
-            for idx, label in enumerate(labels):
-                design_axes[label] = np.arange(
-                    design_lower[idx],
-                    design_upper[idx] + 0.5 * design_step[idx],
-                    design_step[idx],
-                    dtype=np.float64,
-                )
-
-            constraint = None
-            if sum_lower is not None or sum_upper is not None:
-                lower_bound = sum_lower if sum_lower is not None else -np.inf
-                upper_bound = sum_upper if sum_upper is not None else np.inf
-
-                def _constraint(**kwargs):
-                    total = sum(kwargs.values())
-                    within = np.logical_and(total >= lower_bound - 1e-9, total <= upper_bound + 1e-9)
-                    return within.astype(int)
-
-                constraint = _constraint
-
-            grid = Grid(**design_axes, constraint=constraint) if constraint else Grid(**design_axes)
-
-            designs = torch.tensor(
-                getattr(grid, grid.names[0]).squeeze(), device=self.device, dtype=torch.float64
-            ).unsqueeze(1)
-            for name in grid.names[1:]:
-                values = torch.tensor(
-                    getattr(grid, name).squeeze(), device=self.device, dtype=torch.float64
-                ).unsqueeze(1)
-                designs = torch.cat([designs, values], dim=1)
-
-        self.designs = designs
+        self.designs = designs.to(self.device)
         if self.designs.numel() == 0:
             if self.verbose:
                 print("Design grid empty under current constraint; defaulting to nominal design.")
