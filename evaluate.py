@@ -32,11 +32,10 @@ import inspect
 
 class Evaluator:
     def __init__(
-            self, run_id, guide_samples=1000, design_step=0.05, design_lower=0.05, design_upper=None,
-            design_chunk_size=None, seed=1, cosmo_exp='num_tracers', levels=[0.68, 0.95], global_rank=0, eig_file_path=None,
-            n_evals=10, n_particles=1000, param_space='physical', input_designs=None, design_sum_lower=1.0, design_sum_upper=1.0,
-            display_run=False, verbose=False, device="cuda:0", profile=False, sort=True, include_nominal=False, batch_size=1,
-            particle_batch_size=None
+            self, run_id, guide_samples=1000, design_chunk_size=None, seed=1, cosmo_exp='num_tracers', 
+            levels=[0.68, 0.95], global_rank=0, eig_file_path=None, n_evals=10, n_particles=1000, 
+            param_space='physical', display_run=False, verbose=False, device="cuda:0", profile=False, 
+            sort=True, include_nominal=False, batch_size=1, particle_batch_size=None, design_args_path=None
             ):
         self.cosmo_exp = cosmo_exp
         
@@ -88,18 +87,13 @@ class Evaluator:
         self.include_nominal = include_nominal
         self.batch_size = batch_size  # Batch size for sample_posterior to reduce memory usage
         
-        # Store design arguments
-        self.design_args = {
-            "design_step": design_step,
-            "design_lower": design_lower,
-            "design_upper": design_upper,
-            "design_sum_lower": design_sum_lower,
-            "design_sum_upper": design_sum_upper,
-        }
-        
-        # Add input_design if provided (otherwise it will be None, which triggers grid generation)
-        if input_designs is not None:
-            self.design_args["input_designs"] = input_designs
+        # Load design_args from file
+        if design_args_path is not None:
+            self.design_args = load_design_args(design_args_path, global_rank=self.global_rank)
+            print(f"Loaded design_args from: {design_args_path}")
+        else:
+            # Will default to the run's artifacts design_args.yaml
+            self.design_args = None
         
         # Initialize experiment - it will handle input_design and generate designs accordingly 
         # (single design, multiple designs, or grid)
@@ -1713,17 +1707,11 @@ if __name__ == "__main__":
     parser.add_argument('--global_rank', type=int, default=0, help='Global rank to evaluate (default: 0)')
     parser.add_argument('--n_particles', type=int, default=1000, help='Number of particles to use for evaluation')
     parser.add_argument('--guide_samples', type=int, default=10000, help='Number of samples to generate from the posterior')
-    parser.add_argument('--design_lower', type=parse_float_or_list, default=0.05, help='Lowest design value (float or JSON list)')
-    parser.add_argument('--design_upper', type=parse_float_or_list, default=None, help='Highest design value (float or JSON list)')
-    parser.add_argument('--design_step', type=parse_float_or_list, default=0.05, help='Step size for design grid (float or JSON list)')
-    parser.add_argument('--design_sum_lower', type=float, default=1.0, help='Lower bound for design sum')
-    parser.add_argument('--design_sum_upper', type=float, default=1.0, help='Upper bound for design sum')
     parser.add_argument('--design_chunk_size', type=int, default=None, help='Number of designs per chunk (None = use all designs)')
     parser.add_argument('--n_evals', type=int, default=5, help='Number of evaluations to average over')
     parser.add_argument('--device', type=str, default='cuda:0', help='Device to use for evaluation')
     parser.add_argument('--seed', type=int, default=1, help='Seed for evaluation')
     parser.add_argument('--param_space', type=str, default='physical', help='Parameter space to use for evaluation')
-    parser.add_argument('--input_designs', type=str, default=None, help='Evaluate specific design(s). Can be: 1) A JSON file path (e.g., designs.json), 2) A JSON string with single design [x1,...,xn] or multiple designs [[x1,...,xn], [y1,...,yn], ...]. If provided, overrides grid generation parameters (default: None)')
     parser.add_argument('--profile', action='store_true', help='Enable profiling of methods')
     parser.add_argument('--verbose', action='store_true', help='Enable verbose output')
     parser.add_argument('--no-sort', dest='sort', action='store_false', help='Disable sorting of designs by EIG (default: sorting enabled)')
@@ -1731,57 +1719,13 @@ if __name__ == "__main__":
     parser.add_argument('--eig_file_path', type=str, default=None, help='Path to previously calculated eig_data JSON file to load instead of recalculating')
     parser.add_argument('--batch_size', type=int, default=1, help='Batch size for sample_posterior to reduce memory usage (default: 1)')
     parser.add_argument('--particle_batch_size', type=int, default=None, help='Batch size for processing particles in LikelihoodDataset to reduce memory usage (default: None to use all particles)')
+    parser.add_argument('--design_args_path', type=str, default=None, help='Path to design_args.yaml file. If None, defaults to the run\'s artifacts/design_args.yaml')
 
     args = parser.parse_args()
 
     valid_params = inspect.signature(Evaluator.__init__).parameters.keys()
     valid_params = [k for k in valid_params if k != 'self']
     eval_args = {k: v for k, v in vars(args).items() if k in valid_params}
-    if eval_args['input_designs'] is not None:
-        # Handle input_design - can be a JSON file path, JSON string, or already parsed
-        if isinstance(eval_args['input_designs'], str):
-            input_design_str = eval_args['input_designs'].strip()
-            
-            # Check if it's the special "nominal" keyword
-            if input_design_str.lower() == 'nominal':
-                eval_args['input_designs'] = 'nominal'
-            # Check if it's a file path (ends with .json and file exists, or just a valid file path)
-            elif (input_design_str.endswith('.json') or input_design_str.endswith('.JSON')) and os.path.isfile(input_design_str):
-                # Read from JSON file
-                try:
-                    with open(input_design_str, 'r') as f:
-                        parsed_value = json.load(f)
-                    eval_args['input_designs'] = parsed_value
-                    print(f"Loaded input_designs from file: {input_design_str}")
-                except json.JSONDecodeError as e:
-                    raise ValueError(f"Failed to parse JSON file {input_design_str}: {e}")
-                except Exception as e:
-                    raise ValueError(f"Failed to read file {input_design_str}: {e}")
-            else:
-                # Try to parse as JSON string
-                # Replace newlines and multiple spaces with single spaces for better JSON parsing
-                input_design_str = re.sub(r'\s+', ' ', input_design_str)
-                try:
-                    parsed_value = json.loads(input_design_str)
-                    eval_args['input_designs'] = parsed_value
-                except json.JSONDecodeError as e:
-                    # Show more context in error message
-                    error_pos = e.pos if hasattr(e, 'pos') else 'unknown'
-                    context_start = max(0, error_pos - 50)
-                    context_end = min(len(input_design_str), error_pos + 50)
-                    context = input_design_str[context_start:context_end]
-                    raise ValueError(
-                        f"Failed to parse input_designs as JSON at position {error_pos}.\n"
-                        f"Error: {e.msg}\n"
-                        f"Context: ...{context}...\n"
-                        f"Full input (first 500 chars): {input_design_str[:500]}\n"
-                        f"Note: If you intended to pass a file path, make sure the file exists and ends with .json"
-                    )
-        # If it's already a list/dict, use it as-is
-        elif isinstance(eval_args['input_designs'], (list, dict)):
-            pass  # Already parsed, use as-is
-        else:
-            raise ValueError(f"input_designs must be a JSON file path, JSON string, list, or dict, got {type(eval_args['input_designs'])}")
     
     print(f"Evaluating with parameters:")
     print(json.dumps(eval_args, indent=2))
