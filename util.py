@@ -1044,7 +1044,13 @@ def init_experiment(
         seed (int): The seed to use.
     """
     run_args.update(design_args)
-    run_args["priors_path"] = run_obj.info.artifact_uri + "/priors.yaml"
+    # Convert MLflow artifact_uri (which may be a file:// URI) to a file path
+    artifact_uri = run_obj.info.artifact_uri
+    if artifact_uri.startswith("file://"):
+        artifact_path = artifact_uri[7:]  # Remove "file://" prefix
+    else:
+        artifact_path = artifact_uri
+    run_args["priors_path"] = artifact_path + "/priors.yaml"
     run_args["device"] = device
     # Use profile from run_args if present, otherwise use the function parameter
     run_args["profile"] = run_args.get("profile", profile)
