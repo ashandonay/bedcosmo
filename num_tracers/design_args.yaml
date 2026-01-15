@@ -1,5 +1,7 @@
 # Design arguments for num_tracers experiment
 labels: ["BGS", "LRG", "ELG", "QSO"]
+input_type: variable # variable or nominal
+input_designs_path: /home/ashandonay/bed/BED_cosmo/num_tracers/notebooks/input_designs.npy
 step: [0.01, 0.01, 0.01, 0.01]
 lower: [0.02, 0.1, 0.1, 0.15]
 upper: [0.0856, 0.294, 0.5, 0.2323]

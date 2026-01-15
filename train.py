@@ -67,7 +67,13 @@ class Trainer:
 
         self._init_device_settings(device)
         self._init_run()
-        self.experiment = init_experiment(self.run_obj, self.run_args, checkpoint=self.checkpoint, device=self.device, global_rank=self.global_rank)
+        # Load design_args from file if design_args_path is set
+        if hasattr(self, 'design_args_path') and self.design_args_path is not None:
+            self.design_args = load_design_args(self.design_args_path, global_rank=self.global_rank)
+        else:
+            # For resume, design_args will be loaded from artifacts in init_experiment
+            self.design_args = None
+        self.experiment = init_experiment(self.run_obj, self.run_args, checkpoint=self.checkpoint, device=self.device, global_rank=self.global_rank, design_args=self.design_args)
 
         self.posterior_flow = init_nf(
             self.run_args,
@@ -77,14 +83,16 @@ class Trainer:
             seed=self.run_args["nf_seed"]
         )
         if self.global_rank == 0:
+            if not self.run_args.get("resume_id", None) and not self.run_args.get("restart_id", None):
+                self._save_input_files()
+
             print("MLFlow Run Info:", self.run_obj.info.experiment_id + "/" + self.run_obj.info.run_id)
             print(f"Using {self.run_args['n_devices']} devices with {self.run_args['n_particles']} total particles.")
             print(f'Input dim: {len(self.experiment.cosmo_params)}, Context dim: {self.experiment.context_dim}')
             print(f"Cosmology: {self.run_args['cosmo_model']}")
             print(f"Target labels: {self.experiment.cosmo_params}")
             print("Flow model initialized: \n", self.posterior_flow)
-            np.save(f"{self.run_path}/artifacts/designs.npy", self.experiment.designs.cpu().detach().numpy())
-            mlflow.log_artifact(f"{self.run_path}/artifacts/designs.npy")
+            
 
         # For DDP, ensure device_ids and output_device use the pytorch_device_idx (which is 0)
         if "LOCAL_RANK" in os.environ and torch.cuda.is_available():
@@ -661,8 +669,8 @@ class Trainer:
                 self.checkpoint = None
                 
                 # For fresh run, priors_run_path is set to the priors_path.yaml file
-                self.priors_run_path = self.run_args.get("priors_path", None)
-                
+                self.priors_path = self.run_args.get("priors_path", None)
+                self.design_args_path = self.run_args.get("design_args_path", None)
             else: 
                 # Restart from existing run
                 if self.global_rank == 0:
@@ -684,7 +692,12 @@ class Trainer:
                 checkpoint_dir = f"{self.storage_path}/mlruns/{ref_run.info.experiment_id}/{self.run_args['restart_id']}/artifacts/checkpoints"
                 
                 # Use saved priors file from artifacts for restart
-                self.priors_run_path = f"{self.storage_path}/mlruns/{ref_run.info.experiment_id}/{self.run_args['restart_id']}/artifacts/priors.yaml"
+                self.priors_path = f"{self.storage_path}/mlruns/{ref_run.info.experiment_id}/{self.run_args['restart_id']}/artifacts/priors.yaml"
+                self.run_args["priors_path"] = self.priors_path
+
+                # Use saved design_args file from artifacts for restart
+                self.design_args_path = f"{self.storage_path}/mlruns/{ref_run.info.experiment_id}/{self.run_args['restart_id']}/artifacts/design_args.yaml"
+                self.run_args["design_args_path"] = self.design_args_path
 
                 if self.run_args.get("restart_checkpoint", None) is not None:
                     # Load specific checkpoint file for all ranks
@@ -713,8 +726,6 @@ class Trainer:
             self.previous_cumulative_runtime = 0.0  # seconds
 
             if self.global_rank == 0:
-                # Save input (prior and design args) files to artifacts
-                self._save_input_files()
                 
                 # Log parameters
                 for key, value in self.run_args.items():
@@ -735,7 +746,12 @@ class Trainer:
             checkpoint_dir = f"{self.storage_path}/mlruns/{self.run_obj.info.experiment_id}/{self.run_args['resume_id']}/artifacts/checkpoints"
             
             # Use saved priors file from artifacts for resume
-            self.priors_run_path = f"{self.storage_path}/mlruns/{self.run_obj.info.experiment_id}/{self.run_args['resume_id']}/artifacts/priors.yaml"
+            self.priors_path = f"{self.storage_path}/mlruns/{self.run_obj.info.experiment_id}/{self.run_args['resume_id']}/artifacts/priors.yaml"
+            self.run_args["priors_path"] = self.priors_path
+
+            # Use saved design_args file from artifacts for resume
+            self.design_args_path = f"{self.storage_path}/mlruns/{self.run_obj.info.experiment_id}/{self.run_args['resume_id']}/artifacts/design_args.yaml"
+            self.run_args["design_args_path"] = self.design_args_path
 
             # Load the checkpoint
             self.checkpoint, self.start_step = get_checkpoint(
@@ -830,41 +846,50 @@ class Trainer:
         self.run_args = run_args_list_to_broadcast[0] # All ranks now have the definitive run_args
 
     def _save_input_files(self):
-        """Save priors file and design_args to artifacts."""
+        """Save input (prior and design args and optionally input_designs) files to artifacts"""
         artifacts_dir = f"{self.storage_path}/mlruns/{mlflow.active_run().info.experiment_id}/{mlflow.active_run().info.run_id}/artifacts"
-        
+        print(f"Saving input files to artifacts directory.")
+
         # Save priors file if available
-        if self.priors_run_path is not None:
-            if not os.path.exists(self.priors_run_path):
-                raise RuntimeError(f"Priors file not found at {self.priors_run_path}")
-            
-            try:
-                priors_artifact_path = f"{artifacts_dir}/priors.yaml"
-                shutil.copy2(self.priors_run_path, priors_artifact_path)
-                mlflow.log_artifact(priors_artifact_path)
-                    
-                # Verify the file was saved correctly
-                if not os.path.exists(priors_artifact_path):
-                    raise RuntimeError(f"Failed to save priors file to artifacts: {priors_artifact_path}")
-            except Exception as e:
-                raise RuntimeError(f"Failed to save priors file: {e}")
+        if not os.path.exists(self.priors_path):
+            raise RuntimeError(f"Priors file not found at {self.priors_path}")
+        
+        try:
+            priors_artifact_path = f"{artifacts_dir}/priors.yaml"
+            shutil.copy2(self.priors_path, priors_artifact_path)
+            mlflow.log_artifact(priors_artifact_path)
+                
+            # Verify the file was saved correctly
+            if not os.path.exists(priors_artifact_path):
+                raise RuntimeError(f"Failed to save priors file to artifacts: {priors_artifact_path}")
+        except Exception as e:
+            raise RuntimeError(f"Failed to save priors file: {e}")
         
         # Save design_args if available
-        if 'design_args' in self.run_args and self.run_args['design_args'] is not None:
-            try:
-                design_args_artifact_path = f"{artifacts_dir}/design_args.yaml"
+        if not os.path.exists(self.design_args_path):
+            raise FileNotFoundError(f"Design args file not found: {self.design_args_path}")
+        with open(self.design_args_path, 'r') as f:
+            design_args = yaml.safe_load(f)
+
+        # Copy the npy file to artifacts
+        designs_artifact_path = f"{artifacts_dir}/designs.npy"
+        np.save(designs_artifact_path, self.experiment.designs.cpu().detach().numpy())
+        mlflow.log_artifact(designs_artifact_path)
+        # Update design_args to point to the saved NPY file location
+        design_args["input_designs_path"] = designs_artifact_path
+
+        try:
+            design_args_artifact_path = f"{artifacts_dir}/design_args.yaml"
+            # Write the updated design_args dict to YAML (instead of copying the original)
+            with open(design_args_artifact_path, 'w') as f:
+                yaml.dump(design_args, f, default_flow_style=False, sort_keys=False)
+            mlflow.log_artifact(design_args_artifact_path)
                 
-                # Write design_args to YAML file
-                with open(design_args_artifact_path, 'w') as f:
-                    yaml.dump(self.run_args['design_args'], f, default_flow_style=False)
-                
-                mlflow.log_artifact(design_args_artifact_path)
-                    
-                # Verify the file was saved correctly
-                if not os.path.exists(design_args_artifact_path):
-                    raise RuntimeError(f"Failed to save design_args file to artifacts: {design_args_artifact_path}")
-            except Exception as e:
-                raise RuntimeError(f"Failed to save design_args file: {e}")
+            # Verify the file was saved correctly
+            if not os.path.exists(design_args_artifact_path):
+                raise RuntimeError(f"Failed to save design_args file to artifacts: {design_args_artifact_path}")
+        except Exception as e:
+            raise RuntimeError(f"Failed to save design_args file: {e}")
 
     def _fix_model_args(self, ref_run):
         """

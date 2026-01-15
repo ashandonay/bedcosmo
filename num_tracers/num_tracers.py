@@ -1,6 +1,7 @@
 import os
 import sys
 import yaml
+import json
 import mlflow
 import pandas as pd
 import numpy as np
@@ -194,7 +195,6 @@ class NumTracers:
         cosmo_model="base",
         priors_path=None,
         flow_type="MAF",
-        input_designs=None,
         design_args=None,
         nominal_design=None,
         include_D_M=True, 
@@ -266,14 +266,14 @@ class NumTracers:
         self.priors, self.param_constraints, self.latex_labels = self.get_priors(priors_path)
         self.desi_priors, _, _ = self.get_priors(os.path.join(home_dir, f"data/desi/bao_{self.dataset}", 'priors.yaml'))
         self.cosmo_params = list(self.priors.keys())
-        self.param_bijector = Bijector(self, cdf_bins=5000, cdf_samples=1e7)
+        self.param_bijector = Bijector(self, cdf_bins=5000, cdf_samples=1e5)
         if bijector_state is not None:
             if self.global_rank == 0:
                 print(f"Restoring bijector state from checkpoint.")
             self.param_bijector.set_state(bijector_state)
         # if the priors are not the same as the DESI priors, create a new bijector for the DESI samples
         if self.priors.items() != self.desi_priors.items():
-            self.desi_bijector = Bijector(self, priors=self.desi_priors, cdf_bins=5000, cdf_samples=2e7)
+            self.desi_bijector = Bijector(self, priors=self.desi_priors, cdf_bins=5000, cdf_samples=2e5)
         else:
             self.desi_bijector = self.param_bijector
 
@@ -286,139 +286,145 @@ class NumTracers:
         self._idx_hr = [self.cosmo_params.index('hrdrag')] if 'hrdrag' in self.cosmo_params else []
         self.observation_labels = ["y"]
         
-        
         # Pass design_args using ** unpacking if provided, otherwise use defaults
         if design_args is not None:
-            self.init_designs(input_designs=input_designs, **design_args)
+            self.init_designs(**design_args)
         else:
-            self.init_designs(input_designs=input_designs)
+            self.init_designs()
 
     @profile_method
-    def init_designs(self, input_designs=None, step=0.05, lower=0.05, upper=None, sum_lower=1.0, sum_upper=1.0, tol=1e-3, labels=None):
+    def init_designs(
+        self, input_designs_path=None, step=0.05, lower=0.05, upper=None, 
+        sum_lower=1.0, sum_upper=1.0, tol=1e-3, labels=None, input_type="variable"):
         """
         Initialize design space.
         
         Args:
-            input_designs: Can be:
-                - None: Generate design grid using design parameters (default)
-                - "nominal": Use the nominal design as the input design
-                - list/array: Use specific design(s), shape should be (num_designs, num_targets)
-                  If 1D list with length == num_targets, it will be reshaped to (1, num_targets)
-                  Examples: [0.2, 0.3, 0.3, 0.2] for single design
-                           [[0.2, 0.3, 0.3, 0.2], [0.25, 0.25, 0.25, 0.25]] for multiple designs
-            step: Step size(s) for design grid (default: 0.05, only used if input_designs is None)
-            lower: Lower bound(s) for each design variable (default: 0.05, only used if input_designs is None)
-            upper: Upper bound(s) for each design variable (default: None, only used if input_designs is None)
+            input_designs_path: Path to numpy file containing designs
+            step: Step size(s) for design grid (default: 0.05)
+            lower: Lower bound(s) for each design variable (default: 0.05)
+            upper: Upper bound(s) for each design variable (default: None)
             sum_lower: Lower bound on sum of design variables (default: 1.0)
             sum_upper: Upper bound on sum of design variables (default: 1.0)
-            tol: Tolerance for sum constraint (default: 1e-3)
+            tol: Tolerance for sum constraint (default: 1e-3),
+            labels: Labels for design variables (default: None)
+            input_type: Type of input designs ("nominal" or "variable")
 
         """
-        # Check if input_designs is the special "nominal" keyword
-        if input_designs == "nominal":
+        # Check if input_type is "nominal"
+        if input_type == "nominal":
             designs = self.nominal_design.unsqueeze(0)  # Add batch dimension
-        elif input_designs is not None:
-            # User provided specific design(s)
-            design_array = np.array(input_designs)
-            
-            # Handle 1D input (single design)
-            if design_array.ndim == 1:
-                if len(design_array) != len(labels):
-                    raise ValueError(f"Input design must have {len(labels)} values, got {len(design_array)}")
-                design_array = design_array.reshape(1, -1)
-            elif design_array.ndim == 2:
-                if design_array.shape[1] != len(labels):
-                    raise ValueError(f"Input design must have {len(labels)} columns, got {design_array.shape[1]}")
-            else:
-                raise ValueError(f"Input design must be 1D or 2D, got shape {design_array.shape}")
-            
-            designs = torch.tensor(design_array, device=self.device, dtype=torch.float64)
-        else:
-            # Generate design grid
-            if type(step) == float:
-                design_steps = [step]*len(labels)
-            elif type(step) == list:
-                design_steps = step
-            else:
-                raise ValueError("step must be a float or list")
-            
-            if type(lower) == float:
-                lower_limits = [lower]*len(labels)
-            elif type(lower) == list:
-                lower_limits = lower
-            else:
-                raise ValueError("lower must be a float or list")
-            
-            if upper is None:
-                upper_limits = [self.num_targets[target] / self.nominal_total_obs for target in labels]
-            elif type(upper) == float:
-                upper_limits = [upper]*len(labels)
-            elif type(upper) == list:
-                upper_limits = upper
-            else:
-                raise ValueError("upper must be a float or list")
+        elif input_type == "variable":
+            # If input_designs_path is provided, load from path (assumed to be absolute)
+            if input_designs_path is not None:
+                if not os.path.isabs(input_designs_path):
+                    raise ValueError(f"input_designs_path must be an absolute path, got: {input_designs_path}")
+                if not os.path.exists(input_designs_path):
+                    raise FileNotFoundError(f"input_designs_path not found: {input_designs_path}")
                 
-            designs_dict = {
-                f'N_{target}': np.arange(
-                    lower_limits[i],
-                    upper_limits[i],
-                    design_steps[i]
-                ) for i, target in enumerate(labels)
-            }
-            
-            # Create constrained grid based on sum_lower and sum_upper
-            if sum_lower is None and sum_upper is None:
-                # No constraint on sum
-                grid_designs = Grid(**designs_dict)
-            elif sum_lower is not None and sum_upper is not None:
-                if abs(sum_lower - sum_upper) < tol:
-                    # Equal bounds: sum must equal this value
-                    target_sum = sum_lower
+                if self.global_rank == 0:
+                    print(f"Loading input designs from numpy file: {input_designs_path}")
+                input_designs_array = np.load(input_designs_path)
+                # Convert to tensor
+                designs = torch.tensor(input_designs_array, device=self.device, dtype=torch.float64)
+                # Handle 1D input (single design)
+                if designs.ndim == 1:
+                    if len(designs) != len(labels):
+                        raise ValueError(f"Input design must have {len(labels)} values, got {len(designs)}")
+                    designs = designs.reshape(1, -1)
+                elif designs.ndim == 2:
+                    if designs.shape[1] != len(labels):
+                        raise ValueError(f"Input design must have {len(labels)} columns, got {designs.shape[1]}")
+                else:
+                    raise ValueError(f"Input design must be 1D or 2D, got shape {designs.shape}")
+            else:
+                # Generate design grid
+                if type(step) == float:
+                    design_steps = [step]*len(labels)
+                elif type(step) == list:
+                    design_steps = step
+                else:
+                    raise ValueError("step must be a float or list")
+                
+                if type(lower) == float:
+                    lower_limits = [lower]*len(labels)
+                elif type(lower) == list:
+                    lower_limits = lower
+                else:
+                    raise ValueError("lower must be a float or list")
+                
+                if upper is None:
+                    upper_limits = [self.num_targets[target] / self.nominal_total_obs for target in labels]
+                elif type(upper) == float:
+                    upper_limits = [upper]*len(labels)
+                elif type(upper) == list:
+                    upper_limits = upper
+                else:
+                    raise ValueError("upper must be a float or list")
+                    
+                designs_dict = {
+                    f'N_{target}': np.arange(
+                        lower_limits[i],
+                        upper_limits[i],
+                        design_steps[i]
+                    ) for i, target in enumerate(labels)
+                }
+                
+                # Create constrained grid based on sum_lower and sum_upper
+                if sum_lower is None and sum_upper is None:
+                    # No constraint on sum
+                    grid_designs = Grid(**designs_dict)
+                elif sum_lower is not None and sum_upper is not None:
+                    if abs(sum_lower - sum_upper) < tol:
+                        # Equal bounds: sum must equal this value
+                        target_sum = sum_lower
+                        grid_designs = Grid(
+                            **designs_dict,
+                            constraint=lambda **kwargs: np.abs(sum(kwargs.values()) - target_sum) < tol
+                        )
+                    else:
+                        # Range: sum must be between lower and upper
+                        grid_designs = Grid(
+                            **designs_dict,
+                            constraint=lambda **kwargs: ((sum(kwargs.values()) >= sum_lower - tol) & 
+                                                        (sum(kwargs.values()) <= sum_upper + tol))
+                        )
+                elif sum_lower is not None:
+                    # Only lower bound: sum >= lower
                     grid_designs = Grid(
                         **designs_dict,
-                        constraint=lambda **kwargs: np.abs(sum(kwargs.values()) - target_sum) < tol
+                        constraint=lambda **kwargs: sum(kwargs.values()) >= (sum_lower - tol)
                     )
                 else:
-                    # Range: sum must be between lower and upper
+                    # Only upper bound: sum <= upper
                     grid_designs = Grid(
                         **designs_dict,
-                        constraint=lambda **kwargs: ((sum(kwargs.values()) >= sum_lower - tol) & 
-                                                    (sum(kwargs.values()) <= sum_upper + tol))
+                        constraint=lambda **kwargs: sum(kwargs.values()) <= (sum_upper + tol)
                     )
-            elif sum_lower is not None:
-                # Only lower bound: sum >= lower
-                grid_designs = Grid(
-                    **designs_dict,
-                    constraint=lambda **kwargs: sum(kwargs.values()) >= (sum_lower - tol)
-                )
-            else:
-                # Only upper bound: sum <= upper
-                grid_designs = Grid(
-                    **designs_dict,
-                    constraint=lambda **kwargs: sum(kwargs.values()) <= (sum_upper + tol)
-                )
 
-            designs = torch.tensor(getattr(grid_designs, grid_designs.names[0]).squeeze(), device=self.device).unsqueeze(1)
-            for name in grid_designs.names[1:]:
-                design_tensor = torch.tensor(getattr(grid_designs, name).squeeze(), device=self.device).unsqueeze(1)
-                designs = torch.cat((designs, design_tensor), dim=1)
+                designs = torch.tensor(getattr(grid_designs, grid_designs.names[0]).squeeze(), device=self.device).unsqueeze(1)
+                for name in grid_designs.names[1:]:
+                    design_tensor = torch.tensor(getattr(grid_designs, name).squeeze(), device=self.device).unsqueeze(1)
+                    designs = torch.cat((designs, design_tensor), dim=1)
                 
         self.designs = designs.to(self.device)
 
         if self.global_rank == 0 and self.verbose:
-            print(
-                f"Designs initialized with the following parameters:\n",
-                f"step size: {step}\n",
-                f"lower range: {lower}\n",
-                f"upper range: {upper}\n",
-                f"sum lower: {sum_lower}\n",
-                f"sum upper: {sum_upper}\n"
-                )
             print(f"Designs shape: {self.designs.shape}")
-            if input_designs == "nominal":
+            if input_type == "nominal":
                 print(f"Using nominal design as input design: {self.designs}")
-            elif input_designs is not None:
-                print(f"Input design(s): {self.designs}")
+            elif input_designs_path is None:
+                print(
+                    f"Designs initialized with the following parameters:\n",
+                    f"step size: {step}\n",
+                    f"lower range: {lower}\n",
+                    f"upper range: {upper}\n",
+                    f"sum lower: {sum_lower}\n",
+                    f"sum upper: {sum_upper}\n"
+                    )
+            elif input_designs_path is not None:
+                print(f"Input designs loaded from numpy file: {input_designs_path}")
+                print(f"Input designs: {self.designs[:10]}")
             print(f"Nominal design: {self.nominal_design}\n")
     def design_plot(self):
         """
@@ -1261,6 +1267,8 @@ class NumTracers:
         
         The posterior model is conditional on context (design + observations),
         so we sample at the nominal context (nominal design + central values).
+        
+        Samples in batches to avoid GPU memory issues when sampling large numbers.
         """
         # Get the total number of samples needed
         total_samples = int(np.prod(sample_shape)) if isinstance(sample_shape, tuple) else int(sample_shape)
@@ -1268,21 +1276,33 @@ class NumTracers:
         # Get nominal context for sampling
         nominal_context = getattr(self, 'prior_flow_nominal_context', self.nominal_context.to(self.device))
         
-        # Expand context to match sample shape
-        # nominal_context shape: (context_dim,)
-        # We need: (total_samples, context_dim)
-        expanded_context = nominal_context.unsqueeze(0).expand(total_samples, -1)
+        # Batch size for sampling to avoid OOM errors
+        # Use a reasonable batch size (e.g., 10k samples at a time)
+        batch_size = getattr(self, 'prior_flow_batch_size', 10000)
         
-        # Sample from the posterior flow
+        # Sample in batches
+        all_samples = []
         with torch.no_grad():
-            posterior_dist = self.prior_flow(expanded_context)
-            samples = posterior_dist.sample()  # Shape: (total_samples, param_dim)
+            for i in range(0, total_samples, batch_size):
+                batch_end = min(i + batch_size, total_samples)
+                batch_size_actual = batch_end - i
+                
+                # Expand context for this batch
+                expanded_context = nominal_context.unsqueeze(0).expand(batch_size_actual, -1)
+                
+                # Sample from the posterior flow
+                posterior_dist = self.prior_flow(expanded_context)
+                batch_samples = posterior_dist.sample()  # Shape: (batch_size_actual, param_dim)
+                
+                # Transform from unconstrained to constrained space if needed
+                prior_transform_input = getattr(self, 'prior_flow_transform_input', False)
+                if prior_transform_input:
+                    batch_samples = self.params_from_unconstrained(batch_samples)
+                
+                all_samples.append(batch_samples)
         
-        # Transform from unconstrained to constrained space if the prior flow was trained with transform_input
-        prior_transform_input = getattr(self, 'prior_flow_transform_input', False)
-        if prior_transform_input:
-            # Prior flow outputs unconstrained parameters, transform to constrained space
-            samples = self.params_from_unconstrained(samples)
+        # Concatenate all batches
+        samples = torch.cat(all_samples, dim=0)  # Shape: (total_samples, param_dim)
         
         # Reshape to match sample_shape
         if isinstance(sample_shape, tuple):

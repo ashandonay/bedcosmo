@@ -1047,13 +1047,15 @@ def init_experiment(
             1. Artifacts (design_args.yaml) from the run_obj
             2. File if design_args_path is specified in run_args
     """
+
+    artifact_uri = run_obj.info.artifact_uri
+    if artifact_uri.startswith("file://"):
+        artifact_path = artifact_uri[7:]  # Remove "file://" prefix
+    else:
+        artifact_path = artifact_uri
     # If design_args is not provided (None), try to load from artifacts first
     if design_args is None:
-        design_args_artifact_path = run_obj.info.artifact_uri + "/design_args.yaml"
-        # Try to load from artifacts (handle both file:// and other URI schemes)
-        if design_args_artifact_path.startswith("file://"):
-            design_args_artifact_path = design_args_artifact_path[7:]  # Remove file:// prefix
-        
+        design_args_artifact_path = artifact_path + "/design_args.yaml"
         if os.path.exists(design_args_artifact_path):
             if global_rank == 0:
                 print(f"Loading design_args from artifacts: {design_args_artifact_path}")
@@ -1061,20 +1063,16 @@ def init_experiment(
                 design_args = yaml.safe_load(f)
         else:
             # Fall back to loading from file if design_args_path is specified
-            loaded_design_args = load_design_args(run_args, global_rank=global_rank)
-            if loaded_design_args is not None:
-                design_args = loaded_design_args
+            design_args_path = run_args.get("design_args_path", None)
+            if design_args_path is not None:
+                loaded_design_args = load_design_args(design_args_path, global_rank=global_rank)
+                if loaded_design_args is not None:
+                    design_args = loaded_design_args
     
     # Set design_args in run_args if we have it (including empty dict if explicitly provided)
+    # Note: input_designs loading from JSON paths is now handled by the experiment classes
     if design_args is not None:
         run_args['design_args'] = design_args
-    # Convert MLflow artifact_uri (which may be a file:// URI) to a file path
-    artifact_uri = run_obj.info.artifact_uri
-    if artifact_uri.startswith("file://"):
-        artifact_path = artifact_uri[7:]  # Remove "file://" prefix
-    else:
-        artifact_path = artifact_uri
-    run_args["priors_path"] = artifact_path + "/priors.yaml"
     run_args["device"] = device
     # Use profile from run_args if present, otherwise use the function parameter
     run_args["profile"] = run_args.get("profile", profile)
@@ -1123,37 +1121,24 @@ def init_experiment(
     
     return experiment
 
-def load_design_args(run_args, global_rank=0):
+def load_design_args(design_args_path, global_rank=0):
     """
-    Load design_args from separate file if design_args_path is specified in run_args.
-    Merges design_args into run_args.
+    Load design_args from a YAML file.
     
     Args:
-        run_args (dict): The run arguments dictionary. Will be modified in place.
+        design_args_path (str): Path to the design_args YAML file.
         global_rank (int): Global rank for distributed training (for logging).
     
     Returns:
-        None: Modifies run_args in place by adding 'design_args' key if loaded from file.
+        dict: The loaded design_args dictionary.
     """
-    if 'design_args_path' in run_args and run_args.get('design_args_path') is not None:
-        design_args_path = run_args['design_args_path']
-        # Handle both relative and absolute paths
-        if not os.path.isabs(design_args_path):
-            # If relative, assume it's relative to the project root
-            design_args_path = os.path.join(home_dir, "bed/BED_cosmo", design_args_path)
-        
-        if not os.path.exists(design_args_path):
-            raise FileNotFoundError(f"Design args file not found: {design_args_path}")
-        
-        with open(design_args_path, 'r') as f:
-            design_args = yaml.safe_load(f)
-        
-        if global_rank == 0:
-            print(f"Loaded design args from {design_args_path}")
-        
-        return design_args
-    else:
-        return None
+    if design_args_path is None:
+        raise ValueError("design_args_path must be specified")
+    if not os.path.exists(design_args_path):
+        raise FileNotFoundError(f"Design args file not found: {design_args_path}")
+    with open(design_args_path, 'r') as f:
+        design_args = yaml.safe_load(f)
+    return design_args
 
 def eval_eigs(
         experiment, 

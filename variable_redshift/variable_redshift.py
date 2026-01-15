@@ -1,6 +1,7 @@
 import os
 import sys
 import yaml
+import json
 import mlflow
 import pandas as pd
 import numpy as np
@@ -190,7 +191,6 @@ class VariableRedshift:
         cosmo_model="base",
         priors_path=None,
         flow_type="MAF",
-        input_designs=None,
         design_args=None,
         nominal_design=None,
         include_D_M=False,
@@ -307,9 +307,9 @@ class VariableRedshift:
         
         # Initialize designs
         if design_args is not None:
-            self.init_designs(input_designs=input_designs, **design_args)
+            self.init_designs(**design_args)
         else:
-            self.init_designs(input_designs=input_designs)
+            self.init_designs()
         
         # Extract labels from design_args if provided, otherwise generate from n_redshifts
         if design_args is not None and 'labels' in design_args:
@@ -358,7 +358,7 @@ class VariableRedshift:
             print(f"  Nominal design: {self.nominal_design}")
 
     @profile_method
-    def init_designs(self, input_designs=None, step=0.1, lower=0.0, upper=5.0, perm_invar=True, labels=None, n_redshifts=None):
+    def init_designs(self, input_designs=None, input_designs_path=None, step=0.1, lower=0.0, upper=5.0, perm_invar=True, labels=None, n_redshifts=None):
         """
         Initialize the redshift design grid.
         
@@ -371,11 +371,30 @@ class VariableRedshift:
                   Examples: [2.0] for single redshift design with n_redshifts=1
                            [[2.0], [2.5]] for multiple single-redshift designs
                            [[2.0, 2.5]] for single design with n_redshifts=2
+            input_designs_path: Path to JSON file containing designs (overrides input_designs if provided)
             step: Step size for design grid (default: 0.1, ignored if input_design is provided)
             lower: Lower bound for redshift grid (default: 0.0, ignored if input_design is provided)
             upper: Upper bound for redshift grid (default: 5.0, ignored if input_design is provided)
             perm_invar: Enforce permutation invariance by removing duplicate permutations (default: True)
         """
+        # If input_designs_path is provided, load from path (assumed to be absolute)
+        if input_designs_path is not None:
+            if not os.path.isabs(input_designs_path):
+                raise ValueError(f"input_designs_path must be an absolute path, got: {input_designs_path}")
+            if not os.path.exists(input_designs_path):
+                raise FileNotFoundError(f"input_designs_path not found: {input_designs_path}")
+            
+            if self.global_rank == 0:
+                print(f"Loading input designs from numpy file: {input_designs_path}")
+            input_designs_array = np.load(input_designs_path)
+            # Convert to tensor
+            if isinstance(input_designs_array, torch.Tensor):
+                input_designs = input_designs_array.to(self.device, dtype=torch.float64)
+            elif isinstance(input_designs_array, (list, tuple, np.ndarray)):
+                input_designs = torch.as_tensor(input_designs_array, device=self.device, dtype=torch.float64)
+            else:
+                raise ValueError(f"input_designs must be a list, array, or tensor, got {type(input_designs_array)}")
+        
         # Check if input_designs is the special "nominal" keyword
         if input_designs == "nominal":
             # Compute nominal design (same logic as in __init__)
