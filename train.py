@@ -66,7 +66,6 @@ class Trainer:
         self.client = MlflowClient()
 
         self._init_device_settings(device)
-        self._load_design_args()
         self._init_run()
         self.experiment = init_experiment(self.run_obj, self.run_args, checkpoint=self.checkpoint, device=self.device, global_rank=self.global_rank)
 
@@ -624,30 +623,6 @@ class Trainer:
         # Initialize MLflow experiment and run info on rank 0
         self.device = f"cuda:{self.pytorch_device_idx}" if "LOCAL_RANK" in os.environ and torch.cuda.is_available() else (f"cuda:{self.effective_device_id}" if self.effective_device_id != -1 else "cpu")
     
-    def _load_design_args(self):
-        """
-        Load design_args from separate file if design_args_path is specified in run_args.
-        Merges design_args into run_args.
-        """
-        if 'design_args_path' in self.run_args and self.run_args.get('design_args_path') is not None:
-            design_args_path = self.run_args['design_args_path']
-            # Handle both relative and absolute paths
-            if not os.path.isabs(design_args_path):
-                # If relative, assume it's relative to the project root (where train.py is)
-                design_args_path = os.path.join(script_dir, design_args_path)
-            
-            if not os.path.exists(design_args_path):
-                raise FileNotFoundError(f"Design args file not found: {design_args_path}")
-            
-            with open(design_args_path, 'r') as f:
-                design_args = yaml.safe_load(f)
-            
-            # Merge design_args into run_args as 'design_args'
-            self.run_args['design_args'] = design_args
-            
-            if self.global_rank == 0:
-                print(f"Loaded design args from {design_args_path}")
-
     def _init_dataloader(self, batch_size=1, num_workers=0):
         # Create dataset with designs on GPU
         dataset = LikelihoodDataset(
@@ -738,8 +713,8 @@ class Trainer:
             self.previous_cumulative_runtime = 0.0  # seconds
 
             if self.global_rank == 0:
-                if self.priors_run_path is not None:
-                    self._save_priors_file()
+                # Save input (prior and design args) files to artifacts
+                self._save_input_files()
                 
                 # Log parameters
                 for key, value in self.run_args.items():
@@ -854,26 +829,42 @@ class Trainer:
         tdist.broadcast_object_list(run_args_list_to_broadcast, src=0)
         self.run_args = run_args_list_to_broadcast[0] # All ranks now have the definitive run_args
 
-    def _save_priors_file(self):
-        """Save priors file to artifacts."""
-        if self.priors_run_path is None:
-            raise ValueError("Priors path is None")
+    def _save_input_files(self):
+        """Save priors file and design_args to artifacts."""
+        artifacts_dir = f"{self.storage_path}/mlruns/{mlflow.active_run().info.experiment_id}/{mlflow.active_run().info.run_id}/artifacts"
         
-        if not os.path.exists(self.priors_run_path):
-            raise RuntimeError(f"Priors file not found at {self.priors_run_path}")
+        # Save priors file if available
+        if self.priors_run_path is not None:
+            if not os.path.exists(self.priors_run_path):
+                raise RuntimeError(f"Priors file not found at {self.priors_run_path}")
+            
+            try:
+                priors_artifact_path = f"{artifacts_dir}/priors.yaml"
+                shutil.copy2(self.priors_run_path, priors_artifact_path)
+                mlflow.log_artifact(priors_artifact_path)
+                    
+                # Verify the file was saved correctly
+                if not os.path.exists(priors_artifact_path):
+                    raise RuntimeError(f"Failed to save priors file to artifacts: {priors_artifact_path}")
+            except Exception as e:
+                raise RuntimeError(f"Failed to save priors file: {e}")
         
-        try:
-            priors_artifact_path = f"{self.storage_path}/mlruns/{mlflow.active_run().info.experiment_id}/{mlflow.active_run().info.run_id}/artifacts/priors.yaml"
-            shutil.copy2(self.priors_run_path, priors_artifact_path)
-            mlflow.log_artifact(priors_artifact_path)
+        # Save design_args if available
+        if 'design_args' in self.run_args and self.run_args['design_args'] is not None:
+            try:
+                design_args_artifact_path = f"{artifacts_dir}/design_args.yaml"
                 
-            # Verify the file was saved correctly
-            if not os.path.exists(priors_artifact_path):
-                raise RuntimeError(f"Failed to save priors file to artifacts: {priors_artifact_path}")
+                # Write design_args to YAML file
+                with open(design_args_artifact_path, 'w') as f:
+                    yaml.dump(self.run_args['design_args'], f, default_flow_style=False)
                 
-            return priors_artifact_path
-        except Exception as e:
-            raise RuntimeError(f"Failed to save priors file: {e}")
+                mlflow.log_artifact(design_args_artifact_path)
+                    
+                # Verify the file was saved correctly
+                if not os.path.exists(design_args_artifact_path):
+                    raise RuntimeError(f"Failed to save design_args file to artifacts: {design_args_artifact_path}")
+            except Exception as e:
+                raise RuntimeError(f"Failed to save design_args file: {e}")
 
     def _fix_model_args(self, ref_run):
         """
