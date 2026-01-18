@@ -3781,7 +3781,7 @@ def plot_lr_schedule(initial_lr, gamma, gamma_freq, steps=100000):
 
     return lr[-1]
 
-def plot_designs_parallel_coords(design_args=None, input_designs=None, cosmo_exp='num_tracers', run_id=None, alpha=0.6, linewidth=0.8, 
+def plot_designs_parallel_coords(design_args=None, run_id=None, cosmo_exp='num_tracers', alpha=0.6, linewidth=0.8, 
                                  figsize=(12, 6), cmap='viridis', save_path=None,
                                  color_dim=0, labels=None):
     """
@@ -3792,15 +3792,16 @@ def plot_designs_parallel_coords(design_args=None, input_designs=None, cosmo_exp
     
     Args:
         design_args (dict or str, optional): Design arguments dictionary or path to YAML file containing design_args.
-                                            Required keys if input_designs is None: 'step', 'lower', 'upper', 'sum_lower', 'sum_upper', 'labels'
-                                            If input_designs is provided, only 'labels' is needed from design_args.
-        input_designs (None, str, list, or array, optional): Input designs to use. Takes precedence over design_args.
-                                                           Can be:
-                                                           - None: Generate design grid from design_args (default)
-                                                           - "nominal": Use the nominal design
-                                                           - list/array: Use specific design(s), shape (num_designs, num_dims) or (num_dims,)
-        cosmo_exp (str): Cosmology experiment name (default: 'num_tracers')
+                                            Can contain:
+                                            - 'input_designs_path': Path to numpy file with input designs (absolute path)
+                                            - 'input_type': 'nominal' or 'variable' (default: 'variable')
+                                            - 'labels': List of labels for each dimension
+                                            - 'step', 'lower', 'upper', 'sum_lower', 'sum_upper': For generating design grid
+                                            If input_designs_path is None and input_type is 'variable', requires grid generation params.
+                                            If None and run_id is provided, will be loaded from run artifacts.
         run_id (str, optional): MLflow run ID. If provided, will plot nominal and optimal designs.
+                                If design_args is None, will load design_args from run artifacts.
+        cosmo_exp (str): Cosmology experiment name (default: 'num_tracers')
         alpha (float): Transparency of lines (default: 0.6)
         linewidth (float): Width of lines (default: 0.8)
         figsize (tuple): Figure size (default: (12, 6))
@@ -3812,40 +3813,15 @@ def plot_designs_parallel_coords(design_args=None, input_designs=None, cosmo_exp
     Returns:
         fig: Matplotlib figure object
     """
-    # If input_designs is provided, it takes precedence
-    # Otherwise, design_args is required
-    if input_designs is None and design_args is None:
-        raise ValueError("Either design_args or input_designs must be provided")
-    
-    # Load design_args from YAML file if it's a string path
-    if design_args is not None and isinstance(design_args, str):
-        if not os.path.exists(design_args):
-            raise FileNotFoundError(f"Design args file not found: {design_args}")
-        with open(design_args, 'r') as f:
-            design_args = yaml.safe_load(f)
-    
-    # Validate design_args if provided
-    if design_args is not None:
-        if not isinstance(design_args, dict):
-            raise ValueError("design_args must be a dictionary or path to a YAML file")
-        
-        # If input_designs is None, we need full design_args to generate grid
-        if input_designs is None:
-            required_keys = ['step', 'lower', 'upper', 'sum_lower', 'sum_upper', 'labels']
-            for key in required_keys:
-                if key not in design_args:
-                    raise ValueError(f"design_args must contain '{key}' key when input_designs is None")
-        # If input_designs is provided, we only need labels from design_args (if not provided separately)
-        elif 'labels' not in design_args and labels is None:
-            # Try to get labels from experiment or use defaults
-            pass  # Will handle this later when we have the experiment
-    
     device = "cuda:0"
     experiment = None
     nominal_design = None
     optimal_design = None
+    run_data = None
+    run_obj = None
+    run_args = None
     
-    # If run_id is provided, load experiment to get nominal and optimal designs
+    # If run_id is provided, load run data
     if run_id is not None:
         run_data_list, _, _ = get_runs_data(run_ids=run_id, cosmo_exp=cosmo_exp)
         if not run_data_list:
@@ -3855,25 +3831,56 @@ def plot_designs_parallel_coords(design_args=None, input_designs=None, cosmo_exp
         run_obj = run_data['run_obj']
         run_args = run_data['params']
         
-        # If input_designs is provided, it takes precedence - use it with design_args for labels
-        if input_designs is not None:
-            # Use design_args if provided (mainly for labels), otherwise use empty dict
-            exp_design_args = design_args if design_args is not None else {}
-            experiment = init_experiment(
-                run_obj, run_args, device, 
-                design_args=exp_design_args, global_rank=0
-            )
-            # Override with input_designs
-            if design_args is not None and 'labels' in design_args:
-                experiment.init_designs(input_designs=input_designs, labels=design_args['labels'])
+        # If design_args is None, try to load from artifacts
+        if design_args is None:
+            artifact_uri = run_obj.info.artifact_uri
+            if artifact_uri.startswith("file://"):
+                artifact_path = artifact_uri[7:]  # Remove "file://" prefix
             else:
-                experiment.init_designs(input_designs=input_designs)
-        else:
-            # Use design_args to generate design space
-            experiment = init_experiment(
-                run_obj, run_args, device, 
-                design_args=design_args, global_rank=0
-            )
+                artifact_path = artifact_uri
+            
+            design_args_artifact_path = artifact_path + "/design_args.yaml"
+            if os.path.exists(design_args_artifact_path):
+                print(f"Loading design_args from run artifacts: {design_args_artifact_path}")
+                with open(design_args_artifact_path, 'r') as f:
+                    design_args = yaml.safe_load(f)
+            else:
+                raise FileNotFoundError(f"design_args not found in run artifacts at {design_args_artifact_path} and design_args was not provided")
+    
+    # design_args is required (either provided or loaded from artifacts)
+    if design_args is None:
+        raise ValueError("design_args must be provided, or run_id must be provided to load from artifacts")
+    
+    # Load design_args from YAML file if it's a string path
+    if isinstance(design_args, str):
+        if not os.path.exists(design_args):
+            raise FileNotFoundError(f"Design args file not found: {design_args}")
+        with open(design_args, 'r') as f:
+            design_args = yaml.safe_load(f)
+    
+    # Validate design_args
+    if not isinstance(design_args, dict):
+        raise ValueError("design_args must be a dictionary or path to a YAML file")
+    
+    # Validate that we have enough info to generate designs
+    # If input_designs_path is None and input_type is 'variable', need grid generation params
+    input_type = design_args.get('input_type', 'variable')
+    input_designs_path = design_args.get('input_designs_path', None)
+    
+    if input_designs_path is None and input_type == 'variable':
+        # Need grid generation parameters
+        required_keys = ['step', 'lower', 'upper']
+        for key in required_keys:
+            if key not in design_args:
+                raise ValueError(f"design_args must contain '{key}' key when input_designs_path is None and input_type is 'variable'")
+    
+    # If run_id is provided, load experiment to get nominal and optimal designs
+    if run_id is not None:
+        # Use design_args to initialize experiment (it will handle input_designs_path)
+        experiment = init_experiment(
+            run_obj, run_args, device, 
+            design_args=design_args, global_rank=0
+        )
         
         nominal_design = experiment.nominal_design.cpu().numpy()
         
@@ -3890,7 +3897,6 @@ def plot_designs_parallel_coords(design_args=None, input_designs=None, cosmo_exp
             from num_tracers import NumTracers
             experiment = NumTracers(
                 design_args=design_args,
-                input_designs=input_designs,
                 device=device,
                 global_rank=0,
                 verbose=False
@@ -3899,7 +3905,6 @@ def plot_designs_parallel_coords(design_args=None, input_designs=None, cosmo_exp
             from variable_redshift import VariableRedshift
             experiment = VariableRedshift(
                 design_args=design_args,
-                input_designs=input_designs,
                 device=device,
                 global_rank=0,
                 verbose=False
@@ -3908,7 +3913,6 @@ def plot_designs_parallel_coords(design_args=None, input_designs=None, cosmo_exp
             from num_visits import NumVisits
             experiment = NumVisits(
                 design_args=design_args,
-                input_designs=input_designs,
                 device=device,
                 global_rank=0,
                 verbose=False
@@ -3983,11 +3987,6 @@ def plot_designs_parallel_coords(design_args=None, input_designs=None, cosmo_exp
     ax.set_xticklabels(axis_labels, fontsize=12)
     ax.set_ylabel('Tracer Fraction', fontsize=12)
     ax.grid(True, alpha=0.3, linestyle='--')
-    plt.legend(loc='best')
-    
-    # Add legend if nominal or optimal designs are plotted
-    if nominal_design is not None or optimal_design is not None:
-        ax.legend()
     
     # Add legend if nominal or optimal designs are plotted
     if nominal_design is not None or optimal_design is not None:

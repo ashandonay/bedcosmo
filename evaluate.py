@@ -1396,13 +1396,17 @@ class Evaluator:
             ax0 = fig.add_subplot(gs[0, 0])  # Top plot for EIG
             ax1 = fig.add_subplot(gs[1, 0], sharex=ax0)  # Bottom plot for heatmap shares x-axis
             # Reserve a dedicated colorbar axis on the right that spans both subplots
-            fig.subplots_adjust(left=0.06, right=0.92)
-            bbox = ax1.get_position()
-            cbar_width = 0.015
-            cbar_gap = 0.02  # maintain a small gap between plots and colorbar
-            cbar_left = min(0.985 - cbar_width, bbox.x1 + cbar_gap)
-            cbar_height = 0.6
-            cbar_bottom = 0.5 - cbar_height / 2  # vertically center the colorbar
+            # Adjust margins: move colorbar closer to plot, leave more room on right for label
+            fig.subplots_adjust(left=0.06, right=0.88)  # More room on right for label
+            # Get bboxes to calculate full height spanning both subplots
+            bbox0 = ax0.get_position()
+            bbox1 = ax1.get_position()
+            cbar_width = 0.02  # Slightly wider colorbar
+            cbar_gap = 0.01  # Smaller gap - move colorbar closer to plot
+            cbar_left = bbox1.x1 + cbar_gap  # Position on right, close to plot
+            # Make colorbar span full height from top of ax0 to bottom of ax1
+            cbar_bottom = bbox1.y0  # Bottom of ax1
+            cbar_height = bbox0.y1 - bbox1.y0  # Full height from top of ax0 to bottom of ax1
             cbar_ax = fig.add_axes([cbar_left, cbar_bottom, cbar_width, cbar_height])
             plt.setp(ax0.get_xticklabels(), visible=False)
             ax0.tick_params(axis='x', which='both', length=0)
@@ -1575,52 +1579,86 @@ class Evaluator:
             # Add colorbar spanning the full height
             cbar = fig.colorbar(im, cax=cbar_ax)
             if use_relative_colors:
-                cbar.set_label('Ratio to Nominal Design', labelpad=10, fontsize=12, weight='bold')
-                # Set symmetric tick marks around 1.0 for consistent display on both red and blue sides
-                # Calculate the maximum deviation from 1.0 to ensure symmetric range
-                max_deviation = max(abs(vmin - 1.0), abs(vmax - 1.0))
+                # Increase labelpad to prevent title from getting cut off
+                cbar.set_label('Ratio to Nominal Design', labelpad=15, fontsize=12, weight='bold')
+                # Set exactly 3 tick marks above and below 1.0, with min/max at the ends
+                # Ticks below 1.0 (red side): vmin and 2 equally spaced between vmin and 1.0
+                # Ticks above 1.0 (blue side): vmax and 2 equally spaced between 1.0 and vmax
                 
-                # Create symmetric tick marks with consistent spacing on both sides
-                # Number of major ticks per side (excluding 1.0)
-                n_ticks_per_side = 4
+                range_below = 1.0 - vmin
+                range_above = vmax - 1.0
                 
-                # Generate ticks symmetrically around 1.0
-                # Create evenly spaced ticks from 1.0 to the symmetric bounds
-                symmetric_min = max(vmin, 1.0 - max_deviation)
-                symmetric_max = min(vmax, 1.0 + max_deviation)
-                
-                # Generate ticks above 1.0
-                if symmetric_max > 1.0:
-                    positive_ticks = np.linspace(1.0, symmetric_max, n_ticks_per_side + 1)[1:]  # Exclude 1.0
-                    positive_ticks = positive_ticks[positive_ticks <= vmax]
-                else:
-                    positive_ticks = np.array([])
-                
-                # Generate ticks below 1.0 with the same spacing (mirrored)
-                if symmetric_min < 1.0:
-                    if len(positive_ticks) > 0:
-                        # Mirror the spacing: use the same interval size as positive side
-                        spacing = positive_ticks[0] - 1.0
-                        # Create the same number of negative ticks as positive ticks
-                        n_negative = len(positive_ticks)
-                        negative_ticks = 1.0 - np.arange(1, n_negative + 1) * spacing
-                        negative_ticks = negative_ticks[negative_ticks >= vmin]
-                    else:
-                        # If no positive ticks, create evenly spaced ticks below 1.0
-                        negative_ticks = np.linspace(symmetric_min, 1.0, n_ticks_per_side + 1)[:-1]  # Exclude 1.0
-                        negative_ticks = negative_ticks[negative_ticks >= vmin]
+                # Generate exactly 3 ticks below 1.0 (red side)
+                if range_below > 0:
+                    # Three ticks: vmin, and 2 equally spaced between vmin and 1.0
+                    negative_ticks = np.array([
+                        vmin,
+                        1.0 - (2.0 / 3.0) * range_below,  # 1/3 of the way from 1.0 to vmin
+                        1.0 - (1.0 / 3.0) * range_below   # 2/3 of the way from 1.0 to vmin
+                    ])
+                    # Ensure all are within bounds and below 1.0
+                    negative_ticks = negative_ticks[(negative_ticks < 1.0) & (negative_ticks >= vmin)]
+                    # Sort ascending
+                    negative_ticks = np.sort(negative_ticks)
                 else:
                     negative_ticks = np.array([])
                 
+                # Generate exactly 3 ticks above 1.0 (blue side)
+                if range_above > 0:
+                    # Three ticks: 2 equally spaced between 1.0 and vmax, and vmax
+                    positive_ticks = np.array([
+                        1.0 + (1.0 / 3.0) * range_above,  # 1/3 of the way from 1.0 to vmax
+                        1.0 + (2.0 / 3.0) * range_above,  # 2/3 of the way from 1.0 to vmax
+                        vmax
+                    ])
+                    # Ensure all are within bounds and above 1.0
+                    positive_ticks = positive_ticks[(positive_ticks > 1.0) & (positive_ticks <= vmax)]
+                    # Sort ascending
+                    positive_ticks = np.sort(positive_ticks)
+                else:
+                    positive_ticks = np.array([])
+                
                 # Combine all ticks: negative, 1.0, and positive
-                all_ticks = np.concatenate([negative_ticks, [1.0], positive_ticks])
+                all_ticks_list = []
+                if len(negative_ticks) > 0:
+                    all_ticks_list.extend(negative_ticks.tolist())
+                all_ticks_list.append(1.0)
+                if len(positive_ticks) > 0:
+                    all_ticks_list.extend(positive_ticks.tolist())
+                
+                all_ticks = np.array(all_ticks_list)
                 all_ticks = np.unique(all_ticks)  # Remove duplicates
-                all_ticks = np.clip(all_ticks, vmin, vmax)  # Ensure all ticks are within bounds
                 all_ticks = np.sort(all_ticks)  # Final sort
                 
-                # Format tick labels with appropriate precision
+                # Format tick labels with 2 decimals to prevent cutoff and keep labels concise
+                # Explicitly set ticks and labels, ensuring all are shown (including red side)
+                tick_labels = [f'{tick:.2f}' for tick in all_ticks]
+                
+                # Set ticks first - this creates the tick marks
                 cbar.set_ticks(all_ticks)
-                cbar.set_ticklabels([f'{tick:.2f}' for tick in all_ticks])
+                
+                # Then set labels for all ticks - ensure every tick has a label
+                cbar.set_ticklabels(tick_labels)
+                
+                # Force update to apply the changes
+                cbar.update_ticks()
+                
+                # Explicitly verify and set all labels to ensure they're all visible
+                # This is critical for the red (negative) side labels
+                yticklabels = cbar.ax.get_yticklabels()
+                # Make sure we have the same number of labels as ticks
+                if len(yticklabels) != len(all_ticks):
+                    # If counts don't match, re-set all labels manually using the axes directly
+                    cbar.ax.set_yticks(all_ticks)
+                    cbar.ax.set_yticklabels(tick_labels)
+                    yticklabels = cbar.ax.get_yticklabels()
+                
+                # Explicitly set each label to be visible
+                for i in range(len(all_ticks)):
+                    if i < len(yticklabels):
+                        yticklabels[i].set_text(tick_labels[i])
+                        yticklabels[i].set_visible(True)
+                        yticklabels[i].set_rotation(0)  # Ensure horizontal labels
             else:
                 cbar.set_label('Design Value', labelpad=10, fontsize=12, weight='bold')
             ax0.spines['bottom'].set_visible(False)

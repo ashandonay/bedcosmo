@@ -24,11 +24,7 @@ base_omegak:
   particle_batch_size: 50000  
   n_evals: 10
   param_space: physical
-  design_step: [0.01, 0.01, 0.01, 0.01]
-  design_lower: [0.02, 0.1, 0.1, 0.15]
-  design_upper: [0.0856, 0.294, 0.5, 0.2323]
-  design_sum_lower: 1.0
-  design_sum_upper: 1.0
+  design_args_path: null
   design_chunk_size: 1
   profile: true
   verbose: true
@@ -42,11 +38,7 @@ base_w:
   particle_batch_size: 50000  
   n_evals: 10
   param_space: physical
-  design_step: [0.01, 0.01, 0.01, 0.01]
-  design_lower: [0.02, 0.1, 0.1, 0.15]
-  design_upper: [0.0856, 0.294, 0.5, 0.2323]
-  design_sum_lower: 1.0
-  design_sum_upper: 1.0
+  design_args_path: null
   design_chunk_size: 1
   profile: true
   verbose: true
@@ -60,11 +52,7 @@ base_w_wa:
   particle_batch_size: 50000  
   n_evals: 10
   param_space: physical
-  design_step: [0.01, 0.01, 0.01, 0.01]
-  design_lower: [0.02, 0.1, 0.1, 0.15]
-  design_upper: [0.0856, 0.294, 0.5, 0.2323]
-  design_sum_lower: 1.0
-  design_sum_upper: 1.0
+  design_args_path: null
   design_chunk_size: 1
   profile: true
   verbose: true
@@ -79,11 +67,7 @@ base_omegak_w_wa:
   n_evals: 10
   param_space: physical
   input_designs: null
-  design_step: [0.01, 0.01, 0.01, 0.01]
-  design_lower: [0.02, 0.1, 0.1, 0.15]
-  design_upper: [0.0856, 0.294, 0.5, 0.2323]
-  design_sum_lower: 1.0
-  design_sum_upper: 1.0
+  design_args_path: null
   design_chunk_size: 1
   profile: true
   verbose: true

@@ -266,14 +266,14 @@ class NumTracers:
         self.priors, self.param_constraints, self.latex_labels = self.get_priors(priors_path)
         self.desi_priors, _, _ = self.get_priors(os.path.join(home_dir, f"data/desi/bao_{self.dataset}", 'priors.yaml'))
         self.cosmo_params = list(self.priors.keys())
-        self.param_bijector = Bijector(self, cdf_bins=5000, cdf_samples=1e5)
+        self.param_bijector = Bijector(self, cdf_bins=5000, cdf_samples=1e6)
         if bijector_state is not None:
             if self.global_rank == 0:
                 print(f"Restoring bijector state from checkpoint.")
             self.param_bijector.set_state(bijector_state)
         # if the priors are not the same as the DESI priors, create a new bijector for the DESI samples
         if self.priors.items() != self.desi_priors.items():
-            self.desi_bijector = Bijector(self, priors=self.desi_priors, cdf_bins=5000, cdf_samples=2e5)
+            self.desi_bijector = Bijector(self, priors=self.desi_priors, cdf_bins=5000, cdf_samples=1e6)
         else:
             self.desi_bijector = self.param_bijector
 
