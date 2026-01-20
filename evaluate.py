@@ -22,7 +22,7 @@ import numpy as np
 import torch
 import getdist
 import argparse
-from plotting import *
+from plotting import RunPlotter
 import traceback
 from pyro_oed_src import nf_loss, LikelihoodDataset
 from matplotlib.patches import Rectangle
@@ -109,6 +109,9 @@ class Evaluator:
             self.eig_data['input_designs'] = self.input_designs.cpu().numpy().tolist()
             self.eig_data['nominal_design'] = self.experiment.nominal_design.cpu().numpy().tolist()
             
+        
+        # Initialize plotter for saving figures
+        self.plotter = RunPlotter(run_id=self.run_id, cosmo_exp=self.cosmo_exp)
         
         # Cache for EIG calculations to avoid redundant computations
         self._eig_cache = {}
@@ -260,123 +263,6 @@ class Evaluator:
 
     
     @profile_method
-    def generate_posterior(self, step='last', display=['nominal', 'optimal'], levels=[0.68]):
-        """
-        Generates the posterior for given type(s) of design input.
-
-        Args:
-            step (int): The checkpoint step to plot the posterior for.
-            display (list): The designs to display.
-            levels (float or list): Contour level(s) to plot.
-
-        """
-        # Normalize levels to always be a list
-        if isinstance(levels, (int, float)):
-            levels = [levels]
-        
-        print(f"Generating posterior plot...")
-        all_samples = []
-        all_colors = []
-        all_alphas = []
-        
-        if 'nominal' in display:
-            print(f"Generating posterior samples with nominal design...")
-            nominal_samples = self._eval_step(step, nominal_design=True)
-            all_samples.append(nominal_samples)
-            all_colors.append('tab:blue')
-            all_alphas.append(1.0)
-        
-        # Check if we have multiple designs (grid) or single/multiple input designs
-        # Only show "optimal" if we have a grid (multiple designs to choose from)
-        has_multiple_designs = len(self.input_designs) > 1
-        
-        if 'optimal' in display and has_multiple_designs:
-            print(f"Generating posterior samples with optimal design...")
-            optimal_samples = self._eval_step(step)
-            all_samples.append(optimal_samples)
-            all_colors.append('tab:orange')
-            all_alphas.append(1.0)
-
-        # Get the DESI MCMC samples
-        try:
-            nominal_samples_gd = self.experiment.get_nominal_samples(transform_output=self.nominal_transform_output)
-            all_samples.append(nominal_samples_gd)
-            all_colors.append('black')
-            all_alphas.append(1.0)
-            ref_contour = True
-        except NotImplementedError:
-            print(f"Warning: get_nominal_samples not implemented for {self.cosmo_exp}, skipping nominal design plot.")
-            ref_contour = False
-            pass
-        
-        plot_width = 10
-        g = plot_posterior(all_samples, all_colors, levels=levels, width_inch=plot_width, alpha=all_alphas)
-        
-        # Calculate dynamic font sizes based on plot dimensions and number of parameters
-        n_params = len(all_samples[0].paramNames.names)
-        # Base font size scales with plot width AND number of parameters
-        # More parameters = larger triangle plot = need larger fonts
-        # Use additive sqrt scaling with reduced coefficients for better balance
-        base_fontsize = max(6, min(18, plot_width * (0.2 + 0.42 * np.sqrt(n_params))))
-        title_fontsize = base_fontsize * 1.15  # Title slightly larger than base
-        legend_fontsize = base_fontsize * 0.65  # Legend smaller than base
-        
-        if self.display_run:
-            title = f"Posterior Comparison - Run: {self.run_id[:8]}"
-        else:
-            title = f"Posterior Comparison"
-        g.fig.suptitle(title, fontsize=title_fontsize, weight='bold')
-
-        # Get EIG values for legend
-        nominal_eig = None
-        optimal_eig = None
-        if 'nominal' in display:
-            try:
-                nominal_eig, _ = self.get_eig(step, nominal_design=True)
-            except Exception as e:
-                print(f"Warning: Could not get EIG for nominal design: {e}")
-        if 'optimal' in display:
-            try:
-                eigs, _ = self.get_eig(step, nominal_design=False)
-                if len(self.input_designs) > 1:
-                    optimal_eig = np.max(eigs)
-                else:
-                    optimal_eig = eigs[0] if isinstance(eigs, np.ndarray) else eigs
-            except Exception as e:
-                print(f"Warning: Could not get EIG for optimal design: {e}")
-
-        # Create custom legend
-        if g.fig.legends:
-            for legend in g.fig.legends:
-                legend.remove()
-        custom_legend = []
-        if 'nominal' in display:
-            eig_str = f", EIG: {nominal_eig:.3f} bits" if nominal_eig is not None else ""
-            custom_legend.append(
-                Line2D([0], [0], color='tab:blue', label=f'Nominal Design (NF){eig_str}', linewidth=1.2)
-            )
-        # Check if we have multiple designs (grid) - only show optimal if we have multiple
-        has_multiple_designs = len(self.input_designs) > 1
-        if 'optimal' in display and has_multiple_designs:
-            eig_str = f", EIG: {optimal_eig:.3f} bits" if optimal_eig is not None else ""
-            custom_legend.append(
-                Line2D([0], [0], color='tab:orange', label=f'Optimal Design (NF){eig_str}', linewidth=1.2)
-            )
-        elif 'optimal' in display and not has_multiple_designs:
-            eig_str = f", EIG: {optimal_eig:.3f} bits" if optimal_eig is not None else ""
-            custom_legend.append(
-                Line2D([0], [0], color='tab:orange', label=f'Input Design (NF){eig_str}', linewidth=1.2)
-            )
-        if ref_contour:
-            custom_legend.append(
-                Line2D([0], [0], color='black', label=f'Nominal Design (MCMC)', linewidth=1.2)
-            )
-        g.fig.set_constrained_layout(True)
-        leg = g.fig.legend(handles=custom_legend, loc='upper right', bbox_to_anchor=(0.99, 0.96), fontsize=legend_fontsize)
-        leg.set_in_layout(False)
-        save_figure(f"{self.save_path}/plots/posterior_eval_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{self.param_space}.png", fig=g.fig, dpi=400)
-    
-    @profile_method
     def sample_posterior(self, step, levels, num_data_samples=10, global_rank=0, central=True, batch_size=1):
         # Normalize levels to always be a list
         if isinstance(levels, (int, float)):
@@ -460,7 +346,7 @@ class Evaluator:
             colors.extend([color]*len(data_idxs) + ['black'])
 
         plot_width = 10
-        g = plot_posterior(all_samples, colors, levels=levels, alpha=0.4, width_inch=plot_width)
+        g = self.plotter.plot_posterior(all_samples, colors, levels=levels, alpha=0.4, width_inch=plot_width)
         
         # Calculate dynamic font sizes based on plot dimensions and number of parameters
         n_params = len(all_samples[0].paramNames.names)
@@ -528,7 +414,8 @@ class Evaluator:
         else:
             title = f"Posterior Evaluations for {num_data_samples} Likelihood Samples"
         g.fig.suptitle(title, fontsize=title_fontsize, weight='bold')
-        save_figure(f"{self.save_path}/plots/posterior_samples_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png", fig=g.fig, dpi=400)
+        filename = f"posterior_samples_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+        self.plotter.save_figure(g.fig, filename, run_id=self.run_id, experiment_id=self.exp_id, dpi=400)
 
     def _compute_eig(self, flow_model, nominal_design=False, designs=None):
         """
@@ -913,125 +800,6 @@ class Evaluator:
         return (result, result_std)
 
     @profile_method
-    def design_comparison(self, step, width=0.2, log_scale=True, use_fractional=False):
-        """
-        Plots a bar chart the nominal and optimal design.
-        
-        Args:
-            step: The step to evaluate
-            width: Width of the bars in the bar chart
-            log_scale: Whether to use log scale for y-axis (default: True)
-            use_fractional: Whether to plot fractional values or absolute quantities (default: False)
-        """
-        print(f"Generating design comparison plot...")
-        
-        # Determine which design to use
-        # If we have multiple designs, find optimal; otherwise use the first (and only) design
-        optimal_eig = None
-        nominal_eig = None
-        if len(self.input_designs) > 1:
-            # Get EIGs and optimal design
-            eigs, _ = self.get_eig(step, nominal_design=False)
-            optimal_eig = np.max(eigs)
-            optimal_design = self.input_designs[np.argmax(eigs)]
-            design = optimal_design.cpu().numpy()
-        else:
-            # Single design case - use the only available design
-            try:
-                eigs, _ = self.get_eig(step, nominal_design=False)
-                optimal_eig = eigs[0] if isinstance(eigs, np.ndarray) else eigs
-            except Exception as e:
-                print(f"Warning: Could not get EIG for input design: {e}")
-            design = self.input_designs[0].cpu().numpy()
-        
-        # Get EIG for nominal design
-        try:
-            nominal_eig, _ = self.get_eig(step, nominal_design=True)
-        except Exception as e:
-            print(f"Warning: Could not get EIG for nominal design: {e}")
-        
-        # Get nominal design and total observations
-        nominal_design_cpu = self.experiment.nominal_design.cpu().numpy()
-        nominal_total_obs = self.experiment.nominal_total_obs
-        
-        # Determine whether to use fractional or absolute values
-        if use_fractional:
-            # Use fractional values directly
-            nominal_design_plot = nominal_design_cpu
-            design_plot = design
-            # Get maximum possible tracers as fractions
-            max_tracers = np.array([self.experiment.num_targets[target] for target in self.experiment.design_labels])
-            max_tracers = max_tracers / nominal_total_obs
-            ylabel = 'Fraction of Total Tracers'
-        else:
-            # Convert fractional values to actual number of tracers
-            nominal_design_plot = nominal_design_cpu * nominal_total_obs
-            design_plot = design * nominal_total_obs
-            # Get maximum possible tracers for each class
-            max_tracers = np.array([self.experiment.num_targets[target] for target in self.experiment.design_labels])
-            ylabel = 'Number of Tracers'
-        
-        # Set the positions for the bars
-        x = np.arange(len(self.experiment.design_labels))  # the label locations
-
-        # Create the bar chart
-        fig, ax = plt.subplots(figsize=(14, 7))
-        
-        # Add gray bars with dotted edges for maximum possible tracers
-        # Use Rectangle patches for the filled bars, then manually draw dotted edges
-        for i, max_val in enumerate(max_tracers):
-            # Draw filled gray rectangle
-            rect = Rectangle((x[i] - width, 0), width*2, max_val,
-                           facecolor='gray', alpha=0.3, edgecolor='none')
-            ax.add_patch(rect)
-            # Manually draw dotted edges
-            x_left = x[i] - width
-            x_right = x[i] + width
-            y_top = max_val
-            # Top edge
-            ax.plot([x_left, x_right], [y_top, y_top], 'k:', linewidth=1.5, alpha=0.7)
-            # Left edge
-            ax.plot([x_left, x_left], [0, y_top], 'k:', linewidth=1.5, alpha=0.7)
-            # Right edge
-            ax.plot([x_right, x_right], [0, y_top], 'k:', linewidth=1.5, alpha=0.7)
-        
-        # Determine label based on whether we have multiple designs or a single input design
-        has_multiple_designs = len(self.input_designs) > 1
-        design_label = 'Optimal Design' if has_multiple_designs else 'Input Design'
-        # Add EIG values to labels
-        nominal_label = 'Nominal Design'
-        if nominal_eig is not None:
-            nominal_label += f', EIG: {nominal_eig:.3f} bits'
-        design_label_with_eig = design_label
-        if optimal_eig is not None:
-            design_label_with_eig += f', EIG: {optimal_eig:.3f} bits'
-        
-        bars1 = ax.bar(x - width/2, nominal_design_plot, width, label=nominal_label, color='tab:blue')
-        bars2 = ax.bar(x + width/2, design_plot, width, label=design_label_with_eig, color='tab:orange')
-        
-        # Add label for max possible tracers (manually since we used patches)
-        max_label = 'Max Possible Tracers' if not use_fractional else 'Max Possible Fraction'
-        ax.plot([], [], 'k:', linewidth=1.5, alpha=0.7, label=max_label)
-        
-        ax.set_xlabel('Tracer Class', fontsize=12, weight='bold')
-        ax.set_ylabel(ylabel, fontsize=12, weight='bold')
-        ax.set_xticks(x)
-        ax.set_xticklabels(self.experiment.design_labels)
-        ax.legend(fontsize=14)
-        if log_scale:
-            ax.set_yscale('log')
-        if self.display_run:
-            title = f"Design Comparison - Run: {self.run_id[:8]}"
-        else:
-            title = f"Design Comparison"
-        plt.suptitle(title, fontsize=16, weight='bold')
-        plt.tight_layout()
-        save_path = f"{self.save_path}/plots/design_comparison_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
-        save_figure(save_path, fig=fig, dpi=400)
-        plt.close(fig)
-
-
-    @profile_method
     def eig_grid(self, step):
         """
         Plots the EIG on a 2D grid with subplot layout:
@@ -1165,524 +933,8 @@ class Evaluator:
         fig.suptitle(title, fontsize=16, y=0.995, weight='bold')
         
         plt.tight_layout()
-        save_figure(f"{self.save_path}/plots/eig_grid_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png", fig=fig, dpi=400)
-
-    @profile_method
-    def posterior_steps(self, steps, levels=[0.68]):
-        """
-        Plots posterior distributions at different training steps for a single run.
-        
-        Args:
-            steps (list): List of steps to plot. Can include 'last' or 'loss_best' as special values.
-            levels (float or list): Contour level(s) to plot.
-        """
-        # Normalize levels to always be a list
-        if isinstance(levels, (int, float)):
-            levels = [levels]
-        
-        print(f"Running posterior steps evaluation...")
-        colors = plt.cm.viridis_r(np.linspace(0, 1, len(steps)))
-        
-        all_samples = []
-        all_colors = []
-        custom_legend = []
-        checkpoint_dir = f'{self.storage_path}/mlruns/{self.exp_id}/{self.run_id}/artifacts/checkpoints'
-        if not os.path.isdir(checkpoint_dir):
-            print(f"Warning: Checkpoint directory not found for run {self.run_id}, skipping. Path: {checkpoint_dir}")
-            return
-        for i, step in enumerate(steps):
-            samples = self._eval_step(step, nominal_design=True)
-            # Convert RGBA color to hex string before extending
-            color_hex = matplotlib.colors.to_hex(colors[i % len(colors)])
-            # samples is a single MCSamples object
-            all_samples.append(samples)
-            all_colors.append(color_hex)
-            if step == 'last':
-                step_label = self.run_args["total_steps"]
-            elif step == 'loss_best':
-                step_label = 'Best Loss'
-            else:
-                step_label = step
-            custom_legend.append(
-                Line2D([0], [0], color=color_hex, 
-                        label=f'Step {step_label}', linewidth=1.2)
-            )
-
-        try:
-            # Get nominal samples using reference experiment
-            nominal_samples_gd = self.experiment.get_nominal_samples(transform_output=self.nominal_transform_output)
-            all_samples.append(nominal_samples_gd)
-            all_colors.append('black')  
-        except NotImplementedError:
-            print(f"Warning: get_nominal_samples not implemented for {self.cosmo_exp}, skipping nominal design plot.")
-            pass
-
-        plot_width = 12
-        g = plot_posterior(all_samples, all_colors, levels=levels, width_inch=plot_width)
-        
-        # Calculate dynamic font sizes based on plot dimensions and number of parameters
-        n_params = len(all_samples[0].paramNames.names)
-        # Scale fonts up with more parameters since triangle plot grows
-        # Use additive sqrt scaling with reduced coefficients for better balance
-        base_fontsize = max(6, min(18, plot_width * (0.2 + 0.42 * np.sqrt(n_params))))
-        title_fontsize = base_fontsize * 1.15
-        legend_fontsize = base_fontsize * 0.80
-        
-        # Remove existing legends if any
-        if g.fig.legends:
-            for legend in g.fig.legends:
-                legend.remove()
-
-        custom_legend.append(
-            Line2D([0], [0], color='black', label=f'DESI', linewidth=1.2)
-        )
-        
-        g.fig.set_constrained_layout(True)
-        leg = g.fig.legend(handles=custom_legend, loc='upper right', bbox_to_anchor=(0.99, 0.96), fontsize=legend_fontsize)
-        leg.set_in_layout(False)
-        levels_str = ', '.join([f"{int(level*100)}%" for level in levels])
-        if self.display_run:
-            title = f"Posterior Steps - Run: {self.run_id[:8]}"
-        else:
-            title = f"Posterior Steps"
-        g.fig.suptitle(title, fontsize=title_fontsize, weight='bold')
-        
-        save_figure(f"{self.save_path}/plots/posterior_steps_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png", fig=g.fig, dpi=400)
-
-    @profile_method
-    def eig_designs(self, steps='last', sort=True, sort_step=None, include_nominal=True):
-        """
-        Plots sorted EIG values and corresponding designs using the evaluator's EIG calculations.
-        Can plot single or multiple training steps.
-        
-        Args:
-            steps (int, str, or list): Step(s) to evaluate. Can be:
-                                      - Single int/str (e.g., 5000 or 'last')
-                                      - List of steps (e.g., [2500, 5000, 7500, 'last'])
-            sort_step (int, str, or None): Which step to use for sorting designs. Must be in `steps`.
-                                          If None, uses 'last' if present, otherwise the largest step.
-            include_nominal (bool): Whether to include the nominal EIG in the plot.
-        """
-        # Convert single step to list for unified handling
-        if not isinstance(steps, list):
-            steps = [steps]
-        
-        print(f"Generating EIG designs plot for step(s) {steps}...")
-        
-        # Only generate sorted EIG plot if we have multiple designs (grid case)
-        if len(self.input_designs) <= 1:
-            print("Warning: Single or no designs available, skipping sorted EIG plot.")
-            return
-        
-        # Determine which step to use for sorting
-        if sort_step is None:
-            # Default: use 'last' if present, otherwise the largest numeric step
-            if 'last' in steps:
-                sort_step = 'last'
-            else:
-                # Find the largest numeric step
-                numeric_steps = [s for s in steps if isinstance(s, int)]
-                if numeric_steps:
-                    sort_step = max(numeric_steps)
-                else:
-                    sort_step = steps[-1]  # Fall back to last in list
-        else:
-            # Validate that sort_step is in the steps list
-            if sort_step not in steps:
-                raise ValueError(f"sort_step={sort_step} must be one of the steps to plot: {steps}")
-        
-        print(f"  Sorting designs by step: {sort_step}")
-        
-        # Create color gradient for multiple steps (light gray to black)
-        if len(steps) > 1:
-            from matplotlib.colors import LinearSegmentedColormap
-            light_gray = np.array([0.7, 0.7, 0.7])  # RGB for light gray
-            black = np.array([0.0, 0.0, 0.0])        # RGB for black
-            
-            n_steps = len(steps)
-            colors = np.array([light_gray * (1 - i/(n_steps-1)) + black * (i/(n_steps-1)) 
-                              for i in range(n_steps)])
-        else:
-            colors = [np.array([0.0, 0.0, 0.0])]  # Just black for single step
-        
-        # Store EIG data for all steps
-        all_steps_data = []
-        sorted_eigs_idx = None
-        
-        for step_idx, s in enumerate(steps):
-            # Calculate/get EIG data for this step (get_eig handles caching and storage)
-            print(f"  Getting EIG data for step {s}...")
-            eigs_avg, eigs_std = self.get_eig(s, nominal_design=False)
-            eigs_avg = np.atleast_1d(eigs_avg)
-            eigs_std = np.atleast_1d(eigs_std)
-            
-            # Get the actual step number that was resolved (needed for step_key)
-            _, selected_step = load_model(
-                self.experiment, s, self.run_obj, 
-                self.run_args, self.device, 
-                global_rank=self.global_rank
-            )
-            
-            # Store data for this step
-            data_dict = {
-                'step': selected_step,
-                'step_label': s,
-                'eigs_avg': eigs_avg,
-                'eigs_std': eigs_std,
-                'color': colors[step_idx]
-            }
-            
-            if include_nominal:
-                # Get nominal EIG (get_eig handles caching and storage)
-                nominal_eig, _ = self.get_eig(s, nominal_design=True)
-                data_dict['nominal'] = float(nominal_eig)
-                
-            all_steps_data.append(data_dict)
-            
-            # Use the specified sort_step to determine sorting order
-            if s == sort_step:
-                if sort:
-                    sorted_eigs_idx = np.argsort(eigs_avg)[::-1]
-                else:
-                    # Keep original design order
-                    sorted_eigs_idx = np.arange(len(eigs_avg))
-        
-        # Get designs and order them according to sorted_eigs_idx (use reference experiment)
-        designs = self.input_designs.cpu().numpy()
-        if sorted_eigs_idx is None:
-            sorted_eigs_idx = np.arange(len(designs))
-        sorted_designs = designs[sorted_eigs_idx]
-
-        nominal_sorted_pos = None
-        nominal_sorted_value = None
-
-        metrics_step_data = next((d for d in all_steps_data if d['step_label'] == sort_step), None)
-        
-        # Check if designs are 1D or multi-dimensional
-        is_1d_design = (sorted_designs.shape[1] == 1)
-        
-        if include_nominal:
-            nominal_design = self.experiment.nominal_design.cpu().numpy()
-            try:
-                nominal_idx = int(np.argmin(np.linalg.norm(designs - nominal_design, axis=1)))
-            except ValueError:
-                nominal_idx = None
-
-            if nominal_idx is not None:
-                if is_1d_design and not sort:
-                    nominal_sorted_value = float(designs[nominal_idx, 0])
-                else:
-                    matches = np.where(sorted_eigs_idx == nominal_idx)[0]
-                    if matches.size > 0:
-                        nominal_sorted_pos = int(matches[0])
-
-        # Create figure with subplots and space for colorbar
-        if is_1d_design and not sort:
-            # For 1D designs without sorting, plot EIG directly against design variable (no second subplot needed)
-            fig, ax0 = plt.subplots(figsize=(16, 6))
-            ax1 = None
-        else:
-            # For sorted 1D or multi-dimensional designs, align heatmap beneath line plot and add a vertical colorbar
-            if is_1d_design and sort:
-                height_ratios = [0.65, 0.15]
-            else:
-                height_ratios = [0.6, 0.2]
-            fig = plt.figure(figsize=(16, 6))
-            gs = gridspec.GridSpec(
-                2, 1,
-                height_ratios=height_ratios,
-                hspace=0.0
-            )
-            ax0 = fig.add_subplot(gs[0, 0])  # Top plot for EIG
-            ax1 = fig.add_subplot(gs[1, 0], sharex=ax0)  # Bottom plot for heatmap shares x-axis
-            # Reserve a dedicated colorbar axis on the right that spans both subplots
-            # Adjust margins: move colorbar closer to plot, leave more room on right for label
-            fig.subplots_adjust(left=0.06, right=0.88)  # More room on right for label
-            # Get bboxes to calculate full height spanning both subplots
-            bbox0 = ax0.get_position()
-            bbox1 = ax1.get_position()
-            cbar_width = 0.02  # Slightly wider colorbar
-            cbar_gap = 0.01  # Smaller gap - move colorbar closer to plot
-            cbar_left = bbox1.x1 + cbar_gap  # Position on right, close to plot
-            # Make colorbar span full height from top of ax0 to bottom of ax1
-            cbar_bottom = bbox1.y0  # Bottom of ax1
-            cbar_height = bbox0.y1 - bbox1.y0  # Full height from top of ax0 to bottom of ax1
-            cbar_ax = fig.add_axes([cbar_left, cbar_bottom, cbar_width, cbar_height])
-            plt.setp(ax0.get_xticklabels(), visible=False)
-            ax0.tick_params(axis='x', which='both', length=0)
-        
-        # Plot all steps
-        for step_data in all_steps_data:
-            sorted_eigs_avg = step_data['eigs_avg'][sorted_eigs_idx]
-            
-            # For 1D designs without sorting, use design variable values as x-axis; otherwise use index
-            if is_1d_design and not sort:
-                x_vals = sorted_designs[:, 0]
-            else:
-                x_vals = np.arange(len(sorted_eigs_avg))
-            
-            # Plot error bars (gray fill) only for the sorted step
-            if step_data['step_label'] == sort_step and 'eigs_std' in step_data:
-                sorted_eigs_std = step_data['eigs_std'][sorted_eigs_idx]
-                ax0.fill_between(
-                    x_vals,
-                    sorted_eigs_avg - sorted_eigs_std,
-                    sorted_eigs_avg + sorted_eigs_std,
-                    color='gray', alpha=0.3, zorder=1
-                )
-            
-            # Plot EIG (main line)
-            if len(all_steps_data) > 1:
-                # Multiple steps: show step number in label
-                line_label = f"Step {step_data['step']}"
-            else:
-                # Single step: show rank
-                sort_label = "Sorted" if sort else None
-                if sort_label is not None:
-                    line_label = f"{sort_label} EIG"
-                else:
-                    line_label = f"EIG"
-            
-            # Convert color array to tuple for matplotlib
-            plot_color = tuple(step_data['color']) if isinstance(step_data['color'], np.ndarray) else step_data['color']
-            ax0.plot(x_vals, sorted_eigs_avg, label=line_label, 
-                    color=plot_color, linestyle='-', linewidth=2.5, alpha=1.0 if step_data['step_label'] == sort_step else 0.6, zorder=5)
-            
-            # Plot nominal EIG for the sorting step
-            if step_data['step_label'] == sort_step and include_nominal:
-                ax0.axhline(y=step_data['nominal'], color='tab:blue', linestyle='--', 
-                           label='Nominal EIG', linewidth=2, zorder=10)
-        
-        # Add vertical orange dotted line and orange dot at optimal EIG
-        # Get the data for the sort_step to find optimal EIG
-        sort_step_data = next((d for d in all_steps_data if d['step_label'] == sort_step), None)
-        if sort_step_data is not None:
-            sorted_eigs_avg = sort_step_data['eigs_avg'][sorted_eigs_idx]
-            # Determine x_vals for the sort_step
-            if is_1d_design and not sort:
-                x_vals_optimal = sorted_designs[:, 0]
-            else:
-                x_vals_optimal = np.arange(len(sorted_eigs_avg))
-            
-            # Find optimal EIG position
-            optimal_idx = np.argmax(sorted_eigs_avg)
-            optimal_x = x_vals_optimal[optimal_idx]
-            optimal_y = sorted_eigs_avg[optimal_idx]
-            
-            # Plot vertical orange dotted line
-            ax0.axvline(optimal_x, color='tab:orange', linestyle=':', linewidth=2, 
-                       zorder=8)
-            # Plot orange dot at optimal position
-            ax0.plot(optimal_x, optimal_y, 'o', color='tab:orange', markersize=8, zorder=9, 
-                    label='Optimal Design')
-        
-        # Set x-axis label and limits based on design dimensionality and sorting
-        if is_1d_design and not sort:
-            ax0.set_xlabel(f'${self.experiment.design_labels[0]}$', fontsize=12, weight='bold')
-            ax0.set_xlim(x_vals.min(), x_vals.max())
-        else:
-            ax0.set_xlim(-0.5, len(sorted_eigs_avg) - 0.5)
-        
-        ax0.set_ylabel("Expected Information Gain [bits]", fontsize=12, weight='bold')
-        '''
-        if nominal_sorted_pos is not None:
-            if is_1d_design and not sort:
-                ax0.axvline(nominal_sorted_value, color='black', linestyle=':', linewidth=1.5, label='Nearest Nominal Design')
-            elif nominal_sorted_pos is not None:
-                ax0.axvline(nominal_sorted_pos, color='black', linestyle=':', linewidth=1.5, label='Nearest Nominal Design')
-        '''
-        ax0.legend(loc='lower left', fontsize=9, framealpha=0.9)
-        
-        # Plot sorted designs
-        if is_1d_design and sort:
-            # For 1D sorted designs, visualize as a single-row heatmap to highlight values
-            im = ax1.imshow(sorted_designs.T, aspect='auto', cmap='viridis')
-            ax1.set_ylabel('')
-            ax1.set_yticks([0])
-            ax1.set_yticklabels([f'${self.experiment.design_labels[0]}$'])
-            ax1.tick_params(axis='y', length=0)
-            ax1.spines['top'].set_visible(False)
-            ax1.spines['right'].set_visible(True)
-            ax1.spines['left'].set_visible(True)
-            ax1.set_xlim(-0.5, len(sorted_designs) - 0.5)
-            if len(all_steps_data) > 1:
-                sort_step_number = next((step_data['step'] for step_data in all_steps_data 
-                                        if step_data['step_label'] == sort_step), sort_step)
-                xlabel = f"Design Index (sorted by reference step {sort_step_number} EIG)"
-            else:
-                xlabel = "Design Index (sorted by EIG)"
-            ax1.set_xlabel(xlabel, fontsize=12, weight='bold')
-            ax1.margins(x=0)
-            plt.setp(ax1.get_xticklabels(), rotation=0)
-            if nominal_sorted_pos is not None:
-                ax1.axvline(nominal_sorted_pos, color='black', linestyle=':', linewidth=1.5)
-            cbar = fig.colorbar(im, cax=cbar_ax)
-            cbar.set_label('Design Value', labelpad=10, fontsize=12, weight='bold')
-            ax0.spines['bottom'].set_visible(False)
-            ax1.spines['bottom'].set_visible(True)
-        elif not is_1d_design:
-            # For multi-dimensional designs, use heatmap with colorbar
-            # Use ratio to nominal design colormapping (same as compare_best_designs)
-            nominal_design = self.experiment.nominal_design.cpu().numpy()
-            
-            # Check for zeros in nominal_design to avoid division by zero
-            if np.any(nominal_design == 0):
-                # Fallback to absolute values if nominal has zeros
-                plot_data = sorted_designs.T
-                use_relative_colors = False
-                cmap = 'viridis'
-            else:
-                # Simple ratio: designs / nominal_design
-                # Ratio > 1.0 means larger than nominal, Ratio < 1.0 means smaller than nominal
-                # Ensure proper broadcasting: sorted_designs is (n_designs, n_dims), nominal_design is (n_dims,)
-                plot_data = sorted_designs / nominal_design[np.newaxis, :]
-                plot_data = plot_data.T  # Transpose for imshow
-                use_relative_colors = True
-                cmap = 'RdBu'  # Red for larger ratios (>1.0), Blue for smaller ratios (<1.0)
-            
-            if use_relative_colors:
-                # Use TwoSlopeNorm to center the colormap at 1.0
-                from matplotlib.colors import TwoSlopeNorm
-                vmin = plot_data.min()
-                vmax = plot_data.max()
-                norm = TwoSlopeNorm(vmin=vmin, vcenter=1.0, vmax=vmax)
-                
-                im = ax1.imshow(plot_data, aspect='auto', cmap=cmap, norm=norm)
-            else:
-                im = ax1.imshow(plot_data, aspect='auto', cmap=cmap)
-            
-            if len(all_steps_data) > 1:
-                # Find the actual step number used for sorting
-                sort_step_number = next((step_data['step'] for step_data in all_steps_data 
-                                        if step_data['step_label'] == sort_step), sort_step)
-                if sort:
-                    xlabel = f"Design Index (sorted by reference step {sort_step_number} EIG)"
-                else:
-                    xlabel = f"Design Index"
-            else:
-                if sort:
-                    xlabel = "Design Index (sorted by EIG)"
-                else:
-                    xlabel = "Design Index"
-            ax1.set_xlabel(xlabel, fontsize=12, weight='bold')
-            ax1.set_yticks(np.arange(len(self.experiment.design_labels)), [f'${label}$' for label in self.experiment.design_labels])
-            ax1.spines['top'].set_visible(False)
-            ax1.spines['right'].set_visible(True)
-            ax1.spines['left'].set_visible(True)
-            ax1.tick_params(axis='y', length=0)
-            ax1.set_xlim(-0.5, len(sorted_designs) - 0.5)
-            ax1.set_ylabel('')
-            ax1.margins(x=0)
-            # Restore x tick labels only on the heatmap axis
-            plt.setp(ax1.get_xticklabels(), rotation=0)
-
-            # Add colorbar spanning the full height
-            cbar = fig.colorbar(im, cax=cbar_ax)
-            if use_relative_colors:
-                # Increase labelpad to prevent title from getting cut off
-                cbar.set_label('Ratio to Nominal Design', labelpad=15, fontsize=12, weight='bold')
-                # Set exactly 3 tick marks above and below 1.0, with min/max at the ends
-                # Ticks below 1.0 (red side): vmin and 2 equally spaced between vmin and 1.0
-                # Ticks above 1.0 (blue side): vmax and 2 equally spaced between 1.0 and vmax
-                
-                range_below = 1.0 - vmin
-                range_above = vmax - 1.0
-                
-                # Generate exactly 3 ticks below 1.0 (red side)
-                if range_below > 0:
-                    # Three ticks: vmin, and 2 equally spaced between vmin and 1.0
-                    negative_ticks = np.array([
-                        vmin,
-                        1.0 - (2.0 / 3.0) * range_below,  # 1/3 of the way from 1.0 to vmin
-                        1.0 - (1.0 / 3.0) * range_below   # 2/3 of the way from 1.0 to vmin
-                    ])
-                    # Ensure all are within bounds and below 1.0
-                    negative_ticks = negative_ticks[(negative_ticks < 1.0) & (negative_ticks >= vmin)]
-                    # Sort ascending
-                    negative_ticks = np.sort(negative_ticks)
-                else:
-                    negative_ticks = np.array([])
-                
-                # Generate exactly 3 ticks above 1.0 (blue side)
-                if range_above > 0:
-                    # Three ticks: 2 equally spaced between 1.0 and vmax, and vmax
-                    positive_ticks = np.array([
-                        1.0 + (1.0 / 3.0) * range_above,  # 1/3 of the way from 1.0 to vmax
-                        1.0 + (2.0 / 3.0) * range_above,  # 2/3 of the way from 1.0 to vmax
-                        vmax
-                    ])
-                    # Ensure all are within bounds and above 1.0
-                    positive_ticks = positive_ticks[(positive_ticks > 1.0) & (positive_ticks <= vmax)]
-                    # Sort ascending
-                    positive_ticks = np.sort(positive_ticks)
-                else:
-                    positive_ticks = np.array([])
-                
-                # Combine all ticks: negative, 1.0, and positive
-                all_ticks_list = []
-                if len(negative_ticks) > 0:
-                    all_ticks_list.extend(negative_ticks.tolist())
-                all_ticks_list.append(1.0)
-                if len(positive_ticks) > 0:
-                    all_ticks_list.extend(positive_ticks.tolist())
-                
-                all_ticks = np.array(all_ticks_list)
-                all_ticks = np.unique(all_ticks)  # Remove duplicates
-                all_ticks = np.sort(all_ticks)  # Final sort
-                
-                # Format tick labels with 2 decimals to prevent cutoff and keep labels concise
-                # Explicitly set ticks and labels, ensuring all are shown (including red side)
-                tick_labels = [f'{tick:.2f}' for tick in all_ticks]
-                
-                # Set ticks first - this creates the tick marks
-                cbar.set_ticks(all_ticks)
-                
-                # Then set labels for all ticks - ensure every tick has a label
-                cbar.set_ticklabels(tick_labels)
-                
-                # Force update to apply the changes
-                cbar.update_ticks()
-                
-                # Explicitly verify and set all labels to ensure they're all visible
-                # This is critical for the red (negative) side labels
-                yticklabels = cbar.ax.get_yticklabels()
-                # Make sure we have the same number of labels as ticks
-                if len(yticklabels) != len(all_ticks):
-                    # If counts don't match, re-set all labels manually using the axes directly
-                    cbar.ax.set_yticks(all_ticks)
-                    cbar.ax.set_yticklabels(tick_labels)
-                    yticklabels = cbar.ax.get_yticklabels()
-                
-                # Explicitly set each label to be visible
-                for i in range(len(all_ticks)):
-                    if i < len(yticklabels):
-                        yticklabels[i].set_text(tick_labels[i])
-                        yticklabels[i].set_visible(True)
-                        yticklabels[i].set_rotation(0)  # Ensure horizontal labels
-            else:
-                cbar.set_label('Design Value', labelpad=10, fontsize=12, weight='bold')
-            ax0.spines['bottom'].set_visible(False)
-            ax1.spines['bottom'].set_visible(True)
-        
-        # Add overall title
-        sort_title = "Sorted" if sort else None
-        if sort_title is not None:
-            title = f'{sort_title} EIG per Design (N={self.n_evals} Evaluations)'
-        else:
-            title = f'EIG per Design (N={self.n_evals} Evaluations)'
-        if self.display_run:
-            title += f' - Run: {self.run_id[:8]}'
-        if not (is_1d_design and not sort):
-            # Subplots already adjusted earlier
-            pass
-        else:
-            fig.subplots_adjust(left=0.06, right=0.98)
-        fig.suptitle(title, fontsize=16, y=0.95, weight='bold')
-        
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        save_figure(f"{self.save_path}/plots/eig_designs_{timestamp}.png", fig=fig, dpi=400)
-        
-        plt.show()
+        filename = f"eig_grid_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+        self.plotter.save_figure(fig, filename, run_id=self.run_id, experiment_id=self.exp_id, dpi=400)
 
     def run(self, eval_step=None):
         # Determine eval_step
@@ -1744,50 +996,52 @@ class Evaluator:
 
         # Update timing after EIG computation
         self._update_runtime()
-
-        try:
-            if self.cosmo_exp == 'num_tracers':
-                self.generate_posterior(step=eval_step, levels=self.levels)
-                self._update_runtime()
-            self._update_runtime()
-        except Exception as e:
-            traceback.print_exc()
-
-        try:
-            #self.posterior_steps(steps=[self.total_steps//4, self.total_steps//2, self.total_steps*3//4, 'last'])
-            self._update_runtime()
-        except Exception as e:
-            traceback.print_exc()
         
-        try:
-            self.eig_designs(steps=['last'], sort=self.sort, include_nominal=self.include_nominal)
-            self._update_runtime()
-        except Exception as e:
-            traceback.print_exc()
-
-        try:
-            if self.cosmo_exp == 'num_tracers':
-                self.design_comparison(step=eval_step, log_scale=True, use_fractional=False)
-                self._update_runtime()
-        except Exception as e:
-            traceback.print_exc()
-
-        try:
-            if self.cosmo_exp == 'num_tracers':
-                self.sample_posterior(step=eval_step, levels=[0.68], num_data_samples=20, central=True, batch_size=self.batch_size)
-                self._update_runtime()
-        except Exception as e:
-            traceback.print_exc()
+        # Check if EIG data is already complete (from loaded file)
+        is_complete = self.eig_data.get('status', 'incomplete') == 'complete'
         
-        if self.eig_file_path is None:
-            # Save combined eig_data at the end of run
+        # If not complete, mark as complete and save
+        if not is_complete:
             self.eig_data['status'] = 'complete'  # Mark as complete when evaluation finishes
             eig_data_save_path = f"{self.save_path}/eig_data_{self.timestamp}.json"
             with open(eig_data_save_path, "w") as f:
                 json.dump(self.eig_data, f, indent=2)
             print(f"Saved EIG data to {eig_data_save_path}")
-            
-            print(f"Evaluation completed successfully!")
+        
+        # Make some evaluation plots
+        try:
+            if self.cosmo_exp == 'num_tracers':
+                self.plotter.generate_posterior(step_key=eval_step, display=['nominal', 'optimal'], levels=self.levels)
+                self._update_runtime()
+        except Exception as e:
+            print(f"Warning: generate_posterior failed: {e}")
+            traceback.print_exc()
+        
+        try:
+            if self.cosmo_exp == 'num_tracers':
+                self.plotter.design_comparison(step_key=eval_step, log_scale=True, use_fractional=False)
+                self._update_runtime()
+        except Exception as e:
+            print(f"Warning: design_comparison failed: {e}")
+            traceback.print_exc()
+        
+        try:
+            self.plotter.eig_designs(step_key=eval_step, sort=self.sort, include_nominal=self.include_nominal)
+            self._update_runtime()
+        except Exception as e:
+            print(f"Warning: eig_designs failed: {e}")
+            traceback.print_exc()
+        
+        try:
+            # Plot posterior at different training steps
+            steps_to_plot = [self.total_steps//4, self.total_steps//2, self.total_steps*3//4, 'last']
+            self.plotter.posterior_steps(steps=steps_to_plot, levels=self.levels)
+            self._update_runtime()
+        except Exception as e:
+            print(f"Warning: posterior_steps failed: {e}")
+            traceback.print_exc()
+        
+        print(f"Evaluation completed successfully!")
 
 if __name__ == "__main__":
 

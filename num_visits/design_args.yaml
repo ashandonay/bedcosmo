@@ -1,5 +1,5 @@
 # Design arguments for num_visits experiment
-labels: ["n_u", "n_g", "n_r", "n_i", "n_z", "n_y"]
+labels: ["u", "g", "r", "i", "z", "y"]
 input_type: variable # variable or nominal
 input_designs_path: null
 step: [10.0, 10.0, 30.0, 30.0, 30.0, 30.0]

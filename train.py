@@ -42,7 +42,7 @@ import json
 import yaml
 import argparse
 import traceback
-from plotting import get_contour_area, plot_training, save_figure, plot_posterior
+from plotting import get_contour_area, RunPlotter
 
 class Trainer:
     def __init__(self, cosmo_exp, mlflow_exp, run_args, device=None, profile=False, verbose=False):
@@ -300,7 +300,8 @@ class Trainer:
                             pass
                         ranges = {param: (self.experiment.prior_data['parameters'][param]['plot']['lower'], self.experiment.prior_data['parameters'][param]['plot']['upper']) for param in self.experiment.cosmo_params}
                         plt.figure()
-                        plot_posterior(
+                        plotter = RunPlotter(run_id=self.run_obj.info.run_id, cosmo_exp=self.cosmo_exp)
+                        plotter.plot_posterior(
                             plot_samples, 
                             plot_colors, 
                             legend_labels=plot_labels, 
@@ -428,9 +429,8 @@ class Trainer:
             tdist.barrier()
         
         if self.global_rank == 0:
-            plot_training(
-                run_id=self.run_obj.info.run_id,
-                cosmo_exp=self.cosmo_exp,
+            run_plotter = RunPlotter(run_id=self.run_obj.info.run_id, cosmo_exp=self.cosmo_exp)
+            run_plotter.plot_training(
                 var=None,
                 log_scale=True,
                 loss_step_freq=10,

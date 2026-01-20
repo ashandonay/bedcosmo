@@ -217,14 +217,7 @@ class VariableRedshift:
         self.verbose = verbose
         self.profile = profile
         
-        # Extract n_redshifts from design_args (required)
-        # This needs to be done early as it's used in subsequent calculations
-        if design_args is not None and 'n_redshifts' in design_args:
-            self.n_redshifts = int(design_args['n_redshifts'])
-        else:
-            raise ValueError("n_redshifts must be provided in design_args")
-        if self.n_redshifts < 1:
-            raise ValueError("n_redshifts must be >= 1")
+        self.n_redshifts = len(design_args.get('labels', ['z_1']))
         self.obs_per_redshift = 2 if include_D_M else 1
         self.observation_dim = self.n_redshifts * self.obs_per_redshift
         if seed is not None:
@@ -358,7 +351,10 @@ class VariableRedshift:
             print(f"  Nominal design: {self.nominal_design}")
 
     @profile_method
-    def init_designs(self, input_designs=None, input_designs_path=None, step=0.1, lower=0.0, upper=5.0, perm_invar=True, labels=None, n_redshifts=None):
+    def init_designs(
+        self, input_designs=None, input_designs_path=None, 
+        step=0.1, lower=0.0, upper=5.0, perm_invar=True, 
+        labels=None, input_type="variable"):
         """
         Initialize the redshift design grid.
         

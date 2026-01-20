@@ -17,7 +17,6 @@ base:
   mnn_signal: 32
   nf_transform: affine
   spline_bins: 16
-  filters_list: ["u", "g", "r", "i", "z", "y"]
   design_args_path: num_visits/design_args.yaml
   total_steps: 5000
   optimizer: Adam
