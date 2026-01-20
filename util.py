@@ -1205,9 +1205,12 @@ def load_prior_flow_from_file(prior_flow_path, prior_run_id, device, global_rank
     """
     Load a prior flow model from a .pt checkpoint file.
     
+    Expects input_dim and context_dim in the checkpoint (saved at train time, or added via
+    scripts/add_checkpoint_dims.py). The full experiment is not initialized.
+    
     Args:
         prior_flow_path (str): Path to the .pt checkpoint file
-        prior_run_id (str): MLflow run_id to fetch run_args from
+        prior_run_id (str): MLflow run_id to fetch run_args from (for init_nf and metadata)
         device (str): Device to load model on
         global_rank (int): Global rank for distributed training
         
@@ -1226,15 +1229,15 @@ def load_prior_flow_from_file(prior_flow_path, prior_run_id, device, global_rank
         print(f"Loading prior flow from file: {prior_flow_path}")
         print(f"Loading run_args from MLflow run_id: {prior_run_id}")
     
-    # Load run_args from MLflow
-    # Determine cosmo_exp from the run_id by trying both common experiments
-    # We'll try to get it from the run itself
+    # Load checkpoint first (needed for state_dict and possibly input_dim/context_dim)
+    checkpoint = torch.load(prior_flow_path, map_location=device, weights_only=False)
+    
+    # Fetch run_args from MLflow (needed for init_nf hyperparams and transform_input)
     storage_paths = [
         os.environ["SCRATCH"] + f"/bed/BED_cosmo/num_tracers",
         os.environ["SCRATCH"] + f"/bed/BED_cosmo/num_visits",
         os.environ["SCRATCH"] + f"/bed/BED_cosmo/variable_redshift"
     ]
-    
     prior_run_args = None
     prior_run = None
     for storage_path in storage_paths:
@@ -1243,9 +1246,8 @@ def load_prior_flow_from_file(prior_flow_path, prior_run_id, device, global_rank
             client = MlflowClient()
             prior_run = client.get_run(prior_run_id)
             prior_run_args = parse_mlflow_params(prior_run.data.params)
-            cosmo_exp = prior_run_args.get("cosmo_exp", "num_tracers")
             if global_rank == 0:
-                print(f"Found run in {cosmo_exp} experiment")
+                print(f"Found run in {prior_run_args.get('cosmo_exp', 'num_tracers')} experiment")
             break
         except Exception:
             continue
@@ -1253,14 +1255,16 @@ def load_prior_flow_from_file(prior_flow_path, prior_run_id, device, global_rank
     if prior_run_args is None or prior_run is None:
         raise ValueError(f"Could not find run_id {prior_run_id} in any experiment. Check that the run_id is correct.")
     
-    # Initialize experiment to get dimensions
-    experiment = init_experiment(prior_run, prior_run_args, device, global_rank=global_rank)
-    input_dim = len(experiment.cosmo_params)
-    context_dim = experiment.context_dim
-    nominal_context = None
-
-    # Load checkpoint
-    checkpoint = torch.load(prior_flow_path, map_location=device, weights_only=False)
+    # Require input_dim and context_dim in checkpoint (saved at train time, or via scripts/add_checkpoint_dims.py)
+    if 'input_dim' not in checkpoint or 'context_dim' not in checkpoint:
+        raise ValueError(
+            f"Checkpoint {prior_flow_path} is missing 'input_dim' and/or 'context_dim'. "
+            "Re-save from training, or run: python scripts/add_checkpoint_dims.py --checkpoint <path.pt> --prior_run_id <run_id>"
+        )
+    input_dim = int(checkpoint['input_dim'])
+    context_dim = int(checkpoint['context_dim'])
+    if global_rank == 0:
+        print(f"Using input_dim={input_dim}, context_dim={context_dim} from checkpoint")
     
     # Initialize the flow model
     posterior_flow = init_nf(
@@ -1283,10 +1287,9 @@ def load_prior_flow_from_file(prior_flow_path, prior_run_id, device, global_rank
     posterior_flow.eval()
     
     # Store metadata in a dict to return alongside the flow
-    # This keeps training metadata separate from the model object
     prior_flow_metadata = {
         'transform_input': prior_run_args.get("transform_input", False),
-        'nominal_context': nominal_context if nominal_context is not None else None
+        'nominal_context': None
     }
     
     if global_rank == 0:

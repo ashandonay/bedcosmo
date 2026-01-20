@@ -1713,7 +1713,7 @@ class ComparisonPlotter(BasePlotter):
     """
     
     def __init__(self, cosmo_exp='num_tracers', mlflow_exp=None, run_ids=None, 
-                 excluded_runs=None, filter_string=None):
+                 excluded_runs=None, filter_string=None, run_labels=None):
         """
         Initialize the comparison plotter.
         
@@ -1721,8 +1721,9 @@ class ComparisonPlotter(BasePlotter):
             cosmo_exp (str): Cosmology experiment folder name.
             mlflow_exp (str, optional): Name of the MLflow experiment. If provided, all runs in this experiment will be used.
             run_ids (list, optional): List of specific run IDs to compare. If provided, mlflow_exp is ignored.
-            excluded_runs (list, optional): List of run IDs to exclude.
+            excluded_runs (list, optional): List of run IDs to exclude. Especially useful when mlflow_exp is passed to skip specific runs across all comparison methods.
             filter_string (str, optional): MLflow filter string.
+            run_labels (list, optional): Labels for each run (same order as run_ids / run_data_list). Used by compare_optimal_designs and compare_eigs.
         """
         super().__init__(cosmo_exp=cosmo_exp)
         
@@ -1735,27 +1736,24 @@ class ComparisonPlotter(BasePlotter):
         self.run_ids = run_ids if isinstance(run_ids, list) else [run_ids] if run_ids is not None else None
         self.excluded_runs = excluded_runs or []
         self.filter_string = filter_string
+        self.run_labels = run_labels
         
         # Cache for run data (will be populated on first use)
         self._run_data_cache = {}
     
-    def _get_run_data_list(self, parse_params=True, excluded_runs=None, filter_string=None):
+    def _get_run_data_list(self, parse_params=True, filter_string=None):
         """
         Get run data list, using cached values if available.
         
         Args:
             parse_params (bool): Whether to parse MLflow parameters.
-            excluded_runs (list, optional): Override excluded_runs from __init__.
             filter_string (str, optional): Override filter_string from __init__.
             
         Returns:
             tuple: (run_data_list, experiment_id, actual_mlflow_exp)
         """
-        # Use provided overrides or fall back to instance values
-        excluded = excluded_runs if excluded_runs is not None else self.excluded_runs
         filter_str = filter_string if filter_string is not None else self.filter_string
-        
-        # Create cache key
+        excluded = self.excluded_runs
         cache_key = (parse_params, tuple(excluded) if excluded else (), filter_str)
         
         if cache_key not in self._run_data_cache:
@@ -1785,7 +1783,7 @@ class ComparisonPlotter(BasePlotter):
     def compare_posterior(self, var=None, guide_samples=10000, show_scatter=False,
                          step='loss_best', seed=1, device="cuda:0",
                          global_rank=0, dpi=300, levels=[0.68, 0.95], width_inch=10,
-                         colors=None, excluded_runs=None, filter_string=None):
+                         colors=None, filter_string=None):
         """
         Compare posterior distributions across multiple runs in a triangle plot.
         
@@ -1801,7 +1799,6 @@ class ComparisonPlotter(BasePlotter):
             levels (list): List of contour levels to plot.
             width_inch (float): Width of the triangle plot in inches.
             colors (list, optional): List of colors to use for each group.
-            excluded_runs (list, optional): Override excluded_runs from __init__.
             filter_string (str, optional): Override filter_string from __init__.
             
         Returns:
@@ -1814,7 +1811,6 @@ class ComparisonPlotter(BasePlotter):
         
         run_data_list, experiment_id_for_save_path, actual_mlflow_exp_for_title = self._get_run_data_list(
             parse_params=True,
-            excluded_runs=excluded_runs,
             filter_string=filter_string
         )
         if not run_data_list:
@@ -1984,8 +1980,6 @@ class ComparisonPlotter(BasePlotter):
     
     def compare_eigs(
         self,
-        excluded_runs=None,
-        run_labels=None,
         var=None,
         step_key=None,
         save_path=None,
@@ -2008,10 +2002,8 @@ class ComparisonPlotter(BasePlotter):
         Compare EIG values across multiple runs using the same layout as `evaluate.py::eig_designs`.
 
         Args:
-            excluded_runs (list, optional): Override excluded_runs from __init__.
-            run_labels (list, optional): Custom legend labels per run.
             var (str or list, optional): Parameter(s) from MLflow run params to include in the label.
-                                        If provided and run_labels is None, labels will be generated from these parameters.
+                                        If provided and self.run_labels is None, labels will be generated from these parameters. Otherwise run ID (first 8 chars).
             step_key (str or int, optional): Step identifier (if omitted the most recent step is used).
             save_path (str, optional): File path to persist the figure.
             figsize (tuple): Matplotlib figure size.
@@ -2037,10 +2029,9 @@ class ComparisonPlotter(BasePlotter):
         storage_path = self.storage_path
 
         # Parse params if we need them for var labels or plot_input_design
-        need_params = plot_input_design or (var is not None and run_labels is None)
+        need_params = plot_input_design or (var is not None and self.run_labels is None)
         run_data_list, experiment_id_for_save_path, actual_mlflow_exp_for_title = self._get_run_data_list(
-            parse_params=need_params,
-            excluded_runs=excluded_runs
+            parse_params=need_params
         )
         if not run_data_list:
             raise ValueError(f"No runs found in experiment {self.cosmo_exp}")
@@ -2074,25 +2065,21 @@ class ComparisonPlotter(BasePlotter):
         if not all_data:
             raise ValueError("No valid EIG data files found to compare")
 
-        # Generate run_labels from var if provided and run_labels is None
-        if run_labels is None:
+        # Resolve run_labels: self.run_labels (mapped by run_id), else var, else run_id[:8]
+        if self.run_labels is not None and len(self.run_labels) == len(run_data_list):
+            rid2lab = {r['run_id']: self.run_labels[i] for i, r in enumerate(run_data_list)}
+            run_labels = [rid2lab.get(rid, rid[:8]) for rid in found_run_ids]
+        else:
             if var is not None:
                 # Generate labels from var parameters
                 vars_list = var if isinstance(var, list) else [var]
                 run_labels = []
                 for run_id in found_run_ids:
-                    # Find the corresponding run_data to get params
                     run_data_item = next((r for r in run_data_list if r['run_id'] == run_id), None)
                     if run_data_item and 'params' in run_data_item:
                         run_params = run_data_item['params']
-                        label_parts = []
-                        for v_key in vars_list:
-                            if v_key in run_params:
-                                label_parts.append(f"{v_key}={run_params[v_key]}")
-                        if label_parts:
-                            run_labels.append(", ".join(label_parts))
-                        else:
-                            run_labels.append(run_id[:8])
+                        label_parts = [f"{v_key}={run_params[v_key]}" for v_key in vars_list if v_key in run_params]
+                        run_labels.append(", ".join(label_parts) if label_parts else run_id[:8])
                     else:
                         run_labels.append(run_id[:8])
             else:
@@ -2509,8 +2496,6 @@ class ComparisonPlotter(BasePlotter):
     
     def compare_optimal_designs(
         self,
-        excluded_runs=None,
-        labels=None,
         step_key=None,
         top_n=1,
         save_path=None,
@@ -2532,8 +2517,6 @@ class ComparisonPlotter(BasePlotter):
         When top_n>1, displays top N designs per run as a heatmap with visual separation between runs.
         
         Args:
-            excluded_runs (list, optional): Override excluded_runs from __init__.
-            labels (list, optional): Labels for each run. If None, uses run IDs (first 8 chars)
             step_key (str or int, optional): Which step to use. If None, finds most recent eig_data file
             top_n (int): Number of designs to plot from each run (default: 1). When top_n=1, uses bar chart. When top_n>1, uses heatmap.
             save_path (str, optional): Path to save the comparison plot. If None, doesn't save
@@ -2555,8 +2538,7 @@ class ComparisonPlotter(BasePlotter):
         
         # Get run data - uses stored mlflow_exp or run_ids from __init__
         run_data_list, experiment_id_for_save_path, actual_mlflow_exp_for_title = self._get_run_data_list(
-            parse_params=True,
-            excluded_runs=excluded_runs
+            parse_params=True
         )
         if not run_data_list:
             raise ValueError(f"No runs found in experiment {self.cosmo_exp}")
@@ -2650,10 +2632,12 @@ class ComparisonPlotter(BasePlotter):
             if len(optimal_designs) == 0:
                 raise ValueError("No valid optimal design data found to compare")
             
-            # Generate labels if not provided
-            if labels is None:
+            # Resolve run labels: self.run_labels (mapped by run_id) or run_id[:8]
+            if self.run_labels is not None and len(self.run_labels) == len(run_data_list):
+                rid2lab = {r['run_id']: self.run_labels[i] for i, r in enumerate(run_data_list)}
+                labels = [rid2lab.get(rid, rid[:8]) for rid in found_run_ids]
+            else:
                 labels = [run_id[:8] for run_id in found_run_ids]
-            
             if len(labels) != len(optimal_designs):
                 labels = labels[:len(optimal_designs)]
             
@@ -2968,10 +2952,12 @@ class ComparisonPlotter(BasePlotter):
                 run_boundaries.append((current_idx, current_idx + len(run_designs)))
                 current_idx += len(run_designs)
             
-            # Generate labels if not provided
-            if labels is None:
+            # Resolve run labels: self.run_labels (mapped by run_id) or run_id[:8]
+            if self.run_labels is not None and len(self.run_labels) == len(run_data_list):
+                rid2lab = {r['run_id']: self.run_labels[i] for i, r in enumerate(run_data_list)}
+                labels = [rid2lab.get(rid, rid[:8]) for rid in found_run_ids]
+            else:
                 labels = [run_id[:8] for run_id in found_run_ids]
-            
             if len(labels) != len(all_run_top_designs):
                 labels = labels[:len(all_run_top_designs)]
             
@@ -3122,7 +3108,6 @@ class ComparisonPlotter(BasePlotter):
     def compare_training(
         self,
         var=None,
-        excluded_runs=None,
         log_scale=False,
         loss_step_freq=10,
         start_step=0,
@@ -3146,7 +3131,6 @@ class ComparisonPlotter(BasePlotter):
 
         Args:
             var (str or list): Parameter(s) from MLflow run params to include in the label.
-            excluded_runs (list, optional): Override excluded_runs from __init__.
             log_scale (bool): If True, use log scale for the y-axes (Loss, LR, Area). Loss values <= 0 will be omitted in log scale.
             loss_step_freq (int): Sampling frequency for plotting loss points.
             start_step (int or list): Starting step offset for x-axis. If list, must be same length as run_id.
@@ -3167,8 +3151,7 @@ class ComparisonPlotter(BasePlotter):
         # Note: compare_training uses var which requires params, but historically used parse_params=False
         # We'll use parse_params=True to support var grouping
         run_data_list, experiment_id_for_save_path, _ = self._get_run_data_list(
-            parse_params=True,
-            excluded_runs=excluded_runs
+            parse_params=True
         )
         if not run_data_list:
             return
@@ -3613,6 +3596,310 @@ class ComparisonPlotter(BasePlotter):
                                      experiment_id=experiment_id_for_save, dpi=dpi)
         plt.close(fig)
 
+    def plot_design_dim_by_eig(
+        self,
+        run_labels=None,
+        step_key=None,
+        save_path=None,
+        figsize=(16, 10),
+        dpi=400,
+        design_labels=None,
+        title=None,
+        nominal_design=None,
+        colors=None,
+        moving_avg_window=50,
+        top_n=None,
+        ratio=False,
+        show_nominal=False
+    ):
+        """
+        Plot eig values for each design dimension across multiple runs, sorted by EIG.
+        Creates one subplot per dimension showing the eig values.
+        
+        Args:
+            run_labels (list, optional): Labels for each run. If None, uses run IDs (first 8 chars)
+            step_key (str or int, optional): Which step to use. If None, finds most recent eig_data file
+            save_path (str, optional): Path to save the plot. If None, doesn't save
+            figsize (tuple): Figure size (width, height)
+            dpi (int): Resolution for saved figure
+            design_labels (list, optional): Labels for each design dimension. If None, tries to infer from experiment or uses generic labels
+            title (str, optional): Custom title for the plot. If None, generates default title
+            nominal_design (list, optional): Nominal design as a list of floats. Required if ratio=True.
+            colors (list, optional): Colors for each run. If None, uses default color cycle
+            moving_avg_window (int): Window size for moving average smoothing. If None or 0, no smoothing is applied. Default: 50
+            top_n (int, optional): If specified, only plot the top N designs (by EIG) from each run. If None, plots all designs. Default: None
+            ratio (bool): If True, plot ratios to nominal design. If False, plot actual design fractions. Default: False
+            show_nominal (bool): If True, show a horizontal line at the nominal value (1.0 for ratios, or actual nominal value for fractions). Default: False
+        
+        Returns:
+            fig, axes: Matplotlib figure and axes objects (one axis per tracer)
+        """
+        if ratio and nominal_design is None:
+            raise ValueError("nominal_design is required when ratio=True")
+        
+        # Use instance storage_path
+        storage_path = self.storage_path
+        
+        # Get run data using class method
+        run_data_list, experiment_id_for_save_path, actual_mlflow_exp_for_title = self._get_run_data_list(
+            parse_params=True
+        )
+        if not run_data_list:
+            raise ValueError(f"No runs found in experiment {self.cosmo_exp}")
+        
+        # Extract run_ids from run_data_list
+        run_ids = [run_data['run_id'] for run_data in run_data_list]
+        
+        # Build a map from run_id to exp_id
+        run_id_to_exp_id = self._get_run_id_to_exp_id(run_data_list)
+        
+        # Find and load JSON files for each run
+        all_run_data = []  # List of dicts: each dict contains designs, eigs, and run_id for that run
+        found_run_ids = []
+        
+        for run_id in run_ids:
+            if run_id not in run_id_to_exp_id:
+                print(f"Warning: Run {run_id} not found in experiment {self.cosmo_exp}, skipping...")
+                continue
+            
+            exp_id = run_id_to_exp_id[run_id]
+            artifacts_dir = f"{storage_path}/mlruns/{exp_id}/{run_id}/artifacts"
+            
+            # Load completed eig_data file using class method
+            try:
+                json_path, data = self.load_eig_data_file(artifacts_dir, step_key=None)
+                if data is None:
+                    print(f"Warning: No completed eig_data file found for run {run_id}, skipping...")
+                    continue
+            except ValueError as e:
+                print(f"Warning: {e}, skipping run {run_id}...")
+                continue
+            
+            try:
+                
+                # Determine which step to use
+                if step_key is not None:
+                    step_str = f"step_{step_key}"
+                else:
+                    # Find the highest available step key
+                    step_keys = [k for k in data.keys() if k.startswith('step_')]
+                    if step_keys:
+                        # Extract step numbers and find the highest
+                        step_numbers = []
+                        for k in step_keys:
+                            try:
+                                step_num = int(k.split('_')[1])
+                                step_numbers.append((step_num, k))
+                            except (ValueError, IndexError):
+                                continue
+                        if step_numbers:
+                            step_str = max(step_numbers, key=lambda x: x[0])[1]
+                        else:
+                            step_str = step_keys[0]  # Fallback to first if parsing fails
+                    else:
+                        print(f"Warning: No step data found in {json_path}, skipping...")
+                        continue
+                
+                if step_str not in data:
+                    print(f"Warning: Step {step_str} not found in {json_path}, skipping...")
+                    continue
+                
+                step_data = data[step_str]
+                
+                # Access nested structure
+                variable_data = step_data.get('variable', {})
+                
+                # Extract designs from top-level input_designs and EIGs from variable subdict
+                if 'input_designs' not in data:
+                    print(f"Warning: No input_designs found in {json_path}, skipping...")
+                    continue
+                
+                if 'eigs_avg' not in variable_data:
+                    print(f"Warning: No eigs_avg data found in {json_path} for {step_str}, skipping...")
+                    continue
+                
+                designs = np.array(data['input_designs'])
+                eigs = np.array(variable_data['eigs_avg'])
+                
+                # Check if designs and eigs have matching lengths
+                if len(designs) != len(eigs):
+                    print(f"Warning: Mismatch - {len(designs)} designs but {len(eigs)} EIG values for run {run_id}")
+                    continue
+                
+                # Ensure designs are 2D (n_designs, n_dims)
+                if designs.ndim == 1:
+                    designs = designs.reshape(-1, 1)
+                
+                all_run_data.append({
+                    'run_id': run_id,
+                    'designs': designs,
+                    'eigs': eigs
+                })
+                found_run_ids.append(run_id)
+                    
+            except Exception as e:
+                print(f"Warning: Error loading {json_path}: {e}, skipping...")
+                continue
+        
+        if len(all_run_data) == 0:
+            raise ValueError("No valid design data found to compare")
+        
+        # Determine design labels
+        if design_labels is None:
+            # Try to infer from first run's experiment
+            try:
+                first_run_data = run_data_list[0]
+                device = "cuda:0"
+                experiment = init_experiment(
+                    first_run_data['run_obj'], 
+                    first_run_data['params'], 
+                    device, 
+                    design_args={}, 
+                    global_rank=0
+                )
+                if hasattr(experiment, 'design_labels'):
+                    design_labels = experiment.design_labels
+            except Exception as e:
+                print(f"Warning: Could not initialize experiment to get design labels: {e}")
+        
+        # Use generic labels if still None
+        if design_labels is None:
+            n_dims = all_run_data[0]['designs'].shape[1]
+            design_labels = [f'$f_{i}$' for i in range(n_dims)]
+        
+        # Verify all runs have the same number of dimensions
+        n_dims = all_run_data[0]['designs'].shape[1]
+        for run_data in all_run_data:
+            if run_data['designs'].shape[1] != n_dims:
+                raise ValueError(f"Design dimension mismatch: run {run_data['run_id']} has {run_data['designs'].shape[1]} dimensions, expected {n_dims}")
+        
+        if len(design_labels) != n_dims:
+            raise ValueError(f"design_labels length ({len(design_labels)}) must match number of design dimensions ({n_dims})")
+        
+        # Validate nominal_design if ratio is True
+        if ratio:
+            nominal_design = np.array(nominal_design)
+            if len(nominal_design) != n_dims:
+                raise ValueError(f"nominal_design length ({len(nominal_design)}) must match number of design dimensions ({n_dims})")
+            
+            if np.any(nominal_design == 0):
+                raise ValueError("nominal_design cannot contain zero values (division by zero)")
+        
+        # Generate labels if not provided
+        if run_labels is None:
+            run_labels = [run_id[:8] for run_id in found_run_ids]
+        
+        if len(run_labels) != len(all_run_data):
+            run_labels = run_labels[:len(all_run_data)]
+        
+        # Generate colors if not provided
+        if colors is None:
+            colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
+            # Cycle colors if we have more runs than colors
+            colors = [colors[i % len(colors)] for i in range(len(all_run_data))]
+        elif len(colors) < len(all_run_data):
+            colors = [colors[i % len(colors)] for i in range(len(all_run_data))]
+        else:
+            colors = colors[:len(all_run_data)]
+        
+        # Sort designs by EIG within each run and compute ratios
+        sorted_run_data = []
+        for run_data in all_run_data:
+            designs = run_data['designs']
+            eigs = run_data['eigs']
+            
+            # Sort by EIG (descending) within this run
+            sorted_indices = np.argsort(eigs)[::-1]
+            
+            # If top_n is specified, only take top N designs
+            if top_n is not None and top_n > 0:
+                sorted_indices = sorted_indices[:min(top_n, len(sorted_indices))]
+            
+            sorted_designs = designs[sorted_indices]
+            
+            # Compute ratios or use actual design values
+            if ratio:
+                plot_values = sorted_designs / nominal_design[np.newaxis, :]
+            else:
+                plot_values = sorted_designs
+            
+            sorted_run_data.append({
+                'plot_values': plot_values,
+                'eigs': eigs[sorted_indices]
+            })
+        
+        # Create figure with subplots - one per tracer/dimension
+        n_cols = min(2, n_dims)  # 2 columns
+        n_rows = (n_dims + n_cols - 1) // n_cols  # Ceiling division
+        fig, axes = plt.subplots(n_rows, n_cols, figsize=figsize, squeeze=False)
+        axes = axes.flatten()
+        
+        # Plot each tracer/dimension
+        for dim_idx in range(n_dims):
+            ax = axes[dim_idx]
+            
+            # Plot each run as a line
+            for run_idx, run_sorted_data in enumerate(sorted_run_data):
+                plot_values = run_sorted_data['plot_values'][:, dim_idx]
+                n_designs = len(plot_values)
+                design_indices = np.arange(n_designs)
+                
+                # Apply moving average if window size is specified
+                if moving_avg_window is not None and moving_avg_window > 0 and n_designs > moving_avg_window:
+                    # Use manual moving average that handles edges properly
+                    # At each point, use the available window (may be smaller at edges)
+                    values_smoothed = np.zeros_like(plot_values)
+                    half_window = moving_avg_window // 2
+                    
+                    for i in range(n_designs):
+                        # Determine the actual window bounds for this point
+                        start_idx = max(0, i - half_window)
+                        end_idx = min(n_designs, i + half_window + 1)
+                        # Compute average over the available window
+                        values_smoothed[i] = np.mean(plot_values[start_idx:end_idx])
+                else:
+                    values_smoothed = plot_values
+                
+                ax.plot(
+                    design_indices,
+                    values_smoothed,
+                    label=run_labels[run_idx],
+                    color=colors[run_idx],
+                    linewidth=2,
+                    alpha=0.8
+                )
+            
+            # Add horizontal line at ratio = 1.0 (nominal) or nominal value if ratio mode
+            if show_nominal:
+                if ratio:
+                    ax.axhline(y=1.0, color='black', linestyle='--', linewidth=1.5, alpha=0.7, label='Nominal' if dim_idx == 0 else '')
+                elif nominal_design is not None:
+                    nominal_value = np.array(nominal_design)[dim_idx]
+                    ax.axhline(y=nominal_value, color='black', linestyle='--', linewidth=1.5, alpha=0.7, label='Nominal' if dim_idx == 0 else '')
+            
+            ax.set_xlabel('Design Index (sorted by EIG per run)', fontsize=12, weight='bold')
+            if ratio:
+                ax.set_ylabel(f'Ratio to Nominal', fontsize=12, weight='bold')
+            else:
+                ax.set_ylabel(f'Design Fraction', fontsize=12, weight='bold')
+            ax.set_title(f'{design_labels[dim_idx]}', fontsize=14, weight='bold')
+            ax.grid(True, alpha=0.3)
+            ax.legend(loc='best', fontsize=9)
+        
+        # Hide unused subplots
+        for dim_idx in range(n_dims, len(axes)):
+            axes[dim_idx].set_visible(False)
+        
+        plt.tight_layout()
+        
+        # Save if requested
+        if save_path is not None:
+            os.makedirs(os.path.dirname(save_path) if os.path.dirname(save_path) else '.', exist_ok=True)
+            fig.savefig(save_path, dpi=dpi)
+            print(f"Saved plot to {save_path}")
+        
+        return fig, axes
+    
 
 # ============================================================================
 # Standalone Plotting Functions (for backward compatibility and utilities)
@@ -4239,322 +4526,6 @@ def compare_increasing_design(
         ax2 = None
     
     return fig, ax
-    
-
-def plot_design_dim_by_eig(
-        mlflow_exp=None,
-        run_ids=None,
-        excluded_runs=[],
-        cosmo_exp='num_tracers',
-        run_labels=None,
-        step_key=None,
-        save_path=None,
-        figsize=(16, 10),
-        dpi=400,
-        design_labels=None,
-        title=None,
-        nominal_design=None,
-        colors=None,
-        moving_avg_window=50,
-        top_n=None,
-        ratio=False,
-        show_nominal=False
-    ):
-    """
-    Plot eig values for each design dimension across multiple runs, sorted by EIG.
-    Creates one subplot per dimension showing the eig values.
-    
-    Args:
-        mlflow_exp (str, optional): Name of the MLflow experiment. If provided, all runs in this experiment will be used.
-        run_ids (list, optional): List of MLflow run IDs to compare. If provided, mlflow_exp is ignored.
-        excluded_runs (list): List of run IDs to exclude.
-        cosmo_exp (str): Cosmological experiment name (default: 'num_tracers')
-        run_labels (list, optional): Labels for each run. If None, uses run IDs (first 8 chars)
-        step_key (str or int, optional): Which step to use. If None, finds most recent eig_data file
-        save_path (str, optional): Path to save the plot. If None, doesn't save
-        figsize (tuple): Figure size (width, height)
-        dpi (int): Resolution for saved figure
-        design_labels (list, optional): Labels for each design dimension. If None, tries to infer from experiment or uses generic labels
-        title (str, optional): Custom title for the plot. If None, generates default title
-        nominal_design (list, optional): Nominal design as a list of floats. Required if ratio=True.
-        colors (list, optional): Colors for each run. If None, uses default color cycle
-        moving_avg_window (int): Window size for moving average smoothing. If None or 0, no smoothing is applied. Default: 50
-        top_n (int, optional): If specified, only plot the top N designs (by EIG) from each run. If None, plots all designs. Default: None
-        ratio (bool): If True, plot ratios to nominal design. If False, plot actual design fractions. Default: False
-        show_nominal (bool): If True, show a horizontal line at the nominal value (1.0 for ratios, or actual nominal value for fractions). Default: False
-    
-    Returns:
-        fig, axes: Matplotlib figure and axes objects (one axis per tracer)
-    """
-    if ratio and nominal_design is None:
-        raise ValueError("nominal_design is required when ratio=True")
-    
-    # Set MLflow tracking URI
-    storage_path = os.environ["SCRATCH"] + f"/bed/BED_cosmo/{cosmo_exp}"
-    
-    # Get run data - can use either mlflow_exp or run_ids
-    run_data_list, experiment_id_for_save_path, actual_mlflow_exp_for_title = get_runs_data(
-        mlflow_exp=mlflow_exp,
-        run_ids=run_ids,
-        excluded_runs=excluded_runs,
-        parse_params=True,
-        cosmo_exp=cosmo_exp
-    )
-    if not run_data_list:
-        raise ValueError(f"No runs found in experiment {cosmo_exp}")
-    
-    # Extract run_ids from run_data_list
-    run_ids = [run_data['run_id'] for run_data in run_data_list]
-    
-    # Build a map from run_id to exp_id
-    run_id_to_exp_id = {run_data['run_id']: run_data['exp_id'] for run_data in run_data_list}
-    
-    # Find and load JSON files for each run
-    all_run_data = []  # List of dicts: each dict contains designs, eigs, and run_id for that run
-    found_run_ids = []
-    
-    for run_id in run_ids:
-        if run_id not in run_id_to_exp_id:
-            print(f"Warning: Run {run_id} not found in experiment {cosmo_exp}, skipping...")
-            continue
-        
-        exp_id = run_id_to_exp_id[run_id]
-        artifacts_dir = f"{storage_path}/mlruns/{exp_id}/{run_id}/artifacts"
-        
-        # Load completed eig_data file
-        try:
-            json_path, data = load_eig_data_file(artifacts_dir, step_key=None)
-            if data is None:
-                print(f"Warning: No completed eig_data file found for run {run_id}, skipping...")
-                continue
-        except ValueError as e:
-            print(f"Warning: {e}, skipping run {run_id}...")
-            continue
-        
-        try:
-            
-            # Determine which step to use
-            if step_key is not None:
-                step_str = f"step_{step_key}"
-            else:
-                # Find the highest available step key
-                step_keys = [k for k in data.keys() if k.startswith('step_')]
-                if step_keys:
-                    # Extract step numbers and find the highest
-                    step_numbers = []
-                    for k in step_keys:
-                        try:
-                            step_num = int(k.split('_')[1])
-                            step_numbers.append((step_num, k))
-                        except (ValueError, IndexError):
-                            continue
-                    if step_numbers:
-                        step_str = max(step_numbers, key=lambda x: x[0])[1]
-                    else:
-                        step_str = step_keys[0]  # Fallback to first if parsing fails
-                else:
-                    print(f"Warning: No step data found in {json_path}, skipping...")
-                    continue
-            
-            if step_str not in data:
-                print(f"Warning: Step {step_str} not found in {json_path}, skipping...")
-                continue
-            
-            step_data = data[step_str]
-            
-            # Access nested structure
-            variable_data = step_data.get('variable', {})
-            
-            # Extract designs from top-level input_designs and EIGs from variable subdict
-            if 'input_designs' not in data:
-                print(f"Warning: No input_designs found in {json_path}, skipping...")
-                continue
-            
-            if 'eigs_avg' not in variable_data:
-                print(f"Warning: No eigs_avg data found in {json_path} for {step_str}, skipping...")
-                continue
-            
-            designs = np.array(data['input_designs'])
-            eigs = np.array(variable_data['eigs_avg'])
-            
-            # Check if designs and eigs have matching lengths
-            if len(designs) != len(eigs):
-                print(f"Warning: Mismatch - {len(designs)} designs but {len(eigs)} EIG values for run {run_id}")
-                continue
-            
-            # Ensure designs are 2D (n_designs, n_dims)
-            if designs.ndim == 1:
-                designs = designs.reshape(-1, 1)
-            
-            all_run_data.append({
-                'run_id': run_id,
-                'designs': designs,
-                'eigs': eigs
-            })
-            found_run_ids.append(run_id)
-                
-        except Exception as e:
-            print(f"Warning: Error loading {json_path}: {e}, skipping...")
-            continue
-    
-    if len(all_run_data) == 0:
-        raise ValueError("No valid design data found to compare")
-    
-    # Determine design labels
-    if design_labels is None:
-        # Try to infer from first run's experiment
-        try:
-            first_run_data = run_data_list[0]
-            device = "cuda:0"
-            experiment = init_experiment(
-                first_run_data['run_obj'], 
-                first_run_data['params'], 
-                device, 
-                design_args={}, 
-                global_rank=0
-            )
-            if hasattr(experiment, 'design_labels'):
-                design_labels = experiment.design_labels
-        except Exception as e:
-            print(f"Warning: Could not initialize experiment to get design labels: {e}")
-    
-    # Use generic labels if still None
-    if design_labels is None:
-        n_dims = all_run_data[0]['designs'].shape[1]
-        design_labels = [f'$f_{i}$' for i in range(n_dims)]
-    
-    # Verify all runs have the same number of dimensions
-    n_dims = all_run_data[0]['designs'].shape[1]
-    for run_data in all_run_data:
-        if run_data['designs'].shape[1] != n_dims:
-            raise ValueError(f"Design dimension mismatch: run {run_data['run_id']} has {run_data['designs'].shape[1]} dimensions, expected {n_dims}")
-    
-    if len(design_labels) != n_dims:
-        raise ValueError(f"design_labels length ({len(design_labels)}) must match number of design dimensions ({n_dims})")
-    
-    # Validate nominal_design if ratio is True
-    if ratio:
-        nominal_design = np.array(nominal_design)
-        if len(nominal_design) != n_dims:
-            raise ValueError(f"nominal_design length ({len(nominal_design)}) must match number of design dimensions ({n_dims})")
-        
-        if np.any(nominal_design == 0):
-            raise ValueError("nominal_design cannot contain zero values (division by zero)")
-    
-    # Generate labels if not provided
-    if run_labels is None:
-        run_labels = [run_id[:8] for run_id in found_run_ids]
-    
-    if len(run_labels) != len(all_run_data):
-        run_labels = run_labels[:len(all_run_data)]
-    
-    # Generate colors if not provided
-    if colors is None:
-        colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
-        # Cycle colors if we have more runs than colors
-        colors = [colors[i % len(colors)] for i in range(len(all_run_data))]
-    elif len(colors) < len(all_run_data):
-        colors = [colors[i % len(colors)] for i in range(len(all_run_data))]
-    else:
-        colors = colors[:len(all_run_data)]
-    
-    # Sort designs by EIG within each run and compute ratios
-    sorted_run_data = []
-    for run_data in all_run_data:
-        designs = run_data['designs']
-        eigs = run_data['eigs']
-        
-        # Sort by EIG (descending) within this run
-        sorted_indices = np.argsort(eigs)[::-1]
-        
-        # If top_n is specified, only take top N designs
-        if top_n is not None and top_n > 0:
-            sorted_indices = sorted_indices[:min(top_n, len(sorted_indices))]
-        
-        sorted_designs = designs[sorted_indices]
-        
-        # Compute ratios or use actual design values
-        if ratio:
-            plot_values = sorted_designs / nominal_design[np.newaxis, :]
-        else:
-            plot_values = sorted_designs
-        
-        sorted_run_data.append({
-            'plot_values': plot_values,
-            'eigs': eigs[sorted_indices]
-        })
-    
-    # Create figure with subplots - one per tracer/dimension
-    n_cols = min(2, n_dims)  # 2 columns
-    n_rows = (n_dims + n_cols - 1) // n_cols  # Ceiling division
-    fig, axes = plt.subplots(n_rows, n_cols, figsize=figsize, squeeze=False)
-    axes = axes.flatten()
-    
-    # Plot each tracer/dimension
-    for dim_idx in range(n_dims):
-        ax = axes[dim_idx]
-        
-        # Plot each run as a line
-        for run_idx, run_sorted_data in enumerate(sorted_run_data):
-            plot_values = run_sorted_data['plot_values'][:, dim_idx]
-            n_designs = len(plot_values)
-            design_indices = np.arange(n_designs)
-            
-            # Apply moving average if window size is specified
-            if moving_avg_window is not None and moving_avg_window > 0 and n_designs > moving_avg_window:
-                # Use manual moving average that handles edges properly
-                # At each point, use the available window (may be smaller at edges)
-                values_smoothed = np.zeros_like(plot_values)
-                half_window = moving_avg_window // 2
-                
-                for i in range(n_designs):
-                    # Determine the actual window bounds for this point
-                    start_idx = max(0, i - half_window)
-                    end_idx = min(n_designs, i + half_window + 1)
-                    # Compute average over the available window
-                    values_smoothed[i] = np.mean(plot_values[start_idx:end_idx])
-            else:
-                values_smoothed = plot_values
-            
-            ax.plot(
-                design_indices,
-                values_smoothed,
-                label=run_labels[run_idx],
-                color=colors[run_idx],
-                linewidth=2,
-                alpha=0.8
-            )
-        
-        # Add horizontal line at ratio = 1.0 (nominal) or nominal value if ratio mode
-        if show_nominal:
-            if ratio:
-                ax.axhline(y=1.0, color='black', linestyle='--', linewidth=1.5, alpha=0.7, label='Nominal' if dim_idx == 0 else '')
-            elif nominal_design is not None:
-                nominal_value = np.array(nominal_design)[dim_idx]
-                ax.axhline(y=nominal_value, color='black', linestyle='--', linewidth=1.5, alpha=0.7, label='Nominal' if dim_idx == 0 else '')
-        
-        ax.set_xlabel('Design Index (sorted by EIG per run)', fontsize=12, weight='bold')
-        if ratio:
-            ax.set_ylabel(f'Ratio to Nominal', fontsize=12, weight='bold')
-        else:
-            ax.set_ylabel(f'Design Fraction', fontsize=12, weight='bold')
-        ax.set_title(f'{design_labels[dim_idx]}', fontsize=14, weight='bold')
-        ax.grid(True, alpha=0.3)
-        ax.legend(loc='best', fontsize=9)
-    
-    # Hide unused subplots
-    for dim_idx in range(n_dims, len(axes)):
-        axes[dim_idx].set_visible(False)
-    
-    plt.tight_layout()
-    
-    # Save if requested
-    if save_path is not None:
-        os.makedirs(os.path.dirname(save_path) if os.path.dirname(save_path) else '.', exist_ok=True)
-        fig.savefig(save_path, dpi=dpi)
-        print(f"Saved plot to {save_path}")
-    
-    return fig, axes
     
 def compare_contours(
         run_ids, 

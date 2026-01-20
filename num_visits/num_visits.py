@@ -155,6 +155,7 @@ class NumVisits:
         self.global_rank = global_rank
 
         self.filters_list = design_args.get('labels', ["u", "g", "r", "i", "z", "y"])
+        self.design_labels = self.filters_list
         self.num_filters = len(self.filters_list)
         self.observation_labels = ["magnitudes"]
         # Context = design (nvisits per filter) + observations (magnitudes per filter)

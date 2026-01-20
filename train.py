@@ -510,6 +510,11 @@ class Trainer:
                 if self.global_rank == 0:
                     print(f'Warning: Failed to serialize bijector state: {exc}')
 
+        # Save input_dim and context_dim
+        if hasattr(self, 'experiment') and self.experiment is not None:
+            checkpoint['input_dim'] = len(self.experiment.cosmo_params)
+            checkpoint['context_dim'] = self.experiment.context_dim
+
         # Always include global rank information
         if global_rank is not None:
             if additional_state is None:
