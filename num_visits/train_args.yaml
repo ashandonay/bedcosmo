@@ -18,12 +18,11 @@ base:
   nf_transform: affine
   spline_bins: 16
   filters_list: ["u", "g", "r", "i", "z", "y"]
-  fixed_design: false
   design_args_path: num_visits/design_args.yaml
-  total_steps: 50000
+  total_steps: 5000
   optimizer: Adam
   initial_lr: 0.0005
-  final_lr: 0.0
+  final_lr: 0.00001
   grad_clip: 0.0
   warmup_fraction: 0.05
   scheduler_type: cosine
@@ -31,7 +30,7 @@ base:
   gamma: 0.1
   step_freq: 1
   checkpoint_step_freq: 1000
-  n_particles_per_device: 100
+  n_particles_per_device: 50
   condition_design: true
   log_nominal_area: false
   verbose: true

@@ -9,11 +9,7 @@ base:
   particle_batch_size: 50000  
   n_evals: 10
   param_space: physical
-  design_step: 20.0
-  design_lower: [50.0, 80.0, 210.0, 210.0, 180.0, 180.0]
-  design_upper: [90.0, 120.0, 250.0, 250.0, 220.0, 220.0]
-  design_sum_lower: 1030
-  design_sum_upper: 1030
+  design_args_path: null
   design_chunk_size: 1
   profile: true
   verbose: true
