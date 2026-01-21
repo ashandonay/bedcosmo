@@ -19,7 +19,7 @@ base:
   mnn_signal: 64
   nf_transform: affine
   spline_bins: 20
-  design_args_path: num_tracers/design_args.yaml
+  design_args_path: num_tracers/design_args_dr2.yaml
   total_steps: 200000
   optimizer: Adam
   initial_lr: 0.0005
@@ -55,7 +55,7 @@ base_omegak:
   mnn_signal: 64
   nf_transform: affine
   spline_bins: 20
-  design_args_path: num_tracers/design_args.yaml
+  design_args_path: num_tracers/design_args_dr2.yaml
   total_steps: 200000
   optimizer: Adam
   initial_lr: 0.0005
@@ -91,7 +91,7 @@ base_w:
   mnn_signal: 64
   nf_transform: affine
   spline_bins: 20
-  design_args_path: num_tracers/design_args.yaml
+  design_args_path: num_tracers/design_args_dr2.yaml
   total_steps: 200000
   optimizer: Adam
   initial_lr: 0.0005
@@ -127,7 +127,7 @@ base_w_wa:
   mnn_signal: 64
   nf_transform: affine
   spline_bins: 20
-  design_args_path: num_tracers/design_args.yaml
+  design_args_path: num_tracers/design_args_dr2.yaml
   total_steps: 200000
   optimizer: Adam
   initial_lr: 0.0005
@@ -163,7 +163,7 @@ base_omegak_w_wa:
   mnn_signal: 64
   nf_transform: affine
   spline_bins: 20
-  design_args_path: num_tracers/design_args.yaml
+  design_args_path: num_tracers/design_args_dr2.yaml
   total_steps: 200000
   optimizer: Adam
   initial_lr: 0.0005
