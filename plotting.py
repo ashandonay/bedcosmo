@@ -145,7 +145,7 @@ class BasePlotter:
         save_path = os.path.join(save_dir, filename)
         
         # Save the figure
-        fig.savefig(save_path, dpi=dpi)
+        fig.savefig(save_path, dpi=dpi, bbox_inches='tight', pad_inches=0.1)
         print(f"Saved plot to {save_path}")
         
         # Display figure if requested and in interactive environment
@@ -533,18 +533,6 @@ class RunPlotter(BasePlotter):
                 raise ValueError(f"Run {self.run_id} not found.")
             self._run_data = run_data_list[0]
             self._experiment_id = exp_id
-            
-            # Update priors_path to use the priors.yaml from the run's artifacts directory
-            try:
-                artifacts_dir = self._get_artifacts_dir()
-                priors_artifact_path = os.path.join(artifacts_dir, "priors.yaml")
-                if os.path.exists(priors_artifact_path):
-                    self._run_data['params']['priors_path'] = priors_artifact_path
-                    print(f"Updated priors_path to use run artifacts: {priors_artifact_path}")
-                else:
-                    print(f"Warning: priors.yaml not found in artifacts at {priors_artifact_path}, using original priors_path: {self._run_data['params'].get('priors_path', 'not set')}")
-            except Exception as e:
-                print(f"Warning: Could not update priors_path from artifacts: {e}")
         
         return self._run_data
     
@@ -1520,7 +1508,7 @@ class RunPlotter(BasePlotter):
             include_nominal (bool): Whether to include the nominal EIG in the plot (default: True).
             
         Returns:
-            matplotlib.figure.Figure: The created figure.
+            tuple: (fig, (ax0, ax1)) matplotlib figure and axes objects. ax1 may be None for 1D designs without sorting.
         """
         print(f"Generating EIG designs plot...")
         
@@ -1658,7 +1646,9 @@ class RunPlotter(BasePlotter):
                 im = ax1.imshow(sorted_designs.T, aspect='auto', cmap='viridis')
                 ax1.set_ylabel('')
                 ax1.set_yticks([0])
-                ax1.set_yticklabels([f'${design_labels[0]}$'])
+                # Format label: use as-is if already has $, otherwise wrap with $
+                label0 = design_labels[0] if design_labels[0].startswith('$') else f'${design_labels[0]}$'
+                ax1.set_yticklabels([label0])
                 ax1.tick_params(axis='y', length=0)
                 if nominal_sorted_pos is not None:
                     ax1.axvline(nominal_sorted_pos, color='black', linestyle=':', linewidth=1.5)
@@ -1682,7 +1672,9 @@ class RunPlotter(BasePlotter):
                 ax1.set_xlabel("Design Index (sorted by EIG)" if sort else "Design Index", 
                               fontsize=12, weight='bold')
                 ax1.set_yticks(np.arange(len(design_labels)))
-                ax1.set_yticklabels([f'${label}$' for label in design_labels])
+                # Format labels: use as-is if already has $, otherwise wrap with $
+                formatted_labels = [label if label.startswith('$') else f'${label}$' for label in design_labels]
+                ax1.set_yticklabels(formatted_labels)
                 ax1.set_xlim(-0.5, len(sorted_designs) - 0.5)
                 ax1.set_ylabel('')
                 cbar = fig.colorbar(im, cax=cbar_ax)
@@ -1699,7 +1691,7 @@ class RunPlotter(BasePlotter):
         filename = self.generate_filename("eig_designs")
         self.save_figure(fig, filename, run_id=self.run_id, experiment_id=self.experiment_id, dpi=400, close_fig=False, display_fig=False)
         
-        return fig
+        return fig, (ax0, ax1)
 
 
 # ============================================================================
@@ -1996,10 +1988,11 @@ class ComparisonPlotter(BasePlotter):
         normalize=False,
         show_errorbars=True,
         plot_input_design=False,
-        design_labels=None
+        design_labels=None,
+        show_ratio_to_nominal=True
     ):
         """
-        Compare EIG values across multiple runs using the same layout as `evaluate.py::eig_designs`.
+        Compare EIG values across multiple runs.
 
         Args:
             var (str or list, optional): Parameter(s) from MLflow run params to include in the label.
@@ -2021,6 +2014,7 @@ class ComparisonPlotter(BasePlotter):
             plot_input_design (bool): If True, plot scatter points for input_designs from MLflow params on the heatmap.
                                     Only plots if they match the evaluation designs. Default False.
             design_labels (list, optional): Custom labels for each design dimension. Must be the same length as the number of design dimensions.
+            show_ratio_to_nominal (bool): If True, display designs as ratio to nominal design (like eig_designs). Default True.
         
         Returns:
             tuple: (fig, (ax_line, ax_heat)) matplotlib figure and axes objects.
@@ -2216,6 +2210,7 @@ class ComparisonPlotter(BasePlotter):
 
         reference_record = None
         global_sort_idx = None
+        per_run_sort = False  # Flag to indicate per-run sorting (no sort_reference)
 
         if sort:
             if sort_reference is not None:
@@ -2227,24 +2222,74 @@ class ComparisonPlotter(BasePlotter):
                     raise ValueError(f"sort_reference '{sort_reference}' not found among provided run_ids or labels.")
                 global_sort_idx = np.argsort(reference_record['eigs_avg'])[::-1]
             else:
-                for rec in run_records:
-                    rec['sort_idx'] = np.argsort(rec['eigs_avg'])[::-1]
+                # Sort each run independently from highest to lowest
+                per_run_sort = True
+                # Store per-run sort indices in each record
+                for record in run_records:
+                    record['sort_idx'] = np.argsort(record['eigs_avg'])[::-1]
         else:
             global_sort_idx = np.arange(num_designs)
 
-        # Get sorted designs for heatmap (use reference run or first run)
-        if global_sort_idx is not None:
-            idx_for_heatmap = global_sort_idx
+        # Get sorted designs for heatmap (only if not per-run sorting)
+        if per_run_sort:
+            sorted_designs = None  # No heatmap when sorting per-run
+            run_for_nominal = run_records[0]  # Use first run for nominal design
+        elif reference_record is not None:
+            sorted_designs = reference_record['designs'][global_sort_idx]
+            run_for_nominal = reference_record
         else:
-            idx_for_heatmap = np.arange(num_designs)
-        sorted_designs = run_records[0]['designs'][idx_for_heatmap]
+            sorted_designs = run_records[0]['designs'][global_sort_idx]
+            run_for_nominal = run_records[0]
+        
+        # Get nominal design if needed for ratio display (same as eig_designs)
+        nominal_design = None
+        if show_ratio_to_nominal and not is_1d_design:
+            # Initialize experiment from the reference run to get nominal_design
+            try:
+                device = "cuda:0"
+                run_data_item = next((r for r in run_data_list if r['run_id'] == run_for_nominal['run_id']), None)
+                if run_data_item and run_data_item.get('run_obj') is not None:
+                    run_params = run_data_item['params'].copy()
+                    
+                    # init_experiment is imported via 'from util import *' at the top
+                    # init_experiment will automatically load prior_args from artifacts
+                    experiment = init_experiment(
+                        run_data_item['run_obj'],
+                        run_params,
+                        device,
+                        design_args=None,
+                        global_rank=0
+                    )
+                    if hasattr(experiment, 'nominal_design'):
+                        nominal_design = experiment.nominal_design.cpu().numpy()
+                        # Verify shape matches (nominal_design should be 1D with num_dims elements)
+                        if nominal_design.ndim == 1:
+                            if nominal_design.shape[0] != sorted_designs.shape[1]:
+                                print(f"Warning: nominal_design shape {nominal_design.shape} doesn't match design dimensions {sorted_designs.shape[1]}, disabling ratio display.")
+                                nominal_design = None
+                        else:
+                            print(f"Warning: nominal_design has unexpected shape {nominal_design.shape}, expected 1D array, disabling ratio display.")
+                            nominal_design = None
+            except Exception as e:
+                print(f"Warning: Could not initialize experiment to get nominal_design: {e}")
+                print("Will display designs as absolute values instead of ratios.")
 
-        if is_1d_design and not sort:
+        # Determine if we should show heatmap (only if not per-run sorting)
+        show_heatmap = not per_run_sort and (not is_1d_design or sort)
+        
+        if is_1d_design and not sort and not per_run_sort:
             fig, ax_line = plt.subplots(figsize=figsize)
             ax_heat = None
             cbar_ax = None
             x_vals = sorted_designs[:, 0]
             x_label = design_labels[0]
+        elif per_run_sort:
+            # Per-run sorting: no heatmap, just line plot
+            fig, ax_line = plt.subplots(figsize=figsize)
+            ax_heat = None
+            cbar_ax = None
+            x_vals = np.arange(num_designs)
+            x_label = "Design Index (sorted per run, highest to lowest)"
         else:
             # For sorted 1D or multi-dimensional designs, align heatmap beneath line plot and add a vertical colorbar
             if is_1d_design and sort:
@@ -2259,14 +2304,15 @@ class ComparisonPlotter(BasePlotter):
             )
             ax_line = fig.add_subplot(gs[0, 0])  # Top plot for EIG
             ax_heat = fig.add_subplot(gs[1, 0], sharex=ax_line)  # Bottom plot for heatmap shares x-axis
-            # Reserve a dedicated colorbar axis on the right that spans both subplots
-            fig.subplots_adjust(left=0.06, right=0.92)
-            bbox = ax_heat.get_position()
-            cbar_width = 0.015
-            cbar_gap = 0.02  # maintain a small gap between plots and colorbar
-            cbar_left = min(0.985 - cbar_width, bbox.x1 + cbar_gap)
-            cbar_height = 0.6
-            cbar_bottom = 0.5 - cbar_height / 2  # vertically center the colorbar
+            # Reserve a dedicated colorbar axis on the right that spans both subplots (matching eig_designs)
+            fig.subplots_adjust(left=0.06, right=0.88)
+            bbox0 = ax_line.get_position()
+            bbox1 = ax_heat.get_position()
+            cbar_width = 0.02
+            cbar_gap = 0.01
+            cbar_left = bbox1.x1 + cbar_gap
+            cbar_bottom = bbox1.y0
+            cbar_height = bbox0.y1 - bbox1.y0
             cbar_ax = fig.add_axes([cbar_left, cbar_bottom, cbar_width, cbar_height])
             plt.setp(ax_line.get_xticklabels(), visible=False)
             ax_line.tick_params(axis='x', which='both', length=0)
@@ -2276,7 +2322,8 @@ class ComparisonPlotter(BasePlotter):
             if sort_reference is not None:
                 x_label_suffix = f" (sorted by {reference_record['run_label']})"
             elif sort:
-                x_label_suffix = " (sorted per run)"
+                # Use first run as reference when sort_reference is not specified
+                x_label_suffix = f" (sorted by {run_records[0]['run_label']})"
             else:
                 x_label_suffix = ""
             x_label = f"Design Index{x_label_suffix}"
@@ -2289,10 +2336,11 @@ class ComparisonPlotter(BasePlotter):
         nominal_handle = None
 
         for record in run_records:
-            if global_sort_idx is not None:
-                sort_idx = global_sort_idx
+            # Use per-run sort_idx if per_run_sort, otherwise use global_sort_idx
+            if per_run_sort:
+                sort_idx = record['sort_idx']
             else:
-                sort_idx = record.get('sort_idx', np.arange(num_designs))
+                sort_idx = global_sort_idx
 
             eig_vals = record['eigs_avg'][sort_idx]
             eig_std_vals = record['eigs_std'][sort_idx]
@@ -2306,14 +2354,16 @@ class ComparisonPlotter(BasePlotter):
 
             eig_vals_plot = eig_vals - baseline
 
-            if sorted_designs.shape[0] == 1:
+            # Determine if single point or line
+            num_points = len(eig_vals_plot)
+            if num_points == 1:
                 line = ax_line.scatter(x_vals, eig_vals_plot, color=color, zorder=5, label=record['run_label'])
             else:
                 line = ax_line.plot(x_vals, eig_vals_plot, color=color, linewidth=2, label=record['run_label'])[0]
                 
             handles_for_legend.append(line)
             if show_errorbars and np.any(eig_std_vals > 0):
-                if sorted_designs.shape[0] == 1:
+                if num_points == 1:
                     ax_line.errorbar(x_vals, eig_vals_plot, yerr=eig_std_vals, color=color, zorder=5, fmt='o', capsize=5, label=record['run_label'])
                 else:
                     ax_line.fill_between(
@@ -2411,8 +2461,8 @@ class ComparisonPlotter(BasePlotter):
         legend_labels.extend([h.get_label() for h in handles_for_legend])
         ax_line.legend(legend_handles, legend_labels, loc='best', framealpha=0.9)
         
-        # Plot sorted designs (heatmap) if ax_heat exists
-        if ax_heat is not None:
+        # Plot sorted designs (heatmap) if ax_heat exists and we're not doing per-run sorting
+        if ax_heat is not None and not per_run_sort:
             if is_1d_design and not sort:
                 extent = [x_vals.min(), x_vals.max(), -0.5, 0.5]
                 im = ax_heat.imshow(
@@ -2425,18 +2475,30 @@ class ComparisonPlotter(BasePlotter):
                 ax_heat.set_xlim(x_vals.min(), x_vals.max())
                 ax_line.set_xlim(x_vals.min(), x_vals.max())
                 ax_heat.set_yticks([0])
-                ax_heat.set_yticklabels([design_labels[0]])
+                # Format label: use as-is if already has $, otherwise wrap with $
+                label0 = design_labels[0] if design_labels[0].startswith('$') else f'${design_labels[0]}$'
+                ax_heat.set_yticklabels([label0])
             else:
-                im = ax_heat.imshow(
-                    sorted_designs.T,
-                    aspect='auto',
-                    cmap='viridis',
-                    origin='upper'
-                )
+                # Multi-dimensional designs - use ratio to nominal (exact same as eig_designs)
+                if nominal_design is None or np.any(nominal_design == 0):
+                    plot_data = sorted_designs.T
+                    cmap = 'viridis'
+                    im = ax_heat.imshow(plot_data, aspect='auto', cmap=cmap, origin='upper')
+                else:
+                    plot_data = (sorted_designs / nominal_design[np.newaxis, :]).T
+                    cmap = 'RdBu'
+                    from matplotlib.colors import TwoSlopeNorm
+                    vmin = plot_data.min()
+                    vmax = plot_data.max()
+                    norm = TwoSlopeNorm(vmin=vmin, vcenter=1.0, vmax=vmax)
+                    im = ax_heat.imshow(plot_data, aspect='auto', cmap=cmap, norm=norm, origin='upper')
+                
                 ax_heat.set_xlim(-0.5, num_designs - 0.5)
                 ax_line.set_xlim(-0.5, num_designs - 0.5)
                 ax_heat.set_yticks(np.arange(num_dims))
-                ax_heat.set_yticklabels(design_labels)
+                # Format labels: use as-is if already has $, otherwise wrap with $
+                formatted_labels = [label if label.startswith('$') else f'${label}$' for label in design_labels]
+                ax_heat.set_yticklabels(formatted_labels)
 
             ax_heat.set_xlabel(x_label, fontsize=12, weight='bold')
             ax_heat.set_ylabel('')
@@ -2444,7 +2506,11 @@ class ComparisonPlotter(BasePlotter):
             ax_heat.margins(x=0)
 
             cbar = fig.colorbar(im, cax=cbar_ax)
-            cbar.set_label('Design Value', fontsize=11, weight='bold')
+            if is_1d_design and not sort:
+                cbar.set_label('Design Value', labelpad=15, fontsize=12, weight='bold')
+            else:
+                cbar.set_label('Ratio to Nominal Design' if cmap == 'RdBu' else 'Design Value', 
+                              labelpad=15, fontsize=12, weight='bold')
             ax_line.spines['bottom'].set_visible(False)
             ax_heat.spines['bottom'].set_visible(True)
         else:
@@ -2464,11 +2530,10 @@ class ComparisonPlotter(BasePlotter):
             if self.mlflow_exp and actual_mlflow_exp_for_title:
                 title = f'EIG per Design - {actual_mlflow_exp_for_title}'
             elif self.mlflow_exp:
-                title = f'EIG per Design - {mlflow_exp}'
+                title = f'EIG per Design - {self.mlflow_exp}'
             else:
                 title = 'EIG per Design Comparison'
-        fig.suptitle(title, fontsize=16, weight='bold')
-        fig.tight_layout(rect=[0, 0, 1, 0.98])
+        fig.suptitle(title, fontsize=16, y=0.95, weight='bold')
 
         if save_path is not None:
             # Extract filename from save_path
@@ -2673,18 +2738,12 @@ class ComparisonPlotter(BasePlotter):
                     
                     run_data = run_id_to_run_data[run_id]
                     try:
-                        # Update priors_path to use the priors.yaml from the run's artifacts directory
                         run_params = run_data['params'].copy()  # Make a copy to avoid modifying original
-                        exp_id = run_id_to_exp_id.get(run_id)
-                        if exp_id:
-                            artifacts_dir = f"{storage_path}/mlruns/{exp_id}/{run_id}/artifacts"
-                            priors_artifact_path = os.path.join(artifacts_dir, "priors.yaml")
-                            if os.path.exists(priors_artifact_path):
-                                run_params['priors_path'] = priors_artifact_path
                         
+                        # init_experiment will automatically load prior_args from artifacts
                         experiment = init_experiment(
                             run_data['run_obj'], 
-                            run_params,  # Use updated params with correct priors_path
+                            run_params,
                             device, 
                             global_rank=0
                         )
@@ -2967,19 +3026,12 @@ class ComparisonPlotter(BasePlotter):
             try:
                 first_run_data = run_data_list[0]
                 device = "cuda:0"
-                # Update priors_path to use the priors.yaml from the run's artifacts directory
                 run_params = first_run_data['params'].copy()  # Make a copy to avoid modifying original
-                first_run_id = first_run_data['run_id']
-                exp_id = run_id_to_exp_id.get(first_run_id)
-                if exp_id:
-                    artifacts_dir = f"{storage_path}/mlruns/{exp_id}/{first_run_id}/artifacts"
-                    priors_artifact_path = os.path.join(artifacts_dir, "priors.yaml")
-                    if os.path.exists(priors_artifact_path):
-                        run_params['priors_path'] = priors_artifact_path
                 
+                # init_experiment will automatically load prior_args from artifacts
                 experiment = init_experiment(
                     first_run_data['run_obj'], 
-                    run_params,  # Use updated params with correct priors_path
+                    run_params,
                     device, 
                     global_rank=0
                 )

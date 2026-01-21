@@ -191,11 +191,11 @@ def _cumsimpson(x, y, dim=-1):
 class NumTracers:
     def __init__(
         self, 
+        prior_args=None,
+        design_args=None,
         dataset="dr2", 
         cosmo_model="base",
-        priors_path=None,
         flow_type="MAF",
-        design_args=None,
         nominal_design=None,
         include_D_M=True, 
         include_D_V=True,
@@ -213,8 +213,6 @@ class NumTracers:
         self.dataset = dataset
         self.desi_data = pd.read_csv(os.path.join(home_dir, f"data/desi/bao_{self.dataset}", 'desi_data.csv'))
         self.desi_tracers = pd.read_csv(os.path.join(home_dir, f"data/desi/bao_{self.dataset}", 'desi_tracers.csv'))
-        if priors_path is None:
-            priors_path = os.path.join(home_dir, f"data/desi/bao_{self.dataset}", 'priors.yaml')
         self.nominal_cov = np.load(os.path.join(home_dir, f"data/desi/bao_{self.dataset}", 'desi_cov.npy'))
         self.DH_idx = np.where(self.desi_data["quantity"] == "DH_over_rs")[0]
         self.DM_idx = np.where(self.desi_data["quantity"] == "DM_over_rs")[0]
@@ -259,21 +257,30 @@ class NumTracers:
         # This ensures it matches the actual data structure regardless of flags
         self.context_dim = self.nominal_context.shape[-1]
         
-        # initialize the priors
-        self.prior_flow = None
-        with open(priors_path, 'r') as file:
-            self.prior_data = yaml.safe_load(file)
-        self.priors, self.param_constraints, self.latex_labels = self.get_priors(priors_path)
-        self.desi_priors, _, _ = self.get_priors(os.path.join(home_dir, f"data/desi/bao_{self.dataset}", 'priors.yaml'))
-        self.cosmo_params = list(self.priors.keys())
+        # initialize the prior
+        self.prior_args = prior_args
+        if self.prior_args is None:
+            raise ValueError("prior_args must be provided. It should be loaded from MLflow artifacts or passed explicitly.")
+        
+        self.prior, self.param_constraints, self.latex_labels = self.init_prior(**self.prior_args)
+        # Load DESI prior from the default location
+        desi_prior_path = os.path.join(home_dir, f"data/desi/bao_{self.dataset}", 'prior_args.yaml')
+        if os.path.exists(desi_prior_path):
+            with open(desi_prior_path, 'r') as file:
+                desi_prior_data = yaml.safe_load(file)
+            self.desi_prior, _, _ = self.init_prior(**desi_prior_data)
+        else:
+            # If DESI prior not found, use the same as the main prior
+            self.desi_prior = self.prior
+        self.cosmo_params = list(self.prior.keys())
         self.param_bijector = Bijector(self, cdf_bins=5000, cdf_samples=1e6)
         if bijector_state is not None:
             if self.global_rank == 0:
                 print(f"Restoring bijector state from checkpoint.")
             self.param_bijector.set_state(bijector_state)
-        # if the priors are not the same as the DESI priors, create a new bijector for the DESI samples
-        if self.priors.items() != self.desi_priors.items():
-            self.desi_bijector = Bijector(self, priors=self.desi_priors, cdf_bins=5000, cdf_samples=1e6)
+        # if the prior is not the same as the DESI prior, create a new bijector for the DESI samples
+        if self.prior.items() != self.desi_prior.items():
+            self.desi_bijector = Bijector(self, prior=self.desi_prior, cdf_bins=5000, cdf_samples=1e6)
         else:
             self.desi_bijector = self.param_bijector
 
@@ -408,113 +415,57 @@ class NumTracers:
                     designs = torch.cat((designs, design_tensor), dim=1)
                 
         self.designs = designs.to(self.device)
-
-        if self.global_rank == 0 and self.verbose:
-            print(f"Designs shape: {self.designs.shape}")
-            if input_type == "nominal":
-                print(f"Using nominal design as input design: {self.designs}")
-            elif input_designs_path is None:
-                print(
-                    f"Designs initialized with the following parameters:\n",
-                    f"step size: {step}\n",
-                    f"lower range: {lower}\n",
-                    f"upper range: {upper}\n",
-                    f"sum lower: {sum_lower}\n",
-                    f"sum upper: {sum_upper}\n"
-                    )
-            elif input_designs_path is not None:
-                print(f"Input designs loaded from numpy file: {input_designs_path}")
-                print(f"Input designs: {self.designs[:10]}")
-            print(f"Nominal design: {self.nominal_design}\n")
-    def design_plot(self):
-        """
-        Plot the design variables in 3D with the 4th dimension (QSO) as color
-        """
-        fig = plt.figure(figsize=(10, 8))
-        ax_3d = fig.add_subplot(111, projection='3d')
-
-        # Convert tensors to numpy for plotting
-        designs_np = self.designs.cpu().numpy()
-        nominal_design_np = self.nominal_design.cpu().numpy()
-        
-        cbar_min = np.min(designs_np[:, 3])
-        cbar_max = np.max(designs_np[:, 3])
-        # 3D scatter plot with 4th dimension (QSO) as color
-        scatter_3d = ax_3d.scatter(designs_np[:, 1], designs_np[:, 2], designs_np[:, 0],
-                    c=designs_np[:, 3],  # 4th dimension (QSO) as color
-                    cmap='viridis',
-                    s=60,
-                    alpha=0.8,
-                    marker='o',
-                    vmin=cbar_min,
-                    vmax=cbar_max)
-        
-        # Add nominal and optimal markers
-        ax_3d.scatter(nominal_design_np[1], nominal_design_np[2], nominal_design_np[0],
-                    c=nominal_design_np[3],
-                    cmap='viridis',
-                    s=100,
-                    alpha=0.8,
-                    vmin=cbar_min,
-                    vmax=cbar_max,
-                    marker='*',
-                    label='Nominal Design')
-        
-        # Configure 3D plot
-        ax_3d.set_title('Design Variables', fontsize=16)
-        ax_3d.set_xlabel("$f_{LRG}$", fontsize=14)
-        ax_3d.set_ylabel("$f_{ELG}$", fontsize=14)
-        ax_3d.set_zlabel("$f_{BGS}$", fontsize=14)
-        ax_3d.grid(True, alpha=0.3)
-        ax_3d.legend(fontsize=12)
-        
-        # Add colorbar
-        cbar = plt.colorbar(scatter_3d, ax=ax_3d, shrink=0.8, aspect=20)
-        cbar.set_label("$f_{QSO}$", fontsize=14)
-        return fig
     
     @profile_method
-    def get_priors(self, prior_path):
+    def init_prior(
+        self,
+        parameters,
+        constraints=None,
+        prior_flow=None,
+        prior_run_id=None,
+        **kwargs
+    ):
         """
-        Load cosmological priors and constraints from a YAML configuration file.
+        Load cosmological prior and constraints from prior arguments.
         
-        This function dynamically constructs the priors and latex labels based on the
+        This function dynamically constructs the prior and latex labels based on the
         specified cosmology model in the YAML file. It supports uniform distributions
         and handles parameter constraints like Om + Ok < 1 and w0 + wa < 0.
         
         Args:
-            prior_path (str): Path to the YAML file containing prior definitions
-            
-        Raises:
-            FileNotFoundError: If the prior file doesn't exist
-            yaml.YAMLError: If the YAML file is malformed
-            ValueError: If required sections or parameters are missing, or if bounds are invalid
-            
-        The YAML file should have the following structure:
-        - parameters: defines each parameter with distribution type and bounds
-        - models: defines cosmology models and their parameter lists
-        - constraints: defines parameter constraints (optional)
+            parameters (dict): Dictionary defining each parameter with distribution type and bounds.
+                Each parameter should have:
+                - distribution: dict with 'type' ('uniform'), 'lower', 'upper'
+                - latex: LaTeX label for the parameter
+                - multiplier: optional multiplier for the parameter
+            constraints (dict, optional): Dictionary defining parameter constraints.
+                Keys are constraint names, values are dicts with 'affected_parameters' and 'bounds'.
+            prior_flow (str, optional): Absolute path to prior flow checkpoint file.
+                Must be an absolute path. Required if using a trained posterior as prior.
+            prior_run_id (str, optional): MLflow run ID for prior flow metadata.
+                Required if prior_flow is specified.
+            **kwargs: Additional arguments (ignored, for compatibility with YAML structure).
         """
         try:
-            with open(prior_path, 'r') as file:
-                prior_data = yaml.safe_load(file)
             with open(os.path.join(os.path.dirname(__file__), 'models.yaml'), 'r') as file:
                 cosmo_models = yaml.safe_load(file)
         except Exception as e:
-            raise ValueError(f"Error parsing YAML file: {e}")
+            raise ValueError(f"Error parsing models.yaml file: {e}")
 
-        # Load prior flow if specified in priors YAML
-        prior_flow_path = prior_data.get('prior_flow')
-        if prior_flow_path:
-            if not os.path.isabs(prior_flow_path):
-                prior_flow_path = os.path.join(os.path.dirname(prior_path), prior_flow_path)
+        # Load prior flow if specified
+        # Note: prior_flow_path must be an absolute path
+        if prior_flow:
+            if not os.path.isabs(prior_flow):
+                raise ValueError(
+                    f"prior_flow path '{prior_flow}' must be an absolute path. "
+                    "Relative paths are not supported."
+                )
 
-            prior_run_id = prior_data.get('prior_run_id')
             if prior_run_id is None:
-                raise ValueError("prior_run_id must be specified in priors.yaml when using prior_flow")
+                raise ValueError("prior_run_id must be specified when using prior_flow")
 
             self.prior_flow, prior_flow_metadata = load_prior_flow_from_file(
-                prior_flow_path,
+                prior_flow,
                 prior_run_id,
                 self.device,
                 self.global_rank
@@ -526,35 +477,40 @@ class NumTracers:
                 else self.nominal_context.to(self.device)
             )
             if self.global_rank == 0:
-                print("Using trained posterior model as prior for parameter sampling (loaded from priors.yaml)")
+                print("Using trained posterior model as prior for parameter sampling (loaded from prior_args.yaml)")
                 print(f"  Metadata loaded from MLflow run_id: {prior_run_id}")
 
         # Get the specified cosmology model
         if self.cosmo_model not in cosmo_models:
             raise ValueError(f"Cosmology model '{self.cosmo_model}' not found in cosmo_models.yaml. Available models: {list(cosmo_models.keys())}")
         
-        # Initialize priors, constraints, and latex labels
-        priors = {}
+        # Initialize prior, constraints, and latex labels
+        prior = {}
         param_constraints = {}
         latex_labels = []
 
         model_parameters = cosmo_models[self.cosmo_model]['parameters']
         latex_labels = cosmo_models[self.cosmo_model]['latex_labels']
-        for constraint in cosmo_models[self.cosmo_model].get('constraints', []):
-            param_constraints[constraint] = prior_data['constraints'][constraint]
         
-        # Create priors for each parameter in the model
+        # Process constraints if provided
+        if constraints is not None:
+            for constraint in cosmo_models[self.cosmo_model].get('constraints', []):
+                if constraint not in constraints:
+                    raise ValueError(f"Constraint '{constraint}' required by model '{self.cosmo_model}' not found in constraints")
+                param_constraints[constraint] = constraints[constraint]
+        
+        # Create prior for each parameter in the model
         for param_name in model_parameters:
-            if param_name not in prior_data['parameters']:
-                raise ValueError(f"Parameter '{param_name}' not found in prior.yaml parameters section")
+            if param_name not in parameters:
+                raise ValueError(f"Parameter '{param_name}' not found in prior_args.yaml parameters section")
             
-            param_config = prior_data['parameters'][param_name]
+            param_config = parameters[param_name]
             
             # Validate parameter configuration
             if 'distribution' not in param_config:
-                raise ValueError(f"Parameter '{param_name}' missing 'distribution' section in prior.yaml")
+                raise ValueError(f"Parameter '{param_name}' missing 'distribution' section in prior_args.yaml")
             if 'latex' not in param_config:
-                raise ValueError(f"Parameter '{param_name}' missing 'latex' section in prior.yaml")
+                raise ValueError(f"Parameter '{param_name}' missing 'latex' section in prior_args.yaml")
             
             dist_config = param_config['distribution']
             
@@ -565,14 +521,14 @@ class NumTracers:
                 upper = dist_config.get('upper', 1.0)
                 if lower >= upper:
                     raise ValueError(f"Invalid bounds for '{param_name}': lower ({lower}) must be < upper ({upper})")
-                priors[param_name] = dist.Uniform(*torch.tensor([lower, upper], device=self.device))
+                prior[param_name] = dist.Uniform(*torch.tensor([lower, upper], device=self.device))
             else:
                 raise ValueError(f"Distribution type '{dist_config['type']}' not supported. Only 'uniform' is currently supported.")
             
             if 'multiplier' in param_config.keys():
                 setattr(self, f'{param_name}_multiplier', float(param_config['multiplier']))
 
-        return priors, param_constraints, latex_labels
+        return prior, param_constraints, latex_labels
 
     @profile_method
     def params_to_unconstrained(self, params, bijector_class=None):
@@ -1163,7 +1119,7 @@ class NumTracers:
         
         with pyro.plate("plate", num_param_samples):
             parameters = {}
-            for i, (k, v) in enumerate(self.priors.items()):
+            for i, (k, v) in enumerate(self.prior.items()):
                 if isinstance(v, dist.Distribution):
                     parameters[k] = pyro.sample(k, v).unsqueeze(-1)
                 else:
@@ -1205,12 +1161,12 @@ class NumTracers:
         return torch.tensor(np.array(param_samples), device=self.device)
 
     @profile_method
-    def sample_valid_parameters(self, sample_shape, priors=None):
+    def sample_valid_parameters(self, sample_shape, prior=None):
         """
-        Sample parameters from priors or from a trained posterior model if available.
+        Sample parameters from prior or from a trained posterior model if available.
         
         If prior_flow is set, samples are drawn from the posterior model
-        at the nominal context. Otherwise, samples are drawn from the uniform priors.
+        at the nominal context. Otherwise, samples are drawn from the uniform prior.
         """
         # Check if we should use a posterior model as prior
         if hasattr(self, 'prior_flow') and self.prior_flow is not None:
@@ -1218,46 +1174,46 @@ class NumTracers:
         
         # register samples in the trace using pyro.sample
         parameters = {}
-        if priors is None:
-            priors = self.priors
+        if prior is None:
+            prior = self.prior
         # Handle constraints based on YAML configuration
         if hasattr(self, 'param_constraints'):
             # Check for valid density constraint
             if 'valid_densities' in self.param_constraints:
                 # 0 < Om + Ok < 1
-                OmOk_priors = {'Om': priors['Om'], 'Ok': priors['Ok']}
-                OmOk_samples = ConstrainedUniform2D(OmOk_priors, **self.param_constraints["valid_densities"]["bounds"]).sample(sample_shape)
+                OmOk_prior = {'Om': prior['Om'], 'Ok': prior['Ok']}
+                OmOk_samples = ConstrainedUniform2D(OmOk_prior, **self.param_constraints["valid_densities"]["bounds"]).sample(sample_shape)
                 parameters['Om'] = pyro.sample('Om', dist.Delta(OmOk_samples[..., 0])).unsqueeze(-1)
                 parameters['Ok'] = pyro.sample('Ok', dist.Delta(OmOk_samples[..., 1])).unsqueeze(-1)
             else:
                 # Sample Om, Ok normally if no constraint or Ok not present
-                if 'Om' in priors.keys():
-                    parameters['Om'] = pyro.sample('Om', priors['Om']).unsqueeze(-1)
-                if 'Ok' in priors.keys():
-                    parameters['Ok'] = pyro.sample('Ok', priors['Ok']).unsqueeze(-1)
+                if 'Om' in prior.keys():
+                    parameters['Om'] = pyro.sample('Om', prior['Om']).unsqueeze(-1)
+                if 'Ok' in prior.keys():
+                    parameters['Ok'] = pyro.sample('Ok', prior['Ok']).unsqueeze(-1)
             
             # Check for high z matter domination constraint
             if 'high_z_matter_dom' in self.param_constraints:
                 # w0 + wa < 0
-                w0wa_priors = {'w0': priors['w0'], 'wa': priors['wa']}
-                w0wa_samples = ConstrainedUniform2D(w0wa_priors, **self.param_constraints["high_z_matter_dom"]["bounds"]).sample(sample_shape)
+                w0wa_prior = {'w0': prior['w0'], 'wa': prior['wa']}
+                w0wa_samples = ConstrainedUniform2D(w0wa_prior, **self.param_constraints["high_z_matter_dom"]["bounds"]).sample(sample_shape)
                 parameters['w0'] = pyro.sample('w0', dist.Delta(w0wa_samples[..., 0])).unsqueeze(-1)
                 parameters['wa'] = pyro.sample('wa', dist.Delta(w0wa_samples[..., 1])).unsqueeze(-1)
             else:
                 # Sample w0, wa normally if no constraint or wa not present
-                if 'w0' in priors.keys():
-                    parameters['w0'] = pyro.sample('w0', priors['w0']).unsqueeze(-1)
-                if 'wa' in priors.keys():
-                    parameters['wa'] = pyro.sample('wa', priors['wa']).unsqueeze(-1)
+                if 'w0' in prior.keys():
+                    parameters['w0'] = pyro.sample('w0', prior['w0']).unsqueeze(-1)
+                if 'wa' in prior.keys():
+                    parameters['wa'] = pyro.sample('wa', prior['wa']).unsqueeze(-1)
         else:
             # if no parameter constraints defined
-            if 'Om' in priors.keys():
-                parameters['Om'] = pyro.sample('Om', priors['Om']).unsqueeze(-1)
-            if 'w0' in priors.keys():
-                parameters['w0'] = pyro.sample('w0', priors['w0']).unsqueeze(-1)
+            if 'Om' in prior.keys():
+                parameters['Om'] = pyro.sample('Om', prior['Om']).unsqueeze(-1)
+            if 'w0' in prior.keys():
+                parameters['w0'] = pyro.sample('w0', prior['w0']).unsqueeze(-1)
             
         # Always sample hrdrag
-        parameters['hrdrag'] = pyro.sample('hrdrag', priors['hrdrag']).unsqueeze(-1)
+        parameters['hrdrag'] = pyro.sample('hrdrag', prior['hrdrag']).unsqueeze(-1)
 
         return parameters
     

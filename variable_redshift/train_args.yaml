@@ -6,7 +6,7 @@ base_om:
   mlflow_exp: base_om
   pyro_seed: 1
   nf_seed: 1
-  priors_path: variable_redshift/priors.yaml
+  prior_args_path: variable_redshift/prior_args_hrdrag.yaml
   flow_type: MAF
   transform_input: true
   activation: elu
@@ -43,7 +43,7 @@ base:
   mlflow_exp: base
   pyro_seed: 1
   nf_seed: 1
-  priors_path: variable_redshift/priors.yaml
+  prior_args_path: variable_redshift/prior_args_hrdrag.yaml
   flow_type: MAF
   transform_input: true
   activation: elu
@@ -80,7 +80,7 @@ base_omegak:
   mlflow_exp: base_omegak
   pyro_seed: 1
   nf_seed: 1
-  priors_path: variable_redshift/priors.yaml
+  prior_args_path: variable_redshift/prior_args_hrdrag.yaml
   flow_type: MAF
   transform_input: true
   activation: elu
@@ -117,7 +117,7 @@ base_w:
   mlflow_exp: base_w
   pyro_seed: 1
   nf_seed: 1
-  priors_path: variable_redshift/priors.yaml
+  prior_args_path: variable_redshift/prior_args_hrdrag.yaml
   flow_type: MAF
   transform_input: true
   activation: elu
@@ -154,7 +154,7 @@ base_w_wa:
   mlflow_exp: variable_redshift_base_w_wa
   pyro_seed: 1
   nf_seed: 1
-  priors_path: variable_redshift/priors.yaml
+  prior_args_path: variable_redshift/prior_args_hrdrag.yaml
   flow_type: MAF
   transform_input: true
   activation: elu
@@ -191,7 +191,7 @@ base_omegak_w_wa:
   mlflow_exp: base_omegak_w_wa
   pyro_seed: 1
   nf_seed: 1
-  priors_path: variable_redshift/priors.yaml
+  prior_path: variable_redshift/prior_args_hrdrag.yaml
   flow_type: MAF
   transform_input: true
   activation: elu

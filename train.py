@@ -67,13 +67,34 @@ class Trainer:
 
         self._init_device_settings(device)
         self._init_run()
-        # Load design_args from file if design_args_path is set
-        if hasattr(self, 'design_args_path') and self.design_args_path is not None:
-            self.design_args = load_design_args(self.design_args_path, global_rank=self.global_rank)
-        else:
-            # For resume, design_args will be loaded from artifacts in init_experiment
-            self.design_args = None
         self.experiment = init_experiment(self.run_obj, self.run_args, checkpoint=self.checkpoint, device=self.device, global_rank=self.global_rank, design_args=self.design_args)
+
+        # Print design information in verbose mode
+        if self.global_rank == 0 and self.verbose:
+            # Get design_args from run_args (set by init_experiment) or from self.design_args
+            design_args = self.run_args.get('design_args', self.design_args)
+            
+            print(f"Designs shape: {self.experiment.designs.shape}")
+            
+            if design_args is not None and len(design_args) > 0:
+                input_type = design_args.get('input_type', 'variable')
+                input_designs_path = design_args.get('input_designs_path', None)
+                
+                if input_type == "nominal":
+                    print(f"Using nominal design as input design: {self.experiment.designs}")
+                elif input_designs_path is None:
+                    # Print design_args when designs are generated (not loaded from file)
+                    print("Designs initialized with the following parameters:")
+                    print(yaml.dump(design_args, default_flow_style=False, sort_keys=False))
+                else:
+                    print(f"Input designs loaded from numpy file: {input_designs_path}")
+                    print(f"Input designs: {self.experiment.designs[:10]}")
+            else:
+                # Fallback: if design_args is None or empty, just print basic info
+                print("Designs initialized (design_args not available)")
+            
+            if hasattr(self.experiment, 'nominal_design'):
+                print(f"Nominal design: {self.experiment.nominal_design}\n")
 
         self.posterior_flow = init_nf(
             self.run_args,
@@ -84,7 +105,7 @@ class Trainer:
         )
         if self.global_rank == 0:
             if not self.run_args.get("resume_id", None) and not self.run_args.get("restart_id", None):
-                self._save_input_files()
+                self._save_design_array()
 
             print("MLFlow Run Info:", self.run_obj.info.experiment_id + "/" + self.run_obj.info.run_id)
             print(f"Using {self.run_args['n_devices']} devices with {self.run_args['n_particles']} total particles.")
@@ -245,7 +266,8 @@ class Trainer:
         # Restore RNG state on resume
         if self.checkpoint is not None:
             restore_rng_state(self.checkpoint, self.global_rank)
-            print(f"RNG state restored at step {self.start_step}")
+            if self.global_rank == 0:
+                print(f"RNG state restored at step {self.start_step}")
 
         step_times = []
         current_step = self.start_step
@@ -298,7 +320,7 @@ class Trainer:
                             plot_scatter.append(False)
                         except NotImplementedError:
                             pass
-                        ranges = {param: (self.experiment.prior_data['parameters'][param]['plot']['lower'], self.experiment.prior_data['parameters'][param]['plot']['upper']) for param in self.experiment.cosmo_params}
+                        ranges = {param: (self.experiment.prior_args['parameters'][param]['plot']['lower'], self.experiment.prior_args['parameters'][param]['plot']['upper']) for param in self.experiment.cosmo_params}
                         plt.figure()
                         plotter = RunPlotter(run_id=self.run_obj.info.run_id, cosmo_exp=self.cosmo_exp)
                         plotter.plot_posterior(
@@ -673,9 +695,22 @@ class Trainer:
                     print("Starting fresh training run")
                 self.checkpoint = None
                 
-                # For fresh run, priors_run_path is set to the priors_path.yaml file
-                self.priors_path = self.run_args.get("priors_path", None)
+                # Store prior_args_path and design_args_path for _save_input_args
+                self.prior_args_path = self.run_args.get("prior_args_path", None)
                 self.design_args_path = self.run_args.get("design_args_path", None)
+                
+                # Resolve relative paths to absolute paths from project root
+                if self.prior_args_path and not os.path.isabs(self.prior_args_path):
+                    project_root = os.path.dirname(os.path.abspath(__file__))
+                    self.prior_args_path = os.path.normpath(os.path.join(project_root, self.prior_args_path))
+                
+                if self.design_args_path and not os.path.isabs(self.design_args_path):
+                    project_root = os.path.dirname(os.path.abspath(__file__))
+                    self.design_args_path = os.path.normpath(os.path.join(project_root, self.design_args_path))
+                
+                # Save prior_args.yaml and design_args.yaml to artifacts before init_experiment
+                if self.global_rank == 0:
+                    self._save_input_args()
             else: 
                 # Restart from existing run
                 if self.global_rank == 0:
@@ -696,13 +731,14 @@ class Trainer:
 
                 checkpoint_dir = f"{self.storage_path}/mlruns/{ref_run.info.experiment_id}/{self.run_args['restart_id']}/artifacts/checkpoints"
                 
-                # Use saved priors file from artifacts for restart
-                self.priors_path = f"{self.storage_path}/mlruns/{ref_run.info.experiment_id}/{self.run_args['restart_id']}/artifacts/priors.yaml"
-                self.run_args["priors_path"] = self.priors_path
-
-                # Use saved design_args file from artifacts for restart
-                self.design_args_path = f"{self.storage_path}/mlruns/{ref_run.info.experiment_id}/{self.run_args['restart_id']}/artifacts/design_args.yaml"
-                self.run_args["design_args_path"] = self.design_args_path
+                # Store paths from restart run for _save_input_args
+                self.restart_run_id = self.run_args["restart_id"]
+                self.restart_exp_id = ref_run.info.experiment_id
+                
+                # Copy prior_args.yaml and design_args.yaml from restart run's artifacts to new run's artifacts
+                # init_experiment will then load them from artifacts automatically
+                if self.global_rank == 0:
+                    self._save_input_args(restart_run=True)
 
                 if self.run_args.get("restart_checkpoint", None) is not None:
                     # Load specific checkpoint file for all ranks
@@ -747,16 +783,9 @@ class Trainer:
                     }
         else:
             # Resume existing run
+            # init_experiment will automatically load prior_args.yaml and design_args.yaml from artifacts
             self.run_obj = self.client.get_run(self.run_args["resume_id"])
             checkpoint_dir = f"{self.storage_path}/mlruns/{self.run_obj.info.experiment_id}/{self.run_args['resume_id']}/artifacts/checkpoints"
-            
-            # Use saved priors file from artifacts for resume
-            self.priors_path = f"{self.storage_path}/mlruns/{self.run_obj.info.experiment_id}/{self.run_args['resume_id']}/artifacts/priors.yaml"
-            self.run_args["priors_path"] = self.priors_path
-
-            # Use saved design_args file from artifacts for resume
-            self.design_args_path = f"{self.storage_path}/mlruns/{self.run_obj.info.experiment_id}/{self.run_args['resume_id']}/artifacts/design_args.yaml"
-            self.run_args["design_args_path"] = self.design_args_path
 
             # Load the checkpoint
             self.checkpoint, self.start_step = get_checkpoint(
@@ -850,42 +879,90 @@ class Trainer:
         tdist.broadcast_object_list(run_args_list_to_broadcast, src=0)
         self.run_args = run_args_list_to_broadcast[0] # All ranks now have the definitive run_args
 
-    def _save_input_files(self):
-        """Save input (prior and design args and optionally input_designs) files to artifacts"""
+        # design_args will be loaded from artifacts in init_experiment
+        # For new runs, we can also get it from run_args if provided
+        self.design_args = self.run_args.get("design_args", None)
+
+    def _save_input_args(self, restart_run=False):
+        """
+        Save prior_args.yaml and design_args.yaml to artifacts.
+        
+        Args:
+            restart_run: If True, copy files from restart run's artifacts instead of from file paths.
+        """
         artifacts_dir = f"{self.storage_path}/mlruns/{mlflow.active_run().info.experiment_id}/{mlflow.active_run().info.run_id}/artifacts"
-        print(f"Saving input files to artifacts directory.")
-
-        # Save priors file if available
-        if not os.path.exists(self.priors_path):
-            raise RuntimeError(f"Priors file not found at {self.priors_path}")
+        os.makedirs(artifacts_dir, exist_ok=True)
         
-        try:
-            priors_artifact_path = f"{artifacts_dir}/priors.yaml"
-            shutil.copy2(self.priors_path, priors_artifact_path)
-            mlflow.log_artifact(priors_artifact_path)
+        if restart_run:
+            # Copy prior_args.yaml and design_args.yaml from restart run's artifacts
+            restart_artifacts_dir = f"{self.storage_path}/mlruns/{self.restart_exp_id}/{self.restart_run_id}/artifacts"
+            
+            # Copy prior_args.yaml
+            restart_prior_args_path = f"{restart_artifacts_dir}/prior_args.yaml"
+            if os.path.exists(restart_prior_args_path):
+                new_prior_args_path = f"{artifacts_dir}/prior_args.yaml"
+                shutil.copy2(restart_prior_args_path, new_prior_args_path)
+                mlflow.log_artifact(new_prior_args_path)
+                if self.verbose:
+                    print(f"Copied prior_args.yaml from restart run to new run artifacts")
+            else:
+                raise FileNotFoundError(f"Prior file not found in restart run artifacts: {restart_prior_args_path}")
+            
+            # Copy design_args.yaml
+            restart_design_args_path = f"{restart_artifacts_dir}/design_args.yaml"
+            if os.path.exists(restart_design_args_path):
+                new_design_args_path = f"{artifacts_dir}/design_args.yaml"
+                shutil.copy2(restart_design_args_path, new_design_args_path)
+                mlflow.log_artifact(new_design_args_path)
+                if self.verbose:
+                    print(f"Copied design_args.yaml from restart run to new run artifacts")
+            else:
+                raise FileNotFoundError(f"Design args file not found in restart run artifacts: {restart_design_args_path}")
+        else:
+            # Save prior_args.yaml from file path
+            if hasattr(self, 'prior_args_path') and self.prior_args_path is not None:
+                if not os.path.exists(self.prior_args_path):
+                    raise FileNotFoundError(f"Prior file not found at {self.prior_args_path}")
                 
-            # Verify the file was saved correctly
-            if not os.path.exists(priors_artifact_path):
-                raise RuntimeError(f"Failed to save priors file to artifacts: {priors_artifact_path}")
-        except Exception as e:
-            raise RuntimeError(f"Failed to save priors file: {e}")
-        
-        # Save design_args if available
-        if not os.path.exists(self.design_args_path):
-            raise FileNotFoundError(f"Design args file not found: {self.design_args_path}")
-        with open(self.design_args_path, 'r') as f:
-            design_args = yaml.safe_load(f)
+                prior_artifact_path = f"{artifacts_dir}/prior_args.yaml"
+                shutil.copy2(self.prior_args_path, prior_artifact_path)
+                mlflow.log_artifact(prior_artifact_path)
+                if self.verbose:
+                    print(f"Saved prior_args.yaml to artifacts: {prior_artifact_path}")
+            else:
+                if self.global_rank == 0:
+                    print(f"Warning: prior_args_path not set in run_args, skipping prior_args.yaml save")
+            
+            # Save design_args.yaml from file path
+            if hasattr(self, 'design_args_path') and self.design_args_path is not None:
+                if not os.path.exists(self.design_args_path):
+                    raise FileNotFoundError(f"Design args file not found at {self.design_args_path}")
+                
+                design_args_artifact_path = f"{artifacts_dir}/design_args.yaml"
+                shutil.copy2(self.design_args_path, design_args_artifact_path)
+                mlflow.log_artifact(design_args_artifact_path)
+                if self.verbose:
+                    print(f"Saved design_args.yaml to artifacts: {design_args_artifact_path}")
+    
+    def _save_design_array(self):
+        """Save designs.npy to artifacts and update design_args.yaml with input_designs_path."""
+        artifacts_dir = f"{self.storage_path}/mlruns/{mlflow.active_run().info.experiment_id}/{mlflow.active_run().info.run_id}/artifacts"
+        print(f"Saving designs to artifacts directory.")
 
-        # Copy the npy file to artifacts
+        # Save designs.npy to artifacts
         designs_artifact_path = f"{artifacts_dir}/designs.npy"
         np.save(designs_artifact_path, self.experiment.designs.cpu().detach().numpy())
         mlflow.log_artifact(designs_artifact_path)
+        
         # Update design_args to point to the saved NPY file location
+        design_args = self.run_args.get('design_args', {})
+        if design_args is None:
+            design_args = {}
         design_args["input_designs_path"] = designs_artifact_path
 
+        # Update design_args.yaml in artifacts with the input_designs_path
         try:
             design_args_artifact_path = f"{artifacts_dir}/design_args.yaml"
-            # Write the updated design_args dict to YAML (instead of copying the original)
             with open(design_args_artifact_path, 'w') as f:
                 yaml.dump(design_args, f, default_flow_style=False, sort_keys=False)
             mlflow.log_artifact(design_args_artifact_path)

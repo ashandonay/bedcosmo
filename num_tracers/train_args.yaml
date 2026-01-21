@@ -6,7 +6,7 @@ base:
   mlflow_exp: base
   pyro_seed: 1
   nf_seed: 1
-  priors_path: num_tracers/priors_hrdrag.yaml
+  prior_args_path: num_tracers/prior_args_hrdrag.yaml
   dataset: dr2
   flow_type: NAF
   transform_input: false
@@ -42,7 +42,7 @@ base_omegak:
   mlflow_exp: base_omegak
   pyro_seed: 1
   nf_seed: 1
-  priors_path: num_tracers/priors.yaml
+  prior_args_path: num_tracers/prior_args_hrdrag.yaml
   dataset: dr2
   flow_type: NAF
   transform_input: true
@@ -78,7 +78,7 @@ base_w:
   mlflow_exp: base_w
   pyro_seed: 1
   nf_seed: 1
-  priors_path: num_tracers/priors.yaml
+  prior_args_path: num_tracers/prior_args_hrdrag.yaml
   dataset: dr2
   flow_type: NAF
   transform_input: true
@@ -114,7 +114,7 @@ base_w_wa:
   mlflow_exp: base_w_wa
   pyro_seed: 1
   nf_seed: 1
-  priors_path: num_tracers/priors.yaml
+  prior_args_path: num_tracers/prior_args_hrdrag.yaml
   dataset: dr2
   flow_type: NAF
   transform_input: true
@@ -150,7 +150,7 @@ base_omegak_w_wa:
   mlflow_exp: base_omegak_w_wa
   pyro_seed: 1
   nf_seed: 1
-  priors_path: num_tracers/priors.yaml
+  prior_args_path: num_tracers/prior_args_hrdrag.yaml
   dataset: dr2
   flow_type: NAF
   transform_input: true

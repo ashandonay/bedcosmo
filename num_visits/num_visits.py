@@ -129,11 +129,11 @@ class NumVisits:
 
     def __init__(
         self,
+        prior_args=None,
+        design_args=None,
         temperature=5000,
         z_prior_bounds=(0.1, 3.0),
-        design_args=None,
         nominal_design=None,
-        priors_path=None,
         pixel_scale=0.2,
         stamp_size=31,
         threshold=0.0,
@@ -170,45 +170,14 @@ class NumVisits:
         if z_low >= z_high:
             raise ValueError("z_prior_bounds must satisfy lower < upper.")
         self.z_prior_bounds = z_prior_bounds
-        if priors_path is None:
-            priors_path = os.path.join(SCRIPT_DIR, "priors.yaml")
-        self.priors, self.latex_labels, self.prior_data = self.get_priors(priors_path)
-        self.cosmo_params = list(self.priors.keys())
-        self.z_prior = self.priors[self.cosmo_params[0]]
         
-        # Check if prior_flow is specified in priors YAML
-        self.prior_flow = None
-        if 'prior_flow' in self.prior_data and self.prior_data['prior_flow'] is not None and self.prior_data['prior_flow'] != '':
-            prior_flow_path = self.prior_data['prior_flow']
-            # Handle relative paths - assume relative to priors_path directory
-            if not os.path.isabs(prior_flow_path):
-                prior_flow_path = os.path.join(os.path.dirname(priors_path), prior_flow_path)
-            
-            # prior_run_id is required to get metadata from MLflow
-            prior_run_id = self.prior_data.get('prior_run_id', None)
-            if prior_run_id is None:
-                raise ValueError("prior_run_id must be specified in priors.yaml when using prior_flow")
-            
-            
-            self.prior_flow, prior_flow_metadata = load_prior_flow_from_file(
-                prior_flow_path,
-                prior_run_id,
-                self.device,
-                self.global_rank
-            )
-            # Store metadata in experiment class, not on the flow model
-            self.prior_flow_transform_input = prior_flow_metadata['transform_input']
-            # Set nominal context for num_visits
-            # Context = design (nvisits per filter) + observations (magnitudes per filter)
-            if prior_flow_metadata['nominal_context'] is not None:
-                self.prior_flow_nominal_context = prior_flow_metadata['nominal_context']
-            else:
-                nominal_observations = torch.zeros(self.num_filters, device=self.device, dtype=torch.float64)
-                self.prior_flow_nominal_context = torch.cat([self.nominal_design, nominal_observations], dim=-1)
-            if self.global_rank == 0:
-                print("Using trained posterior model as prior for parameter sampling (loaded from priors.yaml)")
-                if prior_run_id:
-                    print(f"  Metadata loaded from MLflow run_id: {prior_run_id}")
+        # initialize the prior
+        self.prior_args = prior_args
+        if self.prior_args is None:
+            raise ValueError("prior_args must be provided. It should be loaded from MLflow artifacts or passed explicitly.")
+        self.prior, self.latex_labels = self.init_prior(**self.prior_args)
+        self.cosmo_params = list(self.prior.keys())
+        self.z_prior = self.prior[self.cosmo_params[0]]
 
         if nominal_design is None:
             self.nominal_design = torch.tensor(
@@ -221,6 +190,12 @@ class NumVisits:
                     f"nominal_design must have shape ({self.num_filters},), got {nominal_array.shape}"
                 )
             self.nominal_design = torch.tensor(nominal_array, device=self.device, dtype=torch.float64)
+        
+        # Set nominal context for prior_flow if it was loaded
+        if hasattr(self, 'prior_flow') and self.prior_flow is not None:
+            if not hasattr(self, 'prior_flow_nominal_context'):
+                nominal_observations = torch.zeros(self.num_filters, device=self.device, dtype=torch.float64)
+                self.prior_flow_nominal_context = torch.cat([self.nominal_design, nominal_observations], dim=-1)
 
         self.pixel_scale = pixel_scale
         self.stamp_size = stamp_size
@@ -320,24 +295,73 @@ class NumVisits:
         raise TypeError(f"{label} must be a float or sequence, got {type(value)}")
 
     @profile_method
-    def get_priors(self, prior_path):
-        with open(prior_path, "r") as file:
-            prior_data = yaml.safe_load(file)
-        parameters = prior_data.get("parameters", {})
-        priors = {}
+    def init_prior(
+        self,
+        parameters,
+        prior_flow=None,
+        prior_run_id=None,
+        **kwargs
+    ):
+        """
+        Load cosmological prior from prior arguments.
+        
+        Args:
+            parameters (dict): Dictionary defining each parameter with distribution type and bounds.
+                Each parameter should have:
+                - distribution: dict with 'type' ('uniform'), 'lower', 'upper'
+                - latex: LaTeX label for the parameter
+            prior_flow (str, optional): Absolute path to prior flow checkpoint file.
+                Must be an absolute path. Required if using a trained posterior as prior.
+            prior_run_id (str, optional): MLflow run ID for prior flow metadata.
+                Required if prior_flow is specified.
+            **kwargs: Additional arguments (ignored, for compatibility with YAML structure).
+        """
+        prior = {}
         latex_labels = []
+        
         for name, cfg in parameters.items():
             dist_cfg = cfg.get("distribution", {})
             if dist_cfg.get("type") != "uniform":
-                raise ValueError(f"Only uniform priors supported (got {dist_cfg.get('type')})")
+                raise ValueError(f"Only uniform prior supported (got {dist_cfg.get('type')})")
             lower = float(dist_cfg.get("lower", 0.0))
             upper = float(dist_cfg.get("upper", 1.0))
-            priors[name] = dist.Uniform(
+            prior[name] = dist.Uniform(
                 torch.tensor(lower, device=self.device, dtype=torch.float64),
                 torch.tensor(upper, device=self.device, dtype=torch.float64),
             )
             latex_labels.append(cfg.get("latex", name))
-        return priors, latex_labels, prior_data
+        
+        # Load prior flow if specified
+        # Note: prior_flow_path must be an absolute path
+        if prior_flow:
+            if not os.path.isabs(prior_flow):
+                raise ValueError(
+                    f"prior_flow path '{prior_flow}' must be an absolute path. "
+                    "Relative paths are not supported."
+                )
+
+            if prior_run_id is None:
+                raise ValueError("prior_run_id must be specified when using prior_flow")
+            
+            self.prior_flow, prior_flow_metadata = load_prior_flow_from_file(
+                prior_flow,
+                prior_run_id,
+                self.device,
+                self.global_rank
+            )
+            # Store metadata in experiment class, not on the flow model
+            self.prior_flow_transform_input = prior_flow_metadata['transform_input']
+            # Set nominal context for num_visits (will be finalized in __init__ after nominal_design is set)
+            # Context = design (nvisits per filter) + observations (magnitudes per filter)
+            if prior_flow_metadata['nominal_context'] is not None:
+                self.prior_flow_nominal_context = prior_flow_metadata['nominal_context']
+            # If not provided, will be set in __init__ after nominal_design is available
+            if self.global_rank == 0:
+                print("Using trained posterior model as prior for parameter sampling (loaded from prior_args.yaml)")
+                if prior_run_id:
+                    print(f"  Metadata loaded from MLflow run_id: {prior_run_id}")
+        
+        return prior, latex_labels
 
     @profile_method
     def _calculate_base_profile(self):
@@ -798,43 +822,6 @@ class NumVisits:
         
         return z
 
-    @profile_method
-    def get_priors(self, prior_path):
-        """Load uniform priors for the redshift parameter."""
-        try:
-            with open(prior_path, "r") as file:
-                prior_data = yaml.safe_load(file)
-            with open(os.path.join(SCRIPT_DIR, "models.yaml"), "r") as file:
-                cosmo_models = yaml.safe_load(file)
-        except Exception as exc:
-            raise ValueError(f"Error parsing YAML file: {exc}") from exc
-
-        model_key = "base"
-        if model_key not in cosmo_models:
-            raise ValueError(f"Model '{model_key}' not found in models.yaml")
-
-        model_parameters = cosmo_models[model_key]["parameters"]
-        latex_labels = cosmo_models[model_key]["latex_labels"]
-
-        priors = {}
-        for idx, param_name in enumerate(model_parameters):
-            if param_name not in prior_data["parameters"]:
-                raise ValueError(f"Parameter '{param_name}' missing from priors.yaml")
-            param_config = prior_data["parameters"][param_name]
-            dist_config = param_config.get("distribution", {})
-            if dist_config.get("type") != "uniform":
-                raise ValueError("num_visits only supports uniform priors")
-            lower = dist_config.get("lower")
-            upper = dist_config.get("upper")
-            if lower is None or upper is None or lower >= upper:
-                raise ValueError(f"Invalid bounds for '{param_name}'")
-            priors[param_name] = dist.Uniform(
-                torch.tensor(lower, device=self.device, dtype=torch.float64),
-                torch.tensor(upper, device=self.device, dtype=torch.float64),
-            )
-            latex_labels[idx] = param_config.get("latex", latex_labels[idx])
-
-        return priors, latex_labels, prior_data
 
     @profile_method
     def params_to_unconstrained(self, params, bijector_class=None):

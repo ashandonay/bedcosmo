@@ -42,12 +42,12 @@ sys.path.insert(0, home_dir + "/bed/BED_cosmo/num_visits")
 
 
 class Bijector:
-    def __init__(self, experiment, priors=None, cdf_bins=1000, cdf_samples=500000):
+    def __init__(self, experiment, prior=None, cdf_bins=1000, cdf_samples=500000):
         self.experiment = experiment
-        if priors is not None:
-            self.priors = priors
+        if prior is not None:
+            self.prior = prior
         else:
-            self.priors = self.experiment.priors
+            self.prior = self.experiment.prior
         self.cdfs = self.create_cdfs(num_bins=int(cdf_bins), num_samples=int(cdf_samples))
 
     def create_cdfs(self, num_bins, num_samples):
@@ -65,14 +65,14 @@ class Bijector:
             Dictionary with 'bins' and 'cdf_values' keys for fast CDF computation
         """
         with pyro.plate_stack("plate", (num_samples,)):
-            empirical_priors = self.experiment.sample_valid_parameters((num_samples,), priors=self.priors)
+            empirical_prior = self.experiment.sample_valid_parameters((num_samples,), prior=self.prior)
         cdfs = {}
-        for key, samples in empirical_priors.items():
+        for key, samples in empirical_prior.items():
             sorted_samples, _ = torch.sort(samples.flatten())
             n_samples = len(sorted_samples)
 
             # Create evenly spaced bins across the extended range
-            bins = torch.linspace(self.priors[key].low, self.priors[key].high, num_bins, device=samples.device)
+            bins = torch.linspace(self.prior[key].low, self.prior[key].high, num_bins, device=samples.device)
             
             # Compute CDF values for each bin
             cdf_values = torch.zeros_like(bins)
@@ -1033,6 +1033,7 @@ def init_experiment(
         checkpoint=None,
         global_rank=0,
         design_args=None,
+        prior_args=None,
         ):
     """
     Initializes the experiment class with the run arguments.
@@ -1046,6 +1047,8 @@ def init_experiment(
         design_args (dict): The design arguments. If None, will try to load from:
             1. Artifacts (design_args.yaml) from the run_obj
             2. File if design_args_path is specified in run_args
+        prior_args (dict): The prior arguments. If None, will try to load from:
+            Artifacts (prior_args.yaml) from the run_obj
     """
 
     artifact_uri = run_obj.info.artifact_uri
@@ -1073,6 +1076,20 @@ def init_experiment(
     # Note: input_designs loading from JSON paths is now handled by the experiment classes
     if design_args is not None:
         run_args['design_args'] = design_args
+    
+    # If prior_args is not provided (None), try to load from artifacts
+    if prior_args is None:
+        prior_artifact_path = artifact_path + "/prior_args.yaml"
+        if os.path.exists(prior_artifact_path):
+            if global_rank == 0:
+                print(f"Loading prior_args from artifacts: {prior_artifact_path}")
+            with open(prior_artifact_path, 'r') as f:
+                prior_args = yaml.safe_load(f)
+        else:
+            if global_rank == 0:
+                print(f"Warning: prior_args.yaml not found in artifacts at {prior_artifact_path}")
+    
+    run_args['prior_args'] = prior_args
     run_args["device"] = device
     # Use profile from run_args if present, otherwise use the function parameter
     run_args["profile"] = run_args.get("profile", profile)
@@ -1107,6 +1124,8 @@ def init_experiment(
         from num_visits import NumVisits
         valid_params = inspect.signature(NumVisits.__init__).parameters.keys()
         valid_params = [k for k in valid_params if k != 'self']
+
+        # Filter run_args to only include valid NumVisits parameters
         exp_args = {k: v for k, v in run_args.items() if k in valid_params}
         exp_args['global_rank'] = global_rank
         if checkpoint is not None and 'bijector_state' in checkpoint.keys():

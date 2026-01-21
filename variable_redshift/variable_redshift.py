@@ -189,7 +189,7 @@ class VariableRedshift:
     def __init__(
         self, 
         cosmo_model="base",
-        priors_path=None,
+        prior_args=None,
         flow_type="MAF",
         design_args=None,
         nominal_design=None,
@@ -259,14 +259,13 @@ class VariableRedshift:
         # Context = design (redshift) + observations
         self.context_dim = self.n_redshifts + self.observation_dim
         
-        # Initialize the priors
-        if priors_path is None:
-            priors_path = os.path.join(script_dir, 'priors.yaml')
-        with open(priors_path, 'r') as file:
-            self.prior_data = yaml.safe_load(file)
-        self.priors, self.param_constraints, self.latex_labels = self.get_priors(priors_path)
-        self.desi_priors, _, _ = self.get_priors(priors_path)  # For now, same as priors
-        self.cosmo_params = list(self.priors.keys())
+        # Initialize the prior
+        self.prior_args = prior_args
+        if self.prior_args is None:
+            raise ValueError("prior_args must be provided. It should be loaded from MLflow artifacts or passed explicitly.")
+        self.prior, self.param_constraints, self.latex_labels = self.init_prior(**self.prior_args)
+        self.desi_prior = self.prior  # For now, same as prior
+        self.cosmo_params = list(self.prior.keys())
         
         self.transform_input = transform_input
         if self.transform_input:
@@ -440,42 +439,72 @@ class VariableRedshift:
             print(f"Initialized {self.designs.shape[0]} redshift designs from z={lower} to z={upper}")
 
     @profile_method
-    def get_priors(self, prior_path):
-        """Load cosmological priors and constraints from a YAML configuration file."""
+    def init_prior(
+        self,
+        parameters,
+        constraints=None,
+        prior_flow=None,
+        prior_run_id=None,
+        **kwargs
+    ):
+        """
+        Load cosmological prior and constraints from prior arguments.
+        
+        This function dynamically constructs the prior and latex labels based on the
+        specified cosmology model in the YAML file. It supports uniform distributions
+        and handles parameter constraints.
+        
+        Args:
+            parameters (dict): Dictionary defining each parameter with distribution type and bounds.
+                Each parameter should have:
+                - distribution: dict with 'type' ('uniform'), 'lower', 'upper'
+                - latex: LaTeX label for the parameter
+                - multiplier: optional multiplier for the parameter
+            constraints (dict, optional): Dictionary defining parameter constraints.
+                Keys are constraint names, values are dicts with 'affected_parameters' and 'bounds'.
+            prior_flow (str, optional): Absolute path to prior flow checkpoint file.
+                Must be an absolute path. Required if using a trained posterior as prior.
+            prior_run_id (str, optional): MLflow run ID for prior flow metadata.
+                Required if prior_flow is specified.
+            **kwargs: Additional arguments (ignored, for compatibility with YAML structure).
+        """
         try:
-            with open(prior_path, 'r') as file:
-                prior_data = yaml.safe_load(file)
             with open(os.path.join(os.path.dirname(__file__), 'models.yaml'), 'r') as file:
                 cosmo_models = yaml.safe_load(file)
         except Exception as e:
-            raise ValueError(f"Error parsing YAML file: {e}")
+            raise ValueError(f"Error parsing models.yaml file: {e}")
 
         # Get the specified cosmology model
         if self.cosmo_model not in cosmo_models:
             raise ValueError(f"Cosmology model '{self.cosmo_model}' not found in models.yaml. Available models: {list(cosmo_models.keys())}")
         
-        # Initialize priors, constraints, and latex labels
-        priors = {}
+        # Initialize prior, constraints, and latex labels
+        prior = {}
         param_constraints = {}
         latex_labels = []
 
         model_parameters = cosmo_models[self.cosmo_model]['parameters']
         latex_labels = cosmo_models[self.cosmo_model]['latex_labels']
-        for constraint in cosmo_models[self.cosmo_model].get('constraints', []):
-            param_constraints[constraint] = prior_data['constraints'][constraint]
         
-        # Create priors for each parameter in the model
+        # Process constraints if provided
+        if constraints is not None:
+            for constraint in cosmo_models[self.cosmo_model].get('constraints', []):
+                if constraint not in constraints:
+                    raise ValueError(f"Constraint '{constraint}' required by model '{self.cosmo_model}' not found in constraints")
+                param_constraints[constraint] = constraints[constraint]
+        
+        # Create prior for each parameter in the model
         for param_name in model_parameters:
-            if param_name not in prior_data['parameters']:
-                raise ValueError(f"Parameter '{param_name}' not found in prior.yaml parameters section")
+            if param_name not in parameters:
+                raise ValueError(f"Parameter '{param_name}' not found in prior_args.yaml parameters section")
             
-            param_config = prior_data['parameters'][param_name]
+            param_config = parameters[param_name]
             
             # Validate parameter configuration
             if 'distribution' not in param_config:
-                raise ValueError(f"Parameter '{param_name}' missing 'distribution' section in prior.yaml")
+                raise ValueError(f"Parameter '{param_name}' missing 'distribution' section in prior_args.yaml")
             if 'latex' not in param_config:
-                raise ValueError(f"Parameter '{param_name}' missing 'latex' section in prior.yaml")
+                raise ValueError(f"Parameter '{param_name}' missing 'latex' section in prior_args.yaml")
             
             dist_config = param_config['distribution']
             
@@ -486,7 +515,7 @@ class VariableRedshift:
                 upper = dist_config.get('upper', 1.0)
                 if lower >= upper:
                     raise ValueError(f"Invalid bounds for '{param_name}': lower ({lower}) must be < upper ({upper})")
-                priors[param_name] = dist.Uniform(*torch.tensor([lower, upper], device=self.device))
+                prior[param_name] = dist.Uniform(*torch.tensor([lower, upper], device=self.device))
             else:
                 raise ValueError(f"Distribution type '{dist_config['type']}' not supported. Only 'uniform' is currently supported.")
             
@@ -495,7 +524,7 @@ class VariableRedshift:
         if 'hrdrag' not in model_parameters:
             setattr(self, 'hrdrag_multiplier', 100.0)
 
-        return priors, param_constraints, latex_labels
+        return prior, param_constraints, latex_labels
 
     def error_func(self, z, D_H, D_M=None):
         if hasattr(self, 'variable_error'):
@@ -865,55 +894,55 @@ class VariableRedshift:
         return prefac * geom
 
     @profile_method
-    def sample_valid_parameters(self, sample_shape, priors=None):
-        """Sample parameters from priors with constraints."""
+    def sample_valid_parameters(self, sample_shape, prior=None):
+        """Sample parameters from prior with constraints."""
         parameters = {}
-        if priors is None:
-            priors = self.priors
+        if prior is None:
+            prior = self.prior
         
         # Handle constraints based on YAML configuration
         if hasattr(self, 'param_constraints'):
             # Check for valid density constraint
             if 'valid_densities' in self.param_constraints:
                 # 0 < Om + Ok < 1
-                OmOk_priors = {'Om': priors['Om'], 'Ok': priors['Ok']}
-                OmOk_samples = ConstrainedUniform2D(OmOk_priors, **self.param_constraints["valid_densities"]["bounds"]).sample(sample_shape)
+                OmOk_prior = {'Om': prior['Om'], 'Ok': prior['Ok']}
+                OmOk_samples = ConstrainedUniform2D(OmOk_prior, **self.param_constraints["valid_densities"]["bounds"]).sample(sample_shape)
                 parameters['Om'] = pyro.sample('Om', dist.Delta(OmOk_samples[..., 0])).unsqueeze(-1)
                 parameters['Ok'] = pyro.sample('Ok', dist.Delta(OmOk_samples[..., 1])).unsqueeze(-1)
             else:
                 # Sample Om, Ok normally if no constraint or Ok not present
-                if 'Om' in priors.keys():
-                    parameters['Om'] = pyro.sample('Om', priors['Om']).unsqueeze(-1)
-                if 'Ok' in priors.keys():
-                    parameters['Ok'] = pyro.sample('Ok', priors['Ok']).unsqueeze(-1)
+                if 'Om' in prior.keys():
+                    parameters['Om'] = pyro.sample('Om', prior['Om']).unsqueeze(-1)
+                if 'Ok' in prior.keys():
+                    parameters['Ok'] = pyro.sample('Ok', prior['Ok']).unsqueeze(-1)
             
             # Check for high z matter domination constraint
             if 'high_z_matter_dom' in self.param_constraints:
                 # w0 + wa < 0
-                w0wa_priors = {'w0': priors['w0'], 'wa': priors['wa']}
-                w0wa_samples = ConstrainedUniform2D(w0wa_priors, **self.param_constraints["high_z_matter_dom"]["bounds"]).sample(sample_shape)
+                w0wa_prior = {'w0': prior['w0'], 'wa': prior['wa']}
+                w0wa_samples = ConstrainedUniform2D(w0wa_prior, **self.param_constraints["high_z_matter_dom"]["bounds"]).sample(sample_shape)
                 parameters['w0'] = pyro.sample('w0', dist.Delta(w0wa_samples[..., 0])).unsqueeze(-1)
                 parameters['wa'] = pyro.sample('wa', dist.Delta(w0wa_samples[..., 1])).unsqueeze(-1)
             else:
                 # Sample w0, wa normally if no constraint or wa not present
-                if 'w0' in priors.keys():
-                    parameters['w0'] = pyro.sample('w0', priors['w0']).unsqueeze(-1)
-                if 'wa' in priors.keys():
-                    parameters['wa'] = pyro.sample('wa', priors['wa']).unsqueeze(-1)
+                if 'w0' in prior.keys():
+                    parameters['w0'] = pyro.sample('w0', prior['w0']).unsqueeze(-1)
+                if 'wa' in prior.keys():
+                    parameters['wa'] = pyro.sample('wa', prior['wa']).unsqueeze(-1)
         else:
             # If no parameter constraints defined
-            if 'Om' in priors.keys():
-                parameters['Om'] = pyro.sample('Om', priors['Om']).unsqueeze(-1)
-            if 'Ok' in priors.keys():
-                parameters['Ok'] = pyro.sample('Ok', priors['Ok']).unsqueeze(-1)
-            if 'w0' in priors.keys():
-                parameters['w0'] = pyro.sample('w0', priors['w0']).unsqueeze(-1)
-            if 'wa' in priors.keys():
-                parameters['wa'] = pyro.sample('wa', priors['wa']).unsqueeze(-1)
+            if 'Om' in prior.keys():
+                parameters['Om'] = pyro.sample('Om', prior['Om']).unsqueeze(-1)
+            if 'Ok' in prior.keys():
+                parameters['Ok'] = pyro.sample('Ok', prior['Ok']).unsqueeze(-1)
+            if 'w0' in prior.keys():
+                parameters['w0'] = pyro.sample('w0', prior['w0']).unsqueeze(-1)
+            if 'wa' in prior.keys():
+                parameters['wa'] = pyro.sample('wa', prior['wa']).unsqueeze(-1)
             
         # Always sample hrdrag if it's in the model
-        if 'hrdrag' in priors.keys():
-            parameters['hrdrag'] = pyro.sample('hrdrag', priors['hrdrag']).unsqueeze(-1)
+        if 'hrdrag' in prior.keys():
+            parameters['hrdrag'] = pyro.sample('hrdrag', prior['hrdrag']).unsqueeze(-1)
 
         return parameters
 
