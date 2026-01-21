@@ -1,0 +1,9 @@
+# Design arguments for num_tracers experiment
+labels: ["BGS", "LRG", "ELG", "QSO"]
+input_type: variable # variable or nominal
+input_designs_path: null
+step: [0.05, 0.05, 0.05, 0.05]
+lower: [0.05, 0.1, 0.1, 0.1]
+upper: [1.0, 1.0, 1.0, 1.0]
+sum_lower: 1.0
+sum_upper: 1.0
