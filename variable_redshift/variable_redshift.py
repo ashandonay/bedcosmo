@@ -19,6 +19,7 @@ import contextlib
 import io
 import getdist
 import math
+import inspect
 
 # Get the directory containing the current script
 script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -469,7 +470,9 @@ class VariableRedshift:
             **kwargs: Additional arguments (ignored, for compatibility with YAML structure).
         """
         try:
-            with open(os.path.join(os.path.dirname(__file__), 'models.yaml'), 'r') as file:
+            class_file = inspect.getfile(self.__class__)
+            models_yaml_path = os.path.join(os.path.dirname(class_file), 'models.yaml')
+            with open(models_yaml_path, 'r') as file:
                 cosmo_models = yaml.safe_load(file)
         except Exception as e:
             raise ValueError(f"Error parsing models.yaml file: {e}")

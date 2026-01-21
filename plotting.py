@@ -1844,6 +1844,11 @@ class ComparisonPlotter(BasePlotter):
             print("No valid groups found. Cannot plot.")
             return None
         
+        # Create run_id to label mapping if self.run_labels is available
+        run_id_to_label = {}
+        if self.run_labels is not None and len(self.run_labels) == len(run_data_list):
+            run_id_to_label = {r['run_id']: self.run_labels[i] for i, r in enumerate(run_data_list)}
+        
         # Sort groups
         if var:
             def custom_sort_key(group_key):
@@ -1907,10 +1912,35 @@ class ComparisonPlotter(BasePlotter):
             all_samples.extend(group_samples)
             all_colors.extend([group_color] * len(group_samples))
             
+            # Determine group label: combine run_labels and var if both are available
+            label_parts = []
+            
+            # Get run_label if available
+            if run_id_to_label:
+                # Get labels for all runs in this group
+                group_run_labels = [run_id_to_label.get(run_data_item['run_id'], None) 
+                                   for run_data_item in group_runs]
+                # Filter out None values
+                group_run_labels = [label for label in group_run_labels if label is not None]
+                
+                if group_run_labels:
+                    # If all runs in group have the same label, use it; otherwise use first label
+                    if len(set(group_run_labels)) == 1:
+                        label_parts.append(group_run_labels[0])
+                    else:
+                        # Multiple different labels in group - use first one
+                        label_parts.append(group_run_labels[0])
+            
+            # Add var information if specified
             if var:
-                group_label = ', '.join([f'{vars_list[j]}={val}' for j, val in enumerate(group_key)])
+                var_label = ', '.join([f'{vars_list[j]}={val}' for j, val in enumerate(group_key)])
+                label_parts.append(var_label)
+            
+            # Combine label parts, or fall back to run_id if nothing available
+            if label_parts:
+                group_label = ', '.join(label_parts)
             else:
-                group_label = group_key[:8]
+                group_label = group_key[:8] if isinstance(group_key, str) else str(group_key)[:8]
             
             legend_handles.append(
                 Line2D([0], [0], color=group_color, label=group_label)
