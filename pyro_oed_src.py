@@ -264,7 +264,14 @@ def nf_loss(
     if evaluation:
         if log_probs is None:
             raise ValueError("Log probabilities are not provided")
-        prior_entropy = -1 * sum(log_probs[l].mean(dim=0) for l in experiment.cosmo_params)
+        
+        # Check if experiment uses prior_flow - if so, use joint log_prob directly
+        if hasattr(experiment, 'prior_flow') and experiment.prior_flow is not None:
+            prior_entropy = -1 * log_probs["joint"].mean(dim=0)
+        else:
+            # Per-parameter log_probs from uniform priors: sum them
+            prior_entropy = -1 * sum(log_probs[l].mean(dim=0) for l in experiment.cosmo_params)
+        
         loss = prior_entropy - loss
 
     return agg_loss, loss
@@ -630,9 +637,39 @@ class LikelihoodDataset(Dataset):
 
             # Compute log probabilities only if evaluation=True
             if self.evaluation:
-                trace.compute_log_prob()
-                # Extract log probabilities for cosmological parameters
-                log_probs = {l: trace.nodes[l]["log_prob"] for l in self.experiment.cosmo_params}
+                # Check if we should use prior_flow for log probabilities
+                if hasattr(self.experiment, 'prior_flow') and self.experiment.prior_flow is not None:
+                    # Compute log probabilities from prior_flow
+                    # Get nominal context for the prior flow
+                    nominal_context = self.experiment.prior_flow_metadata['nominal_context'].to(self.device)
+                    
+                    # Expand nominal context to match batch size
+                    batch_shape = samples.shape[:-1]  # e.g., [n_particles, num_designs]
+                    flattened_samples = samples.view(-1, samples.shape[-1])
+                    expanded_context = nominal_context.unsqueeze(0).expand(flattened_samples.shape[0], -1)
+                    
+                    # Transform samples to unconstrained space if needed
+                    prior_transform_input = self.experiment.prior_flow_metadata['transform_input']
+                    if prior_transform_input:
+                        samples_for_log_prob = self.experiment.params_to_unconstrained(flattened_samples)
+                    else:
+                        samples_for_log_prob = flattened_samples
+                    
+                    # Compute log probabilities from prior_flow
+                    prior_dist = self.experiment.prior_flow(expanded_context)
+                    log_prob_all = prior_dist.log_prob(samples_for_log_prob)  # Shape: [n_particles * num_designs]
+                    
+                    # Reshape back to batch shape
+                    log_prob_all = log_prob_all.reshape(batch_shape)
+                    
+                    log_probs = {"joint": log_prob_all}
+                    
+                else:
+                    # Use standard trace.compute_log_prob() for uniform priors
+                    trace.compute_log_prob()
+                    # Extract log probabilities for cosmological parameters
+                    log_probs = {l: trace.nodes[l]["log_prob"] for l in self.experiment.cosmo_params}
+                
                 # Clean up trace to free memory
                 del trace, expanded_design, y_dict, theta_dict
                 return samples, condition_input, log_probs
