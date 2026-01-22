@@ -7,6 +7,7 @@ import gc
 import pickle
 import re
 import matplotlib
+from matplotlib.lines import Line2D
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 import time

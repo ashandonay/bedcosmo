@@ -296,7 +296,7 @@ class NumVisits:
     def init_prior(
         self,
         parameters,
-        prior_flow=None,
+        prior_flow_path=None,
         prior_run_id=None,
         **kwargs
     ):
@@ -311,7 +311,7 @@ class NumVisits:
                     - For 'gamma': 'shape', 'z_0' (rate = 1/z_0)
                     - For 'gaussian': 'loc' (mean), 'scale' (std)
                 - latex: LaTeX label for the parameter
-            prior_flow (str, optional): Absolute path to prior flow checkpoint file.
+            prior_flow_path (str, optional): Absolute path to prior flow checkpoint file.
                 Must be an absolute path. Required if using a trained posterior as prior.
             prior_run_id (str, optional): MLflow run ID for prior flow metadata.
                 Required if prior_flow is specified.
@@ -368,34 +368,31 @@ class NumVisits:
         
         # Load prior flow if specified
         # Note: prior_flow_path must be an absolute path
-        if prior_flow:
-            if not os.path.isabs(prior_flow):
+        if prior_flow_path:
+            if not os.path.isabs(prior_flow_path):
                 raise ValueError(
-                    f"prior_flow path '{prior_flow}' must be an absolute path. "
+                    f"prior_flow path '{prior_flow_path}' must be an absolute path. "
                     "Relative paths are not supported."
                 )
 
             if prior_run_id is None:
                 raise ValueError("prior_run_id must be specified when using prior_flow")
             
-            self.prior_flow, prior_flow_metadata = load_prior_flow_from_file(
-                prior_flow,
+            self.prior_flow, self.prior_flow_metadata = load_prior_flow_from_file(
+                prior_flow_path,
                 prior_run_id,
                 self.device,
                 self.global_rank
             )
             # Store metadata in experiment class, not on the flow model
-            self.prior_flow_transform_input = prior_flow_metadata['transform_input']
-            # Set nominal context for num_visits (will be finalized in __init__ after nominal_design is set)
-            # Context = design (nvisits per filter) + observations (magnitudes per filter)
-            if prior_flow_metadata['nominal_context'] is not None:
-                self.prior_flow_nominal_context = prior_flow_metadata['nominal_context']
             # If not provided, will be set in __init__ after nominal_design is available
             if self.global_rank == 0:
                 print("Using trained posterior model as prior for parameter sampling (loaded from prior_args.yaml)")
                 if prior_run_id:
                     print(f"  Metadata loaded from MLflow run_id: {prior_run_id}")
-        
+        else:
+            self.prior_flow = None
+
         return prior, latex_labels
 
     @profile_method
