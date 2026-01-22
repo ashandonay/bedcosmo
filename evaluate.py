@@ -89,7 +89,10 @@ class Evaluator:
         
         # Load design_args from file
         if design_args_path is not None:
-            self.design_args = load_design_args(design_args_path, global_rank=self.global_rank)
+            if not os.path.exists(design_args_path):
+                raise FileNotFoundError(f"Design args file not found: {design_args_path}")
+            with open(design_args_path, 'r') as f:
+                self.design_args = yaml.safe_load(f)
             print(f"Loaded design_args from: {design_args_path}")
         else:
             # Will default to the run's artifacts design_args.yaml
@@ -98,7 +101,7 @@ class Evaluator:
         # Initialize experiment - it will handle input_design and generate designs accordingly 
         # (single design, multiple designs, or grid)
         self.experiment = init_experiment(
-            self.run_obj, self.run_args, self.device, 
+            self.run_obj, self.run_args, device=self.device, 
             design_args=self.design_args, global_rank=self.global_rank
         )
         if self.eig_file_path is not None and 'input_designs' in self.eig_data:

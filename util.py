@@ -1013,7 +1013,7 @@ def get_nominal_samples(run_obj, run_args, guide_samples=101, seed=1, device="cu
     mlflow.set_tracking_uri(storage_path + "/mlruns")
 
     # Pass run_obj, run_args (which should be consistent with run_obj), and classes
-    experiment = init_experiment(run_obj, run_args, device, global_rank=global_rank)
+    experiment = init_experiment(run_obj, run_args, device=device, global_rank=global_rank)
     posterior_flow, selected_step = load_model(experiment, step, run_obj, run_args, device, global_rank=global_rank)
     auto_seed(seed)
 
@@ -1026,22 +1026,23 @@ def get_nominal_samples(run_obj, run_args, guide_samples=101, seed=1, device="cu
     return nominal_samples, selected_step
 
 def init_experiment(
-        run_obj,
-        run_args, 
-        device,
-        profile=False,
+        run_obj=None,
+        run_args=None,
+        cosmo_exp=None,
         checkpoint=None,
         global_rank=0,
         design_args=None,
+        design_args_path=None,
         prior_args=None,
+        prior_args_path=None,
+        **kwargs
         ):
     """
     Initializes the experiment class with the run arguments.
     Args:
         run_obj: The MLflow Run object.
         run_args (dict): The run arguments.
-        device (str): The device to use.
-        profile (bool): Whether to profile the code.
+        cosmo_exp (str): The cosmology experiment name.
         checkpoint (dict): Checkpoint dictionary.
         global_rank (int): Global rank for distributed training.
         design_args (dict): The design arguments. If None, will try to load from:
@@ -1049,52 +1050,76 @@ def init_experiment(
             2. File if design_args_path is specified in run_args
         prior_args (dict): The prior arguments. If None, will try to load from:
             Artifacts (prior_args.yaml) from the run_obj
+        **kwargs: Additional arguments (e.g., device, profile) that will be added to run_args.
     """
+    if run_obj is not None and run_args is not None:
 
-    artifact_uri = run_obj.info.artifact_uri
-    if artifact_uri.startswith("file://"):
-        artifact_path = artifact_uri[7:]  # Remove "file://" prefix
+        cosmo_exp = run_args.get("cosmo_exp")
+
+        artifact_uri = run_obj.info.artifact_uri
+        if artifact_uri.startswith("file://"):
+            artifact_path = artifact_uri[7:]  # Remove "file://" prefix
+        else:
+            artifact_path = artifact_uri
+        # If design_args is not provided (None), try to load from artifacts first
+        if design_args is None:
+            design_args_artifact_path = artifact_path + "/design_args.yaml"
+            if os.path.exists(design_args_artifact_path):
+                if global_rank == 0:
+                    print(f"Loading design_args from artifacts: {design_args_artifact_path}")
+                with open(design_args_artifact_path, 'r') as f:
+                    design_args = yaml.safe_load(f)
+            else:
+                # Fall back to loading from file if design_args_path is specified
+                design_args_path = run_args.get("design_args_path", None)
+                if design_args_path is not None:
+                    if not os.path.exists(design_args_path):
+                        raise FileNotFoundError(f"Design args file not found: {design_args_path}")
+                    with open(design_args_path, 'r') as f:
+                        design_args = yaml.safe_load(f)
+        
+        # If prior_args is not provided (None), try to load from artifacts
+        if prior_args is None:
+            prior_artifact_path = artifact_path + "/prior_args.yaml"
+            if os.path.exists(prior_artifact_path):
+                if global_rank == 0:
+                    print(f"Loading prior_args from artifacts: {prior_artifact_path}")
+                with open(prior_artifact_path, 'r') as f:
+                    prior_args = yaml.safe_load(f)
+            else:
+                if global_rank == 0:
+                    print(f"Warning: prior_args.yaml not found in artifacts at {prior_artifact_path}")
+
     else:
-        artifact_path = artifact_uri
-    # If design_args is not provided (None), try to load from artifacts first
-    if design_args is None:
-        design_args_artifact_path = artifact_path + "/design_args.yaml"
-        if os.path.exists(design_args_artifact_path):
-            if global_rank == 0:
-                print(f"Loading design_args from artifacts: {design_args_artifact_path}")
-            with open(design_args_artifact_path, 'r') as f:
-                design_args = yaml.safe_load(f)
-        else:
-            # Fall back to loading from file if design_args_path is specified
-            design_args_path = run_args.get("design_args_path", None)
+        if cosmo_exp is None:
+            raise ValueError("cosmo_exp must be specified")
+        run_args = {}
+        if design_args is None:
             if design_args_path is not None:
-                loaded_design_args = load_design_args(design_args_path, global_rank=global_rank)
-                if loaded_design_args is not None:
-                    design_args = loaded_design_args
+                design_args_path = os.path.join(os.path.dirname(__file__), design_args_path)
+                if not os.path.exists(design_args_path):
+                    raise FileNotFoundError(f"Design args file not found: {design_args_path}")
+                with open(design_args_path, 'r') as f:
+                    design_args = yaml.safe_load(f)
+
+        if prior_args is None:
+            if prior_args_path is not None:
+                prior_args_path = os.path.join(os.path.dirname(__file__), prior_args_path)
+                if not os.path.exists(prior_args_path):
+                    raise FileNotFoundError(f"Prior args file not found: {prior_args_path}")
+                with open(prior_args_path, 'r') as f:
+                    prior_args = yaml.safe_load(f)
     
-    # Set design_args in run_args if we have it (including empty dict if explicitly provided)
-    # Note: input_designs loading from JSON paths is now handled by the experiment classes
-    if design_args is not None:
-        run_args['design_args'] = design_args
+    # Initialize run_args if None
+    if run_args is None:
+        run_args = {}
     
-    # If prior_args is not provided (None), try to load from artifacts
-    if prior_args is None:
-        prior_artifact_path = artifact_path + "/prior_args.yaml"
-        if os.path.exists(prior_artifact_path):
-            if global_rank == 0:
-                print(f"Loading prior_args from artifacts: {prior_artifact_path}")
-            with open(prior_artifact_path, 'r') as f:
-                prior_args = yaml.safe_load(f)
-        else:
-            if global_rank == 0:
-                print(f"Warning: prior_args.yaml not found in artifacts at {prior_artifact_path}")
-    
+    # Add design_args and prior_args
+    run_args['design_args'] = design_args
     run_args['prior_args'] = prior_args
-    run_args["device"] = device
-    # Use profile from run_args if present, otherwise use the function parameter
-    run_args["profile"] = run_args.get("profile", profile)
     
-    cosmo_exp = run_args.get("cosmo_exp")
+    # Merge kwargs into run_args
+    run_args.update(kwargs)
     
     if cosmo_exp == 'num_tracers':
         from num_tracers import NumTracers
@@ -1139,25 +1164,6 @@ def init_experiment(
         )
     
     return experiment
-
-def load_design_args(design_args_path, global_rank=0):
-    """
-    Load design_args from a YAML file.
-    
-    Args:
-        design_args_path (str): Path to the design_args YAML file.
-        global_rank (int): Global rank for distributed training (for logging).
-    
-    Returns:
-        dict: The loaded design_args dictionary.
-    """
-    if design_args_path is None:
-        raise ValueError("design_args_path must be specified")
-    if not os.path.exists(design_args_path):
-        raise FileNotFoundError(f"Design args file not found: {design_args_path}")
-    with open(design_args_path, 'r') as f:
-        design_args = yaml.safe_load(f)
-    return design_args
 
 def eval_eigs(
         experiment, 

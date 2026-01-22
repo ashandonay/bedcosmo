@@ -826,7 +826,7 @@ class RunPlotter(BasePlotter):
         step_for_model = 'last' if step_key is None else step_num
         
         # Initialize experiment for optimal design samples (nominal uses get_nominal_samples)
-        experiment = init_experiment(run_obj, run_args, device, design_args=None, global_rank=0)
+        experiment = init_experiment(run_obj, run_args, device=device, design_args=None, global_rank=0)
         
         # Load model for this step (needed for optimal design samples)
         posterior_flow, selected_step = load_model(experiment, step_for_model, run_obj, run_args, device, global_rank=0)
@@ -1059,7 +1059,7 @@ class RunPlotter(BasePlotter):
             
             # Initialize experiment to get designs
             experiment = init_experiment(
-                run_obj, run_args, device, 
+                run_obj, run_args, device=device, 
                 design_args=design_args, global_rank=0
             )
             
@@ -1270,7 +1270,7 @@ class RunPlotter(BasePlotter):
         run_obj = self.run_data['run_obj']
         run_args = self.run_data['params']
         experiment = init_experiment(
-            run_obj, run_args, device, 
+            run_obj, run_args, device=device, 
             design_args=None, global_rank=0
         )
         return experiment
@@ -1426,7 +1426,7 @@ class RunPlotter(BasePlotter):
         run_args = self.run_data['params']
         
         # Initialize experiment once
-        experiment = init_experiment(run_obj, run_args, device, design_args=None, global_rank=0)
+        experiment = init_experiment(run_obj, run_args, device=device, design_args=None, global_rank=0)
         
         # Load labels once (needed for all samples)
         _, target_labels, latex_labels = load_nominal_samples(
@@ -2286,7 +2286,7 @@ class ComparisonPlotter(BasePlotter):
                     experiment = init_experiment(
                         run_data_item['run_obj'],
                         run_params,
-                        device,
+                        device=device,
                         design_args=None,
                         global_rank=0
                     )
@@ -2774,7 +2774,7 @@ class ComparisonPlotter(BasePlotter):
                         experiment = init_experiment(
                             run_data['run_obj'], 
                             run_params,
-                            device, 
+                            device=device, 
                             global_rank=0
                         )
                         
@@ -3062,7 +3062,7 @@ class ComparisonPlotter(BasePlotter):
                 experiment = init_experiment(
                     first_run_data['run_obj'], 
                     run_params,
-                    device, 
+                    device=device, 
                     global_rank=0
                 )
                 if hasattr(experiment, 'design_labels'):
@@ -3835,7 +3835,7 @@ class ComparisonPlotter(BasePlotter):
                 experiment = init_experiment(
                     first_run_data['run_obj'], 
                     first_run_data['params'], 
-                    device, 
+                    device=device, 
                     design_args={}, 
                     global_rank=0
                 )
@@ -4300,7 +4300,7 @@ def compare_increasing_design(
             experiment = init_experiment(
                 run_data_for_init['run_obj'], 
                 run_data_for_init['params'], 
-                device, 
+                device=device, 
                 design_args={}, 
                 global_rank=0
             )
