@@ -263,13 +263,15 @@ class NumTracers:
         if self.prior_args is None:
             raise ValueError("prior_args must be provided. It should be loaded from MLflow artifacts or passed explicitly.")
         
-        self.prior, self.param_constraints, self.latex_labels = self.init_prior(**self.prior_args)
+
+        self.prior, self.param_constraints, self.latex_labels, self.prior_flow, self.prior_flow_metadata = self.init_prior(**self.prior_args)
+        
         # Load DESI prior from the default location
         desi_prior_path = os.path.join(home_dir, f"data/desi/bao_{self.dataset}", 'prior_args.yaml')
         if os.path.exists(desi_prior_path):
             with open(desi_prior_path, 'r') as file:
                 desi_prior_data = yaml.safe_load(file)
-            self.desi_prior, _, _ = self.init_prior(**desi_prior_data)
+            self.desi_prior, _, _, _, _ = self.init_prior(**desi_prior_data)
         else:
             # If DESI prior not found, use the same as the main prior
             self.desi_prior = self.prior
@@ -422,7 +424,7 @@ class NumTracers:
         self,
         parameters,
         constraints=None,
-        prior_flow=None,
+        prior_flow_path=None,
         prior_run_id=None,
         **kwargs
     ):
@@ -441,11 +443,19 @@ class NumTracers:
                 - multiplier: optional multiplier for the parameter
             constraints (dict, optional): Dictionary defining parameter constraints.
                 Keys are constraint names, values are dicts with 'affected_parameters' and 'bounds'.
-            prior_flow (str, optional): Absolute path to prior flow checkpoint file.
+            prior_flow_path (str, optional): Absolute path to prior flow checkpoint file.
                 Must be an absolute path. Required if using a trained posterior as prior.
             prior_run_id (str, optional): MLflow run ID for prior flow metadata.
                 Required if prior_flow is specified.
             **kwargs: Additional arguments (ignored, for compatibility with YAML structure).
+        
+        Returns:
+            tuple: (prior, param_constraints, latex_labels, prior_flow, prior_flow_metadata)
+                - prior: Dictionary of parameter distributions
+                - param_constraints: Dictionary of parameter constraints
+                - latex_labels: List of LaTeX labels for parameters
+                - prior_flow: Loaded prior flow model or None
+                - prior_flow_metadata: Metadata dict from prior flow or None
         """
         try:
             class_file = inspect.getfile(self.__class__)
@@ -456,32 +466,30 @@ class NumTracers:
             raise ValueError(f"Error parsing models.yaml file: {e}")
 
         # Load prior flow if specified
-        # Note: prior_flow_path must be an absolute path
-        if prior_flow:
-            if not os.path.isabs(prior_flow):
+        if prior_flow_path:
+            if not os.path.isabs(prior_flow_path):
                 raise ValueError(
-                    f"prior_flow path '{prior_flow}' must be an absolute path. "
+                    f"prior_flow path '{prior_flow_path}' must be an absolute path. "
                     "Relative paths are not supported."
                 )
 
             if prior_run_id is None:
-                raise ValueError("prior_run_id must be specified when using prior_flow")
+                raise ValueError("prior_run_id must be specified when using prior_flow_path")
 
-            self.prior_flow, prior_flow_metadata = load_prior_flow_from_file(
-                prior_flow,
+            prior_flow, prior_flow_metadata = load_prior_flow_from_file(
+                prior_flow_path,
                 prior_run_id,
                 self.device,
                 self.global_rank
             )
-            self.prior_flow_transform_input = prior_flow_metadata['transform_input']
-            self.prior_flow_nominal_context = (
-                prior_flow_metadata['nominal_context']
-                if prior_flow_metadata['nominal_context'] is not None
-                else self.nominal_context.to(self.device)
-            )
+            prior_flow_metadata['nominal_context'] = self.nominal_context.to(self.device) if prior_flow_metadata['nominal_context'] is None else prior_flow_metadata['nominal_context']
+
             if self.global_rank == 0:
                 print("Using trained posterior model as prior for parameter sampling (loaded from prior_args.yaml)")
                 print(f"  Metadata loaded from MLflow run_id: {prior_run_id}")
+        else:
+            prior_flow = None
+            prior_flow_metadata = None
 
         # Get the specified cosmology model
         if self.cosmo_model not in cosmo_models:
@@ -531,7 +539,7 @@ class NumTracers:
             if 'multiplier' in param_config.keys():
                 setattr(self, f'{param_name}_multiplier', float(param_config['multiplier']))
 
-        return prior, param_constraints, latex_labels
+        return prior, param_constraints, latex_labels, prior_flow, prior_flow_metadata
 
     @profile_method
     def params_to_unconstrained(self, params, bijector_class=None):

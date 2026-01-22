@@ -949,7 +949,7 @@ class RunPlotter(BasePlotter):
         leg.set_in_layout(False)
         
         # Save figure automatically
-        filename = self.generate_filename("posterior_comparison")
+        filename = self.generate_filename("posterior_eval")
         self.save_figure(g.fig, filename, run_id=self.run_id, experiment_id=self.experiment_id, dpi=400, close_fig=False, display_fig=False)
         
         return g
@@ -1980,7 +1980,7 @@ class ComparisonPlotter(BasePlotter):
         g.fig.suptitle(title)
         
         # Save figure
-        filename_prefix = "posterior_comparison"
+        filename_prefix = "posterior_comp"
         single_run_id_for_path = None
         if self.mlflow_exp and experiment_id_for_save_path:
             save_dir = self.get_save_dir(experiment_id=experiment_id_for_save_path)
