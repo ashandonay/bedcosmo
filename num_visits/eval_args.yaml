@@ -4,9 +4,9 @@ base:
   cosmo_model: base
   eval_step: last
   levels: [0.68, 0.95]
-  guide_samples: 1000
-  n_particles: 10001
-  particle_batch_size: 50000  
+  guide_samples: 100000
+  n_particles: 100001
+  particle_batch_size: 10000  
   n_evals: 10
   param_space: physical
   design_args_path: null

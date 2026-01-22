@@ -148,6 +148,121 @@ class Trainer:
             )
         return loss, agg_loss
 
+    def _check_nan_loss(self, loss, global_loss, current_step, samples=None, context=None):
+        """
+        Check for NaN/Inf values in loss tensors and print detailed diagnostic information.
+        
+        Args:
+            loss: Loss tensor
+            global_loss: Global (averaged) loss value
+            current_step: Current training step
+            samples: Sample tensor (optional, for printing associated samples)
+            context: Context tensor (optional, for printing associated context)
+            
+        Returns:
+            bool: True if NaN/Inf detected, False otherwise
+        """
+        if not (np.isnan(global_loss) or np.isinf(global_loss)):
+            return False
+        
+        if self.global_rank == 0:
+            print(f"\nERROR: NaN/Inf loss detected at step {current_step}. Stopping training.")
+            
+            print(f"Loss tensor shape: {loss.shape}")
+            
+            loss_nan_mask = torch.isnan(loss)
+            loss_inf_mask = torch.isinf(loss)
+            loss_nan_count = loss_nan_mask.sum().item()
+            loss_inf_count = loss_inf_mask.sum().item()
+            
+            if loss_nan_count > 0:
+                loss_nan_indices = torch.nonzero(loss_nan_mask, as_tuple=False)
+                print(f"\nLoss tensor: {loss_nan_count} NaN values found")
+                print(f"NaN indices (first 20): {loss_nan_indices[:20].cpu().numpy().tolist()}")
+                if loss_nan_count > 20:
+                    print(f"... and {loss_nan_count - 20} more NaN values")
+                
+                # Print associated samples and context for NaN indices
+                if samples is not None and context is not None:
+                    print(f"\n=== Associated Samples and Context for NaN Loss ===")
+                    print(f"Samples shape: {samples.shape}")
+                    print(f"Context shape: {context.shape}")
+                    
+                    # Print information for first few NaN indices
+                    num_to_print = min(5, len(loss_nan_indices))
+                    for i in range(num_to_print):
+                        idx = loss_nan_indices[i].cpu().numpy().tolist()
+                        idx_tuple = tuple(idx)
+                        print(f"\nNaN at loss index {idx}:")
+                        
+                        # Show loss value at this index (will be NaN, but show for completeness)
+                        loss_val = loss[idx_tuple].item()
+                        print(f"  Loss value: {loss_val}")
+                        
+                        # Extract sample and context based on loss tensor dimensions
+                        try:
+                            # Convert list to tuple for indexing
+                            idx_tuple = tuple(idx)
+                            
+                            # Determine how to map loss indices to samples/context indices
+                            # If samples/context have more dimensions than the loss, check if there's a batch dimension
+                            samples_extra_dims = len(samples.shape) - len(loss.shape)
+                            context_extra_dims = len(context.shape) - len(loss.shape)
+                            
+                            # Build sample slice: handle batch dimension if present
+                            if samples_extra_dims > 0:
+                                # Check if first dimension is batch dimension (size 1)
+                                if samples.shape[0] == 1:
+                                    # Batch dimension at index 0, then use loss indices for next dims
+                                    sample_slice = (0,) + idx_tuple + (slice(None),) * (samples_extra_dims - 1)
+                                else:
+                                    # No batch dimension, use loss indices directly
+                                    sample_slice = idx_tuple + (slice(None),) * samples_extra_dims
+                            elif samples_extra_dims == 0:
+                                sample_slice = idx_tuple
+                            else:
+                                # Samples have fewer dims than loss (shouldn't happen, but handle gracefully)
+                                sample_slice = tuple(idx[:len(samples.shape)])
+                            
+                            sample_val = samples[sample_slice]
+                            print(f"  Sample at {sample_slice}: {sample_val.cpu().numpy()}")
+                            
+                            # Similar for context
+                            if context_extra_dims > 0:
+                                if context.shape[0] == 1:
+                                    context_slice = (0,) + idx_tuple + (slice(None),) * (context_extra_dims - 1)
+                                else:
+                                    context_slice = idx_tuple + (slice(None),) * context_extra_dims
+                            elif context_extra_dims == 0:
+                                context_slice = idx_tuple
+                            else:
+                                context_slice = tuple(idx[:len(context.shape)])
+                            
+                            context_val = context[context_slice]
+                            print(f"  Context at {context_slice}: {context_val.cpu().numpy()}")
+                            
+                        except (IndexError, RuntimeError, TypeError) as e:
+                            print(f"  Could not extract sample/context at {idx}: {e}")
+                            print(f"    Loss shape: {loss.shape}, Samples shape: {samples.shape}, Context shape: {context.shape}")
+            
+            if loss_inf_count > 0:
+                loss_inf_indices = torch.nonzero(loss_inf_mask, as_tuple=False)
+                print(f"\nLoss tensor: {loss_inf_count} Inf values found")
+                print(f"Inf indices (first 20): {loss_inf_indices[:20].cpu().numpy().tolist()}")
+                if loss_inf_count > 20:
+                    print(f"... and {loss_inf_count - 20} more Inf values")
+            
+            # Statistics about valid values
+            loss_valid = loss[~loss_nan_mask & ~loss_inf_mask]
+            
+            if len(loss_valid) > 0:
+                print(f"\nValid loss values: min={loss_valid.min().item():.6f}, max={loss_valid.max().item():.6f}, mean={loss_valid.mean().item():.6f}, std={loss_valid.std().item():.6f}")
+            
+            print(f"Global loss: {global_loss}")
+            print(f"==============================\n")
+        
+        return True
+
     @profile_method
     def step(self, samples, context, current_step):
         # Time the step if we're in the first 100 steps
@@ -276,12 +391,10 @@ class Trainer:
             for samples, context in self.dataloader:
                 loss, agg_loss, global_loss, global_agg_loss, current_step, step_time = self.step(samples, context, current_step)
                 
-                # Check for NaN loss values (moved outside step to allow communication/computation overlap)
-                if np.isnan(global_loss) or np.isnan(global_agg_loss) or np.isinf(global_loss) or np.isinf(global_agg_loss):
-                    if self.global_rank == 0:
-                        print(f"\nERROR: NaN/Inf loss detected at step {current_step}. Stopping training.")
-                        if self.is_tty and not self.profile:
-                            self.pbar.close()
+                # Check for NaN loss values
+                if self._check_nan_loss(loss, global_loss, current_step, samples, context):
+                    if self.global_rank == 0 and self.is_tty and not self.profile:
+                        self.pbar.close()
                     tdist.barrier()
                     break_loop = True
                     break

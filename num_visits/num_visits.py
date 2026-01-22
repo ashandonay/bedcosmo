@@ -173,8 +173,6 @@ class NumVisits:
         
         # initialize the prior
         self.prior_args = prior_args
-        if self.prior_args is None:
-            raise ValueError("prior_args must be provided. It should be loaded from MLflow artifacts or passed explicitly.")
         self.prior, self.latex_labels = self.init_prior(**self.prior_args)
         self.cosmo_params = list(self.prior.keys())
         self.z_prior = self.prior[self.cosmo_params[0]]
@@ -308,7 +306,10 @@ class NumVisits:
         Args:
             parameters (dict): Dictionary defining each parameter with distribution type and bounds.
                 Each parameter should have:
-                - distribution: dict with 'type' ('uniform'), 'lower', 'upper'
+                - distribution: dict with 'type' and distribution-specific parameters:
+                    - For 'uniform': 'lower', 'upper'
+                    - For 'gamma': 'shape', 'z_0' (rate = 1/z_0)
+                    - For 'gaussian': 'loc' (mean), 'scale' (std)
                 - latex: LaTeX label for the parameter
             prior_flow_path (str, optional): Absolute path to prior flow checkpoint file.
                 Must be an absolute path. Required if using a trained posterior as prior.
@@ -321,14 +322,48 @@ class NumVisits:
         
         for name, cfg in parameters.items():
             dist_cfg = cfg.get("distribution", {})
-            if dist_cfg.get("type") != "uniform":
-                raise ValueError(f"Only uniform prior supported (got {dist_cfg.get('type')})")
-            lower = float(dist_cfg.get("lower", 0.0))
-            upper = float(dist_cfg.get("upper", 1.0))
-            prior[name] = dist.Uniform(
-                torch.tensor(lower, device=self.device, dtype=torch.float64),
-                torch.tensor(upper, device=self.device, dtype=torch.float64),
-            )
+            dist_type = dist_cfg.get("type", "uniform")
+            
+            if dist_type == "uniform":
+                lower = float(dist_cfg.get("lower", 0.0))
+                upper = float(dist_cfg.get("upper", 1.0))
+                if lower >= upper:
+                    raise ValueError(f"Invalid bounds for '{name}': lower ({lower}) must be < upper ({upper})")
+                prior[name] = dist.Uniform(
+                    torch.tensor(lower, device=self.device, dtype=torch.float64),
+                    torch.tensor(upper, device=self.device, dtype=torch.float64),
+                )
+            elif dist_type == "gamma":
+                # Gamma distribution
+                # For LSST redshift distribution: p(z) = (1/(2*z_0)) * (z/z_0)^2 * exp(-z/z_0)
+                shape = float(dist_cfg.get("shape", 1.0))
+                if "z_0" not in dist_cfg:
+                    raise ValueError(f"Gamma distribution for '{name}' requires 'z_0' parameter")
+                z_0 = float(dist_cfg["z_0"])
+                if z_0 <= 0:
+                    raise ValueError(f"Gamma z_0 for '{name}' must be > 0, got {z_0}")
+                if shape <= 0:
+                    raise ValueError(f"Gamma shape for '{name}' must be > 0, got {shape}")
+                # Convert z_0 to rate: rate = 1/z_0
+                rate = 1.0 / z_0
+                prior[name] = dist.Gamma(
+                    torch.tensor(shape, device=self.device, dtype=torch.float64),
+                    torch.tensor(rate, device=self.device, dtype=torch.float64),
+                )
+            elif dist_type == "gaussian":
+                # Normal distribution: loc (mean) and scale (std)
+                loc = float(dist_cfg.get("loc", 0.0))
+                scale = float(dist_cfg.get("scale", 1.0))
+                if scale <= 0:
+                    raise ValueError(f"Normal scale for '{name}' must be > 0, got {scale}")
+                prior[name] = dist.Normal(
+                    torch.tensor(loc, device=self.device, dtype=torch.float64),
+                    torch.tensor(scale, device=self.device, dtype=torch.float64),
+                )
+
+            else:
+                raise ValueError(f"Distribution type '{dist_type}' not supported. Supported types: uniform, gamma, normal")
+            
             latex_labels.append(cfg.get("latex", name))
         
         # Load prior flow if specified
@@ -681,6 +716,17 @@ class NumVisits:
             self._four_pi_tensor = torch.tensor(4 * np.pi, device=self.device, dtype=torch.float64)
         flux = L / (one_plus_z * self._four_pi_tensor * lum_dist_2d**2)  # (n_z, n_wlen)
         
+        # Check for extreme flux values that could cause magnitude issues
+        if torch.any(~torch.isfinite(flux)) or torch.any(flux <= 0):
+            problematic_flux = (~torch.isfinite(flux)) | (flux <= 0)
+            problematic_count = problematic_flux.sum().item()
+            if self.global_rank == 0 and problematic_count > 0:
+                print(f"WARNING: {problematic_count} problematic flux values found!")
+                print(f"  flux range: [{flux.min().item():.2e}, {flux.max().item():.2e}]")
+                print(f"  L range: [{L.min().item():.2e}, {L.max().item():.2e}]")
+                print(f"  lum_dist range: [{lum_dist.min().item():.2e}, {lum_dist.max().item():.2e}]")
+                print(f"  z_unique range: [{z_unique.min().item():.4f}, {z_unique.max().item():.4f}]")
+        
         # Expand flux for all filters: (n_z, 1, n_wlen)
         flux_expanded = flux.unsqueeze(1)  # (n_z, 1, n_wlen)
         
@@ -696,16 +742,54 @@ class NumVisits:
         # Use torch.trapezoid to integrate over wavelength dimension (last dimension)
         photon_flux = torch.trapezoid(integrand, self._wlen_aa_tensor, dim=-1)  # (n_z, n_filters)
         
+        # Check for negative or problematic photon_flux values
+        if torch.any(photon_flux < 0):
+            negative_count = (photon_flux < 0).sum().item()
+            negative_min = photon_flux[photon_flux < 0].min().item()
+            if self.global_rank == 0:
+                print(f"WARNING: {negative_count} negative photon_flux values found! Min: {negative_min:.2e}")
+                # Check if integrand has negative values
+                negative_integrand = (integrand < 0).sum().item()
+                if negative_integrand > 0:
+                    print(f"  {negative_integrand} negative integrand values found!")
+                    print(f"  integrand range: [{integrand.min().item():.2e}, {integrand.max().item():.2e}]")
+                    print(f"  flux range: [{flux.min().item():.2e}, {flux.max().item():.2e}]")
+                    print(f"  transmission range: [{transmission_expanded.min().item():.2e}, {transmission_expanded.max().item():.2e}]")
+                    print(f"  wlen_over_hc range: [{wlen_over_hc_expanded.min().item():.2e}, {wlen_over_hc_expanded.max().item():.2e}]")
+        
         # Convert to magnitude for all filters
         A_cm2 = (319/9.6) * 1e4  # cm^2
         photon_flux_pixel = photon_flux * A_cm2  # (n_z, n_filters)
+        
+        # Check for extreme values before log10
+        if torch.any(photon_flux_pixel <= 0):
+            non_positive_count = (photon_flux_pixel <= 0).sum().item()
+            if self.global_rank == 0:
+                print(f"WARNING: {non_positive_count} non-positive photon_flux_pixel values found!")
+                print(f"  photon_flux range: [{photon_flux.min().item():.2e}, {photon_flux.max().item():.2e}]")
+                print(f"  photon_flux_pixel range: [{photon_flux_pixel.min().item():.2e}, {photon_flux_pixel.max().item():.2e}]")
         
         # s0 values for all filters: (n_filters,)
         s0_vals = torch.tensor([s0[band] for band in self.filters_list], device=self.device, dtype=torch.float64)
         s0_vals = s0_vals.unsqueeze(0)  # (1, n_filters) for broadcasting
         
+        # Clamp photon_flux_pixel to avoid log10 of negative/zero values
+        # Use a very small positive value as minimum
+        min_flux = torch.finfo(photon_flux_pixel.dtype).tiny * 1e10
+        photon_flux_pixel_clamped = torch.clamp(photon_flux_pixel, min=min_flux)
+        
+        # Check ratio before log10
+        flux_ratio = photon_flux_pixel_clamped / s0_vals
+        if torch.any(flux_ratio <= 0) or torch.any(~torch.isfinite(flux_ratio)):
+            problematic_count = ((flux_ratio <= 0) | (~torch.isfinite(flux_ratio))).sum().item()
+            if self.global_rank == 0:
+                print(f"WARNING: {problematic_count} problematic flux_ratio values before log10!")
+                print(f"  flux_ratio range: [{flux_ratio.min().item():.2e}, {flux_ratio.max().item():.2e}]")
+        
         # Magnitudes: (n_z, n_filters)
-        mags_unique = 24.0 - 2.5 * torch.log10(photon_flux_pixel / s0_vals)
+        # Clamp the ratio to ensure positive values for log10
+        flux_ratio_clamped = torch.clamp(flux_ratio, min=min_flux)
+        mags_unique = 24.0 - 2.5 * torch.log10(flux_ratio_clamped)
         
         # Map back to original z values
         mags_flat = mags_unique[inverse_indices]  # (n_z, n_filters)
@@ -746,10 +830,18 @@ class NumVisits:
         noise = np.sqrt((masked_pixels**2 * total_var).sum(axis=(-2, -1)))
         snr = np.where(noise == 0, 0.0, signal / noise)
         coeff = 2.5 / np.log(10.0)
+        
+        # Calculate minimum SNR threshold for reasonable magnitude error
+        # If SNR is below this, set mag_err = 10 (essentially undetectable)
+        min_snr_for_detection = coeff / 10.0
+        
+        # Calculate magnitude errors
+        # For very small SNR (including <= 0): set to 10.0 (undetectable but bounded)
+        # For reasonable SNR: use coeff / snr
         mag_err = np.where(
-            snr <= 0,
-            1e6,
-            coeff / snr,
+            snr < min_snr_for_detection,
+            10.0,
+            coeff / snr
         )
 
         errors = torch.tensor(mag_err, device=self.device, dtype=torch.float64)
