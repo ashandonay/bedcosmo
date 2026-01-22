@@ -5,7 +5,7 @@ base:
   mlflow_exp: base
   pyro_seed: 1
   nf_seed: 1
-  prior_args_path: num_visits/prior_args.yaml
+  prior_args_path: num_visits/prior_args_gamma.yaml
   flow_type: NAF
   transform_input: false
   activation: elu
