@@ -2404,12 +2404,14 @@ class ComparisonPlotter(BasePlotter):
                         alpha=0.2
                     )
 
-            if show_nominal:
-                if normalize:
-                    if not nominal_line_drawn:
-                        nominal_handle = ax_line.axhline(0, linestyle='--', color='gray', alpha=0.6, linewidth=1.2, label='Nominal (all runs)')
-                        nominal_line_drawn = True
-                elif record['nominal_eig'] is not None:
+            if normalize:
+                # Always show horizontal line at y=0 when normalized (represents nominal baseline)
+                if not nominal_line_drawn:
+                    nominal_handle = ax_line.axhline(0, linestyle='--', color='black', linewidth=1.2, label='Nominal (all runs)')
+                    nominal_line_drawn = True
+            elif show_nominal:
+                # When not normalized, show nominal lines per run if requested
+                if record['nominal_eig'] is not None:
                     ax_line.axhline(record['nominal_eig'], linestyle='--', color=color, alpha=0.6, linewidth=1.2)
 
             if ax_heat is not None and show_optimal:
