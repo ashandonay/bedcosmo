@@ -20,7 +20,7 @@ base:
   design_args_path: num_visits/design_args.yaml
   total_steps: 10000
   optimizer: Adam
-  initial_lr: 0.0005
+  initial_lr: 0.0001
   final_lr: 0.00001
   grad_clip: 0.0
   warmup_fraction: 0.05

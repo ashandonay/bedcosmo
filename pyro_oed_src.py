@@ -5,6 +5,7 @@ from pyro.contrib.util import lexpand
 from pyro.infer.autoguide.utils import mean_field_entropy
 import math
 from torch.utils.data import Dataset
+from util import profile_method
 
 def nmc_eig(
     model,
@@ -556,11 +557,13 @@ def _create_condition_input(design, y_dict, observation_labels, condition_design
         return torch.cat(ys[1:], dim=-1)
 
 class LikelihoodDataset(Dataset):
-    def __init__(self, experiment, n_particles_per_device, designs=None, device="cuda", evaluation=False, particle_batch_size=None):
+    def __init__(self, experiment, n_particles_per_device, designs=None, device="cuda", evaluation=False, particle_batch_size=None, profile=False, global_rank=0):
         self.experiment = experiment
         self.n_particles_per_device = n_particles_per_device
         self.device = device
         self.evaluation = evaluation
+        self.profile = profile
+        self.global_rank = global_rank
         if particle_batch_size is None:
             self.particle_batch_size = n_particles_per_device
         else:
@@ -610,71 +613,65 @@ class LikelihoodDataset(Dataset):
             else:
                 return samples, condition_input
     
+    @profile_method
+    def _sample_from_model(self, expanded_design):
+        """Sample from the pyro model and return trace, y_dict, theta_dict."""
+        with torch.no_grad():
+            trace = poutine.trace(self.experiment.pyro_model).get_trace(expanded_design)
+            y_dict = {l: trace.nodes[l]["value"] for l in self.experiment.observation_labels}
+            theta_dict = {l: trace.nodes[l]["value"] for l in self.experiment.cosmo_params}
+        return trace, y_dict, theta_dict
+
+    @profile_method
+    def _compute_prior_log_probs(self, samples, trace):
+        """Compute log probabilities from prior (either prior_flow or uniform)."""
+        if hasattr(self.experiment, 'prior_flow') and self.experiment.prior_flow is not None:
+            # Compute log probabilities from prior_flow
+            nominal_context = self.experiment.prior_flow_metadata['nominal_context'].to(self.device)
+            batch_shape = samples.shape[:-1]
+            flattened_samples = samples.view(-1, samples.shape[-1])
+            expanded_context = nominal_context.unsqueeze(0).expand(flattened_samples.shape[0], -1)
+
+            prior_transform_input = self.experiment.prior_flow_metadata['transform_input']
+            if prior_transform_input:
+                samples_for_log_prob = self.experiment.params_to_unconstrained(flattened_samples)
+            else:
+                samples_for_log_prob = flattened_samples
+
+            prior_dist = self.experiment.prior_flow(expanded_context)
+            log_prob_all = prior_dist.log_prob(samples_for_log_prob)
+            log_prob_all = log_prob_all.reshape(batch_shape)
+            return {"joint": log_prob_all}
+        else:
+            # Use standard trace.compute_log_prob() for uniform priors
+            trace.compute_log_prob()
+            return {l: trace.nodes[l]["log_prob"] for l in self.experiment.cosmo_params}
+
+    @profile_method
     def _process_particles(self, n_particles):
         """Process a batch of particles and return results."""
         # Dynamically expand the designs on each access
         expanded_design = lexpand(self.designs, n_particles).to(self.device)
 
-        # Generate samples from the NumTracers pyro model
-        with torch.no_grad():
-            # Generate the samples directly on the GPU
-            trace = poutine.trace(self.experiment.pyro_model).get_trace(expanded_design)
-            
-            # Assuming trace values are already on the correct device from the model
-            y_dict = {l: trace.nodes[l]["value"] for l in self.experiment.observation_labels}
-            theta_dict = {l: trace.nodes[l]["value"] for l in self.experiment.cosmo_params}
+        # Sample from pyro model
+        trace, y_dict, theta_dict = self._sample_from_model(expanded_design)
 
-            # Extract the target samples (theta)
-            samples = torch.cat([theta_dict[k].unsqueeze(dim=-1) for k in self.experiment.cosmo_params], dim=-1)
+        # Extract the target samples (theta)
+        samples = torch.cat([theta_dict[k].unsqueeze(dim=-1) for k in self.experiment.cosmo_params], dim=-1)
 
-            # Create the condition input
-            condition_input = _create_condition_input(
-                design=expanded_design,
-                y_dict=y_dict,
-                observation_labels=self.experiment.observation_labels,
-                condition_design=True
-            )
+        # Create the condition input
+        condition_input = _create_condition_input(
+            design=expanded_design,
+            y_dict=y_dict,
+            observation_labels=self.experiment.observation_labels,
+            condition_design=True
+        )
 
-            # Compute log probabilities only if evaluation=True
-            if self.evaluation:
-                # Check if we should use prior_flow for log probabilities
-                if hasattr(self.experiment, 'prior_flow') and self.experiment.prior_flow is not None:
-                    # Compute log probabilities from prior_flow
-                    # Get nominal context for the prior flow
-                    nominal_context = self.experiment.prior_flow_metadata['nominal_context'].to(self.device)
-                    
-                    # Expand nominal context to match batch size
-                    batch_shape = samples.shape[:-1]  # e.g., [n_particles, num_designs]
-                    flattened_samples = samples.view(-1, samples.shape[-1])
-                    expanded_context = nominal_context.unsqueeze(0).expand(flattened_samples.shape[0], -1)
-                    
-                    # Transform samples to unconstrained space if needed
-                    prior_transform_input = self.experiment.prior_flow_metadata['transform_input']
-                    if prior_transform_input:
-                        samples_for_log_prob = self.experiment.params_to_unconstrained(flattened_samples)
-                    else:
-                        samples_for_log_prob = flattened_samples
-                    
-                    # Compute log probabilities from prior_flow
-                    prior_dist = self.experiment.prior_flow(expanded_context)
-                    log_prob_all = prior_dist.log_prob(samples_for_log_prob)  # Shape: [n_particles * num_designs]
-                    
-                    # Reshape back to batch shape
-                    log_prob_all = log_prob_all.reshape(batch_shape)
-                    
-                    log_probs = {"joint": log_prob_all}
-                    
-                else:
-                    # Use standard trace.compute_log_prob() for uniform priors
-                    trace.compute_log_prob()
-                    # Extract log probabilities for cosmological parameters
-                    log_probs = {l: trace.nodes[l]["log_prob"] for l in self.experiment.cosmo_params}
-                
-                # Clean up trace to free memory
-                del trace, expanded_design, y_dict, theta_dict
-                return samples, condition_input, log_probs
-            else:
-                # Clean up trace to free memory
-                del trace, expanded_design, y_dict, theta_dict
-                return samples, condition_input
+        if self.evaluation:
+            log_probs = self._compute_prior_log_probs(samples, trace)
+            del trace, expanded_design, y_dict, theta_dict
+            return samples, condition_input, log_probs
+        else:
+            del trace, expanded_design, y_dict, theta_dict
+            return samples, condition_input
 

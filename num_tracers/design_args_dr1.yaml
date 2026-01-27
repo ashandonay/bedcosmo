@@ -2,7 +2,7 @@
 labels: ["BGS", "LRG", "ELG", "QSO"]
 input_type: variable # variable or nominal
 input_designs_path: null
-step: [0.005, 0.01, 0.01, 0.005]
+step: [0.01, 0.02, 0.02, 0.01]
 lower: [0.02, 0.1, 0.1, 0.1]
 upper: [0.0585, 0.3820, 0.5, 0.3291]
 sum_lower: 1.0

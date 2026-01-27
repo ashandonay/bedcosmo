@@ -223,7 +223,8 @@ if [ "$JOB_TYPE" = "eval" ] && [ -z "$COSMO_MODEL" ]; then
     # Capture stderr separately to avoid polluting COSMO_MODEL with warnings
     # Use a temp file to capture stderr, then extract only the last line (the model name) from stdout
     TEMP_STDERR=$(mktemp)
-    COSMO_MODEL=$(python3 -c "
+    set +e  # Temporarily disable exit on error to capture the result
+    COSMO_MODEL=$(timeout 30 python3 -c "
 import mlflow
 import os
 import sys
@@ -238,14 +239,15 @@ client = MlflowClient()
 try:
     run = client.get_run('${RUN_ID}')
     cosmo_model = run.data.params.get('cosmo_model', 'base')
-    print(cosmo_model)
+    print(cosmo_model, flush=True)
 except Exception as e:
     print(f'ERROR: {e}', file=sys.stderr)
-    exit(1)
+    sys.exit(1)
 " 2>"$TEMP_STDERR")
     PYTHON_EXIT_CODE=$?
     STDERR_CONTENT=$(cat "$TEMP_STDERR" 2>/dev/null)
     rm -f "$TEMP_STDERR"
+    set -e  # Re-enable exit on error
     
     # Show warnings if any (but don't fail on them)
     if [ -n "$STDERR_CONTENT" ]; then
@@ -254,9 +256,13 @@ except Exception as e:
     fi
     
     if [ $PYTHON_EXIT_CODE -ne 0 ]; then
-        echo "Error: Failed to get cosmo_model from run ${RUN_ID}"
+        if [ $PYTHON_EXIT_CODE -eq 124 ]; then
+            echo "Error: Timeout while getting cosmo_model from run ${RUN_ID} (command took >30 seconds)"
+        else
+            echo "Error: Failed to get cosmo_model from run ${RUN_ID} (exit code: $PYTHON_EXIT_CODE)"
+        fi
         if [ -n "$COSMO_MODEL" ]; then
-            echo "$COSMO_MODEL"
+            echo "Partial output: $COSMO_MODEL"
         fi
         exit 1
     fi
@@ -270,6 +276,7 @@ except Exception as e:
     fi
     
     echo "Inferred cosmo_model: $COSMO_MODEL"
+    echo ""
 fi
 
 # Load YAML config file for this cosmo_exp and cosmo_model (skip for resume/restart)
@@ -290,7 +297,11 @@ if [ -n "$CONFIG_FILE" ] && [ ! -f "$CONFIG_FILE" ]; then
     YAML_ARGS=()
 elif [ -n "$CONFIG_FILE" ]; then
     echo "Loading config from: $CONFIG_FILE"
-    echo "Using model: $COSMO_MODEL"
+    if [ -n "$COSMO_MODEL" ]; then
+        echo "Using model: $COSMO_MODEL"
+    else
+        echo "Warning: COSMO_MODEL is empty, this may cause issues"
+    fi
     
     # Parse YAML and extract config for specified model
     # Using Python to parse YAML reliably
@@ -382,8 +393,8 @@ for key, value in data.items():
         # Explicitly output 'null' for None values (JSON null)
         print(f'{key}=null')
     elif isinstance(value, list):
-        # Format lists as JSON-like strings
-        formatted = '[' + ', '.join(str(v) for v in value) + ']'
+        # Format lists as valid JSON strings
+        formatted = json.dumps(value)
         print(f'{key}={formatted}')
     elif isinstance(value, bool):
         # Output lowercase boolean for consistency
@@ -453,6 +464,18 @@ case $JOB_TYPE in
             exit 1
         fi
         FINAL_ARGS=("--cosmo_exp" "$COSMO_EXP" "--run_id" "$RUN_ID" "${YAML_ARGS[@]}")
+        echo ""
+        echo "Eval job configuration:"
+        echo "  Cosmo experiment: $COSMO_EXP"
+        echo "  Run ID: $RUN_ID"
+        if [ -n "$COSMO_MODEL" ]; then
+            echo "  Cosmo model: $COSMO_MODEL"
+        fi
+        if [ ${#YAML_ARGS[@]} -gt 0 ]; then
+            echo "  Eval params from YAML: ${#YAML_ARGS[@]} arguments"
+        else
+            echo "  Eval params from YAML: none (using defaults or command-line only)"
+        fi
         ;;
     
     resume)
@@ -592,24 +615,38 @@ echo "=========================================="
 echo ""
 
 # Capture sbatch output and exit code
-SBATCH_OUTPUT=$(sbatch "${SBATCH_ARGS[@]}" "$SCRIPT_DIR/$SCRIPT_FILE" "${FINAL_ARGS[@]}" 2>&1)
+# Use a temporary file to ensure we capture all output even if there are issues
+TEMP_SBATCH_OUTPUT=$(mktemp)
+set +e  # Temporarily disable exit on error to capture the full error message
+sbatch "${SBATCH_ARGS[@]}" "$SCRIPT_DIR/$SCRIPT_FILE" "${FINAL_ARGS[@]}" > "$TEMP_SBATCH_OUTPUT" 2>&1
 SBATCH_EXIT_CODE=$?
+set -e  # Re-enable exit on error
+SBATCH_OUTPUT=$(cat "$TEMP_SBATCH_OUTPUT")
+rm -f "$TEMP_SBATCH_OUTPUT"
 
 if [ $SBATCH_EXIT_CODE -ne 0 ]; then
     echo ""
+    echo "=========================================="
     echo "ERROR: Failed to submit job to SLURM"
+    echo "=========================================="
+    echo ""
     echo "Exit code: $SBATCH_EXIT_CODE"
-    echo "Error output:"
+    echo ""
+    echo "SLURM error message:"
+    echo "----------------------------------------"
     echo "$SBATCH_OUTPUT"
+    echo "----------------------------------------"
     echo ""
     echo "Please check:"
     echo "  1. SLURM is available and accessible"
     echo "  2. All required arguments are valid"
     echo "  3. The script file exists: $SCRIPT_DIR/$SCRIPT_FILE"
+    echo "  4. Your QOS/account limits (time, nodes, etc.)"
     if [ "$JOB_TYPE" = "eval" ]; then
-        echo "  4. The MLflow run ID exists: $RUN_ID"
-        echo "  5. The cosmo_exp directory exists: $PROJECT_ROOT/$COSMO_EXP"
+        echo "  5. The MLflow run ID exists: $RUN_ID"
+        echo "  6. The cosmo_exp directory exists: $PROJECT_ROOT/$COSMO_EXP"
     fi
+    echo ""
     exit 1
 fi
 

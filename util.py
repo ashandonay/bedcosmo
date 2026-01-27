@@ -8,7 +8,6 @@ import random
 import numpy as np
 from mlflow.tracking import MlflowClient
 from pyro import distributions as dist
-from pyro_oed_src import _safe_mean_terms, posterior_loss
 import json
 import contextlib
 import matplotlib.pyplot as plt
@@ -42,30 +41,39 @@ sys.path.insert(0, home_dir + "/bed/BED_cosmo/num_visits")
 
 
 class Bijector:
-    def __init__(self, experiment, prior=None, cdf_bins=1000, cdf_samples=500000):
+    def __init__(self, experiment, prior=None, cdf_bins=1000, cdf_samples=500000,
+                 skip_sampling=False, use_prior_flow=True):
         self.experiment = experiment
+        self.use_prior_flow = use_prior_flow
         if prior is not None:
             self.prior = prior
         else:
             self.prior = self.experiment.prior
-        self.cdfs = self.create_cdfs(num_bins=int(cdf_bins), num_samples=int(cdf_samples))
+
+        if not skip_sampling:
+            self.cdfs = self.create_cdfs(num_bins=int(cdf_bins), num_samples=int(cdf_samples))
+        else:
+            # CDFs will be restored via set_state() - initialize empty
+            self.cdfs = {}
 
     def create_cdfs(self, num_bins, num_samples):
         """
         Create memory-efficient CDF bins from raw samples.
-        
+
         Instead of storing all raw samples, this creates a compact representation
         of the empirical CDF using a small number of bins.
-        
+
         Args:
             samples: Raw samples from the empirical prior
             num_bins: Number of CDF bins to create (default: 1000)
-            
+
         Returns:
             Dictionary with 'bins' and 'cdf_values' keys for fast CDF computation
         """
         with pyro.plate_stack("plate", (num_samples,)):
-            empirical_prior = self.experiment.sample_valid_parameters((num_samples,), prior=self.prior)
+            empirical_prior = self.experiment.sample_valid_parameters(
+                (num_samples,), prior=self.prior, use_prior_flow=self.use_prior_flow
+            )
         cdfs = {}
         for key, samples in empirical_prior.items():
             sorted_samples, _ = torch.sort(samples.flatten())
@@ -1165,67 +1173,6 @@ def init_experiment(
     
     return experiment
 
-def eval_eigs(
-        experiment, 
-        run_args, 
-        posterior_flow, 
-        n_evals=10,
-        n_particles=1000
-        ):
-    """
-    Evaluates the EIG of the posterior flow for an input designs tensor.
-
-    Args:
-        designs (torch.Tensor): Designs to evaluate.
-        nominal_design (torch.Tensor): Nominal design to evaluate.
-        run_args (dict): Run arguments.
-
-    Returns:
-        tuple: A tuple containing:
-            - avg_eigs (np.ndarray): Average EIGs for each design.
-            - optimal_eig (float): Maximum EIG.
-            - avg_nominal_eig (float): Average EIG of the nominal design.
-            - optimal_design (torch.Tensor): Design with the maximum EIG.
-    """
-    eigs_batch = []
-    nominal_eig_batch = []
-    for n in range(n_evals):
-        with torch.no_grad():
-            agg_loss, eigs = posterior_loss(
-                                            experiment=experiment,
-                                            guide=posterior_flow,
-                                            num_particles=n_particles,
-                                            evaluation=True,
-                                            nflow=True,
-                                            analytic_prior=False,
-                                            condition_design=run_args["condition_design"]
-                                            )
-        eigs_batch.append(eigs.cpu().numpy()/np.log(2))
-
-        with torch.no_grad():
-            agg_loss, nominal_eig = posterior_loss(
-                                            experiment=experiment,
-                                            guide=posterior_flow,
-                                            num_particles=n_particles,
-                                            evaluation=True,
-                                            nflow=True,
-                                            analytic_prior=False,
-                                            condition_design=run_args["condition_design"],
-                                            nominal_design=True
-                                            )
-        nominal_eig_batch.append(nominal_eig.cpu().numpy()/np.log(2))
-
-    eigs_batch = np.array(eigs_batch)
-    nominal_eig_batch = np.array(nominal_eig_batch)
-    # avg over the number of evaluations
-    avg_eigs = np.mean(eigs_batch, axis=0)
-    eigs_std = np.std(eigs_batch, axis=0)
-    eigs_se = eigs_std/np.sqrt(n_evals)
-    avg_nominal_eig = np.mean(nominal_eig_batch, axis=0).item()
-
-    optimal_design = experiment.designs[np.argmax(avg_eigs)]
-    return avg_eigs, np.max(avg_eigs), avg_nominal_eig, optimal_design
-
 def load_prior_flow_from_file(prior_flow_path, prior_run_id, device, global_rank=0):
     """
     Load a prior flow model from a .pt checkpoint file.
@@ -1369,26 +1316,6 @@ def load_model(experiment, step, run_obj, run_args, device, global_rank=0):
     posterior_flow.eval()
     
     return posterior_flow, selected_step
-
-def calc_entropy(design, posterior_flow, experiment, num_samples):
-    # sample values of y from experiment.pyro_model
-    expanded_design = lexpand(design.unsqueeze(0), num_samples)
-    y = experiment.pyro_model(expanded_design)
-    nominal_context = torch.cat([expanded_design, y], dim=-1)
-    passed_ratio = experiment.calc_passed(expanded_design)
-    constrained_parameters = experiment.sample_valid_parameters(passed_ratio.shape[:-1])
-    with pyro.plate_stack("plate", passed_ratio.shape[:-1]):
-        # register samples in the trace using pyro.sample
-        parameters = {}
-        for k, v in constrained_parameters.items():
-            # use dist.Delta to fix the value of each parameter
-            parameters[k] = pyro.sample(k, dist.Delta(v)).unsqueeze(-1)
-    evaluate_samples = torch.cat([parameters[k].unsqueeze(dim=-1) for k in experiment.cosmo_params], dim=-1)
-    flattened_samples = torch.flatten(evaluate_samples, start_dim=0, end_dim=len(expanded_design.shape[:-1])-1)
-    samples = posterior_flow(nominal_context).log_prob(flattened_samples)
-    # calculate entropy of samples
-    _, entropy = _safe_mean_terms(samples)
-    return entropy
 
 def load_nominal_samples(cosmo_exp, cosmo_model, dataset='dr2'):
     if cosmo_exp == 'num_tracers':

@@ -67,7 +67,7 @@ class Trainer:
 
         self._init_device_settings(device)
         self._init_run()
-        self.experiment = init_experiment(self.run_obj, self.run_args, checkpoint=self.checkpoint, device=self.device, global_rank=self.global_rank, design_args=self.design_args)
+        self.experiment = init_experiment(self.run_obj, self.run_args, checkpoint=self.checkpoint, device=self.device, global_rank=self.global_rank, design_args=self.design_args, profile=self.profile)
 
         # Print design information in verbose mode
         if self.global_rank == 0 and self.verbose:
@@ -112,6 +112,7 @@ class Trainer:
             print(f'Input dim: {len(self.experiment.cosmo_params)}, Context dim: {self.experiment.context_dim}')
             print(f"Cosmology: {self.run_args['cosmo_model']}")
             print(f"Target labels: {self.experiment.cosmo_params}")
+            print(f"Designs shape: {self.experiment.designs.shape}")
             print("Flow model initialized: \n", self.posterior_flow)
             
 
@@ -777,9 +778,11 @@ class Trainer:
             experiment=self.experiment,
             n_particles_per_device=self.run_args["n_particles_per_device"],
             device=f"cuda:{self.pytorch_device_idx}",
-            evaluation=False
+            evaluation=False,
+            profile=self.profile,
+            global_rank=self.global_rank
         )
-        
+
         # Use regular DataLoader without DistributedSampler
         self.dataloader = DataLoader(
             dataset,

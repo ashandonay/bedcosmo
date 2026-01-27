@@ -69,5 +69,5 @@ constraints:
     bounds:
       upper: 0
 
-prior_run_id: 3c0f7514dbf64241aa938cac4fa87339
-prior_flow_path: /pscratch/sd/a/ashandon/bed/BED_cosmo/num_tracers/mlruns/306798476351298692/3c0f7514dbf64241aa938cac4fa87339/artifacts/checkpoints/checkpoint_rank_0_last.pt
+prior_run_id: c32d6205149e4bdebe76640037307d28
+prior_flow_path: /pscratch/sd/a/ashandon/bed/BED_cosmo/num_tracers/mlruns/204611251649321356/c32d6205149e4bdebe76640037307d28/artifacts/checkpoints/checkpoint_rank_1_last.pt

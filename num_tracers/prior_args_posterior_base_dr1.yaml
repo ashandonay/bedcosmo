@@ -68,6 +68,6 @@ constraints:
     affected_parameters: ["w0", "wa"]
     bounds:
       upper: 0
-
-prior_run_id: 3c0f7514dbf64241aa938cac4fa87339
-prior_flow_path: /pscratch/sd/a/ashandon/bed/BED_cosmo/num_tracers/mlruns/306798476351298692/3c0f7514dbf64241aa938cac4fa87339/artifacts/checkpoints/checkpoint_rank_0_last.pt
+      
+prior_run_id: a43634315cbd418583826396bb164860
+prior_flow_path: /pscratch/sd/a/ashandon/bed/BED_cosmo/num_tracers/mlruns/213645716229923753/a43634315cbd418583826396bb164860/artifacts/checkpoints/checkpoint_rank_0_last.pt

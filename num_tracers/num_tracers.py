@@ -191,23 +191,24 @@ def _cumsimpson(x, y, dim=-1):
 
 class NumTracers:
     def __init__(
-        self, 
+        self,
         prior_args=None,
         design_args=None,
-        dataset="dr2", 
+        dataset="dr2",
         cosmo_model="base",
         flow_type="MAF",
         nominal_design=None,
-        include_D_M=True, 
+        include_D_M=True,
         include_D_V=True,
         bijector_state=None,
         seed=None,
-        global_rank=0, 
+        global_rank=0,
         transform_input=False,
         device="cuda:0",
         mode='train',
         verbose=False,
-        profile=False
+        profile=False,
+        prior_flow_batch_size=100000
     ):
 
         self.name = 'num_tracers'
@@ -226,6 +227,7 @@ class NumTracers:
         self.seed = seed
         self.verbose = verbose
         self.profile = profile
+        self.prior_flow_batch_size = prior_flow_batch_size
         if seed is not None:
             auto_seed(self.seed)
         self.rdrag = 149.77
@@ -276,14 +278,18 @@ class NumTracers:
             # If DESI prior not found, use the same as the main prior
             self.desi_prior = self.prior
         self.cosmo_params = list(self.prior.keys())
-        self.param_bijector = Bijector(self, cdf_bins=5000, cdf_samples=1e6)
+        # Skip sampling if bijector_state will be restored from checkpoint
+        skip_bijector_sampling = bijector_state is not None
+        self.param_bijector = Bijector(self, cdf_bins=5000, cdf_samples=1e6, skip_sampling=skip_bijector_sampling)
         if bijector_state is not None:
             if self.global_rank == 0:
                 print(f"Restoring bijector state from checkpoint.")
             self.param_bijector.set_state(bijector_state)
         # if the prior is not the same as the DESI prior, create a new bijector for the DESI samples
         if self.prior.items() != self.desi_prior.items():
-            self.desi_bijector = Bijector(self, prior=self.desi_prior, cdf_bins=5000, cdf_samples=1e6)
+            # desi_bijector uses the uniform desi_prior, not the prior_flow
+            self.desi_bijector = Bijector(self, prior=self.desi_prior, cdf_bins=5000, cdf_samples=1e6,
+                                         use_prior_flow=False)
         else:
             self.desi_bijector = self.param_bijector
 
@@ -1172,15 +1178,22 @@ class NumTracers:
         return torch.tensor(np.array(param_samples), device=self.device)
 
     @profile_method
-    def sample_valid_parameters(self, sample_shape, prior=None):
+    def sample_valid_parameters(self, sample_shape, prior=None, use_prior_flow=True):
         """
         Sample parameters from prior or from a trained posterior model if available.
-        
-        If prior_flow is set, samples are drawn from the posterior model
-        at the nominal context. Otherwise, samples are drawn from the uniform prior.
+
+        If prior_flow is set and use_prior_flow is True, samples are drawn from
+        the posterior model at the nominal context. Otherwise, samples are drawn
+        from the uniform prior.
+
+        Args:
+            sample_shape: Shape of the samples to draw.
+            prior: Optional prior dict to sample from. Defaults to self.prior.
+            use_prior_flow: If True (default), use prior_flow when available.
+                Set to False to bypass prior_flow and sample from the explicit prior.
         """
         # Check if we should use a posterior model as prior
-        if hasattr(self, 'prior_flow') and self.prior_flow is not None:
+        if use_prior_flow and hasattr(self, 'prior_flow') and self.prior_flow is not None:
             return self._sample_from_prior_flow(sample_shape)
         
         # register samples in the trace using pyro.sample
@@ -1228,21 +1241,22 @@ class NumTracers:
 
         return parameters
     
+    @profile_method
     def _sample_from_prior_flow(self, sample_shape):
         """
         Sample parameters from a trained posterior model used as prior.
-        
+
         The posterior model is conditional on context (design + observations),
         so we sample at the nominal context (nominal design + central values).
-        
+
         Samples in batches to avoid GPU memory issues when sampling large numbers.
         """
         # Get the total number of samples needed
         total_samples = int(np.prod(sample_shape)) if isinstance(sample_shape, tuple) else int(sample_shape)
-        
+
         # Get nominal context for sampling
         nominal_context = getattr(self, 'prior_flow_nominal_context', self.nominal_context.to(self.device))
-        
+
         # Batch size for sampling to avoid OOM errors
         # Use a reasonable batch size (e.g., 10k samples at a time)
         batch_size = getattr(self, 'prior_flow_batch_size', 10000)
@@ -1250,13 +1264,12 @@ class NumTracers:
         # Sample in batches
         all_samples = []
         with torch.no_grad():
-            for i in range(0, total_samples, batch_size):
+            for batch_idx, i in enumerate(range(0, total_samples, batch_size)):
                 batch_end = min(i + batch_size, total_samples)
                 batch_size_actual = batch_end - i
                 
                 # Expand context for this batch
                 expanded_context = nominal_context.unsqueeze(0).expand(batch_size_actual, -1)
-                
                 # Sample from the posterior flow
                 posterior_dist = self.prior_flow(expanded_context)
                 batch_samples = posterior_dist.sample()  # Shape: (batch_size_actual, param_dim)
@@ -1267,23 +1280,23 @@ class NumTracers:
                     batch_samples = self.params_from_unconstrained(batch_samples)
                 
                 all_samples.append(batch_samples)
-        
+
         # Concatenate all batches
         samples = torch.cat(all_samples, dim=0)  # Shape: (total_samples, param_dim)
-        
+
         # Reshape to match sample_shape
         if isinstance(sample_shape, tuple):
             samples = samples.reshape(sample_shape + (-1,))
         else:
             samples = samples.reshape(sample_shape, -1)
-        
+
         # Split into individual parameters and register with pyro.sample
         parameters = {}
         for i, param_name in enumerate(self.cosmo_params):
             param_values = samples[..., i]
             # Use Delta distribution to fix the sampled values
             parameters[param_name] = pyro.sample(param_name, dist.Delta(param_values)).unsqueeze(-1)
-        
+
         return parameters
 
     @profile_method
