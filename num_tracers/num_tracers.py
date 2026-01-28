@@ -268,6 +268,14 @@ class NumTracers:
 
         self.prior, self.param_constraints, self.latex_labels, self.prior_flow, self.prior_flow_metadata = self.init_prior(**self.prior_args)
         
+        # Extract prior_flow settings for use in _sample_from_prior_flow
+        if self.prior_flow_metadata is not None:
+            self.prior_flow_transform_input = self.prior_flow_metadata.get('transform_input', False)
+            self.prior_flow_nominal_context = self.prior_flow_metadata.get('nominal_context', self.nominal_context)
+        else:
+            self.prior_flow_transform_input = False
+            self.prior_flow_nominal_context = None
+        
         # Load DESI prior from the default location
         desi_prior_path = os.path.join(home_dir, f"data/desi/bao_{self.dataset}", 'prior_args.yaml')
         if os.path.exists(desi_prior_path):
@@ -278,13 +286,26 @@ class NumTracers:
             # If DESI prior not found, use the same as the main prior
             self.desi_prior = self.prior
         self.cosmo_params = list(self.prior.keys())
-        # Skip sampling if bijector_state will be restored from checkpoint
-        skip_bijector_sampling = bijector_state is not None
+        
+        # Determine which bijector_state to use:
+        # 1. If bijector_state argument is provided (resume training), use that
+        # 2. Else if prior_flow has bijector_state (using prior_flow as prior), use that
+        # 3. Else create new bijector by sampling
+        effective_bijector_state = bijector_state
+        bijector_source = "checkpoint"
+        
+        if effective_bijector_state is None and self.prior_flow_metadata is not None:
+            prior_flow_bijector_state = self.prior_flow_metadata.get('bijector_state')
+            if prior_flow_bijector_state is not None:
+                effective_bijector_state = prior_flow_bijector_state
+                bijector_source = "prior_flow"
+        
+        skip_bijector_sampling = effective_bijector_state is not None
         self.param_bijector = Bijector(self, cdf_bins=5000, cdf_samples=1e6, skip_sampling=skip_bijector_sampling)
-        if bijector_state is not None:
+        if effective_bijector_state is not None:
             if self.global_rank == 0:
-                print(f"Restoring bijector state from checkpoint.")
-            self.param_bijector.set_state(bijector_state)
+                print(f"Restoring bijector state from {bijector_source}.")
+            self.param_bijector.set_state(effective_bijector_state, device=self.device)
         # if the prior is not the same as the DESI prior, create a new bijector for the DESI samples
         if self.prior.items() != self.desi_prior.items():
             # desi_bijector uses the uniform desi_prior, not the prior_flow

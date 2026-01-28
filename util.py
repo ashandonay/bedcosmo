@@ -1261,12 +1261,15 @@ def load_prior_flow_from_file(prior_flow_path, prior_run_id, device, global_rank
     # Store metadata in a dict to return alongside the flow
     prior_flow_metadata = {
         'transform_input': prior_run_args.get("transform_input", False),
-        'nominal_context': None
+        'nominal_context': None,
+        'bijector_state': checkpoint.get('bijector_state', None)
     }
     
     if global_rank == 0:
         print(f"Successfully loaded prior flow from {prior_flow_path}")
         print(f"  Input dim: {input_dim}, Context dim: {context_dim}")
+        if prior_flow_metadata['bijector_state'] is not None:
+            print(f"  Bijector state loaded with params: {list(prior_flow_metadata['bijector_state'].keys())}")
     
     # Return both the flow and its metadata
     return posterior_flow, prior_flow_metadata
