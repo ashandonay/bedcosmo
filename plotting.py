@@ -1772,6 +1772,97 @@ class ComparisonPlotter(BasePlotter):
         """
         return {run_data['run_id']: run_data['exp_id'] for run_data in run_data_list}
     
+    def _resolve_run_labels(self, run_data_list, run_ids, var=None):
+        """
+        Resolve run labels using self.run_labels, var parameters, or run_id.
+        
+        Priority: self.run_labels (if available) + var parameters (if specified) > var parameters > run_id[:8]
+        When var is specified, it is appended to the base label (from self.run_labels or run_id).
+        
+        Args:
+            run_data_list (list): List of run data dictionaries (full list from _get_run_data_list).
+            run_ids (list): List of run IDs to resolve labels for (may be a subset of run_data_list).
+            var (str or list, optional): Parameter(s) from MLflow run params to include in the label.
+        
+        Returns:
+            list: List of labels corresponding to run_ids.
+        """
+        # Convert run_ids to list if it's a single value
+        if not isinstance(run_ids, list):
+            run_ids = [run_ids]
+        
+        # Get base labels from self.run_labels if available, otherwise use run_id[:8]
+        if self.run_labels is not None and len(self.run_labels) == len(run_data_list):
+            rid2lab = {r['run_id']: self.run_labels[i] for i, r in enumerate(run_data_list)}
+            base_labels = [rid2lab.get(rid, rid[:8]) for rid in run_ids]
+        else:
+            base_labels = [rid[:8] for rid in run_ids]
+        
+        # If var is specified, append var parameters to base labels
+        if var is not None:
+            vars_list = var if isinstance(var, list) else [var]
+            run_labels = []
+            for run_id, base_label in zip(run_ids, base_labels):
+                run_data_item = next((r for r in run_data_list if r['run_id'] == run_id), None)
+                if run_data_item and 'params' in run_data_item:
+                    run_params = run_data_item['params']
+                    var_parts = [f"{v_key}={run_params[v_key]}" for v_key in vars_list if v_key in run_params]
+                    if var_parts:
+                        # Append var parameters to base label
+                        run_labels.append(f"{base_label}, {', '.join(var_parts)}")
+                    else:
+                        run_labels.append(base_label)
+                else:
+                    run_labels.append(base_label)
+            return run_labels
+        else:
+            return base_labels
+    
+    def _set_legend(self, ax, num_runs, title=None, loc='best', framealpha=0.9, 
+                    handles=None, labels=None, fontsize=None):
+        """
+        Set legend for a plot with appropriate font size based on number of runs.
+        
+        Args:
+            ax: Matplotlib axis object.
+            num_runs (int): Number of runs/entries in the legend.
+            title (str, optional): Legend title.
+            loc (str): Legend location. Default 'best'.
+            framealpha (float): Legend frame alpha. Default 0.9.
+            handles (list, optional): Explicit legend handles. If None, uses existing handles from ax.
+            labels (list, optional): Explicit legend labels. Must be provided if handles is provided.
+            fontsize (str or int, optional): Explicit font size. If None, determined automatically based on num_runs.
+        
+        Returns:
+            Legend object.
+        """
+        # Determine font size if not explicitly provided
+        if fontsize is None:
+            if num_runs > 10:
+                fontsize = 'xx-small'
+            elif num_runs > 6:
+                fontsize = 'x-small'
+            elif num_runs > 4:
+                fontsize = 'small'
+            else:
+                fontsize = 'medium'
+        
+        # Build legend kwargs
+        legend_kwargs = {
+            'loc': loc,
+            'fontsize': fontsize,
+            'framealpha': framealpha
+        }
+        
+        if title is not None:
+            legend_kwargs['title'] = title
+        
+        # Use explicit handles/labels if provided, otherwise let matplotlib auto-detect
+        if handles is not None and labels is not None:
+            return ax.legend(handles, labels, **legend_kwargs)
+        else:
+            return ax.legend(**legend_kwargs)
+    
     def compare_posterior(self, var=None, guide_samples=10000, show_scatter=False,
                          step='loss_best', seed=1, device="cuda:0",
                          global_rank=0, dpi=300, levels=[0.68, 0.95], width_inch=10,
@@ -2089,25 +2180,8 @@ class ComparisonPlotter(BasePlotter):
         if not all_data:
             raise ValueError("No valid EIG data files found to compare")
 
-        # Resolve run_labels: self.run_labels (mapped by run_id), else var, else run_id[:8]
-        if self.run_labels is not None and len(self.run_labels) == len(run_data_list):
-            rid2lab = {r['run_id']: self.run_labels[i] for i, r in enumerate(run_data_list)}
-            run_labels = [rid2lab.get(rid, rid[:8]) for rid in found_run_ids]
-        else:
-            if var is not None:
-                # Generate labels from var parameters
-                vars_list = var if isinstance(var, list) else [var]
-                run_labels = []
-                for run_id in found_run_ids:
-                    run_data_item = next((r for r in run_data_list if r['run_id'] == run_id), None)
-                    if run_data_item and 'params' in run_data_item:
-                        run_params = run_data_item['params']
-                        label_parts = [f"{v_key}={run_params[v_key]}" for v_key in vars_list if v_key in run_params]
-                        run_labels.append(", ".join(label_parts) if label_parts else run_id[:8])
-                    else:
-                        run_labels.append(run_id[:8])
-            else:
-                run_labels = [run_id[:8] for run_id in found_run_ids]
+        # Resolve run_labels using centralized method
+        run_labels = self._resolve_run_labels(run_data_list, found_run_ids, var=var)
         if len(run_labels) != len(found_run_ids):
             raise ValueError("run_labels must match the number of discovered runs")
 
@@ -2491,7 +2565,7 @@ class ComparisonPlotter(BasePlotter):
             legend_labels.append(nominal_handle.get_label())
         legend_handles.extend(handles_for_legend)
         legend_labels.extend([h.get_label() for h in handles_for_legend])
-        ax_line.legend(legend_handles, legend_labels, loc='best', framealpha=0.9)
+        self._set_legend(ax_line, len(legend_labels), handles=legend_handles, labels=legend_labels)
         
         # Plot sorted designs (heatmap) if ax_heat exists and we're not doing per-run sorting
         if ax_heat is not None and not per_run_sort:
@@ -2729,12 +2803,8 @@ class ComparisonPlotter(BasePlotter):
             if len(optimal_designs) == 0:
                 raise ValueError("No valid optimal design data found to compare")
             
-            # Resolve run labels: self.run_labels (mapped by run_id) or run_id[:8]
-            if self.run_labels is not None and len(self.run_labels) == len(run_data_list):
-                rid2lab = {r['run_id']: self.run_labels[i] for i, r in enumerate(run_data_list)}
-                labels = [rid2lab.get(rid, rid[:8]) for rid in found_run_ids]
-            else:
-                labels = [run_id[:8] for run_id in found_run_ids]
+            # Resolve run labels using centralized method
+            labels = self._resolve_run_labels(run_data_list, found_run_ids, var=None)
             if len(labels) != len(optimal_designs):
                 labels = labels[:len(optimal_designs)]
             
@@ -2931,7 +3001,7 @@ class ComparisonPlotter(BasePlotter):
                 ax.set_ylabel(ylabel, fontsize=12, weight='bold')
                 ax.set_xticks(x)
                 ax.set_xticklabels(design_labels, fontsize=11)
-                ax.legend(loc='best', fontsize=16, framealpha=0.9)
+                self._set_legend(ax, len(plot_labels), fontsize=16)
                 ax.grid(True, alpha=0.3, axis='y')
                 if log_scale:
                     ax.set_yscale('log')
@@ -3043,12 +3113,8 @@ class ComparisonPlotter(BasePlotter):
                 run_boundaries.append((current_idx, current_idx + len(run_designs)))
                 current_idx += len(run_designs)
             
-            # Resolve run labels: self.run_labels (mapped by run_id) or run_id[:8]
-            if self.run_labels is not None and len(self.run_labels) == len(run_data_list):
-                rid2lab = {r['run_id']: self.run_labels[i] for i, r in enumerate(run_data_list)}
-                labels = [rid2lab.get(rid, rid[:8]) for rid in found_run_ids]
-            else:
-                labels = [run_id[:8] for run_id in found_run_ids]
+            # Resolve run labels using centralized method
+            labels = self._resolve_run_labels(run_data_list, found_run_ids, var=None)
             if len(labels) != len(all_run_top_designs):
                 labels = labels[:len(all_run_top_designs)]
             
@@ -3491,17 +3557,9 @@ class ComparisonPlotter(BasePlotter):
             else:
                 color = 'gray'  # Use gray for runs that don't match grouping criteria
 
-            # Create label from group key
-            if not vars_list:
-                # When var is None, use run_id as the label
-                base_label = run_id_iter[:8]
-            else:
-                # Original logic for when var is specified
-                label_parts = [run_id_iter[:8]]  # Start with run_id
-                for v_key in vars_list:
-                    if v_key in run_params:
-                        label_parts.append(f"{v_key}={run_params[v_key]}")
-                base_label = ", ".join(label_parts) if label_parts else run_id_iter[:8]
+            # Resolve run_labels using centralized method
+            resolved_labels = self._resolve_run_labels(run_data_list, [run_id_iter], var=var)
+            base_label = resolved_labels[0]
 
             # Only add label if this group hasn't been added to legend yet
             should_add_label = group_key_tuple not in legend_entries_added if is_valid_for_grouping else run_id_iter not in legend_entries_added
@@ -3589,18 +3647,13 @@ class ComparisonPlotter(BasePlotter):
                 legend_entries_added.add(run_id_iter)
 
         # --- Final Plot Configuration ---
-        # Determine legend font size based on number of runs
         num_runs = len(valid_runs_processed_for_metrics)
-        if num_runs > 10: legend_fontsize = 'xx-small'
-        elif num_runs > 6: legend_fontsize = 'x-small'
-        elif num_runs > 4: legend_fontsize = 'small'
-        else: legend_fontsize = 'medium'
 
         # Configure ax1 (Loss)
         ax1.set_ylabel("Loss")
         ax1.tick_params(axis='y')
         ax1.grid(True, axis='y', linestyle='--', alpha=0.6)
-        ax1.legend(loc='best', fontsize=legend_fontsize, title="Run Args")
+        self._set_legend(ax1, num_runs)
         if loss_limits:
             ax1.set_ylim(loss_limits)
 
