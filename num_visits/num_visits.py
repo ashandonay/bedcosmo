@@ -189,12 +189,6 @@ class NumVisits:
                 )
             self.nominal_design = torch.tensor(nominal_array, device=self.device, dtype=torch.float64)
         
-        # Set nominal context for prior_flow if it was loaded
-        if hasattr(self, 'prior_flow') and self.prior_flow is not None:
-            if not hasattr(self, 'prior_flow_nominal_context'):
-                nominal_observations = torch.zeros(self.num_filters, device=self.device, dtype=torch.float64)
-                self.prior_flow_nominal_context = torch.cat([self.nominal_design, nominal_observations], dim=-1)
-
         self.pixel_scale = pixel_scale
         self.stamp_size = stamp_size
         self.threshold = threshold
@@ -268,6 +262,13 @@ class NumVisits:
         self._wlen_cm_tensor = torch.tensor(wlen_common_cm, device=self.device, dtype=torch.float64)  # (n_wlen,)
         self._transmission_tensor = torch.tensor(transmission_array, device=self.device, dtype=torch.float64)  # (n_filters, n_wlen)
         self._wlen_over_hc_tensor = torch.tensor(wlen_over_hc_common, device=self.device, dtype=torch.float64)  # (n_wlen,)
+
+        # Assume a redshift of 1.0 for the observations central value
+        z_central_tensor = torch.tensor([1.0], device=self.device, dtype=torch.float64)
+        self.central_val = self._calculate_magnitudes(z_central_tensor).squeeze(0)  # (num_filters,)
+        self.nominal_context = torch.cat([self.nominal_design, self.central_val], dim=-1)
+        if hasattr(self, "prior_flow") and self.prior_flow is not None:
+            self.prior_flow_nominal_context = self.nominal_context
 
         # Pass design_args using ** unpacking if provided, otherwise use defaults
         if design_args is not None:
@@ -859,7 +860,7 @@ class NumVisits:
         
         # Check if we should use a posterior model as prior
         if hasattr(self, 'prior_flow') and self.prior_flow is not None:
-            z = self._sample_z_from_prior_flow(batch_shape, nvisits)
+            z = self._sample_from_prior_flow(batch_shape)
         else:
             z_dist = self.z_prior.expand(batch_shape).to_event(0)
             z = pyro.sample("z", z_dist)
@@ -869,7 +870,7 @@ class NumVisits:
         covariance = torch.diag_embed(sigmas**2)
         return pyro.sample(self.observation_labels[0], dist.MultivariateNormal(means, covariance))
     
-    def _sample_z_from_prior_flow(self, batch_shape, nvisits):
+    def _sample_from_prior_flow(self, batch_shape):
         """
         Sample z from a trained posterior model used as prior.
         
@@ -882,7 +883,9 @@ class NumVisits:
         # Get nominal context for sampling
         nominal_context = getattr(self, 'prior_flow_nominal_context', None)
         if nominal_context is None:
-            # Fallback: create nominal context
+            nominal_context = getattr(self, 'nominal_context', None)
+        if nominal_context is None:
+            # Fallback: create nominal context with zero observations
             nominal_observations = torch.zeros(self.num_filters, device=self.device, dtype=torch.float64)
             nominal_context = torch.cat([self.nominal_design, nominal_observations], dim=-1)
         
@@ -930,7 +933,7 @@ class NumVisits:
         transform_output=True,
     ):
         if context is None:
-            raise ValueError("context is required")
+            context = self.nominal_context
         with torch.no_grad():
             param_samples = guide(context.squeeze()).sample((num_samples,))
 
