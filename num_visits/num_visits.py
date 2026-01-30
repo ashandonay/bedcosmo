@@ -263,8 +263,9 @@ class NumVisits:
         self._wlen_over_hc_tensor = torch.tensor(wlen_over_hc_common, device=self.device, dtype=torch.float64)  # (n_wlen,)
 
         # Assume a redshift of 1.0 for the observations central value
-        z_central_tensor = torch.tensor([1.0], device=self.device, dtype=torch.float64)
-        self.central_val = self._calculate_magnitudes(z_central_tensor).squeeze(0)  # (num_filters,)
+        self.central_z = 0.8
+        central_z_tensor = torch.tensor([self.central_z], device=self.device, dtype=torch.float64)
+        self.central_val = self._calculate_magnitudes(central_z_tensor).squeeze(0)  # (num_filters,)
         self.nominal_context = torch.cat([self.nominal_design, self.central_val], dim=-1)
         if hasattr(self, "prior_flow") and self.prior_flow is not None:
             self.prior_flow_nominal_context = self.nominal_context
@@ -925,7 +926,7 @@ class NumVisits:
                         parameters[k] = pyro.sample(k, v).unsqueeze(-1)
                     else:
                         parameters[k] = v
-            param_samples = torch.stack(list(parameters.values()), dim=-1)
+            param_samples = torch.stack(list(parameters.values()), dim=-1).squeeze(-1)
         # Ensure (num_samples, n_params) and float64 for getdist
         if param_samples.dtype != torch.float64:
             param_samples = param_samples.to(torch.float64)
