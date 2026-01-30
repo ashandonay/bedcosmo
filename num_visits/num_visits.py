@@ -440,8 +440,6 @@ class NumVisits:
                 if not os.path.exists(input_designs_path):
                     raise FileNotFoundError(f"input_designs_path not found: {input_designs_path}")
                 
-                if self.global_rank == 0:
-                    print(f"Loading input designs from numpy file: {input_designs_path}")
                 input_designs_array = np.load(input_designs_path)
                 # Convert to tensor
                 if isinstance(input_designs_array, torch.Tensor):
@@ -510,24 +508,6 @@ class NumVisits:
             if self.verbose:
                 print("Design grid empty under current constraint; defaulting to nominal design.")
             self.designs = self.nominal_design.unsqueeze(0).to(self.device)
-        
-        if self.global_rank == 0 and self.verbose:
-            print(f"Designs shape: {self.designs.shape}")
-            if input_type == "nominal":
-                print(f"Using nominal design as input design: {self.designs}")
-            elif input_designs_path is None:
-                print(
-                    f"Designs initialized with the following parameters:\n",
-                    f"step size: {step}\n",
-                    f"lower range: {lower}\n",
-                    f"upper range: {upper}\n",
-                    f"sum lower: {sum_lower}\n",
-                    f"sum upper: {sum_upper}\n"
-                    )
-            elif input_designs_path is not None:
-                print(f"Input designs loaded from numpy file: {input_designs_path}")
-                print(f"Input designs: {self.designs[:10]}")
-            print(f"Nominal design: {self.nominal_design}\n")
 
     @profile_method
     def _luminosity_distance(self, z, n_int=1025):
