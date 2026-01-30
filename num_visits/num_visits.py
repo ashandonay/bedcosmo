@@ -169,13 +169,12 @@ class NumVisits:
         z_low, z_high = z_prior_bounds
         if z_low >= z_high:
             raise ValueError("z_prior_bounds must satisfy lower < upper.")
-        self.z_prior_bounds = z_prior_bounds
+        self.prior_bounds = z_prior_bounds
         
         # initialize the prior
         self.prior_args = prior_args
         self.prior, self.latex_labels = self.init_prior(**self.prior_args)
         self.cosmo_params = list(self.prior.keys())
-        self.z_prior = self.prior[self.cosmo_params[0]]
 
         if nominal_design is None:
             self.nominal_design = torch.tensor(
@@ -862,7 +861,7 @@ class NumVisits:
         if hasattr(self, 'prior_flow') and self.prior_flow is not None:
             z = self._sample_from_prior_flow(batch_shape)
         else:
-            z_dist = self.z_prior.expand(batch_shape).to_event(0)
+            z_dist = self.prior["z"].expand(batch_shape).to_event(0)
             z = pyro.sample("z", z_dist)
         
         means = self._calculate_magnitudes(z)
@@ -876,7 +875,15 @@ class NumVisits:
         
         The posterior model is conditional on context (design + observations),
         so we sample at the nominal context (nominal design + zero observations).
+
+        Args:
+            batch_shape: int or tuple, number of samples or shape for reshaping.
+
+        Returns:
+            z: Tensor of redshifts with shape (batch_shape,) or (batch_shape, 1) squeezed.
         """
+        if isinstance(batch_shape, int):
+            batch_shape = (batch_shape,) if batch_shape else ()
         # Get the total number of samples needed
         total_samples = int(np.prod(batch_shape)) if batch_shape else 1
         
@@ -922,6 +929,33 @@ class NumVisits:
     @profile_method
     def params_from_unconstrained(self, y, bijector_class=None):
         return y
+
+    @profile_method
+    def get_prior_samples(self, num_samples=100000):
+        # Sample from prior or prior_flow if available; produce (num_samples, n_params) float64
+        if hasattr(self, 'prior_flow') and self.prior_flow is not None:
+            z = self._sample_from_prior_flow(num_samples)
+            # z is (num_samples,) from _sample_from_prior_flow; need (num_samples, 1)
+            param_samples = z.unsqueeze(-1).to(device=self.device, dtype=torch.float64)
+        else:
+            with pyro.plate("plate", num_samples):
+                parameters = {}
+                for i, (k, v) in enumerate(self.prior.items()):
+                    if isinstance(v, dist.Distribution):
+                        parameters[k] = pyro.sample(k, v).unsqueeze(-1)
+                    else:
+                        parameters[k] = v
+            param_samples = torch.stack(list(parameters.values()), dim=-1)
+        # Ensure (num_samples, n_params) and float64 for getdist
+        if param_samples.dtype != torch.float64:
+            param_samples = param_samples.to(torch.float64)
+        with contextlib.redirect_stdout(io.StringIO()):
+            samples_gd = getdist.MCSamples(
+                samples=param_samples.cpu().numpy(),
+                names=self.cosmo_params,
+                labels=self.latex_labels,
+            )
+        return samples_gd
 
     @profile_method
     def get_guide_samples(
