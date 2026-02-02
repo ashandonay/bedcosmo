@@ -347,8 +347,8 @@ class BasePlotter:
                 # Truncate if too many elements
                 show_scatter = show_scatter[:len(samples)]
 
-        # Set line styles in GetDist settings
-        g.settings.line_styles = line_style
+        # Set line styles in GetDist settings (each entry needs linestyle + color or legend gets color='')
+        g.settings.line_styles = list(zip(line_style, colors))
         if isinstance(alpha, (int, float)):
             adjusted_alpha = alpha * contour_alpha_factor
             g.settings.plot_args = {'alpha': adjusted_alpha}
@@ -748,7 +748,8 @@ class RunPlotter(BasePlotter):
         return fig, axes
     
     def generate_posterior(self, step_key=None, display=['nominal', 'optimal'], levels=[0.68], 
-                          guide_samples=1000, device="cuda:0", seed=1):
+                          guide_samples=1000, device="cuda:0", seed=1, plot_prior=False, 
+                          title=None):
         """
         Generates posterior plots for nominal and/or optimal designs using EIG data.
         Uses pre-computed EIG data to quickly identify optimal design without recalculating EIG.
@@ -760,15 +761,14 @@ class RunPlotter(BasePlotter):
             guide_samples (int): Number of samples to generate (default: 1000).
             device (str): Device to use (default: 'cuda:0').
             seed (int): Random seed (default: 1).
-            
+            plot_prior (bool): If True, also plot the prior using experiment.get_prior_samples as solid gray (default: False).
+            title (str, optional): Title of the plot. If None, uses default title.
         Returns:
             GetDist plotter object.
         """
         # Normalize levels to always be a list
         if isinstance(levels, (int, float)):
             levels = [levels]
-        
-        print(f"Generating posterior plot...")
         
         # Load EIG data to get optimal design and EIG values
         eig_data, artifacts_dir = self._get_eig_data(step_key=step_key)
@@ -837,14 +837,8 @@ class RunPlotter(BasePlotter):
         all_alphas = []
         legend_labels = []
         
-        # Load labels first (needed for all samples)
-        _, target_labels, latex_labels = load_nominal_samples(
-            run_args['cosmo_exp'], run_args['cosmo_model'], dataset=run_args['dataset']
-        )
-        
         # Generate samples for nominal design if requested
         if 'nominal' in display:
-            print(f"Generating posterior samples with nominal design...")
             nominal_context = experiment.nominal_context
             # get_guide_samples returns MCSamples object directly (already converted)
             nominal_samples_gd = experiment.get_guide_samples(
@@ -862,7 +856,6 @@ class RunPlotter(BasePlotter):
         # Generate samples for optimal design if requested
         has_multiple_designs = len(input_designs) > 1
         if 'optimal' in display and has_multiple_designs:
-            print(f"Generating posterior samples with optimal design...")
             optimal_design_tensor = torch.tensor(optimal_design, device=device, dtype=torch.float64)
             optimal_context = torch.cat([optimal_design_tensor, experiment.central_val], dim=-1)
             
@@ -897,16 +890,22 @@ class RunPlotter(BasePlotter):
             legend_labels.append(f'Input Design (NF){eig_str}')
         
         # Get DESI MCMC samples for reference
-        try:
-            nominal_samples_mcmc = experiment.get_nominal_samples(transform_output=None)
-            all_samples.append(nominal_samples_mcmc)
+        if self.cosmo_exp == 'num_tracers':
+            try:
+                nominal_samples_mcmc = experiment.get_nominal_samples(transform_output=None)
+                all_samples.append(nominal_samples_mcmc)
+                all_colors.append('black')
+                all_alphas.append(1.0)
+                legend_labels.append('Nominal Design (MCMC)')
+            except NotImplementedError:
+                print(f"Warning: get_nominal_samples not implemented for {self.cosmo_exp}, skipping MCMC reference.")
+        
+        if plot_prior and hasattr(experiment, 'get_prior_samples'):
+            prior_samples_gd = experiment.get_prior_samples(num_samples=guide_samples)
+            all_samples.append(prior_samples_gd)
             all_colors.append('black')
             all_alphas.append(1.0)
-            legend_labels.append('Nominal Design (MCMC)')
-            ref_contour = True
-        except NotImplementedError:
-            print(f"Warning: get_nominal_samples not implemented for {self.cosmo_exp}, skipping MCMC reference.")
-            ref_contour = False
+            legend_labels.append('Prior')
         
         # Set label attribute on each MCSamples object so GetDist uses correct labels
         # This is important because GetDist uses the label attribute for legends
@@ -923,6 +922,10 @@ class RunPlotter(BasePlotter):
             width_inch=plot_width, 
             alpha=all_alphas
         )
+
+        if self.cosmo_exp == 'num_visits':
+            # add a marker at central z
+            g.subplots[0, 0].axvline(experiment.central_z, color='black', linestyle='--')
         
         # Calculate dynamic font sizes
         n_params = len(all_samples[0].paramNames.names)
@@ -942,7 +945,7 @@ class RunPlotter(BasePlotter):
                 Line2D([0], [0], color=color, label=label, linewidth=1.2)
             )
         
-        title = f"Posterior Comparison - Run: {self.run_id[:8]}"
+        title = title if title is not None else f"Posterior Comparison - Run: {self.run_id[:8]}"
         g.fig.suptitle(title, fontsize=title_fontsize, weight='bold')
         g.fig.set_constrained_layout(True)
         leg = g.fig.legend(handles=custom_legend, loc='upper right', bbox_to_anchor=(0.99, 0.96), fontsize=legend_fontsize)
@@ -1428,14 +1431,9 @@ class RunPlotter(BasePlotter):
         # Initialize experiment once
         experiment = init_experiment(run_obj, run_args, device=device, design_args=None, global_rank=0)
         
-        # Load labels once (needed for all samples)
-        _, target_labels, latex_labels = load_nominal_samples(
-            run_args['cosmo_exp'], run_args['cosmo_model'], dataset=run_args['dataset']
-        )
-        
         for i, step in enumerate(steps):
             # Load model for this step
-            posterior_flow, selected_step = load_model(experiment, step, run_obj, run_args, device, global_rank=0)
+            posterior_flow, _ = load_model(experiment, step, run_obj, run_args, device, global_rank=0)
             auto_seed(1)  # Use consistent seed
             
             # Use experiment.get_guide_samples directly (returns MCSamples object)

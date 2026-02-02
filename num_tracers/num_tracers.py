@@ -208,7 +208,9 @@ class NumTracers:
         mode='train',
         verbose=False,
         profile=False,
-        prior_flow_batch_size=100000
+        prior_flow_batch_size=10000,
+        prior_flow_cache_size=100000,
+        prior_flow_use_cache=True,
     ):
 
         self.name = 'num_tracers'
@@ -228,6 +230,8 @@ class NumTracers:
         self.verbose = verbose
         self.profile = profile
         self.prior_flow_batch_size = prior_flow_batch_size
+        self.prior_flow_cache_size = prior_flow_cache_size
+        self.prior_flow_use_cache = prior_flow_use_cache
         if seed is not None:
             auto_seed(self.seed)
         self.rdrag = 149.77
@@ -268,7 +272,7 @@ class NumTracers:
 
         self.prior, self.param_constraints, self.latex_labels, self.prior_flow, self.prior_flow_metadata = self.init_prior(**self.prior_args)
         
-        # Extract prior_flow settings for use in _sample_from_prior_flow
+        # Extract prior_flow settings for use in _sample_prior_flow
         if self.prior_flow_metadata is not None:
             self.prior_flow_transform_input = self.prior_flow_metadata.get('transform_input', False)
             self.prior_flow_nominal_context = self.prior_flow_metadata.get('nominal_context', self.nominal_context)
@@ -359,8 +363,6 @@ class NumTracers:
                 if not os.path.exists(input_designs_path):
                     raise FileNotFoundError(f"input_designs_path not found: {input_designs_path}")
                 
-                if self.global_rank == 0:
-                    print(f"Loading input designs from numpy file: {input_designs_path}")
                 input_designs_array = np.load(input_designs_path)
                 # Convert to tensor
                 designs = torch.tensor(input_designs_array, device=self.device, dtype=torch.float64)
@@ -1207,20 +1209,32 @@ class NumTracers:
         the posterior model at the nominal context. Otherwise, samples are drawn
         from the uniform prior.
 
+        All samples are registered with pyro.sample for proper tracing.
+
         Args:
             sample_shape: Shape of the samples to draw.
             prior: Optional prior dict to sample from. Defaults to self.prior.
             use_prior_flow: If True (default), use prior_flow when available.
                 Set to False to bypass prior_flow and sample from the explicit prior.
         """
+        parameters = {}
+        
         # Check if we should use a posterior model as prior
         if use_prior_flow and hasattr(self, 'prior_flow') and self.prior_flow is not None:
-            return self._sample_from_prior_flow(sample_shape)
+            # Get raw samples from prior flow (shape: *sample_shape, n_params)
+            samples = self._sample_prior_flow(sample_shape)
+            
+            # Register each parameter with pyro.sample
+            for i, param_name in enumerate(self.cosmo_params):
+                param_values = samples[..., i]
+                parameters[param_name] = pyro.sample(param_name, dist.Delta(param_values)).unsqueeze(-1)
+            
+            return parameters
         
-        # register samples in the trace using pyro.sample
-        parameters = {}
+        # Otherwise sample from explicit prior distributions
         if prior is None:
             prior = self.prior
+            
         # Handle constraints based on YAML configuration
         if hasattr(self, 'param_constraints'):
             # Check for valid density constraint
@@ -1263,47 +1277,92 @@ class NumTracers:
         return parameters
     
     @profile_method
-    def _sample_from_prior_flow(self, sample_shape):
+    def _sample_prior_flow_direct(self, total_samples):
         """
-        Sample parameters from a trained posterior model used as prior.
-
-        The posterior model is conditional on context (design + observations),
-        so we sample at the nominal context (nominal design + central values).
-
-        Samples in batches to avoid GPU memory issues when sampling large numbers.
-        """
-        # Get the total number of samples needed
-        total_samples = int(np.prod(sample_shape)) if isinstance(sample_shape, tuple) else int(sample_shape)
-
-        # Get nominal context for sampling
-        nominal_context = getattr(self, 'prior_flow_nominal_context', self.nominal_context.to(self.device))
-
-        # Batch size for sampling to avoid OOM errors
-        # Use a reasonable batch size (e.g., 10k samples at a time)
-        batch_size = getattr(self, 'prior_flow_batch_size', 10000)
+        Sample directly from the prior flow (slow but fresh samples each time).
         
-        # Sample in batches
+        Args:
+            total_samples: Number of samples to generate
+            
+        Returns:
+            Tensor of shape (total_samples, n_params)
+        """
+        nominal_context = getattr(self, 'prior_flow_nominal_context', self.nominal_context.to(self.device))
+        batch_size = getattr(self, 'prior_flow_batch_size', 10000)
+        prior_transform_input = getattr(self, 'prior_flow_transform_input', False)
+        
         all_samples = []
         with torch.no_grad():
-            for batch_idx, i in enumerate(range(0, total_samples, batch_size)):
+            for i in range(0, total_samples, batch_size):
                 batch_end = min(i + batch_size, total_samples)
                 batch_size_actual = batch_end - i
                 
-                # Expand context for this batch
                 expanded_context = nominal_context.unsqueeze(0).expand(batch_size_actual, -1)
-                # Sample from the posterior flow
                 posterior_dist = self.prior_flow(expanded_context)
-                batch_samples = posterior_dist.sample()  # Shape: (batch_size_actual, param_dim)
+                batch_samples = posterior_dist.sample()
                 
-                # Transform from unconstrained to constrained space if needed
-                prior_transform_input = getattr(self, 'prior_flow_transform_input', False)
                 if prior_transform_input:
                     batch_samples = self.params_from_unconstrained(batch_samples)
                 
                 all_samples.append(batch_samples)
+        
+        return torch.cat(all_samples, dim=0)
+    
+    @profile_method
+    def _init_prior_flow_cache(self, cache_size=100000):
+        """
+        Pre-generate a cache of samples from the prior flow for fast access during training.
+        
+        NAF (Neural Autoregressive Flow) is inherently slow due to sequential computation.
+        By pre-sampling a large cache at initialization, we can draw from it instantly
+        during training instead of running expensive forward passes each step.
+        
+        Args:
+            cache_size: Number of samples to pre-generate (default 100k, ~2MB memory for 5 params)
+        """
+        if self.global_rank == 0:
+            print(f"Pre-generating {cache_size:,} samples from prior_flow for cache...")
+        
+        self._prior_flow_cache = self._sample_prior_flow_direct(cache_size)
+        self._prior_flow_cache_idx = 0
+    
+    @profile_method
+    def _sample_prior_flow(self, sample_shape):
+        """
+        Sample raw parameter values from a trained posterior model used as prior.
 
-        # Concatenate all batches
-        samples = torch.cat(all_samples, dim=0)  # Shape: (total_samples, param_dim)
+        If prior_flow_use_cache is True, uses a pre-generated cache for fast access.
+        If False, samples directly from the prior flow each time (slow but fresh).
+        
+        The posterior model is conditional on context (design + observations),
+        so we sample at the nominal context (nominal design + central values).
+        
+        Returns:
+            Tensor of shape (*sample_shape, n_params) with raw parameter values.
+            Does NOT register with pyro - caller handles registration.
+        """
+        total_samples = int(np.prod(sample_shape)) if isinstance(sample_shape, tuple) else int(sample_shape)
+        
+        use_cache = getattr(self, 'prior_flow_use_cache', True)
+        
+        if use_cache:
+            # Initialize cache if needed
+            cache_size = getattr(self, 'prior_flow_cache_size', 100000)
+            if not hasattr(self, '_prior_flow_cache') or self._prior_flow_cache is None:
+                self._init_prior_flow_cache(cache_size)
+            
+            # Check if we need to wrap around - shuffle and reuse
+            if self._prior_flow_cache_idx + total_samples > len(self._prior_flow_cache):
+                perm = torch.randperm(len(self._prior_flow_cache), device=self.device)
+                self._prior_flow_cache = self._prior_flow_cache[perm]
+                self._prior_flow_cache_idx = 0
+            
+            # Draw samples from cache
+            samples = self._prior_flow_cache[self._prior_flow_cache_idx:self._prior_flow_cache_idx + total_samples]
+            self._prior_flow_cache_idx += total_samples
+        else:
+            # Sample directly from prior flow (slow)
+            samples = self._sample_prior_flow_direct(total_samples)
 
         # Reshape to match sample_shape
         if isinstance(sample_shape, tuple):
@@ -1311,14 +1370,7 @@ class NumTracers:
         else:
             samples = samples.reshape(sample_shape, -1)
 
-        # Split into individual parameters and register with pyro.sample
-        parameters = {}
-        for i, param_name in enumerate(self.cosmo_params):
-            param_values = samples[..., i]
-            # Use Delta distribution to fix the sampled values
-            parameters[param_name] = pyro.sample(param_name, dist.Delta(param_values)).unsqueeze(-1)
-
-        return parameters
+        return samples
 
     @profile_method
     def pyro_model(self, tracer_ratio):

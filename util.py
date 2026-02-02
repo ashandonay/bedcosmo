@@ -1073,8 +1073,6 @@ def init_experiment(
         if design_args is None:
             design_args_artifact_path = artifact_path + "/design_args.yaml"
             if os.path.exists(design_args_artifact_path):
-                if global_rank == 0:
-                    print(f"Loading design_args from artifacts: {design_args_artifact_path}")
                 with open(design_args_artifact_path, 'r') as f:
                     design_args = yaml.safe_load(f)
             else:
@@ -1090,8 +1088,6 @@ def init_experiment(
         if prior_args is None:
             prior_artifact_path = artifact_path + "/prior_args.yaml"
             if os.path.exists(prior_artifact_path):
-                if global_rank == 0:
-                    print(f"Loading prior_args from artifacts: {prior_artifact_path}")
                 with open(prior_artifact_path, 'r') as f:
                     prior_args = yaml.safe_load(f)
             else:
@@ -1196,10 +1192,6 @@ def load_prior_flow_from_file(prior_flow_path, prior_run_id, device, global_rank
     
     if prior_run_id is None:
         raise ValueError("prior_run_id must be specified")
-    
-    if global_rank == 0:
-        print(f"Loading prior flow from file: {prior_flow_path}")
-        print(f"Loading run_args from MLflow run_id: {prior_run_id}")
     
     # Load checkpoint first (needed for state_dict and possibly input_dim/context_dim)
     checkpoint = torch.load(prior_flow_path, map_location=device, weights_only=False)

@@ -70,7 +70,7 @@ class Evaluator:
         self.eig_file_path = eig_file_path
         self._init_eig_data()
         
-        # Set seed NOW before any operations that might use randomness (like init_experiment)
+        # Set seed before any operations that might use randomness
         auto_seed(self.seed)
         self.guide_samples = guide_samples
         # Normalize levels to always be a list
@@ -1014,9 +1014,8 @@ class Evaluator:
         
         # Make some evaluation plots
         try:
-            if self.cosmo_exp == 'num_tracers':
-                self.plotter.generate_posterior(step_key=eval_step, display=['nominal', 'optimal'], levels=self.levels)
-                self._update_runtime()
+            self.plotter.generate_posterior(step_key=eval_step, display=['nominal', 'optimal'], levels=self.levels, plot_prior=True)
+            self._update_runtime()
         except Exception as e:
             print(f"Warning: generate_posterior failed: {e}")
             traceback.print_exc()
