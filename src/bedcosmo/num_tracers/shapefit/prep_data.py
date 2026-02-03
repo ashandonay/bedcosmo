@@ -1,5 +1,6 @@
 import argparse
 import json
+import sys
 import traceback
 from typing import Dict, List, Tuple
 
@@ -202,6 +203,8 @@ def main() -> None:
             '\'{"omega_b":{"dist":"normal","mu":0.02218,"sigma":0.00055}}\''
         ),
     )
+    # Strip empty/whitespace args that can appear from shell line continuation
+    sys.argv = [a for a in sys.argv if a.strip()]
     args = parser.parse_args()
 
     priors = DEFAULT_PRIORS if not args.priors_json else parse_priors(args.priors_json)
