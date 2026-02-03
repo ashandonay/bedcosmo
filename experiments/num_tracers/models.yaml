@@ -1,0 +1,29 @@
+# Cosmology model configurations
+bao:
+  base:
+    parameters: ["Om", "hrdrag"]
+    latex_labels: ["\\Omega_m", "H_0r_d"]
+    
+  base_omegak:
+    parameters: ["Om", "Ok", "hrdrag"]
+    latex_labels: ["\\Omega_m", "\\Omega_k", "H_0r_d"]
+    constraints: ["valid_densities"]
+    
+  base_w:
+    parameters: ["Om", "w0", "hrdrag"]
+    latex_labels: ["\\Omega_m", "w_0", "H_0r_d"]
+    
+  base_w_wa:
+    parameters: ["Om", "w0", "wa", "hrdrag"]
+    latex_labels: ["\\Omega_m", "w_0", "w_a", "H_0r_d"]
+    constraints: ["high_z_matter_dom"]
+    
+  base_omegak_w_wa:
+    parameters: ["Om", "Ok", "w0", "wa", "hrdrag"]
+    latex_labels: ["\\Omega_m", "\\Omega_k", "w_0", "w_a", "H_0r_d"]
+    constraints: ["valid_densities", "high_z_matter_dom"]
+
+fullshape:
+  base:
+    parameters: ["omega_cdm", "omega_b", "h", "ln10A_s", "n_s", "b1_sigma8", "b2_sigma8_sq", "bs_sigma8_sq", "alpha_0", "alpha_2", "SN_0", "SN_2"]
+    latex_labels: ["\\omega_{cdm}", "\\omega_b", "h", "\\ln(10^{10} A_s)", "n_s", "(1 + b_1) \\sigma_8", "b_2 \\sigma_8^2", "b_s \\sigma_8^2", "\\alpha_0", "\\alpha_2", "SN_0", "SN_2"]

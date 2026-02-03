@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Helper script to validate arguments, load config defaults, and submit SLURM jobs
+# Helper script to validate arguments, load config defaults, and run training/eval jobs locally via torchrun
 # Usage: ./submit.sh <job_type> [cosmo_exp] [id] [arguments...]
 
 set -e  # Exit on error
@@ -29,17 +29,15 @@ if [ $# -eq 0 ]; then
     echo ""
     echo "Examples:"
     echo "  ./submit.sh train num_tracers base"
-    echo "  ./submit.sh train --cosmo_exp num_tracers --cosmo_model base_w_wa --initial_lr 0.0001 --log_usage"
+    echo "  ./submit.sh train --cosmo_exp num_tracers --cosmo_model base_w_wa --initial_lr 0.0001 --gpus 2"
     echo "  ./submit.sh debug num_tracers --cosmo_model base --profile"
     echo "  ./submit.sh eval num_tracers abc123"
-    echo "  ./submit.sh resume num_tracers abc123 5000 --log_usage"
+    echo "  ./submit.sh resume num_tracers abc123 5000"
     echo "  ./submit.sh restart num_tracers abc123 10000"
-    echo "  ./submit.sh restart num_tracers abc123 checkpoint_rank0_step10000.pt --restart_optimizer"
     echo ""
-    echo "Optional flags: --log_usage, --profile (for train/debug/resume/restart)"
-    echo "Restart-specific: --restart_checkpoint, --restart_optimizer"
+    echo "Optional flags: --gpus <N> (default: 2), --omp_threads <N> (default: 32)"
+    echo "                --log_usage, --profile, --restart_optimizer"
     echo "Note: 'eval', 'resume', and 'restart' jobs do not require --cosmo_model (inferred from MLflow run)"
-    echo "Note: 'restart' requires either --restart_step OR --restart_checkpoint"
     exit 1
 fi
 
@@ -59,9 +57,11 @@ RESTART_CHECKPOINT=""
 LOG_USAGE=false
 PROFILE=false
 RESTART_OPTIMIZER=false
+GPUS=2  # Default GPU count
+OMP_THREADS=32  # Default OMP threads
+
 declare -A CLI_ARGS  # Associative array for command-line arguments
 POSITIONAL_ARGS=()
-SBATCH_ARGS=()
 
 # Parse named arguments
 while [[ $# -gt 0 ]]; do
@@ -98,6 +98,14 @@ while [[ $# -gt 0 ]]; do
             RESTART_CHECKPOINT="$2"
             shift 2
             ;;
+        --gpus)
+            GPUS="$2"
+            shift 2
+            ;;
+        --omp_threads)
+            OMP_THREADS="$2"
+            shift 2
+            ;;
         --log_usage)
             LOG_USAGE=true
             shift 1
@@ -109,10 +117,6 @@ while [[ $# -gt 0 ]]; do
         --restart_optimizer)
             RESTART_OPTIMIZER=true
             shift 1
-            ;;
-        --exclude)
-            SBATCH_ARGS+=("--exclude=$2")
-            shift 2
             ;;
         --*)
             # Store CLI argument (will override YAML defaults)
@@ -205,78 +209,61 @@ if [ -z "$COSMO_MODEL" ] && [ "$JOB_TYPE" != "eval" ] && [ "$JOB_TYPE" != "resum
     echo "Error: --cosmo_model is required for $JOB_TYPE jobs"
     echo "Usage: ./submit.sh $JOB_TYPE [cosmo_exp] [cosmo_model] [additional args...]"
     echo "Available models: base, base_omegak, base_w, base_w_wa, base_omegak_w_wa"
-    echo ""
-    echo "Note: cosmo_model can be provided positionally after cosmo_exp."
-    echo "Note: --cosmo_model is not needed for 'eval', 'resume', or 'restart' jobs (inferred from MLflow run)"
     exit 1
 fi
 
-# Activate conda environment early (needed for MLflow and YAML parsing on login node)
-# This is necessary because we use Python with mlflow and yaml modules before submitting to SLURM
-module load conda 2>/dev/null || true
-source $(conda info --base)/etc/profile.d/conda.sh 2>/dev/null || source /opt/conda/etc/profile.d/conda.sh
-conda activate bed-cosmo
+# Activate conda environment early (needed for MLflow and YAML parsing)
+if [ -f "$HOME/.bashrc" ] && grep -q "conda" "$HOME/.bashrc"; then
+    source "$HOME/.bashrc"
+fi
+
+if command -v conda &> /dev/null; then
+    # Get conda base and activate
+    CONDA_BASE=$(conda info --base 2>/dev/null)
+    if [ -n "$CONDA_BASE" ] && [ -f "$CONDA_BASE/etc/profile.d/conda.sh" ]; then
+        source "$CONDA_BASE/etc/profile.d/conda.sh"
+        conda activate bed-cosmo
+        echo "Activated conda environment: bed-cosmo"
+    else
+        echo "Warning: Could not find conda.sh, trying alternative activation..."
+        eval "$(conda shell.bash hook)"
+        conda activate bed-cosmo
+    fi
+else
+    echo "Error: conda not found. Please ensure conda is installed and in PATH."
+    exit 1
+fi
 
 # For eval jobs, infer cosmo_model from MLflow run
 if [ "$JOB_TYPE" = "eval" ] && [ -z "$COSMO_MODEL" ]; then
     echo "Inferring cosmo_model from MLflow run ${RUN_ID}..."
-    # Capture stderr separately to avoid polluting COSMO_MODEL with warnings
-    # Use a temp file to capture stderr, then extract only the last line (the model name) from stdout
-    TEMP_STDERR=$(mktemp)
-    set +e  # Temporarily disable exit on error to capture the result
-    COSMO_MODEL=$(timeout 30 python3 -c "
+    COSMO_MODEL=$(python3 -c "
 import mlflow
 import os
 import sys
 import warnings
+warnings.filterwarnings('ignore')
 from mlflow.tracking import MlflowClient
 
-# Suppress FutureWarning to stderr (will be shown separately)
-warnings.filterwarnings('ignore', category=FutureWarning)
-
-mlflow.set_tracking_uri('file:' + os.environ['SCRATCH'] + '/bedcosmo/${COSMO_EXP}/mlruns')
+# Use SCRATCH if available, otherwise use local directory
+scratch_path = os.environ.get('SCRATCH', os.path.expanduser('~') + '/scratch')
+mlflow.set_tracking_uri('file:' + scratch_path + '/bedcosmo/${COSMO_EXP}/mlruns')
 client = MlflowClient()
 try:
     run = client.get_run('${RUN_ID}')
     cosmo_model = run.data.params.get('cosmo_model', 'base')
-    print(cosmo_model, flush=True)
+    print(cosmo_model)
 except Exception as e:
     print(f'ERROR: {e}', file=sys.stderr)
-    sys.exit(1)
-" 2>"$TEMP_STDERR")
-    PYTHON_EXIT_CODE=$?
-    STDERR_CONTENT=$(cat "$TEMP_STDERR" 2>/dev/null)
-    rm -f "$TEMP_STDERR"
-    set -e  # Re-enable exit on error
-    
-    # Show warnings if any (but don't fail on them)
-    if [ -n "$STDERR_CONTENT" ]; then
-        echo "Warning from MLflow (non-fatal):" >&2
-        echo "$STDERR_CONTENT" >&2
-    fi
-    
-    if [ $PYTHON_EXIT_CODE -ne 0 ]; then
-        if [ $PYTHON_EXIT_CODE -eq 124 ]; then
-            echo "Error: Timeout while getting cosmo_model from run ${RUN_ID} (command took >30 seconds)"
-        else
-            echo "Error: Failed to get cosmo_model from run ${RUN_ID} (exit code: $PYTHON_EXIT_CODE)"
-        fi
-        if [ -n "$COSMO_MODEL" ]; then
-            echo "Partial output: $COSMO_MODEL"
-        fi
+    exit(1)
+" 2>/dev/null)
+
+    if [ $? -ne 0 ]; then
+        echo "Error: Failed to get cosmo_model from run ${RUN_ID}"
+        echo "$COSMO_MODEL"
         exit 1
     fi
-    
-    # Trim whitespace and extract only the model name (in case any output leaked through)
-    COSMO_MODEL=$(echo "$COSMO_MODEL" | tail -n 1 | xargs)
-    
-    if [ -z "$COSMO_MODEL" ]; then
-        echo "Error: Could not extract cosmo_model from MLflow run ${RUN_ID}"
-        exit 1
-    fi
-    
     echo "Inferred cosmo_model: $COSMO_MODEL"
-    echo ""
 fi
 
 # Load YAML config file for this cosmo_exp and cosmo_model (skip for resume/restart)
@@ -297,27 +284,16 @@ if [ -n "$CONFIG_FILE" ] && [ ! -f "$CONFIG_FILE" ]; then
     YAML_ARGS=()
 elif [ -n "$CONFIG_FILE" ]; then
     echo "Loading config from: $CONFIG_FILE"
-    if [ -n "$COSMO_MODEL" ]; then
-        echo "Using model: $COSMO_MODEL"
-    else
-        echo "Warning: COSMO_MODEL is empty, this may cause issues"
-    fi
+    echo "Using model: $COSMO_MODEL"
     
     # Parse YAML and extract config for specified model
-    # Using Python to parse YAML reliably
     YAML_ARGS=()
     
     # Create a Python script to extract the model config
-    # Capture stderr separately to avoid polluting output with warnings
-    TEMP_YAML_STDERR=$(mktemp)
     YAML_OUTPUT=$(python3 -c "
 import yaml
 import sys
 import json
-import warnings
-
-# Suppress warnings to stderr
-warnings.filterwarnings('ignore')
 
 try:
     with open('$CONFIG_FILE', 'r') as f:
@@ -335,25 +311,15 @@ try:
 except Exception as e:
     print(f'ERROR: Failed to parse YAML: {e}', file=sys.stderr)
     sys.exit(1)
-" 2>"$TEMP_YAML_STDERR")
-    YAML_EXIT_CODE=$?
-    YAML_STDERR=$(cat "$TEMP_YAML_STDERR" 2>/dev/null)
-    rm -f "$TEMP_YAML_STDERR"
+" 2>&1)
 
     # Check if Python command succeeded
-    if [ $YAML_EXIT_CODE -ne 0 ]; then
-        echo "Error: Failed to load YAML config for model '$COSMO_MODEL'"
-        if [ -n "$YAML_STDERR" ]; then
-            echo "$YAML_STDERR"
-        fi
-        if [ -n "$YAML_OUTPUT" ]; then
-            echo "Output: $YAML_OUTPUT"
-        fi
+    if [ $? -ne 0 ]; then
+        echo "$YAML_OUTPUT"
         exit 1
     fi
     
     # Parse the JSON output and build argument list
-    # Use a more robust approach: read all key-value pairs into YAML_ARGS array
     while IFS="=" read -r key value; do
         # Skip if this key was provided via CLI (CLI overrides YAML)
         if [[ -v CLI_ARGS["$key"] ]]; then
@@ -370,7 +336,7 @@ except Exception as e:
             continue
         fi
         
-        # Handle boolean values (now consistently lowercase from Python)
+        # Handle boolean values
         if [ "$value" = "true" ]; then
             YAML_ARGS+=("--$key")
         elif [ "$value" = "false" ]; then
@@ -393,8 +359,8 @@ for key, value in data.items():
         # Explicitly output 'null' for None values (JSON null)
         print(f'{key}=null')
     elif isinstance(value, list):
-        # Format lists as valid JSON strings
-        formatted = json.dumps(value)
+        # Format lists as JSON-like strings
+        formatted = '[' + ', '.join(str(v) for v in value) + ']'
         print(f'{key}={formatted}')
     elif isinstance(value, bool):
         # Output lowercase boolean for consistency
@@ -403,8 +369,6 @@ for key, value in data.items():
         # Output as-is (numbers and strings)
         print(f'{key}={value}')
 ")
-    
-    echo "Config loaded successfully (${#YAML_ARGS[@]} arguments from YAML)"
 fi
 
 # Add CLI arguments (these override YAML)
@@ -442,11 +406,19 @@ if [ "$JOB_TYPE" = "debug" ] || [ "$JOB_TYPE" = "eval" ]; then
     YAML_ARGS=("${FILTERED_ARGS[@]}")
 fi
 
-# Validate and build arguments based on job type
+# Set environment variables
+export OMP_NUM_THREADS=$OMP_THREADS
+
+# Validate and build command based on job type
 case $JOB_TYPE in
-    train|debug|variable_reshift_debug)
-        SCRIPT_FILE="${JOB_TYPE}.sh"
-        FINAL_ARGS=("--cosmo_exp" "$COSMO_EXP" "${YAML_ARGS[@]}")
+    train|debug)
+        PYTHON_MODULE="bedcosmo.train"
+        FINAL_ARGS=("--cosmo_exp" "$COSMO_EXP" "--cosmo_model" "$COSMO_MODEL" "${YAML_ARGS[@]}")
+
+        # For debug jobs, set mlflow_exp to "debug"
+        if [ "$JOB_TYPE" = "debug" ]; then
+            FINAL_ARGS+=("--mlflow_exp" "debug")
+        fi
         # Add optional boolean flags
         if [ "$LOG_USAGE" = true ]; then
             FINAL_ARGS+=("--log_usage")
@@ -457,29 +429,17 @@ case $JOB_TYPE in
         ;;
     
     eval)
-        SCRIPT_FILE="eval.sh"
+        PYTHON_MODULE="bedcosmo.evaluate"
         if [ -z "$RUN_ID" ]; then
             echo "Error: run_id is required for eval"
             echo "Usage: ./submit.sh eval [cosmo_exp] [run_id] [additional args...]"
             exit 1
         fi
         FINAL_ARGS=("--cosmo_exp" "$COSMO_EXP" "--run_id" "$RUN_ID" "${YAML_ARGS[@]}")
-        echo ""
-        echo "Eval job configuration:"
-        echo "  Cosmo experiment: $COSMO_EXP"
-        echo "  Run ID: $RUN_ID"
-        if [ -n "$COSMO_MODEL" ]; then
-            echo "  Cosmo model: $COSMO_MODEL"
-        fi
-        if [ ${#YAML_ARGS[@]} -gt 0 ]; then
-            echo "  Eval params from YAML: ${#YAML_ARGS[@]} arguments"
-        else
-            echo "  Eval params from YAML: none (using defaults or command-line only)"
-        fi
         ;;
     
     resume)
-        SCRIPT_FILE="resume.sh"
+        PYTHON_MODULE="bedcosmo.train"
         if [ -z "$RESUME_ID" ]; then
             echo "Error: resume_id is required for resume"
             echo "Usage: ./submit.sh resume [cosmo_exp] [resume_id] [resume_step] [additional args...]"
@@ -490,7 +450,28 @@ case $JOB_TYPE in
             echo "Usage: ./submit.sh resume [cosmo_exp] [resume_id] [resume_step] [additional args...]"
             exit 1
         fi
-        FINAL_ARGS=("--cosmo_exp" "$COSMO_EXP" "--resume_id" "$RESUME_ID" "--resume_step" "$RESUME_STEP" "${YAML_ARGS[@]}")
+        
+        # Run metrics truncation script first
+        TRUNCATE_SCRIPT="$PROJECT_ROOT/scripts/truncate_metrics.py"
+        if [[ -f "$TRUNCATE_SCRIPT" ]]; then
+            echo "=========================================="
+            echo "Step 1: Truncating metrics to resume step..."
+            echo "=========================================="
+            python3 "$TRUNCATE_SCRIPT" --run_id "$RESUME_ID" --resume_step "$RESUME_STEP"
+            
+            if [[ $? -eq 0 ]]; then
+                echo "Metrics truncation completed successfully!"
+            else
+                echo "Warning: Metrics truncation failed, but continuing with training resume..."
+            fi
+            echo ""
+        fi
+        
+        echo "=========================================="
+        echo "Step 2: Resuming training..."
+        echo "=========================================="
+        
+        FINAL_ARGS=("--resume_id" "$RESUME_ID" "--resume_step" "$RESUME_STEP" "${YAML_ARGS[@]}")
         # Add optional boolean flags
         if [ "$LOG_USAGE" = true ]; then
             FINAL_ARGS+=("--log_usage")
@@ -501,7 +482,7 @@ case $JOB_TYPE in
         ;;
     
     restart)
-        SCRIPT_FILE="restart.sh"
+        PYTHON_MODULE="bedcosmo.train"
         if [ -z "$RESTART_ID" ]; then
             echo "Error: restart_id is required for restart"
             echo "Usage: ./submit.sh restart [cosmo_exp] [restart_id] [restart_step|restart_checkpoint] [additional args...]"
@@ -513,7 +494,7 @@ case $JOB_TYPE in
             echo "Usage: ./submit.sh restart [cosmo_exp] [restart_id] [restart_step|restart_checkpoint] [additional args...]"
             exit 1
         fi
-        FINAL_ARGS=("--cosmo_exp" "$COSMO_EXP" "--restart_id" "$RESTART_ID")
+        FINAL_ARGS=("--restart_id" "$RESTART_ID")
         if [ -n "$RESTART_STEP" ]; then
             FINAL_ARGS+=("--restart_step" "$RESTART_STEP")
         fi
@@ -536,23 +517,18 @@ case $JOB_TYPE in
     *)
         echo "Error: Unknown job type: $JOB_TYPE"
         echo ""
-        echo "Available job types: train, eval, debug, resume, restart, variable_reshift_debug"
+        echo "Available job types: train, eval, debug, resume, restart"
         exit 1
         ;;
 esac
 
-# Verify script file exists
-if [ ! -f "$SCRIPT_DIR/$SCRIPT_FILE" ]; then
-    echo "Error: Script file not found: $SCRIPT_DIR/$SCRIPT_FILE"
-    exit 1
-fi
-
-# Submit the job
+# Print job information
 echo "=========================================="
-echo "Submitting $JOB_TYPE job to SLURM"
-echo "Script: $SCRIPT_FILE"
+echo "Running $JOB_TYPE job"
 echo "Cosmo experiment: $COSMO_EXP"
 echo "Cosmo model: $COSMO_MODEL"
+echo "GPUs: $GPUS"
+echo "OMP threads: $OMP_THREADS"
 if [ -n "$RUN_ID" ]; then
     echo "Run ID: $RUN_ID"
 fi
@@ -569,30 +545,7 @@ if [ -n "$RESTART_STEP" ]; then
     echo "Restart step: $RESTART_STEP"
 fi
 echo ""
-
-# Count actual number of arguments (each --key counts as 1, regardless of whether it has a value)
-arg_count=0
-i=0
-while [ $i -lt ${#FINAL_ARGS[@]} ]; do
-    arg="${FINAL_ARGS[$i]}"
-    if [[ "$arg" == --* ]]; then
-        arg_count=$((arg_count + 1))
-        if [ $((i+1)) -lt ${#FINAL_ARGS[@]} ]; then
-            next="${FINAL_ARGS[$((i+1))]}"
-            if [[ "$next" != --* ]]; then
-                i=$((i+2))
-            else
-                i=$((i+1))
-            fi
-        else
-            i=$((i+1))
-        fi
-    else
-        i=$((i+1))
-    fi
-done
-
-echo "Final arguments ($arg_count args):"
+echo "Final arguments (${#FINAL_ARGS[@]} args):"
 # Print arguments in pairs for readability
 i=0
 while [ $i -lt ${#FINAL_ARGS[@]} ]; do
@@ -614,44 +567,22 @@ done
 echo "=========================================="
 echo ""
 
-# Capture sbatch output and exit code
-# Use a temporary file to ensure we capture all output even if there are issues
-TEMP_SBATCH_OUTPUT=$(mktemp)
-set +e  # Temporarily disable exit on error to capture the full error message
-sbatch "${SBATCH_ARGS[@]}" "$SCRIPT_DIR/$SCRIPT_FILE" "${FINAL_ARGS[@]}" > "$TEMP_SBATCH_OUTPUT" 2>&1
-SBATCH_EXIT_CODE=$?
-set -e  # Re-enable exit on error
-SBATCH_OUTPUT=$(cat "$TEMP_SBATCH_OUTPUT")
-rm -f "$TEMP_SBATCH_OUTPUT"
+# Change to project root to run the command
+cd "$PROJECT_ROOT"
 
-if [ $SBATCH_EXIT_CODE -ne 0 ]; then
-    echo ""
-    echo "=========================================="
-    echo "ERROR: Failed to submit job to SLURM"
-    echo "=========================================="
-    echo ""
-    echo "Exit code: $SBATCH_EXIT_CODE"
-    echo ""
-    echo "SLURM error message:"
-    echo "----------------------------------------"
-    echo "$SBATCH_OUTPUT"
-    echo "----------------------------------------"
-    echo ""
-    echo "Please check:"
-    echo "  1. SLURM is available and accessible"
-    echo "  2. All required arguments are valid"
-    echo "  3. The script file exists: $SCRIPT_DIR/$SCRIPT_FILE"
-    echo "  4. Your QOS/account limits (time, nodes, etc.)"
-    if [ "$JOB_TYPE" = "eval" ]; then
-        echo "  5. The MLflow run ID exists: $RUN_ID"
-        echo "  6. The cosmo_exp directory exists: $PROJECT_ROOT/$COSMO_EXP"
-    fi
-    echo ""
-    exit 1
-fi
+# Setup logging directory and file
+SCRATCH_DIR="${SCRATCH:-$HOME/scratch}"
+LOG_BASE_DIR="${SCRATCH_DIR}/bedcosmo/${COSMO_EXP}/logs"
+mkdir -p "$LOG_BASE_DIR"
+TIMESTAMP=$(date +"%Y-%m-%d_%H-%M-%S")
+LOG_FILE="${LOG_BASE_DIR}/${TIMESTAMP}_${JOB_TYPE}.log"
 
+echo "Logging output to: $LOG_FILE"
 echo ""
-echo "Job submitted successfully!"
-echo "$SBATCH_OUTPUT"
+
+# Execute the command
+echo "Executing: torchrun --nproc_per_node=$GPUS -m $PYTHON_MODULE [${#FINAL_ARGS[@]} arguments]"
+echo "Output will be logged to: $LOG_FILE"
 echo ""
-echo "Check status with: squeue -u $USER"
+# Redirect both stdout and stderr to log file only (no terminal output)
+torchrun --nproc_per_node=$GPUS -m "$PYTHON_MODULE" "${FINAL_ARGS[@]}" > "$LOG_FILE" 2>&1

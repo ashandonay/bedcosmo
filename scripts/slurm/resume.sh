@@ -100,7 +100,7 @@ if [ -z "$RESUME_STEP" ]; then
 fi
 
 # Set log directory based on cosmo_exp
-LOG_DIR="/pscratch/sd/a/ashandon/bed/BED_cosmo/${COSMO_EXP}/logs"
+LOG_DIR="${SCRATCH}/bedcosmo/${COSMO_EXP}/logs"
 mkdir -p "$LOG_DIR"
 
 # Capture all stdout/stderr into the same log file that torchrun uses.
@@ -109,7 +109,8 @@ touch "$JOB_LOG"
 exec > >(tee -a "$JOB_LOG") 2>&1
 
 # Get the directory where this script is located
-TRUNCATE_SCRIPT="/global/homes/a/ashandon/bed/BED_cosmo/scripts/truncate_metrics.py"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TRUNCATE_SCRIPT="${SCRIPT_DIR}/../truncate_metrics.py"
 
 echo "=========================================="
 echo "Resuming training run: $RESUME_ID"
@@ -146,7 +147,7 @@ srun torchrun \
      --node_rank=$SLURM_PROCID \
      --rdzv_backend=c10d \
      --rdzv_endpoint=$MASTER_ADDR:$MASTER_PORT \
-     /global/homes/a/ashandon/bed/BED_cosmo/train.py \
+     -m bedcosmo.train \
      --cosmo_exp $COSMO_EXP \
      --resume_id $RESUME_ID \
      --resume_step $RESUME_STEP \

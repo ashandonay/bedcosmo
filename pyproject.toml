@@ -3,7 +3,7 @@ requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "bed-cosmo"
+name = "bedcosmo"
 version = "0.1.0"
 description = "Bayesian Experimental Design for Cosmology"
 readme = "README.md"
@@ -70,20 +70,20 @@ docs = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/yourusername/bed-cosmo"
-Documentation = "https://bed-cosmo.readthedocs.io"
-Repository = "https://github.com/yourusername/bed-cosmo"
-Issues = "https://github.com/yourusername/bed-cosmo/issues"
-Changelog = "https://github.com/yourusername/bed-cosmo/blob/main/CHANGELOG.md"
+Homepage = "https://github.com/ashandonay/bedcosmo"
+Repository = "https://github.com/ashandonay/bedcosmo"
+Issues = "https://github.com/ashandonay/bedcosmo/issues"
+Changelog = "https://github.com/ashandonay/bedcosmo/blob/main/CHANGELOG.md"
 
 [project.scripts]
-bed-cosmo = "bed_cosmo:main"
+bed-train = "bedcosmo.train:main"
+bed-eval = "bedcosmo.evaluate:main"
 
-[tool.setuptools]
-packages = ["num_tracers", "num_visits", "variable_redshift"]
+[tool.setuptools.packages.find]
+where = ["src"]
 
 [tool.setuptools.package-data]
-"*" = ["*.yaml", "*.yml", "*.json", "*.h"]
+bedcosmo = ["py.typed"]
 
 # ============================================================================
 # Testing Configuration
@@ -99,7 +99,7 @@ addopts = [
     "--tb=short",
     "--strict-markers",
     "--disable-warnings",
-    "--cov=.",
+    "--cov=src/bedcosmo",
     "--cov-report=term-missing",
     "--cov-report=html",
 ]
@@ -158,7 +158,7 @@ ignore = [
 "tests/*" = ["E501", "B011"]
 
 [tool.ruff.isort]
-known-first-party = ["bed_cosmo", "num_tracers", "num_visits", "variable_redshift"]
+known-first-party = ["bedcosmo"]
 
 # ============================================================================
 # Type Checking - Mypy
@@ -193,7 +193,7 @@ ignore_missing_imports = true
 # ============================================================================
 
 [tool.coverage.run]
-source = ["."]
+source = ["src/bedcosmo"]
 omit = [
     "*/tests/*",
     "*/test_*.py",

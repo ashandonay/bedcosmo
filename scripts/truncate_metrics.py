@@ -2,7 +2,7 @@
 """
 Script to truncate MLflow metrics files to remove rows beyond a specified resume step.
 
-This script is designed to work with the BED_cosmo MLflow tracking structure where metrics
+This script is designed to work with the bedcosmo MLflow tracking structure where metrics
 are stored in individual files per metric name, with each line containing:
 timestamp value step
 
@@ -41,7 +41,7 @@ def find_metrics_directory(run_id, cosmo_exp=None):
             f"{cosmo_exp}/mlruns",
             f"../{cosmo_exp}/mlruns",
             f"../../{cosmo_exp}/mlruns",
-            os.path.join(scratch_dir, f"bed/BED_cosmo/{cosmo_exp}/mlruns")
+            os.path.join(scratch_dir, f"bedcosmo/{cosmo_exp}/mlruns")
         ]
     else:
         # Search in all known locations
@@ -49,11 +49,11 @@ def find_metrics_directory(run_id, cosmo_exp=None):
             "num_tracers/mlruns",
             "../num_tracers/mlruns", 
             "../../num_tracers/mlruns",
-            os.path.join(scratch_dir, "bed/BED_cosmo/num_tracers/mlruns"),
+            os.path.join(scratch_dir, "bedcosmo/num_tracers/mlruns"),
             "variable_redshift/mlruns",
             "../variable_redshift/mlruns",
             "../../variable_redshift/mlruns",
-            os.path.join(scratch_dir, "bed/BED_cosmo/variable_redshift/mlruns")
+            os.path.join(scratch_dir, "bedcosmo/variable_redshift/mlruns")
         ]
     
     for search_path in search_paths:
@@ -162,7 +162,7 @@ def main():
                     f"{args.cosmo_exp}/mlruns",
                     f"../{args.cosmo_exp}/mlruns",
                     f"../../{args.cosmo_exp}/mlruns",
-                    os.path.join(scratch_dir, f"bed/BED_cosmo/{args.cosmo_exp}/mlruns")
+                    os.path.join(scratch_dir, f"bedcosmo/{args.cosmo_exp}/mlruns")
                 ]
             else:
                 search_paths = [

@@ -1,0 +1,142 @@
+parameters:
+  # Cold dark matter density parameter (ω_cdm = Ω_cdm * h^2)
+  omega_cdm:
+    distribution: 
+      type: "uniform"
+      lower: 0.01
+      upper: 0.99
+    plot:
+      lower: 0.1
+      upper: 0.2
+    latex: "\\omega_{cdm}"
+    
+  # Baryon density parameter (ω_b = Ω_b * h^2)
+  omega_b:
+    distribution: 
+      type: "gaussian"
+      loc: 0.02218
+      scale: 0.00055
+    plot:
+      lower: 0.020
+      upper: 0.024
+    latex: "\\omega_b"
+    
+  # Hubble parameter
+  h:
+    distribution: 
+      type: "uniform"
+      lower: 0.2
+      upper: 1.0
+    plot:
+      lower: 0.6
+      upper: 0.8
+    latex: "h"
+    
+  # Amplitude of primordial power spectrum (ln(10^10 A_s))
+  ln10A_s:
+    distribution: 
+      type: "uniform"
+      lower: 1.61
+      upper: 3.91
+    plot:
+      lower: 2.5
+      upper: 3.5
+    latex: "\\ln(10^{10} A_s)"
+    
+  # Spectral index
+  n_s:
+    distribution: 
+      type: "gaussian"
+      loc: 0.9649
+      scale: 0.042
+    plot:
+      lower: 0.9
+      upper: 1.05
+    latex: "n_s"
+    
+nuisance_parameters:
+  # Linear bias times sigma_8: (1 + b_1) * σ_8
+  b1_sigma8:
+    distribution: 
+      type: "uniform"
+      lower: 0.0
+      upper: 3.0
+    plot:
+      lower: 0.5
+      upper: 2.5
+    latex: "(1 + b_1) \\sigma_8"
+    
+  # Second-order bias times sigma_8^2: b_2 * σ_8^2
+  b2_sigma8_sq:
+    distribution: 
+      type: "gaussian"
+      loc: 0.0
+      scale: 5.0
+    plot:
+      lower: -15.0
+      upper: 15.0
+    latex: "b_2 \\sigma_8^2"
+    
+  # Shear bias times sigma_8^2: b_s * σ_8^2
+  bs_sigma8_sq:
+    distribution: 
+      type: "gaussian"
+      loc: 0.0
+      scale: 5.0
+    plot:
+      lower: -15.0
+      upper: 15.0
+    latex: "b_s \\sigma_8^2"
+    
+  # Monopole counterterm: α_0
+  alpha_0:
+    distribution: 
+      type: "gaussian"
+      loc: 0.0
+      scale: 12.5
+    plot:
+      lower: -40.0
+      upper: 40.0
+    latex: "\\alpha_0"
+    
+  # Quadrupole counterterm: α_2
+  alpha_2:
+    distribution: 
+      type: "gaussian"
+      loc: 0.0
+      scale: 12.5
+    plot:
+      lower: -40.0
+      upper: 40.0
+    latex: "\\alpha_2"
+    
+  # Shot noise monopole: SN_0
+  # Note: Prior width is N(0, 2^2) × 1/n̄_g, where n̄_g is Poissonian shot-noise
+  # This scaling factor should be applied when using the prior
+  SN_0:
+    distribution: 
+      type: "gaussian"
+      loc: 0.0
+      scale: 2.0
+    plot:
+      lower: -10.0
+      upper: 10.0
+    latex: "SN_0"
+    # Note: Multiply std by 1/n̄_g when using this prior
+    
+  # Shot noise quadrupole: SN_2
+  # Note: Prior width is N(0, 5^2) × f_sat σ_{1,eff}^2 / n̄_g
+  # This scaling factor should be applied when using the prior
+  SN_2:
+    distribution: 
+      type: "gaussian"
+      loc: 0.0
+      scale: 5.0
+    plot:
+      lower: -25.0
+      upper: 25.0
+    latex: "SN_2"
+    # Note: Multiply std by f_sat σ_{1,eff}^2 / n̄_g when using this prior
+
+# Parameter constraints
+constraints: {}

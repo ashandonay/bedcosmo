@@ -1,10 +1,10 @@
-# BED_cosmo
+# bedcosmo
 
 Bayesian Experimental Design for Cosmology using Neural Density Estimation.
 
 ## Overview
 
-BED_cosmo optimizes experimental designs for cosmological parameter inference using neural flows (normalizing flows). The framework learns to estimate the Expected Information Gain (EIG) for different survey configurations, enabling data-driven optimization of galaxy redshift surveys like LSST/DESI.
+bedcosmo optimizes experimental designs for cosmological parameter inference using neural flows (normalizing flows). The framework learns to estimate the Expected Information Gain (EIG) for different survey configurations, enabling data-driven optimization of galaxy redshift surveys like LSST/DESI.
 
 The core approach:
 1. Train a conditional normalizing flow to approximate the posterior distribution p(θ|x, d) where θ are cosmological parameters, x is observed data, and d is the experimental design
@@ -13,23 +13,9 @@ The core approach:
 
 ## Installation
 
-### NERSC (Recommended)
-
-Clone the repository and create the conda environment:
-
 ```bash
-git clone https://github.com/ashandonay/BED_cosmo.git
-cd BED_cosmo
-module load conda
-conda env create -f environment-nersc.yml
-conda activate bed-cosmo
-```
-
-### Local Installation
-
-```bash
-git clone https://github.com/ashandonay/BED_cosmo.git
-cd BED_cosmo
+git clone https://github.com/ashandonay/bedcosmo.git
+cd bedcosmo
 pip install -e ".[dev]"
 ```
 
@@ -39,23 +25,26 @@ pip install -e ".[dev]"
 
 ### Training a Model
 
-Submit a training job on NERSC:
-
 ```bash
-cd scripts/slurm
-./submit.sh train num_tracers base
+./scripts/local/submit.sh train num_tracers base --gpus 1
 ```
 
 This trains a neural flow for the `base` cosmology model (Ωm, H₀rd parameters) on the `num_tracers` experiment.
+
+For HPC clusters with SLURM:
+
+```bash
+./scripts/slurm/submit.sh train num_tracers base
+```
 
 ### Resuming/Restarting Training
 
 ```bash
 # Resume from a checkpoint (continues the same run)
-./submit.sh resume num_tracers <run_id> <step>
+./scripts/local/submit.sh resume num_tracers <run_id> <step>
 
 # Restart from a checkpoint (creates a new run)
-./submit.sh restart num_tracers <run_id> <step>
+./scripts/local/submit.sh restart num_tracers <run_id> <step>
 ```
 
 ### Evaluating a Model
@@ -63,7 +52,7 @@ This trains a neural flow for the `base` cosmology model (Ωm, H₀rd parameters
 After training completes, evaluate the model to compute EIG:
 
 ```bash
-./submit.sh eval num_tracers <run_id>
+./scripts/local/submit.sh eval num_tracers <run_id>
 ```
 
 The `run_id` is the MLflow run ID printed when training starts (or find it in the MLflow UI).
@@ -112,7 +101,7 @@ Training is configured via YAML files in each experiment directory:
 CLI arguments override YAML defaults:
 
 ```bash
-./submit.sh train num_tracers base --initial_lr 0.0001 --total_steps 300000
+./scripts/local/submit.sh train num_tracers base --initial_lr 0.0001 --total_steps 300000
 ```
 
 ### Key Training Parameters
@@ -131,16 +120,16 @@ CLI arguments override YAML defaults:
 
 All experiments are tracked with MLflow. Runs are stored at:
 ```
-$SCRATCH/bed/BED_cosmo/{cosmo_exp}/mlruns/
+$SCRATCH/bedcosmo/{cosmo_exp}/mlruns/
 ```
 
 To view the MLflow UI:
 ```bash
-cd $SCRATCH/bed/BED_cosmo/num_tracers
+cd $SCRATCH/bedcosmo/num_tracers
 mlflow ui --port 5000
 ```
 
-Then open `http://localhost:5000` in your browser (with port forwarding if on NERSC).
+Then open `http://localhost:5000` in your browser.
 
 ### Logged Artifacts
 
@@ -171,7 +160,7 @@ class MyExperiment:
    - `prior_args.yaml` - Prior distributions
    - `design_args.yaml` - Design space
 
-4. Train: `./submit.sh train my_experiment base`
+4. Train: `./scripts/local/submit.sh train my_experiment base`
 
 ## Development
 
@@ -196,13 +185,13 @@ mypy .                      # Type checking
 
 ### Job Fails Immediately
 
-Check SLURM output logs in `$SCRATCH/bed/BED_cosmo/{cosmo_exp}/slurm_logs/`
+Check output logs in `$SCRATCH/bedcosmo/{cosmo_exp}/logs/`
 
 ### Out of Memory
 
 Reduce `n_particles_per_device` in the training args or via CLI:
 ```bash
-./submit.sh train num_tracers base --n_particles_per_device 20
+./scripts/local/submit.sh train num_tracers base --n_particles_per_device 20
 ```
 
 ### MLflow Connection Issues
@@ -216,7 +205,7 @@ mlflow.set_tracking_uri(f"file:{storage_path}/mlruns")
 
 Use `--restart_checkpoint` to specify an exact checkpoint file:
 ```bash
-./submit.sh restart num_tracers <run_id> --restart_checkpoint /path/to/checkpoint.pt
+./scripts/local/submit.sh restart num_tracers <run_id> --restart_checkpoint /path/to/checkpoint.pt
 ```
 
 ## Citation

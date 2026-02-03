@@ -1,0 +1,1507 @@
+import os
+import sys
+import time
+from datetime import timedelta
+
+import torch
+import torch.nn as nn
+import torch.distributed as tdist
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data import DataLoader
+import torch.multiprocessing as mp
+
+import numpy as np
+import pandas as pd
+from scipy.stats import norm
+from urllib.request import urlopen
+
+import pyro
+from pyro import poutine
+from bedcosmo.pyro_oed_src import nf_loss, LikelihoodDataset
+from pyro.contrib.util import lexpand, rexpand
+
+import matplotlib.pyplot as plt
+
+import mlflow
+import mlflow.pytorch
+from mlflow.tracking import MlflowClient
+from tqdm import tqdm
+
+import shutil
+import psutil
+import gc
+from bedcosmo.util import *
+import json
+import yaml
+import argparse
+from bedcosmo.plotting import RunPlotter
+
+class Trainer:
+    def __init__(self, cosmo_exp, mlflow_exp, run_args, device=None, profile=False, verbose=False):
+        self.cosmo_exp = cosmo_exp
+        self.mlflow_exp = mlflow_exp
+        self.run_args = run_args
+        self.profile = profile
+        self.storage_path = os.environ["SCRATCH"] + f"/bedcosmo/{cosmo_exp}"
+        self.is_tty = sys.stdout.isatty()
+        self.verbose = verbose
+        
+        # Clear GPU cache
+        torch.cuda.empty_cache()
+        self.process = psutil.Process()
+        # Trigger garbage collection for CPU
+        gc.collect()
+        pyro.clear_param_store()
+        mlflow.set_tracking_uri(self.storage_path + "/mlruns")
+        
+        # Create MLflow client AFTER setting the tracking URI
+        self.client = MlflowClient()
+
+        self._init_device_settings(device)
+        self._init_run()
+        self.experiment = init_experiment(self.run_obj, self.run_args, checkpoint=self.checkpoint, device=self.device, global_rank=self.global_rank, design_args=self.design_args, profile=self.profile)
+
+        # Print design information in verbose mode
+        if self.global_rank == 0 and self.verbose:
+            # Get design_args from run_args (set by init_experiment) or from self.design_args
+            design_args = self.run_args.get('design_args', self.design_args)
+            
+            print(f"Designs shape: {self.experiment.designs.shape}")
+            
+            if design_args is not None and len(design_args) > 0:
+                input_type = design_args.get('input_type', 'variable')
+                input_designs_path = design_args.get('input_designs_path', None)
+                
+                if input_type == "nominal":
+                    print(f"Using nominal design as input design: {self.experiment.designs}")
+                elif input_designs_path is None:
+                    # Print design_args when designs are generated (not loaded from file)
+                    print("Designs initialized with the following parameters:")
+                    print(yaml.dump(design_args, default_flow_style=False, sort_keys=False))
+                else:
+                    print(f"Input designs loaded from numpy file: {input_designs_path}")
+                    print(f"Input designs: {self.experiment.designs[:10]}")
+            else:
+                # Fallback: if design_args is None or empty, just print basic info
+                print("Designs initialized (design_args not available)")
+            
+            if hasattr(self.experiment, 'nominal_design'):
+                print(f"Nominal design: {self.experiment.nominal_design}\n")
+
+        self.posterior_flow = init_nf(
+            self.run_args,
+            len(self.experiment.cosmo_params),
+            self.experiment.context_dim,
+            device=self.device,
+            seed=self.run_args["nf_seed"]
+        )
+        if self.global_rank == 0:
+            if not self.run_args.get("resume_id", None) and not self.run_args.get("restart_id", None):
+                self._save_design_array()
+
+            print("MLFlow Run Info:", self.run_obj.info.experiment_id + "/" + self.run_obj.info.run_id)
+            print(f"Using {self.run_args['n_devices']} devices with {self.run_args['n_particles']} total particles.")
+            print(f'Input dim: {len(self.experiment.cosmo_params)}, Context dim: {self.experiment.context_dim}')
+            print(f"Cosmology: {self.run_args['cosmo_model']}")
+            print(f"Target labels: {self.experiment.cosmo_params}")
+            print(f"Designs shape: {self.experiment.designs.shape}")
+            print("Flow model initialized: \n", self.posterior_flow)
+            
+
+        # For DDP, ensure device_ids and output_device use the pytorch_device_idx (which is 0)
+        if "LOCAL_RANK" in os.environ and torch.cuda.is_available():
+            ddp_device_spec = [self.pytorch_device_idx] 
+            ddp_output_device_spec = self.pytorch_device_idx
+        else:
+            ddp_device_spec = [self.effective_device_id] if self.effective_device_id != -1 else None
+            ddp_output_device_spec = self.effective_device_id if self.effective_device_id != -1 else None
+
+        # Check if model is already on a CUDA device if CUDA is available
+        if torch.cuda.is_available():
+            model_device = next(self.posterior_flow.parameters()).device
+            if model_device.type == 'cpu' and ddp_device_spec is not None and ddp_device_spec[0] is not None and isinstance(ddp_device_spec[0], int) :
+                self.posterior_flow.to(f"cuda:{ddp_device_spec[0]}")
+        
+        self.posterior_flow = DDP(self.posterior_flow, device_ids=ddp_device_spec, output_device=ddp_output_device_spec, find_unused_parameters=False)
+
+        # Load model checkpoint before creating optimizer (for resume)
+        if self.run_args.get("resume_id", None):
+            self.posterior_flow.module.load_state_dict(self.checkpoint['model_state_dict'], strict=True)
+            self.posterior_flow.train()
+
+        self._init_optimizer()
+        self._init_scheduler()
+        self._init_dataloader()
+    
+    @profile_method
+    def loss(self, samples, context):
+        agg_loss, loss = nf_loss(
+            samples, context, self.posterior_flow, self.experiment, 
+            rank=self.global_rank, verbose_shapes=self.verbose, evaluation=False
+            )
+        return loss, agg_loss
+
+    def _check_nan_loss(self, loss, global_loss, current_step, samples=None, context=None):
+        """
+        Check for NaN/Inf values in loss tensors and print detailed diagnostic information.
+        
+        Args:
+            loss: Loss tensor
+            global_loss: Global (averaged) loss value
+            current_step: Current training step
+            samples: Sample tensor (optional, for printing associated samples)
+            context: Context tensor (optional, for printing associated context)
+            
+        Returns:
+            bool: True if NaN/Inf detected, False otherwise
+        """
+        if not (np.isnan(global_loss) or np.isinf(global_loss)):
+            return False
+        
+        if self.global_rank == 0:
+            print(f"\nERROR: NaN/Inf loss detected at step {current_step}. Stopping training.")
+            
+            print(f"Loss tensor shape: {loss.shape}")
+            
+            loss_nan_mask = torch.isnan(loss)
+            loss_inf_mask = torch.isinf(loss)
+            loss_nan_count = loss_nan_mask.sum().item()
+            loss_inf_count = loss_inf_mask.sum().item()
+            
+            if loss_nan_count > 0:
+                loss_nan_indices = torch.nonzero(loss_nan_mask, as_tuple=False)
+                print(f"\nLoss tensor: {loss_nan_count} NaN values found")
+                print(f"NaN indices (first 20): {loss_nan_indices[:20].cpu().numpy().tolist()}")
+                if loss_nan_count > 20:
+                    print(f"... and {loss_nan_count - 20} more NaN values")
+                
+                # Print associated samples and context for NaN indices
+                if samples is not None and context is not None:
+                    print(f"\n=== Associated Samples and Context for NaN Loss ===")
+                    print(f"Samples shape: {samples.shape}")
+                    print(f"Context shape: {context.shape}")
+                    
+                    # Print information for first few NaN indices
+                    num_to_print = min(5, len(loss_nan_indices))
+                    for i in range(num_to_print):
+                        idx = loss_nan_indices[i].cpu().numpy().tolist()
+                        idx_tuple = tuple(idx)
+                        print(f"\nNaN at loss index {idx}:")
+                        
+                        # Show loss value at this index (will be NaN, but show for completeness)
+                        loss_val = loss[idx_tuple].item()
+                        print(f"  Loss value: {loss_val}")
+                        
+                        # Extract sample and context based on loss tensor dimensions
+                        try:
+                            # Convert list to tuple for indexing
+                            idx_tuple = tuple(idx)
+                            
+                            # Determine how to map loss indices to samples/context indices
+                            # If samples/context have more dimensions than the loss, check if there's a batch dimension
+                            samples_extra_dims = len(samples.shape) - len(loss.shape)
+                            context_extra_dims = len(context.shape) - len(loss.shape)
+                            
+                            # Build sample slice: handle batch dimension if present
+                            if samples_extra_dims > 0:
+                                # Check if first dimension is batch dimension (size 1)
+                                if samples.shape[0] == 1:
+                                    # Batch dimension at index 0, then use loss indices for next dims
+                                    sample_slice = (0,) + idx_tuple + (slice(None),) * (samples_extra_dims - 1)
+                                else:
+                                    # No batch dimension, use loss indices directly
+                                    sample_slice = idx_tuple + (slice(None),) * samples_extra_dims
+                            elif samples_extra_dims == 0:
+                                sample_slice = idx_tuple
+                            else:
+                                # Samples have fewer dims than loss (shouldn't happen, but handle gracefully)
+                                sample_slice = tuple(idx[:len(samples.shape)])
+                            
+                            sample_val = samples[sample_slice]
+                            print(f"  Sample at {sample_slice}: {sample_val.cpu().numpy()}")
+                            
+                            # Similar for context
+                            if context_extra_dims > 0:
+                                if context.shape[0] == 1:
+                                    context_slice = (0,) + idx_tuple + (slice(None),) * (context_extra_dims - 1)
+                                else:
+                                    context_slice = idx_tuple + (slice(None),) * context_extra_dims
+                            elif context_extra_dims == 0:
+                                context_slice = idx_tuple
+                            else:
+                                context_slice = tuple(idx[:len(context.shape)])
+                            
+                            context_val = context[context_slice]
+                            print(f"  Context at {context_slice}: {context_val.cpu().numpy()}")
+                            
+                        except (IndexError, RuntimeError, TypeError) as e:
+                            print(f"  Could not extract sample/context at {idx}: {e}")
+                            print(f"    Loss shape: {loss.shape}, Samples shape: {samples.shape}, Context shape: {context.shape}")
+            
+            if loss_inf_count > 0:
+                loss_inf_indices = torch.nonzero(loss_inf_mask, as_tuple=False)
+                print(f"\nLoss tensor: {loss_inf_count} Inf values found")
+                print(f"Inf indices (first 20): {loss_inf_indices[:20].cpu().numpy().tolist()}")
+                if loss_inf_count > 20:
+                    print(f"... and {loss_inf_count - 20} more Inf values")
+            
+            # Statistics about valid values
+            loss_valid = loss[~loss_nan_mask & ~loss_inf_mask]
+            
+            if len(loss_valid) > 0:
+                print(f"\nValid loss values: min={loss_valid.min().item():.6f}, max={loss_valid.max().item():.6f}, mean={loss_valid.mean().item():.6f}, std={loss_valid.std().item():.6f}")
+            
+            print(f"Global loss: {global_loss}")
+            print(f"==============================\n")
+        
+        return True
+
+    @profile_method
+    def step(self, samples, context, current_step):
+        # Time the step if we're in the first 100 steps
+        start_time = time.time() if current_step < 100 else None
+        
+        # Profile optimizer zero_grad
+        if self.profile and (not hasattr(self, 'global_rank') or self.global_rank == 0):
+            zero_grad_start = time.time()
+        self.optimizer.zero_grad()
+        if self.profile and (not hasattr(self, 'global_rank') or self.global_rank == 0):
+            zero_grad_time = time.time() - zero_grad_start
+            indent = "  " * get_profile_depth()
+            print(f"{indent}  optimizer.zero_grad took {zero_grad_time:.5f} seconds")
+
+        if current_step > 0:
+            self.verbose = False  
+        # Compute the loss using nf_loss
+        loss, agg_loss = self.loss(samples, context)
+        
+        # Prepare tensors for aggregation (reduce to scalars to minimize communication)
+        loss_tensor = loss.mean().detach()
+        agg_loss_tensor = agg_loss.mean().detach()  # Reduce to scalar before all_reduce
+        
+        # Profile aggregation operations
+        if self.profile and (not hasattr(self, 'global_rank') or self.global_rank == 0):
+            agg_start = time.time()
+        # Synchronous all_reduce (async doesn't work as expected with NCCL)
+        if self.profile and (not hasattr(self, 'global_rank') or self.global_rank == 0):
+            allreduce_start = time.time()
+        tdist.all_reduce(loss_tensor, op=tdist.ReduceOp.SUM)
+        tdist.all_reduce(agg_loss_tensor, op=tdist.ReduceOp.SUM)
+        if self.profile and (not hasattr(self, 'global_rank') or self.global_rank == 0):
+            allreduce_time = time.time() - allreduce_start
+            indent = "  " * get_profile_depth()
+            print(f"{indent}  all_reduce took {allreduce_time:.5f} seconds")
+
+        # Profile backpropagation
+        if self.profile and (not hasattr(self, 'global_rank') or self.global_rank == 0):
+            backward_start = time.time()
+        # Backpropagation
+        agg_loss.backward()
+        # Synchronize to measure actual backward computation time
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        if self.profile and (not hasattr(self, 'global_rank') or self.global_rank == 0):
+            backward_time = time.time() - backward_start
+            indent = "  " * get_profile_depth()
+            print(f"{indent}  backward took {backward_time:.5f} seconds")
+        
+        if self.profile and (not hasattr(self, 'global_rank') or self.global_rank == 0):
+            agg_time = time.time() - agg_start
+            indent = "  " * get_profile_depth()
+            print(f"{indent}  aggregation total: {agg_time:.5f} seconds")
+        
+        global_loss = loss_tensor.item() / tdist.get_world_size()
+        global_agg_loss = agg_loss_tensor.item() / tdist.get_world_size()
+
+        # Optional gradient clipping for stability
+        grad_clip = self.run_args.get("grad_clip", 0.0)
+        if grad_clip > 0:
+            print(f"Clipping gradients to {grad_clip}")
+            torch.nn.utils.clip_grad_norm_(self.posterior_flow.parameters(), max_norm=float(grad_clip))
+
+        # Profile optimizer step
+        if self.profile and (not hasattr(self, 'global_rank') or self.global_rank == 0):
+            opt_start = time.time()
+        # Optimizer step
+        self.optimizer.step()
+        # Ensure optimizer step completes
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        if self.profile and (not hasattr(self, 'global_rank') or self.global_rank == 0):
+            opt_time = time.time() - opt_start
+            indent = "  " * get_profile_depth()
+            print(f"{indent}  optimizer.step took {opt_time:.5f} seconds")
+        current_step += 1
+    
+        # Profile barrier synchronization
+        if self.profile and (not hasattr(self, 'global_rank') or self.global_rank == 0):
+            barrier_start = time.time()
+        # Synchronize across ranks before scheduler step
+        tdist.barrier()
+        if self.profile and (not hasattr(self, 'global_rank') or self.global_rank == 0):
+            barrier_time = time.time() - barrier_start
+            indent = "  " * get_profile_depth()
+            print(f"{indent}  barrier took {barrier_time:.5f} seconds")
+
+        # Update scheduler every step_freq steps
+        if current_step % self.run_args.get("step_freq", 1) == 0:
+            if self.profile and (not hasattr(self, 'global_rank') or self.global_rank == 0):
+                scheduler_start = time.time()
+            self.scheduler.step()
+            if self.profile and (not hasattr(self, 'global_rank') or self.global_rank == 0):
+                scheduler_time = time.time() - scheduler_start
+                indent = "  " * get_profile_depth()
+                print(f"{indent}  scheduler.step took {scheduler_time:.5f} seconds")
+
+        # Calculate step time if we were timing
+        step_time = (time.time() - start_time) if start_time is not None else None
+
+        return loss, agg_loss, global_loss, global_agg_loss, current_step, step_time
+
+    @profile_method
+    def run(self):
+
+        # Initialize pbar as None by default
+        if self.is_tty and self.global_rank == 0 and not self.profile:
+            self.pbar = tqdm(total=self.run_args["total_steps"] - self.start_step, desc="Training Progress", position=0, leave=True)
+
+        # Initialize session start time for runtime tracking
+        self._update_cumulative_runtime(self.start_step)
+        
+        # Track training start time for steps/sec calculation
+        training_start_time = time.time()
+        
+        # Restore RNG state on resume
+        if self.checkpoint is not None:
+            restore_rng_state(self.checkpoint, self.global_rank)
+            if self.global_rank == 0:
+                print(f"RNG state restored at step {self.start_step}")
+
+        step_times = []
+        current_step = self.start_step
+        break_loop = False
+        while current_step < self.run_args["total_steps"] and not break_loop:
+            for samples, context in self.dataloader:
+                loss, agg_loss, global_loss, global_agg_loss, current_step, step_time = self.step(samples, context, current_step)
+                
+                # Check for NaN loss values
+                if self._check_nan_loss(loss, global_loss, current_step, samples, context):
+                    if self.global_rank == 0 and self.is_tty and not self.profile:
+                        self.pbar.close()
+                    tdist.barrier()
+                    break_loop = True
+                    break
+                
+                # Collect step times for the first 100 steps
+                if step_time is not None:
+                    step_times.append(step_time)
+                
+                # After 100 steps, calculate and log average step time once
+                if current_step == 100 and self.global_rank == 0:
+                    avg_step_time = np.mean(step_times)
+                    mlflow.log_metric("avg_step_time", avg_step_time, step=100)
+                    if self.verbose:
+                        print(f"Average step time from the first 100 steps: {avg_step_time:.4f}s")
+                if current_step % self.run_args.get("checkpoint_step_freq", 1000) == 0:
+                    # Update cumulative runtime at each checkpoint
+                    self._update_cumulative_runtime(current_step)
+                    
+                    if self.run_args.get("log_usage", False):
+                        log_usage_metrics(self.device, self.process, current_step, self.global_rank)
+                    
+                    # Perform all RNG operations (plotting, etc.) BEFORE saving checkpoint
+                    # This ensures the saved RNG state is ready for the next training step
+                    if self.run_args.get("log_nominal_area", False):
+                        plot_samples, plot_colors, plot_labels, plot_scatter = [], [], [], []
+                        nf_samples = self.experiment.get_guide_samples(self.posterior_flow, self.experiment.nominal_context, num_samples=10000)
+                        plot_samples.append(nf_samples)
+                        plot_colors.append('tab:blue')
+                        plot_labels.append('NF')
+                        plot_scatter.append(True)
+                        try:
+                            nominal_samples = self.experiment.get_nominal_samples(num_samples=10000, params=self.experiment.cosmo_params, transform_output=False)
+                            plot_samples.append(nominal_samples)
+                            plot_colors.append('black')
+                            plot_labels.append('MCMC')
+                            plot_scatter.append(False)
+                        except NotImplementedError:
+                            pass
+                        ranges = {param: (self.experiment.prior_args['parameters'][param]['plot']['lower'], self.experiment.prior_args['parameters'][param]['plot']['upper']) for param in self.experiment.cosmo_params}
+                        plt.figure()
+                        plotter = RunPlotter(run_id=self.run_obj.info.run_id, cosmo_exp=self.cosmo_exp)
+                        plotter.plot_posterior(
+                            plot_samples, 
+                            plot_colors, 
+                            legend_labels=plot_labels, 
+                            levels=[0.68], 
+                            width_inch=12, 
+                            show_scatter=plot_scatter,
+                            ranges=ranges
+                            )
+                        plt.savefig(f"{self.run_path}/artifacts/plots/rank_{self.global_rank}/posterior/{current_step}.png", dpi=400)
+                        plt.close('all')
+                        local_nominal_areas = get_contour_area(nf_samples, 0.68, *self.experiment.cosmo_params, global_rank=self.global_rank, design_type='nominal')[0]
+                        
+                        # Log metrics per rank with tags instead of rank labels
+                        mlflow.log_metrics(local_nominal_areas, step=current_step)
+                        
+                        # Aggregate the nominal areas across all ranks
+                        # Sort keys consistently across ranks to ensure proper aggregation
+                        sorted_keys = sorted(local_nominal_areas.keys())
+                        local_nominal_areas_tensor = torch.tensor([local_nominal_areas[key] for key in sorted_keys], device=self.device)
+                        
+                        tdist.all_reduce(local_nominal_areas_tensor, op=tdist.ReduceOp.SUM)
+                        global_nominal_areas_tensor = local_nominal_areas_tensor / tdist.get_world_size()
+                        
+                        # Log each individual parameter pair area separately
+                        if self.global_rank == 0:
+                            for i, pair_key in enumerate(sorted_keys):
+                                pair_name = pair_key.replace('nominal_area_0_', '')  # Remove rank prefix for metric name
+                                global_value = global_nominal_areas_tensor[i].item()
+                                mlflow.log_metric(f"nominal_area_avg_{pair_name}", global_value, step=current_step)
+                                if global_value < self.best_nominal_area:
+                                    # Save checkpoint if the mean area is the best so far
+                                    self.best_nominal_area = global_value
+                                    mlflow.log_metric("best_avg_nominal_area", self.best_nominal_area, step=current_step)
+                                    mlflow.log_metric(f"best_nominal_area_{pair_name}", self.best_nominal_area, step=current_step)
+                                    # Save the best nominal area checkpoint
+                                    checkpoint_path = f"{self.run_path}/artifacts/checkpoints/checkpoint_nominal_area_{current_step}.pt"
+                                    self.save_checkpoint(checkpoint_path, step=current_step, artifact_path="checkpoints", scheduler=self.scheduler, global_rank=self.global_rank)
+
+                                    # Save the last best area checkpoint
+                                    checkpoint_path = f"{self.run_path}/artifacts/checkpoints/checkpoint_nominal_area_best.pt"
+                                    self.save_checkpoint(checkpoint_path, step=current_step, artifact_path="checkpoints", scheduler=self.scheduler, global_rank=self.global_rank)
+
+                    # Save rank-specific checkpoint after all RNG operations complete
+                    self.save_checkpoint(
+                        f"{self.run_path}/artifacts/checkpoints/checkpoint_rank_{self.global_rank}_{current_step}.pt", 
+                        step=current_step, 
+                        artifact_path="checkpoints", 
+                        scheduler=self.scheduler, 
+                        global_rank=self.global_rank, 
+                        additional_state={
+                        'rank': self.global_rank,
+                        'world_size': tdist.get_world_size(),
+                        'local_loss': loss.mean().detach().item(),
+                        'local_agg_loss': agg_loss.detach().item()
+                        }
+                    )
+                    
+                    # Log the global nominal area on rank 0
+                    if self.global_rank == 0:
+                        if self.verbose:
+                            print_training_state(self.posterior_flow, self.optimizer, current_step)
+                        if global_loss < self.best_loss:
+                            self.best_loss = global_loss
+                            checkpoint_path = f"{self.run_path}/artifacts/checkpoints/checkpoint_loss_{current_step}.pt"
+                            self.save_checkpoint(checkpoint_path, step=current_step, artifact_path="checkpoints", scheduler=self.scheduler, global_rank=self.global_rank)
+                            checkpoint_path = f"{self.run_path}/artifacts/checkpoints/checkpoint_loss_best.pt"
+                            self.save_checkpoint(checkpoint_path, step=current_step, artifact_path="checkpoints", scheduler=self.scheduler, global_rank=self.global_rank)
+                            mlflow.log_metric("best_loss", self.best_loss, step=current_step)
+
+                # Update progress bar or print status
+                if current_step % 10 == 0:
+                    mlflow.log_metric(f"loss_rank_{self.global_rank}", loss.mean().detach().item(), step=current_step)
+                    mlflow.log_metric(f"agg_loss_rank_{self.global_rank}", agg_loss.detach().item(), step=current_step)
+                    if self.global_rank == 0:
+                        mlflow.log_metric("loss", global_loss, step=current_step)
+                        mlflow.log_metric("agg_loss", global_agg_loss, step=current_step)
+                        for param_group in self.optimizer.param_groups:
+                            mlflow.log_metric("lr", param_group['lr'], step=current_step)
+                        
+                        # Calculate seconds per step
+                        elapsed_time = time.time() - training_start_time
+                        steps_completed = current_step - self.start_step
+                        sec_per_step = elapsed_time / steps_completed if steps_completed > 0 else 0.0
+                        
+                        if self.is_tty and not self.profile:
+                            self.pbar.update(10)
+                            self.pbar.set_description(f"Loss: {global_loss:.3f} | {sec_per_step:.3f} s/step")
+                        else:
+                            print(f"Step {current_step}, Loss: {global_loss:.3f}, {sec_per_step:.3f} s/step")
+
+                tdist.barrier()
+
+                if current_step >= self.run_args["total_steps"]:
+                    break
+
+        # If training stopped due to NaN/Inf, exit immediately without cleanup
+        if break_loop:
+            if "LOCAL_RANK" in os.environ:
+                tdist.barrier()
+                tdist.destroy_process_group()
+            if self.global_rank == 0:
+                try:
+                    mlflow.end_run(status="FAILED")
+                except Exception as e:
+                    print(f"Warning: Error ending MLflow run: {e}")
+            sys.exit(1)
+
+        # Ensure progress bar closes cleanly
+        if self.global_rank == 0 and self.is_tty and not self.profile:
+            self.pbar.close()
+
+        # Save last rank-specific checkpoint for all ranks (default behavior)
+        last_checkpoint_path = f"{self.run_path}/artifacts/checkpoints/checkpoint_rank_{self.global_rank}_last.pt"
+        self.save_checkpoint(last_checkpoint_path, step=self.run_args.get("total_steps", 0), artifact_path="checkpoints", scheduler=self.scheduler, global_rank=self.global_rank, additional_state={
+            'rank': self.global_rank,
+            'world_size': tdist.get_world_size(),
+            'last_step': current_step,
+            'training_completed': True
+        })
+        if self.global_rank == 0:
+            print(f"Saved last rank-specific checkpoints for all ranks")
+
+        # Synchronize all ranks before expensive plotting
+        if "LOCAL_RANK" in os.environ:
+            tdist.barrier()
+        
+        if self.global_rank == 0:
+            run_plotter = RunPlotter(run_id=self.run_obj.info.run_id, cosmo_exp=self.cosmo_exp)
+            run_plotter.plot_training(
+                var=None,
+                log_scale=True,
+                loss_step_freq=10,
+                area_step_freq=100,
+                area_limits=[0.5, 2.0]
+            )
+            plt.close('all')
+        
+        # Create GIF for all ranks (only if we logged posterior plots)
+        if self.run_args.get("log_nominal_area", False):
+            create_gif(self.run_obj.info.run_id, fps=5, add_labels=True, label_position='top-right', text_size=1.0, pause_last_frame=3.0, rank=self.global_rank)
+        
+        if self.global_rank == 0:
+            print("Run", self.run_obj.info.experiment_id + "/" + self.run_obj.info.run_id, "completed.")
+        
+        # Final cumulative runtime update
+        final_step = self.run_args.get("total_steps", current_step)
+        self._update_cumulative_runtime(final_step)
+        
+        # Final memory logging
+        if "LOCAL_RANK" in os.environ:
+            # Synchronize all ranks before cleanup
+            tdist.barrier()
+            tdist.destroy_process_group()
+            if self.global_rank == 0:
+                try:
+                    mlflow.end_run()
+                except Exception as e:
+                    print(f"Warning: Error ending MLflow run: {e}")
+                    print("Run may have been corrupted, but training completed successfully.")
+                try:
+                    runtime = get_runtime(self.run_obj.info.run_id)
+                    hours = int(runtime.total_seconds() // 3600)
+                    minutes = int((runtime.total_seconds() % 3600) // 60)
+                    seconds = int(runtime.total_seconds() % 60)
+                    print(f"Total active training time: {hours}h {minutes}m {seconds}s")
+                except Exception as e:
+                    print(f"Warning: Could not retrieve runtime: {e}")
+            
+    @profile_method
+    def save_checkpoint(self, filepath, step=None, artifact_path=None, scheduler=None, additional_state=None, global_rank=None):
+        """
+        Saves the training checkpoint with comprehensive state information.
+
+        Args:
+            filepath (str): Path to save the checkpoint.
+            step (int, optional): Current training step.
+            artifact_path (str, optional): Path to log the artifact to in MLflow.
+            scheduler (torch.optim.lr_scheduler._LRScheduler, optional): Learning rate scheduler.
+            additional_state (dict, optional): Additional state to save (e.g., training metrics, configuration).
+            global_rank (int, optional): Global rank in distributed training.
+        """
+        model_state_dict = self.posterior_flow.module.state_dict()
+
+        checkpoint = {
+            'model_state_dict': model_state_dict,
+            'optimizer_state_dict': self.optimizer.state_dict(),
+            'optimizer_type': self.optimizer.__class__.__name__
+        }
+
+        if scheduler is not None:
+            checkpoint['scheduler_state_dict'] = scheduler.state_dict()
+        
+        if step is not None:
+            checkpoint['step'] = step
+
+        # Save RNG states correctly
+        checkpoint['rng_state'] = get_rng_state()
+        
+        # Also save Pyro's param store state (in case there are any parameters)
+        checkpoint['rng_state']['pyro_param_state'] = pyro.get_param_store().get_state()
+
+        if hasattr(self, 'experiment') and hasattr(self.experiment, 'param_bijector'):
+            try:
+                checkpoint['bijector_state'] = self.experiment.param_bijector.get_state()
+            except Exception as exc:
+                if self.global_rank == 0:
+                    print(f'Warning: Failed to serialize bijector state: {exc}')
+
+        # Save input_dim and context_dim
+        if hasattr(self, 'experiment') and self.experiment is not None:
+            checkpoint['input_dim'] = len(self.experiment.cosmo_params)
+            checkpoint['context_dim'] = self.experiment.context_dim
+
+        # Always include global rank information
+        if global_rank is not None:
+            if additional_state is None:
+                additional_state = {}
+            additional_state['global_rank'] = global_rank
+        
+        # Include additional state if provided
+        if additional_state is not None:
+            checkpoint['additional_state'] = additional_state
+        
+        # Log the checkpoint to mlflow
+        torch.save(checkpoint, filepath)
+        if artifact_path:
+            mlflow.log_artifact(filepath, artifact_path)
+
+    @profile_method
+    def _init_device_settings(self, device):
+        # Set PyTorch CPU threads at the beginning of DDP environment initialization.
+        # This helps manage CPU resources used by PyTorch's own operations on CPU.
+        # It's separate from OMP_NUM_THREADS which affects OpenMP-enabled libraries like NumPy/SciPy.
+        try:
+            # Logic based on OMP_NUM_THREADS or a default, with a cap.
+            omp_threads_str = os.environ.get("OMP_NUM_THREADS")
+            num_pytorch_cpu_threads = 0 # Initialize
+            if omp_threads_str:
+                num_pytorch_cpu_threads = int(omp_threads_str)
+                # Cap PyTorch threads if OMP_NUM_THREADS is very large (e.g. > 8)
+                # Adjust this cap as needed. If OMP_NUM_THREADS is already a per-process target for all libs, this might not be needed.
+                if num_pytorch_cpu_threads > 32: 
+                    num_pytorch_cpu_threads = 32
+                elif num_pytorch_cpu_threads <= 0:
+                    num_pytorch_cpu_threads = 1 # Must be at least 1
+            else:
+                num_pytorch_cpu_threads = 4 # Default if OMP_NUM_THREADS is not set
+            
+            torch.set_num_threads(num_pytorch_cpu_threads)
+            # Logging will be done after rank is determined.
+        except Exception as e:
+            # Using a generic print here as rank might not be available yet for prefixed logging.
+            print(f"Warning: Could not set PyTorch CPU threads during init_training_env: {e}")
+
+        # DDP initialization
+        if device is None:
+            if "LOCAL_RANK" in os.environ and torch.cuda.is_available():
+                self.global_rank = int(os.environ["RANK"])
+                
+                # When CUDA_VISIBLE_DEVICES isolates one GPU, PyTorch sees it as device 0.
+                self.pytorch_device_idx = int(os.environ["LOCAL_RANK"])  # The only GPU visible to this process
+                self.effective_device_id = self.pytorch_device_idx
+                
+                # Initialize CUDA context before DDP setup
+                torch.cuda.init()
+                torch.cuda.set_device(self.pytorch_device_idx)
+                
+                # Ensure CUDA is available and device is set before DDP init
+                if not torch.cuda.is_available():
+                    raise RuntimeError("CUDA is not available but LOCAL_RANK is set")
+                
+                # Create torch.device object for device_id
+                device_obj = torch.device(f"cuda:{self.pytorch_device_idx}")
+                
+                # Initialize process group with explicit device ID
+                tdist.init_process_group(
+                    backend="nccl",
+                    init_method="env://",
+                    world_size=int(os.environ["WORLD_SIZE"]),
+                    rank=self.global_rank,
+                    timeout=timedelta(seconds=360),  # Increased timeout
+                    device_id=device_obj  # Pass torch.device object
+                )
+
+            else: # Not using DDP
+                self.global_rank = 0
+                print("Running without DDP (single-node, single-GPU/CPU)")
+                if torch.cuda.is_available():
+                    parsed_id_from_arg = 0 # Default to 0 for non-DDP CUDA
+                    if isinstance(self.device, str) and self.device.startswith("cuda:") and ":" in self.device.split(":"):
+                        try:
+                            parsed_id_from_arg = int(self.device.split(':')[1])
+                            if not (0 <= parsed_id_from_arg < torch.cuda.device_count()):
+                                print(f"Warning: Parsed device ID {parsed_id_from_arg} from '{self.device}' is invalid. Defaulting to 0.")
+                                parsed_id_from_arg = 0
+                        except (IndexError, ValueError):
+                            print(f"Warning: Could not parse device ID from '{self.device}'. Defaulting to 0.")
+                            parsed_id_from_arg = 0
+                    elif isinstance(self.device, int):
+                        if 0 <= self.device < torch.cuda.device_count():
+                            parsed_id_from_arg = self.device
+                        else:
+                            print(f"Warning: Integer device ID {self.device} is invalid. Defaulting to 0.")
+                            parsed_id_from_arg = 0
+                    
+                    self.effective_device_id = parsed_id_from_arg
+                    torch.cuda.set_device(self.effective_device_id)
+                else:
+                    self.effective_device_id = -1 # Indicates CPU
+        else:
+            self.global_rank = 0
+            self.pytorch_device_idx = 0
+            self.effective_device_id = 0
+            
+        # Log the PyTorch thread count after rank is known
+        if self.global_rank == 0:
+            log_rank_prefix = ""
+            if "RANK" in os.environ:
+                log_rank_prefix = f"[Rank {os.environ.get('RANK')}] "
+            elif "SLURM_PROCID" in os.environ:
+                log_rank_prefix = f"[SlurmPROCID {os.environ.get('SLURM_PROCID')}] "
+            try:
+                print(f"Process group initialized for rank {self.global_rank}")
+                print(f"{log_rank_prefix}PyTorch CPU threads set to: {torch.get_num_threads()} (within init_training_env)")
+                print(f"{log_rank_prefix}os.cpu_count() (cores available to this process): {os.cpu_count()}")
+                slurm_cpus_task = os.environ.get("SLURM_CPUS_PER_TASK")
+                if slurm_cpus_task:
+                    print(f"{log_rank_prefix}SLURM_CPUS_PER_TASK (inherited by worker): {slurm_cpus_task}")
+            except Exception as e:
+                print(f"{log_rank_prefix}Warning: Could not get PyTorch CPU thread count or os.cpu_count(): {e}")
+
+        # Initialize MLflow experiment and run info on rank 0
+        self.device = f"cuda:{self.pytorch_device_idx}" if "LOCAL_RANK" in os.environ and torch.cuda.is_available() else (f"cuda:{self.effective_device_id}" if self.effective_device_id != -1 else "cpu")
+    
+    def _init_dataloader(self, batch_size=1, num_workers=0):
+        # Create dataset with designs on GPU
+        dataset = LikelihoodDataset(
+            experiment=self.experiment,
+            n_particles_per_device=self.run_args["n_particles_per_device"],
+            device=f"cuda:{self.pytorch_device_idx}",
+            evaluation=False,
+            profile=self.profile,
+            global_rank=self.global_rank
+        )
+
+        # Use regular DataLoader without DistributedSampler
+        self.dataloader = DataLoader(
+            dataset,
+            batch_size=batch_size,
+            shuffle=False,
+            num_workers=num_workers,
+            pin_memory=False,
+        )
+
+    @profile_method
+    def _init_run(self):
+        """Initialize MLflow run settings and broadcast to all ranks."""
+        if not self.run_args.get("resume_id", None):
+            if self.global_rank == 0:
+                mlflow.set_experiment(self.mlflow_exp)
+                mlflow.start_run()
+                self.run_obj = mlflow.active_run()
+                # Set n_devices and n_particles using the world size and n_particles_per_device
+                self.run_args["n_devices"] = tdist.get_world_size() if "LOCAL_RANK" in os.environ else 1
+                self.run_args["n_particles"] = self.run_args["n_devices"] * self.run_args["n_particles_per_device"]
+
+            if not self.run_args.get("restart_id", None):
+                # Start new run
+                if self.global_rank == 0:
+                    print(f"=== NEW RUN MODE ===")
+                    print("Starting fresh training run")
+                self.checkpoint = None
+                
+                # Store prior_args_path and design_args_path for _save_input_args
+                self.prior_args_path = self.run_args.get("prior_args_path", None)
+                self.design_args_path = self.run_args.get("design_args_path", None)
+
+                # Resolve relative paths using experiment config directory
+                if self.prior_args_path and not os.path.isabs(self.prior_args_path):
+                    self.prior_args_path = str(get_experiment_config_path(self.cosmo_exp, self.prior_args_path))
+
+                if self.design_args_path and not os.path.isabs(self.design_args_path):
+                    self.design_args_path = str(get_experiment_config_path(self.cosmo_exp, self.design_args_path))
+                
+                # Save prior_args.yaml and design_args.yaml to artifacts before init_experiment
+                if self.global_rank == 0:
+                    self._save_input_args()
+            else: 
+                # Restart from existing run
+                if self.global_rank == 0:
+                    print(f"=== RESTART MODE ===")
+                    print(f"Restart ID: {self.run_args['restart_id']}")
+                    if self.run_args.get("restart_checkpoint", None) is not None:
+                        print(f"Restarting from specific checkpoint file: {self.run_args['restart_checkpoint']}")
+                    elif self.run_args.get("restart_step", None) is not None:
+                        print(f"Restarting from checkpoint at step {self.run_args['restart_step']}")
+                    else:
+                        print("Restarting from latest checkpoint")
+                    print("Will use MLflow run ID to find checkpoint directory")
+                    print("Will create new MLflow run with current parameters")
+
+                ref_run = self.client.get_run(self.run_args["restart_id"])
+                # fix the model parameters for the restart run
+                self._fix_model_args(ref_run)
+
+                checkpoint_dir = f"{self.storage_path}/mlruns/{ref_run.info.experiment_id}/{self.run_args['restart_id']}/artifacts/checkpoints"
+                
+                # Store paths from restart run for _save_input_args
+                self.restart_run_id = self.run_args["restart_id"]
+                self.restart_exp_id = ref_run.info.experiment_id
+                
+                # Copy prior_args.yaml and design_args.yaml from restart run's artifacts to new run's artifacts
+                # init_experiment will then load them from artifacts automatically
+                if self.global_rank == 0:
+                    self._save_input_args(restart_run=True)
+
+                if self.run_args.get("restart_checkpoint", None) is not None:
+                    # Load specific checkpoint file for all ranks
+                    print(f"Loading checkpoint from file: {checkpoint_dir}/{self.run_args['restart_checkpoint']}")
+                    self.checkpoint = torch.load(f"{checkpoint_dir}/{self.run_args['restart_checkpoint']}", map_location=self.device, weights_only=False)
+                else:
+                    # Use existing logic to find checkpoint by step
+                    # Load the checkpoint
+                    self.checkpoint, _ = get_checkpoint(
+                        self.run_args["restart_step"], 
+                        checkpoint_dir, 
+                        self.device, 
+                        self.global_rank, 
+                        total_steps=int(ref_run.data.params["total_steps"])
+                        )
+                
+                # Validate checkpoint compatibility for restart mode
+                validate_checkpoint_compatibility(self.checkpoint, self.run_args, mode="restart", global_rank=self.global_rank)
+
+            # Initialize start step
+            self.start_step = 0
+            self.best_loss = float('inf')
+            self.best_nominal_area = float('inf')
+            
+            # Initialize runtime tracking (only on rank 0)
+            self.previous_cumulative_runtime = 0.0  # seconds
+
+            if self.global_rank == 0:
+                
+                # Log parameters
+                for key, value in self.run_args.items():
+                    mlflow.log_param(key, value)
+
+                # Prepare tensors for broadcasting
+                tensors = self._prepare_broadcast_tensors()
+            else:
+                # Initialize tensors on other ranks
+                tensors = {
+                    'exp_id': torch.zeros(1, dtype=torch.long, device=self.device),
+                    'run_id': [None],
+                    'mlflow_exp': [None]
+                    }
+        else:
+            # Resume existing run
+            # init_experiment will automatically load prior_args.yaml and design_args.yaml from artifacts
+            self.run_obj = self.client.get_run(self.run_args["resume_id"])
+            checkpoint_dir = f"{self.storage_path}/mlruns/{self.run_obj.info.experiment_id}/{self.run_args['resume_id']}/artifacts/checkpoints"
+
+            # Load the checkpoint
+            self.checkpoint, self.start_step = get_checkpoint(
+                self.run_args["resume_step"], 
+                checkpoint_dir, 
+                self.device, 
+                self.global_rank, 
+                total_steps=self.run_args.get("total_steps")
+                )
+            
+            # Validate that the loaded checkpoint step matches the requested resume step
+            if self.start_step != self.run_args["resume_step"]:
+                if self.global_rank == 0:
+                    print(f"Warning: Requested resume step {self.run_args['resume_step']} not found.")
+                    print(f"  Loaded checkpoint from step {self.start_step} instead.")
+                    print(f"  This may cause loss discontinuity.")
+                # Update the resume_step to match the actual loaded step
+                self.run_args["resume_step"] = self.start_step
+            
+            # Validate checkpoint compatibility for resume mode
+            validate_checkpoint_compatibility(self.checkpoint, self.run_args, mode="resume", global_rank=self.global_rank)
+            if self.global_rank == 0:
+                mlflow.set_experiment(experiment_id=self.run_obj.info.experiment_id)
+                mlflow.start_run(run_id=self.run_args["resume_id"])
+                
+                if self.run_args.get("resume_step", None) is None:
+                    raise ValueError("resume_step must be provided when resuming a run")
+                print(f"=== RESUME MODE ===")
+                print(f"Resume ID: {self.run_args['resume_id']}")
+                print(f"Resume Step: {self.start_step}")
+                print(f"Add Steps: {self.run_args['add_steps']}")
+                print("Will continue existing MLflow run with original parameters")
+                resume_args = {
+                    "resume_id": self.run_args["resume_id"],
+                    "resume_step": self.run_args["resume_step"],
+                    "add_steps": self.run_args.get("add_steps", None)
+                }
+                # Overwrite run parameters with original parameters
+                self.run_args = parse_mlflow_params(self.run_obj.data.params)
+                self.run_args.update(resume_args)
+                if self.run_args.get("add_steps", None):
+                    self.run_args["total_steps"] += self.run_args["add_steps"]
+                
+                n_devices = tdist.get_world_size() if "LOCAL_RANK" in os.environ else 1
+                if self.run_args["n_particles"] != n_devices * self.run_args["n_particles_per_device"]:
+                    raise ValueError(f"n_particles ({self.run_args['n_particles']}) must be equal to n_devices * n_particles_per_device ({n_devices * self.run_args['n_particles_per_device']})")
+
+                # Get metrics from previous run
+                self._get_resume_metrics()
+                
+                # Load previous cumulative runtime for resume
+                self._load_cumulative_runtime()
+
+                # Prepare tensors for broadcasting
+                tensors = self._prepare_broadcast_tensors()
+            else:
+                # Initialize tensors on other ranks
+                tensors = {
+                    'exp_id': torch.zeros(1, dtype=torch.long, device=self.device),
+                    'run_id': [None],
+                    'mlflow_exp': [None]
+                    }
+        self._broadcast_variables(tensors)
+
+        # Ensure rank 0 has fully initialized the MLflow run before other ranks join
+        if tdist.is_initialized():
+            tdist.barrier()
+        
+        # Set up MLflow for non-zero ranks
+        if self.global_rank != 0:
+            mlflow.set_experiment(experiment_id=str(tensors['exp_id'].item()))
+            mlflow.start_run(run_id=tensors['run_id'][0], nested=True)
+            self.run_obj = mlflow.active_run()
+        # Define the MLflow run path
+        self.run_path = f"{self.storage_path}/mlruns/{self.run_obj.info.experiment_id}/{self.run_obj.info.run_id}"
+        os.makedirs(f"{self.run_path}/artifacts/checkpoints", exist_ok=True)
+        os.makedirs(f"{self.run_path}/artifacts/plots/rank_{self.global_rank}/posterior", exist_ok=True)
+        # Broadcast run_args from rank 0 to ensure consistency, especially for 'steps' when resuming with add_steps
+        if self.global_rank == 0:
+            print(f"Run path: {self.run_path}")
+            print(f"Running with parameters for cosmo_model='{self.run_args['cosmo_model']}':")
+            print(json.dumps(self.run_args, indent=2))
+            self.session_start_time = None
+            run_args_list_to_broadcast = [self.run_args]
+        else:
+            run_args_list_to_broadcast = [None]
+
+        if tdist.is_initialized():
+            tdist.barrier() # Ensure all ranks are ready before broadcasting run_args
+        
+        tdist.broadcast_object_list(run_args_list_to_broadcast, src=0)
+        self.run_args = run_args_list_to_broadcast[0] # All ranks now have the definitive run_args
+
+        # design_args will be loaded from artifacts in init_experiment
+        # For new runs, we can also get it from run_args if provided
+        self.design_args = self.run_args.get("design_args", None)
+
+    def _save_input_args(self, restart_run=False):
+        """
+        Save prior_args.yaml and design_args.yaml to artifacts.
+        
+        Args:
+            restart_run: If True, copy files from restart run's artifacts instead of from file paths.
+        """
+        artifacts_dir = f"{self.storage_path}/mlruns/{mlflow.active_run().info.experiment_id}/{mlflow.active_run().info.run_id}/artifacts"
+        os.makedirs(artifacts_dir, exist_ok=True)
+        
+        if restart_run:
+            # Copy prior_args.yaml and design_args.yaml from restart run's artifacts
+            restart_artifacts_dir = f"{self.storage_path}/mlruns/{self.restart_exp_id}/{self.restart_run_id}/artifacts"
+            
+            # Copy prior_args.yaml
+            restart_prior_args_path = f"{restart_artifacts_dir}/prior_args.yaml"
+            if os.path.exists(restart_prior_args_path):
+                new_prior_args_path = f"{artifacts_dir}/prior_args.yaml"
+                shutil.copy2(restart_prior_args_path, new_prior_args_path)
+                mlflow.log_artifact(new_prior_args_path)
+                if self.verbose:
+                    print(f"Copied prior_args.yaml from restart run to new run artifacts")
+            else:
+                raise FileNotFoundError(f"Prior file not found in restart run artifacts: {restart_prior_args_path}")
+            
+            # Copy design_args.yaml
+            restart_design_args_path = f"{restart_artifacts_dir}/design_args.yaml"
+            if os.path.exists(restart_design_args_path):
+                new_design_args_path = f"{artifacts_dir}/design_args.yaml"
+                shutil.copy2(restart_design_args_path, new_design_args_path)
+                mlflow.log_artifact(new_design_args_path)
+                if self.verbose:
+                    print(f"Copied design_args.yaml from restart run to new run artifacts")
+            else:
+                raise FileNotFoundError(f"Design args file not found in restart run artifacts: {restart_design_args_path}")
+        else:
+            # Save prior_args.yaml from file path
+            if hasattr(self, 'prior_args_path') and self.prior_args_path is not None:
+                if not os.path.exists(self.prior_args_path):
+                    raise FileNotFoundError(f"Prior file not found at {self.prior_args_path}")
+                
+                prior_artifact_path = f"{artifacts_dir}/prior_args.yaml"
+                shutil.copy2(self.prior_args_path, prior_artifact_path)
+                mlflow.log_artifact(prior_artifact_path)
+                if self.verbose:
+                    print(f"Saved prior_args.yaml to artifacts: {prior_artifact_path}")
+            else:
+                if self.global_rank == 0:
+                    print(f"Warning: prior_args_path not set in run_args, skipping prior_args.yaml save")
+            
+            # Save design_args.yaml from file path
+            if hasattr(self, 'design_args_path') and self.design_args_path is not None:
+                if not os.path.exists(self.design_args_path):
+                    raise FileNotFoundError(f"Design args file not found at {self.design_args_path}")
+                
+                design_args_artifact_path = f"{artifacts_dir}/design_args.yaml"
+                shutil.copy2(self.design_args_path, design_args_artifact_path)
+                mlflow.log_artifact(design_args_artifact_path)
+                if self.verbose:
+                    print(f"Saved design_args.yaml to artifacts: {design_args_artifact_path}")
+    
+    def _save_design_array(self):
+        """Save designs.npy to artifacts and update design_args.yaml with input_designs_path."""
+        artifacts_dir = f"{self.storage_path}/mlruns/{mlflow.active_run().info.experiment_id}/{mlflow.active_run().info.run_id}/artifacts"
+        print(f"Saving designs to artifacts directory.")
+
+        # Save designs.npy to artifacts
+        designs_artifact_path = f"{artifacts_dir}/designs.npy"
+        np.save(designs_artifact_path, self.experiment.designs.cpu().detach().numpy())
+        mlflow.log_artifact(designs_artifact_path)
+        
+        # Update design_args to point to the saved NPY file location
+        design_args = self.run_args.get('design_args', {})
+        if design_args is None:
+            design_args = {}
+        design_args["input_designs_path"] = designs_artifact_path
+
+        # Update design_args.yaml in artifacts with the input_designs_path
+        try:
+            design_args_artifact_path = f"{artifacts_dir}/design_args.yaml"
+            with open(design_args_artifact_path, 'w') as f:
+                yaml.dump(design_args, f, default_flow_style=False, sort_keys=False)
+            mlflow.log_artifact(design_args_artifact_path)
+                
+            # Verify the file was saved correctly
+            if not os.path.exists(design_args_artifact_path):
+                raise RuntimeError(f"Failed to save design_args file to artifacts: {design_args_artifact_path}")
+        except Exception as e:
+            raise RuntimeError(f"Failed to save design_args file: {e}")
+
+    def _fix_model_args(self, ref_run):
+        """
+        Update run_args associated with the model to match the reference run.
+        
+        """
+        changed_params = {}
+        
+        # Common parameters that apply to all flow types
+        common_params = ["cosmo_model", "flow_type", "n_transforms", "activation", "cond_hidden_size", "cond_n_layers"]
+        
+        # Store original values and update common parameters
+        for param in common_params:
+            original_value = self.run_args.get(param)
+            new_value = ref_run.data.params[param]
+            self.run_args[param] = new_value
+            
+            if original_value != new_value:
+                changed_params[param] = (original_value, new_value)
+        
+        # Flow-specific parameters
+        flow_type = ref_run.data.params["flow_type"]
+        flow_specific_params = {
+            "MAF": ["nf_transform"],
+            "NAF": ["mnn_signal", "mnn_hidden_size", "mnn_n_layers"],
+            "NSF": ["spline_bins"]
+        }
+        
+        if flow_type in flow_specific_params:
+            for param in flow_specific_params[flow_type]:
+                original_value = self.run_args.get(param)
+                new_value = ref_run.data.params[param]
+                self.run_args[param] = new_value
+                
+                if original_value != new_value:
+                    changed_params[param] = (original_value, new_value)
+        
+        # Handle condition_design parameter
+        original_condition_design = self.run_args.get("condition_design")
+        self.run_args["condition_design"] = ref_run.data.params["condition_design"]
+        if original_condition_design != run_args["condition_design"]:
+            changed_params["condition_design"] = (original_condition_design, self.run_args["condition_design"])
+        
+        # Log changes if any parameters were modified
+        if changed_params and self.global_rank == 0:
+            print("=== MODEL PARAMETERS OVERWRITTEN BY REFERENCE RUN ===")
+            for param_name, (old_value, new_value) in changed_params.items():
+                print(f"  {param_name}: {old_value} -> {new_value}")
+
+    def _broadcast_variables(self, tensors):
+
+        # Broadcast tensors from rank 0 to all ranks
+        tdist.barrier()
+        tdist.broadcast(tensors['exp_id'], src=0)
+        tdist.broadcast_object_list(tensors['run_id'], src=0)
+        tdist.broadcast_object_list(tensors['mlflow_exp'], src=0)
+
+    def _get_resume_metrics(self):
+        """Get metrics from previous run for resuming."""
+        best_nominal_areas = self.client.get_metric_history(self.run_args["resume_id"], 'best_avg_nominal_area')
+        best_nominal_area_steps = np.array([metric.step for metric in best_nominal_areas])
+        if len(best_nominal_area_steps) > 0:
+            closest_idx = np.argmin(np.abs(best_nominal_area_steps - self.run_args["resume_step"]))
+            self.best_nominal_area = best_nominal_areas[closest_idx].value if best_nominal_area_steps[closest_idx] <= self.run_args["resume_step"] else best_nominal_areas[closest_idx - 1].value
+        else:
+            self.best_nominal_area = np.nan
+        
+        best_losses = self.client.get_metric_history(self.run_args["resume_id"], 'best_loss')
+        best_loss_steps = np.array([metric.step for metric in best_losses])
+        closest_idx = np.argmin(np.abs(best_loss_steps - self.run_args["resume_step"]))
+        self.best_loss = best_losses[closest_idx].value if best_loss_steps[closest_idx] <= self.run_args["resume_step"] else best_losses[closest_idx - 1].value
+    
+    def _load_cumulative_runtime(self):
+        """Load cumulative runtime from previous training sessions."""
+        try:
+            runtime_history = self.client.get_metric_history(self.run_args["resume_id"], 'cumulative_runtime_seconds')
+            if runtime_history:
+                # Get the latest cumulative runtime
+                self.previous_cumulative_runtime = runtime_history[-1].value
+                if self.global_rank == 0:
+                    hours = int(self.previous_cumulative_runtime // 3600)
+                    minutes = int((self.previous_cumulative_runtime % 3600) // 60)
+                    seconds = int(self.previous_cumulative_runtime % 60)
+                    print(f"Loaded previous cumulative runtime: {hours}h {minutes}m {seconds}s")
+            else:
+                self.previous_cumulative_runtime = 0.0
+        except Exception as e:
+            if self.global_rank == 0:
+                print(f"Warning: Could not load cumulative runtime: {e}. Starting from 0.")
+            self.previous_cumulative_runtime = 0.0
+    
+    def _update_cumulative_runtime(self, step):
+        """Update cumulative runtime metric (only rank 0)."""
+        if self.global_rank != 0:
+            return
+            
+        if self.session_start_time is None:
+            # First call - initialize session start time
+            self.session_start_time = time.time()
+            return
+        
+        # Calculate session runtime and add to previous cumulative
+        session_runtime = time.time() - self.session_start_time
+        cumulative_runtime = self.previous_cumulative_runtime + session_runtime
+        
+        # Log runtime to MLflow
+        mlflow.log_metric("cumulative_runtime_seconds", cumulative_runtime, step=step)
+        
+    def _prepare_broadcast_tensors(self):
+        """Prepare tensors for broadcasting to all ranks."""
+        return {
+            'exp_id': torch.tensor([int(self.run_obj.info.experiment_id)], dtype=torch.long, device=self.device),
+            'run_id': [self.run_obj.info.run_id],
+            'mlflow_exp': [mlflow.get_experiment(self.run_obj.info.experiment_id).name]
+        }
+
+    def _init_optimizer(self):
+        """
+        Initialize the optimizer.
+        """
+        if self.run_args["optimizer"] == "Adam":
+            self.optimizer = torch.optim.Adam(self.posterior_flow.parameters(), lr=self.run_args["initial_lr"])
+        elif self.run_args["optimizer"] == "SGD":
+            self.optimizer = torch.optim.SGD(self.posterior_flow.parameters(), lr=self.run_args["initial_lr"])
+        else:
+            raise ValueError(f"Invalid optimizer: {self.run_args['optimizer']}")
+
+    @profile_method
+    def _init_scheduler(self):
+        """
+        Initialize the scheduler.
+        """
+        if self.run_args.get("resume_id", None):
+            # Load optimizer state
+            self.optimizer.load_state_dict(self.checkpoint['optimizer_state_dict'])
+            
+            # Create scheduler with original run parameters (already loaded into run_args during resume)
+            self.scheduler = create_scheduler(self.optimizer, self.run_args)
+            
+            # Load scheduler state if it exists (preserve original scheduler state for resume)
+            if 'scheduler_state_dict' in self.checkpoint:            
+                self.scheduler.load_state_dict(self.checkpoint['scheduler_state_dict'])
+                
+                # Update optimizer learning rate to match scheduler's _last_lr
+                if hasattr(self.scheduler, '_last_lr') and self.scheduler._last_lr:
+                    for param_group in self.optimizer.param_groups:
+                        param_group['lr'] = self.scheduler._last_lr[0]
+                
+                if self.global_rank == 0:
+                    print("Scheduler state restored from checkpoint")
+                    current_lr = self.optimizer.param_groups[0]['lr']
+                    print(f"Current learning rate: {current_lr}")
+            else:
+                if self.global_rank == 0:
+                    print("Warning: No scheduler state found in checkpoint")
+                    print("  Learning rate may not be correct for the resume step")
+                    current_lr = self.optimizer.param_groups[0]['lr']
+                    print(f"  Current learning rate: {current_lr}")
+                    
+                # If no scheduler state, we need to manually step the scheduler to the correct point
+                if self.global_rank == 0:
+                    print(f"  Manually stepping scheduler to step {self.run_args['resume_step']}")
+                step_freq = self.run_args.get("step_freq", 1)
+                scheduler_steps_needed = self.run_args['resume_step'] // step_freq
+                if self.global_rank == 0:
+                    print(f"  Step frequency: {step_freq}, scheduler steps needed: {scheduler_steps_needed}")
+                
+                # All ranks must step the scheduler to stay synchronized
+                for _ in range(scheduler_steps_needed):
+                    self.scheduler.step()
+                
+                if self.global_rank == 0:
+                    current_lr = self.optimizer.param_groups[0]['lr']
+                    print(f"  Learning rate after manual stepping: {current_lr}")
+            
+            if self.global_rank == 0:
+                print(f"Optimizer LR after loading: {self.optimizer.param_groups[0]['lr']}")
+                print("Resume checkpoint loading completed")
+                
+            # Synchronize all ranks after loading checkpoint
+            tdist.barrier()
+
+        elif self.run_args.get("restart_id", None):
+            # Load model weights and optimizer state
+            self.posterior_flow.module.load_state_dict(self.checkpoint['model_state_dict'], strict=True)
+            
+            if self.run_args.get("restart_optimizer", None):
+                if self.run_args["optimizer"] != self.checkpoint["optimizer_type"] if "optimizer_type" in self.checkpoint else False:
+                    raise ValueError(f"Optimizer type mismatch: {self.run_args['optimizer']} != {self.checkpoint['optimizer_type']}")
+                # Update the learning rate in the loaded optimizer state to match current run_args
+                self.optimizer.load_state_dict(self.checkpoint['optimizer_state_dict'])
+                for param_group in self.optimizer.param_groups:
+                    old_lr = param_group['lr']
+                    param_group['lr'] = self.run_args['initial_lr']
+                    param_group['initial_lr'] = self.run_args['initial_lr']
+                    if self.global_rank == 0:
+                        print(f"Restarted optimizer with initial learning rate: {old_lr} -> {self.run_args['initial_lr']}")
+            else:
+                if self.global_rank == 0:
+                    print(f"Created fresh optimizer with initial learning rate: {self.run_args['initial_lr']}")
+            
+            # Create fresh scheduler with new learning rate bounds
+            self.scheduler = create_scheduler(self.optimizer, self.run_args)
+            
+            if self.global_rank == 0:
+                print(f"Using existing optimizer statistics with new learning rate schedule")
+                print(f"Initial lr: {run_args['initial_lr']}, Final lr: {run_args.get('final_lr', run_args['initial_lr'])}")
+                print("Fresh scheduler created with current parameters")
+            
+            # Synchronize all ranks after loading checkpoint
+            tdist.barrier()
+            
+        else:
+            self.scheduler = create_scheduler(self.optimizer, self.run_args)
+            seed = auto_seed(base_seed=self.run_args["pyro_seed"], rank=self.global_rank)
+
+if __name__ == '__main__':
+
+    mp.set_start_method("spawn", force=True)
+    #set default dtype
+    torch.set_default_dtype(torch.float64)
+    
+    # --- Argument Parsing --- 
+    parser = argparse.ArgumentParser(description="Run Number Tracers Training")
+
+    # Add arguments dynamically based on the default config file
+    parser.add_argument('--cosmo_exp', type=str, default='num_tracers', help='Cosmological experiment name')
+    parser.add_argument('--cosmo_model', type=str, default=None, help='Cosmological model set to use from train_args.yaml (not needed for resume)')
+    parser.add_argument('--mlflow_exp', type=str, default='base', help='MLflow experiment name')
+    parser.add_argument('--device', type=str, default=None, help='Device to use for training')
+    
+    # Add resume/restart arguments early so we can check them
+    parser.add_argument('--resume_id', type=str, default=None, help='MLflow run ID to resume training from')
+    parser.add_argument('--resume_step', type=int, default=None, help='Step to resume training from')
+    parser.add_argument('--add_steps', type=int, default=0, help='Number of steps to add to the training (only used with --resume_id)')
+    parser.add_argument('--restart_id', type=str, default=None, help='MLflow run ID to restart training from (creates new run with current parameters)')
+    parser.add_argument('--restart_step', type=lambda x: int(x) if x.isdigit() else x, default=None, help='Step to restart training from (optional when using --restart_id, defaults to latest). Can be an integer or string like "last"')
+    parser.add_argument('--restart_checkpoint', type=str, default=None, help='Specific checkpoint file name to use for all ranks during restart (alternative to --restart_step)')
+    parser.add_argument('--restart_optimizer', action='store_true', help='Restart optimizer from checkpoint')
+    parser.add_argument('--log_usage', action='store_true', help='Log compute usage of the training script')
+    parser.add_argument('--profile', action='store_true', help='Enable profiling for a few steps and then exit.')
+
+    # --- Load Default Config ---
+    # Parse just these essential arguments
+    args, unknown = parser.parse_known_args()
+
+    # For resume or restart, get cosmo_model from MLflow run metadata
+    if args.resume_id:
+        mlflow.set_tracking_uri(os.environ["SCRATCH"] + f"/bedcosmo/{args.cosmo_exp}/mlruns")
+        client = MlflowClient()
+        resume_run = client.get_run(args.resume_id)
+        cosmo_model = resume_run.data.params.get('cosmo_model', 'base')
+        if os.environ.get('RANK', '0') == '0':
+            print(f"Resume mode: Loading cosmo_model '{cosmo_model}' from run {args.resume_id}")
+    elif args.restart_id:
+        mlflow.set_tracking_uri(os.environ["SCRATCH"] + f"/bedcosmo/{args.cosmo_exp}/mlruns")
+        client = MlflowClient()
+        restart_run = client.get_run(args.restart_id)
+        cosmo_model = restart_run.data.params.get('cosmo_model', 'base')
+        if os.environ.get('RANK', '0') == '0':
+            print(f"Restart mode: Loading cosmo_model '{cosmo_model}' from run {args.restart_id}")
+    else:
+        # For new runs, cosmo_model must be specified
+        if args.cosmo_model is None:
+            raise ValueError("--cosmo_model is required for new training runs (not needed for resume/restart)")
+        cosmo_model = args.cosmo_model
+
+    # Load config from train_args.yaml based on cosmo_model
+    config_path = get_experiment_config_path(args.cosmo_exp, 'train_args.yaml')
+
+    if not config_path.exists():
+        raise FileNotFoundError(f"Configuration file not found: {config_path}")
+
+    with open(config_path, 'r') as f:
+        all_configs = yaml.safe_load(f)
+    
+    # Select configuration for the specified cosmo_model
+    if cosmo_model not in all_configs:
+        available_models = ', '.join(all_configs.keys())
+        raise ValueError(f"Model '{cosmo_model}' not found in {config_path}. Available models: {available_models}")
+    
+    run_args_dict = all_configs[cosmo_model]
+    
+    if os.environ.get('RANK', '0') == '0':
+        print(f"Loaded configuration for model '{cosmo_model}' from {config_path}")
+
+    # Skip keys that are already defined as parser arguments
+    skip_keys = {
+        'cosmo_exp', 'cosmo_model', 'mlflow_exp', 'device', 'resume_id', 
+        'resume_step', 'restart_id', 'restart_step', 'restart_checkpoint', 
+        'restart_optimizer', 'add_steps', 'log_usage', 'profile'
+        }
+    
+    for key, value in run_args_dict.items():
+        if key in skip_keys:
+            continue
+        if value is None:
+            parser.add_argument(f'--{key}', type=str, default=None, 
+                              help=f'Override {key} (default: None)')
+            continue
+            
+        arg_type = type(value)
+        # Special handling for input_designs to allow --input_designs [list]
+        if key == 'input_designs':
+            parser.add_argument(f'--{key}', type=str, default=None,
+                              help=f'Specify input design(s) as JSON. Can be single design [x1,...,xn] or multiple [[x1,...,xn], [y1,...,yn], ...] (default: {value})')
+        elif isinstance(value, bool):
+            parser.add_argument(f'--{key}', action='store_true', help=f'Enable {key}')
+            # Set default explicitly for bools, action handles the logic
+            parser.set_defaults(**{key: value})
+        elif isinstance(value, (int, float, str)):
+            parser.add_argument(f'--{key}', type=arg_type, default=None, help=f'Override {key} (default: {value})')
+        elif isinstance(value, list):
+            # For lists, we'll accept them as JSON strings and parse them
+            parser.add_argument(f'--{key}', type=str, default=None, 
+                              help=f'Override {key} as JSON string (default: {value})')
+        else:
+            print(f"Warning: Argument type for key '{key}' not explicitly handled ({arg_type}). Treating as string.")
+            parser.add_argument(f'--{key}', type=str, default=None, help=f'Override {key} (default: {value})')
+
+    args = parser.parse_args()
+    # Validate checkpoint loading arguments
+    if args.resume_id and args.restart_id:
+        raise ValueError("Cannot use --resume_id with --restart_id. Choose one:\n"
+                        "  --resume_id: Continue existing run with same parameters\n"
+                        "  --restart_id: Start new run with potentially different parameters")
+    
+    if args.resume_id and args.resume_step is None:
+        raise ValueError("--resume_step is required when using --resume_id")
+    
+    if args.resume_step is not None and args.resume_id is None:
+        raise ValueError("--resume_step can only be used with --resume_id")
+    
+    if args.restart_step is not None and args.restart_id is None:
+        raise ValueError("--restart_step can only be used with --restart_id")
+    
+    if args.restart_checkpoint is not None and args.restart_id is None:
+        raise ValueError("--restart_checkpoint can only be used with --restart_id")
+    
+    if args.restart_checkpoint is not None and args.restart_step is not None:
+        raise ValueError("Cannot use --restart_checkpoint with --restart_step. Choose one:\n"
+                        "  --restart_step: Find checkpoint by step number in MLflow run\n"
+                        "  --restart_checkpoint: Use specific checkpoint file path")
+    
+    if args.add_steps > 0 and args.resume_id is None:
+        raise ValueError("--add_steps can only be used with --resume_id")
+
+    # Project root for resolving relative paths (e.g. input_designs JSON)
+    project_root = str(get_experiments_dir().parent)
+
+    # Override default run_args with any provided command-line arguments
+    run_args = vars(args)
+    for key, value in run_args.items():
+        if key in run_args_dict.keys():
+            if value is not None:
+                # Special handling for input_designs
+                if key == 'input_designs':
+                    if isinstance(value, str):
+                        input_design_str = value.strip()
+                        
+                        # Check if it's the special "nominal" keyword
+                        if input_design_str.lower() == 'nominal':
+                            run_args[key] = 'nominal'
+                            continue
+                        
+                        # Check if it's a file path (ends with .json and file exists)
+                        if (input_design_str.endswith('.json') or input_design_str.endswith('.JSON')):
+                            # Try current directory first, then project root
+                            file_path = input_design_str
+                            if not os.path.isfile(file_path) and not os.path.isabs(file_path):
+                                # Try relative to project root
+                                file_path = os.path.join(project_root, input_design_str)
+                            
+                            if os.path.isfile(file_path):
+                                # Read from JSON file
+                                try:
+                                    with open(file_path, 'r') as f:
+                                        parsed_value = json.load(f)
+                                    run_args[key] = parsed_value
+                                    if os.environ.get('RANK', '0') == '0':
+                                        print(f"Loaded input_designs from file: {file_path}")
+                                except json.JSONDecodeError as e:
+                                    raise ValueError(f"Failed to parse JSON file {file_path}: {e}")
+                                except Exception as e:
+                                    raise ValueError(f"Failed to read file {file_path}: {e}")
+                            else:
+                                # File doesn't exist, try to parse as JSON string
+                                try:
+                                    parsed_value = json.loads(input_design_str)
+                                    run_args[key] = parsed_value
+                                except json.JSONDecodeError as e:
+                                    if os.environ.get('RANK', '0') == '0':
+                                        print(f"Warning: Could not parse 'input_designs' as JSON and file not found: {input_design_str}. Using as-is.")
+                                    run_args[key] = value
+                        else:
+                            # Try to parse as JSON string
+                            try:
+                                parsed_value = json.loads(input_design_str)
+                                run_args[key] = parsed_value
+                            except json.JSONDecodeError as e:
+                                if os.environ.get('RANK', '0') == '0':
+                                    print(f"Warning: Could not parse 'input_designs' as JSON: {e}. Using as-is.")
+                                run_args[key] = value
+                    else:
+                        run_args[key] = value
+                elif isinstance(run_args_dict[key], bool) and isinstance(value, bool):
+                    run_args[key] = value
+                elif isinstance(run_args_dict[key], list):
+                    # Parse JSON string back to list
+                    try:
+                        parsed_value = json.loads(value)
+                        run_args[key] = parsed_value
+                    except json.JSONDecodeError as e:
+                        if os.environ.get('RANK', '0') == '0':
+                            print(f"Warning: Could not parse '{key}' as JSON: {e}. Keeping default value.")
+                elif not isinstance(run_args_dict[key], float):
+                    run_args[key] = value
+            else:
+                run_args[key] = run_args_dict[key]
+
+    trainer = Trainer(
+        cosmo_exp=args.cosmo_exp,
+        mlflow_exp=args.mlflow_exp,
+        run_args=run_args,
+        profile=args.profile,
+    )
+    trainer.run()

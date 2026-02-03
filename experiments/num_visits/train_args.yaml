@@ -1,0 +1,36 @@
+# Training args for the num_visits experiment (single-parameter redshift model)
+
+base:
+  cosmo_model: base
+  mlflow_exp: base
+  pyro_seed: 1
+  nf_seed: 1
+  prior_args_path: prior_args_gamma.yaml
+  flow_type: NAF
+  transform_input: false
+  activation: elu
+  n_transforms: 4
+  cond_hidden_size: 128
+  cond_n_layers: 3
+  mnn_hidden_size: 128
+  mnn_n_layers: 3
+  mnn_signal: 32
+  nf_transform: affine
+  spline_bins: 16
+  design_args_path: design_args.yaml
+  total_steps: 10000
+  optimizer: Adam
+  initial_lr: 0.0001
+  final_lr: 0.00001
+  grad_clip: 0.0
+  warmup_fraction: 0.05
+  scheduler_type: cosine
+  n_cycles: 1
+  gamma: 0.1
+  step_freq: 1
+  checkpoint_step_freq: 1000
+  n_particles_per_device: 50
+  condition_design: true
+  log_nominal_area: false
+  verbose: true
+

@@ -1,0 +1,143 @@
+theory:
+  camb:
+    extra_args:
+      bbn_predictor: PArthENoPE_880.2_standard.dat
+      dark_energy_model: ppf
+      num_massive_neutrinos: 1
+likelihood:
+  desi_y1_cosmo_bindings.cobaya_likelihoods.bao_likelihoods.desi_bao_all:
+    python_path: /global/homes/a/ashandon/desi-y1-kp
+    path: /global/homes/a/ashandon/desi-y1-kp/desi_y1_cosmo_bindings/cobaya_likelihoods
+params:
+  logA:
+    latex: \ln(10^{10} A_\mathrm{s})
+    drop: true
+    value: 3.036
+  As:
+    value: 'lambda logA: 1e-10*np.exp(logA)'
+    latex: A_\mathrm{s}
+  ns:
+    latex: n_\mathrm{s}
+    value: 0.9649
+  H0:
+    latex: H_0
+    value: 67.36
+  ombh2:
+    latex: \Omega_\mathrm{b} h^2
+    value: 0.02237
+  omch2:
+    value: 'lambda omm, mnu, ombh2, H0: omm*(H0/100)**2 - mnu / 93.14 - ombh2'
+    latex: \Omega_\mathrm{c} h^2
+  tau:
+    latex: \tau_\mathrm{reio}
+    value: 0.0544
+  mnu:
+    latex: \sum m_\nu
+    value: 0.06
+  nnu:
+    latex: N_\mathrm{eff}
+    value: 3.044
+  w:
+    prior:
+      min: -3.0
+      max: 1.0
+    ref:
+      dist: norm
+      loc: -1.0
+      scale: 0.02
+    proposal: 0.02
+    latex: w_{0}
+  wa:
+    prior:
+      min: -3.0
+      max: 2.0
+    ref:
+      dist: norm
+      loc: 0.0
+      scale: 0.05
+    proposal: 0.05
+    latex: w_{a}
+  omk:
+    prior:
+      min: -0.3
+      max: 0.3
+    ref:
+      dist: norm
+      loc: 0.0
+      scale: 0.01
+    proposal: 0.01
+    latex: \Omega_\mathrm{k}
+  omegam:
+    latex: \Omega_\mathrm{m}
+  omegamh2:
+    derived: 'lambda omegam, H0: omegam*(H0/100)**2'
+    latex: \Omega_\mathrm{m} h^2
+  omegal:
+    latex: \Omega_\Lambda
+  zrei:
+    latex: z_\mathrm{reio}
+  YHe:
+    latex: Y_\mathrm{P}
+  Y_p:
+    latex: Y_P^\mathrm{BBN}
+  DHBBN:
+    derived: 'lambda DH: 10**5*DH'
+    latex: 10^5 \mathrm{D}/\mathrm{H}
+  A:
+    derived: 'lambda As: 1e9*As'
+    latex: 10^9 A_\mathrm{s}
+  clamp:
+    derived: 'lambda As, tau: 1e9*As*np.exp(-2*tau)'
+    latex: 10^9 A_\mathrm{s} e^{-2\tau}
+  age:
+    latex: \mathrm{Age}/\mathrm{Gyr}
+  rdrag:
+    value: 'lambda hrdrag, H0: 100 * hrdrag / H0'
+    latex: r_\mathrm{d}
+  zdrag:
+    latex: z_\mathrm{d}
+  H0rdrag:
+    derived: 'lambda H0, rdrag: H0 * rdrag'
+    latex: H_0 r_\mathrm{d}
+  hrdrag:
+    prior:
+      min: 10.0
+      max: 1000.0
+    ref:
+      dist: norm
+      loc: 99.079
+      scale: 1.0
+    proposal: 1.0
+    latex: hr_\mathrm{d}
+  omm:
+    prior:
+      min: 0.01
+      max: 0.99
+    ref:
+      dist: norm
+      loc: 0.3152
+      scale: 0.001
+    proposal: 0.0005
+    drop: true
+sampler:
+  polychord:
+    nlive: 500
+    num_repeats: 20
+    nprior: 500
+    nfail: 500
+    do_clustering: True
+    feedback: 3
+    precision_criterion: 0.01
+    max_ndead: 5000
+    boost_posterior: 0.0
+    posteriors: True
+    equals: True
+    cluster_posteriors: True
+    write_stats: True
+    write_live: True
+    write_dead: True
+    write_prior: True
+    compression_factor: 0.36787944117144233
+    synchronous: True
+    seed: 42
+output: /pscratch/sd/a/ashandon/bedcosmo/num_tracers/chains/polychord/camb/run20251002_032506/chain

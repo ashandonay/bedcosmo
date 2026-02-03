@@ -1,1 +1,1 @@
-"""Unit tests for BED_cosmo plotting module."""
+"""Unit tests for bedcosmo plotting module."""

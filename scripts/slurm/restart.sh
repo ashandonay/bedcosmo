@@ -87,7 +87,7 @@ if [ -z "$RESTART_STEP" ] && [ -z "$RESTART_CHECKPOINT" ]; then
 fi
 
 # Set log directory based on cosmo_exp
-LOG_DIR="/pscratch/sd/a/ashandon/bed/BED_cosmo/${COSMO_EXP}/logs"
+LOG_DIR="${SCRATCH}/bedcosmo/${COSMO_EXP}/logs"
 mkdir -p "$LOG_DIR"
 
 # Capture all stdout/stderr in a single log file.
@@ -149,6 +149,6 @@ srun torchrun \
      --node_rank=$SLURM_PROCID \
      --rdzv_backend=c10d \
      --rdzv_endpoint=$MASTER_ADDR:$MASTER_PORT \
-     /global/homes/a/ashandon/bed/BED_cosmo/train.py \
+     -m bedcosmo.train \
      "${RESTART_ARGS[@]}" \
      "${EXTRA_ARGS[@]}"

@@ -53,7 +53,7 @@ if [ -z "$RUN_ID" ]; then
 fi
 
 # Set log directory based on cosmo_exp
-LOG_DIR="/pscratch/sd/a/ashandon/bed/BED_cosmo/${COSMO_EXP}/logs"
+LOG_DIR="${SCRATCH}/bedcosmo/${COSMO_EXP}/logs"
 mkdir -p "$LOG_DIR"
 
 # Capture all stdout/stderr in a single log file.
@@ -80,7 +80,7 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 srun torchrun \
     --nnodes=1 \
     --nproc_per_node=1 \
-    /global/homes/a/ashandon/bed/BED_cosmo/evaluate.py \
+    -m bedcosmo.evaluate \
     --cosmo_exp "$COSMO_EXP" \
     --run_id "$RUN_ID" \
     "${EXTRA_ARGS[@]}"
