@@ -1,5 +1,6 @@
 import argparse
 import json
+import os
 import traceback
 from typing import Dict, List, Tuple
 
@@ -20,6 +21,13 @@ DEFAULT_PRIORS = {
 }
 
 TARGET_NAMES = ["qiso", "qap", "f_sigmar", "m"]
+
+
+def get_default_save_path() -> str:
+    scratch = os.environ.get("SCRATCH")
+    if not scratch:
+        raise EnvironmentError("SCRATCH is not set; please pass --save-path explicitly.")
+    return os.path.join(scratch, "bedcosmo", "num_tracers", "shapefit")
 
 
 def latin_hypercube_samples(
@@ -90,6 +98,7 @@ def generate_dataset(
     seed: int = 0,
     verbose_every: int = 200,
     sigma_clip: float = 4.0,
+    omega_m_bounds: Tuple[float, float] = (0.05, 1.0),
 ) -> Tuple[List[str], np.ndarray, np.ndarray]:
     extractor = ShapeFitPowerSpectrumExtractor()
     param_names = list(priors.keys())
@@ -112,6 +121,10 @@ def generate_dataset(
         for sample in draws:
             total_attempts += 1
             try:
+                omega_m = (sample["omega_cdm"] + sample["omega_b"]) / (sample["h"] ** 2)
+                if not (omega_m_bounds[0] <= omega_m <= omega_m_bounds[1]):
+                    failed += 1
+                    continue
                 targets = run_extractor(extractor, sample)
                 param_rows.append([sample[p] for p in param_names])
                 target_rows.append([targets[t] for t in TARGET_NAMES])
@@ -119,14 +132,16 @@ def generate_dataset(
                 failed += 1
                 continue
 
-            if len(param_rows) % verbose_every == 0:
-                print(
-                    f"Accepted {len(param_rows):>6}/{n_samples}, "
-                    f"failed {failed}, attempts {total_attempts}"
-                )
-
             if len(param_rows) >= n_samples:
                 break
+        if total_attempts % verbose_every == 0 or len(param_rows) >= n_samples:
+            accepted = len(param_rows)
+            rate = accepted / max(total_attempts, 1)
+            print(
+                f"Accepted {accepted:>6}/{n_samples}, "
+                f"failed {failed}, attempts {total_attempts}, "
+                f"acceptance={100.0 * rate:.2f}%"
+            )
 
     X = np.asarray(param_rows, dtype=np.float64)
     y = np.asarray(target_rows, dtype=np.float64)
@@ -141,6 +156,7 @@ def save_dataset(
     test_size: float = 0.2,
     random_state: int = 1,
 ) -> None:
+    os.makedirs(save_path, exist_ok=True)
     X_train, X_test, y_train, y_test = train_test_split(
         X, y, test_size=test_size, random_state=random_state
     )
@@ -191,8 +207,11 @@ def main() -> None:
     parser.add_argument("--batch-size", type=int, default=256)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--test-size", type=float, default=0.2)
-    parser.add_argument("--save-path", type=str, default=".")
+    parser.add_argument("--save-path", type=str, default=get_default_save_path())
     parser.add_argument("--sigma-clip", type=float, default=4.0)
+    parser.add_argument("--verbose-every", type=int, default=200)
+    parser.add_argument("--omega-m-min", type=float, default=0.05)
+    parser.add_argument("--omega-m-max", type=float, default=1.0)
     parser.add_argument(
         "--priors-json",
         type=str,
@@ -205,7 +224,9 @@ def main() -> None:
     args = parser.parse_args()
 
     priors = DEFAULT_PRIORS if not args.priors_json else parse_priors(args.priors_json)
+    save_path = os.path.abspath(args.save_path)
     print("Using priors:", priors)
+    print("Writing dataset to:", save_path)
 
     try:
         param_names, X, y = generate_dataset(
@@ -213,11 +234,13 @@ def main() -> None:
             n_samples=args.n_samples,
             batch_size=args.batch_size,
             seed=args.seed,
+            verbose_every=args.verbose_every,
             sigma_clip=args.sigma_clip,
+            omega_m_bounds=(args.omega_m_min, args.omega_m_max),
         )
         print(f"Generated dataset with shape X={X.shape}, y={y.shape}")
         save_dataset(
-            save_path=args.save_path,
+            save_path=save_path,
             param_names=param_names,
             X=X,
             y=y,
