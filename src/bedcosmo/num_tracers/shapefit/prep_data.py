@@ -102,6 +102,9 @@ def generate_dataset(
     omega_m_bounds: Tuple[float, float] = (0.05, 1.0),
 ) -> Tuple[List[str], np.ndarray, np.ndarray]:
     extractor = ShapeFitPowerSpectrumExtractor()
+    # Preflight sanity check so we fail fast if extractor setup is broken.
+    extractor()
+    extractor.get()
     param_names = list(priors.keys())
     param_rows: List[List[float]] = []
     target_rows: List[List[float]] = []
@@ -109,6 +112,7 @@ def generate_dataset(
     total_attempts = 0
     failed = 0
     lhs_seed = seed
+    printed_exception = False
 
     while len(param_rows) < n_samples:
         draws = latin_hypercube_samples(
@@ -131,6 +135,11 @@ def generate_dataset(
                 target_rows.append([targets[t] for t in TARGET_NAMES])
             except Exception:
                 failed += 1
+                if not printed_exception:
+                    printed_exception = True
+                    print("First extractor failure (showing traceback once):")
+                    traceback.print_exc()
+                    print(f"Failing sample: {sample}")
                 continue
 
             if len(param_rows) >= n_samples:
