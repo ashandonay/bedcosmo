@@ -1,10 +1,10 @@
 # bedcosmo
 
-Bayesian Experimental Design for Cosmology using Neural Density Estimation.
+Bayesian Experimental Design for Cosmology
 
 ## Overview
 
-bedcosmo optimizes experimental designs for cosmological parameter inference using neural flows (normalizing flows). The framework learns to estimate the Expected Information Gain (EIG) for different survey configurations, enabling data-driven optimization of galaxy redshift surveys like LSST/DESI.
+bedcosmo provides a framework for optimizing cosmological surveys for parameter inference. The goal is to estimate the Expected Information Gain (EIG) by training normalizing flows to approximate densities with variational inference, enabling data-driven optimization of galaxy redshift surveys like LSST/DESI.
 
 The core approach:
 1. Train a conditional normalizing flow to approximate the posterior distribution p(θ|x, d) where θ are cosmological parameters, x is observed data, and d is the experimental design
@@ -12,6 +12,15 @@ The core approach:
 3. Identify optimal survey configurations that maximize information about cosmological parameters
 
 ## Installation
+
+### Create a conda environment
+
+```bash
+conda env create -f environment.yaml
+conda activate bedcosmo
+```
+
+### Install the package
 
 ```bash
 git clone https://github.com/ashandonay/bedcosmo.git
