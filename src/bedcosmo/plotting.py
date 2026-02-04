@@ -11,7 +11,7 @@ import numpy as np
 from getdist import plots
 from bedcosmo.util import (
     get_runs_data, init_experiment, init_nf, load_model, auto_seed, convert_color,
-    load_nominal_samples, get_contour_area,
+    load_nominal_samples, get_contour_area, get_nominal_samples, sort_key_for_group_tuple,
 )
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
