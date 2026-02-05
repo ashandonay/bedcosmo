@@ -915,16 +915,76 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         """
         Unnormalized likelihood compatible with bed.bayesdesign brute-force routines.
         """
-        z_tensor = torch.as_tensor(getattr(params, "z"), device=self.device, dtype=torch.float64)
-        mags_model = self._calculate_magnitudes(z_tensor).cpu().numpy()
+        def _grid_array(grid, name):
+            """Get axis values without GridStack trailing singleton pad dimensions."""
+            values = np.asarray(getattr(grid, name), dtype=np.float64)
+            grid_ndim = len(grid.shape)
+            if values.ndim > grid_ndim:
+                values = values.reshape(values.shape[:grid_ndim])
+            return values
 
-        mag_obs = np.stack([getattr(features, f"mag_{band}") for band in self.filters_list], axis=-1)
-        nvisits = np.stack([getattr(designs, f"n_{band}") for band in self.filters_list], axis=-1)
+        # Parameter grid (z): shape P
+        z_values = _grid_array(params, "z")
+        z_shape = z_values.shape
+        z_tensor = torch.as_tensor(z_values, device=self.device, dtype=torch.float64)
+        mags_model = self._calculate_magnitudes(z_tensor).detach().cpu().numpy()
+        # mags_model shape: P + (num_filters,)
 
+        # Feature grid (magnitudes): broadcast per-filter axes to a common feature shape X
+        feature_axes = [_grid_array(features, f"mag_{band}") for band in self.filters_list]
+        feature_axes = np.broadcast_arrays(*feature_axes)
+        mag_obs = np.stack(feature_axes, axis=-1)
+        feature_shape = mag_obs.shape[:-1]
+        # mag_obs shape: X + (num_filters,)
+
+        # Design grid (visits): broadcast per-filter axes to common design shape D
+        design_axes = [_grid_array(designs, f"n_{band}") for band in self.filters_list]
+        design_axes = np.broadcast_arrays(*design_axes)
+        nvisits = np.stack(design_axes, axis=-1)
+        design_shape = nvisits.shape[:-1]
+        # nvisits shape: D + (num_filters,)
+
+        # Magnitude errors depend on model magnitudes and design only (not on observed features).
+        # Arrange as D + P + (num_filters,) so final output ordering is X + D + P.
+        mags_for_sigma = mags_model.reshape((1,) * len(design_shape) + z_shape + (self.num_filters,))
+        nvisits_for_sigma = nvisits.reshape(design_shape + (1,) * len(z_shape) + (self.num_filters,))
         sigmas = self._magnitude_errors(
-            torch.as_tensor(mags_model, device=self.device, dtype=torch.float64),
-            torch.as_tensor(nvisits, device=self.device, dtype=torch.float64),
-        ).cpu().numpy()
+            torch.as_tensor(mags_for_sigma, device=self.device, dtype=torch.float64),
+            torch.as_tensor(nvisits_for_sigma, device=self.device, dtype=torch.float64),
+        ).detach().cpu().numpy()
+        # sigmas shape: D + P + (num_filters,)
 
-        diff = (mag_obs - mags_model) / sigmas
-        return np.exp(-0.5 * diff**2).prod(axis=-1)
+        # Build full broadcasted shapes for likelihood: X + D + P + (num_filters,)
+        mag_obs_full = mag_obs.reshape(
+            feature_shape
+            + (1,) * len(design_shape)
+            + (1,) * len(z_shape)
+            + (self.num_filters,)
+        )
+        mags_full = mags_model.reshape(
+            (1,) * len(feature_shape)
+            + (1,) * len(design_shape)
+            + z_shape
+            + (self.num_filters,)
+        )
+        sigma_full = sigmas.reshape(
+            (1,) * len(feature_shape)
+            + design_shape
+            + z_shape
+            + (self.num_filters,)
+        )
+
+        diff = (mag_obs_full - mags_full) / sigma_full
+        log_likelihood = -0.5 * np.sum(diff**2, axis=-1)
+
+        # Stabilize exponentiation per (design, parameter) slice to avoid all-zero
+        # likelihoods over the feature grid from floating-point underflow.
+        feature_axes = tuple(range(len(feature_shape)))
+        if feature_axes:
+            log_likelihood = log_likelihood - np.max(
+                log_likelihood, axis=feature_axes, keepdims=True
+            )
+
+        likelihood = np.exp(log_likelihood)
+        # likelihood shape: X + D + P
+        return likelihood
