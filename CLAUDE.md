@@ -23,9 +23,9 @@ bedcosmo/
 │   ├── num_tracers/        # YAML configs, cobaya/, cosmopower/, notebooks/
 │   ├── variable_redshift/  # YAML configs, notebooks/
 │   └── num_visits/         # YAML configs
+├── submit.sh               # Training script
 ├── scripts/
-│   ├── local/              # Local (non-SLURM) job scripts
-│   └── slurm/              # SLURM job submission scripts
+│   └── slurm/              # SLURM job scripts (train.sh, eval.sh)
 ├── tests/                  # Test files
 └── pyproject.toml          # Package configuration
 ```
@@ -43,30 +43,31 @@ ruff check --fix .              # Auto-fix lint issues
 mypy .                          # Type check
 ```
 
-### Job Submission (NERSC/SLURM)
+### Job Submission
 ```bash
-# Training
-./scripts/slurm/submit.sh train num_tracers base
-./scripts/slurm/submit.sh train num_tracers base_w_wa --initial_lr 0.0001
+# Training (auto-detects SLURM on NERSC, local elsewhere)
+./submit.sh train num_tracers base
+./submit.sh train num_tracers base_w_wa --initial_lr 0.0001
+
+# SLURM with custom time and queue
+./submit.sh train num_tracers base --time 04:00 --queue regular
+./submit.sh train num_tracers base --time 02:00 --queue shared --nodes 2
+
+# Force local execution on a SLURM system
+./submit.sh train num_tracers base --local --gpus 2
+
+# Debug mode (logs to 'debug' MLflow experiment)
+./submit.sh train num_tracers base --debug
 
 # Evaluation
-./scripts/slurm/submit.sh eval num_tracers <run_id>
-./scripts/slurm/submit.sh eval num_tracers <run_id> --eig_file_path <path_to_json>
+./submit.sh eval num_tracers <run_id>
+./submit.sh eval num_tracers <run_id> --eig_file_path <path_to_json>
 
 # Resume/Restart training
-./scripts/slurm/submit.sh resume num_tracers <run_id> <step>
-./scripts/slurm/submit.sh restart num_tracers <run_id> <step>
+./submit.sh resume num_tracers <run_id> <step>
+./submit.sh restart num_tracers <run_id> <step>
 
-# Available cosmology models: base, base_omegak, base_w, base_w_wa, base_omegak_w_wa
-# Optional flags: --log_usage, --profile
-```
-
-### Local Job Submission (non-SLURM)
-```bash
-# Same interface as SLURM scripts, but runs directly without job queue
-./scripts/local/submit.sh train num_tracers base --total_steps 100 --gpus 1
-./scripts/local/submit.sh eval num_tracers <run_id>
-./scripts/local/submit.sh resume num_tracers <run_id> <step>
+# Optional flags: --debug, --log_usage, --profile
 ```
 
 ## Architecture

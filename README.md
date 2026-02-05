@@ -40,25 +40,30 @@ pip install -e ".[dev]"
 ### Training a Model
 
 ```bash
-./scripts/local/submit.sh train num_tracers base --gpus 1
+./submit.sh train num_tracers base
 ```
 
-This trains a neural flow for the `base` cosmology model (Ωm, H₀rd parameters) on the `num_tracers` experiment.
-
-For HPC clusters with SLURM:
+This trains a neural flow for the `base` cosmology model (Omega_m, H_0rd parameters) on the `num_tracers` experiment. The script auto-detects whether SLURM is available (submits via `sbatch`) or runs locally (via `torchrun`).
 
 ```bash
-./scripts/slurm/submit.sh train num_tracers base
+# SLURM with custom time and queue
+./submit.sh train num_tracers base --time 04:00 --queue regular
+
+# Force local execution
+./submit.sh train num_tracers base --local --gpus 1
+
+# Debug mode (uses SLURM debug queue / 'debug' MLflow experiment)
+./submit.sh train num_tracers base --debug
 ```
 
 ### Resuming/Restarting Training
 
 ```bash
 # Resume from a checkpoint (continues the same run)
-./scripts/local/submit.sh resume num_tracers <run_id> <step>
+./submit.sh resume num_tracers <run_id> <step>
 
 # Restart from a checkpoint (creates a new run)
-./scripts/local/submit.sh restart num_tracers <run_id> <step>
+./submit.sh restart num_tracers <run_id> <step>
 ```
 
 ### Evaluating a Model
@@ -66,7 +71,7 @@ For HPC clusters with SLURM:
 After training completes, evaluate the model to compute EIG:
 
 ```bash
-./scripts/local/submit.sh eval num_tracers <run_id>
+./submit.sh eval num_tracers <run_id>
 ```
 
 The `run_id` is the MLflow run ID printed when training starts (or find it in the MLflow UI).
@@ -115,7 +120,7 @@ Training is configured via YAML files in each experiment directory:
 CLI arguments override YAML defaults:
 
 ```bash
-./scripts/local/submit.sh train num_tracers base --initial_lr 0.0001 --total_steps 300000
+./submit.sh train num_tracers base --initial_lr 0.0001 --total_steps 300000
 ```
 
 ### Key Training Parameters
@@ -174,7 +179,7 @@ class MyExperiment:
    - `prior_args.yaml` - Prior distributions
    - `design_args.yaml` - Design space
 
-4. Train: `./scripts/local/submit.sh train my_experiment base`
+4. Train: `./submit.sh train my_experiment base`
 
 ## Development
 
@@ -205,7 +210,7 @@ Check output logs in `$SCRATCH/bedcosmo/{cosmo_exp}/logs/`
 
 Reduce `n_particles_per_device` in the training args or via CLI:
 ```bash
-./scripts/local/submit.sh train num_tracers base --n_particles_per_device 20
+./submit.sh train num_tracers base --n_particles_per_device 20
 ```
 
 ### MLflow Connection Issues
@@ -219,7 +224,7 @@ mlflow.set_tracking_uri(f"file:{storage_path}/mlruns")
 
 Use `--restart_checkpoint` to specify an exact checkpoint file:
 ```bash
-./scripts/local/submit.sh restart num_tracers <run_id> --restart_checkpoint /path/to/checkpoint.pt
+./submit.sh restart num_tracers <run_id> --restart_checkpoint /path/to/checkpoint.pt
 ```
 
 ## Citation

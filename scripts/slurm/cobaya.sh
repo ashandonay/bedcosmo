@@ -31,7 +31,7 @@ touch "$JOB_LOG"
 exec > >(tee -a "$JOB_LOG") 2>&1
 
 # Change to working directory
-cd "$PROJECT_ROOT"
+cd /global/homes/a/ashandon/bed/BED_cosmo
 
 # Print job information
 echo "Job ID: $SLURM_JOB_ID"

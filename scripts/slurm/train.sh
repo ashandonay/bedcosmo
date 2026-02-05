@@ -1,17 +1,15 @@
 #!/bin/bash
 #SBATCH -C gpu
-#SBATCH -q regular
 #SBATCH -A desi
 #SBATCH --job-name=train
-#SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1     # 1 primary Slurm task per node
-#SBATCH --cpus-per-task=128     # CPUs for all DDP workers on the node (e.g., 4 workers * 32 cpus/worker)
-#SBATCH --gpus-per-node=4       # Number of GPUs to request per node
-#SBATCH --time=12:00:00
+#SBATCH --cpus-per-task=128     # CPUs for all DDP workers on the node
+#SBATCH --gpus-per-node=4       # Default GPUs per node (overridable via submit.sh --gpus)
 #SBATCH --mail-type=ALL
 #SBATCH --mail-user=ashandon@uci.edu
 #SBATCH --output=/dev/null
 #SBATCH --error=/dev/null
+# Note: --time, --qos, and --nodes are set by submit.sh via sbatch CLI flags
 
 # Parse named arguments
 COSMO_EXP=""
@@ -51,6 +49,41 @@ mkdir -p "$LOG_DIR"
 JOB_LOG="${LOG_DIR}/${SLURM_JOB_ID}_${SLURM_JOB_NAME}.log"
 touch "$JOB_LOG"
 exec > >(tee -a "$JOB_LOG") 2>&1
+
+# Print job information and CLI overrides
+echo "=========================================="
+echo "SLURM Job Started"
+echo "=========================================="
+echo "Job ID:       $SLURM_JOB_ID"
+echo "Job Name:     $SLURM_JOB_NAME"
+echo "Nodes:        $SLURM_NNODES"
+echo "GPUs/Node:    $SLURM_GPUS_PER_NODE"
+echo "Cosmo Exp:    $COSMO_EXP"
+echo "Start Time:   $(date '+%Y-%m-%d %H:%M:%S')"
+echo ""
+if [ -n "$BED_CLI_OVERRIDES" ]; then
+    echo "CLI Overrides (non-default values):"
+    echo "------------------------------------"
+    # Parse and print key-value pairs
+    set -- $BED_CLI_OVERRIDES
+    while [ $# -gt 0 ]; do
+        if [[ "$1" == --* ]]; then
+            if [ $# -gt 1 ] && [[ "$2" != --* ]]; then
+                echo "  $1 $2"
+                shift 2
+            else
+                echo "  $1"
+                shift 1
+            fi
+        else
+            shift 1
+        fi
+    done
+else
+    echo "CLI Overrides: (none - using YAML defaults)"
+fi
+echo "=========================================="
+echo ""
 
 # Load conda first, then activate, then other GPU libraries
 module load conda
