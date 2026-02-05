@@ -8,6 +8,12 @@ set -e  # Exit on error
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
+# Ensure SCRATCH is set (used for MLflow storage, logs, etc.)
+if [ -z "${SCRATCH:-}" ]; then
+    export SCRATCH="$HOME/scratch"
+    echo "SCRATCH was unset; set to: $SCRATCH"
+fi
+
 # Check if job type is provided
 if [ $# -eq 0 ]; then
     echo "Error: Job type is required"
