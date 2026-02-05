@@ -85,7 +85,7 @@ class Bijector:
             Dictionary with 'bins' and 'cdf_values' keys for fast CDF computation
         """
         with pyro.plate_stack("plate", (num_samples,)):
-            empirical_prior = self.experiment.sample_valid_parameters(
+            empirical_prior = self.experiment.sample_parameters(
                 (num_samples,), prior=self.prior, use_prior_flow=self.use_prior_flow
             )
         cdfs = {}

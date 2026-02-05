@@ -453,7 +453,7 @@ class NumVisits(BaseExperiment, CosmologyMixin):
             self.designs = self.nominal_design.unsqueeze(0).to(self.device)
 
     @profile_method
-    def sample_valid_parameters(self, sample_shape, prior=None, **kwargs):
+    def sample_parameters(self, sample_shape, prior=None, use_prior_flow=True, **kwargs):
         """
         Sample valid parameters from prior.
 
@@ -812,7 +812,7 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         # Check if we should use a posterior model as prior
         if hasattr(self, 'prior_flow') and self.prior_flow is not None:
             # Use base class prior flow sampling (returns shape (*batch_shape, n_params))
-            samples = self._sample_prior_flow(batch_shape)
+            samples = self._sample_prior_flow_cache(batch_shape)
             z = samples.squeeze(-1)  # Squeeze last dim since we only have z
             z = pyro.sample("z", dist.Delta(z))  # Register with pyro
         else:
@@ -831,32 +831,6 @@ class NumVisits(BaseExperiment, CosmologyMixin):
     @profile_method
     def params_from_unconstrained(self, y, bijector_class=None):
         return y
-
-    @profile_method
-    def get_prior_samples(self, num_samples=100000):
-        # Sample from prior or prior_flow if available; produce (num_samples, n_params) float64
-        if hasattr(self, 'prior_flow') and self.prior_flow is not None:
-            # Use base class prior flow sampling (returns shape (num_samples, n_params))
-            param_samples = self._sample_prior_flow(num_samples).to(device=self.device, dtype=torch.float64)
-        else:
-            with pyro.plate("plate", num_samples):
-                parameters = {}
-                for i, (k, v) in enumerate(self.prior.items()):
-                    if isinstance(v, dist.Distribution):
-                        parameters[k] = pyro.sample(k, v).unsqueeze(-1)
-                    else:
-                        parameters[k] = v
-            param_samples = torch.stack(list(parameters.values()), dim=-1).squeeze(-1)
-        # Ensure (num_samples, n_params) and float64 for getdist
-        if param_samples.dtype != torch.float64:
-            param_samples = param_samples.to(torch.float64)
-        with contextlib.redirect_stdout(io.StringIO()):
-            samples_gd = getdist.MCSamples(
-                samples=param_samples.cpu().numpy(),
-                names=self.cosmo_params,
-                labels=self.latex_labels,
-            )
-        return samples_gd
 
     @profile_method
     def get_guide_samples(

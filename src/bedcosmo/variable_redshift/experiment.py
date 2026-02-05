@@ -533,7 +533,7 @@ class VariableRedshift(BaseExperiment, CosmologyMixin):
     # Note: _E_of_z, D_H_func, D_M_func are inherited from CosmologyMixin
 
     @profile_method
-    def sample_valid_parameters(self, sample_shape, prior=None, use_prior_flow=True):
+    def sample_parameters(self, sample_shape, prior=None, use_prior_flow=True):
         """Sample parameters from prior with constraints."""
         parameters = {}
         if prior is None:
@@ -592,7 +592,7 @@ class VariableRedshift(BaseExperiment, CosmologyMixin):
         Uses MultivariateNormal with diagonal covariance matrix.
         """
         with pyro.plate_stack("plate", z.shape[:-1]):
-            parameters = self.sample_valid_parameters(z.shape[:-1])
+            parameters = self.sample_parameters(z.shape[:-1])
             
             # Compute mean predictions for all observations
             D_H_mean = self.D_H_func(z, **parameters)
@@ -625,9 +625,7 @@ class VariableRedshift(BaseExperiment, CosmologyMixin):
         if self.transform_input and transform_output:
             param_samples = self.params_from_unconstrained(param_samples)
         
-        # Apply multiplier for hrdrag if present
-        if self._idx_hr and hasattr(self, 'hrdrag_multiplier'):
-            param_samples[..., self._idx_hr[0]] *= self.hrdrag_multiplier
+        self.apply_multipliers(param_samples)
 
         if params is None:
             names = self.cosmo_params
@@ -733,10 +731,8 @@ class VariableRedshift(BaseExperiment, CosmologyMixin):
         if self.transform_input and transform_output:
             param_samples = self.params_from_unconstrained(param_samples)
         
-        # Apply multiplier for hrdrag if present
-        if self._idx_hr and hasattr(self, 'hrdrag_multiplier'):
-            param_samples[..., self._idx_hr[0]] *= self.hrdrag_multiplier
-        
+        self.apply_multipliers(param_samples)
+
         # Reshape to [num_data_samples, num_param_samples, num_params]
         param_samples = param_samples.view(num_data_samples, num_param_samples, -1)
         

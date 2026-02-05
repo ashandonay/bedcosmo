@@ -648,7 +648,7 @@ class NumTracers(BaseExperiment, CosmologyMixin):
             param_samples = guide(context.squeeze()).sample((num_samples,))
         if self.transform_input and transform_output:
             param_samples = self.params_from_unconstrained(param_samples)
-        param_samples[..., -1] *= self.hrdrag_multiplier
+        self.apply_multipliers(param_samples)
 
         if params is None:
             names = self.cosmo_params
@@ -694,7 +694,6 @@ class NumTracers(BaseExperiment, CosmologyMixin):
             desi_samples_gd = getdist.MCSamples(samples=param_samples, names=names, labels=labels)
 
         return desi_samples_gd
-
 
     @profile_method
     def sample_data(self, tracer_ratio, num_samples=100, central=True):
@@ -768,8 +767,8 @@ class NumTracers(BaseExperiment, CosmologyMixin):
         # Apply transformations if needed
         if self.transform_input and transform_output:
             param_samples = self.params_from_unconstrained(param_samples)
-        param_samples[..., -1] *= self.hrdrag_multiplier
-        
+        self.apply_multipliers(param_samples)
+
         # Reshape to [num_data_samples, num_param_samples, num_params]
         param_samples = param_samples.view(num_data_samples, num_param_samples, -1)
         
@@ -869,7 +868,7 @@ class NumTracers(BaseExperiment, CosmologyMixin):
         return torch.tensor(np.array(param_samples), device=self.device)
 
     @profile_method
-    def sample_valid_parameters(self, sample_shape, prior=None, use_prior_flow=True):
+    def sample_parameters(self, sample_shape, prior=None, use_prior_flow=True):
         """
         Sample parameters from prior or from a trained posterior model if available.
 
@@ -890,12 +889,11 @@ class NumTracers(BaseExperiment, CosmologyMixin):
         # Check if we should use a posterior model as prior
         if use_prior_flow and hasattr(self, 'prior_flow') and self.prior_flow is not None:
             # Get raw samples from prior flow (shape: *sample_shape, n_params)
-            samples = self._sample_prior_flow(sample_shape)
+            samples = self._sample_prior_flow_cache(sample_shape)
             
             # Register each parameter with pyro.sample
             for i, param_name in enumerate(self.cosmo_params):
                 param_values = samples[..., i]
-                print(param_name, param_values[:5])
                 parameters[param_name] = pyro.sample(param_name, dist.Delta(param_values)).unsqueeze(-1)
             
             return parameters
@@ -950,7 +948,7 @@ class NumTracers(BaseExperiment, CosmologyMixin):
     def pyro_model(self, tracer_ratio):
         passed_ratio = self.calc_passed(tracer_ratio)
         with pyro.plate_stack("plate", passed_ratio.shape[:-1]):
-            parameters = self.sample_valid_parameters(passed_ratio.shape[:-1])
+            parameters = self.sample_parameters(passed_ratio.shape[:-1])
             means = torch.zeros(passed_ratio.shape[:-1] + (self.sigmas.shape[-1],), device=self.device)
             rescaled_sigmas = torch.zeros(passed_ratio.shape[:-1] + (self.sigmas.shape[-1],), device=self.device)
             z_eff = torch.tensor(self.desi_data[self.desi_data["quantity"] == "DH_over_rs"]["z"].to_list(), device=self.device)
@@ -1255,7 +1253,7 @@ class NumTracers(BaseExperiment, CosmologyMixin):
         
         with pyro.plate_stack("plate", passed_ratio.shape[:-1]):
             # Sample cosmological parameters from prior
-            parameters = self.sample_valid_parameters(passed_ratio.shape[:-1])
+            parameters = self.sample_parameters(passed_ratio.shape[:-1])
             
             # Compute theoretical power spectrum multipoles (vectorized)
             # Shape: (..., n_ells, n_k)

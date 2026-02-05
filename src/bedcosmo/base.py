@@ -32,16 +32,19 @@ class BaseExperiment(ABC):
         - init_designs: Initialize design space
         - init_prior: Initialize prior distributions
         - pyro_model: Define probabilistic model for inference
-        - sample_valid_parameters: Sample parameters from prior with constraints
+        - sample_parameters: Sample parameters from prior with constraints
 
     Subclasses may override:
         - params_to_unconstrained: Transform parameters to unconstrained space
         - params_from_unconstrained: Transform parameters from unconstrained space
         - get_guide_samples: Get samples from trained guide
-        - get_prior_samples: Get samples from prior
         - get_nominal_samples: Get nominal/reference samples
         - sample_data: Sample synthetic data
         - sample_params_from_data_samples: Sample parameters given data
+
+    Concrete methods (shared by all subclasses):
+        - get_prior_samples: Get samples from prior (uses prior_flow if available)
+        - apply_multipliers: Apply parameter multipliers to stacked parameter tensor
 
     Required attributes (set by subclass):
         - name: Experiment name (str)
@@ -96,7 +99,7 @@ class BaseExperiment(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def sample_valid_parameters(self, sample_shape, prior=None, **kwargs):
+    def sample_parameters(self, sample_shape, prior=None, **kwargs):
         """
         Sample valid parameters from prior.
 
@@ -226,9 +229,7 @@ class BaseExperiment(ABC):
         if getattr(self, "transform_input", False) and transform_output:
             param_samples = self.params_from_unconstrained(param_samples)
 
-        # Apply hrdrag multiplier if present
-        if hasattr(self, "_idx_hr") and self._idx_hr and hasattr(self, "hrdrag_multiplier"):
-            param_samples[..., self._idx_hr[0]] *= self.hrdrag_multiplier
+        self.apply_multipliers(param_samples)
 
         # Filter parameters if requested
         if params is None:
@@ -258,23 +259,62 @@ class BaseExperiment(ABC):
 
         return param_samples_gd
 
-    @profile_method
-    def get_prior_samples(self, num_samples=5000, params=None, transform_output=True):
+    def apply_multipliers(self, param_samples):
         """
-        Get samples from the prior distribution.
+        Apply parameter multipliers to a stacked parameter tensor.
 
-        Default implementation raises NotImplementedError.
-        Subclasses should override if they support prior sampling.
+        Checks for {param_name}_multiplier attributes (set by init_prior from YAML config).
+
+        Args:
+            param_samples: Tensor with shape (..., n_params) ordered by self.cosmo_params
+
+        Returns:
+            The same tensor with multipliers applied in-place
+        """
+        for i, param_name in enumerate(self.cosmo_params):
+            multiplier = getattr(self, f"{param_name}_multiplier", None)
+            if multiplier is not None:
+                param_samples[..., i] *= multiplier
+        return param_samples
+
+    @profile_method
+    def get_prior_samples(self, num_samples=100000):
+        """
+        Sample from prior or prior_flow if available; return GetDist MCSamples in physical units.
+
+        Applies parameter multipliers (e.g. hrdrag_multiplier) so output is in display units.
 
         Args:
             num_samples: Number of samples to draw
-            params: Optional list of parameter names to return
-            transform_output: Whether to transform from unconstrained to physical space
 
         Returns:
             getdist.MCSamples object with parameter samples
         """
-        raise NotImplementedError(f"get_prior_samples not implemented for {self._name}")
+        if hasattr(self, "prior_flow") and self.prior_flow is not None:
+            param_samples = self._sample_prior_flow_cache(num_samples).to(
+                device=self.device, dtype=torch.float64
+            )
+        else:
+            with pyro.plate("plate", num_samples):
+                parameters = self.sample_parameters(
+                    (num_samples,), use_prior_flow=False
+                )
+            param_samples = torch.stack(
+                [parameters[k].squeeze(-1) for k in self.cosmo_params], dim=-1
+            )
+
+        if param_samples.dtype != torch.float64:
+            param_samples = param_samples.to(torch.float64)
+
+        self.apply_multipliers(param_samples)
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            samples_gd = getdist.MCSamples(
+                samples=param_samples.cpu().numpy(),
+                names=self.cosmo_params,
+                labels=self.latex_labels,
+            )
+        return samples_gd
 
     @profile_method
     def get_nominal_samples(self, num_samples=10000, params=None, transform_output=True):
@@ -367,9 +407,7 @@ class BaseExperiment(ABC):
         if getattr(self, "transform_input", False) and transform_output:
             param_samples = self.params_from_unconstrained(param_samples)
 
-        # Apply hrdrag multiplier if present
-        if hasattr(self, "_idx_hr") and self._idx_hr and hasattr(self, "hrdrag_multiplier"):
-            param_samples[..., self._idx_hr[0]] *= self.hrdrag_multiplier
+        self.apply_multipliers(param_samples)
 
         # Reshape to [num_data_samples, num_param_samples, num_params]
         param_samples = param_samples.view(num_data_samples, num_param_samples, -1)
@@ -404,7 +442,7 @@ class BaseExperiment(ABC):
     #   _prior_flow_cache_idx: Current index into cache
 
     @profile_method
-    def _sample_prior_flow_direct(self, total_samples):
+    def _sample_prior_flow(self, total_samples):
         """
         Sample directly from the prior flow (slow but fresh samples each time).
 
@@ -467,13 +505,13 @@ class BaseExperiment(ABC):
         if getattr(self, "global_rank", 0) == 0:
             print(f"Pre-generating {cache_size:,} samples from prior_flow for cache...")
 
-        self._prior_flow_cache = self._sample_prior_flow_direct(cache_size)
+        self._prior_flow_cache = self._sample_prior_flow(cache_size)
         self._prior_flow_cache_idx = 0
 
     @profile_method
-    def _sample_prior_flow(self, sample_shape):
+    def _sample_prior_flow_cache(self, sample_shape):
         """
-        Sample parameter values from a trained flow model used as prior.
+        Sample parameter values from a trained flow model used as prior, with caching.
 
         If prior_flow_use_cache is True, uses a pre-generated cache for fast access.
         If False, samples directly from the prior flow each time (slow but fresh).
@@ -511,7 +549,7 @@ class BaseExperiment(ABC):
             self._prior_flow_cache_idx += total_samples
         else:
             # Sample directly from prior flow (slow)
-            samples = self._sample_prior_flow_direct(total_samples)
+            samples = self._sample_prior_flow(total_samples)
 
         # Reshape to match sample_shape
         if isinstance(sample_shape, tuple):
