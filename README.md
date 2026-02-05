@@ -28,7 +28,7 @@ This installs all runtime and development dependencies (PyTorch, JAX, MLflow, co
 If you use conda, create an env with Python 3.10 and install the project (deps come from `pyproject.toml`):
 
 ```bash
-conda create -n bedcosmo python=3.10 -y
+conda create -n bedcosmo python=3.10 libstdcxx-ng -y
 conda activate bedcosmo
 pip install -e ".[dev]"
 ```

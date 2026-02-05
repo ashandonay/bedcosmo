@@ -241,6 +241,11 @@ else
     exit 1
 fi
 
+# Prefer conda env libraries (e.g. libstdc++) to avoid CXXABI / version conflicts with system libs
+if [ -n "${CONDA_PREFIX:-}" ] && [ -d "$CONDA_PREFIX/lib" ]; then
+    export LD_LIBRARY_PATH="${CONDA_PREFIX}/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+fi
+
 # Detect available GPUs and set or cap GPUS (avoids "invalid device ordinal" when default exceeds available)
 AVAILABLE_GPUS=$(python3 -c "import torch; print(torch.cuda.device_count())" 2>/dev/null) || AVAILABLE_GPUS=0
 [ -z "$AVAILABLE_GPUS" ] && AVAILABLE_GPUS=0
