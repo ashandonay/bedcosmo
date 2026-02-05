@@ -614,6 +614,31 @@ done
 echo "=========================================="
 echo ""
 
+# Build CLI overrides string for logging in job scripts
+# This captures only the arguments explicitly passed via CLI (not YAML defaults)
+CLI_OVERRIDES_STR=""
+for key in "${!CLI_ARGS[@]}"; do
+    value="${CLI_ARGS[$key]}"
+    if [ "$value" = "true" ]; then
+        CLI_OVERRIDES_STR+="--$key "
+    elif [ "$value" != "false" ]; then
+        CLI_OVERRIDES_STR+="--$key $value "
+    fi
+done
+# Add special flags that were parsed separately
+if [ "$LOG_USAGE" = true ]; then
+    CLI_OVERRIDES_STR+="--log_usage "
+fi
+if [ "$PROFILE" = true ]; then
+    CLI_OVERRIDES_STR+="--profile "
+fi
+if [ "$RESTART_OPTIMIZER" = true ]; then
+    CLI_OVERRIDES_STR+="--restart_optimizer "
+fi
+# Trim trailing space
+CLI_OVERRIDES_STR="${CLI_OVERRIDES_STR% }"
+export BED_CLI_OVERRIDES="$CLI_OVERRIDES_STR"
+
 # Capture sbatch output and exit code
 # Use a temporary file to ensure we capture all output even if there are issues
 TEMP_SBATCH_OUTPUT=$(mktemp)
