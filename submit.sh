@@ -325,38 +325,33 @@ fi
 # Activate conda environment (needed for MLflow and YAML parsing)
 # ──────────────────────────────────────────────────────────────────────
 if [ "$EXECUTION_MODE" = "slurm" ]; then
-    # SLURM path: use module load conda (NERSC-style)
     module load conda 2>/dev/null || true
-    source $(conda info --base)/etc/profile.d/conda.sh 2>/dev/null || source /opt/conda/etc/profile.d/conda.sh
-    conda activate bed-cosmo
-else
-    # Local path: more portable conda activation
-    if [ "$CONDA_DEFAULT_ENV" = "bedcosmo" ]; then
-        echo "Using existing conda environment: bedcosmo"
-    elif command -v conda &> /dev/null; then
-        if [ -n "$CONDA_PREFIX" ] && [[ "$CONDA_PREFIX" == *"/envs/"* ]]; then
-            CONDA_BASE="${CONDA_PREFIX%/envs/*}"
-        else
-            CONDA_BASE=$(conda info --base 2>/dev/null)
-        fi
-        if [ -n "$CONDA_BASE" ] && [ -f "$CONDA_BASE/etc/profile.d/conda.sh" ]; then
-            source "$CONDA_BASE/etc/profile.d/conda.sh"
-            conda activate bedcosmo
-            echo "Activated conda environment: bedcosmo"
-        else
-            echo "Warning: Could not find conda.sh, trying alternative activation..."
-            eval "$(conda shell.bash hook)"
-            conda activate bedcosmo
-        fi
-    else
-        echo "Error: conda not found. Please activate the bedcosmo env first: conda activate bedcosmo"
-        exit 1
-    fi
+fi
 
-    # Prefer conda env libraries (e.g. libstdc++) to avoid CXXABI / version conflicts with system libs
-    if [ -n "${CONDA_PREFIX:-}" ] && [ -d "$CONDA_PREFIX/lib" ]; then
-        export LD_LIBRARY_PATH="${CONDA_PREFIX}/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+if [ "$CONDA_DEFAULT_ENV" = "bedcosmo" ]; then
+    echo "Using existing conda environment: bedcosmo"
+else
+    # Source conda.sh to enable conda activate
+    if [ -n "$CONDA_PREFIX" ] && [[ "$CONDA_PREFIX" == *"/envs/"* ]]; then
+        CONDA_BASE="${CONDA_PREFIX%/envs/*}"
+    else
+        CONDA_BASE=$(conda info --base 2>/dev/null)
     fi
+    if [ -n "$CONDA_BASE" ] && [ -f "$CONDA_BASE/etc/profile.d/conda.sh" ]; then
+        source "$CONDA_BASE/etc/profile.d/conda.sh"
+    else
+        eval "$(conda shell.bash hook 2>/dev/null)" || {
+            echo "Error: conda not found. Please activate the bedcosmo env first: conda activate bedcosmo"
+            exit 1
+        }
+    fi
+    conda activate bedcosmo
+    echo "Activated conda environment: bedcosmo"
+fi
+
+# Prefer conda env libraries (e.g. libstdc++) to avoid CXXABI / version conflicts with system libs
+if [ -n "${CONDA_PREFIX:-}" ] && [ -d "$CONDA_PREFIX/lib" ]; then
+    export LD_LIBRARY_PATH="${CONDA_PREFIX}/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 fi
 
 # ──────────────────────────────────────────────────────────────────────
@@ -444,6 +439,7 @@ elif [ -n "$CONFIG_FILE" ]; then
     fi
 
     YAML_ARGS=()
+    YAML_ARG_COUNT=0
 
     TEMP_YAML_STDERR=$(mktemp)
     YAML_OUTPUT=$(python3 -c "
@@ -496,18 +492,22 @@ except Exception as e:
         if [ "$value" = "null" ] || [ "$value" = "None" ] || [ -z "$value" ]; then
             if [ "$JOB_TYPE" = "eval" ] && [ "$key" = "fixed_design" ]; then
                 YAML_ARGS+=("--$key" "null")
+                YAML_ARG_COUNT=$((YAML_ARG_COUNT + 1))
             fi
             continue
         fi
 
         if [ "$value" = "true" ]; then
             YAML_ARGS+=("--$key")
+            YAML_ARG_COUNT=$((YAML_ARG_COUNT + 1))
         elif [ "$value" = "false" ]; then
             continue
         elif [[ "$value" == \[*\] ]]; then
             YAML_ARGS+=("--$key" "$value")
+            YAML_ARG_COUNT=$((YAML_ARG_COUNT + 1))
         else
             YAML_ARGS+=("--$key" "$value")
+            YAML_ARG_COUNT=$((YAML_ARG_COUNT + 1))
         fi
     done < <(echo "$YAML_OUTPUT" | python3 -c "
 import json
@@ -526,7 +526,7 @@ for key, value in data.items():
         print(f'{key}={value}')
 ")
 
-    echo "Config loaded successfully (${#YAML_ARGS[@]} arguments from YAML)"
+    echo "Config loaded successfully ($YAML_ARG_COUNT arguments from YAML)"
 fi
 
 # ──────────────────────────────────────────────────────────────────────

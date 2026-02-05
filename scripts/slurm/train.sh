@@ -87,7 +87,7 @@ echo ""
 
 # Load conda first, then activate, then other GPU libraries
 module load conda
-conda activate bed-cosmo
+conda activate bedcosmo
 
 # Load NERSC CUDA and NCCL modules AFTER conda activation
 module load nccl/2.21.5 # NERSC NCCL for Slingshot

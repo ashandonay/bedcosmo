@@ -291,7 +291,7 @@ class BaseExperiment(ABC):
             getdist.MCSamples object with parameter samples
         """
         if hasattr(self, "prior_flow") and self.prior_flow is not None:
-            param_samples = self._sample_prior_flow_cache(num_samples).to(
+            param_samples = self._sample_prior_flow(total_samples=num_samples).to(
                 device=self.device, dtype=torch.float64
             )
         else:
@@ -532,9 +532,8 @@ class BaseExperiment(ABC):
 
         if use_cache:
             # Initialize cache if needed
-            cache_size = getattr(self, "prior_flow_cache_size", 100000)
             if not hasattr(self, "_prior_flow_cache") or self._prior_flow_cache is None:
-                self._init_prior_flow_cache(cache_size)
+                self._init_prior_flow_cache()
 
             # Check if we need to wrap around - shuffle and reuse
             if self._prior_flow_cache_idx + total_samples > len(self._prior_flow_cache):
