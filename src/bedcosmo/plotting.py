@@ -31,10 +31,12 @@ import glob as glob_module
 import traceback
 
 home_dir = os.environ["HOME"]
-sys.path.insert(0, home_dir + '/desi-y1-kp/')
-from desi_y1_plotting import KP7StylePaper, utils
-
-style = KP7StylePaper()
+try:
+    from desi_y1_plotting import KP7StylePaper
+    style = KP7StylePaper()
+except ImportError:
+    KP7StylePaper = None
+    style = None
 
 # Disable LaTeX rendering globally to avoid "latex could not be found" errors
 # This overrides any LaTeX settings that might be set by the style object

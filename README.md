@@ -13,18 +13,23 @@ The core approach:
 
 ## Installation
 
-### Create a conda environment
-
-```bash
-conda env create -f environment.yaml
-conda activate bedcosmo
-```
-
-### Install the package
+Dependencies are defined in `pyproject.toml`. Install the package in editable mode with dev extras (tests, linting, notebooks):
 
 ```bash
 git clone https://github.com/ashandonay/bedcosmo.git
 cd bedcosmo
+pip install -e ".[dev]"
+```
+
+This installs all runtime and development dependencies (PyTorch, JAX, MLflow, cobaya, etc.) from PyPI.
+
+### Optional: Conda environment
+
+If you use conda, create an env with Python 3.10 and install the project (deps come from `pyproject.toml`):
+
+```bash
+conda create -n bedcosmo python=3.10 libstdcxx-ng -y
+conda activate bedcosmo
 pip install -e ".[dev]"
 ```
 

@@ -8,6 +8,12 @@ set -e  # Exit on error
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
+# Ensure SCRATCH is set (used for MLflow storage, logs, etc.)
+if [ -z "${SCRATCH:-}" ]; then
+    export SCRATCH="$HOME/scratch"
+    echo "SCRATCH was unset; set to: $SCRATCH"
+fi
+
 # Check if job type is provided
 if [ $# -eq 0 ]; then
     echo "Error: Job type is required"
@@ -35,7 +41,7 @@ if [ $# -eq 0 ]; then
     echo "  ./submit.sh resume num_tracers abc123 5000"
     echo "  ./submit.sh restart num_tracers abc123 10000"
     echo ""
-    echo "Optional flags: --gpus <N> (default: 2), --omp_threads <N> (default: 32)"
+    echo "Optional flags: --gpus <N> (default: auto-detect), --omp_threads <N> (default: not set)"
     echo "                --log_usage, --profile, --restart_optimizer"
     echo "Note: 'eval', 'resume', and 'restart' jobs do not require --cosmo_model (inferred from MLflow run)"
     exit 1
@@ -45,7 +51,6 @@ JOB_TYPE=$1
 shift  # Remove job type from arguments
 
 # Initialize variables
-DEFAULT_COSMO_EXP="num_tracers"
 COSMO_EXP=""
 COSMO_MODEL=""
 RUN_ID=""
@@ -57,8 +62,9 @@ RESTART_CHECKPOINT=""
 LOG_USAGE=false
 PROFILE=false
 RESTART_OPTIMIZER=false
-GPUS=2  # Default GPU count
-OMP_THREADS=32  # Default OMP threads
+GPUS=""
+GPUS_SET_BY_USER=false
+OMP_THREADS=""
 
 declare -A CLI_ARGS  # Associative array for command-line arguments
 POSITIONAL_ARGS=()
@@ -100,6 +106,7 @@ while [[ $# -gt 0 ]]; do
             ;;
         --gpus)
             GPUS="$2"
+            GPUS_SET_BY_USER=true
             shift 2
             ;;
         --omp_threads)
@@ -187,10 +194,6 @@ if [ -z "$COSMO_MODEL" ] && [ "$JOB_TYPE" != "eval" ] && [ "$JOB_TYPE" != "resum
     POSITIONAL_ARGS=("${POSITIONAL_ARGS[@]:1}")
 fi
 
-if [ -z "$COSMO_EXP" ]; then
-    COSMO_EXP="$DEFAULT_COSMO_EXP"
-fi
-
 if [ ${#POSITIONAL_ARGS[@]} -gt 0 ]; then
     echo "Error: Unexpected positional arguments: ${POSITIONAL_ARGS[*]}"
     echo "Usage: ./submit.sh $JOB_TYPE [cosmo_exp] [id] [additional args...]"
@@ -212,26 +215,56 @@ if [ -z "$COSMO_MODEL" ] && [ "$JOB_TYPE" != "eval" ] && [ "$JOB_TYPE" != "resum
     exit 1
 fi
 
-# Activate conda environment early (needed for MLflow and YAML parsing)
-if [ -f "$HOME/.bashrc" ] && grep -q "conda" "$HOME/.bashrc"; then
-    source "$HOME/.bashrc"
-fi
-
-if command -v conda &> /dev/null; then
-    # Get conda base and activate
-    CONDA_BASE=$(conda info --base 2>/dev/null)
+# Activate conda environment early (needed for MLflow and YAML parsing).
+# Avoid sourcing .bashrc here—it can re-initialize a different conda that doesn't have bedcosmo.
+if [ "$CONDA_DEFAULT_ENV" = "bedcosmo" ]; then
+    # Already in the right env (e.g. user ran script with (bedcosmo) active)
+    echo "Using existing conda environment: bedcosmo"
+elif command -v conda &> /dev/null; then
+    # Derive conda base from current env so we use the same install that has bedcosmo
+    if [ -n "$CONDA_PREFIX" ] && [[ "$CONDA_PREFIX" == *"/envs/"* ]]; then
+        CONDA_BASE="${CONDA_PREFIX%/envs/*}"
+    else
+        CONDA_BASE=$(conda info --base 2>/dev/null)
+    fi
     if [ -n "$CONDA_BASE" ] && [ -f "$CONDA_BASE/etc/profile.d/conda.sh" ]; then
         source "$CONDA_BASE/etc/profile.d/conda.sh"
-        conda activate bed-cosmo
-        echo "Activated conda environment: bed-cosmo"
+        conda activate bedcosmo
+        echo "Activated conda environment: bedcosmo"
     else
         echo "Warning: Could not find conda.sh, trying alternative activation..."
         eval "$(conda shell.bash hook)"
-        conda activate bed-cosmo
+        conda activate bedcosmo
     fi
 else
-    echo "Error: conda not found. Please ensure conda is installed and in PATH."
+    echo "Error: conda not found. Please activate the bedcosmo env first: conda activate bedcosmo"
     exit 1
+fi
+
+# Prefer conda env libraries (e.g. libstdc++) to avoid CXXABI / version conflicts with system libs
+if [ -n "${CONDA_PREFIX:-}" ] && [ -d "$CONDA_PREFIX/lib" ]; then
+    export LD_LIBRARY_PATH="${CONDA_PREFIX}/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+fi
+
+# Detect available GPUs and set or cap GPUS (avoids "invalid device ordinal" when default exceeds available)
+AVAILABLE_GPUS=$(python3 -c "import torch; print(torch.cuda.device_count())" 2>/dev/null) || AVAILABLE_GPUS=0
+[ -z "$AVAILABLE_GPUS" ] && AVAILABLE_GPUS=0
+if [ "$GPUS_SET_BY_USER" = false ]; then
+    if [ "$AVAILABLE_GPUS" -le 0 ]; then
+        GPUS=1
+        echo "No GPUs detected; using 1 process (CPU). Training may fail if code requires CUDA."
+    else
+        GPUS=$AVAILABLE_GPUS
+        echo "No --gpus set; using $GPUS GPU(s) (detected $AVAILABLE_GPUS available)"
+    fi
+else
+    if [ "$AVAILABLE_GPUS" -le 0 ]; then
+        GPUS=1
+        echo "Warning: no GPUs available; capping to 1 process. Training may fail if code requires CUDA."
+    elif [ "$GPUS" -gt "$AVAILABLE_GPUS" ]; then
+        echo "Warning: --gpus $GPUS exceeds available ($AVAILABLE_GPUS); capping to $AVAILABLE_GPUS"
+        GPUS=$AVAILABLE_GPUS
+    fi
 fi
 
 # For eval jobs, infer cosmo_model from MLflow run
@@ -382,7 +415,7 @@ for key in "${!CLI_ARGS[@]}"; do
     fi
 done
 
-# For debug jobs, filter out mlflow_exp from YAML_ARGS (debug.sh sets it to "debug")
+# For debug jobs, filter out mlflow_exp from YAML_ARGS (submit sets it to "debug" below)
 # For eval jobs, filter out cosmo_model from YAML_ARGS (evaluate.py doesn't accept it)
 if [ "$JOB_TYPE" = "debug" ] || [ "$JOB_TYPE" = "eval" ]; then
     FILTERED_ARGS=()
@@ -406,8 +439,10 @@ if [ "$JOB_TYPE" = "debug" ] || [ "$JOB_TYPE" = "eval" ]; then
     YAML_ARGS=("${FILTERED_ARGS[@]}")
 fi
 
-# Set environment variables
-export OMP_NUM_THREADS=$OMP_THREADS
+# Set environment variables (only export if set)
+if [ -n "$OMP_THREADS" ]; then
+    export OMP_NUM_THREADS=$OMP_THREADS
+fi
 
 # Validate and build command based on job type
 case $JOB_TYPE in
@@ -527,8 +562,8 @@ echo "=========================================="
 echo "Running $JOB_TYPE job"
 echo "Cosmo experiment: $COSMO_EXP"
 echo "Cosmo model: $COSMO_MODEL"
-echo "GPUs: $GPUS"
-echo "OMP threads: $OMP_THREADS"
+echo "GPUs: ${GPUS:-auto}"
+echo "OMP threads: ${OMP_THREADS:-not set}"
 if [ -n "$RUN_ID" ]; then
     echo "Run ID: $RUN_ID"
 fi
