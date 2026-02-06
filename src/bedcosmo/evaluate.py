@@ -37,7 +37,7 @@ class Evaluator:
             levels=[0.68, 0.95], global_rank=0, eig_file_path=None, n_evals=10, n_particles=1000, 
             param_space='physical', display_run=False, verbose=False, device="cuda:0", profile=False, 
             sort=True, include_nominal=False, batch_size=1, particle_batch_size=None, design_args_path=None,
-            brute_force=False, brute_force_param_points=75, brute_force_feature_points=35
+            brute_force=False, brute_force_param_pts=75, brute_force_feature_pts=35
             ):
         self.cosmo_exp = cosmo_exp
         
@@ -88,8 +88,8 @@ class Evaluator:
         self.include_nominal = include_nominal
         self.batch_size = batch_size  # Batch size for sample_posterior to reduce memory usage
         self.brute_force = brute_force
-        self.brute_force_param_points = brute_force_param_points
-        self.brute_force_feature_points = brute_force_feature_points
+        self.brute_force_param_pts = brute_force_param_pts
+        self.brute_force_feature_pts = brute_force_feature_pts
         self._brute_force_experiment = None
         
         # Load design_args from file
@@ -153,8 +153,8 @@ class Evaluator:
 
         result = brute_force_from_experiment(
             experiment=self._brute_force_experiment,
-            param_points=self.brute_force_param_points,
-            feature_points=self.brute_force_feature_points,
+            param_pts=self.brute_force_param_pts,
+            feature_pts=self.brute_force_feature_pts,
         )
         eig = np.asarray(result["eig"], dtype=float)
         best_design = result["best_design"]
@@ -1133,8 +1133,8 @@ if __name__ == "__main__":
     parser.add_argument('--particle_batch_size', type=int, default=None, help='Batch size for processing particles in LikelihoodDataset to reduce memory usage (default: None to use all particles)')
     parser.add_argument('--design_args_path', type=str, default=None, help='Path to design_args.yaml file. If None, defaults to the run\'s artifacts/design_args.yaml')
     parser.add_argument('--brute_force', action='store_true', default=False, help='Run brute-force EIG using bayesdesign ExperimentDesigner')
-    parser.add_argument('--brute_force_param_points', type=int, default=75, help='Number of points per parameter axis for brute-force parameter grid')
-    parser.add_argument('--brute_force_feature_points', type=int, default=35, help='Number of points per feature axis for brute-force feature grid')
+    parser.add_argument('--brute_force_param_pts', type=int, default=75, help='Number of points per parameter axis for brute-force parameter grid')
+    parser.add_argument('--brute_force_feature_pts', type=int, default=35, help='Number of points per feature axis for brute-force feature grid')
 
     args = parser.parse_args()
 

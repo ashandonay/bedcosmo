@@ -34,7 +34,7 @@ def _dist_bounds(distribution, q_lo=0.01, q_hi=0.99) -> Tuple[float, float]:
 
 def create_parameter_grid(
     experiment,
-    param_points: int = 75,
+    param_pts: int = 75,
 ) -> Any:
     """
     Create a parameter Grid.
@@ -52,13 +52,13 @@ def create_parameter_grid(
         if name not in prior:
             raise ValueError(f"Prior missing parameter '{name}'.")
         lo, hi = _dist_bounds(prior[name])
-        axes[name] = np.linspace(lo, hi, int(param_points), dtype=np.float64)
+        axes[name] = np.linspace(lo, hi, int(param_pts), dtype=np.float64)
     return Grid(**axes)
 
 
 def create_feature_grid(
     experiment,
-    feature_points: int = 35,
+    feature_pts: int = 35,
     parameter_grid: Any = None,
 ) -> Any:
     """
@@ -83,7 +83,7 @@ def create_feature_grid(
         for i, band in enumerate(experiment.filters_list):
             lo = float(np.min(mags[..., i]))
             hi = float(np.max(mags[..., i]))
-            axes[f"mag_{band}"] = np.linspace(lo, hi, int(feature_points), dtype=np.float64)
+            axes[f"mag_{band}"] = np.linspace(lo, hi, int(feature_pts), dtype=np.float64)
         return Grid(**axes)
 
     raise ValueError(
@@ -143,8 +143,8 @@ def run_experiment_designer(
 
 def brute_force_from_experiment(
     experiment,
-    param_points: int = 75,
-    feature_points: int = 35,
+    param_pts: int = 75,
+    feature_pts: int = 35,
     prior: np.ndarray = None,
 ) -> Dict[str, Any]:
     """
@@ -152,11 +152,11 @@ def brute_force_from_experiment(
     """
     params_grid = create_parameter_grid(
         experiment=experiment,
-        param_points=param_points,
+        param_pts=param_pts,
     )
     features_grid = create_feature_grid(
         experiment=experiment,
-        feature_points=feature_points,
+        feature_pts=feature_pts,
         parameter_grid=params_grid,
     )
     designs_grid = create_design_grid(experiment)
@@ -224,8 +224,8 @@ def main():
     parser.add_argument("--design_args_path", type=str, default=None, help="Path to design_args YAML")
     parser.add_argument("--prior_args_path", type=str, default=None, help="Path to prior_args YAML (config mode)")
     parser.add_argument("--device", type=str, default="cpu", help="Torch device for experiment calculations")
-    parser.add_argument("--param_points", type=int, default=75, help="Points per parameter axis")
-    parser.add_argument("--feature_points", type=int, default=35, help="Points per feature axis")
+    parser.add_argument("--param_pts", type=int, default=75, help="Points per parameter axis")
+    parser.add_argument("--feature_pts", type=int, default=35, help="Points per feature axis")
     parser.add_argument("--save_json", type=str, default=None, help="Optional output JSON path")
     args = parser.parse_args()
 
@@ -251,8 +251,8 @@ def main():
 
     result = brute_force_from_experiment(
         experiment=experiment,
-        param_points=args.param_points,
-        feature_points=args.feature_points,
+        param_pts=args.param_pts,
+        feature_pts=args.feature_pts,
     )
 
     eig = np.asarray(result["eig"], dtype=float)
@@ -269,8 +269,8 @@ def main():
         "design_grid_shape": list(result["design_grid_shape"]),
         "feature_grid_shape": list(result["feature_grid_shape"]),
         "parameter_grid_shape": list(result["parameter_grid_shape"]),
-        "param_points": int(args.param_points),
-        "feature_points": int(args.feature_points),
+        "param_pts": int(args.param_pts),
+        "feature_pts": int(args.feature_pts),
     }
 
     print("Brute-force run complete")
