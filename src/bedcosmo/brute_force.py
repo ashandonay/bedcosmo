@@ -123,6 +123,7 @@ def run_experiment_designer(
     prior: Optional[np.ndarray] = None,
     lfunc_name: str = "unnorm_lfunc",
     debug: bool = False,
+    return_designer: bool = False,
 ) -> Dict[str, Any]:
     """
     Run brute-force EIG with ExperimentDesigner.
@@ -137,11 +138,14 @@ def run_experiment_designer(
     designer = ExperimentDesigner(parameter_grid, feature_grid, design_grid, lfunc)
     best_design = designer.calculateEIG(prior, debug=debug)
     eig = np.asarray(designer.EIG, dtype=np.float64)
-    return {
+    payload = {
         "best_design": best_design,
         "eig": eig,
         "prior": prior,
     }
+    if return_designer:
+        payload["designer"] = designer
+    return payload
 
 
 def brute_force_from_experiment(
@@ -149,6 +153,7 @@ def brute_force_from_experiment(
     param_pts: int = 75,
     feature_pts: int = 35,
     prior: np.ndarray = None,
+    return_designer: bool = False,
 ) -> Dict[str, Any]:
     """
     Convenience wrapper to build grids and run brute-force EIG.
@@ -169,11 +174,111 @@ def brute_force_from_experiment(
         feature_grid=features_grid,
         design_grid=designs_grid,
         prior=prior,
+        return_designer=return_designer,
     )
     result["parameter_grid_shape"] = tuple(params_grid.shape)
     result["feature_grid_shape"] = tuple(features_grid.shape)
     result["design_grid_shape"] = tuple(designs_grid.shape)
+    if return_designer:
+        result["parameter_grid"] = params_grid
+        result["feature_grid"] = features_grid
+        result["design_grid"] = designs_grid
     return result
+
+
+def get_posterior_grid(
+    experiment,
+    designer: ExperimentDesigner,
+    feature_grid,
+    design_grid,
+    nominal: bool = True,
+) -> np.ndarray:
+    """
+    Compute brute-force posterior over parameter grid.
+    """
+    if not nominal:
+        raise NotImplementedError(
+            "Non-nominal posterior conditioning is not implemented yet. "
+            "Pass nominal=True."
+        )
+    if not hasattr(experiment, "nominal_design"):
+        raise ValueError("Experiment must expose nominal_design.")
+    if not hasattr(experiment, "central_val"):
+        raise ValueError("Experiment must expose central_val.")
+
+    nominal_design = torch.as_tensor(
+        experiment.nominal_design, dtype=torch.float64
+    ).detach().cpu().numpy().reshape(-1)
+    central_features = torch.as_tensor(
+        experiment.central_val, dtype=torch.float64
+    ).detach().cpu().numpy().reshape(-1)
+    design_names = list(design_grid.names)
+    feature_names = list(feature_grid.names)
+
+    if nominal_design.size != len(design_names):
+        raise ValueError(
+            "Nominal design size does not match design grid dimensions: "
+            f"{nominal_design.size} vs {len(design_names)}."
+        )
+    if central_features.size != len(feature_names):
+        raise ValueError(
+            "Central feature size does not match feature grid dimensions: "
+            f"{central_features.size} vs {len(feature_names)}."
+        )
+
+    conditioning = {
+        name: float(nominal_design[i]) for i, name in enumerate(design_names)
+    }
+    conditioning.update(
+        {name: float(central_features[i]) for i, name in enumerate(feature_names)}
+    )
+    posterior = designer.get_posterior(**conditioning)
+    if posterior is None:
+        raise RuntimeError(
+            "ExperimentDesigner.get_posterior returned None. "
+            "Ensure calculateEIG was called before requesting posteriors."
+        )
+    return np.asarray(posterior, dtype=np.float64)
+
+
+def draw_param_samples_grid(
+    parameter_grid,
+    pdf: np.ndarray,
+    num_samples: int = 50000,
+    seed: int = 1,
+) -> np.ndarray:
+    """
+    Draw weighted parameter samples from a brute-force posterior grid.
+    """
+    if num_samples <= 0:
+        raise ValueError("num_samples must be positive.")
+
+    posterior = np.asarray(pdf, dtype=np.float64)
+    if posterior.size != int(np.prod(parameter_grid.shape)):
+        raise ValueError(
+            "pdf size does not match parameter_grid shape: "
+            f"{posterior.size} vs {int(np.prod(parameter_grid.shape))}."
+        )
+
+    weights = posterior.reshape(-1).copy()
+    weights[~np.isfinite(weights)] = 0.0
+    total = float(np.sum(weights))
+    if total <= 0.0:
+        raise ValueError("Posterior has no finite positive mass for sampling.")
+    weights /= total
+
+    param_axes = [
+        np.asarray(getattr(parameter_grid, name), dtype=np.float64)
+        for name in parameter_grid.names
+    ]
+    broadcast_axes = np.broadcast_arrays(*param_axes)
+
+    rng = np.random.default_rng(seed)
+    draw_idx = rng.choice(weights.size, size=int(num_samples), replace=True, p=weights)
+    samples = np.column_stack(
+        [axis.reshape(-1)[draw_idx] for axis in broadcast_axes]
+    ).astype(np.float64, copy=False)
+    return samples
 
 
 def _init_from_run_id(run_id: str, cosmo_exp: str, device: str, design_args_path: str | None):

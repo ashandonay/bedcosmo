@@ -746,7 +746,7 @@ class RunPlotter(BasePlotter):
     
     def generate_posterior(self, step_key=None, display=['nominal', 'optimal'], levels=[0.68], 
                           guide_samples=1000, device="cuda:0", seed=1, plot_prior=False, 
-                          transform_output=True, title=None):
+                          transform_output=True, title=None, brute_force_samples=None):
         """
         Generates posterior plots for nominal and/or optimal designs using EIG data.
         Uses pre-computed EIG data to quickly identify optimal design without recalculating EIG.
@@ -760,6 +760,8 @@ class RunPlotter(BasePlotter):
             seed (int): Random seed (default: 1).
             plot_prior (bool): If True, also plot the prior using experiment.get_prior_samples as solid gray (default: False).
             title (str, optional): Title of the plot. If None, uses default title.
+            brute_force_samples (np.ndarray, optional): Optional brute-force posterior parameter samples
+                with shape (n_samples, n_params), typically from ExperimentDesigner.get_posterior.
         Returns:
             GetDist plotter object.
         """
@@ -807,6 +809,13 @@ class RunPlotter(BasePlotter):
         if isinstance(nominal_eig, list):
             nominal_eig = nominal_eig[0] if len(nominal_eig) > 0 else None
         nominal_eig = float(nominal_eig) if nominal_eig is not None else None
+        nominal_brute_force_eig = None
+        nominal_bf_data = nominal_data.get('brute_force', {})
+        if isinstance(nominal_bf_data, dict) and 'eigs_avg' in nominal_bf_data:
+            nominal_brute_force_eig = nominal_bf_data.get('eigs_avg')
+            if isinstance(nominal_brute_force_eig, list):
+                nominal_brute_force_eig = nominal_brute_force_eig[0] if len(nominal_brute_force_eig) > 0 else None
+            nominal_brute_force_eig = float(nominal_brute_force_eig) if nominal_brute_force_eig is not None else None
         
         run_obj = self.run_data['run_obj']
         run_args = self.run_data['params'].copy()  # Make a copy to avoid modifying original
@@ -889,6 +898,46 @@ class RunPlotter(BasePlotter):
             all_line_styles.append('-')
             eig_str = f", EIG: {optimal_eig:.3f} bits" if optimal_eig is not None else ""
             legend_labels.append(f'Input Design (NF){eig_str}')
+
+        if brute_force_samples is not None:
+            bf_samples_np = np.asarray(brute_force_samples, dtype=np.float64)
+            if bf_samples_np.ndim == 1:
+                bf_samples_np = bf_samples_np.reshape(-1, 1)
+            if bf_samples_np.ndim != 2:
+                raise ValueError(
+                    f"brute_force_samples must be 2D or 1D, got shape {bf_samples_np.shape}."
+                )
+            expected_dim = len(experiment.cosmo_params)
+            if bf_samples_np.shape[1] != expected_dim:
+                raise ValueError(
+                    "brute_force_samples dimension does not match parameter count: "
+                    f"{bf_samples_np.shape[1]} vs {expected_dim}."
+                )
+
+            bf_samples_tensor = torch.as_tensor(
+                bf_samples_np, device=experiment.device, dtype=torch.float64
+            )
+            if not transform_output:
+                bf_samples_tensor = experiment.params_to_unconstrained(bf_samples_tensor)
+            bf_samples_np = bf_samples_tensor.detach().cpu().numpy()
+
+            with contextlib.redirect_stdout(io.StringIO()):
+                brute_force_samples_gd = getdist.MCSamples(
+                    samples=bf_samples_np,
+                    names=experiment.cosmo_params,
+                    labels=experiment.latex_labels,
+                )
+
+            all_samples.append(brute_force_samples_gd)
+            all_colors.append('tab:green')
+            all_alphas.append(1.0)
+            all_line_styles.append('--')
+            eig_str = (
+                f", EIG: {nominal_brute_force_eig:.3f} bits"
+                if nominal_brute_force_eig is not None
+                else ""
+            )
+            legend_labels.append(f'Nominal Design (Brute Force){eig_str}')
         
         # Get DESI MCMC samples for reference
         if self.cosmo_exp == 'num_tracers':

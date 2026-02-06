@@ -29,7 +29,11 @@ from bedcosmo.util import (
 import mlflow
 import inspect
 import yaml
-from bedcosmo.brute_force import brute_force_from_experiment
+from bedcosmo.brute_force import (
+    brute_force_from_experiment,
+    draw_param_samples_grid,
+    get_posterior_grid,
+)
 
 class Evaluator:
     def __init__(
@@ -91,6 +95,7 @@ class Evaluator:
         self.brute_force_param_pts = brute_force_param_pts
         self.brute_force_feature_pts = brute_force_feature_pts
         self._brute_force_experiment = None
+        self._brute_force_samples = None
         
         # Load design_args from file
         if design_args_path is not None:
@@ -155,6 +160,7 @@ class Evaluator:
             experiment=self._brute_force_experiment,
             param_pts=self.brute_force_param_pts,
             feature_pts=self.brute_force_feature_pts,
+            return_designer=True,
         )
         eig = np.asarray(result["eig"], dtype=float)
         best_design = result["best_design"]
@@ -184,6 +190,28 @@ class Evaluator:
             "eigs_avg": float(eig_flat[nominal_idx]),
             "eigs_std": 0.0,
         }
+
+        try:
+            pdf = get_posterior_grid(
+                experiment=self._brute_force_experiment,
+                designer=result["designer"],
+                feature_grid=result["feature_grid"],
+                design_grid=result["design_grid"],
+                nominal=True,
+            )
+            self._brute_force_samples = draw_param_samples_grid(
+                parameter_grid=result["parameter_grid"],
+                pdf=pdf,
+                num_samples=50000,
+                seed=self.seed,
+            )
+            variable_data["brute_force"]["posterior_samples"] = int(
+                self._brute_force_samples.shape[0]
+            )
+        except Exception as e:
+            self._brute_force_samples = None
+            print(f"Warning: brute-force posterior sampling failed: {e}")
+
         print(
             f"Brute-force EIG complete: nominal={nominal_data['brute_force']['eigs_avg']:.4f}, "
             f"optimal={optimal_eig:.4f}"
@@ -1076,7 +1104,8 @@ class Evaluator:
         try:
             self.plotter.generate_posterior(
                 step_key=eval_step, display=['nominal', 'optimal'],  guide_samples=50000,
-                levels=self.levels, plot_prior=True, transform_output=self.nf_transform_output
+                levels=self.levels, plot_prior=True, transform_output=self.nf_transform_output,
+                brute_force_samples=self._brute_force_samples
                 )
             self._update_runtime()
         except Exception as e:
