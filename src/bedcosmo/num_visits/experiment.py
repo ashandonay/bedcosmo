@@ -983,13 +983,22 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         diff = (mag_obs_full - mags_full) / sigma_full
         log_likelihood = -0.5 * np.sum(diff**2, axis=-1)
 
-        # Stabilize exponentiation per (design, parameter) slice to avoid all-zero
-        # likelihoods over the feature grid from floating-point underflow.
+        # Stabilize exponentiation. For full feature grids (EIG path), normalize per
+        # (design, parameter) slice. For conditioned single-feature posterior calls,
+        # use a global shift so parameter dependence is preserved.
         feature_axes = tuple(range(len(feature_shape)))
-        if feature_axes:
+        is_stacked = (
+            getattr(params, "_stack_offset", 0) != 0
+            or getattr(features, "_stack_offset", 0) != 0
+            or getattr(designs, "_stack_offset", 0) != 0
+        )
+        has_nontrivial_feature_axis = any(dim > 1 for dim in feature_shape)
+        if is_stacked and feature_axes and has_nontrivial_feature_axis:
             log_likelihood = log_likelihood - np.max(
                 log_likelihood, axis=feature_axes, keepdims=True
             )
+        else:
+            log_likelihood = log_likelihood - np.max(log_likelihood)
 
         likelihood = np.exp(log_likelihood)
         # likelihood shape: X + D + P
