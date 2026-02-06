@@ -9,12 +9,15 @@ import json
 import os
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple, Union
 
 import numpy as np
 import torch
+import yaml
 from bed.design import ExperimentDesigner
 from bed.grid import Grid
+from pyro import distributions as dist
+
 
 def _dist_bounds(distribution, q_lo=0.01, q_hi=0.99) -> Tuple[float, float]:
     # Uniform-like
@@ -38,293 +41,466 @@ def _dist_bounds(distribution, q_lo=0.01, q_hi=0.99) -> Tuple[float, float]:
     return lo, hi
 
 
-def create_parameter_grid(
-    experiment,
-    param_pts: int = 75,
-) -> Any:
+def _create_distribution_from_config(param_config: Dict[str, Any]) -> torch.distributions.Distribution:
     """
-    Create a parameter Grid.
+    Create a PyTorch distribution from a parameter configuration dict.
 
-    Derives bounds from experiment.prior.
+    Args:
+        param_config: Dictionary with 'distribution' key containing type and bounds.
+
+    Returns:
+        PyTorch distribution object.
     """
-    axes: Dict[str, np.ndarray] = {}
-    names = list(getattr(experiment, "cosmo_params", []))
-    if not names:
-        raise ValueError("Experiment must expose cosmo_params.")
+    dist_config = param_config.get("distribution", {})
+    dist_type = dist_config.get("type", "uniform").lower()
 
-    prior = getattr(experiment, "prior", {})
-    for name in names:
-        if name not in prior:
-            raise ValueError(f"Prior missing parameter '{name}'.")
-        lo, hi = _dist_bounds(prior[name])
-        axes[name] = np.linspace(lo, hi, int(param_pts), dtype=np.float64)
-    return Grid(**axes)
+    if dist_type == "uniform":
+        lower = float(dist_config.get("lower", 0.0))
+        upper = float(dist_config.get("upper", 1.0))
+        return dist.Uniform(
+            torch.tensor(lower, dtype=torch.float64),
+            torch.tensor(upper, dtype=torch.float64)
+        )
+    elif dist_type == "normal" or dist_type == "gaussian":
+        mean = float(dist_config.get("mean", 0.0))
+        std = float(dist_config.get("std", 1.0))
+        return dist.Normal(
+            torch.tensor(mean, dtype=torch.float64),
+            torch.tensor(std, dtype=torch.float64)
+        )
+    elif dist_type == "truncatednormal":
+        mean = float(dist_config.get("mean", 0.0))
+        std = float(dist_config.get("std", 1.0))
+        lower = float(dist_config.get("lower", mean - 4 * std))
+        upper = float(dist_config.get("upper", mean + 4 * std))
+        # Use TruncatedNormal from pyro
+        base = dist.Normal(
+            torch.tensor(mean, dtype=torch.float64),
+            torch.tensor(std, dtype=torch.float64)
+        )
+        return dist.TruncatedDistribution(
+            base,
+            low=torch.tensor(lower, dtype=torch.float64),
+            high=torch.tensor(upper, dtype=torch.float64)
+        )
+    else:
+        raise ValueError(f"Unsupported distribution type: {dist_type}")
 
 
-def create_feature_grid(
-    experiment,
-    feature_pts: int = 35,
-    parameter_grid: Any = None,
-) -> Any:
+class BruteForceDesigner:
     """
-    Create a feature Grid.
+    Class-based interface for brute-force EIG computation.
 
-    Auto-builds for experiments exposing filters_list + _calculate_magnitudes.
+    Wraps the bed.design.ExperimentDesigner and provides methods for:
+    - Building parameter, feature, and design grids
+    - Computing prior PDFs from experiment priors or YAML configuration
+    - Running brute-force EIG calculation
+    - Extracting posteriors and samples
     """
-    # Auto mode for magnitude-based experiments (e.g. num_visits).
-    if hasattr(experiment, "filters_list") and hasattr(experiment, "_calculate_magnitudes"):
-        if parameter_grid is None:
-            raise ValueError("parameter_grid is required for auto feature grid construction.")
-        if not hasattr(parameter_grid, "z"):
-            raise ValueError("Auto feature grid requires parameter grid to include 'z'.")
 
-        z = np.asarray(getattr(parameter_grid, "z"), dtype=np.float64)
-        z_tensor = torch.as_tensor(z, device="cpu", dtype=torch.float64)
-        with torch.no_grad():
-            mags = experiment._calculate_magnitudes(z_tensor).detach().cpu().numpy()
-        axes = {}
-        for i, band in enumerate(experiment.filters_list):
-            lo = float(np.min(mags[..., i]))
-            hi = float(np.max(mags[..., i]))
-            axes[f"mag_{band}"] = np.linspace(lo, hi, int(feature_pts), dtype=np.float64)
+    def __init__(
+        self,
+        experiment,
+        param_pts: int = 75,
+        feature_pts: int = 35,
+        device: str = "cpu",
+    ):
+        """
+        Initialize the BruteForceDesigner.
+
+        Args:
+            experiment: Experiment object with prior, cosmo_params, etc.
+            param_pts: Number of points per parameter axis.
+            feature_pts: Number of points per feature axis.
+            device: Torch device (brute-force runs on CPU for stability).
+        """
+        self.experiment = experiment
+        self.param_pts = param_pts
+        self.feature_pts = feature_pts
+        self.device = device
+
+        # Create grids
+        self.parameter_grid = self._create_parameter_grid()
+        self.feature_grid = self._create_feature_grid()
+        self.design_grid = self._create_design_grid()
+
+        # Prior PDF (computed lazily or explicitly)
+        self._prior_pdf: Optional[np.ndarray] = None
+        self._prior_distributions: Optional[Dict[str, torch.distributions.Distribution]] = None
+
+        # Designer and results (populated after run)
+        self.designer: Optional[ExperimentDesigner] = None
+        self.result: Optional[Dict[str, Any]] = None
+        self.eig: Optional[np.ndarray] = None
+        self.best_design: Optional[Any] = None
+
+    def _create_parameter_grid(self) -> Grid:
+        """Create parameter grid from experiment prior."""
+        axes: Dict[str, np.ndarray] = {}
+        names = list(getattr(self.experiment, "cosmo_params", []))
+        if not names:
+            raise ValueError("Experiment must expose cosmo_params.")
+
+        prior = getattr(self.experiment, "prior", {})
+        for name in names:
+            if name not in prior:
+                raise ValueError(f"Prior missing parameter '{name}'.")
+            lo, hi = _dist_bounds(prior[name])
+            axes[name] = np.linspace(lo, hi, int(self.param_pts), dtype=np.float64)
         return Grid(**axes)
 
-    raise ValueError(
-        "Cannot auto-build feature grid for this experiment; provide feature_axes explicitly."
-    )
+    def _create_feature_grid(self) -> Grid:
+        """Create feature grid (auto for magnitude-based experiments)."""
+        experiment = self.experiment
+        # Auto mode for magnitude-based experiments (e.g. num_visits).
+        if hasattr(experiment, "filters_list") and hasattr(experiment, "_calculate_magnitudes"):
+            if not hasattr(self.parameter_grid, "z"):
+                raise ValueError("Auto feature grid requires parameter grid to include 'z'.")
 
+            z = np.asarray(getattr(self.parameter_grid, "z"), dtype=np.float64)
+            z_tensor = torch.as_tensor(z, device="cpu", dtype=torch.float64)
+            with torch.no_grad():
+                mags = experiment._calculate_magnitudes(z_tensor).detach().cpu().numpy()
+            axes = {}
+            for i, band in enumerate(experiment.filters_list):
+                lo = float(np.min(mags[..., i]))
+                hi = float(np.max(mags[..., i]))
+                axes[f"mag_{band}"] = np.linspace(lo, hi, int(self.feature_pts), dtype=np.float64)
+            return Grid(**axes)
 
-def create_design_grid(experiment) -> Any:
-    """
-    Get design Grid from experiment.
-    """
-    if not hasattr(experiment, "designs_grid") or experiment.designs_grid is None:
         raise ValueError(
-            "Experiment does not expose designs_grid. "
-            "Define it in experiment.init_designs (e.g., via BaseExperiment._build_design_grid)."
-        )
-    return experiment.designs_grid
-
-
-def create_uniform_prior(parameter_grid) -> np.ndarray:
-    prior = np.ones(parameter_grid.shape, dtype=np.float64)
-    norm = parameter_grid.sum(prior)
-    if norm <= 0:
-        raise ValueError("Prior normalization failed: non-positive norm.")
-    prior /= norm
-    return prior
-
-
-def run_experiment_designer(
-    experiment,
-    parameter_grid,
-    feature_grid,
-    design_grid,
-    prior: Optional[np.ndarray] = None,
-    lfunc_name: str = "unnorm_lfunc",
-    debug: bool = False,
-    return_designer: bool = False,
-) -> Dict[str, Any]:
-    """
-    Run brute-force EIG with ExperimentDesigner.
-    """
-    if not hasattr(experiment, lfunc_name):
-        raise ValueError(f"Experiment missing likelihood function '{lfunc_name}'.")
-    lfunc = getattr(experiment, lfunc_name)
-
-    if prior is None:
-        prior = create_uniform_prior(parameter_grid)
-
-    designer = ExperimentDesigner(parameter_grid, feature_grid, design_grid, lfunc)
-    best_design = designer.calculateEIG(prior, debug=debug)
-    eig = np.asarray(designer.EIG, dtype=np.float64)
-    payload = {
-        "best_design": best_design,
-        "eig": eig,
-        "prior": prior,
-    }
-    if return_designer:
-        payload["designer"] = designer
-    return payload
-
-
-def brute_force_from_experiment(
-    experiment,
-    param_pts: int = 75,
-    feature_pts: int = 35,
-    prior: np.ndarray = None,
-    return_designer: bool = False,
-) -> Dict[str, Any]:
-    """
-    Convenience wrapper to build grids and run brute-force EIG.
-    """
-    params_grid = create_parameter_grid(
-        experiment=experiment,
-        param_pts=param_pts,
-    )
-    features_grid = create_feature_grid(
-        experiment=experiment,
-        feature_pts=feature_pts,
-        parameter_grid=params_grid,
-    )
-    designs_grid = create_design_grid(experiment)
-    result = run_experiment_designer(
-        experiment=experiment,
-        parameter_grid=params_grid,
-        feature_grid=features_grid,
-        design_grid=designs_grid,
-        prior=prior,
-        return_designer=return_designer,
-    )
-    result["parameter_grid_shape"] = tuple(params_grid.shape)
-    result["feature_grid_shape"] = tuple(features_grid.shape)
-    result["design_grid_shape"] = tuple(designs_grid.shape)
-    if return_designer:
-        result["parameter_grid"] = params_grid
-        result["feature_grid"] = features_grid
-        result["design_grid"] = designs_grid
-    return result
-
-
-def get_posterior_grid(
-    experiment,
-    designer: ExperimentDesigner,
-    feature_grid,
-    design_grid,
-    nominal: bool = True,
-) -> np.ndarray:
-    """
-    Compute brute-force posterior over parameter grid.
-    """
-    if not nominal:
-        raise NotImplementedError(
-            "Non-nominal posterior conditioning is not implemented yet. "
-            "Pass nominal=True."
-        )
-    if not hasattr(experiment, "nominal_design"):
-        raise ValueError("Experiment must expose nominal_design.")
-    if not hasattr(experiment, "central_val"):
-        raise ValueError("Experiment must expose central_val.")
-
-    nominal_design = torch.as_tensor(
-        experiment.nominal_design, dtype=torch.float64
-    ).detach().cpu().numpy().reshape(-1)
-    central_features = torch.as_tensor(
-        experiment.central_val, dtype=torch.float64
-    ).detach().cpu().numpy().reshape(-1)
-    design_names = list(design_grid.names)
-    feature_names = list(feature_grid.names)
-
-    if nominal_design.size != len(design_names):
-        raise ValueError(
-            "Nominal design size does not match design grid dimensions: "
-            f"{nominal_design.size} vs {len(design_names)}."
-        )
-    if central_features.size != len(feature_names):
-        raise ValueError(
-            "Central feature size does not match feature grid dimensions: "
-            f"{central_features.size} vs {len(feature_names)}."
+            "Cannot auto-build feature grid for this experiment; provide feature_axes explicitly."
         )
 
-    conditioning = {
-        name: float(nominal_design[i]) for i, name in enumerate(design_names)
-    }
-    conditioning.update(
-        {name: float(central_features[i]) for i, name in enumerate(feature_names)}
-    )
-    posterior = designer.get_posterior(**conditioning)
-    if posterior is None:
-        raise RuntimeError(
-            "ExperimentDesigner.get_posterior returned None. "
-            "Ensure calculateEIG was called before requesting posteriors."
+    def _create_design_grid(self) -> Grid:
+        """Get design grid from experiment."""
+        if not hasattr(self.experiment, "designs_grid") or self.experiment.designs_grid is None:
+            raise ValueError(
+                "Experiment does not expose designs_grid. "
+                "Define it in experiment.init_designs (e.g., via BaseExperiment._build_design_grid)."
+            )
+        return self.experiment.designs_grid
+
+    @property
+    def prior_pdf(self) -> Optional[np.ndarray]:
+        """Get the prior PDF array."""
+        return self._prior_pdf
+
+    @property
+    def prior_distributions(self) -> Optional[Dict[str, torch.distributions.Distribution]]:
+        """Get the prior distributions dictionary."""
+        return self._prior_distributions
+
+    def compute_prior_pdf(
+        self,
+        prior_args: Optional[Dict[str, Any]] = None,
+        prior_args_path: Optional[str] = None,
+        use_experiment_prior: bool = True,
+        normalize: bool = True,
+    ) -> np.ndarray:
+        """
+        Compute the prior PDF enumerated over the parameter grid.
+
+        Computes the joint prior probability at each grid point by evaluating
+        the log probability under each marginal prior distribution and summing
+        (assuming parameter independence).
+
+        Args:
+            prior_args: Dictionary of prior arguments (from YAML structure).
+                       If provided, distributions are built from this config.
+            prior_args_path: Path to prior_args YAML file.
+                            Takes precedence over prior_args if both provided.
+            use_experiment_prior: If True and no prior_args/path provided,
+                                 uses self.experiment.prior distributions.
+            normalize: If True, normalize the PDF to sum to 1.
+
+        Returns:
+            np.ndarray: Prior PDF values at each grid point, shape matches parameter_grid.shape.
+        """
+        # Determine source of prior distributions
+        if prior_args_path is not None:
+            # Load from YAML file
+            resolved_path = Path(prior_args_path)
+            if not resolved_path.is_absolute():
+                # Try to resolve relative to experiments directory
+                from bedcosmo.util import get_experiment_config_path
+                cosmo_exp = getattr(self.experiment, "_name", None) or self.experiment.__class__.__name__.lower()
+                try:
+                    resolved_path = get_experiment_config_path(cosmo_exp, prior_args_path)
+                except FileNotFoundError:
+                    resolved_path = Path(prior_args_path)
+
+            if not resolved_path.exists():
+                raise FileNotFoundError(f"Prior args file not found: {resolved_path}")
+
+            with open(resolved_path, "r") as f:
+                prior_args = yaml.safe_load(f)
+
+        if prior_args is not None:
+            # Build distributions from prior_args config
+            self._prior_distributions = self._build_distributions_from_args(prior_args)
+        elif use_experiment_prior:
+            # Use experiment's existing prior distributions
+            prior = getattr(self.experiment, "prior", None)
+            if prior is None:
+                raise ValueError("Experiment does not have a prior attribute.")
+            self._prior_distributions = prior
+        else:
+            raise ValueError(
+                "Must provide prior_args, prior_args_path, or set use_experiment_prior=True."
+            )
+
+        # Compute the PDF over the parameter grid
+        self._prior_pdf = self._evaluate_prior_on_grid(normalize=normalize)
+        return self._prior_pdf
+
+    def _build_distributions_from_args(
+        self, prior_args: Dict[str, Any]
+    ) -> Dict[str, torch.distributions.Distribution]:
+        """
+        Build a dictionary of distributions from prior_args configuration.
+
+        Args:
+            prior_args: YAML-loaded prior configuration with 'parameters' key.
+
+        Returns:
+            Dictionary mapping parameter names to distributions.
+        """
+        parameters = prior_args.get("parameters", {})
+        param_names = list(self.parameter_grid.names)
+
+        distributions = {}
+        for name in param_names:
+            if name not in parameters:
+                raise ValueError(
+                    f"Parameter '{name}' not found in prior_args. "
+                    f"Available: {list(parameters.keys())}"
+                )
+            param_config = parameters[name]
+            distributions[name] = _create_distribution_from_config(param_config)
+
+        return distributions
+
+    def _evaluate_prior_on_grid(self, normalize: bool = True) -> np.ndarray:
+        """
+        Evaluate the joint prior PDF at each point in the parameter grid.
+
+        Assumes parameter independence (joint = product of marginals).
+
+        Returns:
+            np.ndarray with shape matching parameter_grid.shape.
+        """
+        if self._prior_distributions is None:
+            raise ValueError("Prior distributions not set. Call compute_prior_pdf first.")
+
+        param_names = list(self.parameter_grid.names)
+        grid_shape = tuple(self.parameter_grid.shape)
+
+        # Get axis values for each parameter
+        axes = [np.asarray(getattr(self.parameter_grid, name), dtype=np.float64) for name in param_names]
+
+        # Create meshgrid of all parameter values
+        # For bed.grid.Grid, the axes are already broadcast-compatible
+        # We need to evaluate the joint log prob at each grid point
+
+        # Initialize log prob array
+        log_prob = np.zeros(grid_shape, dtype=np.float64)
+
+        # For each parameter, evaluate its marginal log prob and add to joint
+        for i, name in enumerate(param_names):
+            distribution = self._prior_distributions[name]
+            axis_values = axes[i]
+
+            # Create tensor from axis values
+            values_tensor = torch.as_tensor(axis_values, dtype=torch.float64)
+
+            # Evaluate log probability
+            with torch.no_grad():
+                marginal_log_prob = distribution.log_prob(values_tensor).detach().cpu().numpy()
+
+            # Handle non-finite values (outside support)
+            marginal_log_prob = np.where(
+                np.isfinite(marginal_log_prob), marginal_log_prob, -np.inf
+            )
+
+            # Broadcast to grid shape and add to joint log prob
+            # The Grid stores axes such that axis[i] broadcasts along dimension i
+            # We need to reshape marginal_log_prob to broadcast correctly
+            shape_for_broadcast = [1] * len(grid_shape)
+            shape_for_broadcast[i] = len(axis_values)
+            marginal_log_prob = marginal_log_prob.reshape(shape_for_broadcast)
+
+            log_prob = log_prob + marginal_log_prob
+
+        # Convert to probability
+        # Subtract max for numerical stability before exp
+        log_prob_max = np.max(log_prob[np.isfinite(log_prob)]) if np.any(np.isfinite(log_prob)) else 0.0
+        prob = np.exp(log_prob - log_prob_max)
+        prob = np.where(np.isfinite(prob), prob, 0.0)
+
+        if normalize:
+            total = np.sum(prob)
+            if total > 0:
+                prob = prob / total
+
+        return prob.astype(np.float64)
+
+    def run(
+        self,
+        prior: Optional[np.ndarray] = None,
+        lfunc_name: str = "unnorm_lfunc",
+        debug: bool = False,
+    ) -> Dict[str, Any]:
+        """
+        Run the brute-force EIG calculation.
+
+        Args:
+            prior: Prior PDF array. If None, uses self._prior_pdf if computed,
+                  otherwise ExperimentDesigner uses uniform prior.
+            lfunc_name: Name of likelihood function attribute on experiment.
+            debug: Enable debug output from ExperimentDesigner.
+
+        Returns:
+            Dictionary with results including 'best_design', 'eig', 'designer'.
+        """
+        # Use computed prior if available and no override provided
+        if prior is None:
+            prior = self._prior_pdf
+
+        if not hasattr(self.experiment, lfunc_name):
+            raise ValueError(f"Experiment missing likelihood function '{lfunc_name}'.")
+        lfunc = getattr(self.experiment, lfunc_name)
+
+        self.designer = ExperimentDesigner(
+            self.parameter_grid,
+            self.feature_grid,
+            self.design_grid,
+            lfunc
         )
-    return np.asarray(posterior, dtype=np.float64)
 
+        self.best_design = self.designer.calculateEIG(prior, debug=debug)
+        self.eig = np.asarray(self.designer.EIG, dtype=np.float64)
 
-def draw_param_samples_grid(
-    parameter_grid,
-    pdf: np.ndarray,
-    num_samples: int = 50000,
-    seed: int = 1,
-) -> np.ndarray:
-    """
-    Draw weighted parameter samples from a brute-force posterior grid.
-    """
-    if num_samples <= 0:
-        raise ValueError("num_samples must be positive.")
+        self.result = {
+            "best_design": self.best_design,
+            "eig": self.eig,
+            "prior": prior,
+            "designer": self.designer,
+            "parameter_grid": self.parameter_grid,
+            "feature_grid": self.feature_grid,
+            "design_grid": self.design_grid,
+            "parameter_grid_shape": tuple(self.parameter_grid.shape),
+            "feature_grid_shape": tuple(self.feature_grid.shape),
+            "design_grid_shape": tuple(self.design_grid.shape),
+        }
 
-    posterior = np.asarray(pdf, dtype=np.float64)
-    if posterior.size != int(np.prod(parameter_grid.shape)):
-        raise ValueError(
-            "pdf size does not match parameter_grid shape: "
-            f"{posterior.size} vs {int(np.prod(parameter_grid.shape))}."
+        return self.result
+
+    def get_posterior(self, nominal: bool = True) -> np.ndarray:
+        """
+        Get the posterior PDF over the parameter grid.
+
+        Args:
+            nominal: If True, condition on nominal design and central features.
+
+        Returns:
+            np.ndarray: Posterior PDF values.
+        """
+        if self.designer is None:
+            raise RuntimeError("Must call run() before getting posterior.")
+
+        if not nominal:
+            raise NotImplementedError(
+                "Non-nominal posterior conditioning is not implemented yet."
+            )
+
+        if not hasattr(self.experiment, "nominal_design"):
+            raise ValueError("Experiment must expose nominal_design.")
+        if not hasattr(self.experiment, "central_val"):
+            raise ValueError("Experiment must expose central_val.")
+
+        nominal_design = torch.as_tensor(
+            self.experiment.nominal_design, dtype=torch.float64
+        ).detach().cpu().numpy().reshape(-1)
+        central_features = torch.as_tensor(
+            self.experiment.central_val, dtype=torch.float64
+        ).detach().cpu().numpy().reshape(-1)
+
+        design_names = list(self.design_grid.names)
+        feature_names = list(self.feature_grid.names)
+
+        if nominal_design.size != len(design_names):
+            raise ValueError(
+                f"Nominal design size mismatch: {nominal_design.size} vs {len(design_names)}."
+            )
+        if central_features.size != len(feature_names):
+            raise ValueError(
+                f"Central feature size mismatch: {central_features.size} vs {len(feature_names)}."
+            )
+
+        conditioning = {
+            name: float(nominal_design[i]) for i, name in enumerate(design_names)
+        }
+        conditioning.update(
+            {name: float(central_features[i]) for i, name in enumerate(feature_names)}
         )
 
-    weights = posterior.reshape(-1).copy()
-    weights[~np.isfinite(weights)] = 0.0
-    total = float(np.sum(weights))
-    if total <= 0.0:
-        raise ValueError("Posterior has no finite positive mass for sampling.")
-    weights /= total
+        posterior = self.designer.get_posterior(**conditioning)
+        if posterior is None:
+            raise RuntimeError(
+                "ExperimentDesigner.get_posterior returned None. "
+                "Ensure calculateEIG was called."
+            )
+        return np.asarray(posterior, dtype=np.float64)
 
-    param_axes = [
-        np.asarray(getattr(parameter_grid, name), dtype=np.float64)
-        for name in parameter_grid.names
-    ]
-    broadcast_axes = np.broadcast_arrays(*param_axes)
+    def draw_samples(
+        self,
+        pdf: Optional[np.ndarray] = None,
+        num_samples: int = 50000,
+        seed: int = 1,
+    ) -> np.ndarray:
+        """
+        Draw weighted parameter samples from a PDF over the parameter grid.
 
-    rng = np.random.default_rng(seed)
-    draw_idx = rng.choice(weights.size, size=int(num_samples), replace=True, p=weights)
-    samples = np.column_stack(
-        [axis.reshape(-1)[draw_idx] for axis in broadcast_axes]
-    ).astype(np.float64, copy=False)
-    return samples
+        Args:
+            pdf: PDF array (e.g., posterior). If None, uses posterior from get_posterior().
+            num_samples: Number of samples to draw.
+            seed: Random seed.
 
+        Returns:
+            np.ndarray: Samples with shape (num_samples, n_params).
+        """
+        if pdf is None:
+            pdf = self.get_posterior(nominal=True)
 
-def _init_from_run_id(run_id: str, cosmo_exp: str, device: str, design_args_path: str | None):
-    import yaml
+        if num_samples <= 0:
+            raise ValueError("num_samples must be positive.")
 
-    from bedcosmo.util import get_experiment_config_path, get_runs_data, init_experiment
+        posterior = np.asarray(pdf, dtype=np.float64)
+        if posterior.size != int(np.prod(self.parameter_grid.shape)):
+            raise ValueError(
+                f"pdf size mismatch: {posterior.size} vs {int(np.prod(self.parameter_grid.shape))}."
+            )
 
-    run_data_list, _, _ = get_runs_data(run_ids=run_id, cosmo_exp=cosmo_exp)
-    if not run_data_list:
-        raise ValueError(f"Run {run_id} not found for cosmo_exp={cosmo_exp}.")
-    run_data = run_data_list[0]
-    run_obj = run_data["run_obj"]
-    run_args = run_data["params"]
+        weights = posterior.reshape(-1).copy()
+        weights[~np.isfinite(weights)] = 0.0
+        total = float(np.sum(weights))
+        if total <= 0.0:
+            raise ValueError("PDF has no finite positive mass for sampling.")
+        weights /= total
 
-    design_args = None
-    if design_args_path is not None:
-        resolved_path = get_experiment_config_path(cosmo_exp, design_args_path)
-        with open(resolved_path, "r") as f:
-            design_args = yaml.safe_load(f)
+        param_axes = [
+            np.asarray(getattr(self.parameter_grid, name), dtype=np.float64)
+            for name in self.parameter_grid.names
+        ]
+        broadcast_axes = np.broadcast_arrays(*param_axes)
 
-    experiment = init_experiment(
-        run_obj=run_obj,
-        run_args=run_args,
-        device=device,
-        design_args=design_args,
-        global_rank=0,
-    )
-    return experiment, run_obj
-
-
-def _init_from_configs(
-    cosmo_exp: str,
-    device: str,
-    design_args_path: str | None,
-    prior_args_path: str | None,
-):
-    from bedcosmo.util import init_experiment
-
-    return init_experiment(
-        cosmo_exp=cosmo_exp,
-        device=device,
-        design_args_path=design_args_path,
-        prior_args_path=prior_args_path,
-        global_rank=0,
-    )
-
+        rng = np.random.default_rng(seed)
+        draw_idx = rng.choice(weights.size, size=int(num_samples), replace=True, p=weights)
+        samples = np.column_stack(
+            [axis.reshape(-1)[draw_idx] for axis in broadcast_axes]
+        ).astype(np.float64, copy=False)
+        return samples
 
 def main():
     parser = argparse.ArgumentParser(description="Standalone brute-force EIG runner")
@@ -342,6 +518,7 @@ def main():
         default=None,
         help="Prior args config name under experiments/<cosmo_exp>/ (config mode)",
     )
+    parser.add_argument("--use_experiment_prior", action="store_true", help="Use experiment's prior distributions for PDF")
     parser.add_argument("--device", type=str, default="cpu", help="Torch device for experiment calculations")
     parser.add_argument("--param_pts", type=int, default=75, help="Points per parameter axis")
     parser.add_argument("--feature_pts", type=int, default=35, help="Points per feature axis")
@@ -368,11 +545,22 @@ def main():
         )
         artifacts_path = None
 
-    result = brute_force_from_experiment(
+    # Use the class-based interface
+    bf = BruteForceDesigner(
         experiment=experiment,
         param_pts=args.param_pts,
         feature_pts=args.feature_pts,
     )
+
+    # Compute prior if requested
+    if args.prior_args_path or args.use_experiment_prior:
+        bf.compute_prior_pdf(
+            prior_args_path=args.prior_args_path,
+            use_experiment_prior=args.use_experiment_prior,
+        )
+        print(f"Computed prior PDF with shape {bf.prior_pdf.shape}")
+
+    result = bf.run()
 
     eig = np.asarray(result["eig"], dtype=float)
     eig_flat = eig.reshape(-1)
@@ -390,6 +578,7 @@ def main():
         "parameter_grid_shape": list(result["parameter_grid_shape"]),
         "param_pts": int(args.param_pts),
         "feature_pts": int(args.feature_pts),
+        "used_prior": args.prior_args_path is not None or args.use_experiment_prior,
     }
 
     print("Brute-force run complete")

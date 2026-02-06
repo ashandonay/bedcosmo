@@ -5,8 +5,6 @@ import io
 import json
 import gc
 import pickle
-import re
-import matplotlib
 from matplotlib.lines import Line2D
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
@@ -29,11 +27,7 @@ from bedcosmo.util import (
 import mlflow
 import inspect
 import yaml
-from bedcosmo.brute_force import (
-    brute_force_from_experiment,
-    draw_param_samples_grid,
-    get_posterior_grid,
-)
+from bedcosmo.brute_force import BruteForceDesigner
 
 class Evaluator:
     def __init__(
@@ -156,12 +150,18 @@ class Evaluator:
                 global_rank=self.global_rank,
             )
 
-        result = brute_force_from_experiment(
+        # Use class-based BruteForceDesigner with experiment's prior
+        bf = BruteForceDesigner(
             experiment=self._brute_force_experiment,
             param_pts=self.brute_force_param_pts,
             feature_pts=self.brute_force_feature_pts,
-            return_designer=True,
         )
+
+        # Compute prior PDF from experiment's prior distributions
+        prior_pdf = bf.compute_prior_pdf(use_experiment_prior=True)
+        print(f"Computed prior PDF with shape {prior_pdf.shape}")
+
+        result = bf.run(prior=prior_pdf)
         eig = np.asarray(result["eig"], dtype=float)
         best_design = result["best_design"]
 
@@ -192,23 +192,14 @@ class Evaluator:
         }
 
         try:
-            pdf = get_posterior_grid(
-                experiment=self._brute_force_experiment,
-                designer=result["designer"],
-                feature_grid=result["feature_grid"],
-                design_grid=result["design_grid"],
-                nominal=True,
-            )
-            self._brute_force_samples = draw_param_samples_grid(
-                parameter_grid=result["parameter_grid"],
+            pdf = bf.get_posterior(nominal=True)
+            self._brute_force_samples = bf.draw_samples(
                 pdf=pdf,
                 num_samples=50000,
                 seed=self.seed,
             )
-            variable_data["brute_force"]["posterior_samples"] = int(
-                self._brute_force_samples.shape[0]
-            )
         except Exception as e:
+            traceback.print_exc()
             self._brute_force_samples = None
             print(f"Warning: brute-force posterior sampling failed: {e}")
 
