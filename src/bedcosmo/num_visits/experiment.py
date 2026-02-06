@@ -993,4 +993,12 @@ class NumVisits(BaseExperiment, CosmologyMixin):
 
         likelihood = np.exp(log_likelihood)
         # likelihood shape: X + D + P
+        if (
+            getattr(params, "_stack_offset", 0) == 0
+            and getattr(features, "_stack_offset", 0) == 0
+            and getattr(designs, "_stack_offset", 0) == 0
+        ):
+            param_shape = tuple(params.shape)
+            if likelihood.shape != param_shape and likelihood.size == int(np.prod(param_shape)):
+                likelihood = likelihood.reshape(param_shape)
         return likelihood

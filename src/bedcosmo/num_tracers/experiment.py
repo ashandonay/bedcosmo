@@ -1342,4 +1342,14 @@ class NumTracers(BaseExperiment, CosmologyMixin):
                 D_M_sigma = self.sigmas[self.DM_idx].cpu().numpy()[i] * np.sqrt(self.nominal_passed_ratio[i].cpu().numpy()/passed_ratio[i])
                 likelihood = np.exp(-0.5 * (D_M_diff / D_M_sigma) ** 2) * likelihood
 
+        if (
+            getattr(params, "_stack_offset", 0) == 0
+            and getattr(features, "_stack_offset", 0) == 0
+            and getattr(designs, "_stack_offset", 0) == 0
+        ):
+            param_shape = tuple(params.shape)
+            likelihood = np.asarray(likelihood, dtype=np.float64)
+            if likelihood.shape != param_shape and likelihood.size == int(np.prod(param_shape)):
+                likelihood = likelihood.reshape(param_shape)
+
         return likelihood

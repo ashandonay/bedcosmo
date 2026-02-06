@@ -822,5 +822,14 @@ class VariableRedshift(BaseExperiment, CosmologyMixin):
             D_M_diff = D_M_obs - D_M_mean.cpu().numpy()
             D_M_likelihood = np.exp(-0.5 * (D_M_diff / self.sigma_D_M) ** 2)
             likelihood = likelihood * D_M_likelihood
-        
+        if (
+            getattr(params, "_stack_offset", 0) == 0
+            and getattr(features, "_stack_offset", 0) == 0
+            and getattr(designs, "_stack_offset", 0) == 0
+        ):
+            param_shape = tuple(params.shape)
+            likelihood = np.asarray(likelihood, dtype=np.float64)
+            if likelihood.shape != param_shape and likelihood.size == int(np.prod(param_shape)):
+                likelihood = likelihood.reshape(param_shape)
+
         return likelihood
