@@ -120,6 +120,108 @@ class BaseExperiment(ABC):
         """Experiment name."""
         return getattr(self, "name", self.__class__.__name__.lower())
 
+    def _build_design_grid(
+        self,
+        design_pts=None,
+        labels=None,
+        design_axes=None,
+        constraint=None,
+        full_shape=None,
+    ):
+        """
+        Build a bed.grid.Grid for experiment designs.
+
+        Exactly one input mode must be provided:
+        1) Explicit points via design_pts (n_designs x design_dim)
+        2) Axis definitions via design_axes, with optional Grid constraint
+        """
+        from bed.grid import Grid  # Local import to avoid hard dependency at import time.
+
+        has_axes = design_axes is not None
+        has_pts = design_pts is not None
+        if has_axes == has_pts:
+            raise ValueError("Provide exactly one of design_axes or design_pts.")
+
+        if has_axes:
+            axis_values = {}
+            for raw_name, values in design_axes.items():
+                name = str(raw_name)
+                arr = np.asarray(values, dtype=np.float64).reshape(-1)
+                if arr.size == 0:
+                    raise ValueError(f"Design axis '{name}' is empty.")
+                axis_values[name] = np.unique(arr)
+
+            if constraint is None:
+                return Grid(**axis_values)
+
+            if full_shape is None:
+                full_shape = tuple(len(v) for v in axis_values.values())
+            return Grid(**axis_values, constraint=constraint, full_shape=tuple(full_shape))
+
+        if torch.is_tensor(design_pts):
+            points = design_pts.detach().cpu().numpy().astype(np.float64)
+        else:
+            points = np.asarray(design_pts, dtype=np.float64)
+
+        if points.ndim != 2:
+            raise ValueError(f"Design points must be 2D, got shape {points.shape}")
+
+        n_rows, n_dim = points.shape
+        if labels is None:
+            labels = getattr(self, "design_labels", None)
+        if labels is None or len(labels) != n_dim:
+            labels = [f"d_{i}" for i in range(n_dim)]
+
+        axis_names = []
+        for label in labels:
+            name = str(label)
+            axis_names.append(name)
+
+        axis_values = {}
+        for j, name in enumerate(axis_names):
+            axis_values[name] = np.unique(points[:, j])
+
+        full_shape = tuple(len(axis_values[name]) for name in axis_names)
+        cart_size = int(np.prod(full_shape))
+        if cart_size == n_rows:
+            return Grid(**axis_values)
+
+        index_maps = [{float(v): i for i, v in enumerate(axis_values[name])} for name in axis_names]
+        multi_idx = []
+        for row in points:
+            row_idx = []
+            for j, val in enumerate(row):
+                key = float(val)
+                if key in index_maps[j]:
+                    row_idx.append(index_maps[j][key])
+                else:
+                    candidates = axis_values[axis_names[j]]
+                    row_idx.append(int(np.argmin(np.abs(candidates - key))))
+            multi_idx.append(tuple(row_idx))
+        multi_idx = np.array(multi_idx, dtype=int).T
+        allowed_flat = np.unique(np.ravel_multi_index(multi_idx, full_shape))
+
+        def _constraint(idx, **kwargs):
+            return np.isin(idx, allowed_flat).astype(int)
+
+        return Grid(**axis_values, constraint=_constraint, full_shape=full_shape)
+
+    def _designs_from_grid(self, design_grid, device=None, dtype=torch.float64):
+        """
+        Convert a bed.grid.Grid of design axes into an (n_designs, design_dim) tensor.
+        """
+        if device is None:
+            device = getattr(self, "device", "cpu")
+        design_cols = []
+        for name in design_grid.names:
+            col = np.asarray(getattr(design_grid, name), dtype=np.float64).reshape(-1)
+            design_cols.append(
+                torch.as_tensor(col, dtype=dtype, device=device).reshape(-1, 1)
+            )
+        if design_cols:
+            return torch.cat(design_cols, dim=1)
+        return torch.empty((0, 0), dtype=dtype, device=device)
+
     # =========================================================================
     # Parameter Transformation Methods
     # =========================================================================

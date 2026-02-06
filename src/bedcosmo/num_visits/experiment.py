@@ -15,7 +15,6 @@ import yaml
 
 from speclite import filters as speclite_filters
 from astropy.constants import h, c
-from bed.grid import Grid
 import getdist
 from bedcosmo.util import load_prior_flow_from_file, profile_method
 from bedcosmo.base import BaseExperiment
@@ -372,19 +371,16 @@ class NumVisits(BaseExperiment, CosmologyMixin):
             sum_upper: Upper bound on sum of design variables (default: None)
             labels: Labels for design variables (default: None)
         """
-        self.designs_grid = None
         if labels is None:
             labels = self.filters_list
+        grid_labels = [str(label) for label in labels]
+        design_pts = None
+        design_axes = None
+        constraint = None
+
         # Check if input_type is "nominal"
         if input_type == "nominal":
-            designs = self.nominal_design.unsqueeze(0)  # Add batch dimension
-            nominal_axes = {
-                f"n_{label}" if not str(label).startswith("n_") else str(label): np.array(
-                    [float(self.nominal_design[idx].detach().cpu())], dtype=np.float64
-                )
-                for idx, label in enumerate(labels)
-            }
-            self.designs_grid = Grid(**nominal_axes)
+            design_pts = self.nominal_design.unsqueeze(0)  # Add batch dimension
         elif input_type == "variable":
             # If input_designs_path is provided, load from path (assumed to be absolute)
             if input_designs_path is not None:
@@ -396,22 +392,23 @@ class NumVisits(BaseExperiment, CosmologyMixin):
                 input_designs_array = np.load(input_designs_path)
                 # Convert to tensor
                 if isinstance(input_designs_array, torch.Tensor):
-                    designs = input_designs_array.to(self.device, dtype=torch.float64)
+                    design_pts = input_designs_array.to(self.device, dtype=torch.float64)
                 elif isinstance(input_designs_array, (list, tuple, np.ndarray)):
-                    designs = torch.as_tensor(input_designs_array, device=self.device, dtype=torch.float64)
+                    design_pts = torch.as_tensor(input_designs_array, device=self.device, dtype=torch.float64)
                 else:
                     raise ValueError(f"input_designs must be a list, array, or tensor, got {type(input_designs_array)}")
                 
                 # Handle 1D input (single design)
-                if designs.ndim == 1:
-                    if len(designs) != self.num_filters:
-                        raise ValueError(f"Input design must have {self.num_filters} values, got {len(designs)}")
-                    designs = designs.reshape(1, -1)
-                elif designs.ndim == 2:
-                    if designs.shape[1] != self.num_filters:
-                        raise ValueError(f"Input design must have {self.num_filters} columns, got {designs.shape[1]}")
+                if design_pts.ndim == 1:
+                    if len(design_pts) != self.num_filters:
+                        raise ValueError(f"Input design must have {self.num_filters} values, got {len(design_pts)}")
+                    design_pts = design_pts.reshape(1, -1)
+                elif design_pts.ndim == 2:
+                    if design_pts.shape[1] != self.num_filters:
+                        raise ValueError(f"Input design must have {self.num_filters} columns, got {design_pts.shape[1]}")
                 else:
-                    raise ValueError(f"Input design must be 1D or 2D, got shape {designs.shape}")
+                    raise ValueError(f"Input design must be 1D or 2D, got shape {design_pts.shape}")
+
             else:
                 # Expand parameters to filters if needed
                 design_step = self._expand_to_filters(step, "step")
@@ -425,16 +422,13 @@ class NumVisits(BaseExperiment, CosmologyMixin):
                     sum_upper = float(self.nominal_design.sum()) if hasattr(self, 'nominal_design') else None
                 
                 design_axes = {}
-                for idx, label in enumerate(labels):
-                    axis_name = f"n_{label}" if not str(label).startswith("n_") else str(label)
-                    design_axes[axis_name] = np.arange(
+                for idx, grid_label in enumerate(grid_labels):
+                    design_axes[grid_label] = np.arange(
                         design_lower[idx],
                         design_upper[idx] + 0.5 * design_step[idx],
                         design_step[idx],
                         dtype=np.float64,
                     )
-
-                constraint = None
                 if sum_lower is not None or sum_upper is not None:
                     lower_bound = sum_lower if sum_lower is not None else -np.inf
                     upper_bound = sum_upper if sum_upper is not None else np.inf
@@ -445,24 +439,20 @@ class NumVisits(BaseExperiment, CosmologyMixin):
                         return within.astype(int)
 
                     constraint = _constraint
+        else:
+            raise ValueError(f"Unknown input_type '{input_type}'. Expected 'nominal' or 'variable'.")
 
-                grid = Grid(**design_axes, constraint=constraint) if constraint else Grid(**design_axes)
-                self.designs_grid = grid
-
-                designs = torch.tensor(
-                    getattr(grid, grid.names[0]).squeeze(), device=self.device, dtype=torch.float64
-                ).unsqueeze(1)
-                for name in grid.names[1:]:
-                    values = torch.tensor(
-                        getattr(grid, name).squeeze(), device=self.device, dtype=torch.float64
-                    ).unsqueeze(1)
-                    designs = torch.cat([designs, values], dim=1)
-        
-        self.designs = designs.to(self.device)
-        if self.designs.numel() == 0:
-            if self.verbose:
-                print("Design grid empty under current constraint; defaulting to nominal design.")
-            self.designs = self.nominal_design.unsqueeze(0).to(self.device)
+        self.designs_grid = self._build_design_grid(
+            design_axes=design_axes,
+            design_pts=design_pts,
+            labels=grid_labels,
+            constraint=constraint,
+        )
+        if design_pts is None:
+            design_pts = self._designs_from_grid(
+                self.designs_grid, device=self.device, dtype=torch.float64
+            )
+        self.designs = design_pts.to(self.device)
 
     @profile_method
     def sample_parameters(self, sample_shape, prior=None, use_prior_flow=True, **kwargs):
@@ -929,6 +919,10 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         """
         def _grid_array(grid, name):
             """Get axis values without GridStack trailing singleton pad dimensions."""
+            if name not in grid.names:
+                raise ValueError(
+                    f"Axis '{name}' not found in grid names {list(grid.names)}."
+                )
             values = np.asarray(getattr(grid, name), dtype=np.float64)
             grid_ndim = len(grid.shape)
             if values.ndim > grid_ndim:
@@ -943,14 +937,14 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         # mags_model shape: P + (num_filters,)
 
         # Feature grid (magnitudes): broadcast per-filter axes to a common feature shape X
-        feature_axes = [_grid_array(features, f"mag_{band}") for band in self.filters_list]
+        feature_axes = [_grid_array(features, f"mag_{band}") for band in self.design_labels]
         feature_axes = np.broadcast_arrays(*feature_axes)
         mag_obs = np.stack(feature_axes, axis=-1)
         feature_shape = mag_obs.shape[:-1]
         # mag_obs shape: X + (num_filters,)
 
         # Design grid (visits): broadcast per-filter axes to common design shape D
-        design_axes = [_grid_array(designs, f"n_{band}") for band in self.filters_list]
+        design_axes = [_grid_array(designs, str(band)) for band in self.design_labels]
         design_axes = np.broadcast_arrays(*design_axes)
         nvisits = np.stack(design_axes, axis=-1)
         design_shape = nvisits.shape[:-1]

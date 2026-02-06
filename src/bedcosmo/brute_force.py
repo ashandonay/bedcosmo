@@ -98,11 +98,12 @@ def create_design_grid(experiment) -> Any:
     """
     Get design Grid from experiment.
     """
-    if hasattr(experiment, "designs_grid") and experiment.designs_grid is not None:
-        return experiment.designs_grid
-    raise ValueError(
-        "Experiment does not expose designs_grid. Add self.designs_grid in init_designs."
-    )
+    if not hasattr(experiment, "designs_grid") or experiment.designs_grid is None:
+        raise ValueError(
+            "Experiment does not expose designs_grid. "
+            "Define it in experiment.init_designs (e.g., via BaseExperiment._build_design_grid)."
+        )
+    return experiment.designs_grid
 
 
 def create_uniform_prior(parameter_grid) -> np.ndarray:

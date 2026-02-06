@@ -50,7 +50,7 @@ class StubExperiment(BaseExperiment):
     def pyro_model(self, design):
         raise NotImplementedError
 
-    def sample_valid_parameters(self, sample_shape, prior=None, use_prior_flow=True, **kwargs):
+    def sample_parameters(self, sample_shape, prior=None, use_prior_flow=True, **kwargs):
         if prior is None:
             prior = self.prior
         parameters = {}
@@ -60,6 +60,12 @@ class StubExperiment(BaseExperiment):
             else:
                 parameters[k] = v
         return parameters
+
+    # Backward-compatible alias for older tests/utilities.
+    def sample_valid_parameters(self, sample_shape, prior=None, use_prior_flow=True, **kwargs):
+        return self.sample_parameters(
+            sample_shape, prior=prior, use_prior_flow=use_prior_flow, **kwargs
+        )
 
 
 # ============================================================================
@@ -383,3 +389,71 @@ class TestSamplePriorFlowCache:
         exp.clear_prior_flow_cache()
         assert exp._prior_flow_cache is None
         assert exp._prior_flow_cache_idx == 0
+
+
+# ============================================================================
+# Design-grid helper tests
+# ============================================================================
+
+@pytest.mark.unit
+class TestDesignGridHelpers:
+    """Tests for BaseExperiment design-grid helper methods."""
+
+    @staticmethod
+    def _make_exp():
+        pytest.importorskip("bed.grid")
+        return StubExperiment(["x", "y"], ["x", "y"], design_labels=["x", "y"])
+
+    def test_requires_exactly_one_input_mode(self):
+        exp = self._make_exp()
+        points = torch.tensor([[0.0, 0.0]], dtype=torch.float64)
+        axes = {"x": np.array([0.0, 1.0]), "y": np.array([0.0, 1.0])}
+
+        with pytest.raises(ValueError, match="exactly one"):
+            exp._build_design_grid()
+
+        with pytest.raises(ValueError, match="exactly one"):
+            exp._build_design_grid(design_pts=points, design_axes=axes, labels=["x", "y"])
+
+    def test_build_from_design_axes_with_constraint(self):
+        exp = self._make_exp()
+        axes = {"x": np.array([0.0, 1.0, 2.0]), "y": np.array([0.0, 1.0, 2.0])}
+
+        grid = exp._build_design_grid(
+            design_axes=axes,
+            constraint=lambda **kwargs: ((kwargs["x"] + kwargs["y"]) <= 2.0).astype(int),
+        )
+        points = exp._designs_from_grid(grid, device="cpu")
+
+        assert points.shape[1] == 2
+        assert points.shape[0] > 0
+        assert points.shape[0] < 9
+        assert torch.all(points.sum(dim=1) <= 2.0 + 1e-12)
+
+    def test_build_from_irregular_design_points_round_trip(self):
+        exp = self._make_exp()
+        design_pts = torch.tensor(
+            [
+                [0.0, 0.0],
+                [0.0, 1.0],
+                [1.0, 0.0],
+            ],
+            dtype=torch.float64,
+        )
+
+        grid = exp._build_design_grid(design_pts=design_pts, labels=["x", "y"])
+        points = exp._designs_from_grid(grid, device="cpu")
+
+        got = {tuple(np.round(row, 12)) for row in points.cpu().numpy()}
+        expected = {tuple(np.round(row, 12)) for row in design_pts.cpu().numpy()}
+        assert got == expected
+
+    def test_single_design_point_is_supported(self):
+        exp = self._make_exp()
+        design_pts = torch.tensor([[7.0, 11.0]], dtype=torch.float64)
+
+        grid = exp._build_design_grid(design_pts=design_pts, labels=["x", "y"])
+        points = exp._designs_from_grid(grid, device="cpu")
+
+        assert points.shape == (1, 2)
+        assert torch.allclose(points, design_pts)

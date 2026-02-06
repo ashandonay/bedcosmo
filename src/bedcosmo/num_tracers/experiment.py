@@ -234,9 +234,16 @@ class NumTracers(BaseExperiment, CosmologyMixin):
             input_type: Type of input designs ("nominal" or "variable")
 
         """
+        if labels is None:
+            labels = list(self.design_labels)
+        grid_labels = [str(label) for label in labels]
+        design_pts = None
+        design_axes = None
+        constraint = None
+
         # Check if input_type is "nominal"
         if input_type == "nominal":
-            designs = self.nominal_design.unsqueeze(0)  # Add batch dimension
+            design_pts = self.nominal_design.unsqueeze(0)  # Add batch dimension
         elif input_type == "variable":
             # If input_designs_path is provided, load from path (assumed to be absolute)
             if input_designs_path is not None:
@@ -247,17 +254,17 @@ class NumTracers(BaseExperiment, CosmologyMixin):
                 
                 input_designs_array = np.load(input_designs_path)
                 # Convert to tensor
-                designs = torch.tensor(input_designs_array, device=self.device, dtype=torch.float64)
+                design_pts = torch.tensor(input_designs_array, device=self.device, dtype=torch.float64)
                 # Handle 1D input (single design)
-                if designs.ndim == 1:
-                    if len(designs) != len(labels):
-                        raise ValueError(f"Input design must have {len(labels)} values, got {len(designs)}")
-                    designs = designs.reshape(1, -1)
-                elif designs.ndim == 2:
-                    if designs.shape[1] != len(labels):
-                        raise ValueError(f"Input design must have {len(labels)} columns, got {designs.shape[1]}")
+                if design_pts.ndim == 1:
+                    if len(design_pts) != len(labels):
+                        raise ValueError(f"Input design must have {len(labels)} values, got {len(design_pts)}")
+                    design_pts = design_pts.reshape(1, -1)
+                elif design_pts.ndim == 2:
+                    if design_pts.shape[1] != len(labels):
+                        raise ValueError(f"Input design must have {len(labels)} columns, got {design_pts.shape[1]}")
                 else:
-                    raise ValueError(f"Input design must be 1D or 2D, got shape {designs.shape}")
+                    raise ValueError(f"Input design must be 1D or 2D, got shape {design_pts.shape}")
             else:
                 # Generate design grid
                 if type(step) == float:
@@ -284,7 +291,7 @@ class NumTracers(BaseExperiment, CosmologyMixin):
                     raise ValueError("upper must be a float or list")
                     
                 designs_dict = {
-                    f'N_{target}': np.arange(
+                    grid_labels[i]: np.arange(
                         lower_limits[i],
                         upper_limits[i],
                         design_steps[i]
@@ -293,42 +300,40 @@ class NumTracers(BaseExperiment, CosmologyMixin):
                 
                 # Create constrained grid based on sum_lower and sum_upper
                 if sum_lower is None and sum_upper is None:
-                    # No constraint on sum
-                    grid_designs = Grid(**designs_dict)
+                    pass
                 elif sum_lower is not None and sum_upper is not None:
                     if abs(sum_lower - sum_upper) < tol:
                         # Equal bounds: sum must equal this value
                         target_sum = sum_lower
-                        grid_designs = Grid(
-                            **designs_dict,
-                            constraint=lambda **kwargs: np.abs(sum(kwargs.values()) - target_sum) < tol
-                        )
+                        constraint = lambda **kwargs: np.abs(sum(kwargs.values()) - target_sum) < tol
                     else:
                         # Range: sum must be between lower and upper
-                        grid_designs = Grid(
-                            **designs_dict,
-                            constraint=lambda **kwargs: ((sum(kwargs.values()) >= sum_lower - tol) & 
-                                                        (sum(kwargs.values()) <= sum_upper + tol))
+                        constraint = lambda **kwargs: (
+                            (sum(kwargs.values()) >= sum_lower - tol)
+                            & (sum(kwargs.values()) <= sum_upper + tol)
                         )
                 elif sum_lower is not None:
                     # Only lower bound: sum >= lower
-                    grid_designs = Grid(
-                        **designs_dict,
-                        constraint=lambda **kwargs: sum(kwargs.values()) >= (sum_lower - tol)
-                    )
+                    constraint = lambda **kwargs: sum(kwargs.values()) >= (sum_lower - tol)
                 else:
                     # Only upper bound: sum <= upper
-                    grid_designs = Grid(
-                        **designs_dict,
-                        constraint=lambda **kwargs: sum(kwargs.values()) <= (sum_upper + tol)
-                    )
+                    constraint = lambda **kwargs: sum(kwargs.values()) <= (sum_upper + tol)
 
-                designs = torch.tensor(getattr(grid_designs, grid_designs.names[0]).squeeze(), device=self.device).unsqueeze(1)
-                for name in grid_designs.names[1:]:
-                    design_tensor = torch.tensor(getattr(grid_designs, name).squeeze(), device=self.device).unsqueeze(1)
-                    designs = torch.cat((designs, design_tensor), dim=1)
-                
-        self.designs = designs.to(self.device)
+                design_axes = designs_dict
+        else:
+            raise ValueError(f"Unknown input_type '{input_type}'. Expected 'nominal' or 'variable'.")
+
+        self.designs_grid = self._build_design_grid(
+            design_axes=design_axes,
+            design_pts=design_pts,
+            labels=grid_labels,
+            constraint=constraint,
+        )
+        if design_pts is None:
+            design_pts = self._designs_from_grid(
+                self.designs_grid, device=self.device, dtype=torch.float64
+            )
+        self.designs = design_pts.to(self.device)
     
     @profile_method
     def init_prior(
@@ -564,28 +569,51 @@ class NumTracers(BaseExperiment, CosmologyMixin):
 
     @profile_method
     def calc_passed(self, class_ratio):
+        label_to_index = {str(label): i for i, label in enumerate(self.design_labels)}
+
+        def _label_index(label):
+            label_str = str(label)
+            if label_str not in label_to_index:
+                raise ValueError(
+                    f"Required design label '{label_str}' not found in design_labels={list(self.design_labels)}."
+                )
+            return label_to_index[label_str]
+
+        def _grid_axis(grid, label):
+            label_str = str(label)
+            if label_str not in grid.names:
+                raise ValueError(
+                    f"Could not find design axis '{label_str}'. "
+                    f"Available names={list(grid.names)}."
+                )
+            return np.asarray(getattr(grid, label_str), dtype=np.float64)
+
         if type(class_ratio) == torch.Tensor:
             assert class_ratio.shape[-1] == len(self.design_labels), f"class_ratio should have {len(self.design_labels)} columns"
             obs_ratio = torch.zeros((class_ratio.shape[0], class_ratio.shape[1], len(self.desi_data)), device=self.device)
+            idx_BGS = _label_index("BGS")
+            idx_LRG = _label_index("LRG")
+            idx_ELG = _label_index("ELG")
+            idx_QSO = _label_index("QSO")
 
             # multiply each class ratio by the observed fraction in each tracer bin
             BGSs = self.desi_tracers.loc[self.desi_tracers["class"] == "BGS"]["observed"]
-            BGS_dist = class_ratio[..., 0].unsqueeze(-1) * torch.tensor((BGSs / BGSs.sum()).values, device=self.device).unsqueeze(0)
+            BGS_dist = class_ratio[..., idx_BGS].unsqueeze(-1) * torch.tensor((BGSs / BGSs.sum()).values, device=self.device).unsqueeze(0)
             obs_ratio[..., np.where(self.desi_data["tracer"] == "BGS")[0]] = BGS_dist[..., 0].unsqueeze(-1)
 
             LRGs = self.desi_tracers.loc[self.desi_tracers["class"] == "LRG"]["observed"]
-            LRG_dist = class_ratio[..., 1].unsqueeze(-1) * torch.tensor((LRGs / LRGs.sum()).values, device=self.device).unsqueeze(0)
+            LRG_dist = class_ratio[..., idx_LRG].unsqueeze(-1) * torch.tensor((LRGs / LRGs.sum()).values, device=self.device).unsqueeze(0)
             obs_ratio[..., np.where(self.desi_data["tracer"] == "LRG1")[0]] = LRG_dist[..., 0].unsqueeze(-1)
             obs_ratio[..., np.where(self.desi_data["tracer"] == "LRG2")[0]] = LRG_dist[..., 1].unsqueeze(-1)
 
             ELGs = self.desi_tracers.loc[self.desi_tracers["class"] == "ELG"]["observed"]
-            ELG_dist = class_ratio[..., 2].unsqueeze(-1) * torch.tensor((ELGs / ELGs.sum()).values, device=self.device).unsqueeze(0)
+            ELG_dist = class_ratio[..., idx_ELG].unsqueeze(-1) * torch.tensor((ELGs / ELGs.sum()).values, device=self.device).unsqueeze(0)
             # add the last value in LRG_dist to the first value in ELG_dist to get LRG3+ELG1
             obs_ratio[..., np.where(self.desi_data["tracer"] == "LRG3+ELG1")[0]] = (LRG_dist[..., 2] + ELG_dist[..., 0]).unsqueeze(-1)
             obs_ratio[..., np.where(self.desi_data["tracer"] == "ELG2")[0]] = ELG_dist[..., 1].unsqueeze(-1)
 
             QSOs = self.desi_tracers.loc[self.desi_tracers["class"] == "QSO"]["observed"]
-            QSO_dist = class_ratio[..., 3].unsqueeze(-1) * torch.tensor((QSOs / QSOs.sum()).values, device=self.device).unsqueeze(0)
+            QSO_dist = class_ratio[..., idx_QSO].unsqueeze(-1) * torch.tensor((QSOs / QSOs.sum()).values, device=self.device).unsqueeze(0)
             obs_ratio[..., np.where(self.desi_data["tracer"] == "QSO")[0]] = QSO_dist[..., 0].unsqueeze(-1)
             obs_ratio[..., np.where(self.desi_data["tracer"] == "Lya QSO")[0]] = QSO_dist[..., 1].unsqueeze(-1)
 
@@ -606,17 +634,20 @@ class NumTracers(BaseExperiment, CosmologyMixin):
             obs_ratio = np.zeros((5,) + len(class_ratio.shape)*(1,))
 
             LRGs = self.desi_tracers.loc[self.desi_tracers["class"] == "LRG"]["observed"]
-            LRG_dist = (class_ratio.N_LRG * np.array((LRGs / LRGs.sum()).values)).squeeze()
+            LRG_axis = _grid_axis(class_ratio, "LRG")
+            LRG_dist = (LRG_axis * np.array((LRGs / LRGs.sum()).values)).squeeze()
             
             obs_ratio[0:2, ...] = LRG_dist[0:2]
 
             ELGs = self.desi_tracers.loc[self.desi_tracers["class"] == "ELG"]["observed"]
-            ELG_dist = (class_ratio.N_ELG * np.array((ELGs / ELGs.sum()).values)).squeeze()
+            ELG_axis = _grid_axis(class_ratio, "ELG")
+            ELG_dist = (ELG_axis * np.array((ELGs / ELGs.sum()).values)).squeeze()
             obs_ratio[..., 2] = (LRG_dist[..., 2] + ELG_dist[..., 0])
             obs_ratio[..., 3] = ELG_dist[..., 1]
 
             QSOs = self.desi_tracers.loc[self.desi_tracers["class"] == "QSO"]["observed"]
-            QSO_dist = (class_ratio.N_QSO * np.array((QSOs / QSOs.sum()).values)).squeeze()
+            QSO_axis = _grid_axis(class_ratio, "QSO")
+            QSO_dist = (QSO_axis * np.array((QSOs / QSOs.sum()).values)).squeeze()
             obs_ratio[..., 4] = QSO_dist[..., 0]
 
             efficiency = np.stack([
@@ -1296,13 +1327,12 @@ class NumTracers(BaseExperiment, CosmologyMixin):
     def unnorm_lfunc(self, params, features, designs):
         parameters = { }
         for key in params.names:
-            parameters[key] = torch.tensor(getattr(params, key), device=self.device)
+            parameters[key] = torch.tensor(getattr(params, key), device=self.device, dtype=torch.float64)
         likelihood = 1
         passed_ratio = self.calc_passed(designs)
         for i in range(len(self.tracer_bins)):
             D_H_mean = self.D_H_func(**parameters)
             D_H_diff = getattr(features, features.names[i]) - D_H_mean.cpu().numpy()
-            print(getattr(designs, designs.names[i]).shape)
             D_H_sigma = self.sigmas[self.DH_idx].cpu().numpy()[i] * np.sqrt(self.nominal_passed_ratio[i].cpu().numpy()/passed_ratio[i])
             likelihood = np.exp(-0.5 * (D_H_diff / D_H_sigma) ** 2) * likelihood
             

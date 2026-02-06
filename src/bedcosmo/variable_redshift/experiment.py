@@ -218,6 +218,8 @@ class VariableRedshift(BaseExperiment, CosmologyMixin):
             upper: Upper bound for redshift grid (default: 5.0, ignored if input_design is provided)
             perm_invar: Enforce permutation invariance by removing duplicate permutations (default: True)
         """
+        if labels is None:
+            labels = [f"z_{i+1}" for i in range(self.n_redshifts)]
         # If input_designs_path is provided, load from path (assumed to be absolute)
         if input_designs_path is not None:
             if not os.path.isabs(input_designs_path):
@@ -280,6 +282,9 @@ class VariableRedshift(BaseExperiment, CosmologyMixin):
             designs = unique_sorted
         
         self.designs = designs.to(self.device)
+        self.designs_grid = self._build_design_grid(
+            design_pts=self.designs, labels=labels
+        )
         
         if self.global_rank == 0 and self.verbose:
             print(f"Initialized {self.designs.shape[0]} redshift designs from z={lower} to z={upper}")
@@ -790,13 +795,18 @@ class VariableRedshift(BaseExperiment, CosmologyMixin):
             # Add trailing dimension for plate system
             parameters[key] = param_array.unsqueeze(-1)
         
-        # Extract redshift from designs
-        print(getattr(designs, designs.names[0]).shape)
-        z_array = torch.tensor(getattr(designs, designs.names[0]), device=self.device, dtype=torch.float64)
+        # Extract redshift from designs using the configured design label.
+        if len(self.design_labels) == 0:
+            raise ValueError("Experiment has no design_labels configured.")
+        design_axis = str(self.design_labels[0])
+        if design_axis not in designs.names:
+            raise ValueError(
+                f"Design axis '{design_axis}' not found in grid names {list(designs.names)}."
+            )
+        z_array = torch.tensor(getattr(designs, design_axis), device=self.device, dtype=torch.float64)
         # z also needs proper shape for broadcasting
         z = z_array.unsqueeze(-1)
-        
-        print(z.shape)
+
         # Compute D_H mean and likelihood
         D_H_mean = self.D_H_func(z, **parameters)
         
