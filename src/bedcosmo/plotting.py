@@ -287,8 +287,7 @@ class BasePlotter:
         Returns:
             g: GetDist plotter object with the generated triangle plot.
         """
-        # Use get_single_plotter with proper ratio and scaling like in the notebook
-        getdist_2D_ratio = 1 / 1.2
+        getdist_2D_ratio = 1.0
         g = plots.get_single_plotter(width_inch=width_inch, ratio=getdist_2D_ratio, scaling=True)
         
         # Apply style settings if provided (like KP7StylePaper)
