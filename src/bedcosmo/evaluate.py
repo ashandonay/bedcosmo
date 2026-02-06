@@ -90,6 +90,7 @@ class Evaluator:
         self.brute_force = brute_force
         self.brute_force_param_points = brute_force_param_points
         self.brute_force_feature_points = brute_force_feature_points
+        self._brute_force_experiment = None
         
         # Load design_args from file
         if design_args_path is not None:
@@ -138,8 +139,20 @@ class Evaluator:
 
     def _compute_brute_force_eig(self, step_key):
         print("Running brute-force EIG calculation with ExperimentDesigner...")
+        # Brute-force path is pinned to CPU for stability / compatibility.
+        # Keep a separate experiment instance so the main evaluator can still run on GPU.
+        if self._brute_force_experiment is None:
+            print("Initializing CPU experiment for brute-force EIG...")
+            self._brute_force_experiment = init_experiment(
+                self.run_obj,
+                self.run_args,
+                device="cpu",
+                design_args=self.design_args,
+                global_rank=self.global_rank,
+            )
+
         result = brute_force_from_experiment(
-            experiment=self.experiment,
+            experiment=self._brute_force_experiment,
             param_points=self.brute_force_param_points,
             feature_points=self.brute_force_feature_points,
         )
