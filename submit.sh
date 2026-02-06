@@ -876,7 +876,10 @@ else
     AVAILABLE_GPUS=$(python3 -c "import torch; print(torch.cuda.device_count())" 2>/dev/null) || AVAILABLE_GPUS=0
     [ -z "$AVAILABLE_GPUS" ] && AVAILABLE_GPUS=0
     if [ "$GPUS_SET_BY_USER" = false ]; then
-        if [ "$AVAILABLE_GPUS" -le 0 ]; then
+        if [ "$JOB_TYPE" = "eval" ]; then
+            GPUS=1
+            echo "Eval job: using 1 GPU (override with --gpus if needed)"
+        elif [ "$AVAILABLE_GPUS" -le 0 ]; then
             GPUS=1
             echo "No GPUs detected; using 1 process (CPU). Training may fail if code requires CUDA."
         else

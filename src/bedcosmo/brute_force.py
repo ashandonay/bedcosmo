@@ -9,18 +9,12 @@ import json
 import os
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
 import torch
-
-
-def _get_grid_and_designer():
-    from bed.design import ExperimentDesigner  # type: ignore
-    from bed.grid import Grid  # type: ignore
-
-    return Grid, ExperimentDesigner
-
+from bed.design import ExperimentDesigner
+from bed.grid import Grid
 
 def _dist_bounds(distribution, q_lo=0.01, q_hi=0.99) -> Tuple[float, float]:
     # Uniform-like
@@ -53,7 +47,6 @@ def create_parameter_grid(
 
     Derives bounds from experiment.prior.
     """
-    Grid, _ = _get_grid_and_designer()
     axes: Dict[str, np.ndarray] = {}
     names = list(getattr(experiment, "cosmo_params", []))
     if not names:
@@ -78,8 +71,6 @@ def create_feature_grid(
 
     Auto-builds for experiments exposing filters_list + _calculate_magnitudes.
     """
-    Grid, _ = _get_grid_and_designer()
-
     # Auto mode for magnitude-based experiments (e.g. num_visits).
     if hasattr(experiment, "filters_list") and hasattr(experiment, "_calculate_magnitudes"):
         if parameter_grid is None:
@@ -135,7 +126,6 @@ def run_experiment_designer(
     """
     Run brute-force EIG with ExperimentDesigner.
     """
-    _, ExperimentDesigner = _get_grid_and_designer()
     if not hasattr(experiment, lfunc_name):
         raise ValueError(f"Experiment missing likelihood function '{lfunc_name}'.")
     lfunc = getattr(experiment, lfunc_name)
@@ -186,7 +176,9 @@ def brute_force_from_experiment(
 
 
 def _init_from_run_id(run_id: str, cosmo_exp: str, device: str, design_args_path: str | None):
-    from bedcosmo.util import get_runs_data, init_experiment
+    import yaml
+
+    from bedcosmo.util import get_experiment_config_path, get_runs_data, init_experiment
 
     run_data_list, _, _ = get_runs_data(run_ids=run_id, cosmo_exp=cosmo_exp)
     if not run_data_list:
@@ -197,9 +189,8 @@ def _init_from_run_id(run_id: str, cosmo_exp: str, device: str, design_args_path
 
     design_args = None
     if design_args_path is not None:
-        import yaml
-
-        with open(design_args_path, "r") as f:
+        resolved_path = get_experiment_config_path(cosmo_exp, design_args_path)
+        with open(resolved_path, "r") as f:
             design_args = yaml.safe_load(f)
 
     experiment = init_experiment(
@@ -233,8 +224,18 @@ def main():
     parser = argparse.ArgumentParser(description="Standalone brute-force EIG runner")
     parser.add_argument("cosmo_exp", type=str, help="Experiment type (e.g. num_visits, num_tracers)")
     parser.add_argument("--run_id", type=str, default=None, help="MLflow run ID to load experiment from")
-    parser.add_argument("--design_args_path", type=str, default=None, help="Path to design_args YAML")
-    parser.add_argument("--prior_args_path", type=str, default=None, help="Path to prior_args YAML (config mode)")
+    parser.add_argument(
+        "--design_args_path",
+        type=str,
+        default=None,
+        help="Design args config name under experiments/<cosmo_exp>/ (e.g. design_args_2d.yaml)",
+    )
+    parser.add_argument(
+        "--prior_args_path",
+        type=str,
+        default=None,
+        help="Prior args config name under experiments/<cosmo_exp>/ (config mode)",
+    )
     parser.add_argument("--device", type=str, default="cpu", help="Torch device for experiment calculations")
     parser.add_argument("--param_pts", type=int, default=75, help="Points per parameter axis")
     parser.add_argument("--feature_pts", type=int, default=35, help="Points per feature axis")
