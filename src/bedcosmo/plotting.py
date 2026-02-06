@@ -983,8 +983,13 @@ class RunPlotter(BasePlotter):
         # Calculate dynamic font sizes
         n_params = len(all_samples[0].paramNames.names)
         base_fontsize = max(6, min(18, plot_width * (0.2 + 0.42 * np.sqrt(n_params))))
+        # For 1D (single-panel) plots, use larger minimum so title and legend are readable
+        if n_params == 1:
+            base_fontsize = max(base_fontsize, 12)
         title_fontsize = base_fontsize * 1.15
         legend_fontsize = base_fontsize * 0.65
+        if n_params == 1:
+            legend_fontsize = max(legend_fontsize, 10)
 
         if g.fig.legends:
             for legend in g.fig.legends:
