@@ -26,10 +26,22 @@ def _dist_bounds(distribution, q_lo=0.01, q_hi=0.99) -> Tuple[float, float]:
     # Uniform-like
     if hasattr(distribution, "low") and hasattr(distribution, "high"):
         return float(distribution.low.detach().cpu()), float(distribution.high.detach().cpu())
-    # Fallback to quantiles for other distributions
+    # Try analytic quantiles for other distributions.
     q = torch.tensor([q_lo, q_hi], dtype=torch.float64)
-    x = distribution.icdf(q)
-    return float(x[0].detach().cpu()), float(x[1].detach().cpu())
+    try:
+        x = distribution.icdf(q)
+        return float(x[0].detach().cpu()), float(x[1].detach().cpu())
+    except (NotImplementedError, RuntimeError, AttributeError):
+        pass
+
+    # Fallback: Monte Carlo quantiles for distributions lacking icdf.
+    with torch.no_grad():
+        samples = distribution.sample((20000,)).to(torch.float64)
+    lo = float(torch.quantile(samples, q_lo).detach().cpu())
+    hi = float(torch.quantile(samples, q_hi).detach().cpu())
+    if not np.isfinite(lo) or not np.isfinite(hi) or lo >= hi:
+        raise ValueError(f"Could not infer valid bounds for distribution {distribution}.")
+    return lo, hi
 
 
 def create_parameter_grid(
