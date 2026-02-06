@@ -88,6 +88,7 @@ Changelog = "https://github.com/ashandonay/bedcosmo/blob/main/CHANGELOG.md"
 [project.scripts]
 bed-train = "bedcosmo.train:main"
 bed-eval = "bedcosmo.evaluate:main"
+bed-bruteforce = "bedcosmo.brute_force:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

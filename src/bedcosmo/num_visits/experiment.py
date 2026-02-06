@@ -372,9 +372,19 @@ class NumVisits(BaseExperiment, CosmologyMixin):
             sum_upper: Upper bound on sum of design variables (default: None)
             labels: Labels for design variables (default: None)
         """
+        self.designs_grid = None
+        if labels is None:
+            labels = self.filters_list
         # Check if input_type is "nominal"
         if input_type == "nominal":
             designs = self.nominal_design.unsqueeze(0)  # Add batch dimension
+            nominal_axes = {
+                f"n_{label}" if not str(label).startswith("n_") else str(label): np.array(
+                    [float(self.nominal_design[idx].detach().cpu())], dtype=np.float64
+                )
+                for idx, label in enumerate(labels)
+            }
+            self.designs_grid = Grid(**nominal_axes)
         elif input_type == "variable":
             # If input_designs_path is provided, load from path (assumed to be absolute)
             if input_designs_path is not None:
@@ -416,7 +426,8 @@ class NumVisits(BaseExperiment, CosmologyMixin):
                 
                 design_axes = {}
                 for idx, label in enumerate(labels):
-                    design_axes[label] = np.arange(
+                    axis_name = f"n_{label}" if not str(label).startswith("n_") else str(label)
+                    design_axes[axis_name] = np.arange(
                         design_lower[idx],
                         design_upper[idx] + 0.5 * design_step[idx],
                         design_step[idx],
@@ -436,6 +447,7 @@ class NumVisits(BaseExperiment, CosmologyMixin):
                     constraint = _constraint
 
                 grid = Grid(**design_axes, constraint=constraint) if constraint else Grid(**design_axes)
+                self.designs_grid = grid
 
                 designs = torch.tensor(
                     getattr(grid, grid.names[0]).squeeze(), device=self.device, dtype=torch.float64

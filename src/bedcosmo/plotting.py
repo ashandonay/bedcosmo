@@ -1547,17 +1547,27 @@ class RunPlotter(BasePlotter):
         
         eig_values = np.array(variable_data.get('eigs_avg', []))
         eig_std_values = np.array(variable_data.get('eigs_std', [])) if 'eigs_std' in variable_data else np.zeros_like(eig_values)
+        brute_force_data = variable_data.get('brute_force', {})
+        brute_force_eig_values = np.array(brute_force_data.get('eigs_avg', [])) if brute_force_data else np.array([])
+        brute_force_eig_std_values = np.array(brute_force_data.get('eigs_std', [])) if brute_force_data else np.array([])
         
         if eig_values.size == 0:
             raise ValueError("No EIG values found in EIG data")
         
         # Get nominal EIG
         nominal_eig = None
+        nominal_brute_force_eig = None
         if include_nominal:
             nominal_eig = nominal_data.get('eigs_avg')
             if isinstance(nominal_eig, list):
                 nominal_eig = nominal_eig[0] if len(nominal_eig) > 0 else None
             nominal_eig = float(nominal_eig) if nominal_eig is not None else None
+            nominal_bf_data = nominal_data.get('brute_force', {})
+            if isinstance(nominal_bf_data, dict) and 'eigs_avg' in nominal_bf_data:
+                nominal_brute_force_eig = nominal_bf_data.get('eigs_avg')
+                if isinstance(nominal_brute_force_eig, list):
+                    nominal_brute_force_eig = nominal_brute_force_eig[0] if len(nominal_brute_force_eig) > 0 else None
+                nominal_brute_force_eig = float(nominal_brute_force_eig) if nominal_brute_force_eig is not None else None
         
         # Initialize experiment for design labels
         experiment = self._init_experiment_for_plotting()
@@ -1573,6 +1583,13 @@ class RunPlotter(BasePlotter):
         sorted_designs = input_designs[sorted_idx]
         sorted_eigs = eig_values[sorted_idx]
         sorted_eigs_std = eig_std_values[sorted_idx]
+        has_brute_force = brute_force_eig_values.size == eig_values.size and brute_force_eig_values.size > 0
+        if has_brute_force:
+            sorted_brute_force_eigs = brute_force_eig_values[sorted_idx]
+            if brute_force_eig_std_values.size == eig_values.size:
+                sorted_brute_force_eigs_std = brute_force_eig_std_values[sorted_idx]
+            else:
+                sorted_brute_force_eigs_std = np.zeros_like(sorted_brute_force_eigs)
         
         # Check if designs are 1D or multi-dimensional
         is_1d_design = (sorted_designs.shape[1] == 1)
@@ -1618,11 +1635,38 @@ class RunPlotter(BasePlotter):
         ax0.fill_between(x_vals, sorted_eigs - sorted_eigs_std, sorted_eigs + sorted_eigs_std,
                          color='gray', alpha=0.3, zorder=1)
         ax0.plot(x_vals, sorted_eigs, label='EIG', color='black', linewidth=2.5, zorder=5)
+        if has_brute_force:
+            ax0.fill_between(
+                x_vals,
+                sorted_brute_force_eigs - sorted_brute_force_eigs_std,
+                sorted_brute_force_eigs + sorted_brute_force_eigs_std,
+                color='tab:green',
+                alpha=0.15,
+                zorder=1,
+            )
+            ax0.plot(
+                x_vals,
+                sorted_brute_force_eigs,
+                label='Brute-force EIG',
+                color='tab:green',
+                linewidth=2.0,
+                linestyle='--',
+                zorder=6,
+            )
         
         # Plot nominal EIG
         if include_nominal and nominal_eig is not None:
             ax0.axhline(y=nominal_eig, color='tab:blue', linestyle='--', 
                        label='Nominal EIG', linewidth=2, zorder=10)
+        if include_nominal and nominal_brute_force_eig is not None:
+            ax0.axhline(
+                y=nominal_brute_force_eig,
+                color='tab:green',
+                linestyle=':',
+                label='Nominal Brute-force EIG',
+                linewidth=2,
+                zorder=10,
+            )
         
         # Plot optimal design
         optimal_idx = np.argmax(sorted_eigs)
