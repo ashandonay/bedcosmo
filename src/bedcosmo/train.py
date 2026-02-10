@@ -807,6 +807,63 @@ class Trainer:
                 self.prior_args_path = self.run_args.get("prior_args_path", None)
                 self.design_args_path = self.run_args.get("design_args_path", None)
 
+                # Handle --prior_flow_path: load prior_args from the checkpoint's MLflow run
+                prior_flow_path = self.run_args.get("prior_flow_path", None)
+                if prior_flow_path:
+                    # Validate path exists
+                    if not os.path.exists(prior_flow_path):
+                        raise FileNotFoundError(f"Prior flow checkpoint not found: {prior_flow_path}")
+
+                    # Extract run info from path
+                    prior_run_id, prior_exp_id, prior_cosmo_exp = extract_run_info_from_checkpoint_path(prior_flow_path)
+
+                    if self.global_rank == 0:
+                        print(f"Extracted prior run info from checkpoint path:")
+                        print(f"  Run ID: {prior_run_id}")
+                        print(f"  Experiment: {prior_cosmo_exp}")
+
+                    # Error if cosmo_exp differs
+                    if prior_cosmo_exp != self.cosmo_exp:
+                        raise ValueError(
+                            f"Prior flow is from experiment '{prior_cosmo_exp}' but current run is '{self.cosmo_exp}'.\n"
+                            "Cross-experiment prior flows are not supported."
+                        )
+
+                    # Check cosmo_model compatibility via MLflow
+                    prior_flow_run = self.client.get_run(prior_run_id)
+                    prior_cosmo_model = prior_flow_run.data.params.get('cosmo_model', None)
+                    current_cosmo_model = self.run_args['cosmo_model']
+
+                    if prior_cosmo_model != current_cosmo_model:
+                        raise ValueError(
+                            f"Prior flow cosmo_model '{prior_cosmo_model}' does not match "
+                            f"current cosmo_model '{current_cosmo_model}'.\n"
+                            "The prior flow must be from a run with the same cosmo_model."
+                        )
+
+                    # Restore tracking URI for current run
+                    mlflow.set_tracking_uri(self.storage_path + "/mlruns")
+
+                    # Build path to prior_args.yaml in the prior run's artifacts
+                    prior_artifact_path = f"{self.storage_path}/mlruns/{prior_exp_id}/{prior_run_id}/artifacts/prior_args.yaml"
+
+                    if not os.path.exists(prior_artifact_path):
+                        raise FileNotFoundError(
+                            f"prior_args.yaml not found for run {prior_run_id}.\n"
+                            f"Expected: {prior_artifact_path}\n"
+                            "This run may predate prior_args artifact saving."
+                        )
+
+                    # Load prior_args from the prior run
+                    with open(prior_artifact_path, 'r') as f:
+                        self.prior_args_from_flow = yaml.safe_load(f)
+
+                    # Add prior_flow_path to the loaded config
+                    self.prior_args_from_flow['prior_flow_path'] = prior_flow_path
+
+                    # Clear prior_args_path since we'll write from dict
+                    self.prior_args_path = None
+
                 # Resolve relative paths using experiment config directory
                 if self.prior_args_path and not os.path.isabs(self.prior_args_path):
                     self.prior_args_path = str(get_experiment_config_path(self.cosmo_exp, self.prior_args_path))
@@ -1025,12 +1082,20 @@ class Trainer:
             else:
                 raise FileNotFoundError(f"Design args file not found in restart run artifacts: {restart_design_args_path}")
         else:
-            # Save prior_args.yaml from file path
-            if hasattr(self, 'prior_args_path') and self.prior_args_path is not None:
+            # Save prior_args.yaml - either from prior_flow or from file path
+            prior_artifact_path = f"{artifacts_dir}/prior_args.yaml"
+
+            if hasattr(self, 'prior_args_from_flow') and self.prior_args_from_flow is not None:
+                # Write prior_args loaded from prior_flow_path
+                with open(prior_artifact_path, 'w') as f:
+                    yaml.dump(self.prior_args_from_flow, f, default_flow_style=False, sort_keys=False)
+                mlflow.log_artifact(prior_artifact_path)
+                if self.verbose:
+                    print(f"Saved prior_args.yaml (from prior_flow) to artifacts: {prior_artifact_path}")
+            elif hasattr(self, 'prior_args_path') and self.prior_args_path is not None:
                 if not os.path.exists(self.prior_args_path):
                     raise FileNotFoundError(f"Prior file not found at {self.prior_args_path}")
-                
-                prior_artifact_path = f"{artifacts_dir}/prior_args.yaml"
+
                 shutil.copy2(self.prior_args_path, prior_artifact_path)
                 mlflow.log_artifact(prior_artifact_path)
                 if self.verbose:
@@ -1319,6 +1384,8 @@ if __name__ == '__main__':
     parser.add_argument('--restart_optimizer', action='store_true', help='Restart optimizer from checkpoint')
     parser.add_argument('--log_usage', action='store_true', help='Log compute usage of the training script')
     parser.add_argument('--profile', action='store_true', help='Enable profiling for a few steps and then exit.')
+    parser.add_argument('--prior_flow_path', type=str, default=None,
+                        help='Path to prior flow checkpoint. Automatically loads prior_args from that run.')
 
     # --- Load Default Config ---
     # Parse just these essential arguments
@@ -1366,9 +1433,9 @@ if __name__ == '__main__':
 
     # Skip keys that are already defined as parser arguments
     skip_keys = {
-        'cosmo_exp', 'cosmo_model', 'mlflow_exp', 'device', 'resume_id', 
-        'resume_step', 'restart_id', 'restart_step', 'restart_checkpoint', 
-        'restart_optimizer', 'add_steps', 'log_usage', 'profile'
+        'cosmo_exp', 'cosmo_model', 'mlflow_exp', 'device', 'resume_id',
+        'resume_step', 'restart_id', 'restart_step', 'restart_checkpoint',
+        'restart_optimizer', 'add_steps', 'log_usage', 'profile', 'prior_flow_path'
         }
     
     for key, value in run_args_dict.items():
@@ -1430,6 +1497,7 @@ if __name__ == '__main__':
 
     # Override default run_args with any provided command-line arguments
     run_args = vars(args)
+
     for key, value in run_args.items():
         if key in run_args_dict.keys():
             if value is not None:

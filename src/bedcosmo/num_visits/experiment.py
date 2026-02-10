@@ -240,7 +240,6 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         self,
         parameters,
         prior_flow_path=None,
-        prior_run_id=None,
         **kwargs
     ):
         """
@@ -256,8 +255,6 @@ class NumVisits(BaseExperiment, CosmologyMixin):
                 - latex: LaTeX label for the parameter
             prior_flow_path (str, optional): Absolute path to prior flow checkpoint file.
                 Must be an absolute path. Required if using a trained posterior as prior.
-            prior_run_id (str, optional): MLflow run ID for prior flow metadata.
-                Required if prior_flow is specified.
             **kwargs: Additional arguments (ignored, for compatibility with YAML structure).
         """
         prior = {}
@@ -318,12 +315,8 @@ class NumVisits(BaseExperiment, CosmologyMixin):
                     "Relative paths are not supported."
                 )
 
-            if prior_run_id is None:
-                raise ValueError("prior_run_id must be specified when using prior_flow")
-            
             self.prior_flow, self.prior_flow_metadata = load_prior_flow_from_file(
                 prior_flow_path,
-                prior_run_id,
                 self.device,
                 self.global_rank
             )
@@ -331,8 +324,6 @@ class NumVisits(BaseExperiment, CosmologyMixin):
             # If not provided, will be set in __init__ after nominal_design is available
             if self.global_rank == 0:
                 print("Using trained posterior model as prior for parameter sampling (loaded from prior_args.yaml)")
-                if prior_run_id:
-                    print(f"  Metadata loaded from MLflow run_id: {prior_run_id}")
         else:
             self.prior_flow = None
 

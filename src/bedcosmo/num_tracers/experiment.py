@@ -341,7 +341,6 @@ class NumTracers(BaseExperiment, CosmologyMixin):
         parameters,
         constraints=None,
         prior_flow_path=None,
-        prior_run_id=None,
         **kwargs
     ):
         """
@@ -361,8 +360,6 @@ class NumTracers(BaseExperiment, CosmologyMixin):
                 Keys are constraint names, values are dicts with 'affected_parameters' and 'bounds'.
             prior_flow_path (str, optional): Absolute path to prior flow checkpoint file.
                 Must be an absolute path. Required if using a trained posterior as prior.
-            prior_run_id (str, optional): MLflow run ID for prior flow metadata.
-                Required if prior_flow is specified.
             **kwargs: Additional arguments (ignored, for compatibility with YAML structure).
         
         Returns:
@@ -388,12 +385,8 @@ class NumTracers(BaseExperiment, CosmologyMixin):
                     "Relative paths are not supported."
                 )
 
-            if prior_run_id is None:
-                raise ValueError("prior_run_id must be specified when using prior_flow_path")
-
             prior_flow, prior_flow_metadata = load_prior_flow_from_file(
                 prior_flow_path,
-                prior_run_id,
                 self.device,
                 self.global_rank
             )
@@ -401,7 +394,6 @@ class NumTracers(BaseExperiment, CosmologyMixin):
 
             if self.global_rank == 0:
                 print("Using trained posterior model as prior for parameter sampling (loaded from prior_args.yaml)")
-                print(f"  Metadata loaded from MLflow run_id: {prior_run_id}")
         else:
             prior_flow = None
             prior_flow_metadata = None

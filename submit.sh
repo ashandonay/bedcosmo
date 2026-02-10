@@ -677,6 +677,12 @@ case $JOB_TYPE in
         ;;
 esac
 
+# Log/job name: use job type so logs are labeled train, eval, resume, restart (or just "debug" when --debug)
+LOG_NAME="$JOB_TYPE"
+if [ "$DEBUG" = true ]; then
+    LOG_NAME="debug"
+fi
+
 # ──────────────────────────────────────────────────────────────────────
 # Print job summary
 # ──────────────────────────────────────────────────────────────────────
@@ -822,9 +828,12 @@ if [ "$EXECUTION_MODE" = "slurm" ]; then
     fi
 
     # Build sbatch flags (these override #SBATCH directives in the script)
-    SBATCH_ARGS+=("--time=$SLURM_TIME" "--qos=$SLURM_QUEUE" "--nodes=$SLURM_NODES")
+    SBATCH_ARGS+=("--job-name=$LOG_NAME" "--time=$SLURM_TIME" "--qos=$SLURM_QUEUE" "--nodes=$SLURM_NODES")
     if [ "$GPUS_SET_BY_USER" = true ]; then
         SBATCH_ARGS+=("--gpus-per-node=$GPUS")
+    fi
+    if [ "$DEBUG" = true ]; then
+        SBATCH_ARGS+=("--mail-type=NONE")
     fi
 
     TEMP_SBATCH_OUTPUT=$(mktemp)
@@ -909,7 +918,7 @@ else
     LOG_BASE_DIR="${SCRATCH_DIR}/bedcosmo/${COSMO_EXP}/logs"
     mkdir -p "$LOG_BASE_DIR"
     TIMESTAMP=$(date +"%Y-%m-%d_%H-%M-%S")
-    LOG_FILE="${LOG_BASE_DIR}/${TIMESTAMP}_${JOB_TYPE}.log"
+    LOG_FILE="${LOG_BASE_DIR}/${TIMESTAMP}_${LOG_NAME}.log"
 
     echo "Logging output to: $LOG_FILE"
     echo ""

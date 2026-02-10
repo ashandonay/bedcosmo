@@ -295,7 +295,6 @@ class VariableRedshift(BaseExperiment, CosmologyMixin):
         parameters,
         constraints=None,
         prior_flow=None,
-        prior_run_id=None,
         **kwargs
     ):
         """
@@ -315,8 +314,6 @@ class VariableRedshift(BaseExperiment, CosmologyMixin):
                 Keys are constraint names, values are dicts with 'affected_parameters' and 'bounds'.
             prior_flow (str, optional): Absolute path to prior flow checkpoint file.
                 Must be an absolute path. Required if using a trained posterior as prior.
-            prior_run_id (str, optional): MLflow run ID for prior flow metadata.
-                Required if prior_flow is specified.
             **kwargs: Additional arguments (ignored, for compatibility with YAML structure).
         """
         try:
