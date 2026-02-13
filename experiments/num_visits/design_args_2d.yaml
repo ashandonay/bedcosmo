@@ -1,0 +1,9 @@
+# Design arguments for num_visits experiment
+labels: ["u", "g"]
+input_type: variable # variable or nominal
+input_designs_path: null
+step: [5.0, 5.0]
+lower: [50.0, 80.0]
+upper: [90.0, 120.0]
+sum_lower: 170
+sum_upper: 170
