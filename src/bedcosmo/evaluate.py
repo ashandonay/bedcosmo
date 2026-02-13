@@ -27,7 +27,7 @@ from bedcosmo.util import (
 import mlflow
 import inspect
 import yaml
-from bedcosmo.brute_force import BruteForceDesigner
+from bedcosmo.grid_calc import GridCalculation
 
 class Evaluator:
     def __init__(
@@ -35,7 +35,7 @@ class Evaluator:
             levels=[0.68, 0.95], global_rank=0, eig_file_path=None, n_evals=10, n_particles=1000, 
             param_space='physical', display_run=False, verbose=False, device="cuda:0", profile=False, 
             sort=True, include_nominal=False, batch_size=1, particle_batch_size=None, design_args_path=None,
-            brute_force=False, brute_force_param_pts=75, brute_force_feature_pts=35
+            grid=False, grid_param_pts=75, grid_feature_pts=35
             ):
         self.cosmo_exp = cosmo_exp
         
@@ -85,11 +85,11 @@ class Evaluator:
         self.sort = sort
         self.include_nominal = include_nominal
         self.batch_size = batch_size  # Batch size for sample_posterior to reduce memory usage
-        self.brute_force = brute_force
-        self.brute_force_param_pts = brute_force_param_pts
-        self.brute_force_feature_pts = brute_force_feature_pts
-        self._brute_force_experiment = None
-        self._brute_force_samples = None
+        self.grid = grid
+        self.grid_param_pts = grid_param_pts
+        self.grid_feature_pts = grid_feature_pts
+        self._grid_experiment = None
+        self._grid_samples = None
         
         # Load design_args from file
         if design_args_path is not None:
@@ -136,13 +136,13 @@ class Evaluator:
         # Initialize timing mechanism
         self.session_start_time = None
 
-    def _compute_brute_force_eig(self, step_key):
-        print("Running brute-force EIG calculation with ExperimentDesigner...")
-        # Brute-force path is pinned to CPU for stability / compatibility.
+    def _compute_grid_eig(self, step_key):
+        print("Running grid EIG calculation with ExperimentDesigner...")
+        # Grid path is pinned to CPU for stability / compatibility.
         # Keep a separate experiment instance so the main evaluator can still run on GPU.
-        if self._brute_force_experiment is None:
-            print("Initializing CPU experiment for brute-force EIG...")
-            self._brute_force_experiment = init_experiment(
+        if self._grid_experiment is None:
+            print("Initializing CPU experiment for grid EIG...")
+            self._grid_experiment = init_experiment(
                 self.run_obj,
                 self.run_args,
                 device="cpu",
@@ -151,17 +151,17 @@ class Evaluator:
             )
 
         # Use class-based BruteForceDesigner with experiment's prior
-        bf = BruteForceDesigner(
-            experiment=self._brute_force_experiment,
-            param_pts=self.brute_force_param_pts,
-            feature_pts=self.brute_force_feature_pts,
+        gc = GridCalculation(
+            experiment=self._grid_experiment,
+            param_pts=self.grid_param_pts,
+            feature_pts=self.grid_feature_pts,
         )
 
         # Compute prior PDF from experiment's prior distributions
-        prior_pdf = bf.compute_prior_pdf(use_experiment_prior=True)
+        prior_pdf = gc.compute_prior_pdf(use_experiment_prior=True)
         print(f"Computed prior PDF with shape {prior_pdf.shape}")
 
-        result = bf.run(prior=prior_pdf)
+        result = gc.run(prior=prior_pdf)
         eig = np.asarray(result["eig"], dtype=float)
         best_design = result["best_design"]
 
@@ -172,7 +172,7 @@ class Evaluator:
         eig_flat = eig.reshape(-1)
         max_idx = int(np.argmax(eig_flat))
         optimal_eig = float(eig_flat[max_idx])
-        variable_data["brute_force"] = {
+        variable_data["grid"] = {
             "eigs_avg": eig_flat.tolist(),
             "eigs_std": np.zeros_like(eig_flat).tolist(),
             "optimal_eig": optimal_eig,
@@ -186,25 +186,25 @@ class Evaluator:
         nominal_design = np.asarray(self.experiment.nominal_design.detach().cpu().numpy(), dtype=float).reshape(1, -1)
         input_designs_np = np.asarray(self.input_designs.detach().cpu().numpy(), dtype=float)
         nominal_idx = int(np.argmin(np.linalg.norm(input_designs_np - nominal_design, axis=1)))
-        nominal_data["brute_force"] = {
+        nominal_data["grid"] = {
             "eigs_avg": float(eig_flat[nominal_idx]),
             "eigs_std": 0.0,
         }
 
         try:
-            pdf = bf.get_posterior(nominal=True)
-            self._brute_force_samples = bf.draw_samples(
+            pdf = gc.get_posterior(nominal=True)
+            self._grid_samples = gc.draw_samples(
                 pdf=pdf,
                 num_samples=50000,
                 seed=self.seed,
             )
         except Exception as e:
             traceback.print_exc()
-            self._brute_force_samples = None
-            print(f"Warning: brute-force posterior sampling failed: {e}")
+            self._grid_samples = None
+            print(f"Warning: grid posterior sampling failed: {e}")
 
         print(
-            f"Brute-force EIG complete: nominal={nominal_data['brute_force']['eigs_avg']:.4f}, "
+            f"Grid EIG complete: nominal={nominal_data['grid']['eigs_avg']:.4f}, "
             f"optimal={optimal_eig:.4f}"
         )
 
@@ -1065,11 +1065,11 @@ class Evaluator:
         self.eig_data["design_type"] = eig_label.lower()  # 'optimal' or 'fixed'
         self.eig_data['status'] = 'incomplete'  # Mark as incomplete during evaluation
 
-        if self.brute_force:
+        if self.grid:
             try:
-                self._compute_brute_force_eig(step_key=step_key)
+                self._compute_grid_eig(step_key=step_key)
             except Exception as e:
-                print(f"Warning: brute-force EIG calculation failed: {e}")
+                print(f"Warning: grid EIG calculation failed: {e}")
                 traceback.print_exc()
 
         eig_data_save_path = f"{self.save_path}/eig_data_{self.timestamp}.json"
@@ -1094,9 +1094,9 @@ class Evaluator:
         # Make some evaluation plots
         try:
             self.plotter.generate_posterior(
-                step_key=eval_step, display=['nominal', 'optimal'],  guide_samples=50000,
+                eval_step=eval_step, display=['nominal', 'optimal'],  guide_samples=50000,
                 levels=self.levels, plot_prior=True, transform_output=self.nf_transform_output,
-                brute_force_samples=self._brute_force_samples
+                grid_samples=self._grid_samples
                 )
             self._update_runtime()
         except Exception as e:
@@ -1105,14 +1105,14 @@ class Evaluator:
         
         try:
             if self.cosmo_exp == 'num_tracers':
-                self.plotter.design_comparison(step_key=eval_step, log_scale=True, use_fractional=False)
+                self.plotter.design_comparison(eval_step=eval_step, log_scale=True, use_fractional=False)
                 self._update_runtime()
         except Exception as e:
             print(f"Warning: design_comparison failed: {e}")
             traceback.print_exc()
         
         try:
-            self.plotter.eig_designs(step_key=eval_step, sort=self.sort, include_nominal=self.include_nominal)
+            self.plotter.eig_designs(eval_step=eval_step, sort=self.sort, include_nominal=self.include_nominal)
             self._update_runtime()
         except Exception as e:
             print(f"Warning: eig_designs failed: {e}")
@@ -1152,9 +1152,9 @@ if __name__ == "__main__":
     parser.add_argument('--batch_size', type=int, default=1, help='Batch size for sample_posterior to reduce memory usage (default: 1)')
     parser.add_argument('--particle_batch_size', type=int, default=None, help='Batch size for processing particles in LikelihoodDataset to reduce memory usage (default: None to use all particles)')
     parser.add_argument('--design_args_path', type=str, default=None, help='Path to design_args.yaml file. If None, defaults to the run\'s artifacts/design_args.yaml')
-    parser.add_argument('--brute_force', action='store_true', default=False, help='Run brute-force EIG using bayesdesign ExperimentDesigner')
-    parser.add_argument('--brute_force_param_pts', type=int, default=75, help='Number of points per parameter axis for brute-force parameter grid')
-    parser.add_argument('--brute_force_feature_pts', type=int, default=35, help='Number of points per feature axis for brute-force feature grid')
+    parser.add_argument('--grid', action='store_true', default=False, help='Run grid EIG using bayesdesign ExperimentDesigner')
+    parser.add_argument('--grid_param_pts', type=int, default=75, help='Number of points per parameter axis for grid parameter grid')
+    parser.add_argument('--grid_feature_pts', type=int, default=35, help='Number of points per feature axis for grid feature grid')
 
     args = parser.parse_args()
 
