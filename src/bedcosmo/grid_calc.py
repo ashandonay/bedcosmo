@@ -182,10 +182,21 @@ class GridCalculation:
                 ).detach().cpu().numpy()
 
             n_sigma = 4.0
+            # Only use z values with detectable errors to set feature bounds.
+            # High-z objects with sigma~10 would stretch the grid far beyond
+            # the region where the likelihood has meaningful support.
+            max_err_for_bounds = 3.0  # ignore objects with sigma > 1 mag
             axes = {}
             for i, band in enumerate(experiment.filters_list):
-                lo = float(np.min(mags[..., i] - n_sigma * mag_errors[..., i]))
-                hi = float(np.max(mags[..., i] + n_sigma * mag_errors[..., i]))
+                err_i = mag_errors[..., i]
+                detectable = err_i < max_err_for_bounds
+                if np.any(detectable):
+                    lo = float(np.min(mags[..., i][detectable] - n_sigma * err_i[detectable]))
+                    hi = float(np.max(mags[..., i][detectable] + n_sigma * err_i[detectable]))
+                else:
+                    # Fallback: use full range if nothing is detectable
+                    lo = float(np.min(mags[..., i]))
+                    hi = float(np.max(mags[..., i]))
                 axes[f"mag_{band}"] = np.linspace(lo, hi, int(self.feature_pts), dtype=np.float64)
             return Grid(**axes)
 
@@ -525,22 +536,22 @@ class GridCalculation:
 
     def plot_marginal(
         self,
-        design: Optional[Dict[str, float]] = None,
+        design_indices: Optional[list] = None,
+        labels: Optional[list] = None,
         figsize: Optional[Tuple[float, float]] = None,
         title: Optional[str] = None,
     ):
         """
-        Plot the marginal distribution P(y|xi) over features for a given design.
+        Plot 2D marginal P(y|xi) as a filled contour for each design index.
 
-        Uses designer.marginal which has shape (features_shape + designs_shape).
-        For a specific design point, slices the marginal and plots 1D distributions
-        for each feature dimension (marginalized over the others).
+        One subplot per design. The two feature axes form the x/y of the plot.
 
         Args:
-            design: Dictionary mapping design names to values. If None, uses the
-                    best design from the EIG calculation.
-            figsize: Figure size (width, height). Defaults based on number of features.
-            title: Optional title for the figure.
+            design_indices: Flat design indices into designer.EIG / marginal.
+                           If None, uses [best_idx].
+            labels: Subplot titles for each design.
+            figsize: Figure size.
+            title: Overall suptitle.
 
         Returns:
             matplotlib Figure and array of Axes.
@@ -550,54 +561,54 @@ class GridCalculation:
 
         marginal = self.designer.marginal
         feature_names = list(self.feature_grid.names)
-        design_names = list(self.design_grid.names)
         n_features = len(feature_names)
 
-        # Determine which design point to condition on
-        if design is None:
-            if self.best_design is None:
-                raise ValueError("No best_design available. Provide design explicitly.")
-            design = self.best_design
+        if design_indices is None:
+            design_indices = [int(np.argmax(self.designer.EIG))]
+        n_plots = len(design_indices)
+        if labels is None:
+            labels = [f"design {i}" for i in design_indices]
 
-        # Build index to slice into the design dimensions of the marginal array.
-        # marginal shape is (features_shape + designs_shape).
-        # We need to find the closest grid index for each design dimension.
-        idx = [slice(None)] * n_features  # keep all feature dimensions
-        for name in design_names:
-            if name not in design:
-                raise ValueError(f"Design must specify '{name}'. Got keys: {list(design.keys())}")
-            axis_vals = self.design_grid.axes_in[name]
-            loc = int(np.argmin(np.abs(axis_vals - design[name])))
-            idx.append(loc)
-
-        # Slice marginal to get P(y|xi) for this design: shape = features_shape
-        marginal_at_design = marginal[tuple(idx)]
+        # Flatten design dims: (features..., *design_shape) -> (features..., n_designs)
+        feature_shape = marginal.shape[:n_features]
+        marginal_flat = marginal.reshape(*feature_shape, -1)
 
         if figsize is None:
-            figsize = (5 * n_features, 4)
+            figsize = (5 * n_plots, 4)
 
-        fig, axes = plt.subplots(1, n_features, figsize=figsize, squeeze=False)
+        fig, axes = plt.subplots(1, n_plots, figsize=figsize, squeeze=False)
         axes = axes[0]
 
-        for i, fname in enumerate(feature_names):
-            ax = axes[i]
-            # Marginalize over all other feature dimensions to get 1D distribution
-            sum_axes = tuple(j for j in range(n_features) if j != i)
-            if sum_axes:
-                marginal_1d = np.sum(marginal_at_design, axis=sum_axes)
+        x_vals = np.asarray(self.feature_grid.axes_in[feature_names[0]]).ravel()
+        y_vals = np.asarray(self.feature_grid.axes_in[feature_names[1]]).ravel() if n_features > 1 else None
+
+        for ax, idx, label in zip(axes, design_indices, labels):
+            marg = marginal_flat[..., idx]
+            # After computing marg for the best design:
+            peak_u = np.unravel_index(np.argmax(marg), marg.shape)[0]
+            plt.figure()
+            plt.plot(y_vals, marg[peak_u, :])
+            plt.xlabel("mag_g")
+            plt.ylabel("P(y|ξ)")
+            plt.title(f"Slice at mag_u index {peak_u}")
+            plt.savefig("marginal_slice.png", dpi=200)
+            plt.close()
+            if n_features == 2 and y_vals is not None:
+                im = ax.pcolormesh(x_vals, y_vals, marg.T, shading="gouraud", cmap="viridis")
+                fig.colorbar(im, ax=ax, label="P(y|ξ)")
+                ax.set_xlabel(feature_names[0])
+                ax.set_ylabel(feature_names[1])
             else:
-                marginal_1d = marginal_at_design.ravel()
+                marg_1d = marg.ravel()
+                ax.plot(x_vals, marg_1d, linewidth=1.5)
+                ax.fill_between(x_vals, marg_1d, alpha=0.3)
+                ax.set_xlabel(feature_names[0])
+                ax.set_ylabel("P(y|ξ)")
+                ax.set_ylim(0, None)
+            ax.set_title(label)
 
-            feature_vals = self.feature_grid.axes_in[fname]
-            ax.plot(feature_vals, marginal_1d, linewidth=1.5)
-            ax.fill_between(feature_vals, marginal_1d, alpha=0.3)
-            ax.set_xlabel(fname)
-            ax.set_ylabel("P(y|ξ)")
-            ax.set_xlim(feature_vals.min(), feature_vals.max())
-
-        design_str = ", ".join(f"{k}={v:.3g}" for k, v in design.items())
         if title is None:
-            title = f"Marginal P(y|ξ) at design: {design_str}"
+            title = "Marginal P(y|ξ)"
         fig.suptitle(title)
         fig.tight_layout()
         return fig, axes
@@ -743,6 +754,19 @@ def main():
             title="Grid Posterior (nominal)",
             save_path=str(out_dir / "posterior.png"),
         )
+
+        # Marginal P(y|xi) plot comparing best and nominal designs
+        best_idx = int(np.argmax(gc.designer.EIG))
+        # Find nominal design index (closest to experiment's nominal)
+        nominal_np = experiment.nominal_design.detach().cpu().numpy().reshape(1, -1)
+        designs_np = input_designs.astype(np.float64)
+        nominal_idx = int(np.argmin(np.linalg.norm(designs_np - nominal_np[:, :designs_np.shape[1]], axis=1)))
+        fig_marg, _ = gc.plot_marginal(
+            design_indices=[best_idx, nominal_idx],
+            labels=["Best", "Nominal"]
+        )
+        fig_marg.savefig(out_dir / "marginal.png", dpi=200, bbox_inches="tight")
+        plt.close(fig_marg)
 
     print(f"All outputs saved to: {out_dir}")
 
