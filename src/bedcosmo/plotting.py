@@ -187,21 +187,497 @@ class BasePlotter:
             return f"{prefix}_{timestamp_str}.{suffix}"
         else:
             return f"{prefix}.{suffix}"
-    
-    def load_eig_data_file(self, artifacts_dir, step_key=None):
+
+    def eig_designs(
+        self,
+        eig_values,
+        input_designs,
+        design_labels,
+        nominal_design,
+        eig_std_values=None,
+        nominal_eig=None,
+        grid_eig_values=None,
+        grid_eig_std_values=None,
+        nominal_grid_eig=None,
+        sort=True,
+        include_nominal=True,
+        title=None,
+        save_path=None,
+        color="tab:green",
+    ):
+        """
+        Plots sorted EIG values and corresponding designs.
+
+        This core method accepts data directly, enabling reuse from both
+        MLflow-based RunPlotter and standalone grid-based contexts.
+
+        Args:
+            eig_values (np.ndarray): EIG values per design.
+            input_designs (np.ndarray): Design array with shape (n_designs, n_design_dims).
+            design_labels (list): Labels for each design dimension.
+            nominal_design (np.ndarray): Nominal design values.
+            eig_std_values (np.ndarray, optional): EIG std per design.
+            nominal_eig (float, optional): Nominal EIG value.
+            grid_eig_values (np.ndarray, optional): Grid EIG values.
+            grid_eig_std_values (np.ndarray, optional): Grid EIG std values.
+            nominal_grid_eig (float, optional): Nominal grid EIG value.
+            sort (bool): Whether to sort designs by EIG (default: True).
+            include_nominal (bool): Whether to include the nominal EIG in the plot (default: True).
+            title (str, optional): Custom title for the plot.
+            save_path (str, optional): Explicit save path. If None, uses self.save_figure/generate_filename.
+
+        Returns:
+            tuple: (fig, (ax0, ax1)) matplotlib figure and axes objects. ax1 may be None for 1D designs without sorting.
+        """
+        print(f"Generating EIG designs plot...")
+
+        eig_values = np.asarray(eig_values)
+        input_designs = np.asarray(input_designs)
+        nominal_design = np.asarray(nominal_design)
+
+        if eig_values.size == 0:
+            raise ValueError("No EIG values provided")
+
+        if len(input_designs) <= 1:
+            print("Warning: Single or no designs available, skipping EIG designs plot.")
+            return None
+
+        if eig_std_values is None:
+            eig_std_values = np.zeros_like(eig_values)
+        else:
+            eig_std_values = np.asarray(eig_std_values)
+
+        if grid_eig_values is not None:
+            grid_eig_values = np.asarray(grid_eig_values)
+        if grid_eig_std_values is not None:
+            grid_eig_std_values = np.asarray(grid_eig_std_values)
+
+        # Sort designs if requested
+        if sort:
+            sorted_idx = np.argsort(eig_values)[::-1]
+        else:
+            sorted_idx = np.arange(len(eig_values))
+
+        sorted_designs = input_designs[sorted_idx]
+        sorted_eigs = eig_values[sorted_idx]
+        sorted_eigs_std = eig_std_values[sorted_idx]
+        has_grid = (
+            grid_eig_values is not None
+            and grid_eig_values.size == eig_values.size
+            and grid_eig_values.size > 0
+        )
+        if has_grid:
+            sorted_grid_eigs = grid_eig_values[sorted_idx]
+            if grid_eig_std_values is not None and grid_eig_std_values.size == eig_values.size:
+                sorted_grid_eigs_std = grid_eig_std_values[sorted_idx]
+            else:
+                sorted_grid_eigs_std = np.zeros_like(sorted_grid_eigs)
+
+        # Check if designs are 1D or multi-dimensional
+        is_1d_design = (sorted_designs.shape[1] == 1)
+
+        # Find nominal design position
+        nominal_sorted_pos = None
+        try:
+            nominal_idx = int(np.argmin(np.linalg.norm(input_designs - nominal_design, axis=1)))
+            matches = np.where(sorted_idx == nominal_idx)[0]
+            if matches.size > 0:
+                nominal_sorted_pos = int(matches[0])
+        except:
+            pass
+
+        # Create figure with subplots
+        if is_1d_design and not sort:
+            fig, ax0 = plt.subplots(figsize=(16, 6))
+            ax1 = None
+            x_vals = sorted_designs[:, 0]
+        else:
+            if is_1d_design and sort:
+                height_ratios = [0.65, 0.15]
+            else:
+                height_ratios = [0.6, 0.2]
+            fig = plt.figure(figsize=(16, 6))
+            gs = gridspec.GridSpec(2, 1, height_ratios=height_ratios, hspace=0.0)
+            ax0 = fig.add_subplot(gs[0, 0])
+            ax1 = fig.add_subplot(gs[1, 0], sharex=ax0)
+            fig.subplots_adjust(left=0.06, right=0.88)
+            bbox0 = ax0.get_position()
+            bbox1 = ax1.get_position()
+            cbar_width = 0.02
+            cbar_gap = 0.01
+            cbar_left = bbox1.x1 + cbar_gap
+            cbar_bottom = bbox1.y0
+            cbar_height = bbox0.y1 - bbox1.y0
+            cbar_ax = fig.add_axes([cbar_left, cbar_bottom, cbar_width, cbar_height])
+            plt.setp(ax0.get_xticklabels(), visible=False)
+            ax0.tick_params(axis='x', which='both', length=0)
+            x_vals = np.arange(len(sorted_eigs))
+
+        # Plot EIG with error bars
+        from matplotlib.colors import to_rgba
+        fill_color = to_rgba(color, alpha=0.3)
+        ax0.fill_between(x_vals, sorted_eigs - sorted_eigs_std, sorted_eigs + sorted_eigs_std,
+                         color=fill_color, zorder=1)
+        ax0.plot(x_vals, sorted_eigs, label='EIG', color=color, linewidth=2.5, zorder=5)
+        if has_grid:
+            ax0.fill_between(
+                x_vals,
+                sorted_grid_eigs - sorted_grid_eigs_std,
+                sorted_grid_eigs + sorted_grid_eigs_std,
+                color='tab:green',
+                alpha=0.15,
+                zorder=1,
+            )
+            ax0.plot(
+                x_vals,
+                sorted_grid_eigs,
+                label='Grid-based EIG',
+                color='tab:green',
+                linewidth=2.0,
+                zorder=6,
+            )
+
+        # Plot nominal EIG
+        if include_nominal and nominal_eig is not None:
+            ax0.axhline(y=nominal_eig, color='tab:blue', linestyle='--',
+                       label='Nominal EIG', linewidth=2, zorder=10)
+        if include_nominal and nominal_grid_eig is not None:
+            ax0.axhline(
+                y=nominal_grid_eig,
+                color='tab:green',
+                linestyle=':',
+                label='Nominal Grid EIG',
+                linewidth=2,
+                zorder=10,
+            )
+
+        # Plot optimal design
+        optimal_idx = np.argmax(sorted_eigs)
+        optimal_x = x_vals[optimal_idx]
+        optimal_y = sorted_eigs[optimal_idx]
+        ax0.axvline(optimal_x, color='tab:orange', linestyle=':', linewidth=2, zorder=8)
+        ax0.plot(optimal_x, optimal_y, 'o', color='tab:orange', markersize=8, zorder=9,
+                label='Optimal Design')
+
+        # Set axis labels
+        if is_1d_design and not sort:
+            ax0.set_xlabel(f'${design_labels[0]}$', fontsize=12, weight='bold')
+            ax0.set_xlim(x_vals.min(), x_vals.max())
+        else:
+            ax0.set_xlim(-0.5, len(sorted_eigs) - 0.5)
+
+        ax0.set_ylabel("Expected Information Gain [bits]", fontsize=12, weight='bold')
+        ax0.legend(loc='lower left', fontsize=9, framealpha=0.9)
+        ax0.grid(True, alpha=0.3)
+
+        # Plot design heatmap
+        if ax1 is not None:
+            if is_1d_design and sort:
+                im = ax1.imshow(sorted_designs.T, aspect='auto', cmap='viridis')
+                ax1.set_ylabel('')
+                ax1.set_yticks([0])
+                # Format label: use as-is if already has $, otherwise wrap with $
+                label0 = design_labels[0] if design_labels[0].startswith('$') else f'${design_labels[0]}$'
+                ax1.set_yticklabels([label0])
+                ax1.tick_params(axis='y', length=0)
+                if nominal_sorted_pos is not None:
+                    ax1.axvline(nominal_sorted_pos, color='black', linestyle=':', linewidth=1.5)
+                cbar = fig.colorbar(im, cax=cbar_ax)
+                cbar.set_label('Design Value', labelpad=10, fontsize=12, weight='bold')
+            else:
+                # Multi-dimensional designs - use ratio to nominal
+                if np.any(nominal_design == 0):
+                    plot_data = sorted_designs.T
+                    cmap = 'viridis'
+                    im = ax1.imshow(plot_data, aspect='auto', cmap=cmap)
+                else:
+                    plot_data = (sorted_designs / nominal_design[np.newaxis, :]).T
+                    cmap = 'RdBu'
+                    from matplotlib.colors import TwoSlopeNorm
+                    vmin = plot_data.min()
+                    vmax = plot_data.max()
+                    norm = TwoSlopeNorm(vmin=vmin, vcenter=1.0, vmax=vmax)
+                    im = ax1.imshow(plot_data, aspect='auto', cmap=cmap, norm=norm)
+
+                ax1.set_xlabel("Design Index (sorted by EIG)" if sort else "Design Index",
+                              fontsize=12, weight='bold')
+                ax1.set_yticks(np.arange(len(design_labels)))
+                # Format labels: use as-is if already has $, otherwise wrap with $
+                formatted_labels = [label if label.startswith('$') else f'${label}$' for label in design_labels]
+                ax1.set_yticklabels(formatted_labels)
+                ax1.set_xlim(-0.5, len(sorted_designs) - 0.5)
+                ax1.set_ylabel('')
+                cbar = fig.colorbar(im, cax=cbar_ax)
+                cbar.set_label('Ratio to Nominal Design' if cmap == 'RdBu' else 'Design Value',
+                              labelpad=15, fontsize=12, weight='bold')
+            ax0.spines['bottom'].set_visible(False)
+            ax1.spines['bottom'].set_visible(True)
+
+        sort_title = "Sorted" if sort else ""
+        if title is None:
+            title = f'{sort_title} EIG per Design'
+        fig.suptitle(title, fontsize=16, y=0.95, weight='bold')
+
+        # Save figure
+        if save_path is not None:
+            os.makedirs(os.path.dirname(save_path), exist_ok=True)
+            fig.savefig(save_path, dpi=400, bbox_inches='tight', pad_inches=0.1)
+            print(f"Saved plot to {save_path}")
+
+        return fig, (ax0, ax1)
+
+    def generate_posterior(
+        self,
+        experiment,
+        posterior_flow=None,
+        input_designs=None,
+        eig_values=None,
+        nominal_eig=None,
+        display=('nominal', 'optimal'),
+        levels=(0.68,),
+        guide_samples=1000,
+        device="cuda:0",
+        seed=1,
+        plot_prior=False,
+        transform_output=True,
+        title=None,
+        grid_samples=None,
+        nominal_grid_eig=None,
+        save_path=None,
+    ):
+        """
+        Generates posterior plots for nominal and/or optimal designs.
+
+        This core method accepts data directly, enabling reuse from both
+        MLflow-based RunPlotter and standalone grid-based contexts.
+
+        Args:
+            experiment: Experiment object (for cosmo_params, latex_labels, central_val, etc.)
+            posterior_flow: Optional normalizing flow model. If None, NF samples are not generated.
+            input_designs (np.ndarray, optional): All designs array.
+            eig_values (np.ndarray, optional): EIG values (to find optimal).
+            nominal_eig (float, optional): Nominal EIG value.
+            display (tuple/list): Designs to display. Can include 'nominal' and/or 'optimal'.
+            levels (tuple/list): Contour level(s) to plot.
+            guide_samples (int): Number of samples to generate.
+            device (str): Device to use.
+            seed (int): Random seed.
+            plot_prior (bool): If True, also plot the prior.
+            transform_output (bool): Whether to transform output to physical space.
+            title (str, optional): Title of the plot.
+            grid_samples (np.ndarray, optional): Grid-based posterior parameter samples.
+            nominal_grid_eig (float, optional): Nominal grid EIG value.
+            save_path (str, optional): Explicit save path. If None, figure is not auto-saved by this method.
+
+        Returns:
+            GetDist plotter object.
+        """
+        # Normalize levels to always be a list
+        if isinstance(levels, (int, float)):
+            levels = [levels]
+
+        auto_seed(seed)
+
+        all_samples = []
+        all_colors = []
+        all_alphas = []
+        all_line_styles = []
+        legend_labels = []
+
+        # Generate samples for nominal design if requested
+        if 'nominal' in display and posterior_flow is not None:
+            nominal_context = experiment.nominal_context
+            nominal_samples_gd = experiment.get_guide_samples(
+                posterior_flow, nominal_context,
+                num_samples=guide_samples,
+                transform_output=transform_output
+            )
+
+            all_samples.append(nominal_samples_gd)
+            all_colors.append('tab:blue')
+            all_alphas.append(1.0)
+            all_line_styles.append('-')
+            eig_str = f", EIG: {nominal_eig:.3f} bits" if nominal_eig is not None else ""
+            legend_labels.append(f'Nominal Design (NF){eig_str}')
+
+        # Generate samples for optimal design if requested
+        if input_designs is not None:
+            input_designs = np.asarray(input_designs)
+        has_multiple_designs = input_designs is not None and len(input_designs) > 1
+
+        if 'optimal' in display and posterior_flow is not None and has_multiple_designs and eig_values is not None:
+            eig_values = np.asarray(eig_values)
+            optimal_idx = np.argmax(eig_values)
+            optimal_design = input_designs[optimal_idx]
+            optimal_eig = float(eig_values[optimal_idx])
+
+            optimal_design_tensor = torch.tensor(optimal_design, device=device, dtype=torch.float64)
+            optimal_context = torch.cat([optimal_design_tensor, experiment.central_val], dim=-1)
+
+            optimal_samples_gd = experiment.get_guide_samples(
+                posterior_flow, optimal_context,
+                num_samples=guide_samples,
+                transform_output=transform_output
+            )
+
+            all_samples.append(optimal_samples_gd)
+            all_colors.append('tab:orange')
+            all_alphas.append(1.0)
+            all_line_styles.append('-')
+            eig_str = f", EIG: {optimal_eig:.3f} bits"
+            legend_labels.append(f'Optimal Design (NF){eig_str}')
+        elif 'optimal' in display and posterior_flow is not None and input_designs is not None and not has_multiple_designs:
+            input_design_tensor = torch.tensor(input_designs[0], device=device, dtype=torch.float64)
+            input_context = torch.cat([input_design_tensor, experiment.central_val], dim=-1)
+
+            input_samples_gd = experiment.get_guide_samples(
+                posterior_flow, input_context,
+                num_samples=guide_samples,
+                transform_output=transform_output
+            )
+
+            all_samples.append(input_samples_gd)
+            all_colors.append('tab:orange')
+            all_alphas.append(1.0)
+            all_line_styles.append('-')
+            optimal_eig = float(np.asarray(eig_values)[0]) if eig_values is not None else None
+            eig_str = f", EIG: {optimal_eig:.3f} bits" if optimal_eig is not None else ""
+            legend_labels.append(f'Input Design (NF){eig_str}')
+
+        if grid_samples is not None:
+            grid_samples_np = np.asarray(grid_samples, dtype=np.float64)
+            if grid_samples_np.ndim == 1:
+                grid_samples_np = grid_samples_np.reshape(-1, 1)
+            if grid_samples_np.ndim != 2:
+                raise ValueError(
+                    f"grid_samples must be 2D or 1D, got shape {grid_samples_np.shape}."
+                )
+            expected_dim = len(experiment.cosmo_params)
+            if grid_samples_np.shape[1] != expected_dim:
+                raise ValueError(
+                    "grid_samples dimension does not match parameter count: "
+                    f"{grid_samples_np.shape[1]} vs {expected_dim}."
+                )
+
+            grid_samples_tensor = torch.as_tensor(
+                grid_samples_np, device=experiment.device, dtype=torch.float64
+            )
+            if not transform_output:
+                grid_samples_tensor = experiment.params_to_unconstrained(grid_samples_tensor)
+            grid_samples_np = grid_samples_tensor.detach().cpu().numpy()
+
+            with contextlib.redirect_stdout(io.StringIO()):
+                grid_samples_gd = getdist.MCSamples(
+                    samples=grid_samples_np,
+                    names=experiment.cosmo_params,
+                    labels=experiment.latex_labels,
+                )
+
+            all_samples.append(grid_samples_gd)
+            all_colors.append('tab:green')
+            all_alphas.append(1.0)
+            all_line_styles.append('-')
+            eig_str = (
+                f", EIG: {nominal_grid_eig:.3f} bits"
+                if nominal_grid_eig is not None
+                else ""
+            )
+            legend_labels.append(f'Nominal Design (Grid){eig_str}')
+
+        # Get DESI MCMC samples for reference
+        if self.cosmo_exp == 'num_tracers':
+            try:
+                nominal_samples_mcmc = experiment.get_nominal_samples(transform_output = not transform_output)
+                all_samples.append(nominal_samples_mcmc)
+                all_colors.append('black')
+                all_alphas.append(1.0)
+                all_line_styles.append('--')
+                legend_labels.append('Nominal Design (MCMC)')
+            except NotImplementedError:
+                print(f"Warning: get_nominal_samples not implemented for {self.cosmo_exp}, skipping MCMC reference.")
+
+        if plot_prior and hasattr(experiment, 'get_prior_samples'):
+            prior_samples_gd = experiment.get_prior_samples(num_samples=guide_samples)
+            all_samples.append(prior_samples_gd)
+            all_colors.append('black')
+            all_alphas.append(1.0)
+            all_line_styles.append('-')
+            legend_labels.append('Prior')
+
+        if not all_samples:
+            print("Warning: No samples to plot.")
+            return None
+
+        # Set label attribute on each MCSamples object so GetDist uses correct labels
+        for sample, label in zip(all_samples, legend_labels):
+            sample.label = label
+
+        # Create plot
+        plot_width = 10
+        g = self.plot_posterior(
+            all_samples,
+            all_colors,
+            legend_labels=legend_labels,
+            levels=levels,
+            width_inch=plot_width,
+            alpha=all_alphas,
+            line_style=all_line_styles
+        )
+
+        if self.cosmo_exp == 'num_visits':
+            g.subplots[0, 0].axvline(experiment.central_z, color='black', linestyle='--')
+
+        # Calculate dynamic font sizes
+        n_params = len(all_samples[0].paramNames.names)
+        base_fontsize = max(6, min(18, plot_width * (0.2 + 0.42 * np.sqrt(n_params))))
+        if n_params == 1:
+            base_fontsize = max(base_fontsize, 12)
+        title_fontsize = base_fontsize * 1.15
+        legend_fontsize = base_fontsize * 0.65
+        if n_params == 1:
+            legend_fontsize = max(legend_fontsize, 10)
+
+        if g.fig.legends:
+            for legend in g.fig.legends:
+                legend.remove()
+
+        # Create custom legend with proper formatting
+        custom_legend = []
+        for i, label in enumerate(legend_labels):
+            color = all_colors[i]
+            custom_legend.append(
+                Line2D([0], [0], color=color, label=label, linewidth=1.2, linestyle=all_line_styles[i])
+            )
+
+        if title is None:
+            title = "Posterior Evaluation"
+        g.fig.suptitle(title, fontsize=title_fontsize, weight='bold')
+        g.fig.set_constrained_layout(True)
+        leg = g.fig.legend(handles=custom_legend, loc='upper right', bbox_to_anchor=(0.99, 0.96), fontsize=legend_fontsize)
+        leg.set_in_layout(False)
+
+        # Save figure
+        if save_path is not None:
+            os.makedirs(os.path.dirname(save_path), exist_ok=True)
+            g.fig.savefig(save_path, dpi=400, bbox_inches='tight', pad_inches=0.1)
+            print(f"Saved plot to {save_path}")
+
+        return g
+
+    def load_eig_data_file(self, artifacts_dir, eval_step=None):
         """
         Load the most recent completed eig_data JSON file from the artifacts directory.
         
         Args:
             artifacts_dir (str): Path to the artifacts directory containing eig_data files
-            step_key (str or int, optional): If provided, verify that the loaded file contains this step
+            eval_step (str or int, optional): If provided, verify that the loaded file contains this step
         
         Returns:
             tuple: (json_path, data) where json_path is the path to the file and data is the loaded JSON.
                    Returns (None, None) if no valid file is found.
         
         Raises:
-            ValueError: If no completed eig_data files are found, if file cannot be loaded, or if step_key is not found in the data.
+            ValueError: If no completed eig_data files are found, if file cannot be loaded, or if eval_step is not found in the data.
         """
         if not os.path.exists(artifacts_dir):
             raise ValueError(f"Artifacts directory not found: {artifacts_dir}")
@@ -227,14 +703,14 @@ class BasePlotter:
                     # Skip incomplete files
                     continue
                 
-                # If step_key is provided, verify it exists in the data
-                if step_key is not None:
-                    step_str = f"step_{step_key}" if not str(step_key).startswith('step_') else str(step_key)
+                # If eval_step is provided, verify it exists in the data
+                if eval_step is not None:
+                    step_str = f"step_{eval_step}" if not str(eval_step).startswith('step_') else str(eval_step)
                     if step_str not in data:
                         # This file doesn't have the requested step, try next file
                         continue
                 
-                # Found a complete file (and it has the requested step if step_key was provided)
+                # Found a complete file (and it has the requested step if eval_step was provided)
                 return json_path, data
                     
             except Exception as e:
@@ -242,9 +718,9 @@ class BasePlotter:
                 print(f"Warning: Error loading {json_path}: {e}, skipping...")
                 continue
         
-        # No completed files found (or no file with the requested step_key)
-        if step_key is not None:
-            raise ValueError(f"No completed eig_data files with step {step_key} found in {artifacts_dir}")
+        # No completed files found (or no file with the requested eval_step)
+        if eval_step is not None:
+            raise ValueError(f"No completed eig_data files with step {eval_step} found in {artifacts_dir}")
         else:
             raise ValueError(f"No completed eig_data files found in {artifacts_dir}")
     
@@ -744,276 +1220,91 @@ class RunPlotter(BasePlotter):
         
         return fig, axes
     
-    def generate_posterior(self, step_key=None, display=['nominal', 'optimal'], levels=[0.68], 
-                          guide_samples=1000, device="cuda:0", seed=1, plot_prior=False, 
-                          transform_output=True, title=None, brute_force_samples=None):
-        """
-        Generates posterior plots for nominal and/or optimal designs using EIG data.
-        Uses pre-computed EIG data to quickly identify optimal design without recalculating EIG.
-        
-        Args:
-            step_key (str or int, optional): Step to evaluate. If None, uses most recent.
-            display (list): Designs to display. Can include 'nominal' and/or 'optimal' (default: ['nominal', 'optimal']).
-            levels (float or list): Contour level(s) to plot (default: [0.68]).
-            guide_samples (int): Number of samples to generate (default: 1000).
-            device (str): Device to use (default: 'cuda:0').
-            seed (int): Random seed (default: 1).
-            plot_prior (bool): If True, also plot the prior using experiment.get_prior_samples as solid gray (default: False).
-            title (str, optional): Title of the plot. If None, uses default title.
-            brute_force_samples (np.ndarray, optional): Optional brute-force posterior parameter samples
-                with shape (n_samples, n_params), typically from ExperimentDesigner.get_posterior.
-        Returns:
-            GetDist plotter object.
-        """
-        # Normalize levels to always be a list
-        if isinstance(levels, (int, float)):
-            levels = [levels]
-        
-        # Load EIG data to get optimal design and EIG values
-        eig_data, artifacts_dir = self._get_eig_data(step_key=step_key)
-        
-        # Determine which step to use
-        if step_key is None:
-            step_keys = [k for k in eig_data.keys() if k.startswith('step_')]
-            if not step_keys:
-                raise ValueError("No step data found in EIG data file")
-            step_key = max(step_keys, key=lambda x: int(x.split('_')[1]))
-        
-        step_str = str(step_key) if not isinstance(step_key, str) or not step_key.startswith('step_') else step_key
-        if not step_str.startswith('step_'):
-            step_str = f"step_{step_str}"
-        
-        if step_str not in eig_data:
-            raise ValueError(f"Step {step_key} not found in EIG data")
-        
+    def _extract_posterior_data(self, eval_step=None, device="cuda:0"):
+        """Extract posterior plotting data from MLflow artifacts into a kwargs dict for generate_posterior()."""
+        eig_data, artifacts_dir = self._get_eig_data(eval_step=eval_step)
+        eval_step, step_str = self._resolve_step(eig_data, eval_step)
+
         step_data = eig_data[step_str]
         variable_data = step_data.get('variable', {})
         nominal_data = step_data.get('nominal', {})
-        
-        # Get designs and EIGs from EIG data
+
         input_designs = np.array(eig_data.get('input_designs', []))
         if input_designs.size == 0:
             raise ValueError("No input designs found in EIG data")
-        
+
         eig_values = np.array(variable_data.get('eigs_avg', []))
         if eig_values.size == 0:
             raise ValueError("No EIG values found in EIG data")
-        
-        # Get optimal design from EIG data
-        optimal_idx = np.argmax(eig_values)
-        optimal_design = input_designs[optimal_idx]
-        optimal_eig = float(eig_values[optimal_idx])
-        
-        # Get nominal EIG
+
         nominal_eig = nominal_data.get('eigs_avg')
         if isinstance(nominal_eig, list):
             nominal_eig = nominal_eig[0] if len(nominal_eig) > 0 else None
         nominal_eig = float(nominal_eig) if nominal_eig is not None else None
-        nominal_brute_force_eig = None
-        nominal_bf_data = nominal_data.get('brute_force', {})
-        if isinstance(nominal_bf_data, dict) and 'eigs_avg' in nominal_bf_data:
-            nominal_brute_force_eig = nominal_bf_data.get('eigs_avg')
-            if isinstance(nominal_brute_force_eig, list):
-                nominal_brute_force_eig = nominal_brute_force_eig[0] if len(nominal_brute_force_eig) > 0 else None
-            nominal_brute_force_eig = float(nominal_brute_force_eig) if nominal_brute_force_eig is not None else None
-        
+        nominal_grid_eig = None
+        nominal_grid_data = nominal_data.get('grid', {})
+        if isinstance(nominal_grid_data, dict) and 'eigs_avg' in nominal_grid_data:
+            nominal_grid_eig = nominal_grid_data.get('eigs_avg')
+            if isinstance(nominal_grid_eig, list):
+                nominal_grid_eig = nominal_grid_eig[0] if len(nominal_grid_eig) > 0 else None
+            nominal_grid_eig = float(nominal_grid_eig) if nominal_grid_eig is not None else None
+
         run_obj = self.run_data['run_obj']
-        run_args = self.run_data['params'].copy()  # Make a copy to avoid modifying original
-        
-        # Extract step number from step_str (e.g., 'step_5000' -> 5000) or use step_key directly
-        if isinstance(step_key, str) and step_key.startswith('step_'):
-            step_num = int(step_key.split('_')[1])
-        elif isinstance(step_key, str):
-            step_num = int(step_key)
+        run_args = self.run_data['params'].copy()
+
+        # Extract step number for model loading
+        if isinstance(eval_step, str) and eval_step.startswith('step_'):
+            step_num = int(eval_step.split('_')[1])
+        elif isinstance(eval_step, str):
+            step_num = int(eval_step)
         else:
-            step_num = step_key
-        
-        # Use 'last' or the step number - load_model will resolve 'last' to actual step
-        step_for_model = 'last' if step_key is None else step_num
-        
-        # Initialize experiment for optimal design samples (nominal uses get_nominal_samples)
+            step_num = eval_step
+
+        step_for_model = 'last' if eval_step is None else step_num
+
         experiment = init_experiment(run_obj, run_args, device=device, design_args=None, global_rank=0)
-        
-        # Load model for this step (needed for optimal design samples)
         posterior_flow, selected_step = load_model(experiment, step_for_model, run_obj, run_args, device, global_rank=0)
-        auto_seed(seed)
-        
-        all_samples = []
-        all_colors = []
-        all_alphas = []
-        all_line_styles = []
-        legend_labels = []
-        
-        # Generate samples for nominal design if requested
-        if 'nominal' in display:
-            nominal_context = experiment.nominal_context
-            # get_guide_samples returns MCSamples object directly (already converted)
-            nominal_samples_gd = experiment.get_guide_samples(
-                posterior_flow, nominal_context, 
-                num_samples=guide_samples,
-                transform_output=transform_output
-            )
-            
-            all_samples.append(nominal_samples_gd)
-            all_colors.append('tab:blue')
-            all_alphas.append(1.0)
-            all_line_styles.append('-')
-            eig_str = f", EIG: {nominal_eig:.3f} bits" if nominal_eig is not None else ""
-            legend_labels.append(f'Nominal Design (NF){eig_str}')
-        
-        # Generate samples for optimal design if requested
-        has_multiple_designs = len(input_designs) > 1
-        if 'optimal' in display and has_multiple_designs:
-            optimal_design_tensor = torch.tensor(optimal_design, device=device, dtype=torch.float64)
-            optimal_context = torch.cat([optimal_design_tensor, experiment.central_val], dim=-1)
-            
-            # get_guide_samples returns MCSamples object directly (already converted)
-            optimal_samples_gd = experiment.get_guide_samples(
-                posterior_flow, optimal_context, 
-                num_samples=guide_samples,
-                transform_output=transform_output
-            )
-            
-            all_samples.append(optimal_samples_gd)
-            all_colors.append('tab:orange')
-            all_alphas.append(1.0)
-            all_line_styles.append('-')
-            eig_str = f", EIG: {optimal_eig:.3f} bits" if optimal_eig is not None else ""
-            legend_labels.append(f'Optimal Design (NF){eig_str}')
-        elif 'optimal' in display and not has_multiple_designs:
-            print(f"Generating posterior samples with input design...")
-            input_design_tensor = torch.tensor(input_designs[0], device=device, dtype=torch.float64)
-            input_context = torch.cat([input_design_tensor, experiment.central_val], dim=-1)
-            
-            # get_guide_samples returns MCSamples object directly (already converted)
-            input_samples_gd = experiment.get_guide_samples(
-                posterior_flow, input_context, 
-                num_samples=guide_samples,
-                transform_output=transform_output
-            )
-            
-            all_samples.append(input_samples_gd)
-            all_colors.append('tab:orange')
-            all_alphas.append(1.0)
-            all_line_styles.append('-')
-            eig_str = f", EIG: {optimal_eig:.3f} bits" if optimal_eig is not None else ""
-            legend_labels.append(f'Input Design (NF){eig_str}')
 
-        if brute_force_samples is not None:
-            bf_samples_np = np.asarray(brute_force_samples, dtype=np.float64)
-            if bf_samples_np.ndim == 1:
-                bf_samples_np = bf_samples_np.reshape(-1, 1)
-            if bf_samples_np.ndim != 2:
-                raise ValueError(
-                    f"brute_force_samples must be 2D or 1D, got shape {bf_samples_np.shape}."
-                )
-            expected_dim = len(experiment.cosmo_params)
-            if bf_samples_np.shape[1] != expected_dim:
-                raise ValueError(
-                    "brute_force_samples dimension does not match parameter count: "
-                    f"{bf_samples_np.shape[1]} vs {expected_dim}."
-                )
+        title = f"Posterior Evaluation - Run: {self.run_id[:8]}"
 
-            bf_samples_tensor = torch.as_tensor(
-                bf_samples_np, device=experiment.device, dtype=torch.float64
-            )
-            if not transform_output:
-                bf_samples_tensor = experiment.params_to_unconstrained(bf_samples_tensor)
-            bf_samples_np = bf_samples_tensor.detach().cpu().numpy()
+        filename = self.generate_filename("posterior_eval")
+        save_dir = self.get_save_dir(run_id=self.run_id, experiment_id=self.experiment_id)
+        os.makedirs(save_dir, exist_ok=True)
+        save_path = os.path.join(save_dir, filename)
 
-            with contextlib.redirect_stdout(io.StringIO()):
-                brute_force_samples_gd = getdist.MCSamples(
-                    samples=bf_samples_np,
-                    names=experiment.cosmo_params,
-                    labels=experiment.latex_labels,
-                )
-
-            all_samples.append(brute_force_samples_gd)
-            all_colors.append('tab:green')
-            all_alphas.append(1.0)
-            all_line_styles.append('--')
-            eig_str = (
-                f", EIG: {nominal_brute_force_eig:.3f} bits"
-                if nominal_brute_force_eig is not None
-                else ""
-            )
-            legend_labels.append(f'Nominal Design (Brute Force){eig_str}')
-        
-        # Get DESI MCMC samples for reference
-        if self.cosmo_exp == 'num_tracers':
-            try:
-                nominal_samples_mcmc = experiment.get_nominal_samples(transform_output = not transform_output)
-                all_samples.append(nominal_samples_mcmc)
-                all_colors.append('black')
-                all_alphas.append(1.0)
-                all_line_styles.append('--')
-                legend_labels.append('Nominal Design (MCMC)')
-            except NotImplementedError:
-                print(f"Warning: get_nominal_samples not implemented for {self.cosmo_exp}, skipping MCMC reference.")
-        
-        if plot_prior and hasattr(experiment, 'get_prior_samples'):
-            prior_samples_gd = experiment.get_prior_samples(num_samples=guide_samples)
-            all_samples.append(prior_samples_gd)
-            all_colors.append('black')
-            all_alphas.append(1.0)
-            all_line_styles.append('-')
-            legend_labels.append('Prior')
-        
-        # Set label attribute on each MCSamples object so GetDist uses correct labels
-        # This is important because GetDist uses the label attribute for legends
-        for sample, label in zip(all_samples, legend_labels):
-            sample.label = label
-        
-        # Create plot - pass legend_labels so GetDist uses correct labels
-        plot_width = 10
-        g = self.plot_posterior(
-            all_samples, 
-            all_colors, 
-            legend_labels=legend_labels,  # Pass legend labels to plot_posterior
-            levels=levels, 
-            width_inch=plot_width, 
-            alpha=all_alphas,
-            line_style=all_line_styles
+        return dict(
+            experiment=experiment,
+            posterior_flow=posterior_flow,
+            input_designs=input_designs,
+            eig_values=eig_values,
+            nominal_eig=nominal_eig,
+            nominal_grid_eig=nominal_grid_eig,
+            title=title,
+            save_path=save_path,
         )
 
-        if self.cosmo_exp == 'num_visits':
-            # add a marker at central z
-            g.subplots[0, 0].axvline(experiment.central_z, color='black', linestyle='--')
-        
-        # Calculate dynamic font sizes
-        n_params = len(all_samples[0].paramNames.names)
-        base_fontsize = max(6, min(18, plot_width * (0.2 + 0.42 * np.sqrt(n_params))))
-        # For 1D (single-panel) plots, use larger minimum so title and legend are readable
-        if n_params == 1:
-            base_fontsize = max(base_fontsize, 12)
-        title_fontsize = base_fontsize * 1.15
-        legend_fontsize = base_fontsize * 0.65
-        if n_params == 1:
-            legend_fontsize = max(legend_fontsize, 10)
+    def generate_posterior(self, eval_step=None, display=['nominal', 'optimal'], levels=[0.68],
+                          guide_samples=1000, device="cuda:0", seed=1, plot_prior=False,
+                          transform_output=True, title=None, grid_samples=None):
+        """Loads EIG data and model from MLflow artifacts and calls BasePlotter.generate_posterior()."""
+        if isinstance(levels, (int, float)):
+            levels = [levels]
 
-        if g.fig.legends:
-            for legend in g.fig.legends:
-                legend.remove()
-        
-        # Create custom legend with proper formatting
-        custom_legend = []
-        for i, label in enumerate(legend_labels):
-            color = all_colors[i]
-            custom_legend.append(
-                Line2D([0], [0], color=color, label=label, linewidth=1.2, linestyle=all_line_styles[i])
-            )
-        
-        title = title if title is not None else f"Posterior Evaluation - Run: {self.run_id[:8]}"
-        g.fig.suptitle(title, fontsize=title_fontsize, weight='bold')
-        g.fig.set_constrained_layout(True)
-        leg = g.fig.legend(handles=custom_legend, loc='upper right', bbox_to_anchor=(0.99, 0.96), fontsize=legend_fontsize)
-        leg.set_in_layout(False)
-        
-        # Save figure automatically
-        filename = self.generate_filename("posterior_eval")
-        self.save_figure(g.fig, filename, run_id=self.run_id, experiment_id=self.experiment_id, dpi=400, close_fig=False, display_fig=False)
-        
-        return g
+        data = self._extract_posterior_data(eval_step, device=device)
+        if title is not None:
+            data['title'] = title
+
+        return super().generate_posterior(
+            **data,
+            display=display,
+            levels=levels,
+            guide_samples=guide_samples,
+            device=device,
+            seed=seed,
+            plot_prior=plot_prior,
+            transform_output=transform_output,
+            grid_samples=grid_samples,
+        )
     
     def plot_designs(
         self,
@@ -1284,13 +1575,13 @@ class RunPlotter(BasePlotter):
         
         return fig
     
-    def _get_eig_data(self, step_key=None):
+    def _get_eig_data(self, eval_step=None):
         """
         Helper method to load EIG data from artifacts directory.
         Finds the artifacts directory by searching for the run_id without needing experiment_id.
         
         Args:
-            step_key (str or int, optional): Step to load data for.
+            eval_step (str or int, optional): Step to load data for.
             
         Returns:
             tuple: (eig_data_dict, artifacts_dir)
@@ -1317,7 +1608,7 @@ class RunPlotter(BasePlotter):
             if artifacts_dir is None or not os.path.exists(artifacts_dir):
                 raise ValueError(f"Could not find artifacts directory for run {self.run_id}")
         
-        json_path, eig_data = self.load_eig_data_file(artifacts_dir, step_key=step_key)
+        json_path, eig_data = self.load_eig_data_file(artifacts_dir, eval_step=eval_step)
         return eig_data, artifacts_dir
     
     def _init_experiment_for_plotting(self):
@@ -1336,12 +1627,12 @@ class RunPlotter(BasePlotter):
         )
         return experiment
     
-    def design_comparison(self, step_key=None, width=0.2, log_scale=True, use_fractional=False):
+    def design_comparison(self, eval_step=None, width=0.2, log_scale=True, use_fractional=False):
         """
         Plots a bar chart comparing the nominal and optimal design.
         
         Args:
-            step_key (str or int, optional): Step to evaluate. If None, uses most recent.
+            eval_step (str or int, optional): Step to evaluate. If None, uses most recent.
             width (float): Width of the bars in the bar chart (default: 0.2)
             log_scale (bool): Whether to use log scale for y-axis (default: True)
             use_fractional (bool): Whether to plot fractional values or absolute quantities (default: False)
@@ -1352,22 +1643,22 @@ class RunPlotter(BasePlotter):
         print(f"Generating design comparison plot...")
         
         # Load EIG data
-        eig_data, artifacts_dir = self._get_eig_data(step_key=step_key)
+        eig_data, artifacts_dir = self._get_eig_data(eval_step=eval_step)
         
         # Get step data
-        if step_key is None:
+        if eval_step is None:
             # Find the most recent step
             step_keys = [k for k in eig_data.keys() if k.startswith('step_')]
             if not step_keys:
                 raise ValueError("No step data found in EIG data file")
-            step_key = max(step_keys, key=lambda x: int(x.split('_')[1]))
+            eval_step = max(step_keys, key=lambda x: int(x.split('_')[1]))
         
-        step_str = str(step_key) if not isinstance(step_key, str) or not step_key.startswith('step_') else step_key
+        step_str = str(eval_step) if not isinstance(eval_step, str) or not eval_step.startswith('step_') else eval_step
         if not step_str.startswith('step_'):
             step_str = f"step_{step_str}"
         
         if step_str not in eig_data:
-            raise ValueError(f"Step {step_key} not found in EIG data")
+            raise ValueError(f"Step {eval_step} not found in EIG data")
         
         step_data = eig_data[step_str]
         variable_data = step_data.get('variable', {})
@@ -1459,14 +1750,14 @@ class RunPlotter(BasePlotter):
         
         return fig
     
-    def posterior_steps(self, steps, levels=[0.68], step_key=None):
+    def posterior_steps(self, steps, levels=[0.68], eval_step=None):
         """
         Plots posterior distributions at different training steps for a single run.
         
         Args:
             steps (list): List of steps to plot. Can include 'last' or 'loss_best' as special values.
             levels (float or list): Contour level(s) to plot (default: [0.68]).
-            step_key (str or int, optional): If provided, used to load EIG data for reference.
+            eval_step (str or int, optional): If provided, used to load EIG data for reference.
             
         Returns:
             GetDist plotter object.
@@ -1553,245 +1844,85 @@ class RunPlotter(BasePlotter):
         
         return g
     
-    def eig_designs(self, step_key=None, sort=True, sort_step=None, include_nominal=True):
-        """
-        Plots sorted EIG values and corresponding designs using EIG data from JSON files.
-        
-        Args:
-            step_key (str or int, optional): Step to plot. If None, uses most recent.
-            sort (bool): Whether to sort designs by EIG (default: True).
-            sort_step (str or int, optional): Which step to use for sorting. Must match step_key if provided.
-            include_nominal (bool): Whether to include the nominal EIG in the plot (default: True).
-            
-        Returns:
-            tuple: (fig, (ax0, ax1)) matplotlib figure and axes objects. ax1 may be None for 1D designs without sorting.
-        """
-        print(f"Generating EIG designs plot...")
-        
-        # Load EIG data
-        eig_data, artifacts_dir = self._get_eig_data(step_key=step_key)
-        
-        # Determine which step to use
-        if step_key is None:
+    def _resolve_step(self, eig_data, eval_step):
+        """Resolve eval_step to a step string key in eig_data."""
+        if eval_step is None:
             step_keys = [k for k in eig_data.keys() if k.startswith('step_')]
             if not step_keys:
                 raise ValueError("No step data found in EIG data file")
-            step_key = max(step_keys, key=lambda x: int(x.split('_')[1]))
-        
-        step_str = str(step_key) if not isinstance(step_key, str) or not step_key.startswith('step_') else step_key
+            eval_step = max(step_keys, key=lambda x: int(x.split('_')[1]))
+
+        step_str = str(eval_step) if not isinstance(eval_step, str) or not eval_step.startswith('step_') else eval_step
         if not step_str.startswith('step_'):
             step_str = f"step_{step_str}"
-        
+
         if step_str not in eig_data:
-            raise ValueError(f"Step {step_key} not found in EIG data")
-        
+            raise ValueError(f"Step {eval_step} not found in EIG data")
+
+        return eval_step, step_str
+
+    def _extract_eig_data(self, eval_step=None, include_nominal=True):
+        """Extract EIG plotting data from MLflow artifacts into a kwargs dict for eig_designs()."""
+        eig_data, artifacts_dir = self._get_eig_data(eval_step=eval_step)
+        eval_step, step_str = self._resolve_step(eig_data, eval_step)
+
         step_data = eig_data[step_str]
         variable_data = step_data.get('variable', {})
         nominal_data = step_data.get('nominal', {})
-        
-        # Get designs and EIGs
+
         input_designs = np.array(eig_data.get('input_designs', []))
         if input_designs.size == 0:
             raise ValueError("No input designs found in EIG data")
-        
-        if len(input_designs) <= 1:
-            print("Warning: Single or no designs available, skipping EIG designs plot.")
-            return None
-        
+
         eig_values = np.array(variable_data.get('eigs_avg', []))
         eig_std_values = np.array(variable_data.get('eigs_std', [])) if 'eigs_std' in variable_data else np.zeros_like(eig_values)
-        brute_force_data = variable_data.get('brute_force', {})
-        brute_force_eig_values = np.array(brute_force_data.get('eigs_avg', [])) if brute_force_data else np.array([])
-        brute_force_eig_std_values = np.array(brute_force_data.get('eigs_std', [])) if brute_force_data else np.array([])
-        
-        if eig_values.size == 0:
-            raise ValueError("No EIG values found in EIG data")
-        
-        # Get nominal EIG
+        grid_data = variable_data.get('grid', {})
+        grid_eig_values = np.array(grid_data.get('eigs_avg', [])) if grid_data else None
+        grid_eig_std_values = np.array(grid_data.get('eigs_std', [])) if grid_data else None
+
         nominal_eig = None
-        nominal_brute_force_eig = None
+        nominal_grid_eig = None
         if include_nominal:
             nominal_eig = nominal_data.get('eigs_avg')
             if isinstance(nominal_eig, list):
                 nominal_eig = nominal_eig[0] if len(nominal_eig) > 0 else None
             nominal_eig = float(nominal_eig) if nominal_eig is not None else None
-            nominal_bf_data = nominal_data.get('brute_force', {})
-            if isinstance(nominal_bf_data, dict) and 'eigs_avg' in nominal_bf_data:
-                nominal_brute_force_eig = nominal_bf_data.get('eigs_avg')
-                if isinstance(nominal_brute_force_eig, list):
-                    nominal_brute_force_eig = nominal_brute_force_eig[0] if len(nominal_brute_force_eig) > 0 else None
-                nominal_brute_force_eig = float(nominal_brute_force_eig) if nominal_brute_force_eig is not None else None
-        
-        # Initialize experiment for design labels
-        experiment = self._init_experiment_for_plotting()
-        design_labels = experiment.design_labels
-        nominal_design = experiment.nominal_design.cpu().numpy()
-        
-        # Sort designs if requested
-        if sort:
-            sorted_idx = np.argsort(eig_values)[::-1]
-        else:
-            sorted_idx = np.arange(len(eig_values))
-        
-        sorted_designs = input_designs[sorted_idx]
-        sorted_eigs = eig_values[sorted_idx]
-        sorted_eigs_std = eig_std_values[sorted_idx]
-        has_brute_force = brute_force_eig_values.size == eig_values.size and brute_force_eig_values.size > 0
-        if has_brute_force:
-            sorted_brute_force_eigs = brute_force_eig_values[sorted_idx]
-            if brute_force_eig_std_values.size == eig_values.size:
-                sorted_brute_force_eigs_std = brute_force_eig_std_values[sorted_idx]
-            else:
-                sorted_brute_force_eigs_std = np.zeros_like(sorted_brute_force_eigs)
-        
-        # Check if designs are 1D or multi-dimensional
-        is_1d_design = (sorted_designs.shape[1] == 1)
-        
-        # Find nominal design position
-        nominal_sorted_pos = None
-        try:
-            nominal_idx = int(np.argmin(np.linalg.norm(input_designs - nominal_design, axis=1)))
-            matches = np.where(sorted_idx == nominal_idx)[0]
-            if matches.size > 0:
-                nominal_sorted_pos = int(matches[0])
-        except:
-            pass
-        
-        # Create figure with subplots
-        if is_1d_design and not sort:
-            fig, ax0 = plt.subplots(figsize=(16, 6))
-            ax1 = None
-            x_vals = sorted_designs[:, 0]
-        else:
-            if is_1d_design and sort:
-                height_ratios = [0.65, 0.15]
-            else:
-                height_ratios = [0.6, 0.2]
-            fig = plt.figure(figsize=(16, 6))
-            gs = gridspec.GridSpec(2, 1, height_ratios=height_ratios, hspace=0.0)
-            ax0 = fig.add_subplot(gs[0, 0])
-            ax1 = fig.add_subplot(gs[1, 0], sharex=ax0)
-            fig.subplots_adjust(left=0.06, right=0.88)
-            bbox0 = ax0.get_position()
-            bbox1 = ax1.get_position()
-            cbar_width = 0.02
-            cbar_gap = 0.01
-            cbar_left = bbox1.x1 + cbar_gap
-            cbar_bottom = bbox1.y0
-            cbar_height = bbox0.y1 - bbox1.y0
-            cbar_ax = fig.add_axes([cbar_left, cbar_bottom, cbar_width, cbar_height])
-            plt.setp(ax0.get_xticklabels(), visible=False)
-            ax0.tick_params(axis='x', which='both', length=0)
-            x_vals = np.arange(len(sorted_eigs))
-        
-        # Plot EIG with error bars
-        ax0.fill_between(x_vals, sorted_eigs - sorted_eigs_std, sorted_eigs + sorted_eigs_std,
-                         color='gray', alpha=0.3, zorder=1)
-        ax0.plot(x_vals, sorted_eigs, label='EIG', color='black', linewidth=2.5, zorder=5)
-        if has_brute_force:
-            ax0.fill_between(
-                x_vals,
-                sorted_brute_force_eigs - sorted_brute_force_eigs_std,
-                sorted_brute_force_eigs + sorted_brute_force_eigs_std,
-                color='tab:green',
-                alpha=0.15,
-                zorder=1,
-            )
-            ax0.plot(
-                x_vals,
-                sorted_brute_force_eigs,
-                label='Brute-force EIG',
-                color='tab:green',
-                linewidth=2.0,
-                linestyle='--',
-                zorder=6,
-            )
-        
-        # Plot nominal EIG
-        if include_nominal and nominal_eig is not None:
-            ax0.axhline(y=nominal_eig, color='tab:blue', linestyle='--', 
-                       label='Nominal EIG', linewidth=2, zorder=10)
-        if include_nominal and nominal_brute_force_eig is not None:
-            ax0.axhline(
-                y=nominal_brute_force_eig,
-                color='tab:green',
-                linestyle=':',
-                label='Nominal Brute-force EIG',
-                linewidth=2,
-                zorder=10,
-            )
-        
-        # Plot optimal design
-        optimal_idx = np.argmax(sorted_eigs)
-        optimal_x = x_vals[optimal_idx]
-        optimal_y = sorted_eigs[optimal_idx]
-        ax0.axvline(optimal_x, color='tab:orange', linestyle=':', linewidth=2, zorder=8)
-        ax0.plot(optimal_x, optimal_y, 'o', color='tab:orange', markersize=8, zorder=9, 
-                label='Optimal Design')
-        
-        # Set axis labels
-        if is_1d_design and not sort:
-            ax0.set_xlabel(f'${design_labels[0]}$', fontsize=12, weight='bold')
-            ax0.set_xlim(x_vals.min(), x_vals.max())
-        else:
-            ax0.set_xlim(-0.5, len(sorted_eigs) - 0.5)
-        
-        ax0.set_ylabel("Expected Information Gain [bits]", fontsize=12, weight='bold')
-        ax0.legend(loc='lower left', fontsize=9, framealpha=0.9)
-        ax0.grid(True, alpha=0.3)
-        
-        # Plot design heatmap
-        if ax1 is not None:
-            if is_1d_design and sort:
-                im = ax1.imshow(sorted_designs.T, aspect='auto', cmap='viridis')
-                ax1.set_ylabel('')
-                ax1.set_yticks([0])
-                # Format label: use as-is if already has $, otherwise wrap with $
-                label0 = design_labels[0] if design_labels[0].startswith('$') else f'${design_labels[0]}$'
-                ax1.set_yticklabels([label0])
-                ax1.tick_params(axis='y', length=0)
-                if nominal_sorted_pos is not None:
-                    ax1.axvline(nominal_sorted_pos, color='black', linestyle=':', linewidth=1.5)
-                cbar = fig.colorbar(im, cax=cbar_ax)
-                cbar.set_label('Design Value', labelpad=10, fontsize=12, weight='bold')
-            else:
-                # Multi-dimensional designs - use ratio to nominal
-                if np.any(nominal_design == 0):
-                    plot_data = sorted_designs.T
-                    cmap = 'viridis'
-                    im = ax1.imshow(plot_data, aspect='auto', cmap=cmap)
-                else:
-                    plot_data = (sorted_designs / nominal_design[np.newaxis, :]).T
-                    cmap = 'RdBu'
-                    from matplotlib.colors import TwoSlopeNorm
-                    vmin = plot_data.min()
-                    vmax = plot_data.max()
-                    norm = TwoSlopeNorm(vmin=vmin, vcenter=1.0, vmax=vmax)
-                    im = ax1.imshow(plot_data, aspect='auto', cmap=cmap, norm=norm)
-                
-                ax1.set_xlabel("Design Index (sorted by EIG)" if sort else "Design Index", 
-                              fontsize=12, weight='bold')
-                ax1.set_yticks(np.arange(len(design_labels)))
-                # Format labels: use as-is if already has $, otherwise wrap with $
-                formatted_labels = [label if label.startswith('$') else f'${label}$' for label in design_labels]
-                ax1.set_yticklabels(formatted_labels)
-                ax1.set_xlim(-0.5, len(sorted_designs) - 0.5)
-                ax1.set_ylabel('')
-                cbar = fig.colorbar(im, cax=cbar_ax)
-                cbar.set_label('Ratio to Nominal Design' if cmap == 'RdBu' else 'Design Value', 
-                              labelpad=15, fontsize=12, weight='bold')
-            ax0.spines['bottom'].set_visible(False)
-            ax1.spines['bottom'].set_visible(True)
+            nominal_grid_data = nominal_data.get('grid', {})
+            if isinstance(nominal_grid_data, dict) and 'eigs_avg' in nominal_grid_data:
+                nominal_grid_eig = nominal_grid_data.get('eigs_avg')
+                if isinstance(nominal_grid_eig, list):
+                    nominal_grid_eig = nominal_grid_eig[0] if len(nominal_grid_eig) > 0 else None
+                nominal_grid_eig = float(nominal_grid_eig) if nominal_grid_eig is not None else None
 
-        sort_title = "Sorted" if sort else ""
+        experiment = self._init_experiment_for_plotting()
+
+        sort_title = "Sorted"
         title = f'{sort_title} EIG per Design - Run: {self.run_id[:8]}'
-        fig.suptitle(title, fontsize=16, y=0.95, weight='bold')
-        
-        # Save figure automatically
+
         filename = self.generate_filename("eig_designs")
-        self.save_figure(fig, filename, run_id=self.run_id, experiment_id=self.experiment_id, dpi=400, close_fig=False, display_fig=False)
-        
-        return fig, (ax0, ax1)
+        save_dir = self.get_save_dir(run_id=self.run_id, experiment_id=self.experiment_id)
+        os.makedirs(save_dir, exist_ok=True)
+        save_path = os.path.join(save_dir, filename)
+
+        return dict(
+            eig_values=eig_values,
+            input_designs=input_designs,
+            design_labels=experiment.design_labels,
+            nominal_design=experiment.nominal_design.cpu().numpy(),
+            eig_std_values=eig_std_values,
+            nominal_eig=nominal_eig,
+            grid_eig_values=grid_eig_values,
+            grid_eig_std_values=grid_eig_std_values,
+            nominal_grid_eig=nominal_grid_eig,
+            include_nominal=include_nominal,
+            title=title,
+            save_path=save_path,
+        ), eval_step, eig_data
+
+    def eig_designs(self, eval_step=None, sort=True, sort_step=None, include_nominal=True):
+        """Loads EIG data from MLflow artifacts and calls BasePlotter.eig_designs()."""
+        data, _, _ = self._extract_eig_data(eval_step, include_nominal)
+        return super().eig_designs(**data, sort=sort, color="black")
 
 
 # ============================================================================
@@ -2194,7 +2325,7 @@ class ComparisonPlotter(BasePlotter):
     def compare_eigs(
         self,
         var=None,
-        step_key=None,
+        eval_step=None,
         save_path=None,
         figsize=(14, 8),
         dpi=400,
@@ -2218,7 +2349,7 @@ class ComparisonPlotter(BasePlotter):
         Args:
             var (str or list, optional): Parameter(s) from MLflow run params to include in the label.
                                         If provided and self.run_labels is None, labels will be generated from these parameters. Otherwise run ID (first 8 chars).
-            step_key (str or int, optional): Step identifier (if omitted the most recent step is used).
+            eval_step (str or int, optional): Step identifier (if omitted the most recent step is used).
             save_path (str, optional): File path to persist the figure.
             figsize (tuple): Matplotlib figure size.
             dpi (int): Save resolution.
@@ -2265,7 +2396,7 @@ class ComparisonPlotter(BasePlotter):
             artifacts_dir = f"{storage_path}/mlruns/{exp_id}/{run_id}/artifacts"
             
             try:
-                json_path, data = self.load_eig_data_file(artifacts_dir, step_key=step_key)
+                json_path, data = self.load_eig_data_file(artifacts_dir, eval_step=eval_step)
                 if data is None:
                     print(f"Warning: No completed eig_data file found for run {run_id}, skipping...")
                     continue
@@ -2286,8 +2417,8 @@ class ComparisonPlotter(BasePlotter):
 
         step_numbers = []
         for data, run_label in zip(all_data, run_labels):
-            if step_key is not None:
-                selected_step = int(step_key) if isinstance(step_key, str) else step_key
+            if eval_step is not None:
+                selected_step = int(eval_step) if isinstance(eval_step, str) else eval_step
             else:
                 step_keys = [k for k in data.keys() if k.startswith('step_')]
                 if not step_keys:
@@ -2408,7 +2539,7 @@ class ComparisonPlotter(BasePlotter):
 
         num_designs, num_dims = design_shape
 
-        # Check if designs are 1D or multi-dimensional (matching eig_designs logic)
+        # Check if designs are 1D or multi-dimensional
         is_1d_design = (num_dims == 1)
 
         reference_record = None
@@ -2444,7 +2575,7 @@ class ComparisonPlotter(BasePlotter):
             sorted_designs = run_records[0]['designs'][global_sort_idx]
             run_for_nominal = run_records[0]
         
-        # Get nominal design if needed for ratio display (same as eig_designs)
+        # Get nominal design if needed for ratio display
         nominal_design = None
         if show_ratio_to_nominal and not is_1d_design:
             # Initialize experiment from the reference run to get nominal_design
@@ -2507,7 +2638,7 @@ class ComparisonPlotter(BasePlotter):
             )
             ax_line = fig.add_subplot(gs[0, 0])  # Top plot for EIG
             ax_heat = fig.add_subplot(gs[1, 0], sharex=ax_line)  # Bottom plot for heatmap shares x-axis
-            # Reserve a dedicated colorbar axis on the right that spans both subplots (matching eig_designs)
+            # Reserve a dedicated colorbar axis on the right that spans both subplots
             fig.subplots_adjust(left=0.06, right=0.88)
             bbox0 = ax_line.get_position()
             bbox1 = ax_heat.get_position()
@@ -2684,7 +2815,7 @@ class ComparisonPlotter(BasePlotter):
                 label0 = design_labels[0] if design_labels[0].startswith('$') else f'${design_labels[0]}$'
                 ax_heat.set_yticklabels([label0])
             else:
-                # Multi-dimensional designs - use ratio to nominal (exact same as eig_designs)
+                # Multi-dimensional designs - use ratio to nominal
                 if nominal_design is None or np.any(nominal_design == 0):
                     plot_data = sorted_designs.T
                     cmap = 'viridis'
@@ -2766,7 +2897,7 @@ class ComparisonPlotter(BasePlotter):
     
     def compare_optimal_designs(
         self,
-        step_key=None,
+        eval_step=None,
         top_n=1,
         save_path=None,
         figsize=(14, 8),
@@ -2787,7 +2918,7 @@ class ComparisonPlotter(BasePlotter):
         When top_n>1, displays top N designs per run as a heatmap with visual separation between runs.
         
         Args:
-            step_key (str or int, optional): Which step to use. If None, finds most recent eig_data file
+            eval_step (str or int, optional): Which step to use. If None, finds most recent eig_data file
             top_n (int): Number of designs to plot from each run (default: 1). When top_n=1, uses bar chart. When top_n>1, uses heatmap.
             save_path (str, optional): Path to save the comparison plot. If None, doesn't save
             figsize (tuple): Figure size (width, height)
@@ -2845,7 +2976,7 @@ class ComparisonPlotter(BasePlotter):
                 
                 # Load completed eig_data file
                 try:
-                    json_path, data = self.load_eig_data_file(artifacts_dir, step_key=None)
+                    json_path, data = self.load_eig_data_file(artifacts_dir, eval_step=None)
                     if data is None:
                         print(f"Warning: No completed eig_data file found for run {run_id}, skipping...")
                         continue
@@ -2855,8 +2986,8 @@ class ComparisonPlotter(BasePlotter):
                 
                 try:
                     # Determine which step to use
-                    if step_key is not None:
-                        step_str = f"step_{step_key}"
+                    if eval_step is not None:
+                        step_str = f"step_{eval_step}"
                     else:
                         # Find the highest available step key
                         step_keys = [k for k in data.keys() if k.startswith('step_')]
@@ -3133,7 +3264,7 @@ class ComparisonPlotter(BasePlotter):
                 artifacts_dir = f"{storage_path}/mlruns/{exp_id}/{run_id}/artifacts"
                 
                 try:
-                    json_path, data = self.load_eig_data_file(artifacts_dir, step_key=None)
+                    json_path, data = self.load_eig_data_file(artifacts_dir, eval_step=None)
                     if data is None:
                         print(f"Warning: No completed eig_data file found for run {run_id}, skipping...")
                         continue
@@ -3143,8 +3274,8 @@ class ComparisonPlotter(BasePlotter):
                 
                 try:
                     # Determine which step to use
-                    if step_key is not None:
-                        step_str = f"step_{step_key}"
+                    if eval_step is not None:
+                        step_str = f"step_{eval_step}"
                     else:
                         step_keys = [k for k in data.keys() if k.startswith('step_')]
                         if step_keys:
@@ -3832,7 +3963,7 @@ class ComparisonPlotter(BasePlotter):
     def plot_design_dim_by_eig(
         self,
         run_labels=None,
-        step_key=None,
+        eval_step=None,
         save_path=None,
         figsize=(16, 10),
         dpi=400,
@@ -3851,7 +3982,7 @@ class ComparisonPlotter(BasePlotter):
         
         Args:
             run_labels (list, optional): Labels for each run. If None, uses run IDs (first 8 chars)
-            step_key (str or int, optional): Which step to use. If None, finds most recent eig_data file
+            eval_step (str or int, optional): Which step to use. If None, finds most recent eig_data file
             save_path (str, optional): Path to save the plot. If None, doesn't save
             figsize (tuple): Figure size (width, height)
             dpi (int): Resolution for saved figure
@@ -3900,7 +4031,7 @@ class ComparisonPlotter(BasePlotter):
             
             # Load completed eig_data file using class method
             try:
-                json_path, data = self.load_eig_data_file(artifacts_dir, step_key=None)
+                json_path, data = self.load_eig_data_file(artifacts_dir, eval_step=None)
                 if data is None:
                     print(f"Warning: No completed eig_data file found for run {run_id}, skipping...")
                     continue
@@ -3911,8 +4042,8 @@ class ComparisonPlotter(BasePlotter):
             try:
                 
                 # Determine which step to use
-                if step_key is not None:
-                    step_str = f"step_{step_key}"
+                if eval_step is not None:
+                    step_str = f"step_{eval_step}"
                 else:
                     # Find the highest available step key
                     step_keys = [k for k in data.keys() if k.startswith('step_')]
@@ -4144,7 +4275,7 @@ def compare_increasing_design(
         excluded_runs=[],
         cosmo_exp='num_tracers',
         labels=None,
-        step_key=None,
+        eval_step=None,
         save_path=None,
         figsize=(14, 8),
         dpi=400,
@@ -4164,7 +4295,7 @@ def compare_increasing_design(
         excluded_runs (list): List of run IDs to exclude.
         cosmo_exp (str): Cosmological experiment name (default: 'num_tracers')
         labels (list, optional): Labels for each run. If None, uses run IDs (first 8 chars)
-        step_key (str or int, optional): Which step to use. If None, finds most recent eig_data file
+        eval_step (str or int, optional): Which step to use. If None, finds most recent eig_data file
         save_path (str, optional): Path to save the comparison plot. If None, doesn't save
         figsize (tuple): Figure size (width, height)
         dpi (int): Resolution for saved figure
@@ -4208,13 +4339,13 @@ def compare_increasing_design(
                 if os.path.exists(ref_artifacts_dir):
                     # Load completed reference eig_data file
                     try:
-                        ref_json_path, ref_data = load_eig_data_file(ref_artifacts_dir, step_key=None)
+                        ref_json_path, ref_data = load_eig_data_file(ref_artifacts_dir, eval_step=None)
                         if ref_data is not None:
                             print(f"Loaded reference EIG data from {ref_json_path}")
                             
                             # Determine which step to use
-                            if step_key is not None:
-                                step_str = f"step_{step_key}"
+                            if eval_step is not None:
+                                step_str = f"step_{eval_step}"
                             else:
                                 # Find the highest available step key
                                 step_keys = [k for k in ref_data.keys() if k.startswith('step_')]
@@ -4317,7 +4448,7 @@ def compare_increasing_design(
         
         # Load completed eig_data file
         try:
-            json_path, data = load_eig_data_file(artifacts_dir, step_key=None)
+            json_path, data = load_eig_data_file(artifacts_dir, eval_step=None)
             if data is None:
                 print(f"Warning: No completed eig_data file found for run {run_id}, skipping...")
                 continue
@@ -4329,8 +4460,8 @@ def compare_increasing_design(
         try:
             
             # Determine which step to use
-            if step_key is not None:
-                step_str = f"step_{step_key}"
+            if eval_step is not None:
+                step_str = f"step_{eval_step}"
             else:
                 # Find the highest available step key
                 step_keys = [k for k in data.keys() if k.startswith('step_')]
@@ -5012,7 +5143,7 @@ def plot_lr_schedule(initial_lr, gamma, gamma_freq, steps=100000):
 
 def plot_2d_eig(
     run_id,
-    step_key=None,
+    eval_step=None,
     cosmo_exp='num_tracers',
     save_path=None,
     figsize=(10, 8),
@@ -5027,7 +5158,7 @@ def plot_2d_eig(
     
     Args:
         run_id (str): MLflow run ID
-        step_key (str or int, optional): Step key to filter eig_data files (e.g., 50000 or 'last').
+        eval_step (str or int, optional): Step key to filter eig_data files (e.g., 50000 or 'last').
                                         If None, uses most recent file.
         cosmo_exp (str): Cosmology experiment name. Default 'num_tracers'.
         save_path (str, optional): Path to save the figure. If None, doesn't save.
@@ -5061,13 +5192,13 @@ def plot_2d_eig(
     artifacts_dir = f"{storage_path}/mlruns/{exp_id}/{run_id}/artifacts"
     
     # Load completed eig_data file
-    json_path, eig_data = load_eig_data_file(artifacts_dir, step_key=None)
+    json_path, eig_data = load_eig_data_file(artifacts_dir, eval_step=None)
     if eig_data is None:
         raise ValueError(f"No completed eig_data file found for run {run_id}")
     
     # Determine which step to use
-    if step_key is not None:
-        step_str = f"step_{step_key}"
+    if eval_step is not None:
+        step_str = f"step_{eval_step}"
     else:
         # Find the highest available step key
         step_keys = [k for k in eig_data.keys() if k.startswith('step_')]

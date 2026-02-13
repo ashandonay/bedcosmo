@@ -1,5 +1,5 @@
 """
-Generic brute-force EIG helpers using bayesdesign/bed ExperimentDesigner.
+Generic grid-based EIG helpers using bayesdesign/bed ExperimentDesigner.
 """
 
 from __future__ import annotations
@@ -9,13 +9,14 @@ import json
 import os
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple, Union
+from typing import Any, Dict, Optional, Tuple
 
+import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import yaml
 from bed.design import ExperimentDesigner
-from bed.grid import Grid
+from bed.grid import Grid, GridStack
 from pyro import distributions as dist
 
 
@@ -87,14 +88,14 @@ def _create_distribution_from_config(param_config: Dict[str, Any]) -> torch.dist
         raise ValueError(f"Unsupported distribution type: {dist_type}")
 
 
-class BruteForceDesigner:
+class GridCalculation:
     """
-    Class-based interface for brute-force EIG computation.
+    Class-based interface for grid-based EIG computation.
 
     Wraps the bed.design.ExperimentDesigner and provides methods for:
     - Building parameter, feature, and design grids
     - Computing prior PDFs from experiment priors or YAML configuration
-    - Running brute-force EIG calculation
+    - Running grid-based EIG calculation
     - Extracting posteriors and samples
     """
 
@@ -106,23 +107,23 @@ class BruteForceDesigner:
         device: str = "cpu",
     ):
         """
-        Initialize the BruteForceDesigner.
+        Initialize the GridCalculation.
 
         Args:
             experiment: Experiment object with prior, cosmo_params, etc.
             param_pts: Number of points per parameter axis.
             feature_pts: Number of points per feature axis.
-            device: Torch device (brute-force runs on CPU for stability).
+            device: Torch device (grid-based calculation runs on CPU for stability).
         """
         self.experiment = experiment
         self.param_pts = param_pts
         self.feature_pts = feature_pts
         self.device = device
 
-        # Create grids
+        # Create grids (design_grid before feature_grid since feature bounds depend on designs)
         self.parameter_grid = self._create_parameter_grid()
-        self.feature_grid = self._create_feature_grid()
         self.design_grid = self._create_design_grid()
+        self.feature_grid = self._create_feature_grid()
 
         # Prior PDF (computed lazily or explicitly)
         self._prior_pdf: Optional[np.ndarray] = None
@@ -161,10 +162,30 @@ class BruteForceDesigner:
             z_tensor = torch.as_tensor(z, device="cpu", dtype=torch.float64)
             with torch.no_grad():
                 mags = experiment._calculate_magnitudes(z_tensor).detach().cpu().numpy()
+                mags_tensor = torch.as_tensor(mags, device="cpu", dtype=torch.float64)
+
+                # Compute magnitude errors using the worst-case (minimum) visits
+                # across all designs so the feature grid covers the full range.
+                # Start from nominal design, then override with design grid mins.
+                nominal = experiment.nominal_design.detach().cpu().to(torch.float64).numpy()
+                min_visits = nominal.copy()
+                design_grid = self.design_grid
+                for j, band in enumerate(experiment.filters_list):
+                    if band in design_grid.names:
+                        band_vals = np.asarray(design_grid.axes_in[band], dtype=np.float64)
+                        min_visits[j] = band_vals.min()
+                min_visits_tensor = torch.as_tensor(
+                    min_visits, device="cpu", dtype=torch.float64
+                ).expand(mags_tensor.shape)
+                mag_errors = experiment._magnitude_errors(
+                    mags_tensor, min_visits_tensor
+                ).detach().cpu().numpy()
+
+            n_sigma = 4.0
             axes = {}
             for i, band in enumerate(experiment.filters_list):
-                lo = float(np.min(mags[..., i]))
-                hi = float(np.max(mags[..., i]))
+                lo = float(np.min(mags[..., i] - n_sigma * mag_errors[..., i]))
+                hi = float(np.max(mags[..., i] + n_sigma * mag_errors[..., i]))
                 axes[f"mag_{band}"] = np.linspace(lo, hi, int(self.feature_pts), dtype=np.float64)
             return Grid(**axes)
 
@@ -352,7 +373,7 @@ class BruteForceDesigner:
         debug: bool = False,
     ) -> Dict[str, Any]:
         """
-        Run the brute-force EIG calculation.
+        Run the grid-based EIG calculation.
 
         Args:
             prior: Prior PDF array. If None, uses self._prior_pdf if computed,
@@ -502,10 +523,92 @@ class BruteForceDesigner:
         ).astype(np.float64, copy=False)
         return samples
 
+    def plot_marginal(
+        self,
+        design: Optional[Dict[str, float]] = None,
+        figsize: Optional[Tuple[float, float]] = None,
+        title: Optional[str] = None,
+    ):
+        """
+        Plot the marginal distribution P(y|xi) over features for a given design.
+
+        Uses designer.marginal which has shape (features_shape + designs_shape).
+        For a specific design point, slices the marginal and plots 1D distributions
+        for each feature dimension (marginalized over the others).
+
+        Args:
+            design: Dictionary mapping design names to values. If None, uses the
+                    best design from the EIG calculation.
+            figsize: Figure size (width, height). Defaults based on number of features.
+            title: Optional title for the figure.
+
+        Returns:
+            matplotlib Figure and array of Axes.
+        """
+        if self.designer is None:
+            raise RuntimeError("Must call run() before plot_marginal.")
+
+        marginal = self.designer.marginal
+        feature_names = list(self.feature_grid.names)
+        design_names = list(self.design_grid.names)
+        n_features = len(feature_names)
+
+        # Determine which design point to condition on
+        if design is None:
+            if self.best_design is None:
+                raise ValueError("No best_design available. Provide design explicitly.")
+            design = self.best_design
+
+        # Build index to slice into the design dimensions of the marginal array.
+        # marginal shape is (features_shape + designs_shape).
+        # We need to find the closest grid index for each design dimension.
+        idx = [slice(None)] * n_features  # keep all feature dimensions
+        for name in design_names:
+            if name not in design:
+                raise ValueError(f"Design must specify '{name}'. Got keys: {list(design.keys())}")
+            axis_vals = self.design_grid.axes_in[name]
+            loc = int(np.argmin(np.abs(axis_vals - design[name])))
+            idx.append(loc)
+
+        # Slice marginal to get P(y|xi) for this design: shape = features_shape
+        marginal_at_design = marginal[tuple(idx)]
+
+        if figsize is None:
+            figsize = (5 * n_features, 4)
+
+        fig, axes = plt.subplots(1, n_features, figsize=figsize, squeeze=False)
+        axes = axes[0]
+
+        for i, fname in enumerate(feature_names):
+            ax = axes[i]
+            # Marginalize over all other feature dimensions to get 1D distribution
+            sum_axes = tuple(j for j in range(n_features) if j != i)
+            if sum_axes:
+                marginal_1d = np.sum(marginal_at_design, axis=sum_axes)
+            else:
+                marginal_1d = marginal_at_design.ravel()
+
+            feature_vals = self.feature_grid.axes_in[fname]
+            ax.plot(feature_vals, marginal_1d, linewidth=1.5)
+            ax.fill_between(feature_vals, marginal_1d, alpha=0.3)
+            ax.set_xlabel(fname)
+            ax.set_ylabel("P(y|ξ)")
+            ax.set_xlim(feature_vals.min(), feature_vals.max())
+
+        design_str = ", ".join(f"{k}={v:.3g}" for k, v in design.items())
+        if title is None:
+            title = f"Marginal P(y|ξ) at design: {design_str}"
+        fig.suptitle(title)
+        fig.tight_layout()
+        return fig, axes
+
+
+
 def main():
-    parser = argparse.ArgumentParser(description="Standalone brute-force EIG runner")
+    from bedcosmo.util import init_experiment, get_experiment_config_path
+
+    parser = argparse.ArgumentParser(description="Standalone grid-based EIG runner")
     parser.add_argument("cosmo_exp", type=str, help="Experiment type (e.g. num_visits, num_tracers)")
-    parser.add_argument("--run_id", type=str, default=None, help="MLflow run ID to load experiment from")
     parser.add_argument(
         "--design_args_path",
         type=str,
@@ -516,58 +619,69 @@ def main():
         "--prior_args_path",
         type=str,
         default=None,
-        help="Prior args config name under experiments/<cosmo_exp>/ (config mode)",
+        help="Prior args config name under experiments/<cosmo_exp>/ (e.g. prior_args_uniform.yaml)",
     )
     parser.add_argument("--use_experiment_prior", action="store_true", help="Use experiment's prior distributions for PDF")
     parser.add_argument("--device", type=str, default="cpu", help="Torch device for experiment calculations")
     parser.add_argument("--param_pts", type=int, default=75, help="Points per parameter axis")
     parser.add_argument("--feature_pts", type=int, default=35, help="Points per feature axis")
-    parser.add_argument("--save_json", type=str, default=None, help="Optional output JSON path")
+    parser.add_argument("--no_plots", action="store_true", help="Skip generating plots")
     args = parser.parse_args()
 
     if "SCRATCH" not in os.environ:
         raise EnvironmentError("SCRATCH environment variable is required.")
 
-    if args.run_id:
-        experiment, run_obj = _init_from_run_id(
-            run_id=args.run_id,
-            cosmo_exp=args.cosmo_exp,
-            device=args.device,
-            design_args_path=args.design_args_path,
-        )
-        artifacts_path = Path(run_obj.info.artifact_uri.replace("file://", ""))
-    else:
-        experiment = _init_from_configs(
-            cosmo_exp=args.cosmo_exp,
-            device=args.device,
-            design_args_path=args.design_args_path,
-            prior_args_path=args.prior_args_path,
-        )
-        artifacts_path = None
+    # If no prior_args_path given, try to find a default from train_args.yaml
+    prior_args_path = args.prior_args_path
+    if prior_args_path is None:
+        try:
+            train_args_file = get_experiment_config_path(args.cosmo_exp, "train_args.yaml")
+            with open(train_args_file, "r") as f:
+                train_args = yaml.safe_load(f)
+            # Use the first model config's prior_args_path as default
+            first_model = next(iter(train_args.values()))
+            if isinstance(first_model, dict):
+                prior_args_path = first_model.get("prior_args_path")
+                if prior_args_path is not None:
+                    print(f"Using default prior_args_path from train_args.yaml: {prior_args_path}")
+        except (FileNotFoundError, StopIteration, KeyError):
+            pass
+
+    # Initialize experiment via init_experiment
+    experiment = init_experiment(
+        cosmo_exp=args.cosmo_exp,
+        design_args_path=args.design_args_path,
+        prior_args_path=prior_args_path,
+        device=args.device,
+    )
+
+    # Build output directory: $SCRATCH/bedcosmo/{exp_name}/grid_calc/{date}
+    date_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+    out_dir = Path(os.environ["SCRATCH"]) / "bedcosmo" / args.cosmo_exp / "grid_calc" / date_str
+    out_dir.mkdir(parents=True, exist_ok=True)
 
     # Use the class-based interface
-    bf = BruteForceDesigner(
+    gc = GridCalculation(
         experiment=experiment,
         param_pts=args.param_pts,
         feature_pts=args.feature_pts,
     )
 
     # Compute prior if requested
-    if args.prior_args_path or args.use_experiment_prior:
-        bf.compute_prior_pdf(
-            prior_args_path=args.prior_args_path,
+    if prior_args_path or args.use_experiment_prior:
+        gc.compute_prior_pdf(
+            prior_args_path=prior_args_path if not args.use_experiment_prior else None,
             use_experiment_prior=args.use_experiment_prior,
         )
-        print(f"Computed prior PDF with shape {bf.prior_pdf.shape}")
+        print(f"Computed prior PDF with shape {gc.prior_pdf.shape}")
 
-    result = bf.run()
+    result = gc.run()
 
     eig = np.asarray(result["eig"], dtype=float)
     eig_flat = eig.reshape(-1)
     best_idx = int(np.argmax(eig_flat))
     payload = {
         "cosmo_exp": args.cosmo_exp,
-        "run_id": args.run_id,
         "timestamp": datetime.now().isoformat(),
         "best_design": result["best_design"],
         "optimal_eig": float(eig_flat[best_idx]),
@@ -578,10 +692,10 @@ def main():
         "parameter_grid_shape": list(result["parameter_grid_shape"]),
         "param_pts": int(args.param_pts),
         "feature_pts": int(args.feature_pts),
-        "used_prior": args.prior_args_path is not None or args.use_experiment_prior,
+        "used_prior": prior_args_path is not None or args.use_experiment_prior,
     }
 
-    print("Brute-force run complete")
+    print("Grid-based run complete")
     print(f"  best_design: {payload['best_design']}")
     print(f"  optimal_eig: {payload['optimal_eig']:.6f} bits")
     print(
@@ -589,16 +703,48 @@ def main():
         f"features={payload['feature_grid_shape']}, designs={payload['design_grid_shape']}"
     )
 
-    if args.save_json is not None:
-        out_path = Path(args.save_json)
-    elif artifacts_path is not None:
-        out_path = artifacts_path / f"brute_force_data_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-    else:
-        out_path = Path.cwd() / f"brute_force_data_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-
-    with open(out_path, "w") as f:
+    # Save eig_data_grid.json
+    json_path = out_dir / "eig_data_grid.json"
+    with open(json_path, "w") as f:
         json.dump(payload, f, indent=2)
-    print(f"Saved: {out_path}")
+    print(f"  Saved: {json_path}")
+
+    # Generate plots using refactored BasePlotter
+    if not args.no_plots:
+        from bedcosmo.plotting import BasePlotter
+
+        print("Generating plots...")
+        plotter = BasePlotter(cosmo_exp=args.cosmo_exp)
+
+        # Get the actual constrained designs used in the EIG calculation
+        input_designs = experiment.designs.detach().cpu().numpy()
+
+        nominal_design = np.asarray(
+            experiment.nominal_design.detach().cpu().numpy(), dtype=np.float64
+        ).reshape(-1)
+
+        design_labels = getattr(experiment, 'design_labels', list(gc.design_grid.names))
+        plotter.eig_designs(
+            eig_values=eig_flat,
+            input_designs=input_designs,
+            design_labels=design_labels,
+            nominal_design=nominal_design,
+            title="Grid EIG vs Design",
+            save_path=str(out_dir / "eig_designs.png"),
+        )
+
+        # Posterior plot
+        posterior = gc.get_posterior(nominal=True)
+        gc_samples = gc.draw_samples(pdf=posterior, num_samples=50000)
+
+        plotter.generate_posterior(
+            experiment=experiment,
+            grid_samples=gc_samples,
+            title="Grid Posterior (nominal)",
+            save_path=str(out_dir / "posterior.png"),
+        )
+
+    print(f"All outputs saved to: {out_dir}")
 
 
 if __name__ == "__main__":

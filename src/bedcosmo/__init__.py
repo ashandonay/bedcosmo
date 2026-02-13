@@ -16,6 +16,7 @@ from bedcosmo.cosmology import CosmologyMixin
 from bedcosmo.num_tracers import NumTracers
 from bedcosmo.variable_redshift import VariableRedshift
 from bedcosmo.num_visits import NumVisits
+from bedcosmo.grid_calc import GridCalculation
 
 __all__ = [
     "Bijector",
@@ -30,4 +31,5 @@ __all__ = [
     "NumTracers",
     "VariableRedshift",
     "NumVisits",
+    "GridCalculation",
 ]

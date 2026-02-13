@@ -205,7 +205,7 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         self._wlen_over_hc_tensor = torch.tensor(wlen_over_hc_common, device=self.device, dtype=torch.float64)  # (n_wlen,)
 
         # Assume a redshift of 1.0 for the observations central value
-        self.central_z = 0.8
+        self.central_z = 1.3
         central_z_tensor = torch.tensor([self.central_z], device=self.device, dtype=torch.float64)
         self.central_val = self._calculate_magnitudes(central_z_tensor).squeeze(0)  # (num_filters,)
         self.nominal_context = torch.cat([self.nominal_design, self.central_val], dim=-1)
@@ -972,24 +972,13 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         )
 
         diff = (mag_obs_full - mags_full) / sigma_full
-        log_likelihood = -0.5 * np.sum(diff**2, axis=-1)
+        log_likelihood = -0.5 * np.sum(diff**2, axis=-1) - np.sum(np.log(sigma_full), axis=-1)
 
-        # Stabilize exponentiation. For full feature grids (EIG path), normalize per
-        # (design, parameter) slice. For conditioned single-feature posterior calls,
-        # use a global shift so parameter dependence is preserved.
-        feature_axes = tuple(range(len(feature_shape)))
-        is_stacked = (
-            getattr(params, "_stack_offset", 0) != 0
-            or getattr(features, "_stack_offset", 0) != 0
-            or getattr(designs, "_stack_offset", 0) != 0
-        )
-        has_nontrivial_feature_axis = any(dim > 1 for dim in feature_shape)
-        if is_stacked and feature_axes and has_nontrivial_feature_axis:
-            log_likelihood = log_likelihood - np.max(
-                log_likelihood, axis=feature_axes, keepdims=True
-            )
-        else:
-            log_likelihood = log_likelihood - np.max(log_likelihood)
+        # Stabilize exponentiation by subtracting the max over the feature axes.
+        # Since bed normalizes the likelihood over features, we only need relative
+        # scaling to be correct within each (design, param) slice. A global max
+        # can cause underflow for parameter values far from the mode.
+        log_likelihood = log_likelihood - np.max(log_likelihood)
 
         likelihood = np.exp(log_likelihood)
         # likelihood shape: X + D + P
