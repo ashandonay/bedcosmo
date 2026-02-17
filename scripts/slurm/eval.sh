@@ -12,16 +12,21 @@
 # Parse named arguments
 COSMO_EXP=""
 RUN_ID=""
+TRAIN_JOB_ID=""
 EXTRA_ARGS=()
 
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --cosmo_exp)
+        --cosmo-exp)
             COSMO_EXP="$2"
             shift 2
             ;;
-        --run_id)
+        --run-id)
             RUN_ID="$2"
+            shift 2
+            ;;
+        --train-job-id)
+            TRAIN_JOB_ID="$2"
             shift 2
             ;;
         *)
@@ -39,14 +44,42 @@ done
 
 # Validate required arguments
 if [ -z "$COSMO_EXP" ]; then
-    echo "Error: --cosmo_exp is required"
-    echo "Usage: sbatch eval.sh --cosmo_exp <value> --run_id <value> [additional args...]"
+    echo "Error: --cosmo-exp is required"
+    echo "Usage: sbatch eval.sh --cosmo-exp <value> --run-id <value> [additional args...]"
     exit 1
 fi
 
+# If --train-job-id is set, extract run_id from training log
+if [ -z "$RUN_ID" ] && [ -n "$TRAIN_JOB_ID" ]; then
+    TRAIN_LOG=$(ls "${SCRATCH}/bedcosmo/${COSMO_EXP}/logs/${TRAIN_JOB_ID}_"*.log 2>/dev/null | head -n 1)
+    if [ -z "$TRAIN_LOG" ] || [ ! -f "$TRAIN_LOG" ]; then
+        echo "Training job $TRAIN_JOB_ID did not produce a log file. Training likely failed."
+        echo "Skipping eval."
+        exit 0
+    fi
+
+    # Check if training completed successfully
+    if grep -q "completed\.$" "$TRAIN_LOG"; then
+        echo "Training job $TRAIN_JOB_ID completed successfully."
+    else
+        echo "Training job $TRAIN_JOB_ID did not complete successfully."
+        echo "Skipping eval."
+        exit 0
+    fi
+
+    echo "Extracting run_id from training log: $TRAIN_LOG"
+    RUN_ID=$(grep "MLFlow Run Info:" "$TRAIN_LOG" | head -n 1 | awk -F'/' '{print $NF}')
+    if [ -z "$RUN_ID" ]; then
+        echo "Error: Could not extract run_id from training log $TRAIN_LOG"
+        echo "Expected line format: 'MLFlow Run Info: <exp_id>/<run_id>'"
+        exit 0
+    fi
+    echo "Extracted run_id: $RUN_ID"
+fi
+
 if [ -z "$RUN_ID" ]; then
-    echo "Error: --run_id is required"
-    echo "Usage: sbatch eval.sh --cosmo_exp <value> --run_id <value> [additional args...]"
+    echo "Error: --run-id (or --train-job-id) is required"
+    echo "Usage: sbatch eval.sh --cosmo-exp <value> --run-id <value> [additional args...]"
     exit 1
 fi
 
@@ -113,6 +146,6 @@ srun torchrun \
     --nnodes=1 \
     --nproc_per_node=1 \
     -m bedcosmo.evaluate \
-    --cosmo_exp "$COSMO_EXP" \
-    --run_id "$RUN_ID" \
+    --cosmo-exp "$COSMO_EXP" \
+    --run-id "$RUN_ID" \
     "${EXTRA_ARGS[@]}"

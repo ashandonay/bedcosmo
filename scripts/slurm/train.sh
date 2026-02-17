@@ -17,7 +17,7 @@ EXTRA_ARGS=()
 
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --cosmo_exp)
+        --cosmo-exp)
             COSMO_EXP="$2"
             shift 2
             ;;
@@ -36,8 +36,8 @@ done
 
 # Validate required arguments
 if [ -z "$COSMO_EXP" ]; then
-    echo "Error: --cosmo_exp is required"
-    echo "Usage: sbatch train.sh --cosmo_exp <value> [additional args...]"
+    echo "Error: --cosmo-exp is required"
+    echo "Usage: sbatch train.sh --cosmo-exp <value> [additional args...]"
     exit 1
 fi
 
@@ -122,5 +122,5 @@ srun torchrun \
      --rdzv_backend=c10d \
      --rdzv_endpoint=$MASTER_ADDR:$MASTER_PORT \
      -m bedcosmo.train \
-     --cosmo_exp "$COSMO_EXP" \
+     --cosmo-exp "$COSMO_EXP" \
      "${EXTRA_ARGS[@]}"

@@ -47,28 +47,53 @@ mypy .                          # Type check
 ```bash
 # Training (auto-detects SLURM on NERSC, local elsewhere)
 ./submit.sh train num_tracers base
-./submit.sh train num_tracers base_w_wa --initial_lr 0.0001
+./submit.sh train num_tracers base_w_wa --initial-lr 0.0001
 
 # SLURM with custom time and queue
 ./submit.sh train num_tracers base --time 04:00 --queue regular
 ./submit.sh train num_tracers base --time 02:00 --queue shared --nodes 2
 
+# Separate train/eval SLURM time
+./submit.sh train num_tracers base --train-time 04:00 --eval-time 00:30
+
 # Force local execution on a SLURM system
 ./submit.sh train num_tracers base --local --gpus 2
 
-# Debug mode (logs to 'debug' MLflow experiment)
+# Debug mode (logs to 'debug' MLflow experiment, disables auto-eval)
 ./submit.sh train num_tracers base --debug
 
-# Evaluation
+# Manual evaluation
 ./submit.sh eval num_tracers <run_id>
-./submit.sh eval num_tracers <run_id> --eig_file_path <path_to_json>
+./submit.sh eval num_tracers <run_id> --eig-file-path <path_to_json>
 
 # Resume/Restart training
 ./submit.sh resume num_tracers <run_id> <step>
 ./submit.sh restart num_tracers <run_id> <step>
 
-# Optional flags: --debug, --log_usage, --profile
+# Optional flags: --debug, --log-usage, --profile
 ```
+
+### Auto-Evaluation
+Eval runs automatically after train/restart/resume jobs. The eval job extracts the run_id from the training log and loads defaults from `eval_args.yaml`. For SLURM, eval is submitted as a dependent job (`afterany`) that checks if training completed before running.
+
+```bash
+# Pass eval-specific args with --eval- prefix
+./submit.sh train num_tracers base --eval-grid --eval-grid-param-pts 2000 --eval-grid-feature-pts 500
+
+# Disable auto-eval (also disabled by default with --debug)
+./submit.sh train num_tracers base --no-eval
+
+# Force auto-eval even in debug mode
+./submit.sh train num_tracers base --debug --auto-eval
+```
+
+### CLI Argument Prefixes
+Unprefixed `--<arg>` args default to training. Use `--train-` or `--eval-` prefixes to be explicit:
+```bash
+./submit.sh train num_tracers base --train-initial-lr 0.0001 --eval-grid --eval-n-evals 5
+```
+
+SLURM infrastructure flags also support prefixes: `--train-time`, `--train-queue`, `--train-nodes`, `--eval-time`.
 
 ## Architecture
 

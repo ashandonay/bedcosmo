@@ -3347,25 +3347,27 @@ class ComparisonPlotter(BasePlotter):
             if len(labels) != len(all_run_top_designs):
                 labels = labels[:len(all_run_top_designs)]
             
-            # Determine design labels
+            # Determine design labels and nominal design from first run's experiment
             design_labels = None
-            # Try to infer from first run's experiment
+            experiment_nominal_design = None
             try:
                 first_run_data = run_data_list[0]
                 device = "cuda:0"
                 run_params = first_run_data['params'].copy()  # Make a copy to avoid modifying original
-                
+
                 # init_experiment will automatically load prior_args from artifacts
                 experiment = init_experiment(
-                    first_run_data['run_obj'], 
+                    first_run_data['run_obj'],
                     run_params,
-                    device=device, 
+                    device=device,
                     global_rank=0
                 )
                 if hasattr(experiment, 'design_labels'):
                     design_labels = experiment.design_labels
+                if hasattr(experiment, 'nominal_design'):
+                    experiment_nominal_design = experiment.nominal_design.cpu().numpy()
             except Exception as e:
-                print(f"Warning: Could not initialize experiment to get design labels: {e}")
+                print(f"Warning: Could not initialize experiment to get design labels/nominal: {e}")
             
             # Use generic labels if still None
             if design_labels is None:
@@ -3375,22 +3377,25 @@ class ComparisonPlotter(BasePlotter):
             if len(design_labels) != combined_designs.shape[1]:
                 raise ValueError(f"design_labels length ({len(design_labels)}) must match number of design dimensions ({combined_designs.shape[1]})")
             
-            # Handle nominal design if provided
+            # Resolve nominal design: use parameter if provided, else fall back to experiment's nominal
+            if nominal_design is not None:
+                nominal_design = np.array(nominal_design)
+            elif experiment_nominal_design is not None:
+                nominal_design = experiment_nominal_design
+
+            # Compute ratios relative to nominal if available
             plot_data = combined_designs.copy()
             use_relative_colors = False
             if nominal_design is not None:
-                nominal_design = np.array(nominal_design)
                 if len(nominal_design) != combined_designs.shape[1]:
                     raise ValueError(f"nominal_design length ({len(nominal_design)}) must match number of design dimensions ({combined_designs.shape[1]})")
-                
+
                 if np.any(nominal_design == 0):
                     raise ValueError("nominal_design cannot contain zero values (division by zero)")
-                
+
                 plot_data = combined_designs / nominal_design[np.newaxis, :]
                 use_relative_colors = True
-                
-                if cmap == 'viridis':
-                    cmap = 'RdBu'
+                cmap = 'RdBu'
             
             # Create figure with space for colorbar
             fig = plt.figure(figsize=figsize)

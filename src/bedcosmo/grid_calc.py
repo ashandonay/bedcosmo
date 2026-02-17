@@ -621,22 +621,22 @@ def main():
     parser = argparse.ArgumentParser(description="Standalone grid-based EIG runner")
     parser.add_argument("cosmo_exp", type=str, help="Experiment type (e.g. num_visits, num_tracers)")
     parser.add_argument(
-        "--design_args_path",
+        "--design-args-path",
         type=str,
         default=None,
         help="Design args config name under experiments/<cosmo_exp>/ (e.g. design_args_2d.yaml)",
     )
     parser.add_argument(
-        "--prior_args_path",
+        "--prior-args-path",
         type=str,
         default=None,
         help="Prior args config name under experiments/<cosmo_exp>/ (e.g. prior_args_uniform.yaml)",
     )
-    parser.add_argument("--use_experiment_prior", action="store_true", help="Use experiment's prior distributions for PDF")
+    parser.add_argument("--use-experiment-prior", action="store_true", help="Use experiment's prior distributions for PDF")
     parser.add_argument("--device", type=str, default="cpu", help="Torch device for experiment calculations")
-    parser.add_argument("--param_pts", type=int, default=75, help="Points per parameter axis")
-    parser.add_argument("--feature_pts", type=int, default=35, help="Points per feature axis")
-    parser.add_argument("--no_plots", action="store_true", help="Skip generating plots")
+    parser.add_argument("--param-pts", type=int, default=75, help="Points per parameter axis")
+    parser.add_argument("--feature-pts", type=int, default=35, help="Points per feature axis")
+    parser.add_argument("--no-plots", action="store_true", help="Skip generating plots")
     args = parser.parse_args()
 
     if "SCRATCH" not in os.environ:

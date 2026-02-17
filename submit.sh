@@ -44,12 +44,15 @@ if [ $# -eq 0 ]; then
     echo ""
     echo "Local options:"
     echo "  --gpus <N>          - GPUs / torchrun processes (default: auto-detect)"
-    echo "  --omp_threads <N>   - Set OMP_NUM_THREADS"
+    echo "  --omp-threads <N>   - Set OMP_NUM_THREADS"
     echo ""
     echo "Common options:"
     echo "  --gpus <N>          - SLURM: overrides gpus-per-node; Local: sets nproc_per_node"
     echo "  --debug             - Use debug queue + 'debug' MLflow experiment (for train/restart)"
-    echo "  --log_usage, --profile, --restart_optimizer"
+    echo "  --no-eval           - Disable auto-eval (on by default, off for --debug)"
+    echo "  --eval-<arg> <val>  - Pass args to auto-eval (e.g. --eval-grid --eval-grid-param-pts 2000)"
+    echo "  --eval-time <HH:MM> - SLURM time limit for auto-eval job (default: 00:30)"
+    echo "  --log-usage, --profile, --restart-optimizer"
     echo ""
     echo "Examples:"
     echo "  ./submit.sh train num_tracers base"
@@ -58,7 +61,7 @@ if [ $# -eq 0 ]; then
     echo "  ./submit.sh eval num_tracers abc123"
     echo "  ./submit.sh resume num_tracers abc123 5000 --time 01:00 --queue regular"
     echo "  ./submit.sh restart num_tracers abc123 10000"
-    echo "  ./submit.sh train num_tracers base_w_wa --initial_lr 0.0001 --log_usage"
+    echo "  ./submit.sh train num_tracers base_w_wa --initial-lr 0.0001 --log-usage"
     exit 1
 fi
 
@@ -87,6 +90,10 @@ LOG_USAGE=false
 PROFILE=false
 DEBUG=false
 RESTART_OPTIMIZER=false
+AUTO_EVAL=true
+AUTO_EVAL_SET_BY_USER=false
+EVAL_TIME="00:30"
+EVAL_EXTRA_ARGS=()  # Args prefixed with --eval_ to pass to auto-eval job
 
 # New unified options
 SLURM_TIME="00:30"
@@ -129,35 +136,35 @@ while [[ $# -gt 0 ]]; do
             SLURM_NODES="$2"
             shift 2
             ;;
-        --cosmo_exp)
+        --cosmo-exp)
             COSMO_EXP="$2"
             shift 2
             ;;
-        --cosmo_model)
+        --cosmo-model)
             COSMO_MODEL="$2"
             shift 2
             ;;
-        --run_id)
+        --run-id)
             RUN_ID="$2"
             shift 2
             ;;
-        --resume_id)
+        --resume-id)
             RESUME_ID="$2"
             shift 2
             ;;
-        --restart_id)
+        --restart-id)
             RESTART_ID="$2"
             shift 2
             ;;
-        --resume_step)
+        --resume-step)
             RESUME_STEP="$2"
             shift 2
             ;;
-        --restart_step)
+        --restart-step)
             RESTART_STEP="$2"
             shift 2
             ;;
-        --restart_checkpoint)
+        --restart-checkpoint)
             RESTART_CHECKPOINT="$2"
             shift 2
             ;;
@@ -166,11 +173,11 @@ while [[ $# -gt 0 ]]; do
             GPUS_SET_BY_USER=true
             shift 2
             ;;
-        --omp_threads)
+        --omp-threads)
             OMP_THREADS="$2"
             shift 2
             ;;
-        --log_usage)
+        --log-usage)
             LOG_USAGE=true
             shift 1
             ;;
@@ -182,16 +189,64 @@ while [[ $# -gt 0 ]]; do
             DEBUG=true
             shift 1
             ;;
-        --restart_optimizer)
+        --restart-optimizer)
             RESTART_OPTIMIZER=true
             shift 1
+            ;;
+        --auto-eval)
+            AUTO_EVAL=true
+            AUTO_EVAL_SET_BY_USER=true
+            shift 1
+            ;;
+        --no-eval)
+            AUTO_EVAL=false
+            shift 1
+            ;;
+        --eval-time)
+            EVAL_TIME="$2"
+            shift 2
             ;;
         --exclude)
             SBATCH_ARGS+=("--exclude=$2")
             shift 2
             ;;
+        --train-time)
+            SLURM_TIME="$2"
+            shift 2
+            ;;
+        --train-queue)
+            SLURM_QUEUE="$2"
+            QUEUE_SET_BY_USER=true
+            shift 2
+            ;;
+        --train-nodes)
+            SLURM_NODES="$2"
+            shift 2
+            ;;
+        --train-*)
+            # Train-specific args: strip train- prefix and treat as CLI arg
+            train_key="${1#--train-}"
+            if [[ $# -gt 1 ]] && [[ ! $2 =~ ^-- ]]; then
+                CLI_ARGS["$train_key"]="$2"
+                shift 2
+            else
+                CLI_ARGS["$train_key"]="true"
+                shift 1
+            fi
+            ;;
+        --eval-*)
+            # Eval-specific args: strip eval- prefix and collect for auto-eval
+            eval_key="${1#--eval-}"
+            if [[ $# -gt 1 ]] && [[ ! $2 =~ ^-- ]]; then
+                EVAL_EXTRA_ARGS+=("--$eval_key" "$2")
+                shift 2
+            else
+                EVAL_EXTRA_ARGS+=("--$eval_key")
+                shift 1
+            fi
+            ;;
         --*)
-            # Store CLI argument (will override YAML defaults)
+            # Store CLI argument (will override YAML defaults, assumed to be for train)
             key="${1#--}"
             # Check if next arg is a value or another flag
             if [[ $# -gt 1 ]] && [[ ! $2 =~ ^-- ]]; then
@@ -232,10 +287,18 @@ fi
 if [[ "$SLURM_TIME" =~ ^[0-9]+:[0-9]+$ ]]; then
     SLURM_TIME="${SLURM_TIME}:00"
 fi
+if [[ "$EVAL_TIME" =~ ^[0-9]+:[0-9]+$ ]]; then
+    EVAL_TIME="${EVAL_TIME}:00"
+fi
 
 # --debug implies SLURM debug queue (unless --queue was explicitly set)
 if [ "$DEBUG" = true ] && [ "$QUEUE_SET_BY_USER" = false ]; then
     SLURM_QUEUE="debug"
+fi
+
+# --debug disables auto-eval (unless --auto-eval was explicitly passed)
+if [ "$DEBUG" = true ] && [ "$AUTO_EVAL_SET_BY_USER" = false ]; then
+    AUTO_EVAL=false
 fi
 
 echo "Execution mode: $EXECUTION_MODE"
@@ -312,12 +375,12 @@ fi
 
 # cosmo_model is NOT required for eval/resume/restart (inferred from MLflow run)
 if [ -z "$COSMO_MODEL" ] && [ "$JOB_TYPE" != "eval" ] && [ "$JOB_TYPE" != "resume" ] && [ "$JOB_TYPE" != "restart" ]; then
-    echo "Error: --cosmo_model is required for $JOB_TYPE jobs"
+    echo "Error: --cosmo-model is required for $JOB_TYPE jobs"
     echo "Usage: ./submit.sh $JOB_TYPE [cosmo_exp] [cosmo_model] [additional args...]"
     echo "Available models: base, base_omegak, base_w, base_w_wa, base_omegak_w_wa"
     echo ""
     echo "Note: cosmo_model can be provided positionally after cosmo_exp."
-    echo "Note: --cosmo_model is not needed for 'eval', 'resume', or 'restart' jobs (inferred from MLflow run)"
+    echo "Note: --cosmo-model is not needed for 'eval', 'resume', or 'restart' jobs (inferred from MLflow run)"
     exit 1
 fi
 
@@ -482,6 +545,9 @@ except Exception as e:
     fi
 
     while IFS="=" read -r key value; do
+        # Convert underscores to hyphens for CLI flags (POSIX convention)
+        key="${key//_/-}"
+
         # Skip if this key was provided via CLI (CLI overrides YAML)
         if [[ -v CLI_ARGS["$key"] ]]; then
             continue
@@ -541,7 +607,7 @@ for key in "${!CLI_ARGS[@]}"; do
     fi
 done
 
-# When --debug is set, filter out mlflow_exp from YAML_ARGS (we'll add --mlflow_exp debug later)
+# When --debug is set, filter out mlflow_exp from YAML_ARGS (we'll add --mlflow-exp debug later)
 # For eval jobs, filter out cosmo_model from YAML_ARGS (evaluate.py doesn't accept it)
 if [ "$DEBUG" = true ] || [ "$JOB_TYPE" = "eval" ]; then
     FILTERED_ARGS=()
@@ -551,11 +617,11 @@ if [ "$DEBUG" = true ] || [ "$JOB_TYPE" = "eval" ]; then
             skip_next=false
             continue
         fi
-        if [ "$DEBUG" = true ] && [ "${YAML_ARGS[$i]}" = "--mlflow_exp" ]; then
+        if [ "$DEBUG" = true ] && [ "${YAML_ARGS[$i]}" = "--mlflow-exp" ]; then
             skip_next=true
             continue
         fi
-        if [ "$JOB_TYPE" = "eval" ] && [ "${YAML_ARGS[$i]}" = "--cosmo_model" ]; then
+        if [ "$JOB_TYPE" = "eval" ] && [ "${YAML_ARGS[$i]}" = "--cosmo-model" ]; then
             skip_next=true
             continue
         fi
@@ -571,13 +637,13 @@ case $JOB_TYPE in
     train)
         SLURM_SCRIPT_FILE="train.sh"
         PYTHON_MODULE="bedcosmo.train"
-        FINAL_ARGS=("--cosmo_exp" "$COSMO_EXP" "${YAML_ARGS[@]}")
+        FINAL_ARGS=("--cosmo-exp" "$COSMO_EXP" "${YAML_ARGS[@]}")
 
         if [ "$DEBUG" = true ]; then
-            FINAL_ARGS+=("--mlflow_exp" "debug")
+            FINAL_ARGS+=("--mlflow-exp" "debug")
         fi
         if [ "$LOG_USAGE" = true ]; then
-            FINAL_ARGS+=("--log_usage")
+            FINAL_ARGS+=("--log-usage")
         fi
         if [ "$PROFILE" = true ]; then
             FINAL_ARGS+=("--profile")
@@ -592,7 +658,7 @@ case $JOB_TYPE in
             echo "Usage: ./submit.sh eval [cosmo_exp] [run_id] [additional args...]"
             exit 1
         fi
-        FINAL_ARGS=("--cosmo_exp" "$COSMO_EXP" "--run_id" "$RUN_ID" "${YAML_ARGS[@]}")
+        FINAL_ARGS=("--cosmo-exp" "$COSMO_EXP" "--run-id" "$RUN_ID" "${YAML_ARGS[@]}")
         echo ""
         echo "Eval job configuration:"
         echo "  Cosmo experiment: $COSMO_EXP"
@@ -621,10 +687,10 @@ case $JOB_TYPE in
             exit 1
         fi
 
-        FINAL_ARGS=("--cosmo_exp" "$COSMO_EXP" "--resume_id" "$RESUME_ID" "--resume_step" "$RESUME_STEP" "${YAML_ARGS[@]}")
+        FINAL_ARGS=("--cosmo-exp" "$COSMO_EXP" "--resume-id" "$RESUME_ID" "--resume-step" "$RESUME_STEP" "${YAML_ARGS[@]}")
 
         if [ "$LOG_USAGE" = true ]; then
-            FINAL_ARGS+=("--log_usage")
+            FINAL_ARGS+=("--log-usage")
         fi
         if [ "$PROFILE" = true ]; then
             FINAL_ARGS+=("--profile")
@@ -640,29 +706,29 @@ case $JOB_TYPE in
             exit 1
         fi
         if [ -z "$RESTART_STEP" ] && [ -z "$RESTART_CHECKPOINT" ]; then
-            echo "Error: Either --restart_step or --restart_checkpoint is required for restart"
+            echo "Error: Either --restart-step or --restart-checkpoint is required for restart"
             echo "Usage: ./submit.sh restart [cosmo_exp] [restart_id] [restart_step|restart_checkpoint] [additional args...]"
             exit 1
         fi
 
-        FINAL_ARGS=("--cosmo_exp" "$COSMO_EXP" "--restart_id" "$RESTART_ID")
+        FINAL_ARGS=("--cosmo-exp" "$COSMO_EXP" "--restart-id" "$RESTART_ID")
 
         if [ -n "$RESTART_STEP" ]; then
-            FINAL_ARGS+=("--restart_step" "$RESTART_STEP")
+            FINAL_ARGS+=("--restart-step" "$RESTART_STEP")
         fi
         if [ -n "$RESTART_CHECKPOINT" ]; then
-            FINAL_ARGS+=("--restart_checkpoint" "$RESTART_CHECKPOINT")
+            FINAL_ARGS+=("--restart-checkpoint" "$RESTART_CHECKPOINT")
         fi
         if [ "$RESTART_OPTIMIZER" = true ]; then
-            FINAL_ARGS+=("--restart_optimizer")
+            FINAL_ARGS+=("--restart-optimizer")
         fi
         FINAL_ARGS+=("${YAML_ARGS[@]}")
 
         if [ "$DEBUG" = true ]; then
-            FINAL_ARGS+=("--mlflow_exp" "debug")
+            FINAL_ARGS+=("--mlflow-exp" "debug")
         fi
         if [ "$LOG_USAGE" = true ]; then
-            FINAL_ARGS+=("--log_usage")
+            FINAL_ARGS+=("--log-usage")
         fi
         if [ "$PROFILE" = true ]; then
             FINAL_ARGS+=("--profile")
@@ -773,7 +839,7 @@ for key in "${!CLI_ARGS[@]}"; do
     fi
 done
 if [ "$LOG_USAGE" = true ]; then
-    CLI_OVERRIDES_STR+="--log_usage "
+    CLI_OVERRIDES_STR+="--log-usage "
 fi
 if [ "$PROFILE" = true ]; then
     CLI_OVERRIDES_STR+="--profile "
@@ -782,7 +848,7 @@ if [ "$DEBUG" = true ]; then
     CLI_OVERRIDES_STR+="--debug "
 fi
 if [ "$RESTART_OPTIMIZER" = true ]; then
-    CLI_OVERRIDES_STR+="--restart_optimizer "
+    CLI_OVERRIDES_STR+="--restart-optimizer "
 fi
 CLI_OVERRIDES_STR="${CLI_OVERRIDES_STR% }"
 export BED_CLI_OVERRIDES="$CLI_OVERRIDES_STR"
@@ -799,7 +865,7 @@ if [ "$JOB_TYPE" = "resume" ]; then
         echo "Pre-step: Truncating metrics to resume step..."
         echo "=========================================="
         set +e
-        python3 "$TRUNCATE_SCRIPT" --run_id "$RESUME_ID" --resume_step "$RESUME_STEP" --cosmo_exp "$COSMO_EXP"
+        python3 "$TRUNCATE_SCRIPT" --run-id "$RESUME_ID" --resume-step "$RESUME_STEP" --cosmo-exp "$COSMO_EXP"
         TRUNCATE_EXIT=$?
         set -e
 
@@ -876,6 +942,109 @@ if [ "$EXECUTION_MODE" = "slurm" ]; then
     echo ""
     echo "Check status with: squeue -u $USER"
 
+    # ──────────────────────────────────────────────────────────────
+    # Auto-eval: submit dependent eval job after training completes
+    # ──────────────────────────────────────────────────────────────
+    if [ "$AUTO_EVAL" = true ] && [[ "$JOB_TYPE" == "train" || "$JOB_TYPE" == "restart" || "$JOB_TYPE" == "resume" ]]; then
+        TRAIN_JOB_ID=$(echo "$SBATCH_OUTPUT" | grep -oP '\d+$')
+        if [ -z "$TRAIN_JOB_ID" ]; then
+            echo "Warning: Could not parse train job ID from sbatch output. Skipping auto-eval."
+        else
+            echo ""
+            echo "==========================================="
+            echo "Submitting dependent eval job (auto_eval)"
+            echo "==========================================="
+            echo "  Dependency: afterok:$TRAIN_JOB_ID"
+            if [ ${#EVAL_EXTRA_ARGS[@]} -gt 0 ]; then
+                echo "  Eval args: ${EVAL_EXTRA_ARGS[*]}"
+            fi
+
+            EVAL_SCRIPT="$PROJECT_ROOT/scripts/slurm/eval.sh"
+            EVAL_SBATCH_ARGS=("--dependency=afterany:$TRAIN_JOB_ID" "--job-name=eval" "--time=$EVAL_TIME" "--qos=$SLURM_QUEUE" "--nodes=1")
+            EVAL_FINAL_ARGS=("--cosmo-exp" "$COSMO_EXP" "--train-job-id" "$TRAIN_JOB_ID" "${EVAL_EXTRA_ARGS[@]}")
+
+            # Load eval_args.yaml for the cosmo_model if available
+            EVAL_CONFIG_FILE="$PROJECT_ROOT/experiments/${COSMO_EXP}/eval_args.yaml"
+            if [ -n "$COSMO_MODEL" ] && [ -f "$EVAL_CONFIG_FILE" ]; then
+                EVAL_YAML_OUTPUT=$(python3 -c "
+import yaml, json, sys, warnings
+warnings.filterwarnings('ignore')
+try:
+    with open('$EVAL_CONFIG_FILE', 'r') as f:
+        config = yaml.safe_load(f)
+    if '$COSMO_MODEL' in config:
+        model_config = config['$COSMO_MODEL']
+        # Remove cosmo_model (inferred from run) and keys we're overriding
+        for k in ['cosmo_model']:
+            model_config.pop(k, None)
+        print(json.dumps(model_config))
+    else:
+        print('{}')
+except Exception as e:
+    print('{}', file=sys.stdout)
+    print(f'Warning: {e}', file=sys.stderr)
+" 2>/dev/null)
+
+                while IFS="=" read -r key value; do
+                    # Convert underscores to hyphens for CLI flags (POSIX convention)
+                    key="${key//_/-}"
+
+                    # Skip keys that were explicitly provided via --eval-* args
+                    skip_key=false
+                    for ((ei=0; ei<${#EVAL_EXTRA_ARGS[@]}; ei++)); do
+                        if [[ "${EVAL_EXTRA_ARGS[$ei]}" == "--$key" ]]; then
+                            skip_key=true
+                            break
+                        fi
+                    done
+                    if [ "$skip_key" = true ]; then
+                        continue
+                    fi
+                    if [ "$value" = "null" ] || [ "$value" = "None" ] || [ -z "$value" ]; then
+                        continue
+                    fi
+                    if [ "$value" = "true" ]; then
+                        EVAL_FINAL_ARGS+=("--$key")
+                    elif [ "$value" = "false" ]; then
+                        continue
+                    else
+                        EVAL_FINAL_ARGS+=("--$key" "$value")
+                    fi
+                done < <(echo "$EVAL_YAML_OUTPUT" | python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+for key, value in data.items():
+    if value is None:
+        print(f'{key}=null')
+    elif isinstance(value, list):
+        formatted = json.dumps(value)
+        print(f'{key}={formatted}')
+    elif isinstance(value, bool):
+        print(f'{key}={str(value).lower()}')
+    else:
+        print(f'{key}={value}')
+" 2>/dev/null)
+            fi
+
+            TEMP_EVAL_OUTPUT=$(mktemp)
+            set +e
+            sbatch "${EVAL_SBATCH_ARGS[@]}" "$EVAL_SCRIPT" "${EVAL_FINAL_ARGS[@]}" > "$TEMP_EVAL_OUTPUT" 2>&1
+            EVAL_EXIT_CODE=$?
+            set -e
+            EVAL_OUTPUT=$(cat "$TEMP_EVAL_OUTPUT")
+            rm -f "$TEMP_EVAL_OUTPUT"
+
+            if [ $EVAL_EXIT_CODE -ne 0 ]; then
+                echo "Warning: Failed to submit auto-eval job (exit code: $EVAL_EXIT_CODE)"
+                echo "$EVAL_OUTPUT"
+            else
+                echo "$EVAL_OUTPUT"
+                echo ""
+                echo "Eval job will run after train job $TRAIN_JOB_ID completes successfully."
+            fi
+        fi
+    fi
+
 else
     # ──────────────────────────────────────────────────────────────────
     # Local path: run directly via torchrun
@@ -925,4 +1094,84 @@ else
     echo "Executing: torchrun --nproc_per_node=$GPUS -m $PYTHON_MODULE [${#FINAL_ARGS[@]} arguments]"
     echo ""
     torchrun --nproc_per_node=$GPUS -m "$PYTHON_MODULE" "${FINAL_ARGS[@]}" > "$LOG_FILE" 2>&1
+    TRAIN_EXIT_CODE=$?
+
+    # ──────────────────────────────────────────────────────────────
+    # Auto-eval: run eval after training completes (local mode)
+    # ──────────────────────────────────────────────────────────────
+    if [ "$AUTO_EVAL" = true ] && [[ "$JOB_TYPE" == "train" || "$JOB_TYPE" == "restart" || "$JOB_TYPE" == "resume" ]] && [ $TRAIN_EXIT_CODE -eq 0 ]; then
+        echo ""
+        echo "==========================================="
+        echo "Training complete. Running auto-eval..."
+        echo "==========================================="
+
+        # Extract run_id from training log
+        AUTO_RUN_ID=$(grep "MLFlow Run Info:" "$LOG_FILE" | head -n 1 | awk -F'/' '{print $NF}')
+        if [ -z "$AUTO_RUN_ID" ]; then
+            echo "Error: Could not extract run_id from training log $LOG_FILE"
+            echo "Skipping auto-eval."
+        else
+            echo "Extracted run_id: $AUTO_RUN_ID"
+
+            EVAL_LOG_FILE="${LOG_BASE_DIR}/${TIMESTAMP}_eval.log"
+            EVAL_ARGS=("--cosmo-exp" "$COSMO_EXP" "--run-id" "$AUTO_RUN_ID" "${EVAL_EXTRA_ARGS[@]}")
+
+            # Load eval_args.yaml for the cosmo_model if available
+            EVAL_CONFIG_FILE="$PROJECT_ROOT/experiments/${COSMO_EXP}/eval_args.yaml"
+            if [ -n "$COSMO_MODEL" ] && [ -f "$EVAL_CONFIG_FILE" ]; then
+                EVAL_YAML_OUTPUT=$(python3 -c "
+import yaml, json, sys, warnings
+warnings.filterwarnings('ignore')
+try:
+    with open('$EVAL_CONFIG_FILE', 'r') as f:
+        config = yaml.safe_load(f)
+    if '$COSMO_MODEL' in config:
+        model_config = config['$COSMO_MODEL']
+        for k in ['cosmo_model']:
+            model_config.pop(k, None)
+        print(json.dumps(model_config))
+    else:
+        print('{}')
+except Exception as e:
+    print('{}', file=sys.stdout)
+" 2>/dev/null)
+
+                while IFS="=" read -r key value; do
+                    if [[ "$key" == "grid" || "$key" == "grid_param_pts" || "$key" == "grid_feature_pts" ]]; then
+                        continue
+                    fi
+                    if [ "$value" = "null" ] || [ "$value" = "None" ] || [ -z "$value" ]; then
+                        continue
+                    fi
+                    if [ "$value" = "true" ]; then
+                        EVAL_ARGS+=("--$key")
+                    elif [ "$value" = "false" ]; then
+                        continue
+                    else
+                        EVAL_ARGS+=("--$key" "$value")
+                    fi
+                done < <(echo "$EVAL_YAML_OUTPUT" | python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+for key, value in data.items():
+    if value is None:
+        print(f'{key}=null')
+    elif isinstance(value, list):
+        formatted = json.dumps(value)
+        print(f'{key}={formatted}')
+    elif isinstance(value, bool):
+        print(f'{key}={str(value).lower()}')
+    else:
+        print(f'{key}={value}')
+" 2>/dev/null)
+            fi
+
+            echo "Eval arguments: ${EVAL_ARGS[*]}"
+            echo "Logging eval output to: $EVAL_LOG_FILE"
+            echo ""
+            torchrun --nproc_per_node=1 -m bedcosmo.evaluate "${EVAL_ARGS[@]}" > "$EVAL_LOG_FILE" 2>&1
+        fi
+    elif [ "$AUTO_EVAL" = true ] && [ $TRAIN_EXIT_CODE -ne 0 ]; then
+        echo "Training failed (exit code: $TRAIN_EXIT_CODE). Skipping auto-eval."
+    fi
 fi

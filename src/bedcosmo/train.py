@@ -1369,22 +1369,22 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Run Number Tracers Training")
 
     # Add arguments dynamically based on the default config file
-    parser.add_argument('--cosmo_exp', type=str, default='num_tracers', help='Cosmological experiment name')
-    parser.add_argument('--cosmo_model', type=str, default=None, help='Cosmological model set to use from train_args.yaml (not needed for resume)')
-    parser.add_argument('--mlflow_exp', type=str, default='base', help='MLflow experiment name')
+    parser.add_argument('--cosmo-exp', type=str, default='num_tracers', help='Cosmological experiment name')
+    parser.add_argument('--cosmo-model', type=str, default=None, help='Cosmological model set to use from train_args.yaml (not needed for resume)')
+    parser.add_argument('--mlflow-exp', type=str, default='base', help='MLflow experiment name')
     parser.add_argument('--device', type=str, default=None, help='Device to use for training')
     
     # Add resume/restart arguments early so we can check them
-    parser.add_argument('--resume_id', type=str, default=None, help='MLflow run ID to resume training from')
-    parser.add_argument('--resume_step', type=int, default=None, help='Step to resume training from')
-    parser.add_argument('--add_steps', type=int, default=0, help='Number of steps to add to the training (only used with --resume_id)')
-    parser.add_argument('--restart_id', type=str, default=None, help='MLflow run ID to restart training from (creates new run with current parameters)')
-    parser.add_argument('--restart_step', type=lambda x: int(x) if x.isdigit() else x, default=None, help='Step to restart training from (optional when using --restart_id, defaults to latest). Can be an integer or string like "last"')
-    parser.add_argument('--restart_checkpoint', type=str, default=None, help='Specific checkpoint file name to use for all ranks during restart (alternative to --restart_step)')
-    parser.add_argument('--restart_optimizer', action='store_true', help='Restart optimizer from checkpoint')
-    parser.add_argument('--log_usage', action='store_true', help='Log compute usage of the training script')
+    parser.add_argument('--resume-id', type=str, default=None, help='MLflow run ID to resume training from')
+    parser.add_argument('--resume-step', type=int, default=None, help='Step to resume training from')
+    parser.add_argument('--add-steps', type=int, default=0, help='Number of steps to add to the training (only used with --resume-id)')
+    parser.add_argument('--restart-id', type=str, default=None, help='MLflow run ID to restart training from (creates new run with current parameters)')
+    parser.add_argument('--restart-step', type=lambda x: int(x) if x.isdigit() else x, default=None, help='Step to restart training from (optional when using --restart-id, defaults to latest). Can be an integer or string like "last"')
+    parser.add_argument('--restart-checkpoint', type=str, default=None, help='Specific checkpoint file name to use for all ranks during restart (alternative to --restart-step)')
+    parser.add_argument('--restart-optimizer', action='store_true', help='Restart optimizer from checkpoint')
+    parser.add_argument('--log-usage', action='store_true', help='Log compute usage of the training script')
     parser.add_argument('--profile', action='store_true', help='Enable profiling for a few steps and then exit.')
-    parser.add_argument('--prior_flow_path', type=str, default=None,
+    parser.add_argument('--prior-flow-path', type=str, default=None,
                         help='Path to prior flow checkpoint. Automatically loads prior_args from that run.')
 
     # --- Load Default Config ---
@@ -1409,7 +1409,7 @@ if __name__ == '__main__':
     else:
         # For new runs, cosmo_model must be specified
         if args.cosmo_model is None:
-            raise ValueError("--cosmo_model is required for new training runs (not needed for resume/restart)")
+            raise ValueError("--cosmo-model is required for new training runs (not needed for resume/restart)")
         cosmo_model = args.cosmo_model
 
     # Load config from train_args.yaml based on cosmo_model
@@ -1448,49 +1448,50 @@ if __name__ == '__main__':
             
         arg_type = type(value)
         # Special handling for input_designs to allow --input_designs [list]
+        cli_key = key.replace("_", "-")
         if key == 'input_designs':
-            parser.add_argument(f'--{key}', type=str, default=None,
+            parser.add_argument(f'--{cli_key}', type=str, default=None,
                               help=f'Specify input design(s) as JSON. Can be single design [x1,...,xn] or multiple [[x1,...,xn], [y1,...,yn], ...] (default: {value})')
         elif isinstance(value, bool):
-            parser.add_argument(f'--{key}', action='store_true', help=f'Enable {key}')
+            parser.add_argument(f'--{cli_key}', action='store_true', help=f'Enable {key}')
             # Set default explicitly for bools, action handles the logic
             parser.set_defaults(**{key: value})
         elif isinstance(value, (int, float, str)):
-            parser.add_argument(f'--{key}', type=arg_type, default=None, help=f'Override {key} (default: {value})')
+            parser.add_argument(f'--{cli_key}', type=arg_type, default=None, help=f'Override {key} (default: {value})')
         elif isinstance(value, list):
             # For lists, we'll accept them as JSON strings and parse them
-            parser.add_argument(f'--{key}', type=str, default=None, 
+            parser.add_argument(f'--{cli_key}', type=str, default=None,
                               help=f'Override {key} as JSON string (default: {value})')
         else:
             print(f"Warning: Argument type for key '{key}' not explicitly handled ({arg_type}). Treating as string.")
-            parser.add_argument(f'--{key}', type=str, default=None, help=f'Override {key} (default: {value})')
+            parser.add_argument(f'--{cli_key}', type=str, default=None, help=f'Override {key} (default: {value})')
 
     args = parser.parse_args()
     # Validate checkpoint loading arguments
     if args.resume_id and args.restart_id:
-        raise ValueError("Cannot use --resume_id with --restart_id. Choose one:\n"
-                        "  --resume_id: Continue existing run with same parameters\n"
-                        "  --restart_id: Start new run with potentially different parameters")
-    
+        raise ValueError("Cannot use --resume-id with --restart-id. Choose one:\n"
+                        "  --resume-id: Continue existing run with same parameters\n"
+                        "  --restart-id: Start new run with potentially different parameters")
+
     if args.resume_id and args.resume_step is None:
-        raise ValueError("--resume_step is required when using --resume_id")
-    
+        raise ValueError("--resume-step is required when using --resume-id")
+
     if args.resume_step is not None and args.resume_id is None:
-        raise ValueError("--resume_step can only be used with --resume_id")
-    
+        raise ValueError("--resume-step can only be used with --resume-id")
+
     if args.restart_step is not None and args.restart_id is None:
-        raise ValueError("--restart_step can only be used with --restart_id")
-    
+        raise ValueError("--restart-step can only be used with --restart-id")
+
     if args.restart_checkpoint is not None and args.restart_id is None:
-        raise ValueError("--restart_checkpoint can only be used with --restart_id")
-    
+        raise ValueError("--restart-checkpoint can only be used with --restart-id")
+
     if args.restart_checkpoint is not None and args.restart_step is not None:
-        raise ValueError("Cannot use --restart_checkpoint with --restart_step. Choose one:\n"
-                        "  --restart_step: Find checkpoint by step number in MLflow run\n"
-                        "  --restart_checkpoint: Use specific checkpoint file path")
-    
+        raise ValueError("Cannot use --restart-checkpoint with --restart-step. Choose one:\n"
+                        "  --restart-step: Find checkpoint by step number in MLflow run\n"
+                        "  --restart-checkpoint: Use specific checkpoint file path")
+
     if args.add_steps > 0 and args.resume_id is None:
-        raise ValueError("--add_steps can only be used with --resume_id")
+        raise ValueError("--add-steps can only be used with --resume-id")
 
     # Project root for resolving relative paths (e.g. input_designs JSON)
     project_root = str(get_experiments_dir().parent)

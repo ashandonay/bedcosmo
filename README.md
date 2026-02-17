@@ -49,10 +49,13 @@ This trains a neural flow for the `base` cosmology model (Omega_m, H_0rd paramet
 # SLURM with custom time and queue
 ./submit.sh train num_tracers base --time 04:00 --queue regular
 
+# Separate train/eval time and queue
+./submit.sh train num_tracers base --train-time 04:00 --eval-time 00:30
+
 # Force local execution
 ./submit.sh train num_tracers base --local --gpus 1
 
-# Debug mode (uses SLURM debug queue / 'debug' MLflow experiment)
+# Debug mode (uses SLURM debug queue / 'debug' MLflow experiment, no auto-eval)
 ./submit.sh train num_tracers base --debug
 ```
 
@@ -66,9 +69,30 @@ This trains a neural flow for the `base` cosmology model (Omega_m, H_0rd paramet
 ./submit.sh restart num_tracers <run_id> <step>
 ```
 
-### Evaluating a Model
+### Auto-Evaluation
 
-After training completes, evaluate the model to compute EIG:
+Evaluation runs automatically after train/restart/resume jobs complete. The eval job extracts the run ID from the training log and loads defaults from `eval_args.yaml`.
+
+Pass eval-specific arguments with the `--eval-` prefix:
+
+```bash
+# Train with grid eval afterwards
+./submit.sh train num_tracers base --eval-grid --eval-grid-param-pts 2000 --eval-grid-feature-pts 500
+
+# Custom eval time for SLURM
+./submit.sh train num_tracers base --eval-time 01:00 --eval-n-evals 5
+
+# Disable auto-eval
+./submit.sh train num_tracers base --no-eval
+```
+
+Auto-eval is disabled by default in `--debug` mode. Use `--auto-eval` to force it on.
+
+For SLURM, the eval job is submitted as a dependent job (`afterany`) and checks if training completed successfully before running.
+
+### Manual Evaluation
+
+To evaluate a specific run manually:
 
 ```bash
 ./submit.sh eval num_tracers <run_id>
@@ -117,10 +141,15 @@ Training is configured via YAML files in each experiment directory:
 
 ### Overriding Configuration
 
-CLI arguments override YAML defaults:
+CLI arguments override YAML defaults. Unprefixed args are assumed to be for training. Use `--train-` or `--eval-` prefixes to be explicit:
 
 ```bash
-./submit.sh train num_tracers base --initial_lr 0.0001 --total_steps 300000
+# These are equivalent for training args
+./submit.sh train num_tracers base --initial-lr 0.0001 --total-steps 300000
+./submit.sh train num_tracers base --train-initial-lr 0.0001 --train-total-steps 300000
+
+# Mix train and eval args
+./submit.sh train num_tracers base --train-initial-lr 0.0001 --eval-grid --eval-grid-param-pts 2000
 ```
 
 ### Key Training Parameters
@@ -210,7 +239,7 @@ Check output logs in `$SCRATCH/bedcosmo/{cosmo_exp}/logs/`
 
 Reduce `n_particles_per_device` in the training args or via CLI:
 ```bash
-./submit.sh train num_tracers base --n_particles_per_device 20
+./submit.sh train num_tracers base --n-particles-per-device 20
 ```
 
 ### MLflow Connection Issues
@@ -222,9 +251,9 @@ mlflow.set_tracking_uri(f"file:{storage_path}/mlruns")
 
 ### Resuming from Wrong Checkpoint
 
-Use `--restart_checkpoint` to specify an exact checkpoint file:
+Use `--restart-checkpoint` to specify an exact checkpoint file:
 ```bash
-./submit.sh restart num_tracers <run_id> --restart_checkpoint /path/to/checkpoint.pt
+./submit.sh restart num_tracers <run_id> --restart-checkpoint /path/to/checkpoint.pt
 ```
 
 ## Citation
