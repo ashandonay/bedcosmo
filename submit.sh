@@ -1137,7 +1137,10 @@ except Exception as e:
 " 2>/dev/null)
 
                 while IFS="=" read -r key value; do
-                    if [[ "$key" == "grid" || "$key" == "grid_param_pts" || "$key" == "grid_feature_pts" ]]; then
+                    # Convert underscores to hyphens for CLI flags (POSIX convention)
+                    key="${key//_/-}"
+
+                    if [[ "$key" == "grid" || "$key" == "grid-param-pts" || "$key" == "grid-feature-pts" ]]; then
                         continue
                     fi
                     if [ "$value" = "null" ] || [ "$value" = "None" ] || [ -z "$value" ]; then
