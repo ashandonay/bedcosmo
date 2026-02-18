@@ -73,7 +73,10 @@ def to_extractor_params(sample: Dict[str, float]) -> Dict[str, float]:
         raise ValueError("h must be > 0 to compute Omega_m")
     omega_m = (omega_cdm + omega_b) / (h * h)
     return {
+        "h": float(h),
         "Omega_m": float(omega_m),
+        "omega_b": float(omega_b),
+        "logA": float(sample["ln10A_s"]),
         "n_s": float(sample["n_s"]),
     }
 
@@ -99,7 +102,6 @@ def generate_dataset(
     seed: int = 0,
     verbose_every: int = 200,
     sigma_clip: float = 4.0,
-    omega_m_bounds: Tuple[float, float] = (0.05, 1.0),
 ) -> Tuple[List[str], np.ndarray, np.ndarray]:
     extractor = ShapeFitPowerSpectrumExtractor()
     # Preflight sanity check so we fail fast if extractor setup is broken.
@@ -126,13 +128,13 @@ def generate_dataset(
         for sample in draws:
             total_attempts += 1
             try:
-                omega_m = (sample["omega_cdm"] + sample["omega_b"]) / (sample["h"] ** 2)
-                if not (omega_m_bounds[0] <= omega_m <= omega_m_bounds[1]):
+                targets = run_extractor(extractor, sample)
+                target_vals = [targets[t] for t in TARGET_NAMES]
+                if not all(np.isfinite(target_vals)):
                     failed += 1
                     continue
-                targets = run_extractor(extractor, sample)
                 param_rows.append([sample[p] for p in param_names])
-                target_rows.append([targets[t] for t in TARGET_NAMES])
+                target_rows.append(target_vals)
             except Exception:
                 failed += 1
                 if not printed_exception:
@@ -158,6 +160,19 @@ def generate_dataset(
     return param_names, X, y
 
 
+def _next_version(save_path: str) -> int:
+    """Find the next available version number in save_path/training_data/v{N} directories."""
+    training_data_dir = os.path.join(save_path, "training_data")
+    if not os.path.isdir(training_data_dir):
+        return 1
+    existing = [
+        int(d[1:])
+        for d in os.listdir(training_data_dir)
+        if d.startswith("v") and d[1:].isdigit()
+    ]
+    return max(existing, default=0) + 1
+
+
 def save_dataset(
     save_path: str,
     param_names: List[str],
@@ -165,26 +180,29 @@ def save_dataset(
     y: np.ndarray,
     test_size: float = 0.2,
     random_state: int = 1,
-) -> None:
-    os.makedirs(save_path, exist_ok=True)
+) -> str:
+    version = _next_version(save_path)
+    versioned_path = os.path.join(save_path, "training_data", f"v{version}")
+    os.makedirs(versioned_path, exist_ok=True)
     X_train, X_test, y_train, y_test = train_test_split(
         X, y, test_size=test_size, random_state=random_state
     )
     np.savez(
-        f"{save_path}/shapefit_train.npz",
+        f"{versioned_path}/train.npz",
         x=X_train,
         y=y_train,
         param_names=np.array(param_names),
         target_names=np.array(TARGET_NAMES),
     )
     np.savez(
-        f"{save_path}/shapefit_test.npz",
+        f"{versioned_path}/test.npz",
         x=X_test,
         y=y_test,
         param_names=np.array(param_names),
         target_names=np.array(TARGET_NAMES),
     )
-    print(f"Saved train/test files to: {save_path}")
+    print(f"Saved train/test files to: {versioned_path} (version {version})")
+    return versioned_path
 
 
 def parse_priors(priors_json: str) -> Dict[str, Dict[str, float]]:
@@ -220,8 +238,6 @@ def main() -> None:
     parser.add_argument("--save-path", type=str, default=get_default_save_path())
     parser.add_argument("--sigma-clip", type=float, default=4.0)
     parser.add_argument("--verbose-every", type=int, default=200)
-    parser.add_argument("--omega-m-min", type=float, default=0.05)
-    parser.add_argument("--omega-m-max", type=float, default=1.0)
     parser.add_argument(
         "--priors-json",
         type=str,
@@ -248,7 +264,6 @@ def main() -> None:
             seed=args.seed,
             verbose_every=args.verbose_every,
             sigma_clip=args.sigma_clip,
-            omega_m_bounds=(args.omega_m_min, args.omega_m_max),
         )
         print(f"Generated dataset with shape X={X.shape}, y={y.shape}")
         save_dataset(
