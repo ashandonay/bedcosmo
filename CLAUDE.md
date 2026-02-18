@@ -111,6 +111,7 @@ Each experiment subpackage contains:
 
 ### Configuration Files (experiments/{experiment}/)
 Each experiment directory contains:
+- `README.md`: **Always read this first** when debugging or working on experiment-specific issues. It documents the likelihood model, design space, prior configuration, and YAML field definitions.
 - `train_args.yaml`: Training configuration per cosmology model
 - `eval_args.yaml`: Evaluation configuration
 - `models.yaml`: Parameter definitions and constraints

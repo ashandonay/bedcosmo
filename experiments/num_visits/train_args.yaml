@@ -30,6 +30,7 @@ base:
   step_freq: 1
   checkpoint_step_freq: 1000
   n_particles_per_device: 10
+  temperature: 5000
   condition_design: true
   log_nominal_area: false
   verbose: true
