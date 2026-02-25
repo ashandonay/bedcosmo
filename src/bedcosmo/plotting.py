@@ -440,10 +440,11 @@ class BasePlotter:
         seed=1,
         plot_prior=False,
         transform_output=True,
+        plot_size_ratio=1.0,
         title=None,
         grid_samples=None,
         nominal_grid_eig=None,
-        save_path=None,
+        save_path=None
     ):
         """
         Generates posterior plots for nominal and/or optimal designs.
@@ -621,7 +622,8 @@ class BasePlotter:
             levels=levels,
             width_inch=plot_width,
             alpha=all_alphas,
-            line_style=all_line_styles
+            line_style=all_line_styles,
+            plot_size_ratio=plot_size_ratio,
         )
 
         if self.cosmo_exp == 'num_visits':
@@ -734,6 +736,7 @@ class BasePlotter:
         alpha=1.0, 
         levels=[0.68, 0.95], 
         width_inch=7, 
+        plot_size_ratio=1.0,
         ranges=None,
         scatter_alpha=0.6,
         contour_alpha_factor=0.8,
@@ -763,8 +766,7 @@ class BasePlotter:
         Returns:
             g: GetDist plotter object with the generated triangle plot.
         """
-        getdist_2D_ratio = 1.0
-        g = plots.get_single_plotter(width_inch=width_inch, ratio=getdist_2D_ratio, scaling=True)
+        g = plots.get_single_plotter(width_inch=width_inch, ratio=plot_size_ratio, scaling=True)
         
         # Apply style settings if provided (like KP7StylePaper)
         if style is not None:

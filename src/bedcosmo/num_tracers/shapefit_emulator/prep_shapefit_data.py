@@ -66,9 +66,10 @@ def latin_hypercube_samples(
 def to_extractor_params(sample: Dict[str, float]) -> Dict[str, float]:
     # omega_* are physical densities: omega_x = Omega_x * h^2
     # so Omega_m = (omega_cdm + omega_b) / h^2.
-    omega_cdm = sample["omega_cdm"]
-    omega_b = sample["omega_b"]
-    h = sample["h"]
+    # assumes fiducial values for omega_cdm, omega_b, h, ln10A_s, n_s
+    omega_cdm = sample.get("omega_cdm", 0.12069)
+    omega_b = sample.get("omega_b", 0.02218)
+    h = sample.get("h", 0.6736)
     if h <= 0.0:
         raise ValueError("h must be > 0 to compute Omega_m")
     omega_m = (omega_cdm + omega_b) / (h * h)
@@ -76,8 +77,8 @@ def to_extractor_params(sample: Dict[str, float]) -> Dict[str, float]:
         "h": float(h),
         "Omega_m": float(omega_m),
         "omega_b": float(omega_b),
-        "logA": float(sample["ln10A_s"]),
-        "n_s": float(sample["n_s"]),
+        "logA": float(sample.get("ln10A_s", 3.036394)),
+        "n_s": float(sample.get("n_s", 0.9649)),
     }
 
 
