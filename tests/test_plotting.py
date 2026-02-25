@@ -714,7 +714,7 @@ class TestLoadEigDataFile:
         with open(eig_file, 'w') as f:
             json.dump(eig_data, f)
 
-        json_path, data = plotter.load_eig_data_file(str(artifacts_dir), step_key='1000')
+        json_path, data = plotter.load_eig_data_file(str(artifacts_dir), eval_step='1000')
 
         assert json_path == str(eig_file)
         assert data == eig_data
@@ -743,8 +743,8 @@ class TestLoadEigDataFile:
         with pytest.raises(ValueError, match="No completed eig_data files found"):
             plotter.load_eig_data_file(str(artifacts_dir))
 
-    def test_load_eig_data_file_step_key_not_found(self, tmp_path, mock_scratch_env):
-        """Test load_eig_data_file when step_key is requested but not in any file."""
+    def test_load_eig_data_file_eval_step_not_found(self, tmp_path, mock_scratch_env):
+        """Test load_eig_data_file when eval_step is requested but not in any file."""
         plotter = BasePlotter(cosmo_exp='test_exp')
         artifacts_dir = tmp_path / "artifacts"
         artifacts_dir.mkdir()
@@ -754,7 +754,7 @@ class TestLoadEigDataFile:
             json.dump(eig_data, f)
 
         with pytest.raises(ValueError, match="No completed eig_data files with step 2000 found"):
-            plotter.load_eig_data_file(str(artifacts_dir), step_key='2000')
+            plotter.load_eig_data_file(str(artifacts_dir), eval_step='2000')
 
 
 class TestPlotLrSchedule:

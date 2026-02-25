@@ -30,7 +30,8 @@ base:
   step_freq: 1
   checkpoint_step_freq: 1000
   n_particles_per_device: 10
-  temperature: 5000
+  temperature: 10000
+  mag_err_cap: 10
   condition_design: true
   log_nominal_area: false
   verbose: true

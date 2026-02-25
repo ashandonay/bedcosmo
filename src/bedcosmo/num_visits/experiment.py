@@ -73,8 +73,9 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         self,
         prior_args=None,
         design_args=None,
-        temperature=5000,
+        temperature=3000,
         z_prior_bounds=(0.1, 3.0),
+        central_z=1.0,
         nominal_design=None,
         pixel_scale=0.2,
         stamp_size=31,
@@ -83,6 +84,7 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         n_exp_per_visit=2,
         read_noise=8.8,
         dark_current=0.2,
+        mag_err_cap=10.0,
         device="cuda:0",
         transform_input=False,
         profile=False,
@@ -135,6 +137,7 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         self.threshold = threshold
         self.read_noise = read_noise
         self.dark_current = dark_current
+        self.mag_err_cap = mag_err_cap
         self.n_exp_per_visit = n_exp_per_visit
         self.exposure_time = exposure_time
         self.visit_time = exposure_time * n_exp_per_visit
@@ -205,7 +208,7 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         self._wlen_over_hc_tensor = torch.tensor(wlen_over_hc_common, device=self.device, dtype=torch.float64)  # (n_wlen,)
 
         # Assume a redshift of 1.0 for the observations central value
-        self.central_z = 1.3
+        self.central_z = central_z
         central_z_tensor = torch.tensor([self.central_z], device=self.device, dtype=torch.float64)
         self.central_val = self._calculate_magnitudes(central_z_tensor).squeeze(0)  # (num_filters,)
         self.nominal_context = torch.cat([self.nominal_design, self.central_val], dim=-1)
@@ -221,6 +224,7 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         if self.global_rank == 0 and self.verbose:
             print(f"Num Visits Experiment Initialized")
             print(f"  Filters: {self.filters_list}")
+            print(f"  Temperature: {self.temperature}")
             print(f"prior z∈[{z_low}, {z_high}]")
             print(f"  Number of designs: {self.designs.shape[0]}")
             print(f"  Nominal design: {self.nominal_design}")
@@ -651,7 +655,7 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         wlen_rest_aa = wlen_2d / one_plus_z  # (n_z, n_wlen)
         wlen_rest_cm = wlen_rest_aa * self._1e8_tensor_f64  # Convert Angstrom to cm
         
-        # Blackbody flux (GPU-accelerated)
+        # Blackbody flux
         F = self._blackbody_flux(wlen_rest_cm, T_K)  # (n_z, n_wlen)
         L = self._four_pi_R2_tensor * F  # (n_z, n_wlen)
         
@@ -776,18 +780,16 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         snr = np.where(noise == 0, 0.0, signal / noise)
         coeff = 2.5 / np.log(10.0)
         
-        # Calculate minimum SNR threshold for reasonable magnitude error
-        # If SNR is below this, set mag_err = 10 (essentially undetectable)
-        min_snr_for_detection = coeff / 10.0
-        
-        # Calculate magnitude errors
-        # For very small SNR (including <= 0): set to 10.0 (undetectable but bounded)
-        # For reasonable SNR: use coeff / snr
-        mag_err = np.where(
-            snr < min_snr_for_detection,
-            10.0,
-            coeff / snr
-        )
+        # Calculate magnitude errors: coeff / snr, with optional cap
+        if self.mag_err_cap is not None:
+            min_snr_for_detection = coeff / self.mag_err_cap
+            mag_err = np.where(
+                snr < min_snr_for_detection,
+                self.mag_err_cap,
+                coeff / snr
+            )
+        else:
+            mag_err = np.where(snr > 0, coeff / snr, coeff / 1e-10)
 
         errors = torch.tensor(mag_err, device=self.device, dtype=torch.float64)
         return torch.clamp(errors, min=1e-6)
@@ -974,11 +976,12 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         diff = (mag_obs_full - mags_full) / sigma_full
         log_likelihood = -0.5 * np.sum(diff**2, axis=-1) - np.sum(np.log(sigma_full), axis=-1)
 
-        # Stabilize exponentiation by subtracting the max over the feature axes.
-        # Since bed normalizes the likelihood over features, we only need relative
-        # scaling to be correct within each (design, param) slice. A global max
-        # can cause underflow for parameter values far from the mode.
-        log_likelihood = log_likelihood - np.max(log_likelihood)
+        # Stabilize exponentiation by subtracting the max over the feature axes
+        # within each (design, param) slice.  A global max can cause underflow
+        # for parameter values far from the mode because their log-likelihood is
+        # hundreds of nats below the global maximum, sending exp() to exactly 0.
+        feature_axes_idx = tuple(range(len(feature_shape)))
+        log_likelihood = log_likelihood - np.max(log_likelihood, axis=feature_axes_idx, keepdims=True)
 
         likelihood = np.exp(log_likelihood)
         # likelihood shape: X + D + P
