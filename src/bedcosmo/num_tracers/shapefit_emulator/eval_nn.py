@@ -208,8 +208,8 @@ def main() -> None:
         default=None,
         help='JSON dict mapping target name to [lo, hi], e.g. \'{"qpar": [-1, 1], "qper": [-2, 2]}\'',
     )
-    parser.add_argument("--rtol", type=float, default=5e-3, help="Relative tolerance for allclose outlier check (default: 5e-3).")
-    parser.add_argument("--atol", type=float, default=5e-3, help="Absolute tolerance for allclose outlier check (default: 1e-4).")
+    parser.add_argument("--rtol", type=float, default=2e-3, help="Relative tolerance for allclose outlier check (default: 2e-3).")
+    parser.add_argument("--atol", type=float, default=2e-3, help="Absolute tolerance for allclose outlier check (default: 2e-3).")
     parser.add_argument(
         "--save-path",
         type=str,
