@@ -1,10 +1,10 @@
 import argparse
 import os
 import sys
-from datetime import datetime
 from typing import Any, Dict
 
 import matplotlib.pyplot as plt
+import mlflow
 import yaml
 import numpy as np
 import torch
@@ -29,6 +29,152 @@ def load_data(data_path: str) -> Dict[str, np.ndarray]:
     _drop_nonfinite_rows(data)
     return data
 
+def create_scheduler(optimizer, run_args):
+    # Setup
+    steps_per_cycle = run_args["total_steps"] // run_args["n_cycles"]
+    initial_lr = run_args["initial_lr"]
+    final_lr = run_args["final_lr"]
+    
+    # Get warmup fraction, defaulting to 0.0 (no warmup)
+    warmup_fraction = run_args.get("warmup_fraction", 0.0)
+    warmup_steps = int(warmup_fraction * run_args["total_steps"])
+
+    if run_args["scheduler_type"] == "constant":
+        if warmup_steps > 0:
+            # Create a warmup + constant schedule
+            def lr_lambda(step):
+                if step < warmup_steps:
+                    # Linear warmup from 0 to initial_lr
+                    return step / warmup_steps
+                else:
+                    # Constant at initial_lr
+                    return 1.0
+            scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+        else:
+            scheduler = torch.optim.lr_scheduler.ConstantLR(
+                optimizer, 
+                factor=1.0
+                )
+    elif run_args["scheduler_type"] == "cosine":
+        if warmup_steps > 0:
+            # Create a warmup + cosine schedule
+            def lr_lambda(step):
+                if step < warmup_steps:
+                    # Linear warmup from 0 to initial_lr
+                    return step / warmup_steps
+                else:
+                    # Cosine decay from initial_lr to final_lr
+                    adjusted_step = step - warmup_steps
+                    adjusted_total_steps = run_args["total_steps"] - warmup_steps
+                    cosine_factor = 0.5 * (1 + np.cos(np.pi * adjusted_step / adjusted_total_steps))
+                    return (final_lr + (initial_lr - final_lr) * cosine_factor) / initial_lr
+            scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+        else:
+            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+                optimizer, 
+                T_max=run_args["total_steps"],
+                eta_min=final_lr
+                )
+    elif run_args["scheduler_type"] == "linear":
+        if warmup_steps > 0:
+            # Create a warmup + linear schedule
+            def lr_lambda(step):
+                if step < warmup_steps:
+                    # Linear warmup from 0 to initial_lr
+                    return step / warmup_steps
+                else:
+                    # Linear decay from initial_lr to final_lr
+                    adjusted_step = step - warmup_steps
+                    adjusted_total_steps = run_args["total_steps"] - warmup_steps
+                    if adjusted_total_steps <= 1:
+                        return final_lr / initial_lr
+                    
+                    progress = adjusted_step / (adjusted_total_steps - 1)
+                    end_factor = final_lr / initial_lr
+                    return 1.0 + (end_factor - 1.0) * progress
+            scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+        else:
+            # This provides a linear ramp from initial_lr to final_lr.
+            # It can handle both increasing and decreasing LR by using LambdaLR.
+            def lr_lambda(step):
+                total_steps = run_args["total_steps"]
+                if initial_lr == 0:
+                    if final_lr != 0:
+                        raise ValueError("Cannot use 'linear' scheduler for warmup from initial_lr=0, as the optimizer's base LR is 0.")
+                    return 1.0  # LR is 0 and stays 0.
+                
+                if total_steps <= 1:
+                    return final_lr / initial_lr
+                
+                progress = step / (total_steps - 1)
+                end_factor = final_lr / initial_lr
+                
+                # Linear interpolation of the multiplicative factor
+                return 1.0 + (end_factor - 1.0) * progress
+            
+            scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+    elif run_args["scheduler_type"] == "exponential":
+        if warmup_steps > 0:
+            # Create a warmup + exponential schedule
+            def lr_lambda(step):
+                if step < warmup_steps:
+                    # Linear warmup from 0 to initial_lr
+                    return step / warmup_steps
+                else:
+                    # Exponential decay from initial_lr to final_lr
+                    adjusted_step = step - warmup_steps
+                    adjusted_total_steps = run_args["total_steps"] - warmup_steps
+                    gamma = (final_lr / initial_lr) ** (1 / adjusted_total_steps)
+                    return (initial_lr * (gamma ** adjusted_step)) / initial_lr
+            scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+        else:
+            # calculate gamma from initial and final lr
+            gamma = (final_lr / initial_lr) ** (1 / run_args["total_steps"])
+            scheduler = torch.optim.lr_scheduler.ExponentialLR(
+                optimizer, 
+                gamma=gamma
+                )
+    elif run_args["scheduler_type"] == "lambda":
+        # Get gamma from run_args for lambda scheduler
+        gamma = run_args.get("gamma", 0.1)
+        if warmup_steps > 0:
+            # Create a warmup + lambda schedule
+            def lr_lambda(step):
+                if step < warmup_steps:
+                    # Linear warmup from 0 to initial_lr
+                    return step / warmup_steps
+                else:
+                    # Original lambda schedule logic
+                    adjusted_step = step - warmup_steps
+                    adjusted_total_steps = run_args["total_steps"] - warmup_steps
+                    steps_per_cycle = adjusted_total_steps // run_args["n_cycles"]
+                    cycle = adjusted_step // steps_per_cycle
+                    cycle_progress = (adjusted_step % steps_per_cycle) / steps_per_cycle
+                    # Decaying peak
+                    peak = initial_lr * (gamma ** cycle)
+                    # Cosine decay within cycle
+                    cosine = 0.5 * (1 + np.cos(np.pi * cycle_progress))
+                    lr = final_lr + (peak - final_lr) * cosine
+                    return lr / initial_lr  # LambdaLR expects a multiplier of the initial LR
+            scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+        else:
+            def lr_lambda(step):
+                cycle = step // steps_per_cycle
+                cycle_progress = (step % steps_per_cycle) / steps_per_cycle
+                # Decaying peak
+                peak = initial_lr * (gamma ** cycle)
+                # Cosine decay within cycle
+                cosine = 0.5 * (1 + np.cos(np.pi * cycle_progress))
+                lr = final_lr + (peak - final_lr) * cosine
+                return lr / initial_lr  # LambdaLR expects a multiplier of the initial LR
+            scheduler = torch.optim.lr_scheduler.LambdaLR(
+                optimizer, 
+                lr_lambda
+                )
+    else:
+        raise ValueError(f"Unknown scheduler_type: {run_args['scheduler_type']}")
+    
+    return scheduler
 
 def _drop_nonfinite_rows(data: Dict[str, np.ndarray]) -> None:
     """Drop rows with any NaN/Inf in x or y; update arrays in place and warn."""
@@ -97,6 +243,65 @@ def standardize(
     return x_train_n, y_train_n, x_test_n, y_test_n, stats
 
 
+def compare_losses(
+        run_ids: list,
+        labels: list | None = None,
+        log_scale: bool = True,
+        y_lim: tuple | None = None,
+        per_step: bool = False,
+        ) -> None:
+    """Compare train/test loss curves across multiple MLflow runs.
+
+    Args:
+        run_ids: List of MLflow run IDs to compare.
+        labels: Optional display labels for each run. Defaults to run IDs.
+        log_scale: Use log scale for y-axis.
+        y_lim: Tuple of (min, max) y-axis limits.
+        per_step: If True, plot per-batch losses instead of epoch-averaged.
+    """
+    from mlflow.tracking import MlflowClient
+
+    scratch = os.environ.get("SCRATCH", os.path.expanduser("~"))
+    mlflow.set_tracking_uri(f"file:{scratch}/bedcosmo/shapefit_emulator/mlruns")
+    client = MlflowClient()
+
+    if labels is None:
+        labels = run_ids
+
+    if per_step:
+        train_metric, test_metric = "batch_train_loss", "batch_test_loss"
+        x_label = "Step"
+    else:
+        train_metric, test_metric = "epoch_train_loss", "epoch_test_loss"
+        x_label = "Epoch"
+
+    fig, (ax_train, ax_test) = plt.subplots(1, 2, figsize=(12, 4))
+
+    for run_id, label in zip(run_ids, labels):
+        train_hist = client.get_metric_history(run_id, train_metric)
+        test_hist = client.get_metric_history(run_id, test_metric)
+
+        if train_hist:
+            steps, vals = zip(*[(m.step, m.value) for m in train_hist if np.isfinite(m.value)])
+            ax_train.plot(steps, vals, label=label, alpha=0.7)
+        if test_hist:
+            steps, vals = zip(*[(m.step, m.value) for m in test_hist if np.isfinite(m.value)])
+            ax_test.plot(steps, vals, label=label, alpha=0.7)
+
+    for ax, title in [(ax_train, "Train Loss"), (ax_test, "Test Loss")]:
+        ax.set_xlabel(x_label)
+        ax.set_ylabel("MSE Loss")
+        ax.set_title(title)
+        ax.legend()
+        if log_scale:
+            ax.set_yscale("log")
+        if y_lim:
+            ax.set_ylim(y_lim)
+
+    fig.tight_layout()
+    plt.show()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Train ShapeFit emulator NN.")
     parser.add_argument(
@@ -111,19 +316,34 @@ def main() -> None:
         default="latest",
         help="Data version to use (e.g. '1', '2', or 'latest' for most recent).",
     )
-    parser.add_argument(
-        "--runs-dir",
-        type=str,
-        default=None,
-        help="Base directory for run outputs. Default: <data-path>/runs",
-    )
-    parser.add_argument("--epochs", type=int, default=1000)
-    parser.add_argument("--batch-size", type=int, default=256)
-    parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--epochs", type=int, default=10000)
+    parser.add_argument("--batch-size", type=int, default=100)
+    parser.add_argument("--lr", type=float, default=5e-4)
     parser.add_argument("--weight-decay", type=float, default=1e-6)
     parser.add_argument("--hidden-dim", type=int, default=256)
     parser.add_argument("--n-hidden", type=int, default=4)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--scheduler-type", type=str, default="constant",
+                        choices=["constant", "cosine", "linear", "exponential", "lambda"],
+                        help="Learning rate scheduler type.")
+    parser.add_argument("--final-lr", type=float, default=1e-6,
+                        help="Final learning rate for scheduler decay.")
+    parser.add_argument("--n-cycles", type=int, default=1,
+                        help="Number of scheduler cycles.")
+    parser.add_argument("--warmup-fraction", type=float, default=0.0,
+                        help="Fraction of total steps for linear warmup.")
+    parser.add_argument(
+        "--mlflow-exp",
+        type=str,
+        default="default",
+        help="MLflow experiment name.",
+    )
+    parser.add_argument(
+        "--run-name",
+        type=str,
+        default=None,
+        help="MLflow run name for easier identification.",
+    )
     args = parser.parse_args()
 
     # Resolve versioned data path
@@ -139,13 +359,30 @@ def main() -> None:
     data_path = os.path.join(args.data_path, "training_data", f"v{version}")
     print(f"Using training data: {data_path}")
 
-    runs_base = args.runs_dir or os.path.join(args.data_path, "runs")
-    run_dir = os.path.join(
-        runs_base,
-        f"{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}",
+    # Set up MLflow tracking
+    scratch = os.environ.get("SCRATCH", os.path.expanduser("~"))
+    mlflow_tracking_uri = f"file:{scratch}/bedcosmo/shapefit_emulator/mlruns"
+    mlflow.set_tracking_uri(mlflow_tracking_uri)
+    mlflow.set_experiment(args.mlflow_exp)
+    mlflow.start_run(run_name=args.run_name)
+    active_run = mlflow.active_run()
+    mlflow_run_id = active_run.info.run_id
+    artifacts_dir = os.path.join(
+        scratch, "bedcosmo", "shapefit_emulator", "mlruns",
+        active_run.info.experiment_id, active_run.info.run_id, "artifacts"
     )
-    os.makedirs(run_dir, exist_ok=True)
-    print(f"Run directory: {run_dir}")
+    os.makedirs(artifacts_dir, exist_ok=True)
+    print(f"MLflow tracking URI: {mlflow_tracking_uri}")
+    print(f"MLflow run ID: {mlflow_run_id}")
+    print(f"Artifacts: {artifacts_dir}")
+
+    # Log parameters immediately after starting run (same pattern as train.py)
+    run_params = vars(args)
+    for key, value in run_params.items():
+        if key == "data_path":
+            continue  # log resolved versioned path instead
+        mlflow.log_param(key, value)
+    mlflow.log_param("data_path", data_path)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
@@ -175,18 +412,34 @@ def main() -> None:
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     loss_fn = nn.MSELoss()
 
+    batches_per_epoch = len(train_loader)
+    total_steps = args.epochs * batches_per_epoch
+    scheduler = create_scheduler(opt, {
+        "total_steps": total_steps,
+        "n_cycles": args.n_cycles,
+        "initial_lr": args.lr,
+        "final_lr": args.final_lr,
+        "scheduler_type": args.scheduler_type,
+        "warmup_fraction": args.warmup_fraction,
+    })
+    print(f"Scheduler: {args.scheduler_type}, total_steps={total_steps}, "
+          f"initial_lr={args.lr}, final_lr={args.final_lr}")
+
     train_losses = []
     test_losses = []
+    global_step = 0
 
     for epoch in range(1, args.epochs + 1):
         model.train()
         train_loss = 0.0
+        max_batch_loss = 0.0
         for xb, yb in train_loader:
             xb, yb = xb.to(device), yb.to(device)
             opt.zero_grad()
             pred = model(xb)
             loss = loss_fn(pred, yb)
-            if not np.isfinite(loss.item()):
+            batch_loss = loss.item()
+            if not np.isfinite(batch_loss):
                 raise RuntimeError(
                     f"NaN/Inf loss at epoch {epoch}. "
                     "Check that prepped data has no NaN/Inf (run with --data-path and inspect or regenerate with prep_data.py)."
@@ -194,8 +447,13 @@ def main() -> None:
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             opt.step()
-            train_loss += loss.item() * xb.size(0)
-        train_loss /= len(train_ds)
+            scheduler.step()
+            global_step += 1
+            mlflow.log_metric("batch_train_loss", batch_loss, step=global_step)
+            train_loss += batch_loss * xb.size(0)
+            if batch_loss > max_batch_loss:
+                max_batch_loss = batch_loss
+        epoch_train_loss = train_loss / len(train_ds)
 
         model.eval()
         test_loss = 0.0
@@ -203,18 +461,25 @@ def main() -> None:
             for xb, yb in test_loader:
                 xb, yb = xb.to(device), yb.to(device)
                 pred = model(xb)
-                test_loss += loss_fn(pred, yb).item() * xb.size(0)
-        test_loss /= len(test_ds)
+                batch_test = loss_fn(pred, yb).item()
+                global_step += 1
+                mlflow.log_metric("batch_test_loss", batch_test, step=global_step)
+                test_loss += batch_test * xb.size(0)
+        epoch_test_loss = test_loss / len(test_ds)
 
         if not np.isfinite(train_loss) or not np.isfinite(test_loss):
             raise RuntimeError(
                 f"NaN/Inf MSE at epoch {epoch}. "
                 "Data may contain non-finite values or learning rate may be too high; try --lr 1e-3 or smaller."
             )
-        train_losses.append(train_loss)
-        test_losses.append(test_loss)
+        train_losses.append(epoch_train_loss)
+        test_losses.append(epoch_test_loss)
+        mlflow.log_metric("epoch_train_loss", epoch_train_loss, step=epoch)
+        mlflow.log_metric("epoch_test_loss", epoch_test_loss, step=epoch)
+        mlflow.log_metric("max_batch_loss", max_batch_loss, step=epoch)
+        mlflow.log_metric("lr", opt.param_groups[0]["lr"], step=epoch)
         if epoch == 1 or epoch % 50 == 0 or epoch == args.epochs:
-            print(f"epoch={epoch:4d} train_mse={train_loss:.6e} test_mse={test_loss:.6e}")
+            print(f"epoch={epoch:4d} train_mse={epoch_train_loss:.6e} test_mse={epoch_test_loss:.6e}")
 
     with torch.no_grad():
         yhat_n = model(torch.from_numpy(x_test).to(device)).cpu().numpy()
@@ -226,6 +491,8 @@ def main() -> None:
     print("Per-target metrics on test set:")
     for i, name in enumerate(target_names):
         print(f"  {name:10s}  MAE={mae[i]:.6e}  RMSE={rms[i]:.6e}")
+        mlflow.log_metric(f"mae_{name}", mae[i])
+        mlflow.log_metric(f"rmse_{name}", rms[i])
 
     fig, ax = plt.subplots()
     epochs = np.arange(1, len(train_losses) + 1)
@@ -237,12 +504,12 @@ def main() -> None:
     ax.legend()
     ax.set_title("ShapeFit NN Training")
     fig.tight_layout()
-    loss_plot_path = os.path.join(run_dir, "loss.png")
+    loss_plot_path = os.path.join(artifacts_dir, "loss.png")
     fig.savefig(loss_plot_path, dpi=150)
     plt.close(fig)
     print(f"Saved loss plot to: {loss_plot_path}")
 
-    model_path = os.path.join(run_dir, "model.pt")
+    model_path = os.path.join(artifacts_dir, "model.pt")
     payload = {
         "state_dict": model.state_dict(),
         "x_mu": torch.from_numpy(stats["x_mu"]),
@@ -271,16 +538,24 @@ def main() -> None:
         "param_names": data["param_names"].tolist(),
         "target_names": target_names,
     }
-    if args.runs_dir is not None:
-        train_params["runs_dir"] = args.runs_dir
-    train_params_path = os.path.join(run_dir, "train_params.yaml")
+    # Log data-dependent params that weren't available at startup
+    mlflow.log_param("in_dim", int(in_dim))
+    mlflow.log_param("out_dim", int(out_dim))
+    mlflow.log_param("param_names", ", ".join(data["param_names"].tolist()))
+    mlflow.log_param("target_names", ", ".join(target_names))
+
+    train_params_path = os.path.join(artifacts_dir, "train_params.yaml")
     with open(train_params_path, "w") as f:
         yaml.safe_dump(train_params, f, default_flow_style=False, sort_keys=False)
     print(f"Saved training params to: {train_params_path}")
 
     # Run evaluation
     print("\nRunning evaluation...")
-    run_eval(model_path, save_path=run_dir, n_samples=3000)
+    run_eval(model_path, save_path=artifacts_dir, n_samples=3000)
+
+    mlflow.end_run()
+    print(f"MLflow run completed: {mlflow_run_id}")
+    print(f"Artifacts: {artifacts_dir}")
 
 
 if __name__ == "__main__":

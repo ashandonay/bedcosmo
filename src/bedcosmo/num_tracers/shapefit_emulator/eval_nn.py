@@ -11,7 +11,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__))))
 from prep_shapefit_data import DEFAULT_PRIORS, TARGET_NAMES, latin_hypercube_samples, run_extractor, get_default_save_path
 from model import NNRegressor
 
-def run_eval(model_path: str, save_path: str, n_samples: int = 500, seed: int = 42, hist_xlims: dict[str, tuple[float, float]] | None = None) -> None:
+def run_eval(model_path: str, save_path: str, n_samples: int = 500, seed: int = 42, hist_xlims: dict[str, tuple[float, float]] | None = None, rtol: float = 5e-3, atol: float = 1e-4) -> None:
     os.makedirs(save_path, exist_ok=True)
     np.random.seed(seed)
 
@@ -103,8 +103,9 @@ def run_eval(model_path: str, save_path: str, n_samples: int = 500, seed: int = 
     print(f"Saved evaluation plot to: {os.path.join(save_path, 'eval_nn.png')}")
 
     # --- Triangle plot of cosmo inputs, coloured by outlier status ---
-    # A sample is an "outlier" if ANY of its target percentage errors exceed 0.5%
-    is_outlier = np.any(np.abs(deltas) > 0.5, axis=1)
+    # A sample is an "outlier" if ANY target fails np.isclose
+    is_close = np.isclose(y_pred, y_true, rtol=rtol, atol=atol)
+    is_outlier = ~np.all(is_close, axis=1)
     n_params = len(param_names)
 
     fig2, axes2 = plt.subplots(n_params, n_params, figsize=(3 * n_params, 3 * n_params))
@@ -117,11 +118,11 @@ def run_eval(model_path: str, save_path: str, n_samples: int = 500, seed: int = 
                 ax.set_visible(False)
                 continue
             if i == j:
-                ax.hist(x_raw[inlier, i], bins=30, color="tab:blue", alpha=0.6, label="$\\leq 0.5\\%$")
-                ax.hist(x_raw[is_outlier, i], bins=30, color="tab:red", alpha=0.6, label="$> 0.5\\%$")
+                ax.hist(x_raw[inlier, i], bins=30, color="tab:blue", alpha=0.6, label="pass")
+                ax.hist(x_raw[is_outlier, i], bins=30, color="tab:red", alpha=0.6, label="fail")
             else:
-                ax.scatter(x_raw[inlier, j], x_raw[inlier, i], s=4, alpha=0.4, color="tab:blue", label="$\\leq 0.5\\%$")
-                ax.scatter(x_raw[is_outlier, j], x_raw[is_outlier, i], s=4, alpha=0.6, color="tab:red", label="$> 0.5\\%$")
+                ax.scatter(x_raw[inlier, j], x_raw[inlier, i], s=4, alpha=0.4, color="tab:blue", label="pass")
+                ax.scatter(x_raw[is_outlier, j], x_raw[is_outlier, i], s=4, alpha=0.6, color="tab:red", label="fail")
             if i == n_params - 1:
                 ax.set_xlabel(param_names[j])
             else:
@@ -135,16 +136,58 @@ def run_eval(model_path: str, save_path: str, n_samples: int = 500, seed: int = 
     handles, labels = axes2[0, 0].get_legend_handles_labels()
     fig2.legend(handles, labels, loc="upper right", fontsize=12)
     n_outlier = int(is_outlier.sum())
-    fig2.suptitle(f"Cosmo inputs — {n_outlier}/{len(is_outlier)} samples with any $|\\mathrm{{error}}| > 0.5\\%$",
+    fig2.suptitle(f"Cosmo inputs — {n_outlier}/{len(is_outlier)} fail (rtol={rtol}, atol={atol})",
                   fontsize=14, y=1.01)
     fig2.tight_layout()
     fig2.savefig(os.path.join(save_path, "eval_nn_triangle.png"), dpi=150, bbox_inches="tight")
     plt.close(fig2)
     print(f"Saved triangle plot to: {os.path.join(save_path, 'eval_nn_triangle.png')}")
 
+    # --- Triangle plot of target outputs, coloured by outlier status ---
+    target_names = list(TARGET_NAMES)
+    n_tgt = len(target_names)
+    fig3, axes3 = plt.subplots(n_tgt, n_tgt, figsize=(3 * n_tgt, 3 * n_tgt))
+
+    for i in range(n_tgt):
+        for j in range(n_tgt):
+            ax = axes3[i, j]
+            if j > i:
+                ax.set_visible(False)
+                continue
+            if i == j:
+                ax.hist(y_true[inlier, i], bins=30, color="tab:blue", alpha=0.6, label="pass")
+                ax.hist(y_true[is_outlier, i], bins=30, color="tab:red", alpha=0.6, label="fail")
+            else:
+                ax.scatter(y_true[inlier, j], y_true[inlier, i], s=4, alpha=0.4, color="tab:blue", label="pass")
+                ax.scatter(y_true[is_outlier, j], y_true[is_outlier, i], s=4, alpha=0.6, color="tab:red", label="fail")
+            if i == n_tgt - 1:
+                ax.set_xlabel(target_names[j])
+            else:
+                ax.set_xticklabels([])
+            if j == 0:
+                ax.set_ylabel(target_names[i])
+            else:
+                ax.set_yticklabels([])
+
+    handles, labels = axes3[0, 0].get_legend_handles_labels()
+    fig3.legend(handles, labels, loc="upper right", fontsize=12)
+    n_outlier = int(is_outlier.sum())
+    fig3.suptitle(f"Target outputs — {n_outlier}/{len(is_outlier)} fail (rtol={rtol}, atol={atol})",
+                  fontsize=14, y=1.01)
+    fig3.tight_layout()
+    fig3.savefig(os.path.join(save_path, "eval_nn_triangle_targets.png"), dpi=150, bbox_inches="tight")
+    plt.close(fig3)
+    print(f"Saved target triangle plot to: {os.path.join(save_path, 'eval_nn_triangle_targets.png')}")
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Evaluate ShapeFit NN against the extractor.")
+    parser.add_argument(
+        "--run-id",
+        type=str,
+        default=None,
+        help="MLflow run ID. Resolves model.pt and save path from the run's artifacts.",
+    )
     parser.add_argument(
         "--run-dir",
         type=str,
@@ -155,7 +198,7 @@ def main() -> None:
         "--model-path",
         type=str,
         default=None,
-        help="Path to model.pt (ignored if --run-dir is set).",
+        help="Path to model.pt (ignored if --run-id or --run-dir is set).",
     )
     parser.add_argument("--n-samples", type=int, default=500)
     parser.add_argument("--seed", type=int, default=42)
@@ -165,22 +208,36 @@ def main() -> None:
         default=None,
         help='JSON dict mapping target name to [lo, hi], e.g. \'{"qpar": [-1, 1], "qper": [-2, 2]}\'',
     )
+    parser.add_argument("--rtol", type=float, default=5e-3, help="Relative tolerance for allclose outlier check (default: 5e-3).")
+    parser.add_argument("--atol", type=float, default=5e-3, help="Absolute tolerance for allclose outlier check (default: 1e-4).")
     parser.add_argument(
         "--save-path",
         type=str,
         default=None,
-        help="Where to save plots (default: run-dir if set, else get_default_save_path()).",
+        help="Where to save plots (default: resolved from run-id/run-dir, else get_default_save_path()).",
     )
     args = parser.parse_args()
 
-    if args.run_dir is not None:
+    if args.run_id is not None:
+        import mlflow
+        scratch = os.environ.get("SCRATCH", os.path.expanduser("~"))
+        mlflow.set_tracking_uri(f"file:{scratch}/bedcosmo/shapefit_emulator/mlruns")
+        run = mlflow.get_run(args.run_id)
+        artifact_uri = run.info.artifact_uri
+        if artifact_uri.startswith("file://"):
+            artifact_uri = artifact_uri[7:]
+        model_path = os.path.join(artifact_uri, "model.pt")
+        save_path = args.save_path or artifact_uri
+        if not os.path.isfile(model_path):
+            raise FileNotFoundError(f"Model not found: {model_path}")
+    elif args.run_dir is not None:
         model_path = os.path.join(args.run_dir, "model.pt")
-        save_path = args.run_dir
+        save_path = args.save_path or args.run_dir
         if not os.path.isfile(model_path):
             raise FileNotFoundError(f"Model not found: {model_path}")
     else:
         if args.model_path is None:
-            raise ValueError("Either --run-dir or --model-path must be set.")
+            raise ValueError("Either --run-id, --run-dir, or --model-path must be set.")
         model_path = args.model_path
         save_path = args.save_path or get_default_save_path()
 
@@ -189,7 +246,7 @@ def main() -> None:
     #    raw = json.loads(args.hist_xlims)
     hist_xlims = {"qiso": (-0.5, 0.5), "qap": (-0.5, 0.5), "f_sigmar": (-10, 10), "m": (-10, 10)}
 
-    run_eval(model_path, save_path, n_samples=args.n_samples, seed=args.seed, hist_xlims=hist_xlims)
+    run_eval(model_path, save_path, n_samples=args.n_samples, seed=args.seed, hist_xlims=hist_xlims, rtol=args.rtol, atol=args.atol)
 
 
 if __name__ == "__main__":
