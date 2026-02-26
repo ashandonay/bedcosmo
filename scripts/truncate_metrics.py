@@ -10,10 +10,10 @@ The script searches backwards from the end of each file for optimal performance 
 the resume step is near the end (the common case when resuming from large step counts).
 
 Usage:
-    python truncate_metrics.py --run_id <run_id> --resume_step <step> [--dry_run]
-    
+    python truncate_metrics.py --run-id <run_id> --resume-step <step> [--dry-run]
+
 Example:
-    python truncate_metrics.py --run_id dcc7aa8be3ce43b1809dd3adb7772823 --resume_step 41000
+    python truncate_metrics.py --run-id dcc7aa8be3ce43b1809dd3adb7772823 --resume-step 41000
 """
 
 import os
@@ -132,11 +132,11 @@ def main():
     parser = argparse.ArgumentParser(
         description="Truncate MLflow metrics files to remove rows beyond a specified resume step"
     )
-    parser.add_argument("--run_id", required=True, help="MLflow run ID")
-    parser.add_argument("--resume_step", type=int, required=True, help="Resume step number (inclusive)")
-    parser.add_argument("--dry_run", action="store_true", help="Show what would be done without making changes")
-    parser.add_argument("--metrics_dir", help="Direct path to metrics directory (optional)")
-    parser.add_argument("--cosmo_exp", help="Cosmological experiment name (e.g., 'num_tracers', 'variable_redshift')")
+    parser.add_argument("--run-id", required=True, help="MLflow run ID")
+    parser.add_argument("--resume-step", type=int, required=True, help="Resume step number (inclusive)")
+    parser.add_argument("--dry-run", action="store_true", help="Show what would be done without making changes")
+    parser.add_argument("--metrics-dir", help="Direct path to metrics directory (optional)")
+    parser.add_argument("--cosmo-exp", help="Cosmological experiment name (e.g., 'num_tracers', 'variable_redshift')")
     
     args = parser.parse_args()
     

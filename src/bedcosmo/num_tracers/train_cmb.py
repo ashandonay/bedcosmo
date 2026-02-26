@@ -382,20 +382,21 @@ if __name__ == '__main__':
 
     parser = argparse.ArgumentParser(description="Run CMB Posterior Inference Training")
     parser.add_argument('--device', type=str, default='cuda:0', help='Device to use for training')
-    parser.add_argument('--exp_name', type=str, default=default_exp_name, help='Experiment name')
-    parser.add_argument('--resume_id', type=str, default=None, help='MLflow run ID to resume training from')
-    parser.add_argument('--resume_step', type=int, default=None, help='Step to resume training from')
-    parser.add_argument('--add_steps', type=int, default=0, help='Number of steps to add to the training')
+    parser.add_argument('--exp-name', type=str, default=default_exp_name, help='Experiment name')
+    parser.add_argument('--resume-id', type=str, default=None, help='MLflow run ID to resume training from')
+    parser.add_argument('--resume-step', type=int, default=None, help='Step to resume training from')
+    parser.add_argument('--add-steps', type=int, default=0, help='Number of steps to add to the training')
     parser.add_argument('--profile', action='store_true', help='Enable profiling for a few steps and then exit.')
-    parser.add_argument('--restart_path', type=str, default=None, help='Path to checkpoint for restarting training')
+    parser.add_argument('--restart-path', type=str, default=None, help='Path to checkpoint for restarting training')
 
     for key, value in default_args.items():
         arg_type = type(value)
+        cli_key = key.replace("_", "-")
         if isinstance(value, bool):
-            parser.add_argument(f'--{key}', action='store_true', help=f'Enable {key}')
+            parser.add_argument(f'--{cli_key}', action='store_true', help=f'Enable {key}')
             parser.set_defaults(**{key: value})
         else:
-            parser.add_argument(f'--{key}', type=arg_type, default=None, help=f'Override {key} (default: {value})')
+            parser.add_argument(f'--{cli_key}', type=arg_type, default=None, help=f'Override {key} (default: {value})')
 
     args = parser.parse_args()
     device = args.device
