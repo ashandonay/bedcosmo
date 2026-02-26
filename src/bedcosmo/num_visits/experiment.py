@@ -930,11 +930,11 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         # mags_model shape: P + (num_filters,)
 
         # Feature grid (magnitudes): broadcast per-filter axes to a common feature shape X
-        feature_axes = [_grid_array(features, f"mag_{band}") for band in self.design_labels]
+        feature_axes = [_grid_array(features, f"y_{band}") for band in self.design_labels]
         feature_axes = np.broadcast_arrays(*feature_axes)
-        mag_obs = np.stack(feature_axes, axis=-1)
-        feature_shape = mag_obs.shape[:-1]
-        # mag_obs shape: X + (num_filters,)
+        feature_obs = np.stack(feature_axes, axis=-1)
+        feature_shape = feature_obs.shape[:-1]
+        # features_obs shape: X + (num_filters,)
 
         # Design grid (visits): broadcast per-filter axes to common design shape D
         design_axes = [_grid_array(designs, str(band)) for band in self.design_labels]
@@ -954,7 +954,7 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         # sigmas shape: D + P + (num_filters,)
 
         # Build full broadcasted shapes for likelihood: X + D + P + (num_filters,)
-        mag_obs_full = mag_obs.reshape(
+        feature_obs_full = feature_obs.reshape(
             feature_shape
             + (1,) * len(design_shape)
             + (1,) * len(z_shape)
@@ -973,15 +973,12 @@ class NumVisits(BaseExperiment, CosmologyMixin):
             + (self.num_filters,)
         )
 
-        diff = (mag_obs_full - mags_full) / sigma_full
+        diff = (feature_obs_full - mags_full) / sigma_full
         log_likelihood = -0.5 * np.sum(diff**2, axis=-1) - np.sum(np.log(sigma_full), axis=-1)
 
-        # Stabilize exponentiation by subtracting the max over the feature axes
-        # within each (design, param) slice.  A global max can cause underflow
-        # for parameter values far from the mode because their log-likelihood is
-        # hundreds of nats below the global maximum, sending exp() to exactly 0.
-        feature_axes_idx = tuple(range(len(feature_shape)))
-        log_likelihood = log_likelihood - np.max(log_likelihood, axis=feature_axes_idx, keepdims=True)
+        # Stabilize exponentiation by subtracting the global max.
+        # This preserves relative P(y|z,d) across all parameters/features.
+        log_likelihood = log_likelihood - np.max(log_likelihood)
 
         likelihood = np.exp(log_likelihood)
         # likelihood shape: X + D + P

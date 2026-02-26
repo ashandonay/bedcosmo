@@ -203,6 +203,21 @@ class Evaluator:
             self._grid_samples = None
             print(f"Warning: grid posterior sampling failed: {e}")
 
+        # Save marginal plot to run artifacts
+        try:
+            fig_marginal, _ = gc.plot_marginal(
+                design_type="nominal",
+                plot_redshift_line=True,
+            )
+            filename = f"grid_marginal_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+            self.plotter.save_figure(
+                fig_marginal, filename,
+                run_id=self.run_id, experiment_id=self.exp_id, dpi=400,
+            )
+        except Exception as e:
+            traceback.print_exc()
+            print(f"Warning: grid marginal plot failed: {e}")
+
         print(
             f"Grid EIG complete: nominal={nominal_data['grid']['eigs_avg']:.4f}, "
             f"optimal={optimal_eig:.4f}"

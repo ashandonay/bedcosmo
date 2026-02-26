@@ -16,7 +16,7 @@ import numpy as np
 import torch
 import yaml
 from bed.design import ExperimentDesigner
-from bed.grid import Grid, GridStack
+from bed.grid import Grid
 from pyro import distributions as dist
 
 
@@ -105,6 +105,9 @@ class GridCalculation:
         param_pts: int = 75,
         feature_pts: int = 35,
         device: str = "cpu",
+        adaptive_features: bool = False,
+        adaptive_floor: float = 0.05,
+        feature_ranges: Optional[Dict[str, Tuple[float, float]]] = None,
     ):
         """
         Initialize the GridCalculation.
@@ -114,11 +117,22 @@ class GridCalculation:
             param_pts: Number of points per parameter axis.
             feature_pts: Number of points per feature axis.
             device: Torch device (grid-based calculation runs on CPU for stability).
+            adaptive_features: If True, use a patched-grid strategy that places
+                a dense grid over the peak region (detectable features) and a
+                sparse grid spanning the full range, then merges them.
+            adaptive_floor: Unused (kept for API compatibility).
+            feature_ranges: Per-feature (lo, hi) bounds for the feature grid.
+                Keys are feature names (e.g. "y_u", "y_g").
+                Features not listed fall back to automatic bounds.
+                If None, all features use auto bounds.
         """
         self.experiment = experiment
         self.param_pts = param_pts
         self.feature_pts = feature_pts
         self.device = device
+        self.adaptive_features = adaptive_features
+        self.adaptive_floor = adaptive_floor
+        self.feature_ranges = feature_ranges or {}
 
         # Create grids (design_grid before feature_grid since feature bounds depend on designs)
         self.parameter_grid = self._create_parameter_grid()
@@ -150,54 +164,165 @@ class GridCalculation:
             axes[name] = np.linspace(lo, hi, int(self.param_pts), dtype=np.float64)
         return Grid(**axes)
 
+    @staticmethod
+    def _adaptive_axis(
+        feature_values: np.ndarray,
+        errors: np.ndarray,
+        lo: float,
+        hi: float,
+        n_pts: int,
+        dense_fraction: float = 0.6,
+    ) -> np.ndarray:
+        """Build a non-uniform 1D axis using a patched-grid strategy.
+
+        Allocates ``dense_fraction`` of the point budget to a dense grid
+        covering the peak region (where detectable features live) and the
+        remaining points to a sparse grid spanning the full range.  The two
+        grids are merged and deduplicated to produce the final axis.
+
+        The dense region is determined automatically from the features
+        with small errors.
+
+        Args:
+            feature_values: 1D array of predicted feature values.
+            errors: 1D array of corresponding feature errors.
+            lo, hi: Full axis bounds.
+            n_pts: Total number of grid points.
+            dense_fraction: Fraction of points allocated to the dense region.
+
+        Returns:
+            Sorted 1D array of length ``n_pts`` spanning [lo, hi].
+        """
+        detectable_err_thresh = 3.0
+        detectable = errors < detectable_err_thresh
+
+        if np.any(detectable):
+            det_features = feature_values[detectable]
+            det_errs = errors[detectable]
+            # Dense region: covers detectable features with generous padding.
+            # Use per-object (mag ± n_sigma * err) with a floor so bright objects
+            # with tiny errors still get a wide dense region.
+            n_sigma_dense = 8.0
+            err_floor = 1.0  # minimum 1 feature of sigma
+            padded_errs = np.maximum(det_errs, err_floor)
+            dense_lo = float(np.min(det_features - n_sigma_dense * padded_errs))
+            dense_hi = float(np.max(det_features + n_sigma_dense * padded_errs))
+            # Clamp to full axis bounds
+            dense_lo = max(dense_lo, lo)
+            dense_hi = min(dense_hi, hi)
+        else:
+            # No detectable features — fall back to uniform
+            return np.linspace(lo, hi, n_pts, dtype=np.float64)
+
+        n_dense = max(3, int(round(n_pts * dense_fraction)))
+        n_sparse = max(3, n_pts - n_dense)
+
+        dense_grid = np.linspace(dense_lo, dense_hi, n_dense)
+        sparse_grid = np.linspace(lo, hi, n_sparse)
+
+        # Merge and deduplicate (keep unique sorted values)
+        merged = np.unique(np.concatenate([dense_grid, sparse_grid]))
+
+        # If merge produced more points than budget, thin to n_pts
+        # by picking equally-spaced indices (preserving endpoints)
+        if len(merged) > n_pts:
+            idx = np.round(np.linspace(0, len(merged) - 1, n_pts)).astype(int)
+            merged = merged[idx]
+
+        # If merge produced fewer (unlikely with unique), pad with linspace
+        if len(merged) < n_pts:
+            extra = np.linspace(lo, hi, n_pts - len(merged) + 2)[1:-1]
+            merged = np.unique(np.concatenate([merged, extra]))[:n_pts]
+
+        return merged.astype(np.float64)
+
     def _create_feature_grid(self) -> Grid:
-        """Create feature grid (auto for magnitude-based experiments)."""
-        experiment = self.experiment
-        # Auto mode for magnitude-based experiments (e.g. num_visits).
-        if hasattr(experiment, "filters_list") and hasattr(experiment, "_calculate_magnitudes"):
-            if not hasattr(self.parameter_grid, "z"):
-                raise ValueError("Auto feature grid requires parameter grid to include 'z'.")
+        """Create feature grid from explicit ranges or infer from experiment."""
 
-            z = np.asarray(getattr(self.parameter_grid, "z"), dtype=np.float64)
-            z_tensor = torch.as_tensor(z, device="cpu", dtype=torch.float64)
-            with torch.no_grad():
-                mags = experiment._calculate_magnitudes(z_tensor).detach().cpu().numpy()
-                mags_tensor = torch.as_tensor(mags, device="cpu", dtype=torch.float64)
+        # If all feature ranges are explicitly provided, use them directly.
+        # This works for any experiment regardless of type.
+        if self.feature_ranges and hasattr(self.experiment, "design_labels"):
+            feature_names = [f"y_{d}" for d in self.experiment.design_labels]
+            all_covered = all(
+                d in self.feature_ranges or f"y_{d}" in self.feature_ranges
+                for d in self.experiment.design_labels
+            )
+            if all_covered:
+                axes = {}
+                for d in self.experiment.design_labels:
+                    key = d if d in self.feature_ranges else f"y_{d}"
+                    lo, hi = self.feature_ranges[key]
+                    name = f"y_{d}"
+                    axes[name] = np.linspace(lo, hi, int(self.feature_pts), dtype=np.float64)
+                    print(f"  Feature grid {d}: [{lo:.1f}, {hi:.1f}] (explicit)")
+                return Grid(**axes)
 
-                # Compute magnitude errors using the worst-case (minimum) visits
-                # across all designs so the feature grid covers the full range.
-                # Start from nominal design, then override with design grid mins.
-                nominal = experiment.nominal_design.detach().cpu().to(torch.float64).numpy()
-                min_visits = nominal.copy()
-                design_grid = self.design_grid
-                for j, band in enumerate(experiment.filters_list):
-                    if band in design_grid.names:
-                        band_vals = np.asarray(design_grid.axes_in[band], dtype=np.float64)
-                        min_visits[j] = band_vals.min()
-                min_visits_tensor = torch.as_tensor(
-                    min_visits, device="cpu", dtype=torch.float64
-                ).expand(mags_tensor.shape)
-                mag_errors = experiment._magnitude_errors(
-                    mags_tensor, min_visits_tensor
+        # Infer feature grid from experiment.
+        if hasattr(self.experiment, "design_labels"):
+            if self.experiment.name == "num_visits":
+                if not hasattr(self.parameter_grid, "z"):
+                    raise ValueError("Auto feature grid requires parameter grid to include 'z'.")
+                z = np.asarray(getattr(self.parameter_grid, "z"), dtype=np.float64)
+                z_tensor = torch.as_tensor(z, device="cpu", dtype=torch.float64)
+                with torch.no_grad():
+                    features = self.experiment._calculate_magnitudes(z_tensor).detach().cpu().numpy()
+            else:
+                raise NotImplementedError(f"Feature grid inference not implemented for {self.experiment.name}.")
+
+            features_tensor = torch.as_tensor(features, device="cpu", dtype=torch.float64)
+            # Compute feature errors using the worst-case (minimum) visits
+            # across all designs so the feature grid covers the full range.
+            # Start from nominal design, then override with design grid mins.
+            nominal = self.experiment.nominal_design.detach().cpu().to(torch.float64).numpy()
+            min_visits = nominal.copy()
+            design_grid = self.design_grid
+            for j, d in enumerate(self.experiment.design_labels):
+                if d in design_grid.names:
+                    d_vals = np.asarray(design_grid.axes_in[d], dtype=np.float64)
+                    min_visits[j] = d_vals.min()
+            min_visits_tensor = torch.as_tensor(
+                min_visits, device="cpu", dtype=torch.float64
+            ).expand(features_tensor.shape)
+            if self.experiment.name == "num_visits":
+                feature_errors = self.experiment._magnitude_errors(
+                    features_tensor, min_visits_tensor
                 ).detach().cpu().numpy()
+            else:
+                raise NotImplementedError(f"Feature grid inference not implemented for {self.experiment.name}.")
 
-            n_sigma = 4.0
-            # Only use z values with detectable errors to set feature bounds.
-            # High-z objects with sigma~10 would stretch the grid far beyond
-            # the region where the likelihood has meaningful support.
-            max_err_for_bounds = 3.0  # ignore objects with sigma > 1 mag
             axes = {}
-            for i, band in enumerate(experiment.filters_list):
-                err_i = mag_errors[..., i]
-                detectable = err_i < max_err_for_bounds
-                if np.any(detectable):
-                    lo = float(np.min(mags[..., i][detectable] - n_sigma * err_i[detectable]))
-                    hi = float(np.max(mags[..., i][detectable] + n_sigma * err_i[detectable]))
+            for i, d in enumerate(self.experiment.design_labels):
+                err_i = feature_errors[..., i]
+                feature_i = features[..., i]
+
+                range_key = d if d in self.feature_ranges else f"y_{d}" if f"y_{d}" in self.feature_ranges else None
+                if range_key is not None:
+                    lo, hi = self.feature_ranges[range_key]
                 else:
-                    # Fallback: use full range if nothing is detectable
-                    lo = float(np.min(mags[..., i]))
-                    hi = float(np.max(mags[..., i]))
-                axes[f"mag_{band}"] = np.linspace(lo, hi, int(self.feature_pts), dtype=np.float64)
+                    # Auto bounds: use per-object Gaussian envelopes
+                    # feature ± n_sigma * err, capped to prevent blow-up.
+                    n_sigma = 4.0
+                    feature_err_cap = 3.0
+                    err_capped = np.minimum(err_i, feature_err_cap)
+                    lo = float(np.min(feature_i - n_sigma * err_capped))
+                    hi = float(np.max(feature_i + n_sigma * err_capped))
+                    padding = 0.10 * (hi - lo)
+                    lo -= padding
+                    hi += padding
+
+                print(f"  Feature grid {d}: [{lo:.1f}, {hi:.1f}]")
+
+                if self.adaptive_features:
+                    axes[f"y_{d}"] = self._adaptive_axis(
+                        feature_values=feature_i.ravel(),
+                        feature_errors=err_i.ravel(),
+                        lo=lo,
+                        hi=hi,
+                        n_pts=int(self.feature_pts),
+                    )
+                else:
+                    axes[f"y_{d}"] = np.linspace(lo, hi, int(self.feature_pts), dtype=np.float64)
+
             return Grid(**axes)
 
         raise ValueError(
@@ -534,27 +659,117 @@ class GridCalculation:
         ).astype(np.float64, copy=False)
         return samples
 
-    def plot_marginal(
+    def plot_feature_grid(
         self,
-        design_indices: Optional[list] = None,
-        labels: Optional[list] = None,
+        redshift_range: Optional[Tuple[float, float]] = None,
+        n_redshift_pts: int = 200,
         figsize: Optional[Tuple[float, float]] = None,
-        title: Optional[str] = None,
+        save_path: Optional[str] = None,
     ):
-        """
-        Plot 2D marginal P(y|xi) as a filled contour for each design index.
+        """Plot the feature grid points in feature space.
 
-        One subplot per design. The two feature axes form the x/y of the plot.
-
-        Args:
-            design_indices: Flat design indices into designer.EIG / marginal.
-                           If None, uses [best_idx].
-            labels: Subplot titles for each design.
-            figsize: Figure size.
-            title: Overall suptitle.
+        For 2D feature grids, plots the grid as a scatter of all (x, y)
+        combinations and optionally overlays the redshift track.
 
         Returns:
-            matplotlib Figure and array of Axes.
+            matplotlib Figure and Axes.
+        """
+        feature_names = list(self.feature_grid.names)
+        n_features = len(feature_names)
+
+        axes_vals = [
+            np.asarray(self.feature_grid.axes_in[name], dtype=np.float64)
+            for name in feature_names
+        ]
+
+        if figsize is None:
+            figsize = (7, 6)
+        fig, ax = plt.subplots(1, 1, figsize=figsize)
+
+        if n_features == 2:
+            xx, yy = np.meshgrid(axes_vals[0], axes_vals[1], indexing="ij")
+            ax.scatter(xx.ravel(), yy.ravel(), s=4, alpha=0.6, color="C0", label="grid points")
+            ax.set_xlabel(feature_names[0])
+            ax.set_ylabel(feature_names[1])
+        elif n_features == 1:
+            ax.scatter(axes_vals[0], np.zeros_like(axes_vals[0]), s=10, color="C0")
+            ax.set_xlabel(feature_names[0])
+            ax.set_yticks([])
+        else:
+            # Higher-D: plot first two dimensions
+            xx, yy = np.meshgrid(axes_vals[0], axes_vals[1], indexing="ij")
+            ax.scatter(xx.ravel(), yy.ravel(), s=4, alpha=0.6, color="C0")
+            ax.set_xlabel(feature_names[0])
+            ax.set_ylabel(feature_names[1])
+
+        # Overlay parameter track
+        if self.experiment is not None and n_features >= 2:
+            if hasattr(self.experiment, "design_labels"):
+                if self.experiment.name == "num_visits":
+                    z_min, z_max = redshift_range or (0.1, 3.0)
+                    z_arr = torch.linspace(z_min, z_max, n_redshift_pts, dtype=torch.float64)
+                    with torch.no_grad():
+                        track_features = self.experiment._calculate_magnitudes(z_arr).detach().cpu().numpy()
+                else:
+                    raise NotImplementedError(f"Feature grid inference not implemented for {self.experiment.name}.")
+                filter_to_idx = {f"y_{d}": i for i, d in enumerate(self.experiment.design_labels)}
+                ix = filter_to_idx.get(feature_names[0])
+                iy = filter_to_idx.get(feature_names[1])
+                if ix is not None and iy is not None:
+                    ax.plot(track_features[:, ix], track_features[:, iy], color="red",
+                            linewidth=1.5, zorder=5, label="z track")
+                    z_np = z_arr.numpy()
+                    for z_mark in [0.5, 1.0, 1.5, 2.0, 2.5, 3.0]:
+                        if z_min <= z_mark <= z_max:
+                            closest = int(np.argmin(np.abs(z_np - z_mark)))
+                            ax.plot(track_features[closest, ix], track_features[closest, iy], "o",
+                                    color="red", markersize=4, zorder=6)
+                            ax.annotate(f"z={z_mark:.1f}",
+                                        (track_features[closest, ix], track_features[closest, iy]),
+                                        textcoords="offset points", xytext=(5, 5),
+                                        fontsize=7, color="red", fontweight="bold", zorder=6)
+                    ax.legend(fontsize=8)
+
+        ax.set_title("Feature grid points")
+        fig.tight_layout()
+        if save_path is not None:
+            fig.savefig(save_path, dpi=200, bbox_inches="tight")
+        return fig, ax
+
+    def plot_marginal(
+        self,
+        design_type: str = "nominal",
+        design_index: Optional[int] = None,
+        label: Optional[str] = None,
+        figsize: Optional[Tuple[float, float]] = None,
+        title: Optional[str] = None,
+        redshift_range: Optional[Tuple[float, float]] = None,
+        n_redshift_pts: int = 200,
+        plot_redshift_line: bool = False,
+        log_scale: bool = True,
+    ):
+        """
+        Plot 2D marginal P(y|xi) for a single design.
+
+        Args:
+            design_index: Flat design index into designer.EIG / marginal.
+                         If None, chosen by ``which``.
+            label: Subplot title. If None, uses ``design_type``.
+            figsize: Figure size.
+            title: Overall suptitle.
+            experiment: Experiment object with design_labels. If provided, overlays a parameter track.
+                       design_labels. If provided, overlays a redshift track.
+            redshift_range: (z_min, z_max) for the redshift track.
+                           Defaults to (0.1, 3.0).
+            n_redshift_pts: Number of points along the redshift track.
+            design_type: "nominal" (default) or "best". Used when design_index
+                  is None to pick the design automatically.
+            plot_redshift_line: If True (default), overlay the redshift track when
+                  experiment is provided and the marginal is 2D. Set to False to omit.
+            log_scale: If True, plot log10 of the marginal values.
+
+        Returns:
+            matplotlib Figure and Axes.
         """
         if self.designer is None:
             raise RuntimeError("Must call run() before plot_marginal.")
@@ -563,55 +778,102 @@ class GridCalculation:
         feature_names = list(self.feature_grid.names)
         n_features = len(feature_names)
 
-        if design_indices is None:
-            design_indices = [int(np.argmax(self.designer.EIG))]
-        n_plots = len(design_indices)
-        if labels is None:
-            labels = [f"design {i}" for i in design_indices]
+        if design_index is None:
+            if design_type == "best":
+                design_index = int(np.argmax(self.designer.EIG))
+            else:
+                design_index = self._nominal_design_index()
+        if label is None:
+            label = design_type.capitalize()
 
         # Flatten design dims: (features..., *design_shape) -> (features..., n_designs)
         feature_shape = marginal.shape[:n_features]
         marginal_flat = marginal.reshape(*feature_shape, -1)
 
         if figsize is None:
-            figsize = (5 * n_plots, 4)
+            figsize = (7, 6)
 
-        fig, axes = plt.subplots(1, n_plots, figsize=figsize, squeeze=False)
-        axes = axes[0]
+        fig, ax = plt.subplots(1, 1, figsize=figsize)
 
         x_vals = np.asarray(self.feature_grid.axes_in[feature_names[0]]).ravel()
         y_vals = np.asarray(self.feature_grid.axes_in[feature_names[1]]).ravel() if n_features > 1 else None
 
-        for ax, idx, label in zip(axes, design_indices, labels):
-            marg = marginal_flat[..., idx]
-            # After computing marg for the best design:
-            peak_u = np.unravel_index(np.argmax(marg), marg.shape)[0]
-            plt.figure()
-            plt.plot(y_vals, marg[peak_u, :])
-            plt.xlabel("mag_g")
-            plt.ylabel("P(y|ξ)")
-            plt.title(f"Slice at mag_u index {peak_u}")
-            plt.savefig("marginal_slice.png", dpi=200)
-            plt.close()
-            if n_features == 2 and y_vals is not None:
-                im = ax.pcolormesh(x_vals, y_vals, marg.T, shading="gouraud", cmap="viridis")
-                fig.colorbar(im, ax=ax, label="P(y|ξ)")
-                ax.set_xlabel(feature_names[0])
-                ax.set_ylabel(feature_names[1])
-            else:
-                marg_1d = marg.ravel()
-                ax.plot(x_vals, marg_1d, linewidth=1.5)
-                ax.fill_between(x_vals, marg_1d, alpha=0.3)
-                ax.set_xlabel(feature_names[0])
-                ax.set_ylabel("P(y|ξ)")
+        marg = marginal_flat[..., design_index]
+
+        if log_scale:
+            with np.errstate(divide="ignore"):
+                marg = np.log(np.maximum(marg, 0.0))
+            marg[~np.isfinite(marg)] = np.nan
+            colorbar_label = r"$\log{P(y \mid \xi)}$"
+            ylabel_1d = r"$\log{P(y \mid \xi)}$"
+        else:
+            colorbar_label = r"$P(y \mid \xi)$"
+            ylabel_1d = r"$P(y \mid \xi)$"
+
+        if n_features == 2 and y_vals is not None:
+            im = ax.pcolormesh(x_vals, y_vals, marg.T, shading="gouraud", cmap="viridis")
+            fig.colorbar(im, ax=ax, label=colorbar_label, fraction=0.046, pad=0.04)
+            ax.set_xlabel(feature_names[0])
+            ax.set_ylabel(feature_names[1])
+        else:
+            marg_1d = marg.ravel()
+            ax.plot(x_vals, marg_1d, linewidth=1.5)
+            ax.fill_between(x_vals, marg_1d, alpha=0.3)
+            ax.set_xlabel(feature_names[0])
+            ax.set_ylabel(ylabel_1d)
+            if not log_scale:
                 ax.set_ylim(0, None)
-            ax.set_title(label)
+
+        # Overlay redshift track if experiment is provided and requested
+        if (
+            plot_redshift_line
+            and n_features == 2
+            and y_vals is not None
+        ):
+            if hasattr(self.experiment, "design_labels"):
+                if self.experiment.name == "num_visits":
+                    z_min, z_max = redshift_range or (0.1, 3.0)
+                    z_arr = torch.linspace(z_min, z_max, n_redshift_pts, dtype=torch.float64)
+                    with torch.no_grad():
+                        track_features = self.experiment._calculate_magnitudes(z_arr).detach().cpu().numpy()
+                else:
+                    raise NotImplementedError(f"Feature grid inference not implemented for {self.experiment.name}.")
+                filter_to_idx = {f"y_{d}": i for i, d in enumerate(self.experiment.design_labels)}
+                ix = filter_to_idx.get(feature_names[0])
+                iy = filter_to_idx.get(feature_names[1])
+                if ix is not None and iy is not None:
+                    track_x = track_features[:, ix]
+                    track_y = track_features[:, iy]
+                    ax.plot(track_x, track_y, color="white", linewidth=2, zorder=5)
+                    z_np = z_arr.numpy()
+                    for z_mark in [0.5, 1.0, 1.5, 2.0, 2.5, 3.0]:
+                        if z_min <= z_mark <= z_max:
+                            closest = int(np.argmin(np.abs(z_np - z_mark)))
+                            ax.plot(track_x[closest], track_y[closest], "o",
+                                    color="black", markersize=4, zorder=6)
+                            ax.annotate(f"z={z_mark:.1f}",
+                                        (track_x[closest], track_y[closest]),
+                                        textcoords="offset points", xytext=(5, 5),
+                                        fontsize=7, color="black", fontweight="bold", zorder=6)
 
         if title is None:
-            title = "Marginal P(y|ξ)"
-        fig.suptitle(title)
+            title = "Marginal P(y|ξ), "
+            if self.experiment is not None and hasattr(self.experiment, "temperature"):
+                T = self.experiment.temperature
+                if hasattr(T, "value"):
+                    T = T.value
+                title += f"T = {T:.0f} K, "
+        fig.suptitle(title + label + " design")
         fig.tight_layout()
-        return fig, axes
+        return fig, ax
+
+    def _nominal_design_index(self) -> int:
+        """Return the flat design index closest to the experiment's nominal design."""
+        nominal_np = self.experiment.nominal_design.detach().cpu().numpy().reshape(1, -1)
+        designs_np = self.experiment.designs.detach().cpu().numpy().astype(np.float64)
+        return int(np.argmin(np.linalg.norm(
+            designs_np - nominal_np[:, :designs_np.shape[1]], axis=1
+        )))
 
 
 
@@ -634,10 +896,49 @@ def main():
     )
     parser.add_argument("--use-experiment-prior", action="store_true", help="Use experiment's prior distributions for PDF")
     parser.add_argument("--device", type=str, default="cpu", help="Torch device for experiment calculations")
+    parser.add_argument("--verbose", action="store_true", help="Verbose output")
     parser.add_argument("--param-pts", type=int, default=75, help="Points per parameter axis")
     parser.add_argument("--feature-pts", type=int, default=35, help="Points per feature axis")
     parser.add_argument("--no-plots", action="store_true", help="Skip generating plots")
-    args = parser.parse_args()
+    parser.add_argument("--adaptive-features", action="store_true", help="Concentrate feature grid points in high-density regions")
+    parser.add_argument("--adaptive-floor", type=float, default=0.05, help="Uniform floor fraction for adaptive feature grid (0=fully adaptive, 1=nearly uniform)")
+    parser.add_argument("--feature-range", type=str, action="append", default=[], metavar="NAME:LO,HI",
+                        help="Per-feature axis range, e.g. --feature-range u:-10,60 --feature-range g:15,55")
+    args, extra_args = parser.parse_known_args()
+
+    # Parse extra args as experiment kwargs
+    exp_kwargs = {}
+    i = 0
+    while i < len(extra_args):
+        arg = extra_args[i]
+        if arg.startswith("--"):
+            key = arg.lstrip("-").replace("-", "_")
+            if i + 1 < len(extra_args) and not extra_args[i + 1].startswith("--"):
+                val = extra_args[i + 1]
+                # Auto-convert types
+                try:
+                    val = int(val)
+                except ValueError:
+                    try:
+                        val = float(val)
+                    except ValueError:
+                        if val.lower() == "true":
+                            val = True
+                        elif val.lower() == "false":
+                            val = False
+                        elif val.lower() == "none":
+                            val = None
+                exp_kwargs[key] = val
+                i += 2
+            else:
+                # Flag-style arg (no value)
+                exp_kwargs[key] = True
+                i += 1
+        else:
+            i += 1
+
+    if exp_kwargs:
+        print(f"Experiment kwargs: {exp_kwargs}")
 
     if "SCRATCH" not in os.environ:
         raise EnvironmentError("SCRATCH environment variable is required.")
@@ -664,6 +965,8 @@ def main():
         design_args_path=args.design_args_path,
         prior_args_path=prior_args_path,
         device=args.device,
+        verbose=args.verbose,
+        **exp_kwargs,
     )
 
     # Build output directory: $SCRATCH/bedcosmo/{exp_name}/grid_calc/{date}
@@ -671,12 +974,37 @@ def main():
     out_dir = Path(os.environ["SCRATCH"]) / "bedcosmo" / args.cosmo_exp / "grid_calc" / date_str
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    # Parse --feature-range args into dict: {"u": (-10, 60), "g": (15, 55)}
+    feature_ranges = {}
+    for fr in args.feature_range:
+        band, bounds = fr.split(":")
+        lo, hi = bounds.split(",")
+        feature_ranges[band.strip()] = (float(lo), float(hi))
+
+    # Save all args (grid_calc + experiment) to args.yaml
+    all_args = {**vars(args), "feature_ranges": feature_ranges, **exp_kwargs}
+    # Remove non-serializable or redundant fields
+    all_args.pop("feature_range", None)
+    with open(out_dir / "args.yaml", "w") as f:
+        yaml.dump(all_args, f, default_flow_style=False, sort_keys=False)
+    print(f"Saved args to: {out_dir / 'args.yaml'}")
+
     # Use the class-based interface
     gc = GridCalculation(
         experiment=experiment,
         param_pts=args.param_pts,
         feature_pts=args.feature_pts,
+        adaptive_features=args.adaptive_features,
+        adaptive_floor=args.adaptive_floor,
+        feature_ranges=feature_ranges,
     )
+
+    # Always save feature grid diagnostic (before run, so it's available on failure)
+    fig_fg, _ = gc.plot_feature_grid(
+        save_path=str(out_dir / "feature_grid.png"),
+    )
+    plt.close(fig_fg)
+    print(f"  Feature grid plot saved to: {out_dir / 'feature_grid.png'}")
 
     # Compute prior if requested
     if prior_args_path or args.use_experiment_prior:
@@ -748,23 +1076,21 @@ def main():
         posterior = gc.get_posterior(nominal=True)
         gc_samples = gc.draw_samples(pdf=posterior, num_samples=50000)
 
+        if experiment.name == "num_visits":
+            posterior_title = f"Grid Posterior (nominal), T = {experiment.temperature:.0f} K"
+
         plotter.generate_posterior(
             experiment=experiment,
             grid_samples=gc_samples,
-            title="Grid Posterior (nominal)",
+            title=posterior_title,
             save_path=str(out_dir / "posterior.png"),
+            plot_size_ratio=0.8,
+            guide_samples=50000,
+            plot_prior=True,
         )
 
-        # Marginal P(y|xi) plot comparing best and nominal designs
-        best_idx = int(np.argmax(gc.designer.EIG))
-        # Find nominal design index (closest to experiment's nominal)
-        nominal_np = experiment.nominal_design.detach().cpu().numpy().reshape(1, -1)
-        designs_np = input_designs.astype(np.float64)
-        nominal_idx = int(np.argmin(np.linalg.norm(designs_np - nominal_np[:, :designs_np.shape[1]], axis=1)))
-        fig_marg, _ = gc.plot_marginal(
-            design_indices=[best_idx, nominal_idx],
-            labels=["Best", "Nominal"]
-        )
+        # Marginal P(y|xi) plot for nominal design
+        fig_marg, _ = gc.plot_marginal(design_type="nominal")
         fig_marg.savefig(out_dir / "marginal.png", dpi=200, bbox_inches="tight")
         plt.close(fig_marg)
 
