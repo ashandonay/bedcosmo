@@ -256,13 +256,52 @@ Use `--restart-checkpoint` to specify an exact checkpoint file:
 ./submit.sh restart num_tracers <run_id> --restart-checkpoint /path/to/checkpoint.pt
 ```
 
-## Citation
+## Grid EIG Calculation
 
-If you use this code, please cite:
+The grid calculator (`bedcosmo.grid_calc`) computes Expected Information Gain by brute-force enumeration over discretized parameter, feature, and design grids using https://github.com/dkirkby/bayesdesign. This serves as a ground-truth reference for validating the neural flow approach.
+
+### Running
+
+```bash
+# Via SLURM
+sbatch scripts/slurm/grid_calc.sh
+
+# Directly
+python -m bedcosmo.grid_calc num_visits \
+    --design-args-path design_args_2d.yaml \
+    --prior-args-path prior_args_uniform.yaml \
+    --param-pts 1000 --feature-pts 500
 ```
-[Citation to be added]
-```
 
-## License
+Key CLI flags:
 
-MIT License
+| Flag | Description |
+|------|-------------|
+| `--design-args-path` | Design space config (e.g. `design_args_2d.yaml`) |
+| `--prior-args-path` | Prior config (e.g. `prior_args_uniform.yaml`). Defaults to the path in `train_args.yaml` |
+| `--use-experiment-prior` | Use the experiment's built-in prior instead of a YAML file |
+| `--param-pts` | Points per parameter axis (default 75) |
+| `--feature-pts` | Points per feature axis (default 35) |
+| `--adaptive-features` | Concentrate feature grid points around detectable features |
+| `--feature-range NAME:LO,HI` | Override feature axis bounds (e.g. `--feature-range u:-10,60`) |
+| `--no-plots` | Skip plot generation |
+
+Outputs are saved to `$SCRATCH/bedcosmo/{cosmo_exp}/grid_calc/{timestamp}/` and include `eig_data_grid.json`, posterior and marginal plots, and the feature grid diagnostic.
+
+### How the Grids Are Built
+
+**Parameter grid:** For each cosmological parameter, the axis spans the prior support (or the 1%–99% quantile range for unbounded priors) with `param-pts` evenly spaced points.
+
+**Design grid:** Taken directly from the experiment's `designs_grid` attribute, which is configured by the design args YAML.
+
+**Feature grid:** Bounds are determined in priority order:
+
+1. **Explicit ranges** (`--feature-range`): used directly if provided for all features.
+2. **Auto-inferred:** The experiment's forward model predicts features (e.g. magnitudes) across the parameter grid. Feature errors are computed at the worst-case (minimum-visit) design. The axis spans `feature ± 4σ` (with σ capped at 3.0 to prevent blow-up from non-detections), plus 10% padding on each side.
+
+With `--adaptive-features`, 60% of the point budget is placed in a dense region around detectable features (error < 3) and the remaining 40% spans the full range, then the two grids are merged.
+
+### Prior PDF
+
+The prior PDF is evaluated as the product of independent marginals over the parameter grid. Sources (in priority order): a `prior_args` YAML file, the experiment's built-in prior (`--use-experiment-prior`), or uniform (if neither is given).
+
