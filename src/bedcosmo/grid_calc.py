@@ -108,6 +108,10 @@ class GridCalculation:
         adaptive_features: bool = False,
         adaptive_floor: float = 0.05,
         feature_ranges: Optional[Dict[str, Tuple[float, float]]] = None,
+        feature_dense_ranges: Optional[Dict[str, Tuple[float, float]]] = None,
+        param_dense_ranges: Optional[Dict[str, Tuple[float, float]]] = None,
+        feature_dense_fraction: float = 0.6,
+        param_dense_fraction: float = 0.6,
     ):
         """
         Initialize the GridCalculation.
@@ -125,6 +129,20 @@ class GridCalculation:
                 Keys are feature names (e.g. "y_u", "y_g").
                 Features not listed fall back to automatic bounds.
                 If None, all features use auto bounds.
+            feature_dense_ranges: Per-feature (lo, hi) bounds for the dense sub-region.
+                Keys are feature names (e.g. "y_u", "u", "g").
+                For each feature with a dense region, the grid uses a
+                patched-grid strategy placing ``feature_dense_fraction`` of
+                points in the dense region and the rest spanning the full range.
+                If None, no dense regions are used (unless adaptive_features
+                infers them automatically).
+            param_dense_ranges: Per-parameter (lo, hi) bounds for dense
+                sub-regions in the parameter grid.  Keys are parameter names
+                (e.g. "z", "w0").  Same patched-grid strategy as feature_dense_ranges.
+            feature_dense_fraction: Fraction of feature grid points allocated
+                to each dense region (default 0.6).
+            param_dense_fraction: Fraction of parameter grid points allocated
+                to each dense region (default 0.6).
         """
         self.experiment = experiment
         self.param_pts = param_pts
@@ -133,6 +151,10 @@ class GridCalculation:
         self.adaptive_features = adaptive_features
         self.adaptive_floor = adaptive_floor
         self.feature_ranges = feature_ranges or {}
+        self.feature_dense_ranges = feature_dense_ranges or {}
+        self.param_dense_ranges = param_dense_ranges or {}
+        self.feature_dense_fraction = feature_dense_fraction
+        self.param_dense_fraction = param_dense_fraction
 
         # Create grids (design_grid before feature_grid since feature bounds depend on designs)
         self.parameter_grid = self._create_parameter_grid()
@@ -161,7 +183,12 @@ class GridCalculation:
             if name not in prior:
                 raise ValueError(f"Prior missing parameter '{name}'.")
             lo, hi = _dist_bounds(prior[name])
-            axes[name] = np.linspace(lo, hi, int(self.param_pts), dtype=np.float64)
+            if name in self.param_dense_ranges:
+                d_lo, d_hi = self.param_dense_ranges[name]
+                axes[name] = self._dense_axis(lo, hi, d_lo, d_hi, int(self.param_pts), self.param_dense_fraction)
+                print(f"  Param grid {name}: [{lo:.4f}, {hi:.4f}] (dense [{d_lo:.4f}, {d_hi:.4f}])")
+            else:
+                axes[name] = np.linspace(lo, hi, int(self.param_pts), dtype=np.float64)
         return Grid(**axes)
 
     @staticmethod
@@ -236,6 +263,53 @@ class GridCalculation:
 
         return merged.astype(np.float64)
 
+    @staticmethod
+    def _dense_axis(
+        lo: float,
+        hi: float,
+        dense_lo: float,
+        dense_hi: float,
+        n_pts: int,
+        dense_fraction: float = 0.6,
+    ) -> np.ndarray:
+        """Build a non-uniform 1D axis with a dense sub-region.
+
+        Like ``_adaptive_axis`` but takes explicit feature-dense-range bounds
+        instead of inferring them from feature values and errors.
+
+        Args:
+            lo, hi: Full axis bounds.
+            dense_lo, dense_hi: Bounds of the dense sub-region (clamped to
+                [lo, hi]).
+            n_pts: Total number of grid points.
+            dense_fraction: Fraction of points allocated to the dense region.
+
+        Returns:
+            Sorted 1D array of length ``n_pts`` spanning [lo, hi].
+        """
+        dense_lo = max(dense_lo, lo)
+        dense_hi = min(dense_hi, hi)
+        if dense_lo >= dense_hi:
+            return np.linspace(lo, hi, n_pts, dtype=np.float64)
+
+        n_dense = max(3, int(round(n_pts * dense_fraction)))
+        n_sparse = max(3, n_pts - n_dense)
+
+        dense_grid = np.linspace(dense_lo, dense_hi, n_dense)
+        sparse_grid = np.linspace(lo, hi, n_sparse)
+
+        merged = np.unique(np.concatenate([dense_grid, sparse_grid]))
+
+        if len(merged) > n_pts:
+            idx = np.round(np.linspace(0, len(merged) - 1, n_pts)).astype(int)
+            merged = merged[idx]
+
+        if len(merged) < n_pts:
+            extra = np.linspace(lo, hi, n_pts - len(merged) + 2)[1:-1]
+            merged = np.unique(np.concatenate([merged, extra]))[:n_pts]
+
+        return merged.astype(np.float64)
+
     def _create_feature_grid(self) -> Grid:
         """Create feature grid from explicit ranges or infer from experiment."""
 
@@ -253,8 +327,14 @@ class GridCalculation:
                     key = d if d in self.feature_ranges else f"y_{d}"
                     lo, hi = self.feature_ranges[key]
                     name = f"y_{d}"
-                    axes[name] = np.linspace(lo, hi, int(self.feature_pts), dtype=np.float64)
-                    print(f"  Feature grid {d}: [{lo:.1f}, {hi:.1f}] (explicit)")
+                    dense_key = d if d in self.feature_dense_ranges else f"y_{d}" if f"y_{d}" in self.feature_dense_ranges else None
+                    if dense_key is not None:
+                        d_lo, d_hi = self.feature_dense_ranges[dense_key]
+                        axes[name] = self._dense_axis(lo, hi, d_lo, d_hi, int(self.feature_pts), self.feature_dense_fraction)
+                        print(f"  Feature grid {d}: [{lo:.1f}, {hi:.1f}] (explicit, dense [{d_lo:.1f}, {d_hi:.1f}])")
+                    else:
+                        axes[name] = np.linspace(lo, hi, int(self.feature_pts), dtype=np.float64)
+                        print(f"  Feature grid {d}: [{lo:.1f}, {hi:.1f}] (explicit)")
                 return Grid(**axes)
 
         # Infer feature grid from experiment.
@@ -310,9 +390,13 @@ class GridCalculation:
                     lo -= padding
                     hi += padding
 
-                print(f"  Feature grid {d}: [{lo:.1f}, {hi:.1f}]")
-
-                if self.adaptive_features:
+                dense_key = d if d in self.feature_dense_ranges else f"y_{d}" if f"y_{d}" in self.feature_dense_ranges else None
+                if dense_key is not None:
+                    d_lo, d_hi = self.feature_dense_ranges[dense_key]
+                    print(f"  Feature grid {d}: [{lo:.1f}, {hi:.1f}] (dense [{d_lo:.1f}, {d_hi:.1f}])")
+                    axes[f"y_{d}"] = self._dense_axis(lo, hi, d_lo, d_hi, int(self.feature_pts), self.feature_dense_fraction)
+                elif self.adaptive_features:
+                    print(f"  Feature grid {d}: [{lo:.1f}, {hi:.1f}] (adaptive)")
                     axes[f"y_{d}"] = self._adaptive_axis(
                         feature_values=feature_i.ravel(),
                         feature_errors=err_i.ravel(),
@@ -321,6 +405,7 @@ class GridCalculation:
                         n_pts=int(self.feature_pts),
                     )
                 else:
+                    print(f"  Feature grid {d}: [{lo:.1f}, {hi:.1f}]")
                     axes[f"y_{d}"] = np.linspace(lo, hi, int(self.feature_pts), dtype=np.float64)
 
             return Grid(**axes)
@@ -935,6 +1020,14 @@ def main():
     parser.add_argument("--adaptive-floor", type=float, default=0.05, help="Uniform floor fraction for adaptive feature grid (0=fully adaptive, 1=nearly uniform)")
     parser.add_argument("--feature-range", type=str, action="append", default=[], metavar="NAME:LO,HI",
                         help="Per-feature axis range, e.g. --feature-range u:-10,60 --feature-range g:15,55")
+    parser.add_argument("--feature-dense-range", type=str, action="append", default=[], metavar="NAME:LO,HI",
+                        help="Per-feature dense sub-region, e.g. --feature-dense-range u:20,30 --feature-dense-range g:22,32")
+    parser.add_argument("--param-dense-range", type=str, action="append", default=[], metavar="NAME:LO,HI",
+                        help="Per-parameter dense sub-region, e.g. --param-dense-range z:0.5,1.5")
+    parser.add_argument("--feature-dense-fraction", type=float, default=0.6,
+                        help="Fraction of feature grid points allocated to each dense region (default 0.6)")
+    parser.add_argument("--param-dense-fraction", type=float, default=0.6,
+                        help="Fraction of parameter grid points allocated to each dense region (default 0.6)")
     args, extra_args = parser.parse_known_args()
 
     exp_kwargs = parse_extra_args(extra_args)
@@ -982,10 +1075,27 @@ def main():
         lo, hi = bounds.split(",")
         feature_ranges[band.strip()] = (float(lo), float(hi))
 
+    # Parse --feature-dense-range args into dict (same syntax as --feature-range)
+    feature_dense_ranges = {}
+    for dr in args.feature_dense_range:
+        band, bounds = dr.split(":")
+        lo, hi = bounds.split(",")
+        feature_dense_ranges[band.strip()] = (float(lo), float(hi))
+
+    # Parse --param-dense-range args into dict
+    param_dense_ranges = {}
+    for pr in args.param_dense_range:
+        name, bounds = pr.split(":")
+        lo, hi = bounds.split(",")
+        param_dense_ranges[name.strip()] = (float(lo), float(hi))
+
     # Save all args (grid_calc + experiment) to args.yaml
-    all_args = {**vars(args), "feature_ranges": feature_ranges, **exp_kwargs}
+    all_args = {**vars(args), "feature_ranges": feature_ranges, "feature_dense_ranges": feature_dense_ranges,
+                "param_dense_ranges": param_dense_ranges, **exp_kwargs}
     # Remove non-serializable or redundant fields
     all_args.pop("feature_range", None)
+    all_args.pop("feature_dense_range", None)
+    all_args.pop("param_dense_range", None)
     with open(out_dir / "args.yaml", "w") as f:
         yaml.dump(all_args, f, default_flow_style=False, sort_keys=False)
     print(f"Saved args to: {out_dir / 'args.yaml'}")
@@ -998,6 +1108,10 @@ def main():
         adaptive_features=args.adaptive_features,
         adaptive_floor=args.adaptive_floor,
         feature_ranges=feature_ranges,
+        feature_dense_ranges=feature_dense_ranges,
+        param_dense_ranges=param_dense_ranges,
+        feature_dense_fraction=args.feature_dense_fraction,
+        param_dense_fraction=args.param_dense_fraction,
     )
 
     # Always save feature grid diagnostic (before run, so it's available on failure)

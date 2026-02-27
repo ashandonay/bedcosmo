@@ -284,13 +284,17 @@ Key CLI flags:
 | `--feature-pts` | Points per feature axis (default 35) |
 | `--adaptive-features` | Concentrate feature grid points around detectable features |
 | `--feature-range NAME:LO,HI` | Override feature axis bounds (e.g. `--feature-range u:-10,60`) |
+| `--feature-dense-range NAME:LO,HI` | Dense sub-region for a feature axis (e.g. `--feature-dense-range u:20,30`) |
+| `--param-dense-range NAME:LO,HI` | Dense sub-region for a parameter axis (e.g. `--param-dense-range z:0.5,1.5`) |
+| `--feature-dense-fraction` | Fraction of feature grid points in the dense region (default 0.6) |
+| `--param-dense-fraction` | Fraction of parameter grid points in the dense region (default 0.6) |
 | `--no-plots` | Skip plot generation |
 
 Outputs are saved to `$SCRATCH/bedcosmo/{cosmo_exp}/grid_calc/{timestamp}/` and include `eig_data_grid.json`, posterior and marginal plots, and the feature grid diagnostic.
 
 ### How the Grids Are Built
 
-**Parameter grid:** For each cosmological parameter, the axis spans the prior support (or the 1%–99% quantile range for unbounded priors) with `param-pts` evenly spaced points.
+**Parameter grid:** For each cosmological parameter, the axis spans the prior support (or the 1%–99% quantile range for unbounded priors) with `param-pts` evenly spaced points. If `--param-dense-range` is given for a parameter, a patched-grid strategy places `param-dense-fraction` of the points in the dense sub-region and the rest across the full range, then merges them.
 
 **Design grid:** Taken directly from the experiment's `designs_grid` attribute, which is configured by the design args YAML.
 
@@ -299,7 +303,7 @@ Outputs are saved to `$SCRATCH/bedcosmo/{cosmo_exp}/grid_calc/{timestamp}/` and 
 1. **Explicit ranges** (`--feature-range`): used directly if provided for all features.
 2. **Auto-inferred:** The experiment's forward model predicts features (e.g. magnitudes) across the parameter grid. Feature errors are computed at the worst-case (minimum-visit) design. The axis spans `feature ± 4σ` (with σ capped at 3.0 to prevent blow-up from non-detections), plus 10% padding on each side.
 
-With `--adaptive-features`, 60% of the point budget is placed in a dense region around detectable features (error < 3) and the remaining 40% spans the full range, then the two grids are merged.
+With `--adaptive-features`, 60% of the point budget is placed in a dense region around detectable features (error < 3) and the remaining 40% spans the full range, then the two grids are merged. Alternatively, `--feature-dense-range` lets you specify the dense sub-region explicitly per feature, with `--feature-dense-fraction` controlling the point allocation (default 0.6). Explicit dense ranges take priority over `--adaptive-features`.
 
 ### Prior PDF
 
