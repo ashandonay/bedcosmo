@@ -89,6 +89,13 @@ echo ""
 module load conda
 conda activate bedcosmo
 
+# Prefer torch's bundled cuBLAS over system libraries to avoid CUBLAS_STATUS_INVALID_VALUE
+# errors from CUDA version mismatches after NERSC system updates
+CUBLAS_LIB="$CONDA_PREFIX/lib/python3.10/site-packages/nvidia/cublas/lib"
+if [ -d "$CUBLAS_LIB" ]; then
+    export LD_LIBRARY_PATH="$CUBLAS_LIB${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+fi
+
 # Load NERSC CUDA and NCCL modules AFTER conda activation
 module load nccl/2.21.5 # NERSC NCCL for Slingshot
 export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
