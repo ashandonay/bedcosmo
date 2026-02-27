@@ -597,7 +597,7 @@ class Evaluator:
         return eigs
 
     @profile_method
-    def get_eig(self, step, nominal_design=False):
+    def get_eig(self, step, nominal_design=False, n_evals=None):
         """
         Calculates EIG for the specified rank.
         Uses caching to avoid redundant calculations.
@@ -606,13 +606,16 @@ class Evaluator:
             step (int): Step for caching key and to load the model.
             nominal_design (bool): If True, calculate EIG for nominal design only.
                                  If False, calculate EIGs for all designs in self.experiment.designs.
+            n_evals (int, optional): Number of evaluations to average over. If None, uses self.n_evals.
 
         Returns:
             tuple: (result, result_std)
                 - result: If nominal_design=True, float; else np.ndarray (mean over n_evals)
                 - result_std: If nominal_design=True, float; else np.ndarray (std over n_evals)
         """
-        cache_key = f"step_{step}_particles_{self.n_particles}_nominal_{nominal_design}_evals_{self.n_evals}"
+        if n_evals is None:
+            n_evals = self.n_evals
+        cache_key = f"step_{step}_particles_{self.n_particles}_nominal_{nominal_design}_evals_{n_evals}"
         
         # Check for cached result
         if cache_key in self._eig_cache:
@@ -700,8 +703,7 @@ class Evaluator:
                 chunk_indices = list(range(i, min(i + chunk_size, num_designs)))
                 design_chunks.append(chunk_indices)
         
-        # Get target n_evals from eig_data (may have been loaded from file)
-        target_n_evals = int(self.eig_data.get('n_evals', self.n_evals))
+        target_n_evals = int(n_evals)
         
         if self.verbose:
             print(f"  Evaluating {num_designs} design(s) in {len(design_chunks)} chunk(s) with {target_n_evals} evaluation(s)")
@@ -1036,6 +1038,44 @@ class Evaluator:
         filename = f"eig_grid_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
         self.plotter.save_figure(fig, filename, run_id=self.run_id, experiment_id=self.exp_id, dpi=400)
 
+    def compute_eig_steps(self, steps, n_evals=1):
+        """
+        Compute EIG at multiple training steps and store results in eig_data.
+
+        Uses a reduced n_evals (default 1) since EIG computation is expensive
+        and this is primarily for visualising how the EIG landscape evolves
+        during training.
+
+        Args:
+            steps (list): Training steps to evaluate (ints or 'last').
+            n_evals (int): Number of evaluations per step (default: 1).
+        """
+        for step in steps:
+            # Resolve 'last' to actual step number
+            _, selected_step = load_model(
+                self.experiment, step, self.run_obj,
+                self.run_args, self.device,
+                global_rank=self.global_rank,
+            )
+            step_key = f"step_{selected_step}"
+
+            # Skip if this step already has variable EIG data
+            existing = self.eig_data.get(step_key, {}).get('variable', {})
+            if 'eigs_avg' in existing and existing['eigs_avg'] is not None:
+                print(f"  Step {selected_step}: using existing EIG data")
+                continue
+
+            print(f"  Step {selected_step}: computing EIG (n_evals={n_evals})...")
+            self.get_eig(step=selected_step, nominal_design=False, n_evals=n_evals)
+
+        # Save updated eig_data (restore 'complete' status since get_eig marks it 'incomplete' during evaluation)
+        self.eig_data['status'] = 'complete'
+        timestamp = getattr(self, 'timestamp', None) or datetime.now().strftime('%Y%m%d_%H%M')
+        eig_data_save_path = f"{self.save_path}/eig_data_{timestamp}.json"
+        with open(eig_data_save_path, "w") as f:
+            json.dump(self.eig_data, f, indent=2)
+        print(f"Saved EIG steps data to {eig_data_save_path}")
+
     def run(self, eval_step=None):
         # Determine eval_step
         if eval_step is None or eval_step == 'last':
@@ -1150,7 +1190,19 @@ class Evaluator:
         except Exception as e:
             print(f"Warning: posterior_steps failed: {e}")
             traceback.print_exc()
-        
+
+        try:
+            # Compute variable EIG at intermediate training steps (cheap: n_evals=1)
+            eig_steps_to_compute = [self.total_steps//4, self.total_steps//2, self.total_steps*3//4]
+            self.compute_eig_steps(steps=eig_steps_to_compute, n_evals=1)
+            # Plot EIG across training steps (intermediate + final eval_step)
+            all_eig_steps = eig_steps_to_compute + [eval_step]
+            self.plotter.eig_designs(eval_step=all_eig_steps, sort=self.sort, include_nominal=self.include_nominal)
+            self._update_runtime()
+        except Exception as e:
+            print(f"Warning: eig_designs (multi-step) failed: {e}")
+            traceback.print_exc()
+
         print(f"Evaluation completed successfully!")
 
 if __name__ == "__main__":

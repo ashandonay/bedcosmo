@@ -195,6 +195,7 @@ class BasePlotter:
         design_labels,
         nominal_design,
         eig_std_values=None,
+        eig_labels=None,
         nominal_eig=None,
         grid_eig_values=None,
         grid_eig_std_values=None,
@@ -211,12 +212,19 @@ class BasePlotter:
         This core method accepts data directly, enabling reuse from both
         MLflow-based RunPlotter and standalone grid-based contexts.
 
+        eig_values and eig_std_values can be a single array (one curve) or a
+        list of arrays (multiple curves overlaid). When a list is provided,
+        sorting and the optimal-design marker use the *last* entry. Use
+        eig_labels to label each curve.
+
         Args:
-            eig_values (np.ndarray): EIG values per design.
+            eig_values (np.ndarray or list[np.ndarray]): EIG values per design.
             input_designs (np.ndarray): Design array with shape (n_designs, n_design_dims).
             design_labels (list): Labels for each design dimension.
             nominal_design (np.ndarray): Nominal design values.
-            eig_std_values (np.ndarray, optional): EIG std per design.
+            eig_std_values (np.ndarray or list[np.ndarray], optional): EIG std per design.
+            eig_labels (list[str], optional): Labels for each EIG curve. Required when
+                eig_values is a list, ignored otherwise.
             nominal_eig (float, optional): Nominal EIG value.
             grid_eig_values (np.ndarray, optional): Grid EIG values.
             grid_eig_std_values (np.ndarray, optional): Grid EIG std values.
@@ -231,44 +239,66 @@ class BasePlotter:
         """
         print(f"Generating EIG designs plot...")
 
-        eig_values = np.asarray(eig_values)
+        # Normalise eig_values / eig_std_values into lists of arrays
+        if isinstance(eig_values, list):
+            eig_list = [np.asarray(v) for v in eig_values]
+        else:
+            eig_list = [np.asarray(eig_values)]
+
+        if eig_std_values is None:
+            std_list = [np.zeros_like(v) for v in eig_list]
+        elif isinstance(eig_std_values, list):
+            std_list = [np.asarray(s) for s in eig_std_values]
+        else:
+            std_list = [np.asarray(eig_std_values)]
+        # Pad std_list to match eig_list length
+        while len(std_list) < len(eig_list):
+            std_list.append(np.zeros_like(eig_list[len(std_list)]))
+
+        if eig_labels is None:
+            if len(eig_list) == 1:
+                eig_labels = ['EIG']
+            else:
+                eig_labels = [f'EIG {i}' for i in range(len(eig_list))]
+
+        multi_curve = len(eig_list) > 1
+
         input_designs = np.asarray(input_designs)
         nominal_design = np.asarray(nominal_design)
 
-        if eig_values.size == 0:
+        # Primary curve is always the last entry (used for sorting / optimal marker)
+        primary_eigs = eig_list[-1]
+        primary_std = std_list[-1]
+
+        if primary_eigs.size == 0:
             raise ValueError("No EIG values provided")
 
         if len(input_designs) <= 1:
             print("Warning: Single or no designs available, skipping EIG designs plot.")
             return None
 
-        if eig_std_values is None:
-            eig_std_values = np.zeros_like(eig_values)
-        else:
-            eig_std_values = np.asarray(eig_std_values)
-
         if grid_eig_values is not None:
             grid_eig_values = np.asarray(grid_eig_values)
         if grid_eig_std_values is not None:
             grid_eig_std_values = np.asarray(grid_eig_std_values)
 
-        # Sort designs if requested
+        # Sort designs if requested (by primary / last curve)
         if sort:
-            sorted_idx = np.argsort(eig_values)[::-1]
+            sorted_idx = np.argsort(primary_eigs)[::-1]
         else:
-            sorted_idx = np.arange(len(eig_values))
+            sorted_idx = np.arange(len(primary_eigs))
 
         sorted_designs = input_designs[sorted_idx]
-        sorted_eigs = eig_values[sorted_idx]
-        sorted_eigs_std = eig_std_values[sorted_idx]
+        sorted_eigs = primary_eigs[sorted_idx]
+        sorted_eigs_std = primary_std[sorted_idx]
         has_grid = (
             grid_eig_values is not None
-            and grid_eig_values.size == eig_values.size
+            and grid_eig_values.size == primary_eigs.size
             and grid_eig_values.size > 0
         )
         if has_grid:
             sorted_grid_eigs = grid_eig_values[sorted_idx]
-            if grid_eig_std_values is not None and grid_eig_std_values.size == eig_values.size:
+            if grid_eig_std_values is not None and grid_eig_std_values.size == primary_eigs.size:
                 sorted_grid_eigs_std = grid_eig_std_values[sorted_idx]
             else:
                 sorted_grid_eigs_std = np.zeros_like(sorted_grid_eigs)
@@ -313,12 +343,25 @@ class BasePlotter:
             ax0.tick_params(axis='x', which='both', length=0)
             x_vals = np.arange(len(sorted_eigs))
 
-        # Plot EIG with error bars
         from matplotlib.colors import to_rgba
-        fill_color = to_rgba(color, alpha=0.3)
-        ax0.fill_between(x_vals, sorted_eigs - sorted_eigs_std, sorted_eigs + sorted_eigs_std,
-                         color=fill_color, zorder=1)
-        ax0.plot(x_vals, sorted_eigs, label='EIG', color=color, linewidth=2.5, zorder=5)
+
+        # Plot all EIG curves
+        if multi_curve:
+            curve_colors = plt.cm.viridis_r(np.linspace(0, 1, len(eig_list)))
+        else:
+            curve_colors = [color]
+
+        for i, (ev, sv, lbl) in enumerate(zip(eig_list, std_list, eig_labels)):
+            cc = curve_colors[i]
+            s_eigs = ev[sorted_idx]
+            s_std = sv[sorted_idx]
+            is_primary = (i == len(eig_list) - 1)
+            lw = 2.5 if is_primary else 1.5
+            ax0.fill_between(x_vals, s_eigs - s_std, s_eigs + s_std,
+                             color=to_rgba(cc, alpha=0.2 if is_primary else 0.12),
+                             zorder=1 + i)
+            ax0.plot(x_vals, s_eigs, label=lbl, color=cc, linewidth=lw, zorder=5 + i)
+
         if has_grid:
             ax0.fill_between(
                 x_vals,
@@ -1935,8 +1978,34 @@ class RunPlotter(BasePlotter):
         ), eval_step, eig_data
 
     def eig_designs(self, eval_step=None, sort=True, sort_step=None, include_nominal=True):
-        """Loads EIG data from MLflow artifacts and calls BasePlotter.eig_designs()."""
-        data, _, _ = self._extract_eig_data(eval_step, include_nominal)
+        """Loads EIG data from MLflow artifacts and calls BasePlotter.eig_designs().
+
+        eval_step can be a single step or a list of steps. When a list is
+        provided, each step's EIG curve is overlaid; the last step is used for
+        sorting and the optimal-design marker.
+        """
+        # Use the last step as primary for _extract_eig_data (grid, nominal, etc.)
+        primary_step = eval_step[-1] if isinstance(eval_step, list) else eval_step
+        data, _, eig_data = self._extract_eig_data(primary_step, include_nominal)
+
+        if isinstance(eval_step, list) and len(eval_step) > 1:
+            eig_values_list = []
+            eig_std_list = []
+            eig_labels_list = []
+            for s in eval_step:
+                _, sk = self._resolve_step(eig_data, s)
+                variable_data = eig_data[sk].get('variable', {})
+                eig_vals = variable_data.get('eigs_avg')
+                if eig_vals is None:
+                    continue
+                eig_values_list.append(np.asarray(eig_vals, dtype=float))
+                eig_std_list.append(np.asarray(variable_data.get('eigs_std', np.zeros_like(eig_values_list[-1])), dtype=float))
+                eig_labels_list.append(f'Step {sk.split("_")[1]}')
+
+            data['eig_values'] = eig_values_list
+            data['eig_std_values'] = eig_std_list
+            data['eig_labels'] = eig_labels_list
+
         return super().eig_designs(**data, sort=sort, color="black")
 
 
