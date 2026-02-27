@@ -102,8 +102,8 @@ class GridCalculation:
     def __init__(
         self,
         experiment,
-        param_pts: int = 75,
-        feature_pts: int = 35,
+        param_pts: int = 231,
+        feature_pts: int = 101,
         device: str = "cpu",
         adaptive_features: bool = False,
         adaptive_floor: float = 0.05,
@@ -302,7 +302,7 @@ class GridCalculation:
                     # Auto bounds: use per-object Gaussian envelopes
                     # feature ± n_sigma * err, capped to prevent blow-up.
                     n_sigma = 4.0
-                    feature_err_cap = 3.0
+                    feature_err_cap = 5.0
                     err_capped = np.minimum(err_i, feature_err_cap)
                     lo = float(np.min(feature_i - n_sigma * err_capped))
                     hi = float(np.max(feature_i + n_sigma * err_capped))
@@ -706,8 +706,21 @@ class GridCalculation:
         if self.experiment is not None and n_features >= 2:
             if hasattr(self.experiment, "design_labels"):
                 if self.experiment.name == "num_visits":
-                    z_min, z_max = redshift_range or (0.1, 3.0)
-                    z_arr = torch.linspace(z_min, z_max, n_redshift_pts, dtype=torch.float64)
+                    if hasattr(self.experiment, "prior") and "z" in self.experiment.prior:
+                        z_prior = self.experiment.prior["z"]
+                        if redshift_range is not None:
+                            z_min, z_max = redshift_range
+                        else:
+                            z_min = float(z_prior.icdf(torch.tensor(1e-6, dtype=torch.float64)))
+                            z_max = float(z_prior.icdf(torch.tensor(1 - 1e-6, dtype=torch.float64)))
+                        p_low = float(z_prior.cdf(torch.tensor(z_min, dtype=torch.float64)))
+                        p_high = float(z_prior.cdf(torch.tensor(z_max, dtype=torch.float64)))
+                        quantiles = torch.linspace(p_low, p_high, n_redshift_pts, dtype=torch.float64).clamp(1e-6, 1 - 1e-6)
+                        z_arr = z_prior.icdf(quantiles).clamp(z_min, z_max)
+                    else:
+                        z_min, z_max = redshift_range or (0.1, 3.0)
+                        z_arr = torch.linspace(z_min, z_max, n_redshift_pts, dtype=torch.float64)
+                        p_low, p_high = 0.0, 1.0
                     with torch.no_grad():
                         track_features = self.experiment._calculate_magnitudes(z_arr).detach().cpu().numpy()
                 else:
@@ -719,15 +732,19 @@ class GridCalculation:
                     ax.plot(track_features[:, ix], track_features[:, iy], color="red",
                             linewidth=1.5, zorder=5, label="z track")
                     z_np = z_arr.numpy()
-                    for z_mark in [0.5, 1.0, 1.5, 2.0, 2.5, 3.0]:
-                        if z_min <= z_mark <= z_max:
-                            closest = int(np.argmin(np.abs(z_np - z_mark)))
-                            ax.plot(track_features[closest, ix], track_features[closest, iy], "o",
-                                    color="red", markersize=4, zorder=6)
-                            ax.annotate(f"z={z_mark:.1f}",
-                                        (track_features[closest, ix], track_features[closest, iy]),
-                                        textcoords="offset points", xytext=(5, 5),
-                                        fontsize=7, color="red", fontweight="bold", zorder=6)
+                    if hasattr(self.experiment, "prior") and "z" in self.experiment.prior:
+                        mark_qs = torch.linspace(p_low, p_high, 6, dtype=torch.float64).clamp(1e-6, 1 - 1e-6)
+                        z_marks = z_prior.icdf(mark_qs).clamp(z_min, z_max).numpy()
+                    else:
+                        z_marks = np.linspace(z_min, z_max, 6)
+                    for z_mark in z_marks:
+                        closest = int(np.argmin(np.abs(z_np - z_mark)))
+                        ax.plot(track_features[closest, ix], track_features[closest, iy], "o",
+                                color="red", markersize=4, zorder=6)
+                        ax.annotate(f"z={z_mark:.2f}",
+                                    (track_features[closest, ix], track_features[closest, iy]),
+                                    textcoords="offset points", xytext=(5, 5),
+                                    fontsize=7, color="red", fontweight="bold", zorder=6)
                     ax.legend(fontsize=8)
 
         ax.set_title("Feature grid points")
@@ -745,7 +762,7 @@ class GridCalculation:
         title: Optional[str] = None,
         redshift_range: Optional[Tuple[float, float]] = None,
         n_redshift_pts: int = 200,
-        plot_redshift_line: bool = False,
+        param_overlay: bool = False,
         log_scale: bool = True,
     ):
         """
@@ -764,8 +781,7 @@ class GridCalculation:
             n_redshift_pts: Number of points along the redshift track.
             design_type: "nominal" (default) or "best". Used when design_index
                   is None to pick the design automatically.
-            plot_redshift_line: If True (default), overlay the redshift track when
-                  experiment is provided and the marginal is 2D. Set to False to omit.
+            param_overlay: If True, overlay the parameter track when the marginal is 2D.
             log_scale: If True, plot log10 of the marginal values.
 
         Returns:
@@ -825,33 +841,48 @@ class GridCalculation:
                 ax.set_ylim(0, None)
 
         # Overlay redshift track if experiment is provided and requested
-        if (
-            plot_redshift_line
-            and n_features == 2
-            and y_vals is not None
-        ):
-            if hasattr(self.experiment, "design_labels"):
-                if self.experiment.name == "num_visits":
-                    z_min, z_max = redshift_range or (0.1, 3.0)
-                    z_arr = torch.linspace(z_min, z_max, n_redshift_pts, dtype=torch.float64)
+        if self.experiment.name == "num_visits":
+            if (
+                param_overlay
+                and n_features == 2
+                and y_vals is not None
+            ):
+                if hasattr(self.experiment, "design_labels"):
+                    if hasattr(self.experiment, "prior") and "z" in self.experiment.prior:
+                        z_prior = self.experiment.prior["z"]
+                        if redshift_range is not None:
+                            z_min, z_max = redshift_range
+                        else:
+                            z_min = float(z_prior.icdf(torch.tensor(1e-6, dtype=torch.float64)))
+                            z_max = float(z_prior.icdf(torch.tensor(1 - 1e-6, dtype=torch.float64)))
+                        p_low = float(z_prior.cdf(torch.tensor(z_min, dtype=torch.float64)))
+                        p_high = float(z_prior.cdf(torch.tensor(z_max, dtype=torch.float64)))
+                        quantiles = torch.linspace(p_low, p_high, n_redshift_pts, dtype=torch.float64).clamp(1e-6, 1 - 1e-6)
+                        z_arr = z_prior.icdf(quantiles).clamp(z_min, z_max)
+                    else:
+                        z_min, z_max = redshift_range or (0.1, 3.0)
+                        z_arr = torch.linspace(z_min, z_max, n_redshift_pts, dtype=torch.float64)
+                        p_low, p_high = 0.0, 1.0
                     with torch.no_grad():
                         track_features = self.experiment._calculate_magnitudes(z_arr).detach().cpu().numpy()
-                else:
-                    raise NotImplementedError(f"Feature grid inference not implemented for {self.experiment.name}.")
-                filter_to_idx = {f"y_{d}": i for i, d in enumerate(self.experiment.design_labels)}
-                ix = filter_to_idx.get(feature_names[0])
-                iy = filter_to_idx.get(feature_names[1])
-                if ix is not None and iy is not None:
-                    track_x = track_features[:, ix]
-                    track_y = track_features[:, iy]
-                    ax.plot(track_x, track_y, color="white", linewidth=2, zorder=5)
-                    z_np = z_arr.numpy()
-                    for z_mark in [0.5, 1.0, 1.5, 2.0, 2.5, 3.0]:
-                        if z_min <= z_mark <= z_max:
+                    filter_to_idx = {f"y_{d}": i for i, d in enumerate(self.experiment.design_labels)}
+                    ix = filter_to_idx.get(feature_names[0])
+                    iy = filter_to_idx.get(feature_names[1])
+                    if ix is not None and iy is not None:
+                        track_x = track_features[:, ix]
+                        track_y = track_features[:, iy]
+                        ax.plot(track_x, track_y, color="white", linewidth=2, zorder=5)
+                        z_np = z_arr.numpy()
+                        if hasattr(self.experiment, "prior") and "z" in self.experiment.prior:
+                            mark_qs = torch.linspace(p_low, p_high, 6, dtype=torch.float64).clamp(1e-6, 1 - 1e-6)
+                            z_marks = z_prior.icdf(mark_qs).clamp(z_min, z_max).numpy()
+                        else:
+                            z_marks = np.linspace(z_min, z_max, 6)
+                        for z_mark in z_marks:
                             closest = int(np.argmin(np.abs(z_np - z_mark)))
                             ax.plot(track_x[closest], track_y[closest], "o",
                                     color="black", markersize=4, zorder=6)
-                            ax.annotate(f"z={z_mark:.1f}",
+                            ax.annotate(f"z={z_mark:.2f}",
                                         (track_x[closest], track_y[closest]),
                                         textcoords="offset points", xytext=(5, 5),
                                         fontsize=7, color="black", fontweight="bold", zorder=6)
@@ -878,7 +909,7 @@ class GridCalculation:
 
 
 def main():
-    from bedcosmo.util import init_experiment, get_experiment_config_path
+    from bedcosmo.util import init_experiment, get_experiment_config_path, parse_extra_args
 
     parser = argparse.ArgumentParser(description="Standalone grid-based EIG runner")
     parser.add_argument("cosmo_exp", type=str, help="Experiment type (e.g. num_visits, num_tracers)")
@@ -906,37 +937,7 @@ def main():
                         help="Per-feature axis range, e.g. --feature-range u:-10,60 --feature-range g:15,55")
     args, extra_args = parser.parse_known_args()
 
-    # Parse extra args as experiment kwargs
-    exp_kwargs = {}
-    i = 0
-    while i < len(extra_args):
-        arg = extra_args[i]
-        if arg.startswith("--"):
-            key = arg.lstrip("-").replace("-", "_")
-            if i + 1 < len(extra_args) and not extra_args[i + 1].startswith("--"):
-                val = extra_args[i + 1]
-                # Auto-convert types
-                try:
-                    val = int(val)
-                except ValueError:
-                    try:
-                        val = float(val)
-                    except ValueError:
-                        if val.lower() == "true":
-                            val = True
-                        elif val.lower() == "false":
-                            val = False
-                        elif val.lower() == "none":
-                            val = None
-                exp_kwargs[key] = val
-                i += 2
-            else:
-                # Flag-style arg (no value)
-                exp_kwargs[key] = True
-                i += 1
-        else:
-            i += 1
-
+    exp_kwargs = parse_extra_args(extra_args)
     if exp_kwargs:
         print(f"Experiment kwargs: {exp_kwargs}")
 

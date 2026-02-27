@@ -953,18 +953,21 @@ class RunPlotter(BasePlotter):
     Handles training plots, evaluation plots, and other run-specific visualizations.
     """
     
-    def __init__(self, run_id, cosmo_exp='num_tracers'):
+    def __init__(self, run_id, cosmo_exp='num_tracers', experiment_args=None):
         """
         Initialize the run plotter.
-        
+
         Args:
             run_id (str): MLflow run ID to plot.
             cosmo_exp (str): Cosmology experiment folder name.
+            experiment_args (dict): Optional kwargs to pass to init_experiment, overriding saved run params.
         """
         super().__init__(cosmo_exp=cosmo_exp)
         self.run_id = run_id
+        self.experiment_args = experiment_args or {}
         self._run_data = None
         self._experiment_id = None
+        self._experiment = None
     
     def _get_artifacts_dir(self):
         """
@@ -1017,6 +1020,14 @@ class RunPlotter(BasePlotter):
         if self._experiment_id is None:
             _ = self.run_data  # Trigger lazy loading
         return self._experiment_id
+
+    def get_experiment(self, device="cuda:0"):
+        """Initialize (or return cached) experiment with experiment_args overrides applied."""
+        if self._experiment is None:
+            run_obj = self.run_data['run_obj']
+            run_args = self.run_data['params'].copy()
+            self._experiment = init_experiment(run_obj, run_args, device=device, **self.experiment_args)
+        return self._experiment
     
     def plot_training(self, var=None, log_scale=True, loss_step_freq=10, 
                      start_step=0, area_step_freq=100, lr_step_freq=1,
@@ -1264,7 +1275,9 @@ class RunPlotter(BasePlotter):
 
         step_for_model = 'last' if eval_step is None else step_num
 
-        experiment = init_experiment(run_obj, run_args, device=device, design_args=None, global_rank=0)
+        experiment = self.get_experiment(device=device)
+        run_obj = self.run_data['run_obj']
+        run_args = self.run_data['params'].copy()
         posterior_flow, selected_step = load_model(experiment, step_for_model, run_obj, run_args, device, global_rank=0)
 
         title = f"Posterior Evaluation - Run: {self.run_id[:8]}"

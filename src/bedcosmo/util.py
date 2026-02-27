@@ -1454,6 +1454,50 @@ def parse_float_or_list(value):
         except ValueError:
             raise argparse.ArgumentTypeError("Invalid value '{}'. Must be a float or JSON list of floats.".format(value))
             
+def parse_extra_args(extra_args: list) -> dict:
+    """
+    Parse a list of unknown CLI args into a kwargs dict, auto-converting value types.
+
+    Handles ``--some-flag`` (boolean True) and ``--key value`` pairs.
+    Dashes in key names are converted to underscores.
+    Values are coerced in order: int → float → bool/None → str.
+
+    Args:
+        extra_args: List of unparsed argument strings from ``parse_known_args()``.
+
+    Returns:
+        Dictionary of keyword arguments suitable for passing to ``init_experiment``.
+    """
+    kwargs = {}
+    i = 0
+    while i < len(extra_args):
+        arg = extra_args[i]
+        if arg.startswith("--"):
+            key = arg.lstrip("-").replace("-", "_")
+            if i + 1 < len(extra_args) and not extra_args[i + 1].startswith("--"):
+                val = extra_args[i + 1]
+                try:
+                    val = int(val)
+                except ValueError:
+                    try:
+                        val = float(val)
+                    except ValueError:
+                        if val.lower() == "true":
+                            val = True
+                        elif val.lower() == "false":
+                            val = False
+                        elif val.lower() == "none":
+                            val = None
+                kwargs[key] = val
+                i += 2
+            else:
+                kwargs[key] = True
+                i += 1
+        else:
+            i += 1
+    return kwargs
+
+
 def sort_key_for_group_tuple(group_tuple_key):
     key_as_num_or_str = []
     for val_in_tuple in group_tuple_key:

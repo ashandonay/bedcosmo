@@ -178,25 +178,25 @@ def print_timing_report(cached_times, nocache_times, cached_total, nocache_total
 
 def main():
     parser = argparse.ArgumentParser(description='Diagnose prior_flow cache behavior')
-    parser.add_argument('--prior_args_path', type=str, 
+    parser.add_argument('--prior-args-path', type=str,
                         default='num_tracers/prior_args_posterior.yaml',
                         help='Path to prior_args.yaml with prior_flow')
     parser.add_argument('--dataset', type=str, default='dr1',
                         help='Dataset to use (dr1 or dr2)')
-    parser.add_argument('--design_args_path', type=str,
+    parser.add_argument('--design-args-path', type=str,
                         default=None,
                         help='Path to design_args.yaml (defaults to design_args_{dataset}.yaml)')
-    parser.add_argument('--cosmo_model', type=str, default='base_omegak_w_wa',
+    parser.add_argument('--cosmo-model', type=str, default='base_omegak_w_wa',
                         help='Cosmology model')
-    parser.add_argument('--n_steps', type=int, default=50,
+    parser.add_argument('--n-steps', type=int, default=50,
                         help='Number of steps to simulate')
-    parser.add_argument('--n_particles', type=int, default=30,
+    parser.add_argument('--n-particles', type=int, default=30,
                         help='Number of particles per step')
-    parser.add_argument('--n_designs', type=int, default=287,
+    parser.add_argument('--n-designs', type=int, default=287,
                         help='Number of designs (set to 1 for faster test)')
-    parser.add_argument('--cache_size', type=int, default=100000,
+    parser.add_argument('--cache-size', type=int, default=100000,
                         help='Cache size for cached sampling')
-    parser.add_argument('--output_dir', type=str, default='.',
+    parser.add_argument('--output-dir', type=str, default='.',
                         help='Output directory for plots')
     parser.add_argument('--device', type=str, default='cuda:0',
                         help='Device to use')

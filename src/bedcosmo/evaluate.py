@@ -22,7 +22,7 @@ from matplotlib.patches import Rectangle
 from bedcosmo.util import (
     auto_seed, init_experiment, init_nf, load_model, get_runs_data,
     get_experiment_config_path, profile_method, parse_float_or_list,
-    get_rng_state,
+    get_rng_state, parse_extra_args,
 )
 import mlflow
 import inspect
@@ -31,11 +31,11 @@ from bedcosmo.grid_calc import GridCalculation
 
 class Evaluator:
     def __init__(
-            self, run_id, guide_samples=1000, design_chunk_size=None, seed=1, cosmo_exp='num_tracers', 
-            levels=[0.68, 0.95], global_rank=0, eig_file_path=None, n_evals=10, n_particles=1000, 
-            param_space='physical', display_run=False, verbose=False, device="cuda:0", profile=False, 
+            self, run_id, guide_samples=1000, design_chunk_size=None, seed=1, cosmo_exp='num_tracers',
+            levels=[0.68, 0.95], global_rank=0, eig_file_path=None, n_evals=10, n_particles=1000,
+            param_space='physical', display_run=False, verbose=False, device="cuda:0", profile=False,
             sort=True, include_nominal=False, batch_size=1, particle_batch_size=None, design_args_path=None,
-            grid=False, grid_param_pts=75, grid_feature_pts=35
+            grid=False, grid_param_pts=231, grid_feature_pts=101, experiment_args=None
             ):
         self.cosmo_exp = cosmo_exp
         
@@ -91,6 +91,13 @@ class Evaluator:
         self._grid_experiment = None
         self._grid_samples = None
         
+        # Parse experiment_args override
+        if isinstance(experiment_args, str):
+            self.experiment_args = json.loads(experiment_args)
+        elif experiment_args is None:
+            self.experiment_args = {}
+        else:
+            self.experiment_args = dict(experiment_args)
         # Load design_args from file
         if design_args_path is not None:
             if not os.path.exists(design_args_path):
@@ -102,11 +109,12 @@ class Evaluator:
             # Will default to the run's artifacts design_args.yaml
             self.design_args = None
 
-        # Initialize experiment - it will handle input_design and generate designs accordingly 
+        # Initialize experiment - it will handle input_design and generate designs accordingly
         # (single design, multiple designs, or grid)
         self.experiment = init_experiment(
-            self.run_obj, self.run_args, device=self.device, 
-            design_args=self.design_args, global_rank=self.global_rank
+            self.run_obj, self.run_args, device=self.device,
+            design_args=self.design_args, global_rank=self.global_rank,
+            **self.experiment_args
         )
         if self.eig_file_path is not None and 'input_designs' in self.eig_data:
             self.input_designs = torch.tensor(self.eig_data['input_designs'], device=self.device, dtype=torch.float64)
@@ -118,7 +126,7 @@ class Evaluator:
             
         
         # Initialize plotter for saving figures
-        self.plotter = RunPlotter(run_id=self.run_id, cosmo_exp=self.cosmo_exp)
+        self.plotter = RunPlotter(run_id=self.run_id, cosmo_exp=self.cosmo_exp, experiment_args=self.experiment_args)
         
         # Cache for EIG calculations to avoid redundant computations
         self._eig_cache = {}
@@ -148,6 +156,7 @@ class Evaluator:
                 device="cpu",
                 design_args=self.design_args,
                 global_rank=self.global_rank,
+                **self.experiment_args,
             )
 
         # Use class-based BruteForceDesigner with experiment's prior
@@ -207,7 +216,7 @@ class Evaluator:
         try:
             fig_marginal, _ = gc.plot_marginal(
                 design_type="nominal",
-                plot_redshift_line=True,
+                param_overlay=True,
             )
             filename = f"grid_marginal_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
             self.plotter.save_figure(
@@ -1171,12 +1180,17 @@ if __name__ == "__main__":
     parser.add_argument('--grid-param-pts', type=int, default=75, help='Number of points per parameter axis for grid parameter grid')
     parser.add_argument('--grid-feature-pts', type=int, default=35, help='Number of points per feature axis for grid feature grid')
 
-    args = parser.parse_args()
+    args, extra_args = parser.parse_known_args()
+
+    experiment_args = parse_extra_args(extra_args)
+    if experiment_args:
+        print(f"Experiment args overrides: {experiment_args}")
 
     valid_params = inspect.signature(Evaluator.__init__).parameters.keys()
     valid_params = [k for k in valid_params if k != 'self']
     eval_args = {k: v for k, v in vars(args).items() if k in valid_params}
-    
+    eval_args['experiment_args'] = experiment_args
+
     print(f"Evaluating with parameters:")
     print(json.dumps(eval_args, indent=2))
     evaluator = Evaluator(**eval_args)
