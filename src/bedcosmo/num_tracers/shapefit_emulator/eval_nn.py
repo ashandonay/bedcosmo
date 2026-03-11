@@ -1,22 +1,88 @@
 import argparse
 import json
+import math
+from datetime import datetime
 
 import matplotlib.pyplot as plt
+import matplotlib.ticker as mticker
 import numpy as np
 import torch
-from desilike.theories.galaxy_clustering import ShapeFitPowerSpectrumExtractor
 import sys
 import os
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__))))
-from prep_shapefit_data import DEFAULT_PRIORS, TARGET_NAMES, latin_hypercube_samples, run_extractor, get_default_save_path
 from model import NNRegressor
+from util import latin_hypercube_samples
 
-def run_eval(model_path: str, save_path: str, n_samples: int = 500, seed: int = 42, hist_xlims: dict[str, tuple[float, float]] | None = None, rtol: float = 5e-3, atol: float = 1e-4) -> None:
+def _log_bins(vals: np.ndarray, n_bins: int = 30) -> np.ndarray:
+    """Return histogram bin edges appropriate for log/symlog data."""
+    if np.all(vals > 0):
+        return np.geomspace(vals.min(), vals.max(), n_bins + 1)
+    # Symlog: evenly space bins in transformed coordinates
+    abs_nonzero = np.abs(vals[vals != 0])
+    linthresh = float(np.min(abs_nonzero)) if len(abs_nonzero) > 0 else 1e-6
+    def fwd(x):
+        return np.sign(x) * np.log10(1 + np.abs(x) / linthresh)
+    def inv(y):
+        return np.sign(y) * linthresh * (10 ** np.abs(y) - 1)
+    t_min, t_max = fwd(vals.min()), fwd(vals.max())
+    return inv(np.linspace(t_min, t_max, n_bins + 1))
+
+
+def _set_plain_formatter(ax) -> None:
+    """Ensure tick labels use compact text, not LaTeX scientific notation."""
+    for axis in (ax.xaxis, ax.yaxis):
+        scale = axis.get_scale()
+        if scale == "linear":
+            axis.set_major_locator(mticker.MaxNLocator(nbins=5, min_n_ticks=3))
+        elif scale == "log":
+            vmin, vmax = axis.get_view_interval()
+            if vmin > 0 and vmax > 0 and vmax / vmin < 30:
+                axis.set_major_locator(mticker.LogLocator(subs=[1, 2, 5], numticks=8))
+        # Use plain '1e-3' style, not '$1 \times 10^{-3}$'
+        axis.set_major_formatter(mticker.FuncFormatter(
+            lambda v, _: "" if v == 0 else f"{v:.3g}"
+        ))
+        axis.set_minor_formatter(mticker.NullFormatter())
+        axis.get_offset_text().set_visible(False)
+
+
+def _set_log_or_symlog(ax, axis: str, vals: np.ndarray) -> None:
+    """Set log scale for all-positive data, symlog for mixed-sign data."""
+    setter = ax.set_xscale if axis == "x" else ax.set_yscale
+    if np.all(vals > 0):
+        setter("log")
+    else:
+        abs_nonzero = np.abs(vals[vals != 0])
+        linthresh = float(np.min(abs_nonzero)) if len(abs_nonzero) > 0 else 1e-6
+        setter("symlog", linthresh=linthresh)
+
+
+
+def _get_pipeline(target_names):
+    """Return (default_priors, target_names, ground_truth_fn, needs_setup) for the right pipeline."""
+    if target_names[0].startswith("cov_"):
+        from prep_shapefit_errors import DEFAULT_PRIORS, TARGET_NAMES, run_fisher
+        def ground_truth_fn(_setup, sample):
+            return run_fisher(sample)
+        return DEFAULT_PRIORS, TARGET_NAMES, ground_truth_fn, None
+    else:
+        from prep_shapefit_data import DEFAULT_PRIORS, TARGET_NAMES, run_extractor
+        from desilike.theories.galaxy_clustering import ShapeFitPowerSpectrumExtractor
+        extractor = ShapeFitPowerSpectrumExtractor()
+        extractor()
+        extractor.get()
+        def ground_truth_fn(setup, sample):
+            return run_extractor(setup, sample)
+        return DEFAULT_PRIORS, TARGET_NAMES, ground_truth_fn, extractor
+
+
+def run_eval(model_path: str, save_path: str, n_samples: int = 500, seed: int = 42, hist_xlims: dict[str, tuple[float, float]] | None = None, rtol: float = 5e-3, atol: float = 1e-4, log_scale: bool = False) -> None:
     os.makedirs(save_path, exist_ok=True)
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     np.random.seed(seed)
 
     # Load trained model
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
     ckpt = torch.load(model_path, map_location=device, weights_only=False)
     model = NNRegressor(
@@ -24,6 +90,7 @@ def run_eval(model_path: str, save_path: str, n_samples: int = 500, seed: int = 
         out_dim=len(ckpt["target_names"]),
         hidden_dim=ckpt["hidden_dim"],
         n_hidden=ckpt["n_hidden"],
+        dropout=ckpt.get("dropout", 0.0),
     ).to(device)
     model.load_state_dict(ckpt["state_dict"])
     model.eval()
@@ -32,13 +99,13 @@ def run_eval(model_path: str, save_path: str, n_samples: int = 500, seed: int = 
     x_sigma = ckpt["x_sigma"].cpu().numpy()
     y_mu = ckpt["y_mu"].cpu().numpy()
     y_sigma = ckpt["y_sigma"].cpu().numpy()
+    log_normalize = ckpt.get("log_normalize", False)
+    y_linthresh = ckpt["y_linthresh"].cpu().numpy() if ckpt.get("y_linthresh") is not None else None
     param_names = ckpt["param_names"]
+    ckpt_target_names = ckpt["target_names"]
 
-    # Sample fresh cosmological parameters from the priors, collecting
-    # exactly n_samples accepted (valid) samples.
-    extractor = ShapeFitPowerSpectrumExtractor()
-    extractor()
-    extractor.get()
+    # Detect pipeline from checkpoint target names
+    default_priors, target_names, ground_truth_fn, setup = _get_pipeline(ckpt_target_names)
 
     true_rows = []
     param_rows = []
@@ -46,12 +113,12 @@ def run_eval(model_path: str, save_path: str, n_samples: int = 500, seed: int = 
     batch_seed = seed
     while len(true_rows) < n_samples:
         remaining = n_samples - len(true_rows)
-        draws = latin_hypercube_samples(DEFAULT_PRIORS, n_samples=remaining, seed=batch_seed)
+        draws = latin_hypercube_samples(default_priors, n_samples=remaining, seed=batch_seed)
         batch_seed += 1
         for sample in draws:
             try:
-                targets = run_extractor(extractor, sample)
-                vals = [targets[t] for t in TARGET_NAMES]
+                targets = ground_truth_fn(setup, sample)
+                vals = [targets[t] for t in target_names]
                 if not all(np.isfinite(vals)):
                     skipped += 1
                     continue
@@ -73,14 +140,29 @@ def run_eval(model_path: str, save_path: str, n_samples: int = 500, seed: int = 
     with torch.no_grad():
         y_pred_norm = model(torch.from_numpy(x_norm).to(device)).cpu().numpy()
     y_pred = y_pred_norm * y_sigma + y_mu
+    if log_normalize and y_linthresh is not None:
+        # Invert symlog: sign(z) * linthresh * expm1(|z|)
+        y_pred = np.sign(y_pred) * y_linthresh * np.expm1(np.abs(y_pred))
 
-    deltas = (y_pred - y_true) / y_true * 100.0
+    # Absolute error for covariance elements (off-diagonal can be near zero),
+    # percentage error for other targets.
+    is_cov = target_names[0].startswith("cov_")
+    if is_cov:
+        deltas = y_pred - y_true
+        delta_label = "absolute error"
+        delta_unit = ""
+    else:
+        deltas = (y_pred - y_true) / y_true * 100.0
+        delta_label = "% error"
+        delta_unit = " [%]"
 
-    # Plot histograms (2x2 grid)
-    n_targets = len(TARGET_NAMES)
-    fig, axes = plt.subplots(2, 2, figsize=(10, 8))
-    axes = axes.flatten()
-    for i, name in enumerate(TARGET_NAMES):
+    # Plot histograms (dynamic grid)
+    n_targets = len(target_names)
+    ncols = min(n_targets, 4)
+    nrows = math.ceil(n_targets / ncols)
+    fig, axes = plt.subplots(nrows, ncols, figsize=(4 * ncols, 3.5 * nrows))
+    axes = np.atleast_1d(axes).flatten()
+    for i, name in enumerate(target_names):
         ax = axes[i]
         if hist_xlims and name in hist_xlims:
             lo, hi = hist_xlims[name]
@@ -91,16 +173,16 @@ def run_eval(model_path: str, save_path: str, n_samples: int = 500, seed: int = 
         ax.axvline(0, color="red", linestyle="--", linewidth=1)
         mean = np.mean(deltas[:, i])
         std = np.std(deltas[:, i])
-        ax.set_xlabel(f"$\\Delta$ {name} [%]")
+        ax.set_xlabel(f"$\\Delta$ {name}{delta_unit}")
         ax.set_ylabel("Count")
-        ax.set_title(f"{name}\nmean={mean:.2f}%, std={std:.2f}%")
-        if hist_xlims and name in hist_xlims:
-            ax.set_xlim(hist_xlims[name])
-    fig.suptitle("NN prediction error (% of true value)", fontsize=14, y=1.02)
+        ax.set_title(f"{name}\nmean={mean:.2e}, std={std:.2e}")
+    for i in range(n_targets, len(axes)):
+        axes[i].set_visible(False)
+    fig.suptitle(f"NN prediction {delta_label}", fontsize=14, y=1.02)
     fig.tight_layout()
-    fig.savefig(os.path.join(save_path, "eval_nn.png"), dpi=150, bbox_inches="tight")
+    fig.savefig(os.path.join(save_path, f"eval_nn_{timestamp}.png"), dpi=150, bbox_inches="tight")
     plt.close(fig)
-    print(f"Saved evaluation plot to: {os.path.join(save_path, 'eval_nn.png')}")
+    print(f"Saved evaluation plot to: {os.path.join(save_path, f'eval_nn_{timestamp}.png')}")
 
     # --- Triangle plot of cosmo inputs, coloured by outlier status ---
     # A sample is an "outlier" if ANY target fails np.isclose
@@ -108,7 +190,8 @@ def run_eval(model_path: str, save_path: str, n_samples: int = 500, seed: int = 
     is_outlier = ~np.all(is_close, axis=1)
     n_params = len(param_names)
 
-    fig2, axes2 = plt.subplots(n_params, n_params, figsize=(3 * n_params, 3 * n_params))
+    panel_size = 4 if log_scale else 3
+    fig2, axes2 = plt.subplots(n_params, n_params, figsize=(panel_size * n_params, panel_size * n_params))
     inlier = ~is_outlier
 
     for i in range(n_params):
@@ -118,19 +201,29 @@ def run_eval(model_path: str, save_path: str, n_samples: int = 500, seed: int = 
                 ax.set_visible(False)
                 continue
             if i == j:
-                ax.hist(x_raw[inlier, i], bins=30, color="tab:blue", alpha=0.6, label="pass")
-                ax.hist(x_raw[is_outlier, i], bins=30, color="tab:red", alpha=0.6, label="fail")
+                all_vals = x_raw[:, i]
+                bins = _log_bins(all_vals) if log_scale else np.linspace(all_vals.min(), all_vals.max(), 31)
+                ax.hist(x_raw[inlier, i], bins=bins, color="tab:blue", alpha=0.6, label="pass")
+                ax.hist(x_raw[is_outlier, i], bins=bins, color="tab:red", alpha=0.6, label="fail")
             else:
                 ax.scatter(x_raw[inlier, j], x_raw[inlier, i], s=4, alpha=0.4, color="tab:blue", label="pass")
                 ax.scatter(x_raw[is_outlier, j], x_raw[is_outlier, i], s=4, alpha=0.6, color="tab:red", label="fail")
+                if log_scale:
+                    _set_log_or_symlog(ax, "x", x_raw[:, j])
+                    _set_log_or_symlog(ax, "y", x_raw[:, i])
+            if log_scale and i == j:
+                _set_log_or_symlog(ax, "x", x_raw[:, i])
+            _set_plain_formatter(ax)
+            ax.tick_params(axis="both", labelsize=8)
             if i == n_params - 1:
                 ax.set_xlabel(param_names[j])
+                ax.tick_params(axis="x", rotation=45)
             else:
-                ax.set_xticklabels([])
+                ax.tick_params(labelbottom=False)
             if j == 0:
                 ax.set_ylabel(param_names[i])
             else:
-                ax.set_yticklabels([])
+                ax.tick_params(labelleft=False)
 
     # Single shared legend
     handles, labels = axes2[0, 0].get_legend_handles_labels()
@@ -139,14 +232,25 @@ def run_eval(model_path: str, save_path: str, n_samples: int = 500, seed: int = 
     fig2.suptitle(f"Cosmo inputs — {n_outlier}/{len(is_outlier)} fail (rtol={rtol}, atol={atol})",
                   fontsize=14, y=1.01)
     fig2.tight_layout()
-    fig2.savefig(os.path.join(save_path, "eval_nn_triangle.png"), dpi=150, bbox_inches="tight")
+    # Re-apply formatter and label visibility after tight_layout
+    for i in range(n_params):
+        for j in range(n_params):
+            ax = axes2[i, j]
+            if not ax.get_visible():
+                continue
+            _set_plain_formatter(ax)
+            if i != n_params - 1:
+                ax.tick_params(labelbottom=False)
+            if j != 0:
+                ax.tick_params(labelleft=False)
+    fig2.savefig(os.path.join(save_path, f"eval_nn_triangle_{timestamp}.png"), dpi=150, bbox_inches="tight")
     plt.close(fig2)
-    print(f"Saved triangle plot to: {os.path.join(save_path, 'eval_nn_triangle.png')}")
+    print(f"Saved triangle plot to: {os.path.join(save_path, f'eval_nn_triangle_{timestamp}.png')}")
 
     # --- Triangle plot of target outputs, coloured by outlier status ---
-    target_names = list(TARGET_NAMES)
+    target_names = list(ckpt_target_names)
     n_tgt = len(target_names)
-    fig3, axes3 = plt.subplots(n_tgt, n_tgt, figsize=(3 * n_tgt, 3 * n_tgt))
+    fig3, axes3 = plt.subplots(n_tgt, n_tgt, figsize=(panel_size * n_tgt, panel_size * n_tgt))
 
     for i in range(n_tgt):
         for j in range(n_tgt):
@@ -155,19 +259,29 @@ def run_eval(model_path: str, save_path: str, n_samples: int = 500, seed: int = 
                 ax.set_visible(False)
                 continue
             if i == j:
-                ax.hist(y_true[inlier, i], bins=30, color="tab:blue", alpha=0.6, label="pass")
-                ax.hist(y_true[is_outlier, i], bins=30, color="tab:red", alpha=0.6, label="fail")
+                all_vals = y_true[:, i]
+                bins = _log_bins(all_vals) if log_scale else np.linspace(all_vals.min(), all_vals.max(), 31)
+                ax.hist(y_true[inlier, i], bins=bins, color="tab:blue", alpha=0.6, label="pass")
+                ax.hist(y_true[is_outlier, i], bins=bins, color="tab:red", alpha=0.6, label="fail")
             else:
                 ax.scatter(y_true[inlier, j], y_true[inlier, i], s=4, alpha=0.4, color="tab:blue", label="pass")
                 ax.scatter(y_true[is_outlier, j], y_true[is_outlier, i], s=4, alpha=0.6, color="tab:red", label="fail")
+                if log_scale:
+                    _set_log_or_symlog(ax, "x", y_true[:, j])
+                    _set_log_or_symlog(ax, "y", y_true[:, i])
+            if log_scale and i == j:
+                _set_log_or_symlog(ax, "x", y_true[:, i])
+            _set_plain_formatter(ax)
+            ax.tick_params(axis="both", labelsize=8)
             if i == n_tgt - 1:
                 ax.set_xlabel(target_names[j])
+                ax.tick_params(axis="x", rotation=45)
             else:
-                ax.set_xticklabels([])
+                ax.tick_params(labelbottom=False)
             if j == 0:
                 ax.set_ylabel(target_names[i])
             else:
-                ax.set_yticklabels([])
+                ax.tick_params(labelleft=False)
 
     handles, labels = axes3[0, 0].get_legend_handles_labels()
     fig3.legend(handles, labels, loc="upper right", fontsize=12)
@@ -175,9 +289,19 @@ def run_eval(model_path: str, save_path: str, n_samples: int = 500, seed: int = 
     fig3.suptitle(f"Target outputs — {n_outlier}/{len(is_outlier)} fail (rtol={rtol}, atol={atol})",
                   fontsize=14, y=1.01)
     fig3.tight_layout()
-    fig3.savefig(os.path.join(save_path, "eval_nn_triangle_targets.png"), dpi=150, bbox_inches="tight")
+    for i in range(n_tgt):
+        for j in range(n_tgt):
+            ax = axes3[i, j]
+            if not ax.get_visible():
+                continue
+            _set_plain_formatter(ax)
+            if i != n_tgt - 1:
+                ax.tick_params(labelbottom=False)
+            if j != 0:
+                ax.tick_params(labelleft=False)
+    fig3.savefig(os.path.join(save_path, f"eval_nn_triangle_targets_{timestamp}.png"), dpi=150, bbox_inches="tight")
     plt.close(fig3)
-    print(f"Saved target triangle plot to: {os.path.join(save_path, 'eval_nn_triangle_targets.png')}")
+    print(f"Saved target triangle plot to: {os.path.join(save_path, f'eval_nn_triangle_targets_{timestamp}.png')}")
 
 
 def main() -> None:
@@ -200,7 +324,7 @@ def main() -> None:
         default=None,
         help="Path to model.pt (ignored if --run-id or --run-dir is set).",
     )
-    parser.add_argument("--n-samples", type=int, default=500)
+    parser.add_argument("--n-samples", type=int, default=200)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
         "--hist-xlims",
@@ -210,6 +334,7 @@ def main() -> None:
     )
     parser.add_argument("--rtol", type=float, default=2e-3, help="Relative tolerance for allclose outlier check (default: 2e-3).")
     parser.add_argument("--atol", type=float, default=2e-3, help="Absolute tolerance for allclose outlier check (default: 2e-3).")
+    parser.add_argument("--log-scale", action="store_true", help="Use log scale on triangle plot axes.")
     parser.add_argument(
         "--save-path",
         type=str,
@@ -239,14 +364,15 @@ def main() -> None:
         if args.model_path is None:
             raise ValueError("Either --run-id, --run-dir, or --model-path must be set.")
         model_path = args.model_path
+        from util import get_default_save_path
         save_path = args.save_path or get_default_save_path()
 
-    #hist_xlims = None
-    #if args.hist_xlims is not None:
-    #    raw = json.loads(args.hist_xlims)
-    hist_xlims = {"qiso": (-0.5, 0.5), "qap": (-0.5, 0.5), "f_sigmar": (-10, 10), "m": (-10, 10)}
+    hist_xlims = None
+    if args.hist_xlims is not None:
+        raw = json.loads(args.hist_xlims)
+        hist_xlims = {k: tuple(v) for k, v in raw.items()}
 
-    run_eval(model_path, save_path, n_samples=args.n_samples, seed=args.seed, hist_xlims=hist_xlims, rtol=args.rtol, atol=args.atol)
+    run_eval(model_path, save_path, n_samples=args.n_samples, seed=args.seed, hist_xlims=hist_xlims, rtol=args.rtol, atol=args.atol, log_scale=args.log_scale)
 
 
 if __name__ == "__main__":

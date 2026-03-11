@@ -12,7 +12,7 @@ from torch import nn
 from torch.utils.data import DataLoader, TensorDataset
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__))))
 from model import NNRegressor
-from prep_shapefit_data import get_default_save_path, _next_version
+from util import get_default_save_path, _next_version
 from eval_nn import run_eval
 
 def load_data(data_path: str) -> Dict[str, np.ndarray]:
@@ -208,12 +208,34 @@ def _drop_nonfinite_rows(data: Dict[str, np.ndarray]) -> None:
     print(f"Using {n_train} train samples, {n_test} test samples.")
 
 
+def _symlog_transform(y: np.ndarray, linthresh: np.ndarray) -> np.ndarray:
+    """Per-column symlog: sign(y) * log1p(|y| / linthresh)."""
+    return np.sign(y) * np.log1p(np.abs(y) / linthresh)
+
+
+def _symlog_inverse(y_log: np.ndarray, linthresh: np.ndarray) -> np.ndarray:
+    """Inverse of _symlog_transform."""
+    return np.sign(y_log) * linthresh * np.expm1(np.abs(y_log))
+
+
 def standardize(
     x_train: np.ndarray,
     y_train: np.ndarray,
     x_test: np.ndarray,
     y_test: np.ndarray,
+    log_normalize: bool = False,
 ):
+    # Optional log normalization of targets before z-score
+    y_linthresh = None
+    if log_normalize:
+        # Per-column linthresh = min absolute nonzero value
+        y_linthresh = np.empty((1, y_train.shape[1]), dtype=np.float32)
+        for col in range(y_train.shape[1]):
+            abs_nz = np.abs(y_train[:, col][y_train[:, col] != 0])
+            y_linthresh[0, col] = float(np.min(abs_nz)) if len(abs_nz) > 0 else 1e-8
+        y_train = _symlog_transform(y_train, y_linthresh)
+        y_test = _symlog_transform(y_test, y_linthresh)
+
     # Use minimum sigma to avoid huge normalized values (e.g. constant columns)
     x_mu = x_train.mean(axis=0, keepdims=True)
     x_sigma = np.maximum(
@@ -239,76 +261,17 @@ def standardize(
                 "Check for NaN/Inf in data or extreme outliers."
             )
 
-    stats = {"x_mu": x_mu, "x_sigma": x_sigma, "y_mu": y_mu, "y_sigma": y_sigma}
+    stats = {"x_mu": x_mu, "x_sigma": x_sigma, "y_mu": y_mu, "y_sigma": y_sigma,
+             "log_normalize": log_normalize, "y_linthresh": y_linthresh}
     return x_train_n, y_train_n, x_test_n, y_test_n, stats
-
-
-def compare_losses(
-        run_ids: list,
-        labels: list | None = None,
-        log_scale: bool = True,
-        y_lim: tuple | None = None,
-        per_step: bool = False,
-        ) -> None:
-    """Compare train/test loss curves across multiple MLflow runs.
-
-    Args:
-        run_ids: List of MLflow run IDs to compare.
-        labels: Optional display labels for each run. Defaults to run IDs.
-        log_scale: Use log scale for y-axis.
-        y_lim: Tuple of (min, max) y-axis limits.
-        per_step: If True, plot per-batch losses instead of epoch-averaged.
-    """
-    from mlflow.tracking import MlflowClient
-
-    scratch = os.environ.get("SCRATCH", os.path.expanduser("~"))
-    mlflow.set_tracking_uri(f"file:{scratch}/bedcosmo/shapefit_emulator/mlruns")
-    client = MlflowClient()
-
-    if labels is None:
-        labels = run_ids
-
-    if per_step:
-        train_metric, test_metric = "batch_train_loss", "batch_test_loss"
-        x_label = "Step"
-    else:
-        train_metric, test_metric = "epoch_train_loss", "epoch_test_loss"
-        x_label = "Epoch"
-
-    fig, (ax_train, ax_test) = plt.subplots(1, 2, figsize=(12, 4))
-
-    for run_id, label in zip(run_ids, labels):
-        train_hist = client.get_metric_history(run_id, train_metric)
-        test_hist = client.get_metric_history(run_id, test_metric)
-
-        if train_hist:
-            steps, vals = zip(*[(m.step, m.value) for m in train_hist if np.isfinite(m.value)])
-            ax_train.plot(steps, vals, label=label, alpha=0.7)
-        if test_hist:
-            steps, vals = zip(*[(m.step, m.value) for m in test_hist if np.isfinite(m.value)])
-            ax_test.plot(steps, vals, label=label, alpha=0.7)
-
-    for ax, title in [(ax_train, "Train Loss"), (ax_test, "Test Loss")]:
-        ax.set_xlabel(x_label)
-        ax.set_ylabel("MSE Loss")
-        ax.set_title(title)
-        ax.legend()
-        if log_scale:
-            ax.set_yscale("log")
-        if y_lim:
-            ax.set_ylim(y_lim)
-
-    fig.tight_layout()
-    plt.show()
-
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Train ShapeFit emulator NN.")
     parser.add_argument(
-        "--data-path",
+        "--data-type",
         type=str,
-        default=get_default_save_path(),
-        help="Base data directory (contains training_data/v{N} subdirs).",
+        default="shapefit",
+        help="Data type (contains training_data/v{N} subdirs).",
     )
     parser.add_argument(
         "--data-version",
@@ -322,6 +285,10 @@ def main() -> None:
     parser.add_argument("--weight-decay", type=float, default=1e-6)
     parser.add_argument("--hidden-dim", type=int, default=256)
     parser.add_argument("--n-hidden", type=int, default=4)
+    parser.add_argument("--dropout", type=float, default=0.0,
+                        help="Dropout probability between hidden layers.")
+    parser.add_argument("--patience", type=int, default=0,
+                        help="Early stopping patience (epochs without test loss improvement). 0 = disabled.")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--scheduler-type", type=str, default="constant",
                         choices=["constant", "cosine", "linear", "exponential", "lambda"],
@@ -344,20 +311,28 @@ def main() -> None:
         default=None,
         help="MLflow run name for easier identification.",
     )
+    parser.add_argument("--log-normalize", action="store_true",
+                        help="Apply symlog transform to targets before z-score standardization.")
+    parser.add_argument("--eval-atol", type=float, default=2e-3,
+                        help="Absolute tolerance for evaluation.")
+    parser.add_argument("--eval-rtol", type=float, default=2e-3,
+                        help="Relative tolerance for evaluation.")
     args = parser.parse_args()
+
+    root_data_dir = get_default_save_path(type=args.data_type)
 
     # Resolve versioned data path
     if args.data_version == "latest":
-        version = _next_version(args.data_path) - 1
+        version = _next_version(root_data_dir) - 1
         if version < 1:
             raise FileNotFoundError(
-                f"No training data versions found in {args.data_path}/training_data/. "
+                f"No training data versions found in {root_data_dir}/training_data/. "
                 "Run prep_shapefit_data.py first."
             )
     else:
         version = int(args.data_version)
-    data_path = os.path.join(args.data_path, "training_data", f"v{version}")
-    print(f"Using training data: {data_path}")
+    data_path = os.path.join(root_data_dir, "training_data", f"v{version}")
+    print(f"Using {args.data_type} training data: {data_path}")
 
     # Set up MLflow tracking
     scratch = os.environ.get("SCRATCH", os.path.expanduser("~"))
@@ -379,10 +354,10 @@ def main() -> None:
     # Log parameters immediately after starting run (same pattern as train.py)
     run_params = vars(args)
     for key, value in run_params.items():
-        if key == "data_path":
+        if key == "data_type":
             continue  # log resolved versioned path instead
         mlflow.log_param(key, value)
-    mlflow.log_param("data_path", data_path)
+    mlflow.log_param("data_type", args.data_type)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
@@ -392,7 +367,8 @@ def main() -> None:
 
     data = load_data(data_path)
     x_train, y_train, x_test, y_test, stats = standardize(
-        data["x_train"], data["y_train"], data["x_test"], data["y_test"]
+        data["x_train"], data["y_train"], data["x_test"], data["y_test"],
+        log_normalize=args.log_normalize,
     )
 
     train_ds = TensorDataset(torch.from_numpy(x_train), torch.from_numpy(y_train))
@@ -407,6 +383,7 @@ def main() -> None:
         out_dim=out_dim,
         hidden_dim=args.hidden_dim,
         n_hidden=args.n_hidden,
+        dropout=args.dropout,
     ).to(device)
 
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
@@ -428,6 +405,9 @@ def main() -> None:
     train_losses = []
     test_losses = []
     global_step = 0
+    best_test_loss = float("inf")
+    best_state_dict = None
+    epochs_without_improvement = 0
 
     for epoch in range(1, args.epochs + 1):
         model.train()
@@ -481,9 +461,30 @@ def main() -> None:
         if epoch == 1 or epoch % 50 == 0 or epoch == args.epochs:
             print(f"epoch={epoch:4d} train_mse={epoch_train_loss:.6e} test_mse={epoch_test_loss:.6e}")
 
+        # Track best model and early stopping
+        if epoch_test_loss < best_test_loss:
+            best_test_loss = epoch_test_loss
+            best_state_dict = {k: v.clone() for k, v in model.state_dict().items()}
+            epochs_without_improvement = 0
+        else:
+            epochs_without_improvement += 1
+
+        if args.patience > 0 and epochs_without_improvement >= args.patience:
+            print(f"Early stopping at epoch {epoch} (no improvement for {args.patience} epochs). "
+                  f"Best test loss: {best_test_loss:.6e}")
+            break
+
+    # Restore best model weights
+    if best_state_dict is not None:
+        model.load_state_dict(best_state_dict)
+        print(f"Restored best model (test loss: {best_test_loss:.6e})")
+
+    model.eval()
     with torch.no_grad():
         yhat_n = model(torch.from_numpy(x_test).to(device)).cpu().numpy()
     yhat = yhat_n * stats["y_sigma"] + stats["y_mu"]
+    if stats["log_normalize"]:
+        yhat = _symlog_inverse(yhat, stats["y_linthresh"])
     mae = np.mean(np.abs(yhat - data["y_test"]), axis=0)
     rms = np.sqrt(np.mean((yhat - data["y_test"]) ** 2, axis=0))
     target_names = data["target_names"].tolist()
@@ -516,10 +517,13 @@ def main() -> None:
         "x_sigma": torch.from_numpy(stats["x_sigma"]),
         "y_mu": torch.from_numpy(stats["y_mu"]),
         "y_sigma": torch.from_numpy(stats["y_sigma"]),
+        "log_normalize": stats["log_normalize"],
+        "y_linthresh": torch.from_numpy(stats["y_linthresh"]) if stats["y_linthresh"] is not None else None,
         "param_names": data["param_names"].tolist(),
         "target_names": target_names,
         "hidden_dim": args.hidden_dim,
         "n_hidden": args.n_hidden,
+        "dropout": args.dropout,
     }
     torch.save(payload, model_path)
     print(f"Saved model checkpoint to: {model_path}")
@@ -551,7 +555,7 @@ def main() -> None:
 
     # Run evaluation
     print("\nRunning evaluation...")
-    run_eval(model_path, save_path=artifacts_dir, n_samples=3000)
+    run_eval(model_path, save_path=artifacts_dir, n_samples=1000, atol=args.eval_atol, rtol=args.eval_rtol, log_scale=True)
 
     mlflow.end_run()
     print(f"MLflow run completed: {mlflow_run_id}")

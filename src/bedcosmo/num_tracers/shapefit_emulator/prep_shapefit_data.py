@@ -7,10 +7,14 @@ from typing import Dict, List, Tuple
 
 import numpy as np
 from desilike.theories.galaxy_clustering import ShapeFitPowerSpectrumExtractor
-from scipy.stats import qmc
-from scipy.stats import truncnorm
-from sklearn.model_selection import train_test_split
 
+from util import (
+    latin_hypercube_samples,
+    parse_priors,
+    save_dataset,
+    to_extractor_params,
+    get_default_save_path,
+)
 
 # Fisher-matrix style priors (normals are truncated at +/-4 sigma by default).
 DEFAULT_PRIORS = {
@@ -22,65 +26,6 @@ DEFAULT_PRIORS = {
 }
 
 TARGET_NAMES = ["qiso", "qap", "f_sigmar", "m"]
-
-
-def get_default_save_path() -> str:
-    scratch = os.environ.get("SCRATCH")
-    if not scratch:
-        raise EnvironmentError("SCRATCH is not set; please pass --save-path explicitly.")
-    return os.path.join(scratch, "bedcosmo", "num_tracers", "shapefit")
-
-
-def latin_hypercube_samples(
-    priors: Dict[str, Dict[str, float]],
-    n_samples: int,
-    seed: int,
-    sigma_clip: float = 4.0,
-) -> List[Dict[str, float]]:
-    keys = list(priors.keys())
-    sampler = qmc.LatinHypercube(d=len(keys), seed=seed)
-    unit_samples = sampler.random(n=n_samples)
-
-    rows: List[Dict[str, float]] = []
-    for urow in unit_samples:
-        out: Dict[str, float] = {}
-        for key, u in zip(keys, urow):
-            spec = priors[key]
-            dist = spec["dist"]
-            if dist == "uniform":
-                low = float(spec["low"])
-                high = float(spec["high"])
-                out[key] = low + (high - low) * float(u)
-            elif dist == "normal":
-                mu = float(spec["mu"])
-                sigma = float(spec["sigma"])
-                a = -sigma_clip
-                b = sigma_clip
-                out[key] = float(truncnorm.ppf(u, a, b, loc=mu, scale=sigma))
-            else:
-                raise ValueError(f"Unsupported dist '{dist}' for '{key}'")
-        rows.append(out)
-    return rows
-
-
-def to_extractor_params(sample: Dict[str, float]) -> Dict[str, float]:
-    # omega_* are physical densities: omega_x = Omega_x * h^2
-    # so Omega_m = (omega_cdm + omega_b) / h^2.
-    # assumes fiducial values for omega_cdm, omega_b, h, ln10A_s, n_s
-    omega_cdm = sample.get("omega_cdm", 0.12069)
-    omega_b = sample.get("omega_b", 0.02218)
-    h = sample.get("h", 0.6736)
-    if h <= 0.0:
-        raise ValueError("h must be > 0 to compute Omega_m")
-    omega_m = (omega_cdm + omega_b) / (h * h)
-    return {
-        "h": float(h),
-        "Omega_m": float(omega_m),
-        "omega_b": float(omega_b),
-        "logA": float(sample.get("ln10A_s", 3.036394)),
-        "n_s": float(sample.get("n_s", 0.9649)),
-    }
-
 
 def run_extractor(
     extractor: ShapeFitPowerSpectrumExtractor, sample: Dict[str, float]
@@ -160,74 +105,6 @@ def generate_dataset(
     y = np.asarray(target_rows, dtype=np.float64)
     return param_names, X, y
 
-
-def _next_version(save_path: str) -> int:
-    """Find the next available version number in save_path/training_data/v{N} directories."""
-    training_data_dir = os.path.join(save_path, "training_data")
-    if not os.path.isdir(training_data_dir):
-        return 1
-    existing = [
-        int(d[1:])
-        for d in os.listdir(training_data_dir)
-        if d.startswith("v") and d[1:].isdigit()
-    ]
-    return max(existing, default=0) + 1
-
-
-def save_dataset(
-    save_path: str,
-    param_names: List[str],
-    X: np.ndarray,
-    y: np.ndarray,
-    test_size: float = 0.2,
-    random_state: int = 1,
-) -> str:
-    version = _next_version(save_path)
-    versioned_path = os.path.join(save_path, "training_data", f"v{version}")
-    os.makedirs(versioned_path, exist_ok=True)
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=test_size, random_state=random_state
-    )
-    np.savez(
-        f"{versioned_path}/train.npz",
-        x=X_train,
-        y=y_train,
-        param_names=np.array(param_names),
-        target_names=np.array(TARGET_NAMES),
-    )
-    np.savez(
-        f"{versioned_path}/test.npz",
-        x=X_test,
-        y=y_test,
-        param_names=np.array(param_names),
-        target_names=np.array(TARGET_NAMES),
-    )
-    print(f"Saved train/test files to: {versioned_path} (version {version})")
-    return versioned_path
-
-
-def parse_priors(priors_json: str) -> Dict[str, Dict[str, float]]:
-    raw = json.loads(priors_json)
-    if not isinstance(raw, dict):
-        raise ValueError("Priors JSON must be a dictionary")
-    for name, spec in raw.items():
-        if not isinstance(spec, dict) or "dist" not in spec:
-            raise ValueError(f"Prior '{name}' must be a dictionary with a 'dist' key")
-        if spec["dist"] == "uniform":
-            if "low" not in spec or "high" not in spec:
-                raise ValueError(f"Uniform prior '{name}' needs 'low' and 'high'")
-            if float(spec["low"]) >= float(spec["high"]):
-                raise ValueError(f"Uniform prior '{name}' must satisfy low < high")
-        elif spec["dist"] == "normal":
-            if "mu" not in spec or "sigma" not in spec:
-                raise ValueError(f"Normal prior '{name}' needs 'mu' and 'sigma'")
-            if float(spec["sigma"]) <= 0.0:
-                raise ValueError(f"Normal prior '{name}' must have sigma > 0")
-        else:
-            raise ValueError(f"Unsupported dist '{spec['dist']}' for '{name}'")
-    return raw
-
-
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Generate training data for a ShapeFit parameter emulator."
@@ -236,7 +113,7 @@ def main() -> None:
     parser.add_argument("--batch-size", type=int, default=256)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--test-size", type=float, default=0.2)
-    parser.add_argument("--save-path", type=str, default=get_default_save_path())
+    parser.add_argument("--save-path", type=str, default=get_default_save_path(type="shapefit"))
     parser.add_argument("--sigma-clip", type=float, default=4.0)
     parser.add_argument("--verbose-every", type=int, default=200)
     parser.add_argument(
