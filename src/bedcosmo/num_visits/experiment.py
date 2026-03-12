@@ -74,7 +74,6 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         prior_args=None,
         design_args=None,
         temperature=3000,
-        z_prior_bounds=(0.1, 3.0),
         central_z=1.0,
         nominal_design=None,
         pixel_scale=0.2,
@@ -109,11 +108,6 @@ class NumVisits(BaseExperiment, CosmologyMixin):
             self.temperature = float(temperature) * u.K
         else:
             self.temperature = temperature
-
-        z_low, z_high = z_prior_bounds
-        if z_low >= z_high:
-            raise ValueError("z_prior_bounds must satisfy lower < upper.")
-        self.prior_bounds = z_prior_bounds
         
         # initialize the prior
         self.prior_args = prior_args
@@ -225,7 +219,6 @@ class NumVisits(BaseExperiment, CosmologyMixin):
             print(f"Num Visits Experiment Initialized")
             print(f"  Filters: {self.filters_list}")
             print(f"  Temperature: {self.temperature}")
-            print(f"prior z∈[{z_low}, {z_high}]")
             print(f"  Number of designs: {self.designs.shape[0]}")
             print(f"  Nominal design: {self.nominal_design}")
 
