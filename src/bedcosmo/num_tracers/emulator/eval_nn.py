@@ -11,7 +11,7 @@ import sys
 import os
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__))))
 from model import NNRegressor
-from util import latin_hypercube_samples
+from util import latin_hypercube_samples, get_default_save_path
 
 def _log_bins(vals: np.ndarray, n_bins: int = 30) -> np.ndarray:
     """Return histogram bin edges appropriate for log/symlog data."""
@@ -58,25 +58,51 @@ def _set_log_or_symlog(ax, axis: str, vals: np.ndarray) -> None:
 
 
 
-def _get_pipeline(target_names):
-    """Return (default_priors, target_names, ground_truth_fn, needs_setup) for the right pipeline."""
-    if target_names[0].startswith("cov_"):
-        from prep_shapefit_errors import DEFAULT_PRIORS, TARGET_NAMES, run_fisher
-        def ground_truth_fn(_setup, sample):
-            return run_fisher(sample)
-        return DEFAULT_PRIORS, TARGET_NAMES, ground_truth_fn, None
+def _load_module(name: str, path: str):
+    """Load a Python module from an explicit file path (avoids name collisions)."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(name, path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _get_pipeline(analysis: str, quantity: str):
+    """Return (default_priors, target_names, ground_truth_fn, setup) for the given analysis/quantity."""
+    _here = os.path.dirname(os.path.abspath(__file__))
+
+    if analysis == "shapefit":
+        if quantity == "covar":
+            mod = _load_module("shapefit_prep_covar", os.path.join(_here, "shapefit", "prep_covar.py"))
+            def ground_truth_fn(_setup, sample):
+                return mod.run_fisher(sample)
+            return mod.DEFAULT_PRIORS, mod.TARGET_NAMES, ground_truth_fn, None
+        elif quantity == "mean":
+            mod = _load_module("shapefit_prep_mean", os.path.join(_here, "shapefit", "prep_mean.py"))
+            from desilike.theories.galaxy_clustering import ShapeFitPowerSpectrumExtractor
+            extractor = ShapeFitPowerSpectrumExtractor()
+            extractor()
+            extractor.get()
+            def ground_truth_fn(setup, sample):
+                return mod.run_extractor(setup, sample)
+            return mod.DEFAULT_PRIORS, mod.TARGET_NAMES, ground_truth_fn, extractor
+        else:
+            raise ValueError(f"Unknown quantity for shapefit: {quantity}")
+
+    elif analysis == "bao":
+        if quantity == "covar":
+            mod = _load_module("bao_prep_covar", os.path.join(_here, "bao", "prep_covar.py"))
+            def ground_truth_fn(_setup, sample):
+                return mod.run_fisher(sample)
+            return mod.DEFAULT_PRIORS, mod.TARGET_NAMES, ground_truth_fn, None
+        else:
+            raise ValueError(f"Unknown quantity for bao: {quantity}")
+
     else:
-        from prep_shapefit_data import DEFAULT_PRIORS, TARGET_NAMES, run_extractor
-        from desilike.theories.galaxy_clustering import ShapeFitPowerSpectrumExtractor
-        extractor = ShapeFitPowerSpectrumExtractor()
-        extractor()
-        extractor.get()
-        def ground_truth_fn(setup, sample):
-            return run_extractor(setup, sample)
-        return DEFAULT_PRIORS, TARGET_NAMES, ground_truth_fn, extractor
+        raise ValueError(f"Unknown analysis: {analysis}")
 
 
-def run_eval(model_path: str, save_path: str, n_samples: int = 500, seed: int = 42, hist_xlims: dict[str, tuple[float, float]] | None = None, rtol: float = 5e-3, atol: float = 1e-4, log_scale: bool = False) -> None:
+def run_eval(model_path: str, save_path: str, analysis: str = "shapefit", quantity: str = "covar", n_samples: int = 500, seed: int = 42, hist_xlims: dict[str, tuple[float, float]] | None = None, rtol: float = 5e-3, atol: float = 1e-4, log_scale: bool = False, rescale_by: str | None = None) -> None:
     os.makedirs(save_path, exist_ok=True)
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     np.random.seed(seed)
@@ -104,8 +130,7 @@ def run_eval(model_path: str, save_path: str, n_samples: int = 500, seed: int = 
     param_names = ckpt["param_names"]
     ckpt_target_names = ckpt["target_names"]
 
-    # Detect pipeline from checkpoint target names
-    default_priors, target_names, ground_truth_fn, setup = _get_pipeline(ckpt_target_names)
+    default_priors, target_names, ground_truth_fn, setup = _get_pipeline(analysis, quantity)
 
     true_rows = []
     param_rows = []
@@ -143,6 +168,13 @@ def run_eval(model_path: str, save_path: str, n_samples: int = 500, seed: int = 
     if log_normalize and y_linthresh is not None:
         # Invert symlog: sign(z) * linthresh * expm1(|z|)
         y_pred = np.sign(y_pred) * y_linthresh * np.expm1(np.abs(y_pred))
+
+    # Undo input-parameter scaling applied during training (e.g. targets were
+    # multiplied by N_tracers before training).  Divide predictions by that
+    # input to recover the original physical scale for comparison with truth.
+    if rescale_by is not None:
+        idx = param_names.index(rescale_by)
+        y_pred = y_pred / x_raw[:, idx : idx + 1]
 
     # Absolute error for covariance elements (off-diagonal can be near zero),
     # percentage error for other targets.
@@ -335,6 +367,20 @@ def main() -> None:
     parser.add_argument("--rtol", type=float, default=2e-3, help="Relative tolerance for allclose outlier check (default: 2e-3).")
     parser.add_argument("--atol", type=float, default=2e-3, help="Absolute tolerance for allclose outlier check (default: 2e-3).")
     parser.add_argument("--log-scale", action="store_true", help="Use log scale on triangle plot axes.")
+    parser.add_argument("--rescale-by", type=str, default=None,
+                        help="Divide predictions by this input parameter before comparing to truth (e.g. 'N_tracers').")
+    parser.add_argument(
+        "--analysis",
+        type=str,
+        default="shapefit",
+        help="Analysis type: 'shapefit' or 'bao'.",
+    )
+    parser.add_argument(
+        "--quantity",
+        type=str,
+        default="covar",
+        help="Quantity: 'covar' or 'mean'.",
+    )
     parser.add_argument(
         "--save-path",
         type=str,
@@ -364,15 +410,14 @@ def main() -> None:
         if args.model_path is None:
             raise ValueError("Either --run-id, --run-dir, or --model-path must be set.")
         model_path = args.model_path
-        from util import get_default_save_path
-        save_path = args.save_path or get_default_save_path()
+        save_path = args.save_path or get_default_save_path(analysis=args.analysis, quantity=args.quantity)
 
     hist_xlims = None
     if args.hist_xlims is not None:
         raw = json.loads(args.hist_xlims)
         hist_xlims = {k: tuple(v) for k, v in raw.items()}
 
-    run_eval(model_path, save_path, n_samples=args.n_samples, seed=args.seed, hist_xlims=hist_xlims, rtol=args.rtol, atol=args.atol, log_scale=args.log_scale)
+    run_eval(model_path, save_path, analysis=args.analysis, quantity=args.quantity, n_samples=args.n_samples, seed=args.seed, hist_xlims=hist_xlims, rtol=args.rtol, atol=args.atol, log_scale=args.log_scale, rescale_by=args.rescale_by)
 
 
 if __name__ == "__main__":

@@ -268,10 +268,16 @@ def standardize(
 def main() -> None:
     parser = argparse.ArgumentParser(description="Train ShapeFit emulator NN.")
     parser.add_argument(
-        "--data-type",
+        "--analysis",
         type=str,
         default="shapefit",
-        help="Data type (contains training_data/v{N} subdirs).",
+        help="Analysis type: 'shapefit' or 'bao'.",
+    )
+    parser.add_argument(
+        "--quantity",
+        type=str,
+        default="mean",
+        help="Quantity: 'mean' or 'covar'.",
     )
     parser.add_argument(
         "--data-version",
@@ -317,9 +323,11 @@ def main() -> None:
                         help="Absolute tolerance for evaluation.")
     parser.add_argument("--eval-rtol", type=float, default=2e-3,
                         help="Relative tolerance for evaluation.")
+    parser.add_argument("--eval-rescale-by", type=str, default=None,
+                        help="Divide predictions by this input param before eval comparison (e.g. 'N_tracers').")
     args = parser.parse_args()
 
-    root_data_dir = get_default_save_path(type=args.data_type)
+    root_data_dir = get_default_save_path(analysis=args.analysis, quantity=args.quantity)
 
     # Resolve versioned data path
     if args.data_version == "latest":
@@ -327,12 +335,12 @@ def main() -> None:
         if version < 1:
             raise FileNotFoundError(
                 f"No training data versions found in {root_data_dir}/training_data/. "
-                "Run prep_shapefit_data.py first."
+                "Run the appropriate prep script first."
             )
     else:
-        version = int(args.data_version)
+        version = args.data_version
     data_path = os.path.join(root_data_dir, "training_data", f"v{version}")
-    print(f"Using {args.data_type} training data: {data_path}")
+    print(f"Using {args.analysis}/{args.quantity} training data: {data_path}")
 
     # Set up MLflow tracking
     scratch = os.environ.get("SCRATCH", os.path.expanduser("~"))
@@ -354,10 +362,11 @@ def main() -> None:
     # Log parameters immediately after starting run (same pattern as train.py)
     run_params = vars(args)
     for key, value in run_params.items():
-        if key == "data_type":
+        if key in ("analysis", "quantity"):
             continue  # log resolved versioned path instead
         mlflow.log_param(key, value)
-    mlflow.log_param("data_type", args.data_type)
+    mlflow.log_param("analysis", args.analysis)
+    mlflow.log_param("quantity", args.quantity)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
@@ -555,7 +564,7 @@ def main() -> None:
 
     # Run evaluation
     print("\nRunning evaluation...")
-    run_eval(model_path, save_path=artifacts_dir, n_samples=1000, atol=args.eval_atol, rtol=args.eval_rtol, log_scale=True)
+    run_eval(model_path, save_path=artifacts_dir, analysis=args.analysis, quantity=args.quantity, n_samples=1000, atol=args.eval_atol, rtol=args.eval_rtol, log_scale=True, rescale_by=args.eval_rescale_by)
 
     mlflow.end_run()
     print(f"MLflow run completed: {mlflow_run_id}")

@@ -5,6 +5,8 @@ import os
 import traceback
 from typing import Dict, List, Tuple
 
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
 import numpy as np
 from desilike.theories.galaxy_clustering import ShapeFitPowerSpectrumExtractor
 
@@ -113,7 +115,7 @@ def main() -> None:
     parser.add_argument("--batch-size", type=int, default=256)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--test-size", type=float, default=0.2)
-    parser.add_argument("--save-path", type=str, default=get_default_save_path(type="shapefit"))
+    parser.add_argument("--save-path", type=str, default=None)
     parser.add_argument("--sigma-clip", type=float, default=4.0)
     parser.add_argument("--verbose-every", type=int, default=200)
     parser.add_argument(
@@ -130,7 +132,7 @@ def main() -> None:
     args = parser.parse_args()
 
     priors = DEFAULT_PRIORS if not args.priors_json else parse_priors(args.priors_json)
-    save_path = os.path.abspath(args.save_path)
+    save_path = os.path.abspath(args.save_path if args.save_path else get_default_save_path(analysis="shapefit", quantity="mean"))
     print("Using priors:", priors)
     print("Writing dataset to:", save_path)
 
