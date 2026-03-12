@@ -20,74 +20,6 @@ from bed.grid import Grid
 from pyro import distributions as dist
 
 
-def _dist_bounds(distribution, q_lo=0.01, q_hi=0.99) -> Tuple[float, float]:
-    # Uniform-like
-    if hasattr(distribution, "low") and hasattr(distribution, "high"):
-        return float(distribution.low.detach().cpu()), float(distribution.high.detach().cpu())
-    # Try analytic quantiles for other distributions.
-    q = torch.tensor([q_lo, q_hi], dtype=torch.float64)
-    try:
-        x = distribution.icdf(q)
-        return float(x[0].detach().cpu()), float(x[1].detach().cpu())
-    except (NotImplementedError, RuntimeError, AttributeError):
-        pass
-
-    # Fallback: Monte Carlo quantiles for distributions lacking icdf.
-    with torch.no_grad():
-        samples = distribution.sample((20000,)).to(torch.float64)
-    lo = float(torch.quantile(samples, q_lo).detach().cpu())
-    hi = float(torch.quantile(samples, q_hi).detach().cpu())
-    if not np.isfinite(lo) or not np.isfinite(hi) or lo >= hi:
-        raise ValueError(f"Could not infer valid bounds for distribution {distribution}.")
-    return lo, hi
-
-
-def _create_distribution_from_config(param_config: Dict[str, Any]) -> torch.distributions.Distribution:
-    """
-    Create a PyTorch distribution from a parameter configuration dict.
-
-    Args:
-        param_config: Dictionary with 'distribution' key containing type and bounds.
-
-    Returns:
-        PyTorch distribution object.
-    """
-    dist_config = param_config.get("distribution", {})
-    dist_type = dist_config.get("type", "uniform").lower()
-
-    if dist_type == "uniform":
-        lower = float(dist_config.get("lower", 0.0))
-        upper = float(dist_config.get("upper", 1.0))
-        return dist.Uniform(
-            torch.tensor(lower, dtype=torch.float64),
-            torch.tensor(upper, dtype=torch.float64)
-        )
-    elif dist_type == "normal" or dist_type == "gaussian":
-        mean = float(dist_config.get("mean", 0.0))
-        std = float(dist_config.get("std", 1.0))
-        return dist.Normal(
-            torch.tensor(mean, dtype=torch.float64),
-            torch.tensor(std, dtype=torch.float64)
-        )
-    elif dist_type == "truncatednormal":
-        mean = float(dist_config.get("mean", 0.0))
-        std = float(dist_config.get("std", 1.0))
-        lower = float(dist_config.get("lower", mean - 4 * std))
-        upper = float(dist_config.get("upper", mean + 4 * std))
-        # Use TruncatedNormal from pyro
-        base = dist.Normal(
-            torch.tensor(mean, dtype=torch.float64),
-            torch.tensor(std, dtype=torch.float64)
-        )
-        return dist.TruncatedDistribution(
-            base,
-            low=torch.tensor(lower, dtype=torch.float64),
-            high=torch.tensor(upper, dtype=torch.float64)
-        )
-    else:
-        raise ValueError(f"Unsupported distribution type: {dist_type}")
-
-
 class GridCalculation:
     """
     Class-based interface for grid-based EIG computation.
@@ -171,6 +103,97 @@ class GridCalculation:
         self.eig: Optional[np.ndarray] = None
         self.best_design: Optional[Any] = None
 
+    @staticmethod
+    def _icdf(distribution, q: torch.Tensor) -> torch.Tensor:
+        """Inverse CDF with Monte Carlo fallback for distributions lacking icdf (e.g. Gamma)."""
+        try:
+            return distribution.icdf(q)
+        except NotImplementedError:
+            pass
+        # Fallback: approximate via sorted samples
+        with torch.no_grad():
+            samples = distribution.sample((100_000,)).to(q.dtype).sort().values
+        indices = (q.clamp(0, 1) * (len(samples) - 1)).long()
+        return samples[indices]
+
+    @staticmethod
+    def _dist_bounds(distribution, q_lo=0.01, q_hi=0.99) -> Tuple[float, float]:
+        # Uniform-like
+        if hasattr(distribution, "low") and hasattr(distribution, "high"):
+            return float(distribution.low.detach().cpu()), float(distribution.high.detach().cpu())
+        # Try analytic quantiles for other distributions.
+        q = torch.tensor([q_lo, q_hi], dtype=torch.float64)
+        try:
+            x = distribution.icdf(q)
+            return float(x[0].detach().cpu()), float(x[1].detach().cpu())
+        except (NotImplementedError, RuntimeError, AttributeError):
+            pass
+
+        # Fallback: Monte Carlo quantiles for distributions lacking icdf.
+        with torch.no_grad():
+            samples = distribution.sample((20000,)).to(torch.float64)
+        lo = float(torch.quantile(samples, q_lo).detach().cpu())
+        hi = float(torch.quantile(samples, q_hi).detach().cpu())
+        if not np.isfinite(lo) or not np.isfinite(hi) or lo >= hi:
+            raise ValueError(f"Could not infer valid bounds for distribution {distribution}.")
+        return lo, hi
+
+    @staticmethod
+    def _create_dist_from_config(param_config: Dict[str, Any]) -> torch.distributions.Distribution:
+        """
+        Create a PyTorch distribution from a parameter configuration dict.
+
+        Args:
+            param_config: Dictionary with 'distribution' key containing type and bounds.
+
+        Returns:
+            PyTorch distribution object.
+        """
+        dist_config = param_config.get("distribution", {})
+        dist_type = dist_config.get("type", "uniform").lower()
+
+        if dist_type == "uniform":
+            lower = float(dist_config.get("lower", 0.0))
+            upper = float(dist_config.get("upper", 1.0))
+            return dist.Uniform(
+                torch.tensor(lower, dtype=torch.float64),
+                torch.tensor(upper, dtype=torch.float64)
+            )
+        elif dist_type == "normal" or dist_type == "gaussian":
+            mean = float(dist_config.get("mean", 0.0))
+            std = float(dist_config.get("std", 1.0))
+            return dist.Normal(
+                torch.tensor(mean, dtype=torch.float64),
+                torch.tensor(std, dtype=torch.float64)
+            )
+        elif dist_type == "truncatednormal":
+            mean = float(dist_config.get("mean", 0.0))
+            std = float(dist_config.get("std", 1.0))
+            lower = float(dist_config.get("lower", mean - 4 * std))
+            upper = float(dist_config.get("upper", mean + 4 * std))
+            # Use TruncatedNormal from pyro
+            base = dist.Normal(
+                torch.tensor(mean, dtype=torch.float64),
+                torch.tensor(std, dtype=torch.float64)
+            )
+            return dist.TruncatedDistribution(
+                base,
+                low=torch.tensor(lower, dtype=torch.float64),
+                high=torch.tensor(upper, dtype=torch.float64)
+            )
+        elif dist_type == "gamma":
+            shape = float(dist_config.get("shape", 1.0))
+            if "z_0" not in dist_config:
+                raise ValueError(f"Gamma distribution requires 'z_0' parameter")
+            z_0 = float(dist_config["z_0"])
+            rate = 1.0 / z_0
+            return dist.Gamma(
+                torch.tensor(shape, dtype=torch.float64),
+                torch.tensor(rate, dtype=torch.float64),
+            )
+        else:
+            raise ValueError(f"Unsupported distribution type: {dist_type}")
+
     def _create_parameter_grid(self) -> Grid:
         """Create parameter grid from experiment prior."""
         axes: Dict[str, np.ndarray] = {}
@@ -182,7 +205,7 @@ class GridCalculation:
         for name in names:
             if name not in prior:
                 raise ValueError(f"Prior missing parameter '{name}'.")
-            lo, hi = _dist_bounds(prior[name])
+            lo, hi = self._dist_bounds(prior[name])
             if name in self.param_dense_ranges:
                 d_lo, d_hi = self.param_dense_ranges[name]
                 axes[name] = self._dense_axis(lo, hi, d_lo, d_hi, int(self.param_pts), self.param_dense_fraction)
@@ -519,7 +542,7 @@ class GridCalculation:
                     f"Available: {list(parameters.keys())}"
                 )
             param_config = parameters[name]
-            distributions[name] = _create_distribution_from_config(param_config)
+            distributions[name] = self._create_dist_from_config(param_config)
 
         return distributions
 
@@ -796,12 +819,12 @@ class GridCalculation:
                         if redshift_range is not None:
                             z_min, z_max = redshift_range
                         else:
-                            z_min = float(z_prior.icdf(torch.tensor(1e-6, dtype=torch.float64)))
-                            z_max = float(z_prior.icdf(torch.tensor(1 - 1e-6, dtype=torch.float64)))
+                            z_min = float(self._icdf(z_prior, torch.tensor(1e-6, dtype=torch.float64)))
+                            z_max = float(self._icdf(z_prior, torch.tensor(1 - 1e-6, dtype=torch.float64)))
                         p_low = float(z_prior.cdf(torch.tensor(z_min, dtype=torch.float64)))
                         p_high = float(z_prior.cdf(torch.tensor(z_max, dtype=torch.float64)))
                         quantiles = torch.linspace(p_low, p_high, n_redshift_pts, dtype=torch.float64).clamp(1e-6, 1 - 1e-6)
-                        z_arr = z_prior.icdf(quantiles).clamp(z_min, z_max)
+                        z_arr = self._icdf(z_prior, quantiles).clamp(z_min, z_max)
                     else:
                         z_min, z_max = redshift_range or (0.1, 3.0)
                         z_arr = torch.linspace(z_min, z_max, n_redshift_pts, dtype=torch.float64)
@@ -819,7 +842,7 @@ class GridCalculation:
                     z_np = z_arr.numpy()
                     if hasattr(self.experiment, "prior") and "z" in self.experiment.prior:
                         mark_qs = torch.linspace(p_low, p_high, 6, dtype=torch.float64).clamp(1e-6, 1 - 1e-6)
-                        z_marks = z_prior.icdf(mark_qs).clamp(z_min, z_max).numpy()
+                        z_marks = self._icdf(z_prior, mark_qs).clamp(z_min, z_max).numpy()
                     else:
                         z_marks = np.linspace(z_min, z_max, 6)
                     for z_mark in z_marks:
@@ -938,12 +961,12 @@ class GridCalculation:
                         if redshift_range is not None:
                             z_min, z_max = redshift_range
                         else:
-                            z_min = float(z_prior.icdf(torch.tensor(1e-6, dtype=torch.float64)))
-                            z_max = float(z_prior.icdf(torch.tensor(1 - 1e-6, dtype=torch.float64)))
+                            z_min = float(self._icdf(z_prior, torch.tensor(1e-6, dtype=torch.float64)))
+                            z_max = float(self._icdf(z_prior, torch.tensor(1 - 1e-6, dtype=torch.float64)))
                         p_low = float(z_prior.cdf(torch.tensor(z_min, dtype=torch.float64)))
                         p_high = float(z_prior.cdf(torch.tensor(z_max, dtype=torch.float64)))
                         quantiles = torch.linspace(p_low, p_high, n_redshift_pts, dtype=torch.float64).clamp(1e-6, 1 - 1e-6)
-                        z_arr = z_prior.icdf(quantiles).clamp(z_min, z_max)
+                        z_arr = self._icdf(z_prior, quantiles).clamp(z_min, z_max)
                     else:
                         z_min, z_max = redshift_range or (0.1, 3.0)
                         z_arr = torch.linspace(z_min, z_max, n_redshift_pts, dtype=torch.float64)
@@ -960,7 +983,7 @@ class GridCalculation:
                         z_np = z_arr.numpy()
                         if hasattr(self.experiment, "prior") and "z" in self.experiment.prior:
                             mark_qs = torch.linspace(p_low, p_high, 6, dtype=torch.float64).clamp(1e-6, 1 - 1e-6)
-                            z_marks = z_prior.icdf(mark_qs).clamp(z_min, z_max).numpy()
+                            z_marks = self._icdf(z_prior, mark_qs).clamp(z_min, z_max).numpy()
                         else:
                             z_marks = np.linspace(z_min, z_max, 6)
                         for z_mark in z_marks:
@@ -1013,8 +1036,8 @@ def main():
     parser.add_argument("--use-experiment-prior", action="store_true", help="Use experiment's prior distributions for PDF")
     parser.add_argument("--device", type=str, default="cpu", help="Torch device for experiment calculations")
     parser.add_argument("--verbose", action="store_true", help="Verbose output")
-    parser.add_argument("--param-pts", type=int, default=75, help="Points per parameter axis")
-    parser.add_argument("--feature-pts", type=int, default=35, help="Points per feature axis")
+    parser.add_argument("--param-pts", type=int, default=500, help="Points per parameter axis")
+    parser.add_argument("--feature-pts", type=int, default=200, help="Points per feature axis")
     parser.add_argument("--no-plots", action="store_true", help="Skip generating plots")
     parser.add_argument("--adaptive-features", action="store_true", help="Concentrate feature grid points in high-density regions")
     parser.add_argument("--adaptive-floor", type=float, default=0.05, help="Uniform floor fraction for adaptive feature grid (0=fully adaptive, 1=nearly uniform)")

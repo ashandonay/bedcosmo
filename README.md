@@ -77,7 +77,7 @@ Pass eval-specific arguments with the `--eval-` prefix:
 
 ```bash
 # Train with grid eval afterwards
-./submit.sh train num_tracers base --eval-grid --eval-grid-param-pts 2000 --eval-grid-feature-pts 500
+./submit.sh train num_tracers base --eval-grid --eval-param-pts 2000 --eval-feature-pts 500
 
 # Custom eval time for SLURM
 ./submit.sh train num_tracers base --eval-time 01:00 --eval-n-evals 5
@@ -149,7 +149,7 @@ CLI arguments override YAML defaults. Unprefixed args are assumed to be for trai
 ./submit.sh train num_tracers base --train-initial-lr 0.0001 --train-total-steps 300000
 
 # Mix train and eval args
-./submit.sh train num_tracers base --train-initial-lr 0.0001 --eval-grid --eval-grid-param-pts 2000
+./submit.sh train num_tracers base --train-initial-lr 0.0001 --eval-grid --eval-param-pts 2000
 ```
 
 ### Key Training Parameters
@@ -263,8 +263,10 @@ The grid calculator (`bedcosmo.grid_calc`) computes Expected Information Gain by
 ### Running
 
 ```bash
-# Via SLURM
-sbatch scripts/slurm/grid_calc.sh
+# Via submit.sh (auto-detects SLURM, like train/eval)
+./submit.sh grid num_visits --param-pts 1000 --feature-pts 500
+./submit.sh grid num_visits --design-args-path design_args_2d.yaml --time 01:00
+./submit.sh grid num_visits --param-pts 1000 --feature-pts 500 --local
 
 # Directly
 python -m bedcosmo.grid_calc num_visits \
@@ -272,6 +274,8 @@ python -m bedcosmo.grid_calc num_visits \
     --prior-args-path prior_args_uniform.yaml \
     --param-pts 1000 --feature-pts 500
 ```
+
+Grid jobs are CPU-only. The SLURM log is automatically copied into the output directory alongside the results.
 
 Key CLI flags:
 

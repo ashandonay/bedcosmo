@@ -35,7 +35,7 @@ class Evaluator:
             levels=[0.68, 0.95], global_rank=0, eig_file_path=None, n_evals=10, n_particles=1000,
             param_space='physical', display_run=False, verbose=False, device="cuda:0", profile=False,
             sort=True, include_nominal=False, batch_size=1, particle_batch_size=None, design_args_path=None,
-            grid=False, grid_param_pts=231, grid_feature_pts=101, experiment_args=None
+            grid=False, grid_args=None, experiment_args=None
             ):
         self.cosmo_exp = cosmo_exp
         
@@ -86,8 +86,7 @@ class Evaluator:
         self.include_nominal = include_nominal
         self.batch_size = batch_size  # Batch size for sample_posterior to reduce memory usage
         self.grid = grid
-        self.grid_param_pts = grid_param_pts
-        self.grid_feature_pts = grid_feature_pts
+        self.grid_args = grid_args or {}
         self._grid_experiment = None
         self._grid_samples = None
         
@@ -162,8 +161,7 @@ class Evaluator:
         # Use class-based BruteForceDesigner with experiment's prior
         gc = GridCalculation(
             experiment=self._grid_experiment,
-            param_pts=self.grid_param_pts,
-            feature_pts=self.grid_feature_pts,
+            **self.grid_args,
         )
 
         # Compute prior PDF from experiment's prior distributions
@@ -1229,8 +1227,17 @@ if __name__ == "__main__":
     parser.add_argument('--particle-batch-size', type=int, default=None, help='Batch size for processing particles in LikelihoodDataset to reduce memory usage (default: None to use all particles)')
     parser.add_argument('--design-args-path', type=str, default=None, help='Path to design_args.yaml file. If None, defaults to the run\'s artifacts/design_args.yaml')
     parser.add_argument('--grid', action='store_true', default=False, help='Run grid EIG using bayesdesign ExperimentDesigner')
-    parser.add_argument('--grid-param-pts', type=int, default=75, help='Number of points per parameter axis for grid parameter grid')
-    parser.add_argument('--grid-feature-pts', type=int, default=35, help='Number of points per feature axis for grid feature grid')
+
+    # GridCalculation args (passed through to GridCalculation.__init__)
+    parser.add_argument('--param-pts', type=int, default=None, help='Number of points per parameter axis for grid')
+    parser.add_argument('--feature-pts', type=int, default=None, help='Number of points per feature axis for grid')
+    parser.add_argument('--adaptive-features', action='store_true', default=None, help='Use adaptive feature grid spacing')
+    parser.add_argument('--adaptive-floor', type=float, default=None, help='Floor value for adaptive feature grid')
+    parser.add_argument('--feature-dense-fraction', type=float, default=None, help='Fraction of feature points in dense region')
+    parser.add_argument('--param-dense-fraction', type=float, default=None, help='Fraction of param points in dense region')
+    parser.add_argument('--feature-range', dest='feature_ranges', action='append', default=None, help='Feature range as name:lo,hi (repeatable, e.g. --feature-range u:-15,100 --feature-range g:15,55)')
+    parser.add_argument('--feature-dense-range', dest='feature_dense_ranges', action='append', default=None, help='Feature dense range as name:lo,hi (repeatable)')
+    parser.add_argument('--param-dense-range', dest='param_dense_ranges', action='append', default=None, help='Param dense range as name:lo,hi (repeatable)')
 
     args, extra_args = parser.parse_known_args()
 
@@ -1238,10 +1245,32 @@ if __name__ == "__main__":
     if experiment_args:
         print(f"Experiment args overrides: {experiment_args}")
 
+    def parse_range_args(raw_list):
+        """Parse ['name:lo,hi', ...] into {'name': (lo, hi), ...}."""
+        result = {}
+        for item in raw_list:
+            name, vals = item.split(':', 1)
+            lo, hi = vals.split(',')
+            result[name] = (float(lo), float(hi))
+        return result
+
+    # Collect grid_args from CLI (only include non-None values)
+    grid_scalar_names = ['param_pts', 'feature_pts', 'adaptive_features', 'adaptive_floor',
+                         'feature_dense_fraction', 'param_dense_fraction']
+    grid_range_names = ['feature_ranges', 'feature_dense_ranges', 'param_dense_ranges']
+    grid_arg_names = grid_scalar_names + grid_range_names
+    grid_args = {k: getattr(args, k) for k in grid_scalar_names if getattr(args, k) is not None}
+    for k in grid_range_names:
+        raw = getattr(args, k)
+        if raw is not None:
+            grid_args[k] = parse_range_args(raw)
+
     valid_params = inspect.signature(Evaluator.__init__).parameters.keys()
     valid_params = [k for k in valid_params if k != 'self']
-    eval_args = {k: v for k, v in vars(args).items() if k in valid_params}
+    eval_args = {k: v for k, v in vars(args).items() if k in valid_params and k not in grid_arg_names}
     eval_args['experiment_args'] = experiment_args
+    if grid_args:
+        eval_args['grid_args'] = grid_args
 
     print(f"Evaluating with parameters:")
     print(json.dumps(eval_args, indent=2))

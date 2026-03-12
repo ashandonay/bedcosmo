@@ -34,3 +34,9 @@ srun python -m bedcosmo.grid_calc num_visits \
     --device cpu \
     --param-pts 1000 \
     --feature-pts 500
+    --temperature 10000 \
+    --param-dense-range z:0.1,0.7 \
+    --param-dense-fraction 0.9 \
+    --feature-range u:-15,100 \
+    --feature-range g:15,55 \
+    --central-z 1.0

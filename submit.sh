@@ -24,6 +24,7 @@ if [ $# -eq 0 ]; then
     echo "  eval                 - Evaluation job"
     echo "  resume               - Resume training job"
     echo "  restart              - Restart training job"
+    echo "  grid                 - Grid-based EIG calculation (CPU)"
     echo ""
     echo "Available cosmo_models:"
     echo "  base, base_omegak, base_w, base_w_wa, base_omegak_w_wa"
@@ -50,7 +51,7 @@ if [ $# -eq 0 ]; then
     echo "  --gpus <N>          - SLURM: overrides gpus-per-node; Local: sets nproc_per_node"
     echo "  --debug             - Use debug queue + 'debug' MLflow experiment (for train/restart)"
     echo "  --no-eval           - Disable auto-eval (on by default, off for --debug)"
-    echo "  --eval-<arg> <val>  - Pass args to auto-eval (e.g. --eval-grid --eval-grid-param-pts 2000)"
+    echo "  --eval-<arg> <val>  - Pass args to auto-eval (e.g. --eval-grid --eval-param-pts 2000)"
     echo "  --eval-time <HH:MM> - SLURM time limit for auto-eval job (default: 00:30)"
     echo "  --log-usage, --profile, --restart-optimizer"
     echo ""
@@ -61,6 +62,7 @@ if [ $# -eq 0 ]; then
     echo "  ./submit.sh eval num_tracers abc123"
     echo "  ./submit.sh resume num_tracers abc123 5000 --time 01:00 --queue regular"
     echo "  ./submit.sh restart num_tracers abc123 10000"
+    echo "  ./submit.sh grid num_visits --param-pts 1000 --feature-pts 500"
     echo "  ./submit.sh train num_tracers base_w_wa --initial-lr 0.0001 --log-usage"
     exit 1
 fi
@@ -106,7 +108,8 @@ GPUS_SET_BY_USER=false
 QUEUE_SET_BY_USER=false
 OMP_THREADS=""
 
-declare -A CLI_ARGS  # Associative array for command-line arguments
+declare -A CLI_ARGS  # Associative array for YAML override detection (last value wins)
+CLI_ARGS_LIST=()     # Indexed array preserving all CLI args (supports repeated keys)
 POSITIONAL_ARGS=()
 SBATCH_ARGS=()
 
@@ -228,9 +231,11 @@ while [[ $# -gt 0 ]]; do
             train_key="${1#--train-}"
             if [[ $# -gt 1 ]] && [[ ! $2 =~ ^-- ]]; then
                 CLI_ARGS["$train_key"]="$2"
+                CLI_ARGS_LIST+=("--$train_key" "$2")
                 shift 2
             else
                 CLI_ARGS["$train_key"]="true"
+                CLI_ARGS_LIST+=("--$train_key")
                 shift 1
             fi
             ;;
@@ -251,10 +256,12 @@ while [[ $# -gt 0 ]]; do
             # Check if next arg is a value or another flag
             if [[ $# -gt 1 ]] && [[ ! $2 =~ ^-- ]]; then
                 CLI_ARGS["$key"]="$2"
+                CLI_ARGS_LIST+=("--$key" "$2")
                 shift 2
             else
                 # Boolean flag
                 CLI_ARGS["$key"]="true"
+                CLI_ARGS_LIST+=("--$key")
                 shift 1
             fi
             ;;
@@ -349,7 +356,7 @@ case $JOB_TYPE in
 esac
 
 # Allow positional cosmo_model for job types that require it
-if [ -z "$COSMO_MODEL" ] && [ "$JOB_TYPE" != "eval" ] && [ "$JOB_TYPE" != "resume" ] && [ "$JOB_TYPE" != "restart" ] && [ ${#POSITIONAL_ARGS[@]} -gt 0 ]; then
+if [ -z "$COSMO_MODEL" ] && [ "$JOB_TYPE" != "eval" ] && [ "$JOB_TYPE" != "resume" ] && [ "$JOB_TYPE" != "restart" ] && [ "$JOB_TYPE" != "grid" ] && [ ${#POSITIONAL_ARGS[@]} -gt 0 ]; then
     COSMO_MODEL="${POSITIONAL_ARGS[0]}"
     POSITIONAL_ARGS=("${POSITIONAL_ARGS[@]:1}")
 fi
@@ -373,8 +380,8 @@ if [ -z "$COSMO_EXP" ]; then
     exit 1
 fi
 
-# cosmo_model is NOT required for eval/resume/restart (inferred from MLflow run)
-if [ -z "$COSMO_MODEL" ] && [ "$JOB_TYPE" != "eval" ] && [ "$JOB_TYPE" != "resume" ] && [ "$JOB_TYPE" != "restart" ]; then
+# cosmo_model is NOT required for eval/resume/restart/grid
+if [ -z "$COSMO_MODEL" ] && [ "$JOB_TYPE" != "eval" ] && [ "$JOB_TYPE" != "resume" ] && [ "$JOB_TYPE" != "restart" ] && [ "$JOB_TYPE" != "grid" ]; then
     echo "Error: --cosmo-model is required for $JOB_TYPE jobs"
     echo "Usage: ./submit.sh $JOB_TYPE [cosmo_exp] [cosmo_model] [additional args...]"
     echo "Available models: base, base_omegak, base_w, base_w_wa, base_omegak_w_wa"
@@ -481,6 +488,10 @@ fi
 # ──────────────────────────────────────────────────────────────────────
 if [ "$JOB_TYPE" = "resume" ] || [ "$JOB_TYPE" = "restart" ]; then
     echo "$JOB_TYPE job: Skipping YAML config (parameters from MLflow or command-line)"
+    YAML_ARGS=()
+    CONFIG_FILE=""
+elif [ "$JOB_TYPE" = "grid" ]; then
+    echo "grid job: Skipping YAML config (all parameters via command-line)"
     YAML_ARGS=()
     CONFIG_FILE=""
 elif [ "$JOB_TYPE" = "eval" ]; then
@@ -596,16 +607,9 @@ for key, value in data.items():
 fi
 
 # ──────────────────────────────────────────────────────────────────────
-# Add CLI arguments (these override YAML)
+# Add CLI arguments (these override YAML; uses indexed list to preserve repeated args)
 # ──────────────────────────────────────────────────────────────────────
-for key in "${!CLI_ARGS[@]}"; do
-    value="${CLI_ARGS[$key]}"
-    if [ "$value" = "true" ]; then
-        YAML_ARGS+=("--$key")
-    elif [ "$value" != "false" ]; then
-        YAML_ARGS+=("--$key" "$value")
-    fi
-done
+YAML_ARGS+=("${CLI_ARGS_LIST[@]}")
 
 # When --debug is set, filter out mlflow_exp from YAML_ARGS (we'll add --mlflow-exp debug later)
 # For eval jobs, filter out cosmo_model from YAML_ARGS (evaluate.py doesn't accept it)
@@ -735,10 +739,23 @@ case $JOB_TYPE in
         fi
         ;;
 
+    grid)
+        SLURM_SCRIPT_FILE="grid.sh"
+        PYTHON_MODULE="bedcosmo.grid_calc"
+        # For SLURM: pass --cosmo-exp so grid.sh can parse it (same pattern as other scripts)
+        # For local: FINAL_ARGS are passed directly to python -m, which expects positional cosmo_exp
+        if [ "$EXECUTION_MODE" = "slurm" ]; then
+            FINAL_ARGS=("--cosmo-exp" "$COSMO_EXP" "${YAML_ARGS[@]}")
+        else
+            FINAL_ARGS=("$COSMO_EXP" "${YAML_ARGS[@]}")
+        fi
+
+        ;;
+
     *)
         echo "Error: Unknown job type: $JOB_TYPE"
         echo ""
-        echo "Available job types: train, eval, resume, restart"
+        echo "Available job types: train, eval, resume, restart, grid"
         exit 1
         ;;
 esac
@@ -830,13 +847,8 @@ echo ""
 # Build CLI overrides string for logging in SLURM job scripts
 # ──────────────────────────────────────────────────────────────────────
 CLI_OVERRIDES_STR=""
-for key in "${!CLI_ARGS[@]}"; do
-    value="${CLI_ARGS[$key]}"
-    if [ "$value" = "true" ]; then
-        CLI_OVERRIDES_STR+="--$key "
-    elif [ "$value" != "false" ]; then
-        CLI_OVERRIDES_STR+="--$key $value "
-    fi
+for arg in "${CLI_ARGS_LIST[@]}"; do
+    CLI_OVERRIDES_STR+="$arg "
 done
 if [ "$LOG_USAGE" = true ]; then
     CLI_OVERRIDES_STR+="--log-usage "
@@ -963,6 +975,14 @@ if [ "$EXECUTION_MODE" = "slurm" ]; then
             EVAL_SBATCH_ARGS=("--dependency=afterany:$TRAIN_JOB_ID" "--job-name=eval" "--time=$EVAL_TIME" "--qos=$SLURM_QUEUE" "--nodes=1")
             EVAL_FINAL_ARGS=("--cosmo-exp" "$COSMO_EXP" "--train-job-id" "$TRAIN_JOB_ID" "${EVAL_EXTRA_ARGS[@]}")
 
+            # Build eval CLI overrides string for logging in eval job script
+            EVAL_CLI_OVERRIDES_STR=""
+            for arg in "${EVAL_EXTRA_ARGS[@]}"; do
+                EVAL_CLI_OVERRIDES_STR+="$arg "
+            done
+            EVAL_CLI_OVERRIDES_STR="${EVAL_CLI_OVERRIDES_STR% }"
+            export BED_CLI_OVERRIDES="$EVAL_CLI_OVERRIDES_STR"
+
             # Load eval_args.yaml for the cosmo_model if available
             EVAL_CONFIG_FILE="$PROJECT_ROOT/experiments/${COSMO_EXP}/eval_args.yaml"
             if [ -n "$COSMO_MODEL" ] && [ -f "$EVAL_CONFIG_FILE" ]; then
@@ -1050,27 +1070,31 @@ else
     # Local path: run directly via torchrun
     # ──────────────────────────────────────────────────────────────────
 
-    # Detect available GPUs and set or cap GPUS
-    AVAILABLE_GPUS=$(python3 -c "import torch; print(torch.cuda.device_count())" 2>/dev/null) || AVAILABLE_GPUS=0
-    [ -z "$AVAILABLE_GPUS" ] && AVAILABLE_GPUS=0
-    if [ "$GPUS_SET_BY_USER" = false ]; then
-        if [ "$JOB_TYPE" = "eval" ]; then
-            GPUS=1
-            echo "Eval job: using 1 GPU (override with --gpus if needed)"
-        elif [ "$AVAILABLE_GPUS" -le 0 ]; then
-            GPUS=1
-            echo "No GPUs detected; using 1 process (CPU). Training may fail if code requires CUDA."
-        else
-            GPUS=$AVAILABLE_GPUS
-            echo "No --gpus set; using $GPUS GPU(s) (detected $AVAILABLE_GPUS available)"
-        fi
+    # Detect available GPUs and set or cap GPUS (skip for CPU-only grid jobs)
+    if [ "$JOB_TYPE" = "grid" ]; then
+        echo "Grid job: CPU-only, skipping GPU detection"
     else
-        if [ "$AVAILABLE_GPUS" -le 0 ]; then
-            GPUS=1
-            echo "Warning: no GPUs available; capping to 1 process. Training may fail if code requires CUDA."
-        elif [ "$GPUS" -gt "$AVAILABLE_GPUS" ]; then
-            echo "Warning: --gpus $GPUS exceeds available ($AVAILABLE_GPUS); capping to $AVAILABLE_GPUS"
-            GPUS=$AVAILABLE_GPUS
+        AVAILABLE_GPUS=$(python3 -c "import torch; print(torch.cuda.device_count())" 2>/dev/null) || AVAILABLE_GPUS=0
+        [ -z "$AVAILABLE_GPUS" ] && AVAILABLE_GPUS=0
+        if [ "$GPUS_SET_BY_USER" = false ]; then
+            if [ "$JOB_TYPE" = "eval" ]; then
+                GPUS=1
+                echo "Eval job: using 1 GPU (override with --gpus if needed)"
+            elif [ "$AVAILABLE_GPUS" -le 0 ]; then
+                GPUS=1
+                echo "No GPUs detected; using 1 process (CPU). Training may fail if code requires CUDA."
+            else
+                GPUS=$AVAILABLE_GPUS
+                echo "No --gpus set; using $GPUS GPU(s) (detected $AVAILABLE_GPUS available)"
+            fi
+        else
+            if [ "$AVAILABLE_GPUS" -le 0 ]; then
+                GPUS=1
+                echo "Warning: no GPUs available; capping to 1 process. Training may fail if code requires CUDA."
+            elif [ "$GPUS" -gt "$AVAILABLE_GPUS" ]; then
+                echo "Warning: --gpus $GPUS exceeds available ($AVAILABLE_GPUS); capping to $AVAILABLE_GPUS"
+                GPUS=$AVAILABLE_GPUS
+            fi
         fi
     fi
 
@@ -1091,10 +1115,28 @@ else
 
     echo "Logging output to: $LOG_FILE"
     echo ""
-    echo "Executing: torchrun --nproc_per_node=$GPUS -m $PYTHON_MODULE [${#FINAL_ARGS[@]} arguments]"
-    echo ""
-    torchrun --nproc_per_node=$GPUS -m "$PYTHON_MODULE" "${FINAL_ARGS[@]}" > "$LOG_FILE" 2>&1
-    TRAIN_EXIT_CODE=$?
+
+    if [ "$JOB_TYPE" = "grid" ]; then
+        # grid_calc is CPU-only, no torchrun needed
+        echo "Executing: python -m $PYTHON_MODULE [${#FINAL_ARGS[@]} arguments]"
+        echo ""
+        python -m "$PYTHON_MODULE" "${FINAL_ARGS[@]}" > "$LOG_FILE" 2>&1
+        TRAIN_EXIT_CODE=$?
+
+        # Copy the log into the grid_calc output directory
+        if [ $TRAIN_EXIT_CODE -eq 0 ]; then
+            OUT_DIR=$(grep "All outputs saved to:" "$LOG_FILE" | tail -n 1 | sed 's/.*All outputs saved to: //')
+            if [ -n "$OUT_DIR" ] && [ -d "$OUT_DIR" ]; then
+                cp "$LOG_FILE" "$OUT_DIR/local_run.log"
+                echo "Log copied to: $OUT_DIR/local_run.log"
+            fi
+        fi
+    else
+        echo "Executing: torchrun --nproc_per_node=$GPUS -m $PYTHON_MODULE [${#FINAL_ARGS[@]} arguments]"
+        echo ""
+        torchrun --nproc_per_node=$GPUS -m "$PYTHON_MODULE" "${FINAL_ARGS[@]}" > "$LOG_FILE" 2>&1
+        TRAIN_EXIT_CODE=$?
+    fi
 
     # ──────────────────────────────────────────────────────────────
     # Auto-eval: run eval after training completes (local mode)
@@ -1140,9 +1182,6 @@ except Exception as e:
                     # Convert underscores to hyphens for CLI flags (POSIX convention)
                     key="${key//_/-}"
 
-                    if [[ "$key" == "grid" || "$key" == "grid-param-pts" || "$key" == "grid-feature-pts" ]]; then
-                        continue
-                    fi
                     if [ "$value" = "null" ] || [ "$value" = "None" ] || [ -z "$value" ]; then
                         continue
                     fi

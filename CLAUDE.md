@@ -23,9 +23,9 @@ bedcosmo/
 │   ├── num_tracers/        # YAML configs, cobaya/, cosmopower/, notebooks/
 │   ├── variable_redshift/  # YAML configs, notebooks/
 │   └── num_visits/         # YAML configs
-├── submit.sh               # Training script
+├── submit.sh               # Unified job submission script
 ├── scripts/
-│   └── slurm/              # SLURM job scripts (train.sh, eval.sh)
+│   └── slurm/              # SLURM job scripts (train.sh, eval.sh, grid.sh)
 ├── tests/                  # Test files
 └── pyproject.toml          # Package configuration
 ```
@@ -70,6 +70,10 @@ mypy .                          # Type check
 ./submit.sh resume num_tracers <run_id> <step>
 ./submit.sh restart num_tracers <run_id> <step>
 
+# Grid-based EIG calculation (CPU-only)
+./submit.sh grid num_visits --param-pts 1000 --feature-pts 500
+./submit.sh grid num_visits --design-args-path design_args_2d.yaml --time 01:00
+
 # Optional flags: --debug, --log-usage, --profile
 ```
 
@@ -78,7 +82,7 @@ Eval runs automatically after train/restart/resume jobs. The eval job extracts t
 
 ```bash
 # Pass eval-specific args with --eval- prefix
-./submit.sh train num_tracers base --eval-grid --eval-grid-param-pts 2000 --eval-grid-feature-pts 500
+./submit.sh train num_tracers base --eval-grid --eval-param-pts 2000 --eval-feature-pts 500
 
 # Disable auto-eval (also disabled by default with --debug)
 ./submit.sh train num_tracers base --no-eval
