@@ -50,6 +50,7 @@ warnings.filterwarnings("default")
 warnings.filterwarnings("ignore", message=".*EisensteinHu.*")
 
 # Same 5 cosmo priors as prep_shapefit_data, plus N_tracers.
+# w0/wa included for base_w_wa model.
 DEFAULT_PRIORS = {
     "N_tracers": {"dist": "uniform", "low": 1e5, "high": 1e7},
     "omega_cdm": {"dist": "uniform", "low": 0.01, "high": 0.99},
@@ -57,7 +58,17 @@ DEFAULT_PRIORS = {
     "h": {"dist": "uniform", "low": 0.2, "high": 1.0},
     "ln10A_s": {"dist": "uniform", "low": 1.61, "high": 3.91},
     "n_s": {"dist": "normal", "mu": 0.9649, "sigma": 0.042},
+    "w0": {"dist": "uniform", "low": -3.0, "high": 1.0},
+    "wa": {"dist": "uniform", "low": -3.0, "high": 2.0},
 }
+
+COSMO_MODELS = {
+    "base":     ["omega_cdm", "omega_b", "h", "ln10A_s", "n_s"],
+    "base_w_wa": ["omega_cdm", "omega_b", "h", "ln10A_s", "n_s", "w0", "wa"],
+}
+
+# Fiducial values for fixed parameters
+PARAM_DEFAULTS = {"w0": -1.0, "wa": 0.0}
 
 _PHYS_NAMES = ["qiso", "qap", "f_sigmar", "m"]
 _TRIU_I, _TRIU_J = np.triu_indices(4)
@@ -162,8 +173,11 @@ def run_fisher(
     sample: Dict[str, float],
     zrange: Tuple[float, float] = (1.2, 1.4),
     z_eff: float | None = None,
+    param_defaults: Dict[str, float] | None = None,
 ) -> Dict[str, float]:
     """Convert a sample dict (with N_tracers + cosmo params) to Fisher covariance elements."""
+    if param_defaults:
+        sample = {**param_defaults, **sample}
     N_tracers = sample["N_tracers"]
     theta_cosmo = to_extractor_params(sample)
     return get_shapefit_fisher_covariance(N_tracers, theta_cosmo, zrange=zrange, z_eff=z_eff)
@@ -187,9 +201,9 @@ def _worker_init():
 
 def _worker_run_fisher(args_tuple):
     """Top-level function for multiprocessing (must be picklable)."""
-    sample, zrange, z_eff = args_tuple
+    sample, zrange, z_eff, param_defaults = args_tuple
     try:
-        targets = run_fisher(sample, zrange=zrange, z_eff=z_eff)
+        targets = run_fisher(sample, zrange=zrange, z_eff=z_eff, param_defaults=param_defaults)
         target_vals = [targets[t] for t in TARGET_NAMES]
         if not all(np.isfinite(v) for v in target_vals):
             return None, None
@@ -208,6 +222,9 @@ def generate_dataset(
     verbose_every: int = 200,
     sigma_clip: float = 4.0,
     workers: int = 1,
+    checkpoint_fn=None,
+    checkpoint_every: int = 1000,
+    param_defaults: Dict[str, float] | None = None,
 ) -> Tuple[List[str], np.ndarray, np.ndarray]:
     param_names = list(priors.keys())
     param_rows: List[List[float]] = []
@@ -217,6 +234,7 @@ def generate_dataset(
     failed = 0
     lhs_seed = seed
     printed_exception = False
+    last_checkpoint = 0
 
     if workers > 1:
         import multiprocessing as mp
@@ -237,7 +255,7 @@ def generate_dataset(
             )
             lhs_seed += 1
 
-            tasks = [(s, zrange, z_eff) for s in draws]
+            tasks = [(s, zrange, z_eff, param_defaults) for s in draws]
             for sample, target_vals in pool.imap_unordered(_worker_run_fisher, tasks):
                 total_attempts += 1
                 if sample is None:
@@ -260,10 +278,15 @@ def generate_dataset(
                         end="", flush=True,
                     )
 
+                # Periodic checkpoint
+                if checkpoint_fn and accepted >= last_checkpoint + checkpoint_every:
+                    last_checkpoint = (accepted // checkpoint_every) * checkpoint_every
+                    checkpoint_fn(param_names, param_rows, target_rows)
+
                 if accepted >= n_samples:
                     break
 
-        pool.close()
+        pool.terminate()
         pool.join()
         elapsed = _time.perf_counter() - t_start
         print(f"\nDone: {len(param_rows)} accepted, {failed} failed, "
@@ -282,7 +305,7 @@ def generate_dataset(
             for sample in draws:
                 total_attempts += 1
                 try:
-                    targets = run_fisher(sample, zrange=zrange, z_eff=z_eff)
+                    targets = run_fisher(sample, zrange=zrange, z_eff=z_eff, param_defaults=param_defaults)
                     target_vals = [targets[t] for t in TARGET_NAMES]
                     if not all(np.isfinite(v) for v in target_vals):
                         failed += 1
@@ -298,7 +321,13 @@ def generate_dataset(
                         print(f"Failing sample: {sample}")
                     continue
 
-                if len(param_rows) >= n_samples:
+                # Periodic checkpoint
+                accepted = len(param_rows)
+                if checkpoint_fn and accepted >= last_checkpoint + checkpoint_every:
+                    last_checkpoint = (accepted // checkpoint_every) * checkpoint_every
+                    checkpoint_fn(param_names, param_rows, target_rows)
+
+                if accepted >= n_samples:
                     break
             if total_attempts % verbose_every == 0 or len(param_rows) >= n_samples:
                 accepted = len(param_rows)
@@ -358,6 +387,13 @@ def main() -> None:
             '\'{"N_tracers":{"dist":"uniform","low":1e5,"high":1e7}}\''
         ),
     )
+    parser.add_argument(
+        "--cosmo-model",
+        type=str,
+        default="base",
+        choices=list(COSMO_MODELS.keys()),
+        help="Cosmology model defining which parameters to vary (default: base).",
+    )
     # Strip empty/whitespace args that can appear from shell line continuation
     sys.argv = [a for a in sys.argv if a.strip()]
     args = parser.parse_args()
@@ -365,14 +401,44 @@ def main() -> None:
     zrange = tuple(args.zrange)
     z_eff = args.z_eff
 
-    priors = dict(DEFAULT_PRIORS) if not args.priors_json else parse_priors(args.priors_json)
+    # Build priors: only include params for the selected cosmo model
+    cosmo_model = args.cosmo_model
+    model_params = COSMO_MODELS[cosmo_model]
+    if args.priors_json:
+        priors = parse_priors(args.priors_json)
+    else:
+        varied_keys = ["N_tracers"] + model_params
+        priors = {k: dict(DEFAULT_PRIORS[k]) for k in varied_keys}
     if args.ntracers_range is not None:
         priors["N_tracers"] = {"dist": "uniform", "low": args.ntracers_range[0], "high": args.ntracers_range[1]}
+
+    # Fixed defaults for non-varied cosmo params
+    fixed_keys = set(PARAM_DEFAULTS.keys()) - set(model_params)
+    param_defaults = {k: PARAM_DEFAULTS[k] for k in fixed_keys}
+
     z_eff_actual = z_eff if z_eff is not None else np.mean(zrange)
-    save_path = os.path.abspath(args.save_path if args.save_path else get_default_save_path(analysis="shapefit", quantity="covar"))
+    save_path = os.path.abspath(args.save_path if args.save_path else get_default_save_path(analysis="shapefit", quantity="covar", cosmo_model=cosmo_model))
+    print(f"Cosmo model: {cosmo_model} (varied: {model_params})")
+    if param_defaults:
+        print(f"Fixed params: {param_defaults}")
     print("Using priors:", priors)
     print(f"Redshift range: {zrange}, z_eff = {z_eff_actual:.2f}")
     print("Writing dataset to:", save_path)
+
+    def checkpoint_fn(param_names, param_rows, target_rows):
+        X_ckpt = np.asarray(param_rows, dtype=np.float64)
+        y_ckpt = np.asarray(target_rows, dtype=np.float64)
+        print(f"\n  Checkpoint: saving {len(param_rows)} samples...")
+        save_dataset(
+            save_path=save_path,
+            param_names=param_names,
+            X=X_ckpt,
+            y=y_ckpt,
+            test_size=args.test_size,
+            target_names=TARGET_NAMES,
+            name=args.name,
+            version=args.version,
+        )
 
     try:
         param_names, X, y = generate_dataset(
@@ -385,6 +451,8 @@ def main() -> None:
             verbose_every=args.verbose_every,
             sigma_clip=args.sigma_clip,
             workers=args.workers,
+            checkpoint_fn=checkpoint_fn,
+            param_defaults=param_defaults,
         )
         print(f"Generated dataset with shape X={X.shape}, y={y.shape}")
         save_dataset(
