@@ -180,6 +180,96 @@ def parse_priors(priors_json: str) -> Dict[str, Dict[str, float]]:
             raise ValueError(f"Unsupported dist '{spec['dist']}' for '{name}'")
     return raw
 
+# DESI DR2 redshift bins: name -> (z_min, z_max, z_eff, ntracers_low, ntracers_high)
+TRACER_BINS = {
+    "BGS":       (0.1, 0.4, 0.295, 6e5, 1.8e6),
+    "LRG1":      (0.4, 0.6, 0.510, 5e5, 1.6e6),
+    "LRG2":      (0.6, 0.8, 0.706, 8e5, 2.4e6),
+    "LRG3_ELG1": (0.8, 1.1, 0.934, 2.3e6, 6.8e6),
+    "ELG2":      (1.1, 1.6, 1.321, 1.9e6, 5.7e6),
+    "QSO":       (0.8, 2.1, 1.484, 7e5, 2.2e6),
+    "Lya_QSO":   (1.8, 4.2, 2.330, 6.5e5, 1.9e6),
+}
+
+TRACER_TYPE_CHOICES = list(TRACER_BINS.keys())
+
+
+def get_tracer_config(tracer: str) -> Dict:
+    """Return tracer bin config as a dict with keys: zrange, z_eff, ntracers_low, ntracers_high."""
+    if tracer not in TRACER_BINS:
+        raise ValueError(f"Unknown tracer type '{tracer}'. Choose from: {TRACER_TYPE_CHOICES}")
+    z_min, z_max, z_eff, nt_low, nt_high = TRACER_BINS[tracer]
+    return {
+        "zrange": (z_min, z_max),
+        "z_eff": z_eff,
+        "ntracers_low": nt_low,
+        "ntracers_high": nt_high,
+    }
+
+
+def _load_module(name: str, path: str):
+    """Load a Python module from an explicit file path (avoids name collisions)."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(name, path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def get_pipeline(analysis: str, quantity: str, tracer: str | None = None):
+    """Return (default_priors, target_names, ground_truth_fn, setup) for the given analysis/quantity.
+
+    If tracer is given, overrides N_tracers prior bounds and passes the
+    corresponding zrange/z_eff to the ground truth function.
+    """
+    _here = os.path.dirname(os.path.abspath(__file__))
+
+    tracer_cfg = get_tracer_config(tracer) if tracer else None
+
+    if analysis == "shapefit":
+        if quantity == "covar":
+            mod = _load_module("shapefit_prep_covar", os.path.join(_here, "shapefit", "prep_covar.py"))
+            kw = {}
+            if tracer_cfg:
+                kw = {"zrange": tracer_cfg["zrange"], "z_eff": tracer_cfg["z_eff"]}
+            def ground_truth_fn(_setup, sample, _kw=kw):
+                return mod.run_fisher(sample, **_kw)
+            priors = dict(mod.DEFAULT_PRIORS)
+            if tracer_cfg:
+                priors["N_tracers"] = {"dist": "uniform", "low": tracer_cfg["ntracers_low"], "high": tracer_cfg["ntracers_high"]}
+            return priors, mod.TARGET_NAMES, ground_truth_fn, None
+        elif quantity == "mean":
+            mod = _load_module("shapefit_prep_mean", os.path.join(_here, "shapefit", "prep_mean.py"))
+            from desilike.theories.galaxy_clustering import ShapeFitPowerSpectrumExtractor
+            extractor = ShapeFitPowerSpectrumExtractor()
+            extractor()
+            extractor.get()
+            def ground_truth_fn(setup, sample):
+                return mod.run_extractor(setup, sample)
+            priors = dict(mod.DEFAULT_PRIORS)
+            return priors, mod.TARGET_NAMES, ground_truth_fn, extractor
+        else:
+            raise ValueError(f"Unknown quantity for shapefit: {quantity}")
+
+    elif analysis == "bao":
+        if quantity == "covar":
+            mod = _load_module("bao_prep_covar", os.path.join(_here, "bao", "prep_covar.py"))
+            kw = {}
+            if tracer_cfg:
+                kw = {"zrange": tracer_cfg["zrange"], "z_eff": tracer_cfg["z_eff"]}
+            def ground_truth_fn(_setup, sample, _kw=kw):
+                return mod.run_fisher(sample, **_kw)
+            priors = dict(mod.DEFAULT_PRIORS)
+            if tracer_cfg:
+                priors["N_tracers"] = {"dist": "uniform", "low": tracer_cfg["ntracers_low"], "high": tracer_cfg["ntracers_high"]}
+            return priors, mod.TARGET_NAMES, ground_truth_fn, None
+        else:
+            raise ValueError(f"Unknown quantity for bao: {quantity}")
+
+    else:
+        raise ValueError(f"Unknown analysis: {analysis}")
+
+
 def get_default_save_path(analysis: str = "shapefit", quantity: str = "mean") -> str:
     scratch = os.environ.get("SCRATCH")
     if not scratch:
