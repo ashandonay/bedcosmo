@@ -53,13 +53,18 @@ def to_extractor_params(sample: Dict[str, float]) -> Dict[str, float]:
     if h <= 0.0:
         raise ValueError("h must be > 0 to compute Omega_m")
     omega_m = (omega_cdm + omega_b) / (h * h)
-    return {
+    result = {
         "h": float(h),
         "Omega_m": float(omega_m),
         "omega_b": float(omega_b),
         "logA": float(sample.get("ln10A_s", 3.036394)),
         "n_s": float(sample.get("n_s", 0.9649)),
     }
+    if "w0" in sample:
+        result["w0_fde"] = float(sample["w0"])
+    if "wa" in sample:
+        result["wa_fde"] = float(sample["wa"])
+    return result
 
 
 def save_dataset(
@@ -77,7 +82,7 @@ def save_dataset(
         target_names = TARGET_NAMES
     if version is None:
         version = _next_version(save_path)
-    versioned_path = os.path.join(save_path, "training_data", f"v{version}")
+    versioned_path = os.path.join(save_path, f"v{version}")
     os.makedirs(versioned_path, exist_ok=True)
     X_train, X_test, y_train, y_test = train_test_split(
         X, y, test_size=test_size, random_state=random_state
@@ -120,10 +125,10 @@ def save_scaled_copy(
         Path to the new versioned directory.
     """
     root = get_default_save_path(analysis=analysis, quantity=quantity)
-    src = os.path.join(root, "training_data", f"v{data_version}")
+    src = os.path.join(root, f"v{data_version}")
     if suffix is None:
         suffix = f"{scale_by}_scaled"
-    dst = os.path.join(root, "training_data", f"v{data_version}_{suffix}")
+    dst = os.path.join(root, f"v{data_version}_{suffix}")
     os.makedirs(dst, exist_ok=True)
 
     for fname in os.listdir(src):
@@ -148,13 +153,12 @@ def save_scaled_copy(
 
 
 def _next_version(save_path: str) -> int:
-    """Find the next available version number in save_path/training_data/v{N} directories."""
-    training_data_dir = os.path.join(save_path, "training_data")
-    if not os.path.isdir(training_data_dir):
+    """Find the next available version number in save_path/v{N} directories."""
+    if not os.path.isdir(save_path):
         return 1
     existing = [
         int(d[1:])
-        for d in os.listdir(training_data_dir)
+        for d in os.listdir(save_path)
         if d.startswith("v") and d[1:].isdigit()
     ]
     return max(existing, default=0) + 1
@@ -180,11 +184,15 @@ def parse_priors(priors_json: str) -> Dict[str, Dict[str, float]]:
             raise ValueError(f"Unsupported dist '{spec['dist']}' for '{name}'")
     return raw
 
-def get_default_save_path(analysis: str = "shapefit", quantity: str = "mean") -> str:
+def get_default_save_path(analysis: str = "shapefit", quantity: str = "mean", cosmo_model: str | None = None) -> str:
     scratch = os.environ.get("SCRATCH")
     if not scratch:
         raise EnvironmentError("SCRATCH is not set; please pass --save-path explicitly.")
-    return os.path.join(scratch, "bedcosmo", "num_tracers", "emulator", analysis, quantity)
+    parts = [scratch, "bedcosmo", "num_tracers", "emulator", "training_data", analysis]
+    if cosmo_model is not None:
+        parts.append(cosmo_model)
+    parts.append(quantity)
+    return os.path.join(*parts)
 
 def compare_losses(
         run_ids: list,
