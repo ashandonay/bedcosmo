@@ -69,9 +69,6 @@ CONSTRAINTS = {
 _OMEGA_B_FID = 0.02237
 _N_S_FID = 0.9649
 _LN10A_S_FID = 3.044
-# Fixed little h (H0/100), matching cosmology.py default.
-_H_FID = 0.6736
-
 _PHYS_NAMES = ["DH_over_rd", "DM_over_rd"]
 _TRIU_I, _TRIU_J = np.triu_indices(2)
 TARGET_NAMES = [f"cov_{_PHYS_NAMES[i]}_{_PHYS_NAMES[j]}" for i, j in zip(_TRIU_I, _TRIU_J)]
@@ -164,30 +161,38 @@ def _constrained_samples(
 def _to_bao_cosmo_params(sample: Dict[str, float]) -> Dict[str, float]:
     """Convert BAO prior parameters to desilike cosmology parameters.
 
-    Fixes h and power-spectrum-shape parameters (omega_b, n_s, ln10A_s)
-    to DESI fiducials.  The ``hrdrag`` sample value is not used here —
-    it only enters via the emulator input so the network can learn how
-    the Jacobian (fiducial DH/rd, DM/rd) scales with h*rd.
+    Uses cosmoprimo's ``Cosmology.solve()`` to find h such that
+    ``h * r_drag == hrdrag``, following the same pattern desilike uses
+    for ``theta_MC_100`` (see ``primordial_cosmology._clone``).
+    Early-universe parameters (omega_b, n_s, ln10A_s) are fixed to DESI
+    fiducials.
 
-    Raises ValueError if the derived omega_cdm would be negative
-    (Om too small for the fixed h and omega_b).
+    Raises ValueError if the solver cannot converge (e.g. because
+    the (Om, hrdrag) combination is unphysical).
     """
-    Om = sample["Om"]
-    omega_cdm = Om * _H_FID**2 - _OMEGA_B_FID
-    if omega_cdm <= 0:
-        raise ValueError(
-            f"Om={Om:.4f} too small: omega_cdm={omega_cdm:.4f} < 0 "
-            f"(need Om > {_OMEGA_B_FID / _H_FID**2:.4f})"
-        )
+    Om = float(sample["Om"])
+    Ok = float(sample["Ok"])
+    w0 = float(sample["w0"])
+    wa = float(sample["wa"])
+    hrdrag = float(sample["hrdrag"])
+
+    cosmo = get_cosmo(("DESI", {
+        "Omega_m": Om, "Omega_k": Ok,
+        "w0_fld": w0, "wa_fld": wa,
+        "omega_b": _OMEGA_B_FID,
+        "n_s": _N_S_FID, "ln10A_s": _LN10A_S_FID,
+    }))
+    cosmo = cosmo.solve(
+        param="h",
+        func=lambda c: c.h * c.rs_drag,
+        target=hrdrag,
+    )
+    omega_cdm = Om * cosmo.h**2 - _OMEGA_B_FID
     return {
-        "Omega_m": float(sample["Om"]),
-        "Omega_k": float(sample["Ok"]),
-        "w0_fde": float(sample["w0"]),
-        "wa_fde": float(sample["wa"]),
-        "h": float(_H_FID),
-        "omega_b": float(_OMEGA_B_FID),
-        "n_s": float(_N_S_FID),
-        "logA": float(_LN10A_S_FID),
+        "h": float(cosmo.h), "omega_cdm": float(omega_cdm),
+        "omega_b": _OMEGA_B_FID,
+        "n_s": _N_S_FID, "ln10A_s": _LN10A_S_FID,
+        "Omega_k": Ok, "w0_fld": w0, "wa_fld": wa,
     }
 
 
