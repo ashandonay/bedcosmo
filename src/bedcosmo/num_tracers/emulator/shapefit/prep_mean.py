@@ -19,19 +19,34 @@ from util import (
 )
 
 # Fisher-matrix style priors (normals are truncated at +/-4 sigma by default).
+# w0/wa included for base_w_wa model.
 DEFAULT_PRIORS = {
     "omega_cdm": {"dist": "uniform", "low": 0.01, "high": 0.99},
     "omega_b": {"dist": "normal", "mu": 0.02218, "sigma": 0.00055},
     "h": {"dist": "uniform", "low": 0.2, "high": 1.0},
     "ln10A_s": {"dist": "uniform", "low": 1.61, "high": 3.91},
     "n_s": {"dist": "normal", "mu": 0.9649, "sigma": 0.042},
+    "w0": {"dist": "uniform", "low": -3.0, "high": 1.0},
+    "wa": {"dist": "uniform", "low": -3.0, "high": 2.0},
 }
+
+COSMO_MODELS = {
+    "base":     ["omega_cdm", "omega_b", "h", "ln10A_s", "n_s"],
+    "base_w_wa": ["omega_cdm", "omega_b", "h", "ln10A_s", "n_s", "w0", "wa"],
+}
+
+# Fiducial values for fixed parameters
+PARAM_DEFAULTS = {"w0": -1.0, "wa": 0.0}
 
 TARGET_NAMES = ["qiso", "qap", "f_sigmar", "m"]
 
 def run_extractor(
-    extractor: ShapeFitPowerSpectrumExtractor, sample: Dict[str, float]
+    extractor: ShapeFitPowerSpectrumExtractor,
+    sample: Dict[str, float],
+    param_defaults: Dict[str, float] | None = None,
 ) -> Dict[str, float]:
+    if param_defaults:
+        sample = {**param_defaults, **sample}
     extractor_params = to_extractor_params(sample)
     extractor(**extractor_params)
     extractor.get()
@@ -50,6 +65,7 @@ def generate_dataset(
     seed: int = 0,
     verbose_every: int = 200,
     sigma_clip: float = 4.0,
+    param_defaults: Dict[str, float] | None = None,
 ) -> Tuple[List[str], np.ndarray, np.ndarray]:
     extractor = ShapeFitPowerSpectrumExtractor()
     # Preflight sanity check so we fail fast if extractor setup is broken.
@@ -76,7 +92,7 @@ def generate_dataset(
         for sample in draws:
             total_attempts += 1
             try:
-                targets = run_extractor(extractor, sample)
+                targets = run_extractor(extractor, sample, param_defaults=param_defaults)
                 target_vals = [targets[t] for t in TARGET_NAMES]
                 if not all(np.isfinite(target_vals)):
                     failed += 1
@@ -127,12 +143,33 @@ def main() -> None:
             '\'{"omega_b":{"dist":"normal","mu":0.02218,"sigma":0.00055}}\''
         ),
     )
+    parser.add_argument(
+        "--cosmo-model",
+        type=str,
+        default="base",
+        choices=list(COSMO_MODELS.keys()),
+        help="Cosmology model defining which parameters to vary (default: base).",
+    )
     # Strip empty/whitespace args that can appear from shell line continuation
     sys.argv = [a for a in sys.argv if a.strip()]
     args = parser.parse_args()
 
-    priors = DEFAULT_PRIORS if not args.priors_json else parse_priors(args.priors_json)
-    save_path = os.path.abspath(args.save_path if args.save_path else get_default_save_path(analysis="shapefit", quantity="mean"))
+    # Build priors: only include params for the selected cosmo model
+    cosmo_model = args.cosmo_model
+    model_params = COSMO_MODELS[cosmo_model]
+    if args.priors_json:
+        priors = parse_priors(args.priors_json)
+    else:
+        priors = {k: dict(DEFAULT_PRIORS[k]) for k in model_params}
+
+    # Fixed defaults for non-varied cosmo params
+    fixed_keys = set(PARAM_DEFAULTS.keys()) - set(model_params)
+    param_defaults = {k: PARAM_DEFAULTS[k] for k in fixed_keys}
+
+    save_path = os.path.abspath(args.save_path if args.save_path else get_default_save_path(analysis="shapefit", quantity="mean", cosmo_model=cosmo_model))
+    print(f"Cosmo model: {cosmo_model} (varied: {model_params})")
+    if param_defaults:
+        print(f"Fixed params: {param_defaults}")
     print("Using priors:", priors)
     print("Writing dataset to:", save_path)
 
@@ -144,6 +181,7 @@ def main() -> None:
             seed=args.seed,
             verbose_every=args.verbose_every,
             sigma_clip=args.sigma_clip,
+            param_defaults=param_defaults,
         )
         print(f"Generated dataset with shape X={X.shape}, y={y.shape}")
         save_dataset(
