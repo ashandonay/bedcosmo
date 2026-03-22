@@ -5,6 +5,7 @@ import traceback
 import warnings
 from typing import Dict, List, Tuple
 
+
 # In spawned worker processes, suppress all C-level stderr (X11, JAX, etc.)
 # before any library imports can trigger it.
 if os.environ.get("_PREP_COVAR_WORKER") == "1":
@@ -64,22 +65,14 @@ CONSTRAINTS = {
     "high_z_matter_dom": {"params": ["w0", "wa"], "upper": 0.0},
 }
 
-COSMO_MODELS = {
-    "base":              ["Om", "hrdrag"],
-    "base_w":            ["Om", "w0", "hrdrag"],
-    "base_w_wa":         ["Om", "w0", "wa", "hrdrag"],
-    "base_omegak":       ["Om", "Ok", "hrdrag"],
-    "base_omegak_w_wa":  ["Om", "Ok", "w0", "wa", "hrdrag"],
-}
-
-# Fiducial values for fixed parameters
-PARAM_DEFAULTS = {"Ok": 0.0, "w0": -1.0, "wa": 0.0}
-
 # DESI fiducial values for parameters that set the power spectrum shape
 # but are not varied in the BAO prior.
 _OMEGA_B_FID = 0.02237
+_MNU_FID = 0.06  # sum of neutrino masses in eV (1 massive neutrino)
+_OMEGA_NU_FID = _MNU_FID / 93.14  # neutrino density parameter
 _N_S_FID = 0.9649
 _LN10A_S_FID = 3.044
+_H_FID = 0.6736
 _PHYS_NAMES = ["DH_over_rd", "DM_over_rd"]
 _TRIU_I, _TRIU_J = np.triu_indices(2)
 TARGET_NAMES = [f"cov_{_PHYS_NAMES[i]}_{_PHYS_NAMES[j]}" for i, j in zip(_TRIU_I, _TRIU_J)]
@@ -169,47 +162,39 @@ def _constrained_samples(
     return rows
 
 
-def _to_bao_cosmo_params(sample: Dict[str, float]) -> Dict[str, float]:
+def _to_bao_cosmo_params(sample: Dict[str, float]) -> Tuple[Dict[str, float], float]:
     """Convert BAO prior parameters to desilike cosmology parameters.
 
-    Uses cosmoprimo's ``Cosmology.solve()`` to find h such that
-    ``h * r_drag == hrdrag``, following the same pattern desilike uses
-    for ``theta_MC_100`` (see ``primordial_cosmology._clone``).
-    Early-universe parameters (omega_b, n_s, ln10A_s) are fixed to DESI
-    fiducials.
+    Fixes h to the DESI fiducial value, matching the DESI Y1 BAO
+    parameterization where h is fixed and hrdrag is a free parameter
+    that only enters through rd = hrdrag / h.
 
-    Raises ValueError if the solver cannot converge (e.g. because
-    the (Om, hrdrag) combination is unphysical).
+    Returns the cosmology dict and the sampled hrdrag value (which is
+    used in the Jacobian to convert from qpar/qper to DH/rd, DM/rd).
+
+    Raises ValueError if the derived omega_cdm would be negative
+    (Om too small for the fixed h and omega_b).
     """
     Om = float(sample["Om"])
-    Ok = float(sample["Ok"])
-    w0 = float(sample["w0"])
-    wa = float(sample["wa"])
-    hrdrag = float(sample["hrdrag"])
-
-    cosmo = get_cosmo(("DESI", {
-        "Omega_m": Om, "Omega_k": Ok,
-        "w0_fld": w0, "wa_fld": wa,
-        "omega_b": _OMEGA_B_FID,
-        "n_s": _N_S_FID, "ln10A_s": _LN10A_S_FID,
-    }))
-    cosmo = cosmo.solve(
-        param="h",
-        func=lambda c: c.h * c.rs_drag,
-        target=hrdrag,
-    )
-    omega_cdm = Om * cosmo.h**2 - _OMEGA_B_FID
-    return {
-        "h": float(cosmo.h), "omega_cdm": float(omega_cdm),
-        "omega_b": _OMEGA_B_FID,
-        "n_s": _N_S_FID, "ln10A_s": _LN10A_S_FID,
-        "Omega_k": Ok, "w0_fld": w0, "wa_fld": wa,
+    omega_cdm = Om * _H_FID**2 - _OMEGA_NU_FID - _OMEGA_B_FID
+    if omega_cdm <= 0:
+        raise ValueError(
+            f"Om={Om:.4f} too small: omega_cdm={omega_cdm:.4f} < 0 "
+            f"(need Om > {(_OMEGA_B_FID + _OMEGA_NU_FID) / _H_FID**2:.4f})"
+        )
+    theta_cosmo = {
+        "Omega_m": Om, "Omega_k": float(sample["Ok"]),
+        "w0_fld": float(sample["w0"]), "wa_fld": float(sample["wa"]),
+        "h": _H_FID, "omega_b": _OMEGA_B_FID,
+        "n_s": _N_S_FID, "logA": _LN10A_S_FID,
     }
+    return theta_cosmo, float(sample["hrdrag"])
 
 
 def get_bao_fisher_covariance(
     N_tracers: float,
     theta_cosmo: Dict[str, float],
+    hrdrag: float,
     zrange: Tuple[float, float] = (1.2, 1.4),
     z_eff: float | None = None,
     area: float = 14000.0,
@@ -221,14 +206,15 @@ def get_bao_fisher_covariance(
     Returns the upper-triangular elements (3 values) of the physical-basis
     covariance matrix for ``(DH/rd, DM/rd)``.
 
-    desilike's Fisher internally uses ``qpar`` and ``qper``, which relate to
-    the physical distances as::
+    Following the DESI Y1 BAO parameterization, h is fixed and
+    ``rd = hrdrag / h`` is a free parameter.  desilike's Fisher internally
+    uses ``qpar`` and ``qper``, which relate to the physical distances as::
 
         DH/rd = qpar * (DH/rd)_fid
         DM/rd = qper * (DM/rd)_fid
 
-    A Jacobian transform ``J = diag((DH/rd)_fid, (DM/rd)_fid)`` is applied
-    to convert to the physical basis.
+    The Jacobian uses ``rd = hrdrag / h`` (not ``cosmo.rs_drag``) to match
+    the DESI parameterization where hrdrag is free.
     """
     z = z_eff if z_eff is not None else np.mean(zrange)
 
@@ -294,8 +280,10 @@ def get_bao_fisher_covariance(
 
     # Jacobian to physical basis (DH/rd, DM/rd):
     # DH/rd = qpar * (DH/rd)_fid,  DM/rd = qper * (DM/rd)_fid
-    DH_over_rd_fid = float(template.DH_over_rd_fid)
-    DM_over_rd_fid = float(template.DM_over_rd_fid)
+    # Use rd = hrdrag / h (DESI parameterization) instead of cosmo.rs_drag.
+    rd = hrdrag / _H_FID
+    DH_over_rd_fid = float(template.DH_fid) / rd
+    DM_over_rd_fid = float(template.DM_fid) / rd
     J = np.diag([DH_over_rd_fid, DM_over_rd_fid])
     cov_phys = J @ cov_q @ J.T
 
@@ -308,14 +296,11 @@ def run_fisher(
     sample: Dict[str, float],
     zrange: Tuple[float, float] = (1.2, 1.4),
     z_eff: float | None = None,
-    param_defaults: Dict[str, float] | None = None,
 ) -> Dict[str, float]:
     """Convert a sample dict (with N_tracers + cosmo params) to Fisher covariance elements."""
-    if param_defaults:
-        sample = {**param_defaults, **sample}
     N_tracers = sample["N_tracers"]
-    theta_cosmo = _to_bao_cosmo_params(sample)
-    return get_bao_fisher_covariance(N_tracers, theta_cosmo, zrange=zrange, z_eff=z_eff)
+    theta_cosmo, hrdrag = _to_bao_cosmo_params(sample)
+    return get_bao_fisher_covariance(N_tracers, theta_cosmo, hrdrag, zrange=zrange, z_eff=z_eff)
 
 
 def _worker_init():
@@ -336,9 +321,9 @@ def _worker_init():
 
 def _worker_run_fisher(args_tuple):
     """Top-level function for multiprocessing (must be picklable)."""
-    sample, zrange, z_eff, param_defaults = args_tuple
+    sample, zrange, z_eff = args_tuple
     try:
-        targets = run_fisher(sample, zrange=zrange, z_eff=z_eff, param_defaults=param_defaults)
+        targets = run_fisher(sample, zrange=zrange, z_eff=z_eff)
         target_vals = [targets[t] for t in TARGET_NAMES]
         if not all(np.isfinite(v) for v in target_vals):
             return None, None
@@ -357,13 +342,7 @@ def generate_dataset(
     verbose_every: int = 200,
     sigma_clip: float = 4.0,
     workers: int = 1,
-    checkpoint_fn=None,
-    checkpoint_every: int = 1000,
-    param_defaults: Dict[str, float] | None = None,
-    constraints: Dict[str, Dict] | None = None,
 ) -> Tuple[List[str], np.ndarray, np.ndarray]:
-    if constraints is None:
-        constraints = CONSTRAINTS
     param_names = list(priors.keys())
     param_rows: List[List[float]] = []
     target_rows: List[List[float]] = []
@@ -372,7 +351,6 @@ def generate_dataset(
     failed = 0
     lhs_seed = seed
     printed_exception = False
-    last_checkpoint = 0
 
     if workers > 1:
         import multiprocessing as mp
@@ -389,12 +367,12 @@ def generate_dataset(
             remaining = n_samples - len(param_rows)
             draw_count = min(max(remaining * 2, batch_size), remaining * 3)
             draws = _constrained_samples(
-                priors, constraints=constraints,
+                priors, constraints=CONSTRAINTS,
                 n_samples=draw_count, seed=lhs_seed, sigma_clip=sigma_clip,
             )
             lhs_seed += 1
 
-            tasks = [(s, zrange, z_eff, param_defaults) for s in draws]
+            tasks = [(s, zrange, z_eff) for s in draws]
             for sample, target_vals in pool.imap_unordered(_worker_run_fisher, tasks):
                 total_attempts += 1
                 if sample is None:
@@ -417,15 +395,10 @@ def generate_dataset(
                         end="", flush=True,
                     )
 
-                # Periodic checkpoint
-                if checkpoint_fn and accepted >= last_checkpoint + checkpoint_every:
-                    last_checkpoint = (accepted // checkpoint_every) * checkpoint_every
-                    checkpoint_fn(param_names, param_rows, target_rows)
-
                 if accepted >= n_samples:
                     break
 
-        pool.terminate()
+        pool.close()
         pool.join()
         elapsed = _time.perf_counter() - t_start
         print(f"\nDone: {len(param_rows)} accepted, {failed} failed, "
@@ -435,7 +408,7 @@ def generate_dataset(
         while len(param_rows) < n_samples:
             draws = _constrained_samples(
                 priors,
-                constraints=constraints,
+                constraints=CONSTRAINTS,
                 n_samples=batch_size,
                 seed=lhs_seed,
                 sigma_clip=sigma_clip,
@@ -445,7 +418,7 @@ def generate_dataset(
             for sample in draws:
                 total_attempts += 1
                 try:
-                    targets = run_fisher(sample, zrange=zrange, z_eff=z_eff, param_defaults=param_defaults)
+                    targets = run_fisher(sample, zrange=zrange, z_eff=z_eff)
                     target_vals = [targets[t] for t in TARGET_NAMES]
                     if not all(np.isfinite(v) for v in target_vals):
                         failed += 1
@@ -461,13 +434,7 @@ def generate_dataset(
                         print(f"Failing sample: {sample}")
                     continue
 
-                # Periodic checkpoint
-                accepted = len(param_rows)
-                if checkpoint_fn and accepted >= last_checkpoint + checkpoint_every:
-                    last_checkpoint = (accepted // checkpoint_every) * checkpoint_every
-                    checkpoint_fn(param_names, param_rows, target_rows)
-
-                if accepted >= n_samples:
+                if len(param_rows) >= n_samples:
                     break
             if total_attempts % verbose_every == 0 or len(param_rows) >= n_samples:
                 accepted = len(param_rows)
@@ -527,13 +494,6 @@ def main() -> None:
             '\'{"N_tracers":{"dist":"uniform","low":1e5,"high":1e7}}\''
         ),
     )
-    parser.add_argument(
-        "--cosmo-model",
-        type=str,
-        default="base_omegak_w_wa",
-        choices=list(COSMO_MODELS.keys()),
-        help="Cosmology model defining which parameters to vary (default: base_omegak_w_wa).",
-    )
     # Strip empty/whitespace args that can appear from shell line continuation
     sys.argv = [a for a in sys.argv if a.strip()]
     args = parser.parse_args()
@@ -541,52 +501,14 @@ def main() -> None:
     zrange = tuple(args.zrange)
     z_eff = args.z_eff  # None means use midpoint of zrange
 
-    # Build priors: only include params for the selected cosmo model
-    cosmo_model = args.cosmo_model
-    model_params = COSMO_MODELS[cosmo_model]
-    if args.priors_json:
-        priors = parse_priors(args.priors_json)
-    else:
-        varied_keys = ["N_tracers"] + model_params
-        priors = {k: dict(DEFAULT_PRIORS[k]) for k in varied_keys}
+    priors = dict(DEFAULT_PRIORS) if not args.priors_json else parse_priors(args.priors_json)
     if args.ntracers_range is not None:
         priors["N_tracers"] = {"dist": "uniform", "low": args.ntracers_range[0], "high": args.ntracers_range[1]}
-
-    # Fixed defaults for non-varied cosmo params
-    all_cosmo_keys = {"Om", "Ok", "w0", "wa", "hrdrag"}
-    fixed_keys = all_cosmo_keys - set(model_params)
-    param_defaults = {k: PARAM_DEFAULTS[k] for k in fixed_keys if k in PARAM_DEFAULTS}
-
-    # Filter constraints: only keep those whose params are both varied
-    constraints = {
-        name: spec for name, spec in CONSTRAINTS.items()
-        if all(p in model_params for p in spec["params"])
-    }
-
     z_eff_actual = z_eff if z_eff is not None else np.mean(zrange)
-    save_path = os.path.abspath(args.save_path if args.save_path else get_default_save_path(analysis="bao", quantity="covar", cosmo_model=cosmo_model))
-    print(f"Cosmo model: {cosmo_model} (varied: {model_params})")
-    if param_defaults:
-        print(f"Fixed params: {param_defaults}")
+    save_path = os.path.abspath(args.save_path if args.save_path else get_default_save_path(analysis="bao", quantity="covar"))
     print("Using priors:", priors)
-    print(f"Active constraints: {list(constraints.keys())}")
     print(f"Redshift range: {zrange}, z_eff = {z_eff_actual:.2f}")
     print("Writing dataset to:", save_path)
-
-    def checkpoint_fn(param_names, param_rows, target_rows):
-        X_ckpt = np.asarray(param_rows, dtype=np.float64)
-        y_ckpt = np.asarray(target_rows, dtype=np.float64)
-        print(f"\n  Checkpoint: saving {len(param_rows)} samples...")
-        save_dataset(
-            save_path=save_path,
-            param_names=param_names,
-            X=X_ckpt,
-            y=y_ckpt,
-            test_size=args.test_size,
-            target_names=TARGET_NAMES,
-            name=args.name,
-            version=args.version,
-        )
 
     try:
         param_names, X, y = generate_dataset(
@@ -599,9 +521,6 @@ def main() -> None:
             verbose_every=args.verbose_every,
             sigma_clip=args.sigma_clip,
             workers=args.workers,
-            checkpoint_fn=checkpoint_fn,
-            param_defaults=param_defaults,
-            constraints=constraints,
         )
         print(f"Generated dataset with shape X={X.shape}, y={y.shape}")
         save_dataset(
