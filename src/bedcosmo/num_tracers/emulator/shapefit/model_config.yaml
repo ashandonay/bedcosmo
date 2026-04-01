@@ -1,0 +1,17 @@
+# Shared NN settings for all cosmo models. If --nn-model is omitted and your
+# --cosmo-model name is not a key here, training falls back to this block.
+base:
+  architecture: resnet
+  hidden_dim: 32
+  n_hidden: 13
+  expand: 4
+  dropout: 0.0
+  lr: 1.0e-3
+  final_lr_frac: 0.01
+  weight_decay: 1.0e-5
+  batch_size: 256
+  warmup_fraction: 0.05
+  scheduler_type: lambda
+  lr_restarts: 10
+  lr_gamma: 0.5
+  grad_clip: 1.0

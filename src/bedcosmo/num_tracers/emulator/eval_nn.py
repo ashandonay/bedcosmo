@@ -10,8 +10,7 @@ import torch
 import sys
 import os
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__))))
-from model import NNRegressor
-from util import latin_hypercube_samples, get_default_save_path
+from util import latin_hypercube_samples, get_default_save_path, get_pipeline, TRACER_TYPE_CHOICES, build_model
 
 def _log_bins(vals: np.ndarray, n_bins: int = 30) -> np.ndarray:
     """Return histogram bin edges appropriate for log/symlog data."""
@@ -58,51 +57,8 @@ def _set_log_or_symlog(ax, axis: str, vals: np.ndarray) -> None:
 
 
 
-def _load_module(name: str, path: str):
-    """Load a Python module from an explicit file path (avoids name collisions)."""
-    import importlib.util
-    spec = importlib.util.spec_from_file_location(name, path)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
 
-
-def _get_pipeline(analysis: str, quantity: str):
-    """Return (default_priors, target_names, ground_truth_fn, setup) for the given analysis/quantity."""
-    _here = os.path.dirname(os.path.abspath(__file__))
-
-    if analysis == "shapefit":
-        if quantity == "covar":
-            mod = _load_module("shapefit_prep_covar", os.path.join(_here, "shapefit", "prep_covar.py"))
-            def ground_truth_fn(_setup, sample):
-                return mod.run_fisher(sample)
-            return mod.DEFAULT_PRIORS, mod.TARGET_NAMES, ground_truth_fn, None
-        elif quantity == "mean":
-            mod = _load_module("shapefit_prep_mean", os.path.join(_here, "shapefit", "prep_mean.py"))
-            from desilike.theories.galaxy_clustering import ShapeFitPowerSpectrumExtractor
-            extractor = ShapeFitPowerSpectrumExtractor()
-            extractor()
-            extractor.get()
-            def ground_truth_fn(setup, sample):
-                return mod.run_extractor(setup, sample)
-            return mod.DEFAULT_PRIORS, mod.TARGET_NAMES, ground_truth_fn, extractor
-        else:
-            raise ValueError(f"Unknown quantity for shapefit: {quantity}")
-
-    elif analysis == "bao":
-        if quantity == "covar":
-            mod = _load_module("bao_prep_covar", os.path.join(_here, "bao", "prep_covar.py"))
-            def ground_truth_fn(_setup, sample):
-                return mod.run_fisher(sample)
-            return mod.DEFAULT_PRIORS, mod.TARGET_NAMES, ground_truth_fn, None
-        else:
-            raise ValueError(f"Unknown quantity for bao: {quantity}")
-
-    else:
-        raise ValueError(f"Unknown analysis: {analysis}")
-
-
-def run_eval(model_path: str, save_path: str, analysis: str = "shapefit", quantity: str = "covar", n_samples: int = 500, seed: int = 42, hist_xlims: dict[str, tuple[float, float]] | None = None, rtol: float = 5e-3, atol: float = 1e-4, log_scale: bool = False, rescale_by: str | None = None) -> None:
+def run_eval(model_path: str, save_path: str, analysis: str = "shapefit", quantity: str = "covar", n_samples: int = 500, seed: int = 42, hist_xlims: dict[str, tuple[float, float]] | None = None, rtol: float = 5e-3, atol: float = 1e-4, log_scale: bool = False, rescale_by: str | None = None, tracer: str | None = None) -> None:
     os.makedirs(save_path, exist_ok=True)
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     np.random.seed(seed)
@@ -111,12 +67,15 @@ def run_eval(model_path: str, save_path: str, analysis: str = "shapefit", quanti
     device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
     ckpt = torch.load(model_path, map_location=device, weights_only=False)
-    model = NNRegressor(
+    model = build_model(
+        analysis=ckpt.get("analysis", "bao"),
+        architecture=ckpt.get("architecture", "resnet"),
         in_dim=len(ckpt["param_names"]),
         out_dim=len(ckpt["target_names"]),
         hidden_dim=ckpt["hidden_dim"],
         n_hidden=ckpt["n_hidden"],
         dropout=ckpt.get("dropout", 0.0),
+        expand=ckpt.get("expand", 4),
     ).to(device)
     model.load_state_dict(ckpt["state_dict"])
     model.eval()
@@ -130,7 +89,7 @@ def run_eval(model_path: str, save_path: str, analysis: str = "shapefit", quanti
     param_names = ckpt["param_names"]
     ckpt_target_names = ckpt["target_names"]
 
-    default_priors, target_names, ground_truth_fn, setup = _get_pipeline(analysis, quantity)
+    default_priors, target_names, ground_truth_fn, setup = get_pipeline(analysis, quantity, tracer=tracer)
 
     true_rows = []
     param_rows = []
@@ -387,6 +346,13 @@ def main() -> None:
         default=None,
         help="Where to save plots (default: resolved from run-id/run-dir, else get_default_save_path()).",
     )
+    parser.add_argument(
+        "--tracer",
+        type=str,
+        default=None,
+        choices=TRACER_TYPE_CHOICES,
+        help="Tracer type (e.g. BGS, LRG1). Sets zrange, z_eff, and N_tracers bounds for evaluation.",
+    )
     args = parser.parse_args()
 
     if args.run_id is not None:
@@ -417,7 +383,7 @@ def main() -> None:
         raw = json.loads(args.hist_xlims)
         hist_xlims = {k: tuple(v) for k, v in raw.items()}
 
-    run_eval(model_path, save_path, analysis=args.analysis, quantity=args.quantity, n_samples=args.n_samples, seed=args.seed, hist_xlims=hist_xlims, rtol=args.rtol, atol=args.atol, log_scale=args.log_scale, rescale_by=args.rescale_by)
+    run_eval(model_path, save_path, analysis=args.analysis, quantity=args.quantity, n_samples=args.n_samples, seed=args.seed, hist_xlims=hist_xlims, rtol=args.rtol, atol=args.atol, log_scale=args.log_scale, rescale_by=args.rescale_by, tracer=args.tracer)
 
 
 if __name__ == "__main__":

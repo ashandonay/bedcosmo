@@ -1,8 +1,9 @@
 import os
-from typing import Dict, List
+from typing import Dict, List, Type
 
 import numpy as np
 import json
+import torch.nn as nn
 from scipy.stats import truncnorm
 from sklearn.model_selection import train_test_split
 
@@ -10,6 +11,46 @@ from scipy.stats import qmc
 from scipy.stats import truncnorm
 import mlflow
 import matplotlib.pyplot as plt
+
+from bao import model as bao_model
+from shapefit import model as shapefit_model
+
+# analysis -> architecture name -> nn.Module subclass (hyperparameters passed at build time).
+ARCHITECTURE_REGISTRY: Dict[str, Dict[str, Type[nn.Module]]] = {
+    "bao": {
+        "resnet": bao_model.ResNetRegressor,
+    },
+    "shapefit": {
+        "resnet": shapefit_model.base_regressor,
+    },
+}
+
+# DESI DR2 redshift bins: name -> (z_min, z_max, z_eff, ntracers_low, ntracers_high)
+TRACER_BINS = {
+    "BGS":       (0.1, 0.4, 0.295, 6e5, 1.8e6),
+    "LRG1":      (0.4, 0.6, 0.510, 5e5, 1.6e6),
+    "LRG2":      (0.6, 0.8, 0.706, 8e5, 2.4e6),
+    "LRG3_ELG1": (0.8, 1.1, 0.934, 2.3e6, 6.8e6),
+    "ELG2":      (1.1, 1.6, 1.321, 1.9e6, 5.7e6),
+    "QSO":       (0.8, 2.1, 1.484, 7e5, 2.2e6),
+    "Lya_QSO":   (1.8, 4.2, 2.330, 6.5e5, 1.9e6),
+}
+
+TRACER_TYPE_CHOICES = list(TRACER_BINS.keys())
+
+def build_model(analysis: str, architecture: str, **kwargs) -> nn.Module:
+    """Instantiate a model from ARCHITECTURE_REGISTRY using the YAML ``architecture`` field."""
+    if analysis not in ARCHITECTURE_REGISTRY:
+        raise ValueError(
+            f"Unknown analysis '{analysis}'. Choose from: {list(ARCHITECTURE_REGISTRY.keys())}"
+        )
+    registry = ARCHITECTURE_REGISTRY[analysis]
+    if architecture not in registry:
+        raise ValueError(
+            f"Unknown architecture '{architecture}' for analysis '{analysis}'. "
+            f"Choose from: {list(registry.keys())}"
+        )
+    return registry[architecture](**kwargs)
 
 def latin_hypercube_samples(
     priors: Dict[str, Dict[str, float]],
@@ -183,20 +224,6 @@ def parse_priors(priors_json: str) -> Dict[str, Dict[str, float]]:
         else:
             raise ValueError(f"Unsupported dist '{spec['dist']}' for '{name}'")
     return raw
-
-# DESI DR2 redshift bins: name -> (z_min, z_max, z_eff, ntracers_low, ntracers_high)
-TRACER_BINS = {
-    "BGS":       (0.1, 0.4, 0.295, 6e5, 1.8e6),
-    "LRG1":      (0.4, 0.6, 0.510, 5e5, 1.6e6),
-    "LRG2":      (0.6, 0.8, 0.706, 8e5, 2.4e6),
-    "LRG3_ELG1": (0.8, 1.1, 0.934, 2.3e6, 6.8e6),
-    "ELG2":      (1.1, 1.6, 1.321, 1.9e6, 5.7e6),
-    "QSO":       (0.8, 2.1, 1.484, 7e5, 2.2e6),
-    "Lya_QSO":   (1.8, 4.2, 2.330, 6.5e5, 1.9e6),
-}
-
-TRACER_TYPE_CHOICES = list(TRACER_BINS.keys())
-
 
 def get_tracer_config(tracer: str) -> Dict:
     """Return tracer bin config as a dict with keys: zrange, z_eff, ntracers_low, ntracers_high."""

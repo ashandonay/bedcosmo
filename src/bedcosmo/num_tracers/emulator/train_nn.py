@@ -11,13 +11,16 @@ import torch
 from torch import nn
 from torch.utils.data import DataLoader, TensorDataset
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__))))
-from model import NNRegressor
-from util import get_default_save_path, _next_version
+from util import get_default_save_path, _next_version, TRACER_TYPE_CHOICES, build_model
 from eval_nn import run_eval
 
-def load_data(data_path: str) -> Dict[str, np.ndarray]:
-    train = np.load(f"{data_path}/train.npz", allow_pickle=True)
-    test = np.load(f"{data_path}/test.npz", allow_pickle=True)
+def load_data(data_path: str, tracer: str | None = None) -> Dict[str, np.ndarray]:
+    if tracer and os.path.isfile(f"{data_path}/{tracer}_train.npz"):
+        train = np.load(f"{data_path}/{tracer}_train.npz", allow_pickle=True)
+        test = np.load(f"{data_path}/{tracer}_test.npz", allow_pickle=True)
+    else:
+        train = np.load(f"{data_path}/train.npz", allow_pickle=True)
+        test = np.load(f"{data_path}/test.npz", allow_pickle=True)
     data = {
         "x_train": train["x"].astype(np.float32),
         "y_train": train["y"].astype(np.float32),
@@ -280,31 +283,32 @@ def main() -> None:
         help="Quantity: 'mean' or 'covar'.",
     )
     parser.add_argument(
+        "--cosmo-model",
+        type=str,
+        default="base",
+        choices=["base", "base_w", "base_w_wa", "base_omegak", "base_omegak_w_wa"],
+        help="Cosmology model defining the parameter set (affects data path). Default: 'base'.",
+    )
+    parser.add_argument(
+        "--nn-model",
+        type=str,
+        default=None,
+        help=(
+            "YAML top-level key in {analysis}/model_config.yaml for NN hyperparameters and "
+            "architecture. If omitted, uses --cosmo-model as the key; if that key is missing "
+            "but a 'default' entry exists, uses 'default' (see shapefit/model_config.yaml)."
+        ),
+    )
+    parser.add_argument(
         "--data-version",
         type=str,
         default="latest",
         help="Data version to use (e.g. '1', '2', or 'latest' for most recent).",
     )
     parser.add_argument("--epochs", type=int, default=10000)
-    parser.add_argument("--batch-size", type=int, default=100)
-    parser.add_argument("--lr", type=float, default=5e-4)
-    parser.add_argument("--weight-decay", type=float, default=1e-6)
-    parser.add_argument("--hidden-dim", type=int, default=256)
-    parser.add_argument("--n-hidden", type=int, default=4)
-    parser.add_argument("--dropout", type=float, default=0.0,
-                        help="Dropout probability between hidden layers.")
     parser.add_argument("--patience", type=int, default=0,
                         help="Early stopping patience (epochs without test loss improvement). 0 = disabled.")
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--scheduler-type", type=str, default="constant",
-                        choices=["constant", "cosine", "linear", "exponential", "lambda"],
-                        help="Learning rate scheduler type.")
-    parser.add_argument("--final-lr", type=float, default=1e-6,
-                        help="Final learning rate for scheduler decay.")
-    parser.add_argument("--n-cycles", type=int, default=1,
-                        help="Number of scheduler cycles.")
-    parser.add_argument("--warmup-fraction", type=float, default=0.0,
-                        help="Fraction of total steps for linear warmup.")
     parser.add_argument(
         "--mlflow-exp",
         type=str,
@@ -325,22 +329,48 @@ def main() -> None:
                         help="Relative tolerance for evaluation.")
     parser.add_argument("--eval-rescale-by", type=str, default=None,
                         help="Divide predictions by this input param before eval comparison (e.g. 'N_tracers').")
+    parser.add_argument("--tracer", type=str, default=None,
+                        choices=TRACER_TYPE_CHOICES,
+                        help="Tracer type (e.g. BGS, LRG1). Sets zrange, z_eff, and N_tracers bounds for evaluation.")
     args = parser.parse_args()
 
-    root_data_dir = get_default_save_path(analysis=args.analysis, quantity=args.quantity)
+    # Load training config from {analysis}/model_config.yaml. Keys are arbitrary (e.g. scaled_base);
+    # use --nn-model to pick one. If --nn-model is omitted, try --cosmo-model, then optional "default".
+    _here = os.path.dirname(os.path.abspath(__file__))
+    config_path = os.path.join(_here, args.analysis, "model_config.yaml")
+    with open(config_path) as f:
+        all_model_configs = yaml.safe_load(f)
+    requested = args.nn_model if args.nn_model is not None else args.cosmo_model
+    if requested in all_model_configs:
+        config_key = requested
+    elif args.nn_model is None and "default" in all_model_configs:
+        config_key = "default"
+        print(
+            f"No YAML entry '{requested}' in {config_path}; using 'default' for NN hyperparameters."
+        )
+    else:
+        raise ValueError(
+            f"No training config for nn model key '{requested}' in {config_path}. "
+            f"Available: {list(all_model_configs.keys())}"
+        )
+    model_cfg = all_model_configs[config_key]
+    architecture = model_cfg.get("architecture", "resnet")
+    print(f"Loaded training config for {args.analysis}/{config_key} (architecture={architecture}): {model_cfg}")
+
+    root_data_dir = get_default_save_path(analysis=args.analysis, quantity=args.quantity, cosmo_model=args.cosmo_model)
 
     # Resolve versioned data path
     if args.data_version == "latest":
         version = _next_version(root_data_dir) - 1
         if version < 1:
             raise FileNotFoundError(
-                f"No training data versions found in {root_data_dir}/training_data/. "
+                f"No training data versions found in {root_data_dir}. "
                 "Run the appropriate prep script first."
             )
     else:
         version = args.data_version
-    data_path = os.path.join(root_data_dir, "training_data", f"v{version}")
-    print(f"Using {args.analysis}/{args.quantity} training data: {data_path}")
+    data_path = os.path.join(root_data_dir, f"v{version}")
+    print(f"Using {args.analysis}/{args.cosmo_model}/{args.quantity} training data: {data_path}")
 
     # Set up MLflow tracking
     scratch = os.environ.get("SCRATCH", os.path.expanduser("~"))
@@ -360,13 +390,10 @@ def main() -> None:
     print(f"Artifacts: {artifacts_dir}")
 
     # Log parameters immediately after starting run (same pattern as train.py)
-    run_params = vars(args)
-    for key, value in run_params.items():
-        if key in ("analysis", "quantity"):
-            continue  # log resolved versioned path instead
+    for key, value in vars(args).items():
         mlflow.log_param(key, value)
-    mlflow.log_param("analysis", args.analysis)
-    mlflow.log_param("quantity", args.quantity)
+    for key, value in model_cfg.items():
+        mlflow.log_param(key, value)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
@@ -374,7 +401,7 @@ def main() -> None:
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
 
-    data = load_data(data_path)
+    data = load_data(data_path, tracer=args.tracer)
     x_train, y_train, x_test, y_test, stats = standardize(
         data["x_train"], data["y_train"], data["x_test"], data["y_test"],
         log_normalize=args.log_normalize,
@@ -382,34 +409,40 @@ def main() -> None:
 
     train_ds = TensorDataset(torch.from_numpy(x_train), torch.from_numpy(y_train))
     test_ds = TensorDataset(torch.from_numpy(x_test), torch.from_numpy(y_test))
-    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True)
-    test_loader = DataLoader(test_ds, batch_size=args.batch_size, shuffle=False)
+    train_loader = DataLoader(train_ds, batch_size=model_cfg["batch_size"], shuffle=True)
+    test_loader = DataLoader(test_ds, batch_size=model_cfg["batch_size"], shuffle=False)
 
     in_dim = x_train.shape[1]
     out_dim = y_train.shape[1]
-    model = NNRegressor(
+    model = build_model(
+        analysis=args.analysis,
+        architecture=architecture,
         in_dim=in_dim,
         out_dim=out_dim,
-        hidden_dim=args.hidden_dim,
-        n_hidden=args.n_hidden,
-        dropout=args.dropout,
+        hidden_dim=model_cfg["hidden_dim"],
+        n_hidden=model_cfg["n_hidden"],
+        dropout=model_cfg.get("dropout", 0.0),
+        expand=model_cfg.get("expand", 4),
     ).to(device)
 
-    opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    lr = model_cfg["lr"]
+    final_lr = lr * model_cfg.get("final_lr_frac", 0.01)
+    opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=model_cfg.get("weight_decay", 1e-5))
     loss_fn = nn.MSELoss()
 
     batches_per_epoch = len(train_loader)
     total_steps = args.epochs * batches_per_epoch
     scheduler = create_scheduler(opt, {
         "total_steps": total_steps,
-        "n_cycles": args.n_cycles,
-        "initial_lr": args.lr,
-        "final_lr": args.final_lr,
-        "scheduler_type": args.scheduler_type,
-        "warmup_fraction": args.warmup_fraction,
+        "n_cycles": model_cfg.get("lr_restarts", 1),
+        "initial_lr": lr,
+        "final_lr": final_lr,
+        "scheduler_type": model_cfg.get("scheduler_type", "lambda"),
+        "warmup_fraction": model_cfg.get("warmup_fraction", 0.0),
+        "gamma": model_cfg.get("lr_gamma", 1.0),
     })
-    print(f"Scheduler: {args.scheduler_type}, total_steps={total_steps}, "
-          f"initial_lr={args.lr}, final_lr={args.final_lr}")
+    print(f"Scheduler: {model_cfg.get('scheduler_type', 'lambda')}, total_steps={total_steps}, "
+          f"initial_lr={lr}, final_lr={final_lr}")
 
     train_losses = []
     test_losses = []
@@ -434,7 +467,7 @@ def main() -> None:
                     "Check that prepped data has no NaN/Inf (run with --data-path and inspect or regenerate with prep_data.py)."
                 )
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=model_cfg.get("grad_clip", 1.0))
             opt.step()
             scheduler.step()
             global_step += 1
@@ -530,9 +563,14 @@ def main() -> None:
         "y_linthresh": torch.from_numpy(stats["y_linthresh"]) if stats["y_linthresh"] is not None else None,
         "param_names": data["param_names"].tolist(),
         "target_names": target_names,
-        "hidden_dim": args.hidden_dim,
-        "n_hidden": args.n_hidden,
-        "dropout": args.dropout,
+        "hidden_dim": model_cfg["hidden_dim"],
+        "n_hidden": model_cfg["n_hidden"],
+        "dropout": model_cfg.get("dropout", 0.0),
+        "cosmo_model": args.cosmo_model,
+        "nn_model": config_key,
+        "architecture": architecture,
+        "analysis": args.analysis,
+        "expand": model_cfg.get("expand", 4),
     }
     torch.save(payload, model_path)
     print(f"Saved model checkpoint to: {model_path}")
@@ -540,16 +578,12 @@ def main() -> None:
     train_params: Dict[str, Any] = {
         "data_path": data_path,
         "epochs": args.epochs,
-        "batch_size": args.batch_size,
-        "lr": args.lr,
-        "weight_decay": args.weight_decay,
-        "hidden_dim": args.hidden_dim,
-        "n_hidden": args.n_hidden,
         "seed": args.seed,
         "in_dim": int(in_dim),
         "out_dim": int(out_dim),
         "param_names": data["param_names"].tolist(),
         "target_names": target_names,
+        **model_cfg,
     }
     # Log data-dependent params that weren't available at startup
     mlflow.log_param("in_dim", int(in_dim))
@@ -564,7 +598,7 @@ def main() -> None:
 
     # Run evaluation
     print("\nRunning evaluation...")
-    run_eval(model_path, save_path=artifacts_dir, analysis=args.analysis, quantity=args.quantity, n_samples=1000, atol=args.eval_atol, rtol=args.eval_rtol, log_scale=True, rescale_by=args.eval_rescale_by)
+    run_eval(model_path, save_path=artifacts_dir, analysis=args.analysis, quantity=args.quantity, n_samples=1000, atol=args.eval_atol, rtol=args.eval_rtol, log_scale=True, rescale_by=args.eval_rescale_by, tracer=args.tracer)
 
     mlflow.end_run()
     print(f"MLflow run completed: {mlflow_run_id}")
