@@ -28,6 +28,7 @@ _{expr1}_{expr2}_scaled. e.g.:
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import sys
@@ -386,6 +387,13 @@ def scale_dataset(data_dir: str, scale_exprs: list[str]) -> str:
             target_names=d["target_names"],
         )
         print(f"  {fname}: y * {' * '.join(scale_exprs)}, shape {y.shape}")
+
+    # Save scale info for downstream inversion (eval, etc.)
+    scale_info = {"scale_expressions": scale_exprs, "source_dir": data_dir}
+    info_path = os.path.join(out_dir, "scale_info.json")
+    with open(info_path, "w") as f:
+        json.dump(scale_info, f, indent=2)
+    print(f"Saved scale info to: {info_path}")
 
     print(f"\nDone. Scaled data saved to {out_dir}")
     return out_dir

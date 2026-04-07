@@ -58,7 +58,7 @@ def _set_log_or_symlog(ax, axis: str, vals: np.ndarray) -> None:
 
 
 
-def run_eval(model_path: str, save_path: str, analysis: str = "shapefit", quantity: str = "covar", n_samples: int = 500, seed: int = 42, hist_xlims: dict[str, tuple[float, float]] | None = None, rtol: float = 5e-3, atol: float = 1e-4, log_scale: bool = False, rescale_by: str | None = None, tracer: str | None = None) -> None:
+def run_eval(model_path: str, save_path: str, analysis: str = "shapefit", quantity: str = "covar", n_samples: int = 500, seed: int = 42, hist_xlims: dict[str, tuple[float, float]] | None = None, rtol: float = 5e-3, atol: float = 1e-4, log_scale: bool = False, tracer: str | None = None) -> None:
     os.makedirs(save_path, exist_ok=True)
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     np.random.seed(seed)
@@ -127,13 +127,6 @@ def run_eval(model_path: str, save_path: str, analysis: str = "shapefit", quanti
     if log_normalize and y_linthresh is not None:
         # Invert symlog: sign(z) * linthresh * expm1(|z|)
         y_pred = np.sign(y_pred) * y_linthresh * np.expm1(np.abs(y_pred))
-
-    # Undo input-parameter scaling applied during training (e.g. targets were
-    # multiplied by N_tracers before training).  Divide predictions by that
-    # input to recover the original physical scale for comparison with truth.
-    if rescale_by is not None:
-        idx = param_names.index(rescale_by)
-        y_pred = y_pred / x_raw[:, idx : idx + 1]
 
     # Absolute error for covariance elements (off-diagonal can be near zero),
     # percentage error for other targets.
@@ -326,8 +319,6 @@ def main() -> None:
     parser.add_argument("--rtol", type=float, default=2e-3, help="Relative tolerance for allclose outlier check (default: 2e-3).")
     parser.add_argument("--atol", type=float, default=2e-3, help="Absolute tolerance for allclose outlier check (default: 2e-3).")
     parser.add_argument("--log-scale", action="store_true", help="Use log scale on triangle plot axes.")
-    parser.add_argument("--rescale-by", type=str, default=None,
-                        help="Divide predictions by this input parameter before comparing to truth (e.g. 'N_tracers').")
     parser.add_argument(
         "--analysis",
         type=str,
@@ -358,20 +349,16 @@ def main() -> None:
     if args.run_id is not None:
         import mlflow
         scratch = os.environ.get("SCRATCH", os.path.expanduser("~"))
-        mlflow.set_tracking_uri(f"file:{scratch}/bedcosmo/shapefit_emulator/mlruns")
+        mlflow.set_tracking_uri(f"file:{scratch}/bedcosmo/num_tracers/emulator/mlruns")
         run = mlflow.get_run(args.run_id)
         artifact_uri = run.info.artifact_uri
         if artifact_uri.startswith("file://"):
             artifact_uri = artifact_uri[7:]
-        model_path = os.path.join(artifact_uri, "model.pt")
+        model_path = os.path.join(artifact_uri, "checkpoints", "model_best.pt")
         save_path = args.save_path or artifact_uri
-        if not os.path.isfile(model_path):
-            raise FileNotFoundError(f"Model not found: {model_path}")
     elif args.run_dir is not None:
-        model_path = os.path.join(args.run_dir, "model.pt")
+        model_path = os.path.join(args.run_dir, "checkpoints", "model_best.pt")
         save_path = args.save_path or args.run_dir
-        if not os.path.isfile(model_path):
-            raise FileNotFoundError(f"Model not found: {model_path}")
     else:
         if args.model_path is None:
             raise ValueError("Either --run-id, --run-dir, or --model-path must be set.")
@@ -383,7 +370,7 @@ def main() -> None:
         raw = json.loads(args.hist_xlims)
         hist_xlims = {k: tuple(v) for k, v in raw.items()}
 
-    run_eval(model_path, save_path, analysis=args.analysis, quantity=args.quantity, n_samples=args.n_samples, seed=args.seed, hist_xlims=hist_xlims, rtol=args.rtol, atol=args.atol, log_scale=args.log_scale, rescale_by=args.rescale_by, tracer=args.tracer)
+    run_eval(model_path, save_path, analysis=args.analysis, quantity=args.quantity, n_samples=args.n_samples, seed=args.seed, hist_xlims=hist_xlims, rtol=args.rtol, atol=args.atol, log_scale=args.log_scale, tracer=args.tracer)
 
 
 if __name__ == "__main__":

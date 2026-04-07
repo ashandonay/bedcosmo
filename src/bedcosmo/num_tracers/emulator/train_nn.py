@@ -16,11 +16,14 @@ from eval_nn import run_eval
 
 def load_data(data_path: str, tracer: str | None = None) -> Dict[str, np.ndarray]:
     if tracer and os.path.isfile(f"{data_path}/{tracer}_train.npz"):
-        train = np.load(f"{data_path}/{tracer}_train.npz", allow_pickle=True)
-        test = np.load(f"{data_path}/{tracer}_test.npz", allow_pickle=True)
+        train_file = f"{data_path}/{tracer}_train.npz"
+        test_file = f"{data_path}/{tracer}_test.npz"
     else:
-        train = np.load(f"{data_path}/train.npz", allow_pickle=True)
-        test = np.load(f"{data_path}/test.npz", allow_pickle=True)
+        train_file = f"{data_path}/train.npz"
+        test_file = f"{data_path}/test.npz"
+    print(f"Loading data: {train_file}")
+    train = np.load(train_file, allow_pickle=True)
+    test = np.load(test_file, allow_pickle=True)
     data = {
         "x_train": train["x"].astype(np.float32),
         "y_train": train["y"].astype(np.float32),
@@ -300,10 +303,11 @@ def main() -> None:
         ),
     )
     parser.add_argument(
-        "--data-version",
+        "--data-dir",
         type=str,
         default="latest",
-        help="Data version to use (e.g. '1', '2', or 'latest' for most recent).",
+        help="Data directory: full path, or name within {analysis}/{cosmo_model}/{quantity}/ "
+             "(e.g. 'v3', 'v3_log_N_tracers_inv_exp_Om_hrdrag_scaled'), or 'latest' for most recent v{N}.",
     )
     parser.add_argument("--epochs", type=int, default=10000)
     parser.add_argument("--patience", type=int, default=0,
@@ -327,8 +331,6 @@ def main() -> None:
                         help="Absolute tolerance for evaluation.")
     parser.add_argument("--eval-rtol", type=float, default=2e-3,
                         help="Relative tolerance for evaluation.")
-    parser.add_argument("--eval-rescale-by", type=str, default=None,
-                        help="Divide predictions by this input param before eval comparison (e.g. 'N_tracers').")
     parser.add_argument("--tracer", type=str, default=None,
                         choices=TRACER_TYPE_CHOICES,
                         help="Tracer type (e.g. BGS, LRG1). Sets zrange, z_eff, and N_tracers bounds for evaluation.")
@@ -359,35 +361,56 @@ def main() -> None:
 
     root_data_dir = get_default_save_path(analysis=args.analysis, quantity=args.quantity, cosmo_model=args.cosmo_model)
 
-    # Resolve versioned data path
-    if args.data_version == "latest":
+    # Resolve data path
+    if os.path.isabs(args.data_dir) and os.path.isdir(args.data_dir):
+        data_path = args.data_dir
+    elif args.data_dir == "latest":
         version = _next_version(root_data_dir) - 1
         if version < 1:
             raise FileNotFoundError(
                 f"No training data versions found in {root_data_dir}. "
                 "Run the appropriate prep script first."
             )
+        data_path = os.path.join(root_data_dir, f"v{version}")
     else:
-        version = args.data_version
-    data_path = os.path.join(root_data_dir, f"v{version}")
+        data_path = os.path.join(root_data_dir, args.data_dir)
     print(f"Using {args.analysis}/{args.cosmo_model}/{args.quantity} training data: {data_path}")
 
     # Set up MLflow tracking
     scratch = os.environ.get("SCRATCH", os.path.expanduser("~"))
-    mlflow_tracking_uri = f"file:{scratch}/bedcosmo/shapefit_emulator/mlruns"
+    mlflow_tracking_uri = f"file:{scratch}/bedcosmo/num_tracers/emulator/mlruns"
     mlflow.set_tracking_uri(mlflow_tracking_uri)
     mlflow.set_experiment(args.mlflow_exp)
     mlflow.start_run(run_name=args.run_name)
     active_run = mlflow.active_run()
     mlflow_run_id = active_run.info.run_id
     artifacts_dir = os.path.join(
-        scratch, "bedcosmo", "shapefit_emulator", "mlruns",
+        scratch, "bedcosmo", "num_tracers", "emulator", "mlruns",
         active_run.info.experiment_id, active_run.info.run_id, "artifacts"
     )
     os.makedirs(artifacts_dir, exist_ok=True)
+
+    # Tee stdout/stderr to a log file in the artifacts directory
+    log_file = os.path.join(artifacts_dir, "train.log")
+    class _Tee:
+        def __init__(self, *streams):
+            self.streams = streams
+        def write(self, data):
+            for s in self.streams:
+                s.write(data)
+                s.flush()
+        def flush(self):
+            for s in self.streams:
+                s.flush()
+    _log_fh = open(log_file, "w")
+    sys.stdout = _Tee(sys.__stdout__, _log_fh)
+    sys.stderr = _Tee(sys.__stderr__, _log_fh)
+
+    print(f"Data: {data_path}")
     print(f"MLflow tracking URI: {mlflow_tracking_uri}")
     print(f"MLflow run ID: {mlflow_run_id}")
     print(f"Artifacts: {artifacts_dir}")
+    print(f"Log file: {log_file}")
 
     # Log parameters immediately after starting run (same pattern as train.py)
     for key, value in vars(args).items():
@@ -451,6 +474,35 @@ def main() -> None:
     best_state_dict = None
     epochs_without_improvement = 0
 
+    ckpt_dir = os.path.join(artifacts_dir, "checkpoints")
+    os.makedirs(ckpt_dir, exist_ok=True)
+
+    def _make_payload(state_dict, epoch=None, test_loss=None):
+        payload = {
+            "state_dict": state_dict,
+            "x_mu": torch.from_numpy(stats["x_mu"]),
+            "x_sigma": torch.from_numpy(stats["x_sigma"]),
+            "y_mu": torch.from_numpy(stats["y_mu"]),
+            "y_sigma": torch.from_numpy(stats["y_sigma"]),
+            "log_normalize": stats["log_normalize"],
+            "y_linthresh": torch.from_numpy(stats["y_linthresh"]) if stats["y_linthresh"] is not None else None,
+            "param_names": data["param_names"].tolist(),
+            "target_names": data["target_names"].tolist(),
+            "hidden_dim": model_cfg["hidden_dim"],
+            "n_hidden": model_cfg["n_hidden"],
+            "dropout": model_cfg.get("dropout", 0.0),
+            "cosmo_model": args.cosmo_model,
+            "nn_model": config_key,
+            "architecture": architecture,
+            "analysis": args.analysis,
+            "expand": model_cfg.get("expand", 4),
+        }
+        if epoch is not None:
+            payload["epoch"] = epoch
+        if test_loss is not None:
+            payload["test_loss"] = test_loss
+        return payload
+
     for epoch in range(1, args.epochs + 1):
         model.train()
         train_loss = 0.0
@@ -507,16 +559,35 @@ def main() -> None:
         if epoch_test_loss < best_test_loss:
             best_test_loss = epoch_test_loss
             best_state_dict = {k: v.clone() for k, v in model.state_dict().items()}
+            torch.save(_make_payload(best_state_dict, epoch=epoch, test_loss=best_test_loss),
+                       os.path.join(ckpt_dir, "model_best.pt"))
+            print(f"  Saved best model (test loss: {best_test_loss:.6e}, epoch {epoch})")
             epochs_without_improvement = 0
         else:
             epochs_without_improvement += 1
+
+        # Periodic checkpoint every 2000 epochs
+        if epoch % 2000 == 0:
+            state = {k: v.clone() for k, v in model.state_dict().items()}
+            torch.save(_make_payload(state, epoch=epoch, test_loss=epoch_test_loss),
+                       os.path.join(ckpt_dir, f"model_epoch_{epoch}.pt"))
+            print(f"  Saved checkpoint: model_epoch_{epoch}.pt")
 
         if args.patience > 0 and epochs_without_improvement >= args.patience:
             print(f"Early stopping at epoch {epoch} (no improvement for {args.patience} epochs). "
                   f"Best test loss: {best_test_loss:.6e}")
             break
 
-    # Restore best model weights
+    # Save final model as model_latest.pt
+    final_epoch = len(train_losses)
+    final_test_loss = test_losses[-1] if test_losses else None
+    model_latest_path = os.path.join(ckpt_dir, "model_latest.pt")
+    torch.save(_make_payload({k: v.clone() for k, v in model.state_dict().items()},
+                             epoch=final_epoch, test_loss=final_test_loss),
+               model_latest_path)
+    print(f"Saved model_latest.pt (epoch {final_epoch})")
+
+    # Evaluate using best model
     if best_state_dict is not None:
         model.load_state_dict(best_state_dict)
         print(f"Restored best model (test loss: {best_test_loss:.6e})")
@@ -531,49 +602,26 @@ def main() -> None:
     rms = np.sqrt(np.mean((yhat - data["y_test"]) ** 2, axis=0))
     target_names = data["target_names"].tolist()
 
-    print("Per-target metrics on test set:")
+    print("Per-target metrics on test set (best model):")
     for i, name in enumerate(target_names):
         print(f"  {name:10s}  MAE={mae[i]:.6e}  RMSE={rms[i]:.6e}")
         mlflow.log_metric(f"mae_{name}", mae[i])
         mlflow.log_metric(f"rmse_{name}", rms[i])
 
     fig, ax = plt.subplots()
-    epochs = np.arange(1, len(train_losses) + 1)
-    ax.plot(epochs, train_losses, color="tab:blue", label="Train")
-    ax.plot(epochs, test_losses, color="tab:orange", label="Test")
+    epochs_arr = np.arange(1, len(train_losses) + 1)
+    ax.plot(epochs_arr, train_losses, color="tab:blue", label="Train")
+    ax.plot(epochs_arr, test_losses, color="tab:orange", label="Test")
     ax.set_xlabel("Epoch")
     ax.set_ylabel("MSE Loss")
     ax.set_yscale("log")
     ax.legend()
-    ax.set_title("ShapeFit NN Training")
+    ax.set_title("NN Training")
     fig.tight_layout()
     loss_plot_path = os.path.join(artifacts_dir, "loss.png")
     fig.savefig(loss_plot_path, dpi=150)
     plt.close(fig)
     print(f"Saved loss plot to: {loss_plot_path}")
-
-    model_path = os.path.join(artifacts_dir, "model.pt")
-    payload = {
-        "state_dict": model.state_dict(),
-        "x_mu": torch.from_numpy(stats["x_mu"]),
-        "x_sigma": torch.from_numpy(stats["x_sigma"]),
-        "y_mu": torch.from_numpy(stats["y_mu"]),
-        "y_sigma": torch.from_numpy(stats["y_sigma"]),
-        "log_normalize": stats["log_normalize"],
-        "y_linthresh": torch.from_numpy(stats["y_linthresh"]) if stats["y_linthresh"] is not None else None,
-        "param_names": data["param_names"].tolist(),
-        "target_names": target_names,
-        "hidden_dim": model_cfg["hidden_dim"],
-        "n_hidden": model_cfg["n_hidden"],
-        "dropout": model_cfg.get("dropout", 0.0),
-        "cosmo_model": args.cosmo_model,
-        "nn_model": config_key,
-        "architecture": architecture,
-        "analysis": args.analysis,
-        "expand": model_cfg.get("expand", 4),
-    }
-    torch.save(payload, model_path)
-    print(f"Saved model checkpoint to: {model_path}")
 
     train_params: Dict[str, Any] = {
         "data_path": data_path,
@@ -596,9 +644,10 @@ def main() -> None:
         yaml.safe_dump(train_params, f, default_flow_style=False, sort_keys=False)
     print(f"Saved training params to: {train_params_path}")
 
-    # Run evaluation
+    # Run evaluation using best model
+    best_model_path = os.path.join(ckpt_dir, "model_best.pt")
     print("\nRunning evaluation...")
-    run_eval(model_path, save_path=artifacts_dir, analysis=args.analysis, quantity=args.quantity, n_samples=1000, atol=args.eval_atol, rtol=args.eval_rtol, log_scale=True, rescale_by=args.eval_rescale_by, tracer=args.tracer)
+    run_eval(best_model_path, save_path=artifacts_dir, analysis=args.analysis, quantity=args.quantity, n_samples=1000, atol=args.eval_atol, rtol=args.eval_rtol, log_scale=True, tracer=args.tracer)
 
     mlflow.end_run()
     print(f"MLflow run completed: {mlflow_run_id}")

@@ -12,8 +12,14 @@ from scipy.stats import truncnorm
 import mlflow
 import matplotlib.pyplot as plt
 
-from bao import model as bao_model
-from shapefit import model as shapefit_model
+try:
+    # Preferred when importing as package code (e.g. from bedcosmo/ scripts).
+    from bedcosmo.num_tracers.emulator.bao import model as bao_model
+    from bedcosmo.num_tracers.emulator.shapefit import model as shapefit_model
+except ModuleNotFoundError:
+    # Backward-compatible fallback for running from emulator/ as a script.
+    from bao import model as bao_model  # type: ignore[reportMissingImports]
+    from shapefit import model as shapefit_model  # type: ignore[reportMissingImports]
 
 # analysis -> architecture name -> nn.Module subclass (hyperparameters passed at build time).
 ARCHITECTURE_REGISTRY: Dict[str, Dict[str, Type[nn.Module]]] = {
@@ -145,53 +151,6 @@ def save_dataset(
     )
     print(f"Saved {prefix}train/test files to: {versioned_path} (version {version})")
     return versioned_path
-
-def save_scaled_copy(
-    analysis: str,
-    quantity: str,
-    data_version: str,
-    scale_by: str,
-    suffix: str | None = None,
-) -> str:
-    """Save a copy of existing training data with targets scaled by an input parameter.
-
-    Args:
-        analysis: Analysis name (e.g. 'shapefit').
-        quantity: Quantity name (e.g. 'mean', 'errors').
-        data_version: Version string (e.g. '5'). Will be prefixed with 'v'.
-        scale_by: Name of the input parameter to multiply targets by (must be in param_names).
-        suffix: Suffix for the new version directory. Defaults to '{scale_by}_scaled'.
-
-    Returns:
-        Path to the new versioned directory.
-    """
-    root = get_default_save_path(analysis=analysis, quantity=quantity)
-    src = os.path.join(root, f"v{data_version}")
-    if suffix is None:
-        suffix = f"{scale_by}_scaled"
-    dst = os.path.join(root, f"v{data_version}_{suffix}")
-    os.makedirs(dst, exist_ok=True)
-
-    for fname in os.listdir(src):
-        if not fname.endswith(".npz"):
-            continue
-        d = np.load(os.path.join(src, fname), allow_pickle=True)
-        param_names = d["param_names"].tolist()
-        if scale_by not in param_names:
-            raise ValueError(f"'{scale_by}' not in param_names: {param_names}")
-        idx = param_names.index(scale_by)
-        y_scaled = d["y"] * d["x"][:, idx : idx + 1]
-        np.savez(
-            os.path.join(dst, fname),
-            x=d["x"],
-            y=y_scaled,
-            param_names=d["param_names"],
-            target_names=d["target_names"],
-        )
-        print(f"Saved {fname} to {dst}")
-
-    return dst
-
 
 def _next_version(save_path: str) -> int:
     """Find the next available version number in save_path/v{N} directories."""
@@ -330,7 +289,7 @@ def compare_losses(
     from mlflow.tracking import MlflowClient
 
     scratch = os.environ.get("SCRATCH", os.path.expanduser("~"))
-    mlflow.set_tracking_uri(f"file:{scratch}/bedcosmo/shapefit_emulator/mlruns")
+    mlflow.set_tracking_uri(f"file:{scratch}/bedcosmo/num_tracers/emulator/mlruns")
     client = MlflowClient()
 
     if labels is None:
@@ -343,23 +302,22 @@ def compare_losses(
         train_metric, test_metric = "epoch_train_loss", "epoch_test_loss"
         x_label = "Epoch"
 
-    fig, ax = plt.subplots(figsize=(7, 4))
+    fig, (ax_train, ax_test) = plt.subplots(1, 2, figsize=(10, 4), sharey=True)
 
     for run_id, label in zip(run_ids, labels):
         train_hist = client.get_metric_history(run_id, train_metric)
         test_hist = client.get_metric_history(run_id, test_metric)
 
-        # Use same color for train/test of a given run, with different styles
         color = None
 
         if train_hist:
             steps, vals = zip(
                 *[(m.step, m.value) for m in train_hist if np.isfinite(m.value)]
             )
-            line = ax.plot(
+            line = ax_train.plot(
                 steps,
                 vals,
-                label=f"{label} train",
+                label=label,
                 alpha=0.8,
             )[0]
             color = line.get_color()
@@ -368,23 +326,25 @@ def compare_losses(
             steps, vals = zip(
                 *[(m.step, m.value) for m in test_hist if np.isfinite(m.value)]
             )
-            ax.plot(
+            ax_test.plot(
                 steps,
                 vals,
-                label=f"{label} test",
-                linestyle="--",
+                label=label,
                 alpha=0.8,
                 color=color,
             )
 
-    ax.set_xlabel(x_label)
-    ax.set_ylabel("MSE Loss")
-    ax.set_title("Train/Test Loss")
+    ax_train.set_xlabel(x_label)
+    ax_test.set_xlabel(x_label)
+    ax_train.set_ylabel("MSE Loss")
+    ax_train.set_title("Train")
+    ax_test.set_title("Test")
     if log_scale:
-        ax.set_yscale("log")
+        ax_train.set_yscale("log")
     if y_lim:
-        ax.set_ylim(y_lim)
-    ax.legend()
+        ax_train.set_ylim(y_lim)
+    ax_train.legend()
+    ax_test.legend()
 
     fig.tight_layout()
     plt.show()
