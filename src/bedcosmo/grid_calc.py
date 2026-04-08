@@ -603,6 +603,21 @@ class GridCalculation:
         prob = np.exp(log_prob - log_prob_max)
         prob = np.where(np.isfinite(prob), prob, 0.0)
 
+        # Multiply PDF values by cell widths to convert to probability masses.
+        # This ensures that densely-sampled regions don't get excess weight
+        # in the subsequent plain-sum (PMF) arithmetic used by bed.Grid.sum().
+        for i, name in enumerate(param_names):
+            a = np.asarray(self.parameter_grid.axes_in[name]).ravel()
+            if len(a) < 2:
+                continue
+            dw = np.empty(len(a), dtype=np.float64)
+            dw[0] = a[1] - a[0]
+            dw[-1] = a[-1] - a[-2]
+            dw[1:-1] = 0.5 * (a[2:] - a[:-2])
+            shape = [1] * len(grid_shape)
+            shape[i] = len(a)
+            prob *= dw.reshape(shape)
+
         if normalize:
             total = np.sum(prob)
             if total > 0:

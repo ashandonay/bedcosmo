@@ -416,7 +416,7 @@ def generate_dataset(
                 if accepted >= n_samples:
                     break
 
-        pool.close()
+        pool.terminate()
         pool.join()
         elapsed = _time.perf_counter() - t_start
         print(f"\nDone: {len(param_rows)} accepted, {failed} failed, "
