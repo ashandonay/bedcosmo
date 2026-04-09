@@ -1,0 +1,55 @@
+BGS:
+  zrange: [0.1, 0.4]
+  z_eff: 0.295
+  low: 600000.0
+  high: 1800000.0
+  bias_recon: 1.5
+  smoothing_scale: 15.0
+
+LRG1:
+  zrange: [0.4, 0.6]
+  z_eff: 0.510
+  low: 500000.0
+  high: 1600000.0
+  bias_recon: 2.0
+  smoothing_scale: 15.0
+
+LRG2:
+  zrange: [0.6, 0.8]
+  z_eff: 0.706
+  low: 800000.0
+  high: 2400000.0
+  bias_recon: 2.0
+  smoothing_scale: 15.0
+
+LRG3_ELG1:
+  zrange: [0.8, 1.1]
+  z_eff: 0.934
+  low: 2300000.0
+  high: 6800000.0
+  bias_recon: 1.6
+  smoothing_scale: 15.0
+
+ELG2:
+  zrange: [1.1, 1.6]
+  z_eff: 1.321
+  low: 1900000.0
+  high: 5700000.0
+  bias_recon: 1.2
+  smoothing_scale: 15.0
+
+QSO:
+  zrange: [0.8, 2.1]
+  z_eff: 1.484
+  low: 700000.0
+  high: 2200000.0
+  bias_recon: 2.1
+  smoothing_scale: 30.0
+
+Lya_QSO:
+  zrange: [1.8, 4.2]
+  z_eff: 2.330
+  low: 650000.0
+  high: 1900000.0
+  bias_recon: 2.1
+  smoothing_scale: 30.0

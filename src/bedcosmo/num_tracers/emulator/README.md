@@ -89,6 +89,8 @@ Both scripts share most flags. They write **`{prefix}train.npz`** / **`{prefix}t
 | `--priors-json` | Full prior dict as JSON (must be self-consistent with varied parameters). |
 | `--cosmo-model` | **BAO**: `base`, `base_w`, `base_w_wa`, `base_omegak`, `base_omegak_w_wa` (default `base_omegak_w_wa`). **ShapeFit**: `base`, `base_w_wa` (default `base`). |
 
+**BAO only:** `--tracer-bin` selects a key in `tracers.yaml` for reconstruction / nuisance defaults (default `LRG2`).
+
 BAO additionally applies **constraint** filters from `CONSTRAINTS` when the relevant parameters are both varied.
 
 ShapeFit `prep_covar` can pass a **`checkpoint_fn`** to save intermediate datasets during long runs.
@@ -113,7 +115,7 @@ Outputs go to `training_data/shapefit/{cosmo_model}/mean/v{N}/`.
 
 | File | Role |
 |------|------|
-| **`util.py`** | `build_model`, `get_default_save_path`, `get_pipeline` (loads `prep_covar` / `prep_mean` for ground truth), `save_dataset`, LHS sampling, tracer bins for **`--tracer`**. |
+| **`util.py`** | `build_model`, `get_default_save_path`, `get_pipeline` (loads `prep_covar` / `prep_mean` for ground truth), `save_dataset`, LHS sampling, tracer bins for **`--tracer-bin`**. |
 | **`train_nn.py`** | Loads YAML + `.npz` data, standardizes inputs/targets, trains with MLflow logging, saves checkpoints under the run’s artifacts. |
 | **`eval_nn.py`** | Loads a checkpoint, draws LHS parameters, compares NN to `get_pipeline` ground truth, writes diagnostic plots. |
 | **`scale_data.py`** | Post-processes a directory of `.npz` files: multiplies `y` by user-defined factors of input variables; writes a sibling directory and **`scale_info.json`** (used at train/eval time to track scaling). |
@@ -153,7 +155,7 @@ Output directory: `<data_dir>_<suffix>_scaled` where `suffix` encodes the expres
 | `--run-name` | `None` | Optional run name. |
 | `--log-normalize` | off | Symlog targets before z-score. |
 | `--eval-atol`, `--eval-rtol` | `2e-3` | Passed to post-training eval. |
-| `--tracer` | `None` | One of `BGS`, `LRG1`, `LRG2`, `LRG3_ELG1`, `ELG2`, `QSO`, `Lya_QSO`: loads `{tracer}_train.npz` / `{tracer}_test.npz` if present and scopes eval priors / redshift. |
+| `--tracer-bin` | `None` | One of `BGS`, `LRG1`, `LRG2`, `LRG3_ELG1`, `ELG2`, `QSO`, `Lya_QSO`: loads `{name}_train.npz` / `{name}_test.npz` if present and scopes eval priors / redshift. |
 
 Training uses the first available CUDA device; evaluation inside `eval_nn.py` uses **`cuda:1`** if CUDA is available, else CPU.
 
@@ -176,7 +178,7 @@ Exactly one of **`--run-id`**, **`--run-dir`**, or **`--model-path`** must ident
 | `--analysis` | `shapefit` | Must match the trained model. |
 | `--quantity` | `covar` | `covar` or `mean`. |
 | `--save-path` | auto | Plot output directory. |
-| `--tracer` | `None` | Same choices as training; aligns priors and `zrange` / `z_eff` with DESI bin definitions. |
+| `--tracer-bin` | `None` | Same choices as training; aligns priors and `zrange` / `z_eff` with DESI bin definitions. |
 
 ---
 
@@ -195,8 +197,8 @@ python eval_nn.py --run-id <mlflow_run_id> --analysis bao --quantity covar
 
 ```bash
 python shapefit/prep_covar.py --cosmo-model base_w_wa --name LRG2 --zrange 0.6 0.8 --z-eff 0.706
-python train_nn.py --analysis shapefit --quantity covar --cosmo-model base_w_wa --data-dir latest --tracer LRG2
-python eval_nn.py --run-dir <path_to_run_artifacts> --analysis shapefit --quantity covar --tracer LRG2
+python train_nn.py --analysis shapefit --quantity covar --cosmo-model base_w_wa --data-dir latest --tracer-bin LRG2
+python eval_nn.py --run-dir <path_to_run_artifacts> --analysis shapefit --quantity covar --tracer-bin LRG2
 ```
 
 **3. ShapeFit mean parameters**

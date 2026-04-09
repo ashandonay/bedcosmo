@@ -1,15 +1,16 @@
 import os
-from typing import Dict, List, Type
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple, Type
 
 import numpy as np
 import json
+import yaml
 import torch.nn as nn
 from scipy.stats import truncnorm
 from sklearn.model_selection import train_test_split
 
 from scipy.stats import qmc
 from scipy.stats import truncnorm
-import mlflow
 import matplotlib.pyplot as plt
 
 try:
@@ -31,18 +32,70 @@ ARCHITECTURE_REGISTRY: Dict[str, Dict[str, Type[nn.Module]]] = {
     },
 }
 
-# DESI DR2 redshift bins: name -> (z_min, z_max, z_eff, ntracers_low, ntracers_high)
-TRACER_BINS = {
-    "BGS":       (0.1, 0.4, 0.295, 6e5, 1.8e6),
-    "LRG1":      (0.4, 0.6, 0.510, 5e5, 1.6e6),
-    "LRG2":      (0.6, 0.8, 0.706, 8e5, 2.4e6),
-    "LRG3_ELG1": (0.8, 1.1, 0.934, 2.3e6, 6.8e6),
-    "ELG2":      (1.1, 1.6, 1.321, 1.9e6, 5.7e6),
-    "QSO":       (0.8, 2.1, 1.484, 7e5, 2.2e6),
-    "Lya_QSO":   (1.8, 4.2, 2.330, 6.5e5, 1.9e6),
+_THIS_DIR = Path(__file__).resolve().parent
+_TRACER_CONFIG_PATH = _THIS_DIR / "tracers.yaml"
+_REQUIRED_TRACER_KEYS = {
+    "zrange",
+    "z_eff",
+    "low",
+    "high",
+    "bias_recon",
+    "smoothing_scale",
 }
 
-TRACER_TYPE_CHOICES = list(TRACER_BINS.keys())
+
+def _load_tracer_configs(path: Path) -> Dict[str, Dict[str, object]]:
+    """Load and validate ``tracers.yaml``; normalise keys to uppercase."""
+    if not path.exists():
+        raise FileNotFoundError(f"Tracer config file not found: {path}")
+
+    with path.open("r") as f:
+        raw = yaml.safe_load(f)
+
+    if not isinstance(raw, dict) or not raw:
+        raise ValueError(f"Invalid or empty tracer config YAML: {path}")
+
+    cleaned: Dict[str, Dict[str, object]] = {}
+    for key, cfg in raw.items():
+        if not isinstance(cfg, dict):
+            raise ValueError(f"Tracer config for {key!r} must be a mapping")
+
+        missing = _REQUIRED_TRACER_KEYS - set(cfg)
+        if missing:
+            raise ValueError(f"Tracer config for {key!r} missing keys: {sorted(missing)}")
+
+        zrange = cfg["zrange"]
+        if not isinstance(zrange, (list, tuple)) or len(zrange) != 2:
+            raise ValueError(f"Tracer config for {key!r} must have zrange as length-2 list")
+
+        cleaned[key] = {
+            "zrange": (float(zrange[0]), float(zrange[1])),
+            "z_eff": float(cfg["z_eff"]),
+            "low": float(cfg["low"]),
+            "high": float(cfg["high"]),
+            "bias_recon": float(cfg["bias_recon"]),
+            "smoothing_scale": float(cfg["smoothing_scale"]),
+            "supported": bool(cfg.get("supported", True)),
+        }
+
+    return cleaned
+
+
+TRACER_CONFIGS: Dict[str, Dict[str, object]] = _load_tracer_configs(_TRACER_CONFIG_PATH)
+TRACER_TYPE_CHOICES = list(TRACER_CONFIGS.keys())
+
+
+def get_tracer_config(tracer_bin: str) -> Dict[str, object]:
+    """Return validated tracer config dict (case-insensitive lookup)."""
+    needle = tracer_bin.strip().upper()
+    key = next((k for k in TRACER_CONFIGS if k.upper() == needle), None)
+    if key is None:
+        raise ValueError(f"Unknown tracer bin {tracer_bin!r}. Choices: {TRACER_TYPE_CHOICES}")
+    cfg = dict(TRACER_CONFIGS[key])
+    if not cfg.get("supported", True):
+        raise ValueError(f"Tracer bin {tracer_bin!r} is marked unsupported in tracers.yaml")
+    return cfg
+
 
 def build_model(analysis: str, architecture: str, **kwargs) -> nn.Module:
     """Instantiate a model from ARCHITECTURE_REGISTRY using the YAML ``architecture`` field."""
@@ -184,18 +237,6 @@ def parse_priors(priors_json: str) -> Dict[str, Dict[str, float]]:
             raise ValueError(f"Unsupported dist '{spec['dist']}' for '{name}'")
     return raw
 
-def get_tracer_config(tracer: str) -> Dict:
-    """Return tracer bin config as a dict with keys: zrange, z_eff, ntracers_low, ntracers_high."""
-    if tracer not in TRACER_BINS:
-        raise ValueError(f"Unknown tracer type '{tracer}'. Choose from: {TRACER_TYPE_CHOICES}")
-    z_min, z_max, z_eff, nt_low, nt_high = TRACER_BINS[tracer]
-    return {
-        "zrange": (z_min, z_max),
-        "z_eff": z_eff,
-        "ntracers_low": nt_low,
-        "ntracers_high": nt_high,
-    }
-
 
 def _load_module(name: str, path: str):
     """Load a Python module from an explicit file path (avoids name collisions)."""
@@ -206,27 +247,27 @@ def _load_module(name: str, path: str):
     return mod
 
 
-def get_pipeline(analysis: str, quantity: str, tracer: str | None = None):
+def get_pipeline(analysis: str, quantity: str, tracer_bin: str | None = None):
     """Return (default_priors, target_names, ground_truth_fn, setup) for the given analysis/quantity.
 
-    If tracer is given, overrides N_tracers prior bounds and passes the
+    If *tracer_bin* is given, overrides N_tracers prior bounds and passes the
     corresponding zrange/z_eff to the ground truth function.
     """
     _here = os.path.dirname(os.path.abspath(__file__))
 
-    tracer_cfg = get_tracer_config(tracer) if tracer else None
+    tracer_bin_cfg = get_tracer_config(tracer_bin) if tracer_bin else None
 
     if analysis == "shapefit":
         if quantity == "covar":
             mod = _load_module("shapefit_prep_covar", os.path.join(_here, "shapefit", "prep_covar.py"))
             kw = {}
-            if tracer_cfg:
-                kw = {"zrange": tracer_cfg["zrange"], "z_eff": tracer_cfg["z_eff"]}
+            if tracer_bin_cfg:
+                kw = {"zrange": tracer_bin_cfg["zrange"], "z_eff": tracer_bin_cfg["z_eff"]}
             def ground_truth_fn(_setup, sample, _kw=kw):
                 return mod.run_fisher(sample, **_kw)
             priors = dict(mod.DEFAULT_PRIORS)
-            if tracer_cfg:
-                priors["N_tracers"] = {"dist": "uniform", "low": tracer_cfg["ntracers_low"], "high": tracer_cfg["ntracers_high"]}
+            if tracer_bin_cfg:
+                priors["N_tracers"] = {"dist": "uniform", "low": tracer_bin_cfg["low"], "high": tracer_bin_cfg["high"]}
             return priors, mod.TARGET_NAMES, ground_truth_fn, None
         elif quantity == "mean":
             mod = _load_module("shapefit_prep_mean", os.path.join(_here, "shapefit", "prep_mean.py"))
@@ -245,13 +286,17 @@ def get_pipeline(analysis: str, quantity: str, tracer: str | None = None):
         if quantity == "covar":
             mod = _load_module("bao_prep_covar", os.path.join(_here, "bao", "prep_covar.py"))
             kw = {}
-            if tracer_cfg:
-                kw = {"zrange": tracer_cfg["zrange"], "z_eff": tracer_cfg["z_eff"]}
+            if tracer_bin_cfg:
+                kw = {
+                    "zrange": tracer_bin_cfg["zrange"],
+                    "z_eff": tracer_bin_cfg["z_eff"],
+                    "tracer_bin": tracer_bin,
+                }
             def ground_truth_fn(_setup, sample, _kw=kw):
                 return mod.run_fisher(sample, **_kw)
             priors = dict(mod.DEFAULT_PRIORS)
-            if tracer_cfg:
-                priors["N_tracers"] = {"dist": "uniform", "low": tracer_cfg["ntracers_low"], "high": tracer_cfg["ntracers_high"]}
+            if tracer_bin_cfg:
+                priors["N_tracers"] = {"dist": "uniform", "low": tracer_bin_cfg["low"], "high": tracer_bin_cfg["high"]}
             return priors, mod.TARGET_NAMES, ground_truth_fn, None
         else:
             raise ValueError(f"Unknown quantity for bao: {quantity}")
@@ -286,6 +331,7 @@ def compare_losses(
         y_lim: Tuple of (min, max) y-axis limits.
         per_step: If True, plot per-batch losses instead of epoch-averaged.
     """
+    import mlflow
     from mlflow.tracking import MlflowClient
 
     scratch = os.environ.get("SCRATCH", os.path.expanduser("~"))

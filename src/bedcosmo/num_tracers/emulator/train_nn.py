@@ -11,13 +11,13 @@ import torch
 from torch import nn
 from torch.utils.data import DataLoader, TensorDataset
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__))))
-from util import get_default_save_path, _next_version, TRACER_TYPE_CHOICES, build_model
-from eval_nn import run_eval
+from .util import get_default_save_path, _next_version, TRACER_TYPE_CHOICES, build_model
+from .eval_nn import run_eval
 
-def load_data(data_path: str, tracer: str | None = None) -> Dict[str, np.ndarray]:
-    if tracer and os.path.isfile(f"{data_path}/{tracer}_train.npz"):
-        train_file = f"{data_path}/{tracer}_train.npz"
-        test_file = f"{data_path}/{tracer}_test.npz"
+def load_data(data_path: str, tracer_bin: str | None = None) -> Dict[str, np.ndarray]:
+    if tracer_bin and os.path.isfile(f"{data_path}/{tracer_bin}_train.npz"):
+        train_file = f"{data_path}/{tracer_bin}_train.npz"
+        test_file = f"{data_path}/{tracer_bin}_test.npz"
     else:
         train_file = f"{data_path}/train.npz"
         test_file = f"{data_path}/test.npz"
@@ -331,9 +331,14 @@ def main() -> None:
                         help="Absolute tolerance for evaluation.")
     parser.add_argument("--eval-rtol", type=float, default=2e-3,
                         help="Relative tolerance for evaluation.")
-    parser.add_argument("--tracer", type=str, default=None,
-                        choices=TRACER_TYPE_CHOICES,
-                        help="Tracer type (e.g. BGS, LRG1). Sets zrange, z_eff, and N_tracers bounds for evaluation.")
+    parser.add_argument(
+        "--tracer-bin",
+        dest="tracer_bin",
+        type=str,
+        default=None,
+        choices=TRACER_TYPE_CHOICES,
+        help="DESI tracer bin (e.g. BGS, LRG1). Loads {name}_train/test.npz if present; sets eval priors / z.",
+    )
     args = parser.parse_args()
 
     # Load training config from {analysis}/model_config.yaml. Keys are arbitrary (e.g. scaled_base);
@@ -424,7 +429,7 @@ def main() -> None:
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
 
-    data = load_data(data_path, tracer=args.tracer)
+    data = load_data(data_path, tracer_bin=args.tracer_bin)
     x_train, y_train, x_test, y_test, stats = standardize(
         data["x_train"], data["y_train"], data["x_test"], data["y_test"],
         log_normalize=args.log_normalize,
@@ -647,7 +652,17 @@ def main() -> None:
     # Run evaluation using best model
     best_model_path = os.path.join(ckpt_dir, "model_best.pt")
     print("\nRunning evaluation...")
-    run_eval(best_model_path, save_path=artifacts_dir, analysis=args.analysis, quantity=args.quantity, n_samples=1000, atol=args.eval_atol, rtol=args.eval_rtol, log_scale=True, tracer=args.tracer)
+    run_eval(
+        best_model_path,
+        save_path=artifacts_dir,
+        analysis=args.analysis,
+        quantity=args.quantity,
+        n_samples=1000,
+        atol=args.eval_atol,
+        rtol=args.eval_rtol,
+        log_scale=True,
+        tracer_bin=args.tracer_bin,
+    )
 
     mlflow.end_run()
     print(f"MLflow run completed: {mlflow_run_id}")

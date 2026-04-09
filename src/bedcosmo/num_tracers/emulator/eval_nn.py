@@ -10,7 +10,7 @@ import torch
 import sys
 import os
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__))))
-from util import latin_hypercube_samples, get_default_save_path, get_pipeline, TRACER_TYPE_CHOICES, build_model
+from .util import latin_hypercube_samples, get_default_save_path, get_pipeline, TRACER_TYPE_CHOICES, build_model
 
 def _log_bins(vals: np.ndarray, n_bins: int = 30) -> np.ndarray:
     """Return histogram bin edges appropriate for log/symlog data."""
@@ -58,7 +58,7 @@ def _set_log_or_symlog(ax, axis: str, vals: np.ndarray) -> None:
 
 
 
-def run_eval(model_path: str, save_path: str, analysis: str = "shapefit", quantity: str = "covar", n_samples: int = 500, seed: int = 42, hist_xlims: dict[str, tuple[float, float]] | None = None, rtol: float = 5e-3, atol: float = 1e-4, log_scale: bool = False, tracer: str | None = None) -> None:
+def run_eval(model_path: str, save_path: str, analysis: str = "shapefit", quantity: str = "covar", n_samples: int = 500, seed: int = 42, hist_xlims: dict[str, tuple[float, float]] | None = None, rtol: float = 5e-3, atol: float = 1e-4, log_scale: bool = False, tracer_bin: str | None = None) -> None:
     os.makedirs(save_path, exist_ok=True)
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     np.random.seed(seed)
@@ -89,7 +89,7 @@ def run_eval(model_path: str, save_path: str, analysis: str = "shapefit", quanti
     param_names = ckpt["param_names"]
     ckpt_target_names = ckpt["target_names"]
 
-    default_priors, target_names, ground_truth_fn, setup = get_pipeline(analysis, quantity, tracer=tracer)
+    default_priors, target_names, ground_truth_fn, setup = get_pipeline(analysis, quantity, tracer_bin=tracer_bin)
 
     true_rows = []
     param_rows = []
@@ -338,11 +338,12 @@ def main() -> None:
         help="Where to save plots (default: resolved from run-id/run-dir, else get_default_save_path()).",
     )
     parser.add_argument(
-        "--tracer",
+        "--tracer-bin",
+        dest="tracer_bin",
         type=str,
         default=None,
         choices=TRACER_TYPE_CHOICES,
-        help="Tracer type (e.g. BGS, LRG1). Sets zrange, z_eff, and N_tracers bounds for evaluation.",
+        help="DESI tracer bin (e.g. BGS, LRG1). Sets zrange, z_eff, and N_tracers bounds for evaluation.",
     )
     args = parser.parse_args()
 
@@ -370,7 +371,19 @@ def main() -> None:
         raw = json.loads(args.hist_xlims)
         hist_xlims = {k: tuple(v) for k, v in raw.items()}
 
-    run_eval(model_path, save_path, analysis=args.analysis, quantity=args.quantity, n_samples=args.n_samples, seed=args.seed, hist_xlims=hist_xlims, rtol=args.rtol, atol=args.atol, log_scale=args.log_scale, tracer=args.tracer)
+    run_eval(
+        model_path,
+        save_path,
+        analysis=args.analysis,
+        quantity=args.quantity,
+        n_samples=args.n_samples,
+        seed=args.seed,
+        hist_xlims=hist_xlims,
+        rtol=args.rtol,
+        atol=args.atol,
+        log_scale=args.log_scale,
+        tracer_bin=args.tracer_bin,
+    )
 
 
 if __name__ == "__main__":
