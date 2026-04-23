@@ -477,18 +477,26 @@ def _ssc_cov(
     n_ells, n_k = pk.shape
     assert n_ells == len(ells) and n_k == len(k_centers)
 
+    # Bail out if the theory returned non-finite or non-positive multipoles
+    # (can happen at extreme cosmologies where the P_lin interpolator misbehaves).
+    if not np.all(np.isfinite(pk)):
+        return np.zeros((n_ells * n_k, n_ells * n_k), dtype=np.float64)
+
     log_k = np.log(k_centers)
     R_ell = np.empty_like(pk)
     for i in range(n_ells):
         P_i = pk[i]
-        # guard against zeros / negative
-        safe = np.where(P_i > 0, P_i, np.nan)
-        dlnP_dlnk = np.gradient(np.log(safe), log_k)
-        dlnP_dlnk = np.nan_to_num(dlnP_dlnk, nan=0.0)
-        R_ell[i] = (68.0 / 21.0 - dlnP_dlnk / 3.0) * P_i
+        # Clamp to a positive floor so log/gradient don't blow up.
+        P_clip = np.where(P_i > 0, P_i, 1.0e-30)
+        dlnP_dlnk = np.gradient(np.log(P_clip), log_k)
+        dlnP_dlnk = np.nan_to_num(dlnP_dlnk, nan=0.0, posinf=0.0, neginf=0.0)
+        R_ell[i] = (68.0 / 21.0 - dlnP_dlnk / 3.0) * P_clip
 
     R_flat = R_ell.reshape(-1)  # shape (n_ells * n_k,)
-    return sigma_b_sq * np.outer(R_flat, R_flat)
+    C = sigma_b_sq * np.outer(R_flat, R_flat)
+    if not np.all(np.isfinite(C)):
+        return np.zeros_like(C)
+    return C
 
 
 def _get_lya_qso_bao_params(
@@ -963,17 +971,21 @@ def get_bao_fisher_covariance(
 
             # ----------------------------------------------------------
 
+            if not np.all(np.isfinite(C_full)):
+                raise ValueError("Non-finite entries in augmented covariance")
+
             eigvals = np.linalg.eigvalsh(C_full)
             min_eig = np.min(eigvals)
+            max_eig = np.max(eigvals)
+            # Tolerance scales with matrix magnitude so tiny numerical-noise
+            # negative eigenvalues don't trigger rejection for well-conditioned
+            # covariances.
+            tol = 1.0e-10 * max(abs(max_eig), 1.0)
 
-            if (
-                not np.isfinite(min_eig)
-                or min_eig <= 1e-12
-            ):
-
+            if not np.isfinite(min_eig) or min_eig < -tol:
                 raise ValueError(
                     f"Non-positive-definite covariance "
-                    f"(min eigenvalue = {min_eig:.3e})"
+                    f"(min eigenvalue = {min_eig:.3e}, tol = {tol:.3e})"
                 )
 
         except Exception as exc:
