@@ -47,9 +47,23 @@ QSO:
   smoothing_scale: 30.0
 
 Lya_QSO:
+  # Marked unsupported until a proper
+  # Lyα forecast (Arinyo-i-Prats bias + β_F + pixel-noise P_N) is wired in.
+  supported: false
   zrange: [1.8, 4.2]
-  z_eff: 2.330
+  z_eff: 2.33
+  # Effective observed tracer count
   low: 650000.0
   high: 1900000.0
-  bias_recon: 2.1
-  smoothing_scale: 30.0
+  # Lyα flux bias model
+  bF0: -0.117
+  gamma_bF: 2.9
+  # Empirical BAO damping scales at z_ref
+  Sigma_perp_fid: 5.0
+  Sigma_par_fid: 10.0
+  # Fiducial growth values used to rescale damping
+  sigma8_fid: 0.83
+  f_fid: 0.97
+  # Effective pixel-noise model
+  sigma2_pix: 1.0
+  delta_r_pix: 1.0

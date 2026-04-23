@@ -7,20 +7,25 @@
 #   bash run_prep_covar.sh                   # run all bins with defaults
 #   bash run_prep_covar.sh --n-samples 1000  # pass extra args to prep_covar.py
 #
-# Uses the same DESI DR2 redshift bins and N_tracers ranges as the BAO wrapper.
+# Bins are read from ../tracers.yaml. By default only LRG2 is run; set
+# SHAPEFIT_TRACERS to a space-separated list (e.g. "BGS LRG2") or "all".
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# ── Redshift bins: (name, z_min, z_max, z_eff, ntracers_low, ntracers_high) ──
-# N_tracers ranges centered on DR2 passed counts:
-#   BGS=1188526, LRG1=1052151, LRG2=1613562,
-#   LRG3+ELG1: 1802770+2737573=4540343, ELG2=3797271,
-#   QSO=1461588, Lya_QSO=1289874
-BINS=(
-    "LRG2      0.6  0.8  0.706  8e5  2.4e6"
-)
+mapfile -t BINS < <(python -c "
+import os, sys
+sys.path.insert(0, os.path.abspath('$SCRIPT_DIR/..'))
+from util import TRACER_CONFIGS
+raw = os.environ.get('SHAPEFIT_TRACERS', 'LRG2').strip() or 'LRG2'
+names = None if raw.lower() == 'all' else [n.upper() for n in raw.split()]
+for name, cfg in TRACER_CONFIGS.items():
+    if names is not None and name not in names:
+        continue
+    z_min, z_max = cfg['zrange']
+    print(f'{name} {z_min} {z_max} {cfg[\"z_eff\"]} {cfg[\"low\"]} {cfg[\"high\"]}')
+")
 
 # Extra arguments forwarded to prep_covar.py (e.g. --n-samples 2000)
 EXTRA_ARGS=("$@")
