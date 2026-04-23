@@ -764,8 +764,8 @@ def main() -> None:
     parser.add_argument(
         "--name",
         type=str,
-        default="",
-        help="Tracer name prefix for saved files (e.g. 'LRG1' -> LRG1_train.npz, LRG1_test.npz).",
+        default=None,
+        help="Tracer name prefix for saved files (e.g. 'LRG1' -> LRG1_train.npz). Defaults to --tracer-bin.",
     )
     parser.add_argument(
         "--version",
@@ -878,7 +878,7 @@ def main() -> None:
             y=y,
             test_size=args.test_size,
             target_names=TARGET_NAMES,
-            name=args.name,
+            name=args.name if args.name is not None else args.tracer_bin,
             version=args.version,
         )
     except Exception:
