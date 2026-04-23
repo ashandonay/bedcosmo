@@ -1199,7 +1199,13 @@ def _worker_init():
 
 
 def _worker_run_fisher(args_tuple):
-    """Top-level function for multiprocessing (must be picklable)."""
+    """Top-level function for multiprocessing (must be picklable).
+
+    Returns (sample, target_vals, tb_str) where tb_str is None on success,
+    a traceback string on failure, and "non-finite" if the Fisher returned
+    non-finite target values. The master aggregates and prints the first
+    traceback so the worker's silenced stderr doesn't hide real bugs.
+    """
     sample, tracer_bin, zrange, z_eff, param_defaults = args_tuple
     try:
         targets = run_fisher(
@@ -1211,10 +1217,10 @@ def _worker_run_fisher(args_tuple):
         )
         target_vals = [targets[t] for t in TARGET_NAMES]
         if not all(np.isfinite(v) for v in target_vals):
-            return None, None
-        return sample, target_vals
+            return None, None, "non-finite target values"
+        return sample, target_vals, None
     except Exception:
-        return None, None
+        return None, None, traceback.format_exc()
 
 
 def generate_dataset(
@@ -1265,10 +1271,14 @@ def generate_dataset(
             lhs_seed += 1
 
             tasks = [(s, tracer_bin, zrange, z_eff, param_defaults) for s in draws]
-            for sample, target_vals in pool.imap_unordered(_worker_run_fisher, tasks):
+            for sample, target_vals, tb_str in pool.imap_unordered(_worker_run_fisher, tasks):
                 total_attempts += 1
                 if sample is None:
                     failed += 1
+                    if tb_str is not None and not printed_exception:
+                        printed_exception = True
+                        print("\nFirst worker Fisher failure (showing traceback once):")
+                        print(tb_str)
                 else:
                     param_rows.append([sample[p] for p in param_names])
                     target_rows.append(target_vals)
