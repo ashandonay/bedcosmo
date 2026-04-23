@@ -39,8 +39,6 @@ _REQUIRED_TRACER_KEYS = {
     "z_eff",
     "low",
     "high",
-    "bias_recon",
-    "smoothing_scale",
 }
 
 
@@ -68,15 +66,19 @@ def _load_tracer_configs(path: Path) -> Dict[str, Dict[str, object]]:
         if not isinstance(zrange, (list, tuple)) or len(zrange) != 2:
             raise ValueError(f"Tracer config for {key!r} must have zrange as length-2 list")
 
-        cleaned[key] = {
-            "zrange": (float(zrange[0]), float(zrange[1])),
-            "z_eff": float(cfg["z_eff"]),
-            "low": float(cfg["low"]),
-            "high": float(cfg["high"]),
-            "bias_recon": float(cfg["bias_recon"]),
-            "smoothing_scale": float(cfg["smoothing_scale"]),
-            "supported": bool(cfg.get("supported", True)),
-        }
+        # Start from all yaml fields (preserves per-tracer extras like Lyα's
+        # bF0, gamma_bF, Sigma_perp_fid, etc.), then coerce the mandatory ones.
+        entry: Dict[str, object] = dict(cfg)
+        entry["zrange"] = (float(zrange[0]), float(zrange[1]))
+        entry["z_eff"] = float(cfg["z_eff"])
+        entry["low"] = float(cfg["low"])
+        entry["high"] = float(cfg["high"])
+        if "bias_recon" in cfg:
+            entry["bias_recon"] = float(cfg["bias_recon"])
+        if "smoothing_scale" in cfg:
+            entry["smoothing_scale"] = float(cfg["smoothing_scale"])
+        entry["supported"] = bool(cfg.get("supported", True))
+        cleaned[key] = entry
 
     return cleaned
 
@@ -86,10 +88,9 @@ TRACER_TYPE_CHOICES = list(TRACER_CONFIGS.keys())
 
 
 def get_tracer_config(tracer_bin: str) -> Dict[str, object]:
-    """Return validated tracer config dict (case-insensitive lookup)."""
-    needle = tracer_bin.strip().upper()
-    key = next((k for k in TRACER_CONFIGS if k.upper() == needle), None)
-    if key is None:
+    """Return validated tracer config dict."""
+    key = tracer_bin.strip()
+    if key not in TRACER_CONFIGS:
         raise ValueError(f"Unknown tracer bin {tracer_bin!r}. Choices: {TRACER_TYPE_CHOICES}")
     cfg = dict(TRACER_CONFIGS[key])
     if not cfg.get("supported", True):
