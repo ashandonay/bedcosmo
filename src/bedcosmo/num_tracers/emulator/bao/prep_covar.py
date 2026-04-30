@@ -10,6 +10,8 @@ import traceback
 import warnings
 from typing import Dict, List, Tuple
 from scipy.linalg import cho_factor, cho_solve
+from pathlib import Path
+import pandas as pd
 
 # In spawned worker processes, additionally suppress all C-level stderr.
 if os.environ.get("_PREP_COVAR_WORKER") == "1":
@@ -102,6 +104,11 @@ _K_DISP_MAX = 10.0
 _NK_DISP = 512
 _NMU_DISP = 64
 
+# Random-to-data catalog ratio assumed in post-reconstruction shot-noise floor.
+# Enters the covariance as (1 + 1/alpha) / nbar instead of 1/nbar. A convention,
+# not a fit: DESI pipelines use alpha in [20, 50]; 50 is conservative.
+_N_RAND_OVER_N_DATA = 50.0
+
 
 def _sample_constrained_pair(
     low1: float, high1: float,
@@ -173,6 +180,106 @@ def _constrained_samples(
             row[k] = float(arr[i])
         rows.append(row)
     return rows
+
+
+def _load_nz_slices(nz_slices_path: str | Path) -> pd.DataFrame:
+    """Load a parsed *_nz_slices.csv file produced by parse_desi_nz.py."""
+    path = Path(nz_slices_path).expanduser().resolve()
+    if not path.exists():
+        raise FileNotFoundError(f"Could not find n(z) slices file: {path}")
+
+    df = pd.read_csv(path)
+
+    required = {"zmid", "zlow", "zhigh", "slice_fraction"}
+    missing = required - set(df.columns)
+    if missing:
+        raise ValueError(f"{path} is missing required columns: {missing}")
+
+    df = df.copy()
+    df = df[df["slice_fraction"] > 0].reset_index(drop=True)
+
+    frac_sum = float(df["slice_fraction"].sum())
+    if not np.isfinite(frac_sum) or frac_sum <= 0:
+        raise ValueError(f"Bad slice_fraction sum in {path}: {frac_sum}")
+
+    # Make robust against small CSV/rounding errors.
+    df["slice_fraction"] = df["slice_fraction"] / frac_sum
+
+    return df
+
+
+def _regularize_fisher_matrix(F_matrix: np.ndarray) -> np.ndarray:
+    """Symmetrize and add tiny diagonal jitter if needed."""
+    F_matrix = np.asarray(F_matrix, dtype=np.float64)
+    F_matrix = 0.5 * (F_matrix + F_matrix.T)
+
+    eigvals = np.linalg.eigvalsh(F_matrix)
+    min_eig = float(eigvals.min())
+    if min_eig <= 0:
+        diag_scale = float(np.mean(np.diag(F_matrix)))
+        jitter = max(abs(min_eig), 1e-12 * abs(diag_scale), 1e-30)
+        F_matrix = F_matrix + np.eye(F_matrix.shape[0]) * jitter
+
+    return F_matrix
+
+
+def _cov_q_from_fisher_matrix(
+    F_matrix: np.ndarray,
+    all_names: list[str],
+    bao_internal: list[str] | None = None,
+) -> np.ndarray:
+    """
+    Return the marginalized covariance of qpar/qper from a full Fisher matrix.
+
+    This marginalizes over all nuisance parameters in the slice.
+    """
+    if bao_internal is None:
+        bao_internal = ["qpar", "qper"]
+
+    F_matrix = _regularize_fisher_matrix(F_matrix)
+    bao_idx = [all_names.index(p) for p in bao_internal]
+
+    E = np.zeros((F_matrix.shape[0], len(bao_idx)))
+    for j, idx in enumerate(bao_idx):
+        E[idx, j] = 1.0
+
+    try:
+        c, low = cho_factor(F_matrix, check_finite=False)
+        cov_subset = cho_solve((c, low), E, check_finite=False)
+        cov_q = cov_subset[np.ix_(bao_idx, range(len(bao_idx)))]
+    except np.linalg.LinAlgError:
+        cov_full = np.linalg.pinv(F_matrix, rcond=1e-12)
+        cov_q = cov_full[np.ix_(bao_idx, bao_idx)]
+
+    cov_q = 0.5 * (cov_q + cov_q.T)
+    return cov_q
+
+
+def _q_fisher_from_bao_likelihood_info(info: Dict) -> np.ndarray:
+    """
+    Build Fisher for one likelihood and return marginalized 2x2 Fisher
+    information on qpar/qper.
+    """
+    likelihood = info["likelihood"]
+    params = info["params"]
+
+    fisher = Fisher(likelihood)
+    fisher_result = fisher(**params)
+
+    F_full = -np.array(fisher_result._hessian)
+    all_names = [str(p) for p in fisher_result.names()]
+
+    cov_q = _cov_q_from_fisher_matrix(F_full, all_names, bao_internal=["qpar", "qper"])
+
+    # Convert marginalized covariance back to marginalized information.
+    # This is equivalent to the Schur-complement Fisher on qpar/qper.
+    try:
+        F_q = np.linalg.inv(cov_q)
+    except np.linalg.LinAlgError:
+        F_q = np.linalg.pinv(cov_q, rcond=1e-12)
+
+    F_q = 0.5 * (F_q + F_q.T)
+    return F_q
 
 
 def _to_bao_cosmo_params(sample: Dict[str, float]) -> Tuple[Dict[str, float], float]:
@@ -499,6 +606,103 @@ def _ssc_cov(
     return C
 
 
+def _legendre(ell: int, mu: np.ndarray) -> np.ndarray:
+    mu = np.asarray(mu)
+    if ell == 0:
+        return np.ones_like(mu)
+    if ell == 2:
+        return 0.5 * (3.0 * mu**2 - 1.0)
+    if ell == 4:
+        return (35.0 * mu**4 - 30.0 * mu**2 + 3.0) / 8.0
+    raise ValueError(f"Unsupported multipole ell={ell}")
+
+
+def _mu_integral_blocks(
+    integrand_kmu: np.ndarray,
+    mu: np.ndarray,
+    ells: Tuple[int, ...],
+) -> np.ndarray:
+    """Integrate a k,mu integrand against L_ell(mu) L_ell'(mu) over mu in [0, 1].
+
+    Exploits mu -> -mu parity: for integrands symmetric in mu and multipoles
+    of same parity, int_{-1}^1 dmu/2 ... = int_0^1 dmu ...
+    """
+    leg = np.stack([_legendre(ell, mu) for ell in ells])  # (n_ells, n_mu)
+    n_ells = len(ells)
+    n_k = integrand_kmu.shape[0]
+    out = np.empty((n_ells, n_ells, n_k), dtype=np.float64)
+    for i in range(n_ells):
+        for j in range(n_ells):
+            weight = leg[i] * leg[j]
+            out[i, j] = np.trapz(integrand_kmu * weight[None, :], mu, axis=1)
+    return out
+
+
+def _gaussian_mode_count(k_centers: np.ndarray, dk: float, V: float) -> np.ndarray:
+    """Continuous Fourier mode count per spherical k-shell of width dk in volume V."""
+    return (np.asarray(k_centers, dtype=np.float64) ** 2) * float(dk) * float(V) / (2.0 * np.pi**2)
+
+
+def _diag_block_matrix(
+    blocks: np.ndarray,
+    factor_ll: np.ndarray,
+    N_modes: np.ndarray,
+    n_k: int,
+    n_ells: int,
+) -> np.ndarray:
+    """Assemble a block matrix diagonal in k, dense in ell.
+
+    blocks    : (n_ells, n_ells, n_k) mu-integrated integrand per (ell, ell', k)
+    factor_ll : (n_ells, n_ells) prefactor 2 (2l+1)(2l'+1)
+    N_modes   : (n_k,) per-bin mode count
+    """
+    C = np.zeros((n_ells * n_k, n_ells * n_k), dtype=np.float64)
+    inv_N = 1.0 / np.maximum(N_modes, 1.0)
+    for i in range(n_ells):
+        for j in range(n_ells):
+            diag = factor_ll[i, j] * blocks[i, j] * inv_N
+            C[i * n_k:(i + 1) * n_k, j * n_k:(j + 1) * n_k] = np.diag(diag)
+    return C
+
+
+def _shifted_random_noise_cov(
+    k_centers: np.ndarray,
+    dk: float,
+    ells: Tuple[int, ...],
+    pk_lin_vals: np.ndarray,
+    b1: float,
+    f: float,
+    nbar: float,
+    V: float,
+    alpha_rand: float,
+) -> np.ndarray:
+    """Post-reconstruction shot-noise boost from the shifted-random catalog.
+
+    The reconstructed field is delta_data - delta_rand (both shifted), giving
+    shot noise (1 + 1/alpha)/nbar where alpha = N_rand/N_data. Implemented as
+    the analytic difference [P + (1+1/a)N]^2 - [P + N]^2 so the baseline
+    Gaussian covariance from ObservablesCovarianceMatrix is not modified in
+    place.
+    """
+    if alpha_rand <= 0 or not np.isfinite(alpha_rand):
+        return np.zeros((len(k_centers) * len(ells),) * 2, dtype=np.float64)
+
+    mu = np.linspace(0.0, 1.0, _NMU_DISP)
+    mm = mu[None, :]
+    Pg = (float(b1) + float(f) * mm**2) ** 2 * np.clip(pk_lin_vals, 0.0, None)[:, None]
+    N_shot = 1.0 / float(nbar)
+    a = float(alpha_rand)
+    delta = 2.0 * Pg * N_shot / a + N_shot**2 * (2.0 / a + 1.0 / a**2)
+
+    blocks = _mu_integral_blocks(delta, mu, ells)
+    factor_ll = 2.0 * np.array(
+        [[(2 * li + 1) * (2 * lj + 1) for lj in ells] for li in ells],
+        dtype=np.float64,
+    )
+    N_modes = _gaussian_mode_count(k_centers, dk, V)
+    return _diag_block_matrix(blocks, factor_ll, N_modes, len(k_centers), len(ells))
+
+
 def _get_lya_qso_bao_params(
     cfg: Dict[str, float],
     z_eff: float,
@@ -606,7 +810,7 @@ def _get_standard_tracer_bao_params(
     }
 
 
-def get_bao_fisher_covariance(
+def build_bao_likelihood(
     N_tracers: float,
     theta_cosmo: Dict[str, float],
     hrdrag: float,
@@ -619,16 +823,18 @@ def get_bao_fisher_covariance(
     override_sigmas: Tuple[float, float] | None = None,
     n_iter: int = 1,
     include_fog: bool = True,
-    float_sigma_bao: bool = True
-) -> Dict[str, float]:
-    """
-    Compute the 2x2 BAO covariance matrix from a Fisher forecast.
+    float_sigma_bao: bool = True,
+) -> Dict:
+    """Build the BAO Gaussian likelihood and return it with the fiducial-value bookkeeping
+    needed by downstream consumers (Fisher, MCMC, profile likelihood).
 
-    Realism upgrades:
-    - f(z) computed from sampled cosmology
-    - pre-reconstruction damping from linear P(k)
-    - post-reconstruction residual damping from a semi-analytic reconstruction model
-      using tracer bias, smoothing scale, and comoving number density
+    Returns a dict with:
+        likelihood : ObservablesGaussianLikelihood
+        template   : BAOPowerSpectrumTemplate (for DH_fid, DM_fid)
+        rd         : float, sound horizon in Mpc/h
+        params     : dict of fiducial {b1, sigmaper, sigmapar}
+        observable : TracerPowerSpectrumMultipolesObservable
+        is_lya     : bool
     """
 
     # Load tracer-specific configuration from tracers.yaml
@@ -713,6 +919,25 @@ def get_bao_fisher_covariance(
     #   (h/Mpc)^3
     #
     nbar_comoving = float(N_tracers) / float(base_footprint.volume)
+
+    # Diagnostic: dump survey/nbar for a single-sample call when debugging
+    # tracer-specific discrepancies. Controlled by _PREP_COVAR_DIAG env var
+    # to avoid spamming output during emulator training (parallel workers).
+    if os.environ.get("_PREP_COVAR_DIAG") == "1":
+        # Rough P(k=0.1) estimate for nbar*P readout at BAO scales
+        try:
+            pk_at_01 = float(_linear_pk_1d(fo, z=z)(np.array([0.1]))[0])
+        except Exception:
+            pk_at_01 = float("nan")
+        nP_at_01 = nbar_comoving * pk_at_01
+        print(
+            f"[diag] tracer={tracer_bin} z_eff={z:.3f} "
+            f"area={area:.1f} zrange=({zrange[0]:.3f},{zrange[1]:.3f}) "
+            f"N_tracers={float(N_tracers):.3g} V_survey={float(base_footprint.volume):.3g} "
+            f"nbar_3d={nbar_comoving:.3g} P(k=0.1)={pk_at_01:.3g} nP(k=0.1)={nP_at_01:.3g} "
+            f"smoothing_scale={float(cfg.get('smoothing_scale', float('nan'))):.1f}",
+            flush=True,
+        )
 
     # ------------------------------------------------------------------
     # BAO DAMPING MODEL
@@ -936,6 +1161,13 @@ def get_bao_fisher_covariance(
         k_centers = np.asarray(observable.k[0], dtype=np.float64)
         V_survey = float(footprint.volume)
 
+        # Recover the k-bin width from the observable grid; falls back to
+        # the klim spec (0.005 h/Mpc) if only one bin is present.
+        if k_centers.size > 1:
+            dk_bin = float(np.mean(np.diff(k_centers)))
+        else:
+            dk_bin = 0.005
+
         try:
 
             # ----------------------------------------------------------
@@ -947,6 +1179,7 @@ def get_bao_fisher_covariance(
             theory(**params)
 
             pk_multipoles = np.asarray(theory.power, dtype=np.float64)
+            pk_lin_vals = pk_lin_1d(k_centers)
 
             sigma_b_sq = _sigma_b_sq(
                 cosmo,
@@ -962,8 +1195,23 @@ def get_bao_fisher_covariance(
                 sigma_b_sq=sigma_b_sq,
             )
 
+            # Shifted-random shot-noise boost: (1 + 1/alpha)/nbar instead of 1/nbar.
+            C_srand = _shifted_random_noise_cov(
+                k_centers=k_centers,
+                dk=dk_bin,
+                ells=ell_tuple,
+                pk_lin_vals=pk_lin_vals,
+                b1=b1,
+                f=f,
+                nbar=nbar_comoving,
+                V=V_survey,
+                alpha_rand=_N_RAND_OVER_N_DATA,
+            )
+
             if C_ssc.shape == C_full.shape:
                 C_full += C_ssc
+            if C_srand.shape == C_full.shape:
+                C_full += C_srand
 
             # Finite-value check is sufficient: the Gaussian cov has
             # rank-deficient multipole blocks (det(C_00,C_02; C_02,C_22) = 0),
@@ -987,7 +1235,7 @@ def get_bao_fisher_covariance(
         covariance=augmented_cov,
     )
 
-    # Give sigmas (streaming) a Gaussian prior matching the DESI Y1 BAO fits
+    # Give Sigma_s (streaming) a Gaussian prior matching the DESI Y1 BAO fits
     # instead of fixing it, so the Fisher error on qpar/qper accounts for its
     # marginalization rather than being artificially tight.
     likelihood.all_params["sigmas"].update(
@@ -1001,13 +1249,12 @@ def get_bao_fisher_covariance(
     # and inflates σ(qpar, qper).
     # Lyα QSO is pre-recon so we don't float the damping scales.
     if float_sigma_bao and not is_lya:
-        _sigma_prior_width = 2.0
         likelihood.all_params["sigmaper"].update(
             fixed=False,
             prior={
                 "dist": "norm",
                 "loc": float(sigma_perp_post),
-                "scale": _sigma_prior_width,
+                "scale": 1.0,
             },
         )
         likelihood.all_params["sigmapar"].update(
@@ -1015,7 +1262,7 @@ def get_bao_fisher_covariance(
             prior={
                 "dist": "norm",
                 "loc": float(sigma_par_post),
-                "scale": _sigma_prior_width,
+                "scale": 2.0,
             },
         )
 
@@ -1028,54 +1275,153 @@ def get_bao_fisher_covariance(
         likelihood.all_params["b1"].update(fixed=True)
         likelihood.all_params["dbeta"].update(fixed=True)
 
-    fisher = Fisher(likelihood)
-    fisher_result = fisher(**params)
+    rd = hrdrag / _H_FID
+    return {
+        "likelihood": likelihood,
+        "template": template,
+        "rd": rd,
+        "params": params,
+        "observable": observable,
+        "is_lya": is_lya,
+    }
 
-    F_matrix = -np.array(fisher_result._hessian)
 
-    # Enforce symmetry
-    F_matrix = 0.5 * (F_matrix + F_matrix.T)
+def get_bao_fisher_covariance(
+    N_tracers: float,
+    theta_cosmo: Dict[str, float],
+    hrdrag: float,
+    tracer_bin: str = "LRG2",
+    zrange: Tuple[float, float] | None = None,
+    z_eff: float | None = None,
+    area: float = 14000.0,
+    resolution: int = 3,
+    tracer_config: Dict[str, float] | None = None,
+    override_sigmas: Tuple[float, float] | None = None,
+    n_iter: int = 1,
+    include_fog: bool = True,
+    float_sigma_bao: bool = True,
+) -> Dict[str, float]:
+    """Compute the 2x2 BAO covariance matrix from a single-bin Fisher forecast."""
+    info = build_bao_likelihood(
+        N_tracers=N_tracers,
+        theta_cosmo=theta_cosmo,
+        hrdrag=hrdrag,
+        tracer_bin=tracer_bin,
+        zrange=zrange,
+        z_eff=z_eff,
+        area=area,
+        resolution=resolution,
+        tracer_config=tracer_config,
+        override_sigmas=override_sigmas,
+        n_iter=n_iter,
+        include_fog=include_fog,
+        float_sigma_bao=float_sigma_bao,
+    )
 
-    # Stabilize tiny negative modes from numerical noise
-    eigvals = np.linalg.eigvalsh(F_matrix)
-    min_eig = eigvals.min()
-
-    if min_eig <= 0:
-        diag_scale = np.mean(np.diag(F_matrix))
-        jitter = max(abs(min_eig), 1e-12 * diag_scale)
-
-        F_matrix += np.eye(F_matrix.shape[0]) * jitter
-
-    all_names = [str(p) for p in fisher_result.names()]
-    bao_internal = ["qpar", "qper"]
-    bao_idx = [all_names.index(p) for p in bao_internal]
-
-    # Selection matrix
-    E = np.zeros((F_matrix.shape[0], len(bao_idx)))
-
-    for j, idx in enumerate(bao_idx):
-        E[idx, j] = 1.0
+    F_q = _q_fisher_from_bao_likelihood_info(info)
 
     try:
-        c, low = cho_factor(F_matrix, check_finite=False)
-
-        cov_subset = cho_solve(
-            (c, low),
-            E,
-            check_finite=False,
-        )
-
-        cov_q = cov_subset[np.ix_(bao_idx, range(len(bao_idx)))]
-
+        cov_q = np.linalg.inv(F_q)
     except np.linalg.LinAlgError:
+        cov_q = np.linalg.pinv(F_q, rcond=1e-12)
 
-        cov_full = np.linalg.pinv(F_matrix, rcond=1e-12)
+    template = info["template"]
+    rd = info["rd"]
 
-        cov_q = cov_full[np.ix_(bao_idx, bao_idx)]
-
-    rd = hrdrag / _H_FID
     DH_over_rd_fid = float(template.DH_fid) / rd
     DM_over_rd_fid = float(template.DM_fid) / rd
+
+    J = np.diag([DH_over_rd_fid, DM_over_rd_fid])
+    cov_phys = J @ cov_q @ J.T
+
+    upper_tri_vals = cov_phys[_TRIU_I, _TRIU_J]
+    return dict(zip(TARGET_NAMES, upper_tri_vals))
+
+
+def get_bao_fisher_covariance_sliced_nz(
+    N_tracers: float,
+    theta_cosmo: Dict[str, float],
+    hrdrag: float,
+    nz_slices_path: str | Path,
+    tracer_bin: str = "LRG2",
+    z_eff_bin: float | None = None,
+    area: float = 14000.0,
+    resolution: int = 3,
+    tracer_config: Dict[str, float] | None = None,
+    override_sigmas: Tuple[float, float] | None = None,
+    n_iter: int = 1,
+    include_fog: bool = True,
+    float_sigma_bao: bool = True,
+) -> Dict[str, float]:
+    """
+    Compute BAO covariance using redshift-sliced n(z).
+
+    The CSV supplies slice_fraction, zlow, zhigh, zmid. For a sampled total
+    N_tracers, each slice gets N_i = N_tracers * slice_fraction_i.
+
+    We marginalize each slice over its own nuisance parameters and sum only
+    the qpar/qper Fisher information.
+    """
+    slices = _load_nz_slices(nz_slices_path)
+
+    cfg = get_tracer_config(tracer_bin)
+    if z_eff_bin is None:
+        z_eff_bin = float(cfg["z_eff"])
+
+    F_q_total = np.zeros((2, 2), dtype=np.float64)
+
+    for _, row in slices.iterrows():
+        frac = float(row["slice_fraction"])
+        if frac <= 0.0:
+            continue
+
+        N_i = float(N_tracers) * frac
+        zlo_i = float(row["zlow"])
+        zhi_i = float(row["zhigh"])
+        zmid_i = float(row["zmid"])
+
+        # Skip vanishingly tiny slices.
+        if N_i <= 0.0 or zhi_i <= zlo_i:
+            continue
+
+        info_i = build_bao_likelihood(
+            N_tracers=N_i,
+            theta_cosmo=theta_cosmo,
+            hrdrag=hrdrag,
+            tracer_bin=tracer_bin,
+            zrange=(zlo_i, zhi_i),
+            z_eff=zmid_i,
+            area=area,
+            resolution=resolution,
+            tracer_config=tracer_config,
+            override_sigmas=override_sigmas,
+            n_iter=n_iter,
+            include_fog=include_fog,
+            float_sigma_bao=float_sigma_bao,
+        )
+
+        F_q_total += _q_fisher_from_bao_likelihood_info(info_i)
+
+    F_q_total = _regularize_fisher_matrix(F_q_total)
+
+    try:
+        cov_q = np.linalg.inv(F_q_total)
+    except np.linalg.LinAlgError:
+        cov_q = np.linalg.pinv(F_q_total, rcond=1e-12)
+
+    # Convert qpar/qper to DH/rd and DM/rd at the bin-level effective redshift.
+    # The slices are used to compute total information, but the target remains
+    # the published/bin-level BAO distance at z_eff_bin.
+    template_bin = BAOPowerSpectrumTemplate(
+        z=z_eff_bin,
+        fiducial=("DESI", dict(theta_cosmo)),
+        apmode="qparqper",
+    )
+
+    rd = hrdrag / _H_FID
+    DH_over_rd_fid = float(template_bin.DH_fid) / rd
+    DM_over_rd_fid = float(template_bin.DM_fid) / rd
+
     J = np.diag([DH_over_rd_fid, DM_over_rd_fid])
     cov_phys = J @ cov_q @ J.T
 
@@ -1093,7 +1439,8 @@ def run_fisher(
     override_sigmas: Tuple[float, float] | None = None,
     n_iter: int = 1,
     include_fog: bool = True,
-    float_sigma_bao: bool = True
+    float_sigma_bao: bool = True,
+    nz_slices_path: str | Path | None = None,
 ) -> Dict[str, float]:
     """Convert a sample dict (with N_tracers + cosmo params) to Fisher covariance elements."""
     if param_defaults:
@@ -1101,6 +1448,22 @@ def run_fisher(
 
     N_tracers = sample["N_tracers"]
     theta_cosmo, hrdrag = _to_bao_cosmo_params(sample)
+
+    if nz_slices_path is not None:
+        return get_bao_fisher_covariance_sliced_nz(
+            N_tracers=N_tracers,
+            theta_cosmo=theta_cosmo,
+            hrdrag=hrdrag,
+            nz_slices_path=nz_slices_path,
+            tracer_bin=tracer_bin,
+            z_eff_bin=z_eff,
+            area=area,
+            override_sigmas=override_sigmas,
+            n_iter=n_iter,
+            include_fog=include_fog,
+            float_sigma_bao=float_sigma_bao,
+        )
+
     return get_bao_fisher_covariance(
         N_tracers=N_tracers,
         theta_cosmo=theta_cosmo,
@@ -1112,7 +1475,7 @@ def run_fisher(
         override_sigmas=override_sigmas,
         n_iter=n_iter,
         include_fog=include_fog,
-        float_sigma_bao=float_sigma_bao
+        float_sigma_bao=float_sigma_bao,
     )
 
 
@@ -1206,7 +1569,7 @@ def _worker_run_fisher(args_tuple):
     non-finite target values. The master aggregates and prints the first
     traceback so the worker's silenced stderr doesn't hide real bugs.
     """
-    sample, tracer_bin, zrange, z_eff, param_defaults = args_tuple
+    sample, tracer_bin, zrange, z_eff, param_defaults, area, nz_slices_path = args_tuple
     try:
         targets = run_fisher(
             sample,
@@ -1214,6 +1577,8 @@ def _worker_run_fisher(args_tuple):
             zrange=zrange,
             z_eff=z_eff,
             param_defaults=param_defaults,
+            area=area,
+            nz_slices_path=nz_slices_path,
         )
         target_vals = [targets[t] for t in TARGET_NAMES]
         if not all(np.isfinite(v) for v in target_vals):
@@ -1235,6 +1600,8 @@ def generate_dataset(
     workers: int = 1,
     param_defaults: Dict[str, float] | None = None,
     constraints: Dict[str, Dict] | None = None,
+    area: float = 14000.0,
+    nz_slices_path: str | Path | None = None,
 ) -> Tuple[List[str], np.ndarray, np.ndarray]:
     if constraints is None:
         constraints = CONSTRAINTS
@@ -1270,7 +1637,7 @@ def generate_dataset(
             )
             lhs_seed += 1
 
-            tasks = [(s, tracer_bin, zrange, z_eff, param_defaults) for s in draws]
+            tasks = [(s, tracer_bin, zrange, z_eff, param_defaults, area, nz_slices_path) for s in draws]
             for sample, target_vals, tb_str in pool.imap_unordered(_worker_run_fisher, tasks):
                 total_attempts += 1
                 if sample is None:
@@ -1327,6 +1694,8 @@ def generate_dataset(
                         zrange=zrange,
                         z_eff=z_eff,
                         param_defaults=param_defaults,
+                        area=area,
+                        nz_slices_path=nz_slices_path,
                     )
                     target_vals = [targets[t] for t in TARGET_NAMES]
                     if not all(np.isfinite(v) for v in target_vals):
@@ -1436,7 +1805,22 @@ def main() -> None:
         choices=list(COSMO_MODELS.keys()),
         help="Cosmology model determining which params are varied (default: base).",
     )
-
+    parser.add_argument(
+        "--area",
+        type=float,
+        default=14000.0,
+        help="Effective survey area in deg^2 used by CutskyFootprint.",
+    )
+    parser.add_argument(
+        "--nz-slices-path",
+        type=str,
+        default=None,
+        help=(
+            "Optional path to a parsed *_nz_slices.csv file. "
+            "If provided, N_tracers is distributed across redshift slices "
+            "using slice_fraction and Fisher information is summed over slices."
+        ),
+    )
     sys.argv = [a for a in sys.argv if a.strip()]
     args = parser.parse_args()
 
@@ -1493,6 +1877,9 @@ def main() -> None:
     print(f"Active constraints: {list(constraints.keys())}")
     print(f"Redshift range: {zrange}, z_eff = {z_eff:.3f}")
     print("Writing dataset to:", save_path)
+    print(f"Area: {args.area:.3f} deg^2")
+    if args.nz_slices_path:
+        print(f"Using n(z) slices: {args.nz_slices_path}")
 
     try:
         param_names, X, y = generate_dataset(
@@ -1507,6 +1894,8 @@ def main() -> None:
             workers=args.workers,
             param_defaults=param_defaults,
             constraints=constraints,
+            area=args.area,
+            nz_slices_path=args.nz_slices_path,
         )
         print(f"Generated dataset with shape X={X.shape}, y={y.shape}")
         save_dataset(
