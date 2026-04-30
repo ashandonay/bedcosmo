@@ -73,7 +73,7 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         self,
         prior_args=None,
         design_args=None,
-        temperature=3000,
+        temperature=10000,
         central_z=1.0,
         nominal_design=None,
         pixel_scale=0.2,
@@ -86,6 +86,7 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         mag_err_cap=10.0,
         device="cuda:0",
         transform_input=False,
+        bijector_state=None,
         profile=False,
         verbose=False,
         global_rank=0,
@@ -113,6 +114,8 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         self.prior_args = prior_args
         self.prior, self.latex_labels = self.init_prior(**self.prior_args)
         self.cosmo_params = list(self.prior.keys())
+
+        self._init_param_bijector(bijector_state=bijector_state)
 
         if nominal_design is None:
             self.nominal_design = torch.tensor(
@@ -811,49 +814,6 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         sigmas = self._magnitude_errors(means, nvisits)
         covariance = torch.diag_embed(sigmas**2)
         return pyro.sample(self.observation_labels[0], dist.MultivariateNormal(means, covariance))
-
-    @profile_method
-    def params_to_unconstrained(self, params, bijector_class=None):
-        return params
-
-    @profile_method
-    def params_from_unconstrained(self, y, bijector_class=None):
-        return y
-
-    @profile_method
-    def get_guide_samples(
-        self,
-        guide,
-        context=None,
-        num_samples=5000,
-        params=None,
-        transform_output=True,
-    ):
-        if context is None:
-            context = self.nominal_context
-        with torch.no_grad():
-            param_samples = guide(context.squeeze()).sample((num_samples,))
-
-        if params is None:
-            names = self.cosmo_params
-            labels = self.latex_labels
-        else:
-            indices = [self.cosmo_params.index(p) for p in params if p in self.cosmo_params]
-            param_samples = param_samples[:, indices]
-            names = [self.cosmo_params[i] for i in indices]
-            labels = [self.latex_labels[i] for i in indices]
-
-        for idx in range(param_samples.shape[1]):
-            col = param_samples[:, idx]
-            if torch.all(col == col[0]):
-                noise_scale = 1e-10 if col[0] == 0 else abs(col[0]) * 1e-10
-                param_samples[:, idx] = col + torch.randn_like(col) * noise_scale
-
-        with contextlib.redirect_stdout(io.StringIO()):
-            samples_gd = getdist.MCSamples(
-                samples=param_samples.cpu().numpy(), names=names, labels=labels
-            )
-        return samples_gd
 
     @profile_method
     def get_nominal_samples(self, *_, **__):

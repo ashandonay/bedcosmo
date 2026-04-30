@@ -22,7 +22,7 @@ import math
 import inspect
 
 from bedcosmo.custom_dist import ConstrainedUniform2D
-from bedcosmo.util import Bijector, auto_seed, profile_method, get_experiment_config_path
+from bedcosmo.util import auto_seed, load_prior_flow_from_file, profile_method, get_experiment_config_path
 from bedcosmo.base import BaseExperiment
 from bedcosmo.cosmology import CosmologyMixin, _interp1
 
@@ -114,24 +114,8 @@ class VariableRedshift(BaseExperiment, CosmologyMixin):
         self.cosmo_params = list(self.prior.keys())
         
         self.transform_input = transform_input
-        if self.transform_input:
-            # Initialize bijector for parameter transformation
-            self.param_bijector = Bijector(self, cdf_bins=5000, cdf_samples=1e7)
-            if bijector_state is not None:
-                if self.global_rank == 0:
-                    print(f"Restoring bijector state from checkpoint.")
-                self.param_bijector.set_state(bijector_state)
-            
-            # For consistency with desi bijector (even though we may not have DESI data)
-            self.desi_bijector = self.param_bijector
-        
-        # Store parameter indices for transformations
-        self._idx_Om = [self.cosmo_params.index('Om')] if 'Om' in self.cosmo_params else []
-        self._idx_Ok = [self.cosmo_params.index('Ok')] if 'Ok' in self.cosmo_params else []
-        self._idx_w0 = [self.cosmo_params.index('w0')] if 'w0' in self.cosmo_params else []
-        self._idx_wa = [self.cosmo_params.index('wa')] if 'wa' in self.cosmo_params else []
-        self._idx_hr = [self.cosmo_params.index('hrdrag')] if 'hrdrag' in self.cosmo_params else []
-        
+        self._init_param_bijector(bijector_state=bijector_state)
+
         # Observation labels
         self.observation_labels = ["y"]  # Single observation label for MultivariateNormal
         
@@ -373,6 +357,22 @@ class VariableRedshift(BaseExperiment, CosmologyMixin):
         if 'hrdrag' not in model_parameters:
             setattr(self, 'hrdrag_multiplier', 100.0)
 
+        # Load prior flow if specified (absolute path required).
+        if prior_flow:
+            if not os.path.isabs(prior_flow):
+                raise ValueError(
+                    f"prior_flow path '{prior_flow}' must be an absolute path. "
+                    "Relative paths are not supported."
+                )
+            self.prior_flow, self.prior_flow_metadata = load_prior_flow_from_file(
+                prior_flow, self.device, self.global_rank,
+            )
+            if self.global_rank == 0:
+                print("Using trained posterior model as prior for parameter sampling (loaded from prior_args.yaml)")
+        else:
+            self.prior_flow = None
+            self.prior_flow_metadata = None
+
         return prior, param_constraints, latex_labels
 
     def error_func(self, z, D_H, D_M=None):
@@ -462,75 +462,6 @@ class VariableRedshift(BaseExperiment, CosmologyMixin):
                 print(f"  D_M/r_d = {D_M_val.reshape(-1)[0].item():.4f}")
         
         return central_vals
-
-    @profile_method
-    def params_to_unconstrained(self, params, bijector_class=None):
-        """Vectorized: map PHYSICAL space -> unconstrained R^D."""
-        D = len(self.cosmo_params)
-        assert params.shape[-1] == D, f"Expected last dim {D}, got {params.shape[-1]}"
-        y = params.clone()
-
-        if bijector_class is None:
-            bijector_class = self.param_bijector
-
-        # Om in (0,1): use empirical prior transformation
-        if self._idx_Om:
-            x = params[..., self._idx_Om]
-            y[..., self._idx_Om] = bijector_class.prior_to_gaussian(x, 'Om')
-
-        # Ok in (-0.3, 0.3): use empirical prior transformation
-        if self._idx_Ok:
-            x = params[..., self._idx_Ok]
-            y[..., self._idx_Ok] = bijector_class.prior_to_gaussian(x, 'Ok')
-
-        # w0 in (-3, 1): use empirical prior transformation
-        if self._idx_w0:
-            x = params[..., self._idx_w0]
-            y[..., self._idx_w0] = bijector_class.prior_to_gaussian(x, 'w0')
-
-        # wa in (-3, 2): use empirical prior transformation
-        if self._idx_wa:
-            x = params[..., self._idx_wa]
-            y[..., self._idx_wa] = bijector_class.prior_to_gaussian(x, 'wa')
-
-        # hrdrag > 0: use empirical prior transformation
-        if self._idx_hr:
-            x = params[..., self._idx_hr]
-            y[..., self._idx_hr] = bijector_class.prior_to_gaussian(x, 'hrdrag')
-
-        return y
-
-    @profile_method
-    def params_from_unconstrained(self, y, bijector_class=None):
-        """Vectorized: map unconstrained R^D -> PHYSICAL space."""
-        D = len(self.cosmo_params)
-        assert y.shape[-1] == D, f"Expected last dim {D}, got {y.shape[-1]}"
-        x = y.clone()
-
-        if bijector_class is None:
-            bijector_class = self.param_bijector
-        
-        # Om: use empirical prior inverse transformation
-        if self._idx_Om:
-            x[..., self._idx_Om] = bijector_class.gaussian_to_prior(y[..., self._idx_Om], 'Om')
-
-        # Ok: use empirical prior inverse transformation
-        if self._idx_Ok:
-            x[..., self._idx_Ok] = bijector_class.gaussian_to_prior(y[..., self._idx_Ok], 'Ok')
-
-        # w0: use empirical prior inverse transformation
-        if self._idx_w0:
-            x[..., self._idx_w0] = bijector_class.gaussian_to_prior(y[..., self._idx_w0], 'w0')
-
-        # wa: use empirical prior inverse transformation
-        if self._idx_wa:
-            x[..., self._idx_wa] = bijector_class.gaussian_to_prior(y[..., self._idx_wa], 'wa')
-
-        # hrdrag: use empirical prior inverse transformation
-        if self._idx_hr:
-            x[..., self._idx_hr] = bijector_class.gaussian_to_prior(y[..., self._idx_hr], 'hrdrag')
-
-        return x
 
     # Note: _E_of_z, D_H_func, D_M_func are inherited from CosmologyMixin
 

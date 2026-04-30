@@ -142,40 +142,27 @@ class NumTracers(BaseExperiment, CosmologyMixin):
             self.desi_prior = self.prior
         self.cosmo_params = list(self.prior.keys())
         
-        # Determine which bijector_state to use:
-        # 1. If bijector_state argument is provided (resume training), use that
-        # 2. Else if prior_flow has bijector_state (using prior_flow as prior), use that
-        # 3. Else create new bijector by sampling
-        effective_bijector_state = bijector_state
-        bijector_source = "checkpoint"
-        
-        if effective_bijector_state is None and self.prior_flow_metadata is not None:
-            prior_flow_bijector_state = self.prior_flow_metadata.get('bijector_state')
-            if prior_flow_bijector_state is not None:
-                effective_bijector_state = prior_flow_bijector_state
-                bijector_source = "prior_flow"
-        
-        skip_bijector_sampling = effective_bijector_state is not None
-        self.param_bijector = Bijector(self, cdf_bins=5000, cdf_samples=1e5, skip_sampling=skip_bijector_sampling)
-        if effective_bijector_state is not None:
-            if self.global_rank == 0:
-                print(f"Restoring bijector state from {bijector_source}.")
-            self.param_bijector.set_state(effective_bijector_state, device=self.device)
-        # if the prior is not the same as the DESI prior, create a new bijector for the DESI samples
+        self.transform_input = transform_input
+
+        # param_bijector is built unconditionally (DESI sampling consumes it
+        # even when transform_input is False). State resolution (explicit
+        # arg vs prior_flow_metadata fallback) lives in the helper.
+        self._init_param_bijector(
+            bijector_state=bijector_state,
+            cdf_samples=int(1e5),
+            always_build=True,
+        )
+
+        # If the main prior differs from the DESI prior, build a separate
+        # bijector against the uniform DESI prior (not the prior_flow).
         if self.prior.items() != self.desi_prior.items():
-            # desi_bijector uses the uniform desi_prior, not the prior_flow
-            self.desi_bijector = Bijector(self, prior=self.desi_prior, cdf_bins=5000, cdf_samples=1e6,
-                                         use_prior_flow=False)
+            self.desi_bijector = Bijector(
+                self, prior=self.desi_prior, cdf_bins=5000, cdf_samples=1e6,
+                use_prior_flow=False,
+            )
         else:
             self.desi_bijector = self.param_bijector
 
-        self.transform_input = transform_input
-        # store as Python lists of ints; works for advanced indexing
-        self._idx_Om = [self.cosmo_params.index('Om')] if 'Om' in self.cosmo_params else []
-        self._idx_Ok = [self.cosmo_params.index('Ok')] if 'Ok' in self.cosmo_params else []
-        self._idx_w0 = [self.cosmo_params.index('w0')] if 'w0' in self.cosmo_params else []
-        self._idx_wa = [self.cosmo_params.index('wa')] if 'wa' in self.cosmo_params else []
-        self._idx_hr = [self.cosmo_params.index('hrdrag')] if 'hrdrag' in self.cosmo_params else []
         self.observation_labels = ["y"]
         
         # Pass design_args using ** unpacking if provided, otherwise use defaults
@@ -457,87 +444,6 @@ class NumTracers(BaseExperiment, CosmologyMixin):
 
         return prior, param_constraints, latex_labels, prior_flow, prior_flow_metadata
 
-    @profile_method
-    def params_to_unconstrained(self, params, bijector_class=None):
-        """
-        Vectorized: map PHYSICAL space -> unconstrained R^D.
-        Expected input shape: (..., D) where D == len(self.cosmo_params).
-
-        Returns:
-            y (torch.Tensor): The unconstrained parameters.
-        """
-        D = len(self.cosmo_params)
-        assert params.shape[-1] == D, f"Expected last dim {D}, got {params.shape[-1]}"
-        y = params.clone()
-
-        if bijector_class is None:
-            bijector_class = self.param_bijector
-
-        # Om in (0,1): use empirical prior transformation
-        if self._idx_Om:
-            x = params[..., self._idx_Om]
-            y[..., self._idx_Om] = bijector_class.prior_to_gaussian(x, 'Om')
-
-        # Ok in (-0.3, 0.3): use empirical prior transformation
-        if self._idx_Ok:
-            x = params[..., self._idx_Ok]
-            y[..., self._idx_Ok] = bijector_class.prior_to_gaussian(x, 'Ok')
-
-        # w0 in (-3, 1): use empirical prior transformation
-        if self._idx_w0:
-            x = params[..., self._idx_w0]
-            y[..., self._idx_w0] = bijector_class.prior_to_gaussian(x, 'w0')
-
-        # wa in (-3, 2): use empirical prior transformation
-        if self._idx_wa:
-            x = params[..., self._idx_wa]
-            y[..., self._idx_wa] = bijector_class.prior_to_gaussian(x, 'wa')
-
-        # hrdrag > 0: use empirical prior transformation
-        if self._idx_hr:
-            x = params[..., self._idx_hr]
-            y[..., self._idx_hr] = bijector_class.prior_to_gaussian(x, 'hrdrag')
-
-        return y
-
-    @profile_method
-    def params_from_unconstrained(self, y, bijector_class=None):
-        """
-        Vectorized: map unconstrained R^D -> PHYSICAL space.
-        Expected input shape: (..., D) where D == len(self.cosmo_params).
-
-        Returns:
-            x (torch.Tensor): The physical parameters.
-        """
-        D = len(self.cosmo_params)
-        assert y.shape[-1] == D, f"Expected last dim {D}, got {y.shape[-1]}"
-        x = y.clone()
-
-        if bijector_class is None:
-            bijector_class = self.param_bijector
-        
-        # Om: use empirical prior inverse transformation
-        if self._idx_Om:
-            x[..., self._idx_Om] = bijector_class.gaussian_to_prior(y[..., self._idx_Om], 'Om')
-
-        # Ok: use empirical prior inverse transformation
-        if self._idx_Ok:
-            x[..., self._idx_Ok] = bijector_class.gaussian_to_prior(y[..., self._idx_Ok], 'Ok')
-
-        # w0: use empirical prior inverse transformation
-        if self._idx_w0:
-            x[..., self._idx_w0] = bijector_class.gaussian_to_prior(y[..., self._idx_w0], 'w0')
-
-        # wa: use empirical prior inverse transformation
-        if self._idx_wa:
-            x[..., self._idx_wa] = bijector_class.gaussian_to_prior(y[..., self._idx_wa], 'wa')
-
-        # hrdrag: use empirical prior inverse transformation
-        if self._idx_hr:
-            x[..., self._idx_hr] = bijector_class.gaussian_to_prior(y[..., self._idx_hr], 'hrdrag')
-
-        return x
-            
     @profile_method
     def sigma_scaling_factor(self, passed_ratio, class_ratio, index):
         """

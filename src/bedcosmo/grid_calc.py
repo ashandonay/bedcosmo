@@ -7,6 +7,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
@@ -15,8 +16,15 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import yaml
-from bed.design import ExperimentDesigner
-from bed.grid import Grid
+from bedcosmo.plotting import BasePlotter, RunPlotter
+from bedcosmo.util import (
+    init_experiment, get_experiment_config_path, parse_extra_args,
+    get_runs_data, render_overlay,
+)
+from bed.design import ExperimentDesigner as NumpyExperimentDesigner
+from bed.grid import Grid as NumpyGrid
+from bed_jax.design import ExperimentDesigner as JaxExperimentDesigner
+from bed_jax.grid import Grid as JaxGrid
 from pyro import distributions as dist
 
 
@@ -37,6 +45,7 @@ class GridCalculation:
         param_pts: int = 231,
         feature_pts: int = 101,
         device: str = "cpu",
+        backend: str = "jax",
         adaptive_features: bool = False,
         adaptive_floor: float = 0.05,
         feature_ranges: Optional[Dict[str, Tuple[float, float]]] = None,
@@ -44,6 +53,8 @@ class GridCalculation:
         param_dense_ranges: Optional[Dict[str, Tuple[float, float]]] = None,
         feature_dense_fraction: float = 0.6,
         param_dense_fraction: float = 0.6,
+        design_chunk_size: Optional[int] = None,
+        plt_save_path: Optional[str] = None,
     ):
         """
         Initialize the GridCalculation.
@@ -52,7 +63,8 @@ class GridCalculation:
             experiment: Experiment object with prior, cosmo_params, etc.
             param_pts: Number of points per parameter axis.
             feature_pts: Number of points per feature axis.
-            device: Torch device (grid-based calculation runs on CPU for stability).
+            device: Device hint used for both experiment-side torch tensors and
+                bed_jax backend selection ("cpu", "gpu", or torch-style "cuda:0").
             adaptive_features: If True, use a patched-grid strategy that places
                 a dense grid over the peak region (detectable features) and a
                 sparse grid spanning the full range, then merges them.
@@ -75,11 +87,19 @@ class GridCalculation:
                 to each dense region (default 0.6).
             param_dense_fraction: Fraction of parameter grid points allocated
                 to each dense region (default 0.6).
+            plt_save_path: Path where plots should be saved.
+                     If None, will try to infer from MLflow or default to cwd.
         """
         self.experiment = experiment
+        self.plt_save_path = plt_save_path
+        os.makedirs(self.plt_save_path, exist_ok=True)
+        print(f"GridCalculation initialized with plot save path: {self.plt_save_path}")
         self.param_pts = param_pts
         self.feature_pts = feature_pts
         self.device = device
+        self.backend = str(backend).strip().lower()
+        if self.backend not in {"jax", "numpy"}:
+            raise ValueError(f"Unsupported backend '{backend}'. Use 'jax' or 'numpy'.")
         self.adaptive_features = adaptive_features
         self.adaptive_floor = adaptive_floor
         self.feature_ranges = feature_ranges or {}
@@ -87,14 +107,23 @@ class GridCalculation:
         self.param_dense_ranges = param_dense_ranges or {}
         self.feature_dense_fraction = feature_dense_fraction
         self.param_dense_fraction = param_dense_fraction
+        self.design_chunk_size = design_chunk_size
+        self.bed_jax_device = self._normalize_bed_jax_device(device)
+        if self.backend == "jax":
+            self._grid_cls = JaxGrid
+            self._designer_cls = JaxExperimentDesigner
+        else:
+            self._grid_cls = NumpyGrid
+            self._designer_cls = NumpyExperimentDesigner
 
         # Create grids (design_grid before feature_grid since feature bounds depend on designs)
         self.parameter_grid = self._create_parameter_grid()
         self.design_grid = self._create_design_grid()
         self.feature_grid = self._create_feature_grid()
 
-        # Prior PDF (computed lazily or explicitly)
+        # Prior PDF (true density) and PMF (mass per cell) — computed lazily or explicitly
         self._prior_pdf: Optional[np.ndarray] = None
+        self._prior_pmf: Optional[np.ndarray] = None
         self._prior_distributions: Optional[Dict[str, torch.distributions.Distribution]] = None
 
         # Designer and results (populated after run)
@@ -102,6 +131,40 @@ class GridCalculation:
         self.result: Optional[Dict[str, Any]] = None
         self.eig: Optional[np.ndarray] = None
         self.best_design: Optional[Any] = None
+
+
+    def _make_grid(self, **kwargs):
+        if self.backend == "jax":
+            return self._grid_cls(device=self.bed_jax_device, **kwargs)
+        return self._grid_cls(**kwargs)
+
+    @staticmethod
+    def _normalize_bed_jax_device(device: Any) -> Any:
+        """
+        Normalize device names for bed_jax.
+
+        bed_jax accepts ``"cpu"``/``"gpu"`` (or a concrete jax.Device), while
+        bedcosmo often uses torch-style strings (e.g. ``"cuda:0"``).
+        """
+        if hasattr(device, "platform"):
+            return device
+        if not isinstance(device, str):
+            return "cpu"
+        requested = device.strip().lower()
+        if requested == "gpu" or requested.startswith("cuda"):
+            return "gpu"
+        return "cpu"
+
+    def _experiment_torch_device(self) -> torch.device:
+        """Return the torch device used by the experiment tensors."""
+        nominal_design = getattr(self.experiment, "nominal_design", None)
+        if isinstance(nominal_design, torch.Tensor):
+            return nominal_design.device
+        if isinstance(self.device, torch.device):
+            return self.device
+        if isinstance(self.device, str):
+            return torch.device(self.device)
+        return torch.device("cpu")
 
     @staticmethod
     def _icdf(distribution, q: torch.Tensor) -> torch.Tensor:
@@ -194,7 +257,7 @@ class GridCalculation:
         else:
             raise ValueError(f"Unsupported distribution type: {dist_type}")
 
-    def _create_parameter_grid(self) -> Grid:
+    def _create_parameter_grid(self):
         """Create parameter grid from experiment prior."""
         axes: Dict[str, np.ndarray] = {}
         names = list(getattr(self.experiment, "cosmo_params", []))
@@ -212,7 +275,7 @@ class GridCalculation:
                 print(f"  Param grid {name}: [{lo:.4f}, {hi:.4f}] (dense [{d_lo:.4f}, {d_hi:.4f}])")
             else:
                 axes[name] = np.linspace(lo, hi, int(self.param_pts), dtype=np.float64)
-        return Grid(**axes)
+        return self._make_grid(**axes)
 
     @staticmethod
     def _adaptive_axis(
@@ -333,7 +396,7 @@ class GridCalculation:
 
         return merged.astype(np.float64)
 
-    def _create_feature_grid(self) -> Grid:
+    def _create_feature_grid(self):
         """Create feature grid from explicit ranges or infer from experiment."""
 
         # If all feature ranges are explicitly provided, use them directly.
@@ -358,7 +421,7 @@ class GridCalculation:
                     else:
                         axes[name] = np.linspace(lo, hi, int(self.feature_pts), dtype=np.float64)
                         print(f"  Feature grid {d}: [{lo:.1f}, {hi:.1f}] (explicit)")
-                return Grid(**axes)
+                return self._make_grid(**axes)
 
         # Infer feature grid from experiment.
         if hasattr(self.experiment, "design_labels"):
@@ -366,13 +429,15 @@ class GridCalculation:
                 if not hasattr(self.parameter_grid, "z"):
                     raise ValueError("Auto feature grid requires parameter grid to include 'z'.")
                 z = np.asarray(getattr(self.parameter_grid, "z"), dtype=np.float64)
-                z_tensor = torch.as_tensor(z, device="cpu", dtype=torch.float64)
+                exp_device = self._experiment_torch_device()
+                z_tensor = torch.as_tensor(z, device=exp_device, dtype=torch.float64)
                 with torch.no_grad():
                     features = self.experiment._calculate_magnitudes(z_tensor).detach().cpu().numpy()
             else:
                 raise NotImplementedError(f"Feature grid inference not implemented for {self.experiment.name}.")
 
-            features_tensor = torch.as_tensor(features, device="cpu", dtype=torch.float64)
+            exp_device = self._experiment_torch_device()
+            features_tensor = torch.as_tensor(features, device=exp_device, dtype=torch.float64)
             # Compute feature errors using the worst-case (minimum) visits
             # across all designs so the feature grid covers the full range.
             # Start from nominal design, then override with design grid mins.
@@ -384,7 +449,7 @@ class GridCalculation:
                     d_vals = np.asarray(design_grid.axes_in[d], dtype=np.float64)
                     min_visits[j] = d_vals.min()
             min_visits_tensor = torch.as_tensor(
-                min_visits, device="cpu", dtype=torch.float64
+                min_visits, device=exp_device, dtype=torch.float64
             ).expand(features_tensor.shape)
             if self.experiment.name == "num_visits":
                 feature_errors = self.experiment._magnitude_errors(
@@ -431,25 +496,35 @@ class GridCalculation:
                     print(f"  Feature grid {d}: [{lo:.1f}, {hi:.1f}]")
                     axes[f"y_{d}"] = np.linspace(lo, hi, int(self.feature_pts), dtype=np.float64)
 
-            return Grid(**axes)
+            return self._make_grid(**axes)
 
         raise ValueError(
             "Cannot auto-build feature grid for this experiment; provide feature_axes explicitly."
         )
 
-    def _create_design_grid(self) -> Grid:
-        """Get design grid from experiment."""
+    def _create_design_grid(self):
+        """Get design grid from experiment, converting from bed.Grid to bed_jax.Grid."""
         if not hasattr(self.experiment, "designs_grid") or self.experiment.designs_grid is None:
             raise ValueError(
                 "Experiment does not expose designs_grid. "
                 "Define it in experiment.init_designs (e.g., via BaseExperiment._build_design_grid)."
             )
-        return self.experiment.designs_grid
+        src = self.experiment.designs_grid
+        axes = {name: np.asarray(src.axes_in[name]) for name in src.names}
+        if src.constraint is not None:
+            full_shape = getattr(src, "expanded_shape", None)
+            return self._make_grid(**axes, constraint=src.constraint, full_shape=full_shape)
+        return self._make_grid(**axes)
 
     @property
     def prior_pdf(self) -> Optional[np.ndarray]:
-        """Get the prior PDF array."""
+        """True prior density evaluated at each grid point."""
         return self._prior_pdf
+
+    @property
+    def prior_pmf(self) -> Optional[np.ndarray]:
+        """Per-cell probability mass (PDF * cell width). This is what bed.Grid.sum() consumes."""
+        return self._prior_pmf
 
     @property
     def prior_distributions(self) -> Optional[Dict[str, torch.distributions.Distribution]]:
@@ -515,9 +590,64 @@ class GridCalculation:
                 "Must provide prior_args, prior_args_path, or set use_experiment_prior=True."
             )
 
-        # Compute the PDF over the parameter grid
-        self._prior_pdf = self._evaluate_prior_on_grid(normalize=normalize)
-        return self._prior_pdf
+        # Compute the PDF (true density) and PMF (per-cell mass) over the parameter grid
+        self._prior_pdf, self._prior_pmf = self._evaluate_prior_on_grid(normalize=normalize)
+
+        # Plot and save the prior PDF to a suitable output file in out_dir (run file or grid output location)
+        try:
+            import matplotlib.pyplot as plt
+            import os
+
+            param_names = list(self.parameter_grid.names)
+            pdf = self._prior_pdf
+
+            if len(param_names) == 1:
+                fig, ax = plt.subplots()
+                x = np.asarray(getattr(self.parameter_grid, param_names[0]), dtype=np.float64)
+                ax.plot(x, pdf.ravel())
+                ax.set_xlabel(param_names[0])
+                ax.set_ylabel("Prior PDF")
+                ax.set_title("Prior PDF")
+            elif len(param_names) == 2:
+                fig, ax = plt.subplots()
+                x = np.asarray(getattr(self.parameter_grid, param_names[0]), dtype=np.float64)
+                y = np.asarray(getattr(self.parameter_grid, param_names[1]), dtype=np.float64)
+                im = ax.imshow(
+                    pdf.T,
+                    extent=(x.min(), x.max(), y.min(), y.max()),
+                    origin="lower",
+                    aspect="auto",
+                    interpolation='nearest'
+                )
+                fig.colorbar(im, ax=ax, label="Prior PDF")
+                ax.set_xlabel(param_names[0])
+                ax.set_ylabel(param_names[1])
+                ax.set_title("Prior PDF")
+            else:
+                fig, axs = plt.subplots(len(param_names), 1, figsize=(5, 3 * len(param_names)))
+                for i, name in enumerate(param_names):
+                    ax = axs[i] if len(param_names) > 1 else axs
+                    marginal_pdf = np.sum(pdf, tuple(j for j in range(len(param_names)) if j != i))
+                    x = np.asarray(getattr(self.parameter_grid, name), dtype=np.float64)
+                    ax.plot(x, marginal_pdf)
+                    ax.set_xlabel(name)
+                    ax.set_ylabel("Marginal Prior PDF")
+                fig.suptitle("Prior PDF Marginals")
+
+            # Plot save path is now always provided (self.plt_save_path)
+            prior_plot_path = os.path.join(self.plt_save_path, "grid_prior_pdf.png")
+     
+
+            fig.tight_layout()
+            fig.savefig(prior_plot_path, dpi=200)
+            plt.close(fig)
+            print(f"Saved prior PDF plot to {prior_plot_path}")
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            print(f"Warning: failed to plot/save prior PDF: {e}")
+
+        return self._prior_pmf
 
     def _build_distributions_from_args(
         self, prior_args: Dict[str, Any]
@@ -546,14 +676,17 @@ class GridCalculation:
 
         return distributions
 
-    def _evaluate_prior_on_grid(self, normalize: bool = True) -> np.ndarray:
+    def _evaluate_prior_on_grid(self, normalize: bool = True) -> tuple[np.ndarray, np.ndarray]:
         """
-        Evaluate the joint prior PDF at each point in the parameter grid.
+        Evaluate the joint prior at each point in the parameter grid.
 
         Assumes parameter independence (joint = product of marginals).
 
         Returns:
-            np.ndarray with shape matching parameter_grid.shape.
+            (pdf, pmf) where both have shape matching parameter_grid.shape.
+            - pdf: true probability density at each grid point.
+            - pmf: per-cell probability mass (pdf * product of per-axis cell widths),
+              suitable for plain-sum (bed.Grid.sum) integration. Optionally normalized.
         """
         if self._prior_distributions is None:
             raise ValueError("Prior distributions not set. Call compute_prior_pdf first.")
@@ -561,69 +694,56 @@ class GridCalculation:
         param_names = list(self.parameter_grid.names)
         grid_shape = tuple(self.parameter_grid.shape)
 
-        # Get axis values for each parameter
         axes = [np.asarray(getattr(self.parameter_grid, name), dtype=np.float64) for name in param_names]
 
-        # Create meshgrid of all parameter values
-        # For bed.grid.Grid, the axes are already broadcast-compatible
-        # We need to evaluate the joint log prob at each grid point
-
-        # Initialize log prob array
         log_prob = np.zeros(grid_shape, dtype=np.float64)
 
-        # For each parameter, evaluate its marginal log prob and add to joint
         for i, name in enumerate(param_names):
             distribution = self._prior_distributions[name]
             axis_values = axes[i]
 
-            # Create tensor from axis values
             values_tensor = torch.as_tensor(axis_values, dtype=torch.float64)
-
-            # Evaluate log probability
             with torch.no_grad():
                 marginal_log_prob = distribution.log_prob(values_tensor).detach().cpu().numpy()
 
-            # Handle non-finite values (outside support)
             marginal_log_prob = np.where(
                 np.isfinite(marginal_log_prob), marginal_log_prob, -np.inf
             )
 
-            # Broadcast to grid shape and add to joint log prob
-            # The Grid stores axes such that axis[i] broadcasts along dimension i
-            # We need to reshape marginal_log_prob to broadcast correctly
             shape_for_broadcast = [1] * len(grid_shape)
             shape_for_broadcast[i] = len(axis_values)
             marginal_log_prob = marginal_log_prob.reshape(shape_for_broadcast)
 
             log_prob = log_prob + marginal_log_prob
 
-        # Convert to probability
-        # Subtract max for numerical stability before exp
         log_prob_max = np.max(log_prob[np.isfinite(log_prob)]) if np.any(np.isfinite(log_prob)) else 0.0
-        prob = np.exp(log_prob - log_prob_max)
-        prob = np.where(np.isfinite(prob), prob, 0.0)
+        pdf = np.exp(log_prob - log_prob_max)
+        pdf = np.where(np.isfinite(pdf), pdf, 0.0)
 
-        # Multiply PDF values by cell widths to convert to probability masses.
-        # This ensures that densely-sampled regions don't get excess weight
-        # in the subsequent plain-sum (PMF) arithmetic used by bed.Grid.sum().
+        # Build per-cell mass = pdf * product of per-axis widths. Widths come from
+        # midpoint edges between sample points (each a[i] is the cell center;
+        # boundary cells are mirrored by half a step).
+        pmf = pdf.copy()
         for i, name in enumerate(param_names):
             a = np.asarray(self.parameter_grid.axes_in[name]).ravel()
             if len(a) < 2:
                 continue
-            dw = np.empty(len(a), dtype=np.float64)
-            dw[0] = a[1] - a[0]
-            dw[-1] = a[-1] - a[-2]
-            dw[1:-1] = 0.5 * (a[2:] - a[:-2])
+            edges = np.empty(len(a) + 1, dtype=np.float64)
+            edges[1:-1] = 0.5 * (a[:-1] + a[1:])
+            edges[0] = a[0] - 0.5 * (a[1] - a[0])
+            edges[-1] = a[-1] + 0.5 * (a[-1] - a[-2])
+            dw = np.diff(edges)
             shape = [1] * len(grid_shape)
             shape[i] = len(a)
-            prob *= dw.reshape(shape)
+            pmf = pmf * dw.reshape(shape)
 
         if normalize:
-            total = np.sum(prob)
+            total = float(np.sum(pmf))
             if total > 0:
-                prob = prob / total
+                pmf = pmf / total
+                pdf = pdf / total  # keep PDF on the same normalization as PMF
 
-        return prob.astype(np.float64)
+        return pdf.astype(np.float64), pmf.astype(np.float64)
 
     def run(
         self,
@@ -635,30 +755,37 @@ class GridCalculation:
         Run the grid-based EIG calculation.
 
         Args:
-            prior: Prior PDF array. If None, uses self._prior_pdf if computed,
-                  otherwise ExperimentDesigner uses uniform prior.
+            prior: Per-cell prior mass array (PMF). If None, uses self._prior_pmf if
+                  computed, otherwise ExperimentDesigner uses uniform prior.
             lfunc_name: Name of likelihood function attribute on experiment.
             debug: Enable debug output from ExperimentDesigner.
 
         Returns:
             Dictionary with results including 'best_design', 'eig', 'designer'.
         """
-        # Use computed prior if available and no override provided
+        # Use computed prior mass if available and no override provided
         if prior is None:
-            prior = self._prior_pdf
+            prior = self._prior_pmf
 
         if not hasattr(self.experiment, lfunc_name):
             raise ValueError(f"Experiment missing likelihood function '{lfunc_name}'.")
         lfunc = getattr(self.experiment, lfunc_name)
 
-        self.designer = ExperimentDesigner(
+        designer_kwargs: Dict[str, Any] = {"design_chunk_size": self.design_chunk_size}
+        if self.backend == "jax":
+            designer_kwargs["device"] = self.bed_jax_device
+        self.designer = self._designer_cls(
             self.parameter_grid,
             self.feature_grid,
             self.design_grid,
-            lfunc
+            lfunc,
+            **designer_kwargs,
         )
 
-        self.best_design = self.designer.calculateEIG(prior, debug=debug)
+        # Force debug=True so calculateEIG uses the for-loop path instead of
+        # the JIT-compiled chunked path.  The experiment's unnorm_lfunc uses
+        # torch/numpy and cannot be traced by JAX JIT.
+        self.best_design = self.designer.calculateEIG(prior, debug=True)
         self.eig = np.asarray(self.designer.EIG, dtype=np.float64)
 
         self.result = {
@@ -787,7 +914,7 @@ class GridCalculation:
         redshift_range: Optional[Tuple[float, float]] = None,
         n_redshift_pts: int = 200,
         figsize: Optional[Tuple[float, float]] = None,
-        save_path: Optional[str] = None,
+        save_dir: Optional[str] = None,
     ):
         """Plot the feature grid points in feature space.
 
@@ -831,18 +958,25 @@ class GridCalculation:
                 if self.experiment.name == "num_visits":
                     if hasattr(self.experiment, "prior") and "z" in self.experiment.prior:
                         z_prior = self.experiment.prior["z"]
+                        exp_device = self._experiment_torch_device()
                         if redshift_range is not None:
                             z_min, z_max = redshift_range
                         else:
-                            z_min = float(self._icdf(z_prior, torch.tensor(1e-6, dtype=torch.float64)))
-                            z_max = float(self._icdf(z_prior, torch.tensor(1 - 1e-6, dtype=torch.float64)))
-                        p_low = float(z_prior.cdf(torch.tensor(z_min, dtype=torch.float64)))
-                        p_high = float(z_prior.cdf(torch.tensor(z_max, dtype=torch.float64)))
-                        quantiles = torch.linspace(p_low, p_high, n_redshift_pts, dtype=torch.float64).clamp(1e-6, 1 - 1e-6)
+                            z_min = float(self._icdf(z_prior, torch.tensor(1e-6, device=exp_device, dtype=torch.float64)))
+                            z_max = float(self._icdf(z_prior, torch.tensor(1 - 1e-6, device=exp_device, dtype=torch.float64)))
+                        p_low = float(z_prior.cdf(torch.tensor(z_min, device=exp_device, dtype=torch.float64)))
+                        p_high = float(z_prior.cdf(torch.tensor(z_max, device=exp_device, dtype=torch.float64)))
+                        quantiles = torch.linspace(p_low, p_high, n_redshift_pts, device=exp_device, dtype=torch.float64).clamp(1e-6, 1 - 1e-6)
                         z_arr = self._icdf(z_prior, quantiles).clamp(z_min, z_max)
                     else:
                         z_min, z_max = redshift_range or (0.1, 3.0)
-                        z_arr = torch.linspace(z_min, z_max, n_redshift_pts, dtype=torch.float64)
+                        z_arr = torch.linspace(
+                            z_min,
+                            z_max,
+                            n_redshift_pts,
+                            device=self._experiment_torch_device(),
+                            dtype=torch.float64,
+                        )
                         p_low, p_high = 0.0, 1.0
                     with torch.no_grad():
                         track_features = self.experiment._calculate_magnitudes(z_arr).detach().cpu().numpy()
@@ -854,10 +988,12 @@ class GridCalculation:
                 if ix is not None and iy is not None:
                     ax.plot(track_features[:, ix], track_features[:, iy], color="red",
                             linewidth=1.5, zorder=5, label="z track")
-                    z_np = z_arr.numpy()
+                    z_np = z_arr.detach().cpu().numpy()
                     if hasattr(self.experiment, "prior") and "z" in self.experiment.prior:
-                        mark_qs = torch.linspace(p_low, p_high, 6, dtype=torch.float64).clamp(1e-6, 1 - 1e-6)
-                        z_marks = self._icdf(z_prior, mark_qs).clamp(z_min, z_max).numpy()
+                        mark_qs = torch.linspace(
+                            p_low, p_high, 6, device=self._experiment_torch_device(), dtype=torch.float64
+                        ).clamp(1e-6, 1 - 1e-6)
+                        z_marks = self._icdf(z_prior, mark_qs).clamp(z_min, z_max).detach().cpu().numpy()
                     else:
                         z_marks = np.linspace(z_min, z_max, 6)
                     for z_mark in z_marks:
@@ -872,8 +1008,6 @@ class GridCalculation:
 
         ax.set_title("Feature grid points")
         fig.tight_layout()
-        if save_path is not None:
-            fig.savefig(save_path, dpi=200, bbox_inches="tight")
         return fig, ax
 
     def plot_marginal(
@@ -973,18 +1107,25 @@ class GridCalculation:
                 if hasattr(self.experiment, "design_labels"):
                     if hasattr(self.experiment, "prior") and "z" in self.experiment.prior:
                         z_prior = self.experiment.prior["z"]
+                        exp_device = self._experiment_torch_device()
                         if redshift_range is not None:
                             z_min, z_max = redshift_range
                         else:
-                            z_min = float(self._icdf(z_prior, torch.tensor(1e-6, dtype=torch.float64)))
-                            z_max = float(self._icdf(z_prior, torch.tensor(1 - 1e-6, dtype=torch.float64)))
-                        p_low = float(z_prior.cdf(torch.tensor(z_min, dtype=torch.float64)))
-                        p_high = float(z_prior.cdf(torch.tensor(z_max, dtype=torch.float64)))
-                        quantiles = torch.linspace(p_low, p_high, n_redshift_pts, dtype=torch.float64).clamp(1e-6, 1 - 1e-6)
+                            z_min = float(self._icdf(z_prior, torch.tensor(1e-6, device=exp_device, dtype=torch.float64)))
+                            z_max = float(self._icdf(z_prior, torch.tensor(1 - 1e-6, device=exp_device, dtype=torch.float64)))
+                        p_low = float(z_prior.cdf(torch.tensor(z_min, device=exp_device, dtype=torch.float64)))
+                        p_high = float(z_prior.cdf(torch.tensor(z_max, device=exp_device, dtype=torch.float64)))
+                        quantiles = torch.linspace(p_low, p_high, n_redshift_pts, device=exp_device, dtype=torch.float64).clamp(1e-6, 1 - 1e-6)
                         z_arr = self._icdf(z_prior, quantiles).clamp(z_min, z_max)
                     else:
                         z_min, z_max = redshift_range or (0.1, 3.0)
-                        z_arr = torch.linspace(z_min, z_max, n_redshift_pts, dtype=torch.float64)
+                        z_arr = torch.linspace(
+                            z_min,
+                            z_max,
+                            n_redshift_pts,
+                            device=self._experiment_torch_device(),
+                            dtype=torch.float64,
+                        )
                         p_low, p_high = 0.0, 1.0
                     with torch.no_grad():
                         track_features = self.experiment._calculate_magnitudes(z_arr).detach().cpu().numpy()
@@ -995,10 +1136,12 @@ class GridCalculation:
                         track_x = track_features[:, ix]
                         track_y = track_features[:, iy]
                         ax.plot(track_x, track_y, color="white", linewidth=2, zorder=5)
-                        z_np = z_arr.numpy()
+                        z_np = z_arr.detach().cpu().numpy()
                         if hasattr(self.experiment, "prior") and "z" in self.experiment.prior:
-                            mark_qs = torch.linspace(p_low, p_high, 6, dtype=torch.float64).clamp(1e-6, 1 - 1e-6)
-                            z_marks = self._icdf(z_prior, mark_qs).clamp(z_min, z_max).numpy()
+                            mark_qs = torch.linspace(
+                                p_low, p_high, 6, device=self._experiment_torch_device(), dtype=torch.float64
+                            ).clamp(1e-6, 1 - 1e-6)
+                            z_marks = self._icdf(z_prior, mark_qs).clamp(z_min, z_max).detach().cpu().numpy()
                         else:
                             z_marks = np.linspace(z_min, z_max, 6)
                         for z_mark in z_marks:
@@ -1031,8 +1174,168 @@ class GridCalculation:
 
 
 
+def _run_merge_into_run(
+    args,
+    exp_kwargs,
+    feature_ranges,
+    feature_dense_ranges,
+    param_dense_ranges,
+    session_start_time,
+):
+    """Run grid calc against an existing MLflow run and write output into that run's artifacts dir."""
+    import mlflow
+
+    run_id = args.run_id
+    cosmo_exp = args.cosmo_exp
+
+    mlflow.set_tracking_uri("file:" + os.environ["SCRATCH"] + f"/bedcosmo/{cosmo_exp}/mlruns")
+    run_data_list, exp_id, _ = get_runs_data(run_ids=run_id, cosmo_exp=cosmo_exp)
+    if not run_data_list:
+        raise ValueError(f"Run {run_id} not found in experiment {cosmo_exp}")
+    run_data = run_data_list[0]
+    run_obj = run_data['run_obj']
+    run_args = run_data['params']
+    save_path = os.environ["SCRATCH"] + f"/bedcosmo/{cosmo_exp}/mlruns/{exp_id}/{run_id}/artifacts"
+    os.makedirs(save_path, exist_ok=True)
+
+    eval_step = args.eval_step
+    if eval_step is None:
+        eval_step = run_args.get('total_steps')
+        if eval_step is None:
+            raise ValueError("Could not determine eval_step; pass --eval-step.")
+    eval_step = int(eval_step)
+    step_key = f"step_{eval_step}"
+
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M')
+    output_path = args.grid_eig_data or f"{save_path}/eig_data_grid_{timestamp}.json"
+    print(f"Merge-into-run mode: writing grid eig_data to {output_path}")
+
+    design_args = None
+    if args.design_args_path is not None:
+        design_args_file = args.design_args_path
+        if not os.path.exists(design_args_file):
+            resolved = get_experiment_config_path(cosmo_exp, args.design_args_path)
+            design_args_file = str(resolved)
+        if not os.path.exists(design_args_file):
+            raise FileNotFoundError(f"Design args file not found: {design_args_file}")
+        with open(design_args_file, 'r') as f:
+            design_args = yaml.safe_load(f)
+
+    print(f"Initializing {cosmo_exp} experiment from run {run_id} on device={args.device}...")
+    experiment = init_experiment(
+        run_obj,
+        run_args,
+        device=args.device,
+        design_args=design_args,
+        global_rank=0,
+        **exp_kwargs,
+    )
+
+    eig_data = {"status": "incomplete"}
+    with open(output_path, "w") as f:
+        json.dump(eig_data, f, indent=2)
+
+    gc_obj = GridCalculation(
+        experiment=experiment,
+        device=args.device,
+        backend=args.backend,
+        design_chunk_size=args.design_chunk_size,
+        param_pts=args.param_pts,
+        feature_pts=args.feature_pts,
+        adaptive_features=args.adaptive_features,
+        adaptive_floor=args.adaptive_floor,
+        feature_ranges=feature_ranges,
+        feature_dense_ranges=feature_dense_ranges,
+        param_dense_ranges=param_dense_ranges,
+        feature_dense_fraction=args.feature_dense_fraction,
+        param_dense_fraction=args.param_dense_fraction,
+        out_dir=save_path,
+    )
+
+    prior_pmf = gc_obj.compute_prior_pdf(use_experiment_prior=True)
+    print(f"Computed prior PMF with shape {prior_pmf.shape}")
+
+    result = gc_obj.run(prior=prior_pmf)
+    eig = np.asarray(result["eig"], dtype=float)
+    eig_flat = eig.reshape(-1)
+    max_idx = int(np.argmax(eig_flat))
+    optimal_eig = float(eig_flat[max_idx])
+
+    nominal_np = np.asarray(experiment.nominal_design.detach().cpu().numpy(), dtype=float).reshape(1, -1)
+    designs_np = np.asarray(experiment.designs.detach().cpu().numpy(), dtype=float)
+    nominal_idx = int(np.argmin(np.linalg.norm(designs_np - nominal_np[:, :designs_np.shape[1]], axis=1)))
+
+    step_dict = {"variable": {}, "nominal": {}}
+    step_dict["variable"]["grid"] = {
+        "eigs_avg": eig_flat.tolist(),
+        "eigs_std": np.zeros_like(eig_flat).tolist(),
+        "optimal_eig": optimal_eig,
+        "optimal_eig_std": 0.0,
+        "optimal_design": result["best_design"],
+        "design_grid_shape": list(result["design_grid_shape"]),
+        "feature_grid_shape": list(result["feature_grid_shape"]),
+        "parameter_grid_shape": list(result["parameter_grid_shape"]),
+    }
+    step_dict["nominal"]["grid"] = {
+        "eigs_avg": float(eig_flat[nominal_idx]),
+        "eigs_std": 0.0,
+    }
+    eig_data[step_key] = step_dict
+    eig_data["input_designs"] = designs_np.tolist()
+    eig_data["nominal_design"] = nominal_np.reshape(-1).tolist()
+
+    try:
+        posterior = gc_obj.get_posterior(nominal=True)
+        samples = gc_obj.draw_samples(pdf=posterior, num_samples=50000, seed=args.seed)
+        samples_path = f"{save_path}/grid_samples_{timestamp}.npy"
+        np.save(samples_path, np.asarray(samples))
+        step_dict["grid_samples_path"] = samples_path
+        print(f"Saved grid posterior samples to {samples_path}")
+    except Exception as e:
+        import traceback as _tb
+        _tb.print_exc()
+        print(f"Warning: grid posterior sampling failed: {e}")
+
+    plotter = RunPlotter(run_id=run_id, cosmo_exp=cosmo_exp)
+    try:
+        fig_marginal, _ = gc_obj.plot_marginal(design_type="nominal", param_overlay=True)
+        plotter.save_figure(
+            fig_marginal, filename="grid_marginal", dpi=400,
+            run_id=run_id, experiment_id=exp_id,
+        )
+    except Exception as e:
+        import traceback as _tb
+        _tb.print_exc()
+        print(f"Warning: grid_marginal plot failed: {e}")
+
+    eig_data["status"] = "complete"
+    with open(output_path, "w") as f:
+        json.dump(eig_data, f, indent=2)
+    print(f"Saved grid eig_data to {output_path}")
+    print(f"Grid EIG: nominal={step_dict['nominal']['grid']['eigs_avg']:.4f}, optimal={optimal_eig:.4f}")
+
+    try:
+        render_overlay(
+            own_eig_data=eig_data,
+            own_role='grid',
+            other_eig_data_path=args.nf_eig_data,
+            plotter=plotter,
+            eval_step=eval_step,
+        )
+    except Exception as e:
+        import traceback as _tb
+        _tb.print_exc()
+        print(f"Warning: overlay rendering failed: {e}")
+
+    session_runtime = time.time() - session_start_time
+    hours = int(session_runtime // 3600)
+    minutes = int((session_runtime % 3600) // 60)
+    seconds = int(session_runtime % 60)
+    print(f"Grid calculation runtime: {hours}h {minutes}m {seconds}s")
+
+
 def main():
-    from bedcosmo.util import init_experiment, get_experiment_config_path, parse_extra_args
+    session_start_time = time.time()
 
     parser = argparse.ArgumentParser(description="Standalone grid-based EIG runner")
     parser.add_argument("cosmo_exp", type=str, help="Experiment type (e.g. num_visits, num_tracers)")
@@ -1050,6 +1353,13 @@ def main():
     )
     parser.add_argument("--use-experiment-prior", action="store_true", help="Use experiment's prior distributions for PDF")
     parser.add_argument("--device", type=str, default="cpu", help="Torch device for experiment calculations")
+    parser.add_argument(
+        "--backend",
+        type=str,
+        default="jax",
+        choices=["jax", "numpy"],
+        help="Grid backend: 'jax' (bed_jax) or 'numpy' (legacy bed).",
+    )
     parser.add_argument("--verbose", action="store_true", help="Verbose output")
     parser.add_argument("--param-pts", type=int, default=500, help="Points per parameter axis")
     parser.add_argument("--feature-pts", type=int, default=200, help="Points per feature axis")
@@ -1066,6 +1376,25 @@ def main():
                         help="Fraction of feature grid points allocated to each dense region (default 0.6)")
     parser.add_argument("--param-dense-fraction", type=float, default=0.6,
                         help="Fraction of parameter grid points allocated to each dense region (default 0.6)")
+    parser.add_argument(
+        "--design-chunk-size",
+        type=int,
+        default=1,
+        metavar="N",
+        help="Process this many designs per ExperimentDesigner chunk (default: 1). "
+        "Higher values raise peak memory; set to a large number or None-equivalent to process all at once.",
+    )
+    # Merge-into-run mode: when --run-id is given, grid results are written into the
+    # run's MLflow artifacts dir so they live alongside (but separate from) NF eval.
+    parser.add_argument("--run-id", type=str, default=None,
+                        help="MLflow run ID. If set, grid output is written into the run's artifacts dir.")
+    parser.add_argument("--eval-step", type=str, default=None,
+                        help="Step to tag grid results with (default: run_args['total_steps']).")
+    parser.add_argument("--nf-eig-data", type=str, default=None,
+                        help="Path to the sibling NF eig_data JSON. If complete at end, overlay plots are rendered.")
+    parser.add_argument("--grid-eig-data", type=str, default=None,
+                        help="Path for this grid job to write its eig_data JSON (overrides auto-named eig_data_grid_<timestamp>.json).")
+    parser.add_argument("--seed", type=int, default=1, help="Seed for posterior sample drawing (merge-into-run mode).")
     args, extra_args = parser.parse_known_args()
 
     exp_kwargs = parse_extra_args(extra_args)
@@ -1074,6 +1403,35 @@ def main():
 
     if "SCRATCH" not in os.environ:
         raise EnvironmentError("SCRATCH environment variable is required.")
+
+    # Parse range args once (used by both modes)
+    feature_ranges = {}
+    for fr in args.feature_range:
+        band, bounds = fr.split(":")
+        lo, hi = bounds.split(",")
+        feature_ranges[band.strip()] = (float(lo), float(hi))
+    feature_dense_ranges = {}
+    for dr in args.feature_dense_range:
+        band, bounds = dr.split(":")
+        lo, hi = bounds.split(",")
+        feature_dense_ranges[band.strip()] = (float(lo), float(hi))
+    param_dense_ranges = {}
+    for pr in args.param_dense_range:
+        name, bounds = pr.split(":")
+        lo, hi = bounds.split(",")
+        param_dense_ranges[name.strip()] = (float(lo), float(hi))
+
+    # Branch: merge-into-run mode writes grid results into an MLflow run's artifacts dir.
+    if args.run_id:
+        _run_merge_into_run(
+            args=args,
+            exp_kwargs=exp_kwargs,
+            feature_ranges=feature_ranges,
+            feature_dense_ranges=feature_dense_ranges,
+            param_dense_ranges=param_dense_ranges,
+            session_start_time=session_start_time,
+        )
+        return
 
     # If no prior_args_path given, try to find a default from train_args.yaml
     prior_args_path = args.prior_args_path
@@ -1106,27 +1464,6 @@ def main():
     out_dir = Path(os.environ["SCRATCH"]) / "bedcosmo" / args.cosmo_exp / "grid_calc" / date_str
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Parse --feature-range args into dict: {"u": (-10, 60), "g": (15, 55)}
-    feature_ranges = {}
-    for fr in args.feature_range:
-        band, bounds = fr.split(":")
-        lo, hi = bounds.split(",")
-        feature_ranges[band.strip()] = (float(lo), float(hi))
-
-    # Parse --feature-dense-range args into dict (same syntax as --feature-range)
-    feature_dense_ranges = {}
-    for dr in args.feature_dense_range:
-        band, bounds = dr.split(":")
-        lo, hi = bounds.split(",")
-        feature_dense_ranges[band.strip()] = (float(lo), float(hi))
-
-    # Parse --param-dense-range args into dict
-    param_dense_ranges = {}
-    for pr in args.param_dense_range:
-        name, bounds = pr.split(":")
-        lo, hi = bounds.split(",")
-        param_dense_ranges[name.strip()] = (float(lo), float(hi))
-
     # Save all args (grid_calc + experiment) to args.yaml
     all_args = {**vars(args), "feature_ranges": feature_ranges, "feature_dense_ranges": feature_dense_ranges,
                 "param_dense_ranges": param_dense_ranges, **exp_kwargs}
@@ -1141,6 +1478,9 @@ def main():
     # Use the class-based interface
     gc = GridCalculation(
         experiment=experiment,
+        device=args.device,
+        backend=args.backend,
+        design_chunk_size=args.design_chunk_size,
         param_pts=args.param_pts,
         feature_pts=args.feature_pts,
         adaptive_features=args.adaptive_features,
@@ -1150,14 +1490,14 @@ def main():
         param_dense_ranges=param_dense_ranges,
         feature_dense_fraction=args.feature_dense_fraction,
         param_dense_fraction=args.param_dense_fraction,
+        plt_save_path=str(out_dir) + "/plots",
     )
 
+    plotter = BasePlotter(cosmo_exp=args.cosmo_exp)
+
     # Always save feature grid diagnostic (before run, so it's available on failure)
-    fig_fg, _ = gc.plot_feature_grid(
-        save_path=str(out_dir / "feature_grid.png"),
-    )
-    plt.close(fig_fg)
-    print(f"  Feature grid plot saved to: {out_dir / 'feature_grid.png'}")
+    fig_fg, _ = gc.plot_feature_grid(save_dir=str(out_dir))
+    plotter.save_figure(fig_fg, filename="feature_grid", save_dir=gc.plt_save_path)
 
     # Compute prior if requested
     if prior_args_path or args.use_experiment_prior:
@@ -1201,13 +1541,9 @@ def main():
         json.dump(payload, f, indent=2)
     print(f"  Saved: {json_path}")
 
-    # Generate plots using refactored BasePlotter
+    # Generate plots
     if not args.no_plots:
-        from bedcosmo.plotting import BasePlotter
-
         print("Generating plots...")
-        plotter = BasePlotter(cosmo_exp=args.cosmo_exp)
-
         # Get the actual constrained designs used in the EIG calculation
         input_designs = experiment.designs.detach().cpu().numpy()
 
@@ -1222,7 +1558,8 @@ def main():
             design_labels=design_labels,
             nominal_design=nominal_design,
             title="Grid EIG vs Design",
-            save_path=str(out_dir / "eig_designs.png"),
+            filename="eig_designs",
+            save_dir=gc.plt_save_path,
         )
 
         # Posterior plot
@@ -1236,18 +1573,24 @@ def main():
             experiment=experiment,
             grid_samples=gc_samples,
             title=posterior_title,
-            save_path=str(out_dir / "posterior.png"),
             plot_size_ratio=0.8,
             guide_samples=50000,
             plot_prior=True,
+            filename="posterior",
+            save_dir=gc.plt_save_path,
         )
 
         # Marginal P(y|xi) plot for nominal design
         fig_marg, _ = gc.plot_marginal(design_type="nominal")
-        fig_marg.savefig(out_dir / "marginal.png", dpi=200, bbox_inches="tight")
-        plt.close(fig_marg)
+        plotter.save_figure(fig_marg, filename="marginal", save_dir=gc.plt_save_path)
 
     print(f"All outputs saved to: {out_dir}")
+
+    session_runtime = time.time() - session_start_time
+    hours = int(session_runtime // 3600)
+    minutes = int((session_runtime % 3600) // 60)
+    seconds = int(session_runtime % 60)
+    print(f"Grid calculation runtime: {hours}h {minutes}m {seconds}s")
 
 
 if __name__ == "__main__":

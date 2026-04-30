@@ -32,6 +32,7 @@ base:
   n_particles_per_device: 10
   temperature: 10000
   mag_err_cap: 10
+  central_z: 0.5
   condition_design: true
   log_nominal_area: false
   verbose: true

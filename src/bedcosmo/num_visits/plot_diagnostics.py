@@ -255,6 +255,8 @@ def plot_degeneracy(filters_list, temperatures, mag_err_cap, z_decomp):
     }
 
     fig, axes = plt.subplots(2, len(z_decomp), figsize=(22, 9), sharex=True)
+    if len(z_decomp) == 1:
+        axes = axes[:, np.newaxis]
 
     for col, z_true in enumerate(z_decomp):
         ax_resid = axes[0, col]
@@ -277,7 +279,8 @@ def plot_degeneracy(filters_list, temperatures, mag_err_cap, z_decomp):
 
         ax_resid.set_title(rf"$z_{{\rm true}}$ = {z_true}", fontsize=13, fontweight="bold")
         ax_resid.set_ylim(0, 200)
-        ax_loglik.set_ylim(-50, 5)
+        ax_loglik.set_yscale("symlog", linthresh=1.0)
+        ax_loglik.set_ylim(-1e4, 5)
         ax_resid.set_xlim(0, 3.0)
         ax_loglik.set_xlim(0, 3.0)
         ax_loglik.set_xlabel("Candidate redshift", fontsize=11)

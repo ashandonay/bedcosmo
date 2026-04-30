@@ -16,7 +16,7 @@ from pyro import distributions as dist
 from pyro.contrib.util import lexpand
 import torch
 
-from bedcosmo.util import profile_method
+from bedcosmo.util import Bijector, profile_method
 
 
 class BaseExperiment(ABC):
@@ -226,13 +226,64 @@ class BaseExperiment(ABC):
     # Parameter Transformation Methods
     # =========================================================================
 
+    def _init_param_bijector(
+        self,
+        bijector_state=None,
+        cdf_bins=5000,
+        cdf_samples=int(1e7),
+        always_build=False,
+    ):
+        """
+        Build self.param_bijector.
+
+        By default this is gated on self.transform_input -- the bijector is
+        only constructed when the experiment actually uses parameter-space
+        transformations. Set always_build=True for experiments (e.g.
+        num_tracers) that need the bijector for non-transform consumers
+        (DESI sampling) regardless of transform_input.
+
+        Resolution order for the loaded state:
+            1. The `bijector_state` argument (e.g. resume training).
+            2. self.prior_flow_metadata['bijector_state'] when a prior_flow
+               is being used as the prior -- the saved bijector matches the
+               flow that produced the samples, so reusing it avoids a
+               train/sample distribution mismatch.
+            3. Otherwise, build a fresh bijector by sampling.
+
+        When a state is loaded the bijector is constructed in skip_sampling
+        mode to avoid re-running the expensive empirical-CDF sampling.
+        """
+        if not always_build and not getattr(self, "transform_input", False):
+            return
+
+        source = "checkpoint"
+        if bijector_state is None:
+            metadata = getattr(self, "prior_flow_metadata", None)
+            if metadata is not None:
+                pf_state = metadata.get("bijector_state")
+                if pf_state is not None:
+                    bijector_state = pf_state
+                    source = "prior_flow"
+
+        skip = bijector_state is not None
+        self.param_bijector = Bijector(
+            self,
+            cdf_bins=cdf_bins,
+            cdf_samples=cdf_samples,
+            skip_sampling=skip,
+        )
+        if bijector_state is not None:
+            if getattr(self, "global_rank", 0) == 0:
+                print(f"Restoring bijector state from {source}.")
+            self.param_bijector.set_state(bijector_state, device=self.device)
+
     @profile_method
     def params_to_unconstrained(self, params, bijector_class=None):
         """
         Transform parameters from physical space to unconstrained R^D.
 
-        Default implementation uses bijector for all indexed parameters.
-        Subclasses should override if they need custom transformation logic.
+        Iterates self.cosmo_params and transforms each via the bijector keyed by
+        the parameter's name. Position in cosmo_params is used as the tensor index.
 
         Args:
             params: Parameter tensor with shape (..., D)
@@ -251,13 +302,9 @@ class BaseExperiment(ABC):
         if bijector_class is None:
             bijector_class = self.param_bijector
 
-        # Transform each parameter that has an index
-        for param_name in self.cosmo_params:
-            idx_attr = f"_idx_{param_name.replace('hrdrag', 'hr')}"
-            idx = getattr(self, idx_attr, [])
-            if idx:
-                x = params[..., idx]
-                y[..., idx] = bijector_class.prior_to_gaussian(x, param_name)
+        for i, param_name in enumerate(self.cosmo_params):
+            sl = slice(i, i + 1)
+            y[..., sl] = bijector_class.prior_to_gaussian(params[..., sl], param_name)
 
         return y
 
@@ -266,8 +313,8 @@ class BaseExperiment(ABC):
         """
         Transform parameters from unconstrained R^D to physical space.
 
-        Default implementation uses bijector for all indexed parameters.
-        Subclasses should override if they need custom transformation logic.
+        Iterates self.cosmo_params and transforms each via the bijector keyed by
+        the parameter's name. Position in cosmo_params is used as the tensor index.
 
         Args:
             y: Unconstrained parameter tensor with shape (..., D)
@@ -286,12 +333,9 @@ class BaseExperiment(ABC):
         if bijector_class is None:
             bijector_class = self.param_bijector
 
-        # Transform each parameter that has an index
-        for param_name in self.cosmo_params:
-            idx_attr = f"_idx_{param_name.replace('hrdrag', 'hr')}"
-            idx = getattr(self, idx_attr, [])
-            if idx:
-                x[..., idx] = bijector_class.gaussian_to_prior(y[..., idx], param_name)
+        for i, param_name in enumerate(self.cosmo_params):
+            sl = slice(i, i + 1)
+            x[..., sl] = bijector_class.gaussian_to_prior(y[..., sl], param_name)
 
         return x
 

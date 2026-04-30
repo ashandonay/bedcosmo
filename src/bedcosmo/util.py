@@ -117,21 +117,54 @@ class Bijector:
             sorted_samples, _ = torch.sort(samples.flatten())
             n_samples = len(sorted_samples)
 
-            # Create evenly spaced bins across the extended range
-            bins = torch.linspace(self.prior[key].low, self.prior[key].high, num_bins, device=samples.device)
-            
+            low, high = self._bin_bracket(self.prior[key], key)
+            bins = torch.linspace(low, high, num_bins, device=samples.device)
+
             # Compute CDF values for each bin
             cdf_values = torch.zeros_like(bins)
             for i, bin_val in enumerate(bins):
                 count = (sorted_samples <= bin_val).sum()
                 cdf_values[i] = count / n_samples
-            
+
             # Store additional metadata for better boundary handling
             cdfs[key] = {
                 'bins': bins,
                 'cdf_values': cdf_values
             }
         return cdfs
+
+    @staticmethod
+    def _bin_bracket(prior_dist, key, n_std=12.0):
+        """
+        Compute (low, high) bracket spanning essentially all probability mass
+        of `prior_dist`, used to lay down CDF bins for the bijector.
+
+        The transform always maps the prior to a standard Normal(0, 1), so
+        even already-Gaussian priors get standardized (centered and rescaled).
+
+        - Uniform: exact support [low, high].
+        - Gamma:   [0, mean + n_std * std]; lower bound is 0 since Gamma
+                   support starts at 0. With n_std=12 the residual right-tail
+                   mass is <1e-7 for any reasonable shape.
+        - Normal:  [mean - n_std * std, mean + n_std * std]; symmetric bracket
+                   around the mean.
+        """
+        if isinstance(prior_dist, dist.Uniform):
+            return prior_dist.low, prior_dist.high
+        if isinstance(prior_dist, dist.Gamma):
+            mean = prior_dist.mean
+            std = torch.sqrt(prior_dist.variance)
+            low = torch.zeros_like(mean)
+            high = mean + n_std * std
+            return low, high
+        if isinstance(prior_dist, dist.Normal):
+            mean = prior_dist.mean
+            std = torch.sqrt(prior_dist.variance)
+            return mean - n_std * std, mean + n_std * std
+        raise NotImplementedError(
+            f"Bijector bin bracket not defined for prior type {type(prior_dist).__name__} "
+            f"on parameter '{key}'."
+        )
 
 
     def get_state(self):
@@ -244,11 +277,11 @@ class Bijector:
         u_safe = torch.clamp(u, eps, 1.0 - eps)
         
         z = np.sqrt(2.0) * torch.erfinv(2.0 * u_safe - 1.0)
-        
+
         # Step 3: Scale to target Gaussian distribution
         y = target_mean + target_std * z
-        
-        return y.to(samples.dtype).unsqueeze(-1)
+
+        return y.to(samples.dtype).reshape(samples.shape)
 
     def gaussian_to_prior(self, gaussian_samples, param_key, source_mean=0.0, source_std=1.0):
         """
@@ -2147,3 +2180,137 @@ def convert_color(c):
         return c
     else:
         return str(c)
+
+
+def _merge_sibling_eig_data(own_eig_data, other_eig_data, step_key):
+    """Merge NF and grid eig_data dicts into a single combined dict for plotting.
+
+    The two sides write into disjoint keys within step_key: NF fills
+    step_key/variable/eigs_avg etc.; grid fills step_key/variable/grid/*.
+    Top-level and section collisions favor own_eig_data.
+    """
+    combined = {}
+    if isinstance(other_eig_data, dict):
+        combined.update({k: v for k, v in other_eig_data.items() if k != step_key})
+    if isinstance(own_eig_data, dict):
+        combined.update({k: v for k, v in own_eig_data.items() if k != step_key})
+
+    own_step = own_eig_data.get(step_key, {}) if isinstance(own_eig_data, dict) else {}
+    other_step = other_eig_data.get(step_key, {}) if isinstance(other_eig_data, dict) else {}
+
+    step_combined = {}
+    for src in (other_step, own_step):
+        if isinstance(src, dict):
+            for k, v in src.items():
+                if k not in ('variable', 'nominal'):
+                    step_combined[k] = v
+
+    for section in ('variable', 'nominal'):
+        section_combined = {}
+        for src in (other_step, own_step):
+            src_section = src.get(section, {}) if isinstance(src, dict) else {}
+            if isinstance(src_section, dict):
+                section_combined.update(src_section)
+        step_combined[section] = section_combined
+
+    combined[step_key] = step_combined
+    combined['status'] = 'complete'
+    return combined
+
+
+def render_overlay(
+    own_eig_data,
+    own_role,
+    other_eig_data_path,
+    plotter,
+    eval_step,
+    levels=(0.68,),
+    transform_output=True,
+    include_nominal=False,
+    sort=True,
+):
+    """Render NF+grid overlay plots if the sibling eig_data file is complete.
+
+    Called at the end of evaluate.py and grid_calc.py when the user linked the
+    two jobs via --other-eig-data. Reads sibling JSON, merges fields into an
+    in-memory combined dict, loads grid_samples .npy, and calls the plotter
+    methods with the combined data. No merged file is written to disk.
+
+    Args:
+        own_eig_data: In-memory eig_data dict produced by the current job.
+        own_role: 'nf' or 'grid'.
+        other_eig_data_path: Path to sibling JSON (may be None or missing).
+        plotter: RunPlotter instance.
+        eval_step: Step to render plots for.
+        levels: Contour levels.
+        transform_output: Whether to transform samples to physical space.
+        include_nominal: Passed to eig_designs.
+        sort: Passed to eig_designs.
+
+    Returns True if overlay plots were rendered, False otherwise.
+    """
+    if own_role not in ('nf', 'grid'):
+        raise ValueError(f"own_role must be 'nf' or 'grid', got {own_role!r}")
+
+    if not other_eig_data_path:
+        return False
+    if not os.path.exists(other_eig_data_path):
+        print(f"Sibling eig_data not found at {other_eig_data_path}; skipping overlay plots.")
+        return False
+
+    try:
+        with open(other_eig_data_path, 'r') as f:
+            other_eig_data = json.load(f)
+    except Exception as e:
+        print(f"Warning: could not load sibling eig_data {other_eig_data_path}: {e}")
+        return False
+
+    if other_eig_data.get('status') != 'complete':
+        print(f"Sibling eig_data at {other_eig_data_path} is not complete (status={other_eig_data.get('status')!r}); skipping overlay plots.")
+        return False
+
+    step_key = f"step_{eval_step}" if not str(eval_step).startswith('step_') else str(eval_step)
+    combined = _merge_sibling_eig_data(own_eig_data, other_eig_data, step_key)
+
+    grid_samples = None
+    for src in (own_eig_data, other_eig_data):
+        step_data = src.get(step_key, {}) if isinstance(src, dict) else {}
+        samples_path = step_data.get('grid_samples_path')
+        if samples_path and os.path.exists(samples_path):
+            try:
+                grid_samples = np.load(samples_path)
+                break
+            except Exception as e:
+                print(f"Warning: could not load grid samples from {samples_path}: {e}")
+
+    print(f"Rendering overlay plots (own_role={own_role}) using sibling {other_eig_data_path}...")
+    try:
+        plotter.generate_posterior(
+            eval_step=eval_step,
+            display=['nominal', 'optimal'],
+            guide_samples=50000,
+            levels=list(levels),
+            plot_prior=True,
+            transform_output=transform_output,
+            grid_samples=grid_samples,
+            eig_data=combined,
+            filename='posterior_samples_overlay',
+        )
+    except Exception as e:
+        print(f"Warning: overlay generate_posterior failed: {e}")
+        traceback.print_exc()
+
+    try:
+        plotter.eig_designs(
+            eval_step=eval_step,
+            sort=sort,
+            include_nominal=include_nominal,
+            eig_data=combined,
+            color='black',
+            filename='eig_designs_overlay',
+        )
+    except Exception as e:
+        print(f"Warning: overlay eig_designs failed: {e}")
+        traceback.print_exc()
+
+    return True
