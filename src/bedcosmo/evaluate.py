@@ -23,6 +23,7 @@ from bedcosmo.util import (
     auto_seed, init_experiment, load_model, get_runs_data,
     profile_method, parse_float_or_list,
     get_rng_state, parse_extra_args, render_overlay,
+    get_checkpoint,
 )
 import mlflow
 import inspect
@@ -106,11 +107,31 @@ class Evaluator:
             # Will default to the run's artifacts design_args.yaml
             self.design_args = None
 
+        # If the run was trained with transform_input=True, load the bijector
+        # state from the latest checkpoint so the evaluator's bijector matches
+        # the one the flow was trained against. Without transform_input there
+        # is no bijector to seed, so we skip the checkpoint peek entirely.
+        eval_checkpoint = None
+        if self.run_args.get("transform_input", False):
+            checkpoint_dir = f"{self.save_path}/checkpoints"
+            eval_checkpoint, _ = get_checkpoint(
+                'last', checkpoint_dir, self.device, self.global_rank,
+                self.total_steps,
+            )
+            if 'bijector_state' not in eval_checkpoint:
+                raise RuntimeError(
+                    f"Run {self.run_id} has transform_input=True but its "
+                    f"checkpoint does not contain a bijector_state. The flow "
+                    f"cannot be evaluated against a bijector it was not "
+                    f"trained against -- retrain on current HEAD."
+                )
+
         # Initialize experiment - it will handle input_design and generate designs accordingly
         # (single design, multiple designs, or grid)
         self.experiment = init_experiment(
             self.run_obj, self.run_args, device=self.device,
             design_args=self.design_args, global_rank=self.global_rank,
+            checkpoint=eval_checkpoint,
             **self.experiment_args
         )
         if self.eig_file_path is not None and 'input_designs' in self.eig_data:

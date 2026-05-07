@@ -253,29 +253,54 @@ class BaseExperiment(ABC):
         When a state is loaded the bijector is constructed in skip_sampling
         mode to avoid re-running the expensive empirical-CDF sampling.
         """
-        if not always_build and not getattr(self, "transform_input", False):
-            return
+        # 1. Build self.param_bijector if the current experiment uses transforms.
+        if always_build or getattr(self, "transform_input", False):
+            source = "checkpoint"
+            if bijector_state is None:
+                metadata = getattr(self, "prior_flow_metadata", None)
+                if metadata is not None:
+                    pf_state = metadata.get("bijector_state")
+                    if pf_state is not None:
+                        bijector_state = pf_state
+                        source = "prior_flow"
 
-        source = "checkpoint"
-        if bijector_state is None:
-            metadata = getattr(self, "prior_flow_metadata", None)
-            if metadata is not None:
-                pf_state = metadata.get("bijector_state")
-                if pf_state is not None:
-                    bijector_state = pf_state
-                    source = "prior_flow"
+            skip = bijector_state is not None
+            self.param_bijector = Bijector(
+                self,
+                cdf_bins=cdf_bins,
+                cdf_samples=cdf_samples,
+                skip_sampling=skip,
+            )
+            if bijector_state is not None:
+                if getattr(self, "global_rank", 0) == 0:
+                    print(f"Restoring bijector state from {source}.")
+                self.param_bijector.set_state(bijector_state, device=self.device)
 
-        skip = bijector_state is not None
-        self.param_bijector = Bijector(
-            self,
-            cdf_bins=cdf_bins,
-            cdf_samples=cdf_samples,
-            skip_sampling=skip,
-        )
-        if bijector_state is not None:
+        # 2. Build self.prior_flow_bijector if the prior_flow was trained with
+        # transform_input=True. The prior_flow's log_prob lives in *its* training
+        # space, which uses *its* bijector -- not necessarily the current
+        # experiment's. Keeping it as a separate object lets the EIG code apply
+        # symmetric change-of-variables (T_pf to theta to T_cur) without
+        # assuming the two bijectors agree.
+        metadata = getattr(self, "prior_flow_metadata", None)
+        if metadata is not None and metadata.get("transform_input", False):
+            pf_state = metadata.get("bijector_state")
+            if pf_state is None:
+                raise RuntimeError(
+                    "prior_flow was trained with transform_input=True but its "
+                    "checkpoint did not include a bijector_state. The prior_flow "
+                    "log_prob cannot be evaluated against an unknown bijector. "
+                    "Re-export the prior_flow checkpoint with bijector_state."
+                )
+            self.prior_flow_bijector = Bijector(
+                self,
+                cdf_bins=cdf_bins,
+                cdf_samples=cdf_samples,
+                skip_sampling=True,
+            )
+            self.prior_flow_bijector.set_state(pf_state, device=self.device)
             if getattr(self, "global_rank", 0) == 0:
-                print(f"Restoring bijector state from {source}.")
-            self.param_bijector.set_state(bijector_state, device=self.device)
+                print("Built prior_flow_bijector from prior_flow checkpoint state.")
 
     @profile_method
     def params_to_unconstrained(self, params, bijector_class=None):

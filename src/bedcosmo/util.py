@@ -361,6 +361,57 @@ class Bijector:
         """Interpolate CDF values between two bins"""
         distances = (samples - bin_low) / (bin_high - bin_low)
         return cdf_low + distances * (cdf_high - cdf_low)
+
+    def log_abs_det_jacobian(self, samples, param_key):
+        """
+        log |dT/dx| of the prior_to_gaussian transform T(x) = Phi^{-1}(F_hat(x))
+        evaluated at samples in the original parameter space.
+
+        Decomposing T = Phi^{-1} . F_hat:
+
+            dT/dx = (1 / phi(T(x))) * f_hat(x)
+
+        where phi is the standard-normal pdf and f_hat = dF_hat/dx is the
+        piecewise-constant density implied by linearly interpolating the
+        empirical CDF stored in self.cdfs[param_key]. So
+
+            log |dT/dx| = log f_hat(x) - log phi(T(x))
+
+        This is what change-of-variables consumers need to convert a
+        physical-space prior log-prob into the post-bijector space:
+
+            log p_T(T(x)) = log p_x(x) - log |dT/dx|
+
+        Args:
+            samples: tensor of samples in the original parameter space.
+            param_key: name of the parameter (key into self.cdfs).
+
+        Returns:
+            Tensor with the same shape as samples containing log |dT/dx|.
+        """
+        bins = self.cdfs[param_key]['bins']
+        cdf_values = self.cdfs[param_key]['cdf_values']
+
+        samples_flat = samples.flatten()
+        samples_clamped = torch.clamp(samples_flat, bins[0], bins[-1])
+
+        # For each sample identify the bracketing bin [bins[i_lo], bins[i_hi]].
+        i_hi = torch.searchsorted(bins, samples_clamped, right=False)
+        i_hi = torch.clamp(i_hi, 1, len(bins) - 1)
+        i_lo = i_hi - 1
+
+        db = bins[i_hi] - bins[i_lo]
+        dc = cdf_values[i_hi] - cdf_values[i_lo]
+        eps = 1e-30
+        # Piecewise-constant empirical density on each bin.
+        log_f_emp = torch.log(torch.clamp(dc, min=eps)) - torch.log(torch.clamp(db, min=eps))
+
+        # log phi(T(x)) at the same samples.
+        z = self.prior_to_gaussian(samples, param_key).flatten()
+        log_phi = -0.5 * z.pow(2) - 0.5 * np.log(2.0 * np.pi)
+
+        log_abs_det = (log_f_emp - log_phi).reshape(samples.shape).to(samples.dtype)
+        return log_abs_det
     
     @staticmethod
     def _logit(x, eps: float = 1e-6):
