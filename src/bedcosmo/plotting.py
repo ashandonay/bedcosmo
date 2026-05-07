@@ -1402,6 +1402,7 @@ class RunPlotter(BasePlotter):
 
         # Pass eval_step and device to data extraction
         device = kwargs.get("device", "cuda:0" if torch.cuda.is_available() else "cpu")
+        kwargs['device'] = device
         eval_step = kwargs.get('eval_step', None)
         eig_data_override = kwargs.pop('eig_data', None)
         explicit_grid_samples = kwargs.pop('grid_samples', None) if eig_data_override is not None else None
