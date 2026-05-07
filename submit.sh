@@ -58,6 +58,8 @@ if [ $# -eq 0 ]; then
     echo "  --eval-time <HH:MM> - SLURM time limit for auto-eval job (default: 00:30)"
     echo "  --grid              - (eval only) Dispatch a sibling CPU grid job in parallel with NF eval"
     echo "                        Unprefixed --<arg> are forwarded to BOTH eval and grid jobs."
+    echo "  --grid-eig-data <p> - (eval only, without --grid) Overlay an existing grid eig_data JSON"
+    echo "                        on the NF eval. Pass-through to evaluate.py."
     echo "  --grid-<arg> <val>  - Override args for the grid job only (wins over unprefixed --<arg>)"
     echo "  --grid-time <HH:MM> - SLURM time limit for sibling grid job (default: same as --time)"
     echo "  --log-usage, --profile, --restart-optimizer"
@@ -232,6 +234,12 @@ while [[ $# -gt 0 ]]; do
             ;;
         --grid-time)
             GRID_TIME="$2"
+            shift 2
+            ;;
+        --grid-eig-data)
+            # Pass-through to the eval job (overlay an existing grid eig_data file).
+            CLI_ARGS["grid-eig-data"]="$2"
+            CLI_ARGS_LIST+=("--grid-eig-data" "$2")
             shift 2
             ;;
         --grid-*)
@@ -528,6 +536,11 @@ GRID_EXP_ID=""
 GRID_NF_PATH=""
 GRID_GRID_PATH=""
 if [ "$JOB_TYPE" = "eval" ] && [ "$GRID" = true ]; then
+    if [[ -v CLI_ARGS["grid-eig-data"] ]] || [[ -v CLI_ARGS["nf-eig-data"] ]]; then
+        echo "Error: --grid implies auto-generated sibling output paths; cannot combine with --grid-eig-data/--nf-eig-data"
+        echo "       Drop --grid to overlay an existing grid eig_data file with a fresh NF eval."
+        exit 1
+    fi
     echo "Looking up MLflow experiment_id for run ${RUN_ID}..."
     GRID_EXP_ID=$(timeout 30 python3 -c "
 import mlflow, os, sys, warnings
