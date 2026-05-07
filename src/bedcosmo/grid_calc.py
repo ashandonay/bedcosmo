@@ -12,6 +12,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
+import jax.numpy as jnp
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
@@ -21,10 +22,8 @@ from bedcosmo.util import (
     init_experiment, get_experiment_config_path, parse_extra_args,
     get_runs_data, render_overlay,
 )
-from bed.design import ExperimentDesigner as NumpyExperimentDesigner
-from bed.grid import Grid as NumpyGrid
-from bed_jax.design import ExperimentDesigner as JaxExperimentDesigner
-from bed_jax.grid import Grid as JaxGrid
+from bed.design import ExperimentDesigner
+from bed.grid import Grid
 from pyro import distributions as dist
 
 
@@ -45,7 +44,6 @@ class GridCalculation:
         param_pts: int = 231,
         feature_pts: int = 101,
         device: str = "cpu",
-        backend: str = "jax",
         adaptive_features: bool = False,
         adaptive_floor: float = 0.05,
         feature_ranges: Optional[Dict[str, Tuple[float, float]]] = None,
@@ -64,7 +62,7 @@ class GridCalculation:
             param_pts: Number of points per parameter axis.
             feature_pts: Number of points per feature axis.
             device: Device hint used for both experiment-side torch tensors and
-                bed_jax backend selection ("cpu", "gpu", or torch-style "cuda:0").
+                bed backend selection ("cpu", "gpu", or torch-style "cuda:0").
             adaptive_features: If True, use a patched-grid strategy that places
                 a dense grid over the peak region (detectable features) and a
                 sparse grid spanning the full range, then merges them.
@@ -97,9 +95,6 @@ class GridCalculation:
         self.param_pts = param_pts
         self.feature_pts = feature_pts
         self.device = device
-        self.backend = str(backend).strip().lower()
-        if self.backend not in {"jax", "numpy"}:
-            raise ValueError(f"Unsupported backend '{backend}'. Use 'jax' or 'numpy'.")
         self.adaptive_features = adaptive_features
         self.adaptive_floor = adaptive_floor
         self.feature_ranges = feature_ranges or {}
@@ -108,13 +103,7 @@ class GridCalculation:
         self.feature_dense_fraction = feature_dense_fraction
         self.param_dense_fraction = param_dense_fraction
         self.design_chunk_size = design_chunk_size
-        self.bed_jax_device = self._normalize_bed_jax_device(device)
-        if self.backend == "jax":
-            self._grid_cls = JaxGrid
-            self._designer_cls = JaxExperimentDesigner
-        else:
-            self._grid_cls = NumpyGrid
-            self._designer_cls = NumpyExperimentDesigner
+        self.bed_device = self._normalize_bed_device(device)
 
         # Create grids (design_grid before feature_grid since feature bounds depend on designs)
         self.parameter_grid = self._create_parameter_grid()
@@ -134,16 +123,20 @@ class GridCalculation:
 
 
     def _make_grid(self, **kwargs):
-        if self.backend == "jax":
-            return self._grid_cls(device=self.bed_jax_device, **kwargs)
-        return self._grid_cls(**kwargs)
+        # Convert axis arrays to jnp at the bed boundary; pass through
+        # non-array kwargs (e.g. constraint, full_shape) untouched.
+        converted = {
+            k: (jnp.asarray(v) if isinstance(v, np.ndarray) else v)
+            for k, v in kwargs.items()
+        }
+        return Grid(device=self.bed_device, **converted)
 
     @staticmethod
-    def _normalize_bed_jax_device(device: Any) -> Any:
+    def _normalize_bed_device(device: Any) -> Any:
         """
-        Normalize device names for bed_jax.
+        Normalize device names for bed.
 
-        bed_jax accepts ``"cpu"``/``"gpu"`` (or a concrete jax.Device), while
+        bed accepts ``"cpu"``/``"gpu"`` (or a concrete jax.Device), while
         bedcosmo often uses torch-style strings (e.g. ``"cuda:0"``).
         """
         if hasattr(device, "platform"):
@@ -180,10 +173,25 @@ class GridCalculation:
         return samples[indices]
 
     @staticmethod
-    def _dist_bounds(distribution, q_lo=0.01, q_hi=0.99) -> Tuple[float, float]:
+    def _dist_bounds(distribution, q_lo=None, q_hi=None) -> Tuple[float, float]:
         # Uniform-like
         if hasattr(distribution, "low") and hasattr(distribution, "high"):
             return float(distribution.low.detach().cpu()), float(distribution.high.detach().cpu())
+
+        # Distribution-specific default quantiles.
+        # Gamma: support is [0, inf), lower tail decays slowly toward 0 — push q_lo
+        # very small so the grid reaches near 0; upper tail is thin so q_hi=0.999 suffices.
+        # Symmetric distributions (Normal, etc.): use symmetric tails of the same order.
+        if q_lo is None or q_hi is None:
+            if isinstance(distribution, torch.distributions.Gamma):
+                default_lo, default_hi = 0.0005, 0.993
+            else:
+                default_lo, default_hi = 0.01, 0.99
+            if q_lo is None:
+                q_lo = default_lo
+            if q_hi is None:
+                q_hi = default_hi
+
         # Try analytic quantiles for other distributions.
         q = torch.tensor([q_lo, q_hi], dtype=torch.float64)
         try:
@@ -255,7 +263,7 @@ class GridCalculation:
                 torch.tensor(rate, dtype=torch.float64),
             )
         else:
-            raise ValueError(f"Unsupported distribution type: {dist_type}")
+            raise ValueError(f"Unsupported distribution ty pe: {dist_type}")
 
     def _create_parameter_grid(self):
         """Create parameter grid from experiment prior."""
@@ -503,7 +511,7 @@ class GridCalculation:
         )
 
     def _create_design_grid(self):
-        """Get design grid from experiment, converting from bed.Grid to bed_jax.Grid."""
+        """Get design grid from experiment as a bed.Grid."""
         if not hasattr(self.experiment, "designs_grid") or self.experiment.designs_grid is None:
             raise ValueError(
                 "Experiment does not expose designs_grid. "
@@ -771,21 +779,19 @@ class GridCalculation:
             raise ValueError(f"Experiment missing likelihood function '{lfunc_name}'.")
         lfunc = getattr(self.experiment, lfunc_name)
 
-        designer_kwargs: Dict[str, Any] = {"design_chunk_size": self.design_chunk_size}
-        if self.backend == "jax":
-            designer_kwargs["device"] = self.bed_jax_device
-        self.designer = self._designer_cls(
+        self.designer = ExperimentDesigner(
             self.parameter_grid,
             self.feature_grid,
             self.design_grid,
             lfunc,
-            **designer_kwargs,
+            design_chunk_size=self.design_chunk_size,
+            device=self.bed_device,
         )
 
         # Force debug=True so calculateEIG uses the for-loop path instead of
         # the JIT-compiled chunked path.  The experiment's unnorm_lfunc uses
         # torch/numpy and cannot be traced by JAX JIT.
-        self.best_design = self.designer.calculateEIG(prior, debug=True)
+        self.best_design = self.designer.calculateEIG(jnp.asarray(prior), debug=True)
         self.eig = np.asarray(self.designer.EIG, dtype=np.float64)
 
         self.result = {
@@ -1238,7 +1244,6 @@ def _run_merge_into_run(
     gc_obj = GridCalculation(
         experiment=experiment,
         device=args.device,
-        backend=args.backend,
         design_chunk_size=args.design_chunk_size,
         param_pts=args.param_pts,
         feature_pts=args.feature_pts,
@@ -1249,7 +1254,7 @@ def _run_merge_into_run(
         param_dense_ranges=param_dense_ranges,
         feature_dense_fraction=args.feature_dense_fraction,
         param_dense_fraction=args.param_dense_fraction,
-        out_dir=save_path,
+        plt_save_path=save_path + "/plots",
     )
 
     prior_pmf = gc_obj.compute_prior_pdf(use_experiment_prior=True)
@@ -1353,13 +1358,6 @@ def main():
     )
     parser.add_argument("--use-experiment-prior", action="store_true", help="Use experiment's prior distributions for PDF")
     parser.add_argument("--device", type=str, default="cpu", help="Torch device for experiment calculations")
-    parser.add_argument(
-        "--backend",
-        type=str,
-        default="jax",
-        choices=["jax", "numpy"],
-        help="Grid backend: 'jax' (bed_jax) or 'numpy' (legacy bed).",
-    )
     parser.add_argument("--verbose", action="store_true", help="Verbose output")
     parser.add_argument("--param-pts", type=int, default=500, help="Points per parameter axis")
     parser.add_argument("--feature-pts", type=int, default=200, help="Points per feature axis")
@@ -1460,9 +1458,20 @@ def main():
     )
 
     # Build output directory: $SCRATCH/bedcosmo/{exp_name}/grid_calc/{date}
+    # If a sibling job already grabbed this timestamp, append _1, _2, ... until we
+    # win an atomic mkdir. Race-safe: parallel jobs each get a unique directory.
     date_str = datetime.now().strftime("%Y%m%d_%H%M%S")
-    out_dir = Path(os.environ["SCRATCH"]) / "bedcosmo" / args.cosmo_exp / "grid_calc" / date_str
-    out_dir.mkdir(parents=True, exist_ok=True)
+    base_dir = Path(os.environ["SCRATCH"]) / "bedcosmo" / args.cosmo_exp / "grid_calc"
+    base_dir.mkdir(parents=True, exist_ok=True)
+    out_dir = base_dir / date_str
+    suffix = 1
+    while True:
+        try:
+            out_dir.mkdir(exist_ok=False)
+            break
+        except FileExistsError:
+            out_dir = base_dir / f"{date_str}_{suffix}"
+            suffix += 1
 
     # Save all args (grid_calc + experiment) to args.yaml
     all_args = {**vars(args), "feature_ranges": feature_ranges, "feature_dense_ranges": feature_dense_ranges,
@@ -1479,7 +1488,6 @@ def main():
     gc = GridCalculation(
         experiment=experiment,
         device=args.device,
-        backend=args.backend,
         design_chunk_size=args.design_chunk_size,
         param_pts=args.param_pts,
         feature_pts=args.feature_pts,
