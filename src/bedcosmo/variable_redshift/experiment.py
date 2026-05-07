@@ -4,6 +4,7 @@ import yaml
 import json
 import mlflow
 import pandas as pd
+import jax.numpy as jnp
 import numpy as np
 import pyro
 from pyro import distributions as dist
@@ -719,7 +720,7 @@ class VariableRedshift(BaseExperiment, CosmologyMixin):
         # Grid values need .unsqueeze(-1) to have shape (..., 1) for plate broadcasting
         parameters = {}
         for key in params.names:
-            param_array = torch.tensor(getattr(params, key), device=self.device, dtype=torch.float64)
+            param_array = torch.tensor(np.asarray(getattr(params, key)), device=self.device, dtype=torch.float64)
             # Add trailing dimension for plate system
             parameters[key] = param_array.unsqueeze(-1)
         
@@ -731,24 +732,24 @@ class VariableRedshift(BaseExperiment, CosmologyMixin):
             raise ValueError(
                 f"Design axis '{design_axis}' not found in grid names {list(designs.names)}."
             )
-        z_array = torch.tensor(getattr(designs, design_axis), device=self.device, dtype=torch.float64)
+        z_array = torch.tensor(np.asarray(getattr(designs, design_axis)), device=self.device, dtype=torch.float64)
         # z also needs proper shape for broadcasting
         z = z_array.unsqueeze(-1)
 
         # Compute D_H mean and likelihood
         D_H_mean = self.D_H_func(z, **parameters)
-        
-        # Extract feature values (convert to numpy for comparison)
-        D_H_obs = getattr(features, features.names[0])
-        D_H_diff = D_H_obs - D_H_mean.cpu().numpy()
-        likelihood = np.exp(-0.5 * (D_H_diff / self.sigma_D_H) ** 2)
-        
+
+        # Extract feature values (convert to jnp for comparison)
+        D_H_obs = jnp.asarray(getattr(features, features.names[0]))
+        D_H_diff = D_H_obs - jnp.asarray(D_H_mean.cpu().numpy())
+        likelihood = jnp.exp(-0.5 * (D_H_diff / self.sigma_D_H) ** 2)
+
         # If including D_M, add its contribution
         if self.include_D_M:
             D_M_mean = self.D_M_func(z, **parameters)
-            D_M_obs = getattr(features, features.names[1])
-            D_M_diff = D_M_obs - D_M_mean.cpu().numpy()
-            D_M_likelihood = np.exp(-0.5 * (D_M_diff / self.sigma_D_M) ** 2)
+            D_M_obs = jnp.asarray(getattr(features, features.names[1]))
+            D_M_diff = D_M_obs - jnp.asarray(D_M_mean.cpu().numpy())
+            D_M_likelihood = jnp.exp(-0.5 * (D_M_diff / self.sigma_D_M) ** 2)
             likelihood = likelihood * D_M_likelihood
         if (
             getattr(params, "_stack_offset", 0) == 0
@@ -756,7 +757,7 @@ class VariableRedshift(BaseExperiment, CosmologyMixin):
             and getattr(designs, "_stack_offset", 0) == 0
         ):
             param_shape = tuple(params.shape)
-            likelihood = np.asarray(likelihood, dtype=np.float64)
+            likelihood = jnp.asarray(likelihood, dtype=jnp.float64)
             if likelihood.shape != param_shape and likelihood.size == int(np.prod(param_shape)):
                 likelihood = likelihood.reshape(param_shape)
 

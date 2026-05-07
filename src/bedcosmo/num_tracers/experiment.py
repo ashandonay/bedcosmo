@@ -4,6 +4,7 @@ import yaml
 import json
 import mlflow
 import pandas as pd
+import jax.numpy as jnp
 import numpy as np
 import pyro
 from pyro import distributions as dist
@@ -1225,20 +1226,24 @@ class NumTracers(BaseExperiment, CosmologyMixin):
     def unnorm_lfunc(self, params, features, designs):
         parameters = { }
         for key in params.names:
-            parameters[key] = torch.tensor(getattr(params, key), device=self.device, dtype=torch.float64)
-        likelihood = 1
+            parameters[key] = torch.tensor(np.asarray(getattr(params, key)), device=self.device, dtype=torch.float64)
+        likelihood = jnp.asarray(1.0, dtype=jnp.float64)
         passed_ratio = self.calc_passed(designs)
         for i in range(len(self.tracer_bins)):
             D_H_mean = self.D_H_func(**parameters)
-            D_H_diff = getattr(features, features.names[i]) - D_H_mean.cpu().numpy()
-            D_H_sigma = self.sigmas[self.DH_idx].cpu().numpy()[i] * np.sqrt(self.nominal_passed_ratio[i].cpu().numpy()/passed_ratio[i])
-            likelihood = np.exp(-0.5 * (D_H_diff / D_H_sigma) ** 2) * likelihood
-            
+            D_H_diff = jnp.asarray(getattr(features, features.names[i])) - jnp.asarray(D_H_mean.cpu().numpy())
+            D_H_sigma = jnp.asarray(self.sigmas[self.DH_idx].cpu().numpy()[i]) * jnp.sqrt(
+                jnp.asarray(self.nominal_passed_ratio[i].cpu().numpy()) / jnp.asarray(passed_ratio[i])
+            )
+            likelihood = jnp.exp(-0.5 * (D_H_diff / D_H_sigma) ** 2) * likelihood
+
             if self.include_D_M:
                 D_M_mean = self.D_M_func(**parameters)
-                D_M_diff = getattr(features, features.names[i+len(self.tracer_bins)]) - D_M_mean.cpu().numpy()
-                D_M_sigma = self.sigmas[self.DM_idx].cpu().numpy()[i] * np.sqrt(self.nominal_passed_ratio[i].cpu().numpy()/passed_ratio[i])
-                likelihood = np.exp(-0.5 * (D_M_diff / D_M_sigma) ** 2) * likelihood
+                D_M_diff = jnp.asarray(getattr(features, features.names[i+len(self.tracer_bins)])) - jnp.asarray(D_M_mean.cpu().numpy())
+                D_M_sigma = jnp.asarray(self.sigmas[self.DM_idx].cpu().numpy()[i]) * jnp.sqrt(
+                    jnp.asarray(self.nominal_passed_ratio[i].cpu().numpy()) / jnp.asarray(passed_ratio[i])
+                )
+                likelihood = jnp.exp(-0.5 * (D_M_diff / D_M_sigma) ** 2) * likelihood
 
         if (
             getattr(params, "_stack_offset", 0) == 0
@@ -1246,7 +1251,7 @@ class NumTracers(BaseExperiment, CosmologyMixin):
             and getattr(designs, "_stack_offset", 0) == 0
         ):
             param_shape = tuple(params.shape)
-            likelihood = np.asarray(likelihood, dtype=np.float64)
+            likelihood = jnp.asarray(likelihood, dtype=jnp.float64)
             if likelihood.shape != param_shape and likelihood.size == int(np.prod(param_shape)):
                 likelihood = likelihood.reshape(param_shape)
 

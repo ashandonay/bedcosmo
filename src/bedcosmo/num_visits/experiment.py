@@ -6,6 +6,7 @@ import os
 from astropy import units as u
 from astropy.constants import sigma_sb, h, c, k_B
 import galsim  # type: ignore
+import jax.numpy as jnp
 import numpy as np
 import pyro
 from pyro import distributions as dist
@@ -869,7 +870,7 @@ class NumVisits(BaseExperiment, CosmologyMixin):
                 raise ValueError(
                     f"Axis '{name}' not found in grid names {list(grid.names)}."
                 )
-            values = np.asarray(getattr(grid, name), dtype=np.float64)
+            values = jnp.asarray(getattr(grid, name), dtype=jnp.float64)
             grid_ndim = len(grid.shape)
             if values.ndim > grid_ndim:
                 values = values.reshape(values.shape[:grid_ndim])
@@ -878,21 +879,22 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         # Parameter grid (z): shape P
         z_values = _grid_array(params, "z")
         z_shape = z_values.shape
-        z_tensor = torch.as_tensor(z_values, device=self.device, dtype=torch.float64)
-        mags_model = self._calculate_magnitudes(z_tensor).detach().cpu().numpy()
+        # Bridge to torch for the magnitude model, then back to jnp.
+        z_tensor = torch.as_tensor(np.asarray(z_values), device=self.device, dtype=torch.float64)
+        mags_model = jnp.asarray(self._calculate_magnitudes(z_tensor).detach().cpu().numpy())
         # mags_model shape: P + (num_filters,)
 
         # Feature grid (magnitudes): broadcast per-filter axes to a common feature shape X
         feature_axes = [_grid_array(features, f"y_{band}") for band in self.design_labels]
-        feature_axes = np.broadcast_arrays(*feature_axes)
-        feature_obs = np.stack(feature_axes, axis=-1)
+        feature_axes = jnp.broadcast_arrays(*feature_axes)
+        feature_obs = jnp.stack(feature_axes, axis=-1)
         feature_shape = feature_obs.shape[:-1]
         # features_obs shape: X + (num_filters,)
 
         # Design grid (visits): broadcast per-filter axes to common design shape D
         design_axes = [_grid_array(designs, str(band)) for band in self.design_labels]
-        design_axes = np.broadcast_arrays(*design_axes)
-        nvisits = np.stack(design_axes, axis=-1)
+        design_axes = jnp.broadcast_arrays(*design_axes)
+        nvisits = jnp.stack(design_axes, axis=-1)
         design_shape = nvisits.shape[:-1]
         # nvisits shape: D + (num_filters,)
 
@@ -900,10 +902,10 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         # Arrange as D + P + (num_filters,) so final output ordering is X + D + P.
         mags_for_sigma = mags_model.reshape((1,) * len(design_shape) + z_shape + (self.num_filters,))
         nvisits_for_sigma = nvisits.reshape(design_shape + (1,) * len(z_shape) + (self.num_filters,))
-        sigmas = self._magnitude_errors(
-            torch.as_tensor(mags_for_sigma, device=self.device, dtype=torch.float64),
-            torch.as_tensor(nvisits_for_sigma, device=self.device, dtype=torch.float64),
-        ).detach().cpu().numpy()
+        sigmas = jnp.asarray(self._magnitude_errors(
+            torch.as_tensor(np.asarray(mags_for_sigma), device=self.device, dtype=torch.float64),
+            torch.as_tensor(np.asarray(nvisits_for_sigma), device=self.device, dtype=torch.float64),
+        ).detach().cpu().numpy())
         # sigmas shape: D + P + (num_filters,)
 
         # Build full broadcasted shapes for likelihood: X + D + P + (num_filters,)
@@ -927,13 +929,13 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         )
 
         diff = (feature_obs_full - mags_full) / sigma_full
-        log_likelihood = -0.5 * np.sum(diff**2, axis=-1) - np.sum(np.log(sigma_full), axis=-1)
+        log_likelihood = -0.5 * jnp.sum(diff**2, axis=-1) - jnp.sum(jnp.log(sigma_full), axis=-1)
 
         # Stabilize exponentiation by subtracting the global max.
         # This preserves relative P(y|z,d) across all parameters/features.
-        log_likelihood = log_likelihood - np.max(log_likelihood)
+        log_likelihood = log_likelihood - jnp.max(log_likelihood)
 
-        likelihood = np.exp(log_likelihood)
+        likelihood = jnp.exp(log_likelihood)
         # likelihood shape: X + D + P
         if (
             getattr(params, "_stack_offset", 0) == 0
