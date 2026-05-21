@@ -123,7 +123,8 @@ class NumTracers(BaseExperiment, CosmologyMixin):
         
 
         self.prior, self.param_constraints, self.latex_labels, self.prior_flow, self.prior_flow_metadata = self.init_prior(**self.prior_args)
-        
+        self.cosmo_params = list(self.prior.keys())
+
         # Extract prior_flow settings for use in _sample_prior_flow
         if self.prior_flow_metadata is not None:
             self.prior_flow_transform_input = self.prior_flow_metadata.get('transform_input', False)
@@ -141,8 +142,7 @@ class NumTracers(BaseExperiment, CosmologyMixin):
         else:
             # If DESI prior not found, use the same as the main prior
             self.desi_prior = self.prior
-        self.cosmo_params = list(self.prior.keys())
-        
+
         self.transform_input = transform_input
 
         # param_bijector is built unconditionally (DESI sampling consumes it

@@ -7,6 +7,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import time
 from datetime import datetime
 from pathlib import Path
@@ -20,7 +21,7 @@ import yaml
 from bedcosmo.plotting import BasePlotter, RunPlotter
 from bedcosmo.util import (
     init_experiment, get_experiment_config_path, parse_extra_args,
-    get_runs_data, render_overlay,
+    get_runs_data, render_overlay, NF_INIT_CONFIG_KEY,
 )
 from bed.design import ExperimentDesigner
 from bed.grid import Grid
@@ -440,7 +441,16 @@ class GridCalculation:
                 exp_device = self._experiment_torch_device()
                 z_tensor = torch.as_tensor(z, device=exp_device, dtype=torch.float64)
                 with torch.no_grad():
-                    features = self.experiment._calculate_magnitudes(z_tensor).detach().cpu().numpy()
+                    if hasattr(self.parameter_grid, "T"):
+                        T = np.asarray(getattr(self.parameter_grid, "T"), dtype=np.float64)
+                        z_b, T_b = np.broadcast_arrays(z, T)
+                        T_tensor = torch.as_tensor(T_b, device=exp_device, dtype=torch.float64)
+                        z_tensor = torch.as_tensor(z_b, device=exp_device, dtype=torch.float64)
+                        features = self.experiment._calculate_magnitudes(
+                            z_tensor, T_tensor=T_tensor
+                        ).detach().cpu().numpy()
+                    else:
+                        features = self.experiment._calculate_magnitudes(z_tensor).detach().cpu().numpy()
             else:
                 raise NotImplementedError(f"Feature grid inference not implemented for {self.experiment.name}.")
 
@@ -601,54 +611,70 @@ class GridCalculation:
         # Compute the PDF (true density) and PMF (per-cell mass) over the parameter grid
         self._prior_pdf, self._prior_pmf = self._evaluate_prior_on_grid(normalize=normalize)
 
-        # Plot and save the prior PDF to a suitable output file in out_dir (run file or grid output location)
+        # Plot and save the prior with GetDist so non-uniform axes (e.g. dense z ranges)
+        # are visualized correctly.
         try:
-            import matplotlib.pyplot as plt
+            import contextlib
+            import io
             import os
+            import getdist
+            from getdist import plots as gd_plots
+            from bedcosmo.util import GETDIST_SETTINGS
 
             param_names = list(self.parameter_grid.names)
-            pdf = self._prior_pdf
 
-            if len(param_names) == 1:
-                fig, ax = plt.subplots()
-                x = np.asarray(getattr(self.parameter_grid, param_names[0]), dtype=np.float64)
-                ax.plot(x, pdf.ravel())
-                ax.set_xlabel(param_names[0])
-                ax.set_ylabel("Prior PDF")
-                ax.set_title("Prior PDF")
-            elif len(param_names) == 2:
-                fig, ax = plt.subplots()
-                x = np.asarray(getattr(self.parameter_grid, param_names[0]), dtype=np.float64)
-                y = np.asarray(getattr(self.parameter_grid, param_names[1]), dtype=np.float64)
-                im = ax.imshow(
-                    pdf.T,
-                    extent=(x.min(), x.max(), y.min(), y.max()),
-                    origin="lower",
-                    aspect="auto",
-                    interpolation='nearest'
+            # Build flattened grid points and sample from the PMF for plotting.
+            # Resampling keeps plotting memory bounded for large grids.
+            axes = [np.asarray(self.parameter_grid.axes_in[name], dtype=np.float64).ravel() for name in param_names]
+            mesh = np.meshgrid(*axes, indexing="ij")
+            points = np.column_stack([m.ravel() for m in mesh])
+
+            weights = np.asarray(self._prior_pmf, dtype=np.float64).ravel()
+            total = float(np.sum(weights))
+            if total <= 0.0 or not np.isfinite(total):
+                raise ValueError("Prior PMF has non-positive or invalid total mass.")
+            weights = weights / total
+
+            # Keep this reasonably sized for stable/fast GetDist plotting.
+            n_draw = int(min(200_000, max(50_000, points.shape[0])))
+            rng = np.random.default_rng(1)
+            draw_idx = rng.choice(points.shape[0], size=n_draw, replace=True, p=weights)
+            prior_samples = points[draw_idx]
+
+            # Prevent GetDist from dropping constant dimensions.
+            for i in range(prior_samples.shape[1]):
+                col = prior_samples[:, i]
+                if np.allclose(col, col[0]):
+                    noise_scale = abs(col[0]) * 1e-10 if col[0] != 0 else 1e-10
+                    prior_samples[:, i] = col + rng.normal(scale=noise_scale, size=col.shape)
+
+            labels = []
+            exp_param_names = list(getattr(self.experiment, "cosmo_params", []))
+            exp_latex_labels = list(getattr(self.experiment, "latex_labels", []))
+            for name in param_names:
+                if name in exp_param_names:
+                    idx = exp_param_names.index(name)
+                    if idx < len(exp_latex_labels):
+                        labels.append(exp_latex_labels[idx])
+                    else:
+                        labels.append(name)
+                else:
+                    labels.append(name)
+
+            with contextlib.redirect_stdout(io.StringIO()):
+                gd_samples = getdist.MCSamples(
+                    samples=prior_samples,
+                    names=param_names,
+                    labels=labels,
+                    settings=GETDIST_SETTINGS,
                 )
-                fig.colorbar(im, ax=ax, label="Prior PDF")
-                ax.set_xlabel(param_names[0])
-                ax.set_ylabel(param_names[1])
-                ax.set_title("Prior PDF")
-            else:
-                fig, axs = plt.subplots(len(param_names), 1, figsize=(5, 3 * len(param_names)))
-                for i, name in enumerate(param_names):
-                    ax = axs[i] if len(param_names) > 1 else axs
-                    marginal_pdf = np.sum(pdf, tuple(j for j in range(len(param_names)) if j != i))
-                    x = np.asarray(getattr(self.parameter_grid, name), dtype=np.float64)
-                    ax.plot(x, marginal_pdf)
-                    ax.set_xlabel(name)
-                    ax.set_ylabel("Marginal Prior PDF")
-                fig.suptitle("Prior PDF Marginals")
 
-            # Plot save path is now always provided (self.plt_save_path)
+            g = gd_plots.get_subplot_plotter()
+            g.triangle_plot([gd_samples], filled=True, legend_labels=["Prior"], show=False)
+
             prior_plot_path = os.path.join(self.plt_save_path, "grid_prior_pdf.png")
-     
-
-            fig.tight_layout()
-            fig.savefig(prior_plot_path, dpi=200)
-            plt.close(fig)
+            plt.gcf().savefig(prior_plot_path, dpi=200)
+            plt.close("all")
             print(f"Saved prior PDF plot to {prior_plot_path}")
         except Exception as e:
             import traceback
@@ -702,7 +728,13 @@ class GridCalculation:
         param_names = list(self.parameter_grid.names)
         grid_shape = tuple(self.parameter_grid.shape)
 
-        axes = [np.asarray(getattr(self.parameter_grid, name), dtype=np.float64) for name in param_names]
+        # Use the underlying 1D axis vectors, not broadcasted grid arrays.
+        # `getattr(self.parameter_grid, name)` may return mesh-shaped arrays,
+        # which can break reshape/broadcast logic below.
+        axes = [
+            np.asarray(self.parameter_grid.axes_in[name], dtype=np.float64).ravel()
+            for name in param_names
+        ]
 
         log_prob = np.zeros(grid_shape, dtype=np.float64)
 
@@ -1339,6 +1371,99 @@ def _run_merge_into_run(
     print(f"Grid calculation runtime: {hours}h {minutes}m {seconds}s")
 
 
+def _infer_run_id_from_nf_eig_json(data: Any) -> Optional[str]:
+    """Find a 32-char MLflow run id embedded in string fields (e.g. rng_state_path)."""
+    pat = re.compile(r"/mlruns/\d+/([0-9a-f]{32})/")
+
+    def walk(obj: Any) -> Optional[str]:
+        if isinstance(obj, str):
+            m = pat.search(obj)
+            return m.group(1) if m else None
+        if isinstance(obj, dict):
+            for v in obj.values():
+                rid = walk(v)
+                if rid:
+                    return rid
+        if isinstance(obj, list):
+            for v in obj:
+                rid = walk(v)
+                if rid:
+                    return rid
+        return None
+
+    return walk(data)
+
+
+def _resolve_nf_eval_step_key(nf_data: dict, eval_step_arg: Optional[str]) -> Tuple[int, str]:
+    """Pick ``step_*`` in the NF eig_data JSON for overlay merge."""
+    if eval_step_arg is not None:
+        if isinstance(eval_step_arg, str) and eval_step_arg.startswith("step_"):
+            sk = eval_step_arg
+            step_num = int(sk.split("_", 1)[1])
+        else:
+            step_num = int(eval_step_arg)
+            sk = f"step_{step_num}"
+        if sk not in nf_data:
+            available = sorted(
+                k for k in nf_data if isinstance(k, str) and k.startswith("step_")
+            )
+            raise ValueError(
+                f"NF eig_data has no {sk}; available step keys: {available}"
+            )
+        return step_num, sk
+    es = nf_data.get("eval_step")
+    if es is not None:
+        sk = f"step_{int(es)}"
+        if sk in nf_data:
+            return int(es), sk
+    step_keys = [k for k in nf_data if isinstance(k, str) and k.startswith("step_")]
+    if not step_keys:
+        raise ValueError("NF eig_data contains no step_* keys for overlay.")
+    best = max(step_keys, key=lambda k: int(k.split("_", 1)[1]))
+    return int(best.split("_", 1)[1]), best
+
+
+def _standalone_grid_eig_for_overlay(
+    *,
+    step_key: str,
+    eig_flat: np.ndarray,
+    result: Dict[str, Any],
+    input_designs: np.ndarray,
+    nominal_design: np.ndarray,
+    grid_samples_path: str,
+) -> Dict[str, Any]:
+    """Build merge-compatible eig_data (grid side) for ``render_overlay``."""
+    designs_np = np.asarray(input_designs, dtype=np.float64)
+    nominal_np = np.asarray(nominal_design, dtype=np.float64).reshape(1, -1)
+    nominal_idx = int(
+        np.argmin(np.linalg.norm(designs_np - nominal_np[:, : designs_np.shape[1]], axis=1))
+    )
+    eig_flat = np.asarray(eig_flat, dtype=np.float64).reshape(-1)
+    optimal_eig = float(np.max(eig_flat))
+    step_dict: Dict[str, Any] = {"variable": {}, "nominal": {}}
+    step_dict["variable"]["grid"] = {
+        "eigs_avg": eig_flat.tolist(),
+        "eigs_std": np.zeros_like(eig_flat).tolist(),
+        "optimal_eig": optimal_eig,
+        "optimal_eig_std": 0.0,
+        "optimal_design": result["best_design"],
+        "design_grid_shape": list(result["design_grid_shape"]),
+        "feature_grid_shape": list(result["feature_grid_shape"]),
+        "parameter_grid_shape": list(result["parameter_grid_shape"]),
+    }
+    step_dict["nominal"]["grid"] = {
+        "eigs_avg": float(eig_flat[nominal_idx]),
+        "eigs_std": 0.0,
+    }
+    step_dict["grid_samples_path"] = grid_samples_path
+    return {
+        "status": "complete",
+        "input_designs": designs_np.tolist(),
+        "nominal_design": nominal_np.reshape(-1).tolist(),
+        step_key: step_dict,
+    }
+
+
 def main():
     session_start_time = time.time()
 
@@ -1389,7 +1514,34 @@ def main():
     parser.add_argument("--eval-step", type=str, default=None,
                         help="Step to tag grid results with (default: run_args['total_steps']).")
     parser.add_argument("--nf-eig-data", type=str, default=None,
-                        help="Path to the sibling NF eig_data JSON. If complete at end, overlay plots are rendered.")
+                        help="Path to NF eig_data JSON. In merge-into-run mode (--run-id), overlay plots "
+                        "after the grid job completes. In standalone mode, merges with this NF JSON and "
+                        "writes overlays under grid_calc/.../plots/. Use --nf-checkpoint for NF posterior "
+                        "contours (needs MLflow run id for run_args); without it, the posterior overlay is "
+                        "grid (+ prior) only while the EIG plot still compares NF vs grid from the JSON.")
+    parser.add_argument(
+        "--nf-checkpoint",
+        type=str,
+        default=None,
+        metavar="PATH",
+        help="Standalone (with --nf-eig-data): path to an NF checkpoint .pt. New checkpoints embed "
+        f"{NF_INIT_CONFIG_KEY} so no MLflow run id is needed. Older checkpoints require --nf-overlay-run-id "
+        "to fetch run hyperparameters. If omitted, NF is omitted from the posterior overlay.",
+    )
+    parser.add_argument(
+        "--nf-overlay-run-id",
+        type=str,
+        default=None,
+        help="MLflow run id: only needed for standalone --nf-checkpoint when the .pt file lacks "
+        f"embedded {NF_INIT_CONFIG_KEY} (checkpoints from older trainers).",
+    )
+    parser.add_argument(
+        "--nf-overlay-eval-step",
+        type=str,
+        default=None,
+        help="Which step_* block in the NF eig_data to use (e.g. 50000 or step_50000). "
+        "Default: JSON's eval_step if present, otherwise the largest step_* key.",
+    )
     parser.add_argument("--grid-eig-data", type=str, default=None,
                         help="Path for this grid job to write its eig_data JSON (overrides auto-named eig_data_grid_<timestamp>.json).")
     parser.add_argument("--seed", type=int, default=1, help="Seed for posterior sample drawing (merge-into-run mode).")
@@ -1549,17 +1701,20 @@ def main():
         json.dump(payload, f, indent=2)
     print(f"  Saved: {json_path}")
 
-    # Generate plots
+    input_designs = experiment.designs.detach().cpu().numpy()
+    nominal_design = np.asarray(
+        experiment.nominal_design.detach().cpu().numpy(), dtype=np.float64
+    ).reshape(-1)
+
+    need_grid_samples = (not args.no_plots) or bool(args.nf_eig_data)
+    gc_samples = None
+    if need_grid_samples:
+        posterior = gc.get_posterior(nominal=True)
+        gc_samples = gc.draw_samples(pdf=posterior, num_samples=50000, seed=args.seed)
+
     if not args.no_plots:
         print("Generating plots...")
-        # Get the actual constrained designs used in the EIG calculation
-        input_designs = experiment.designs.detach().cpu().numpy()
-
-        nominal_design = np.asarray(
-            experiment.nominal_design.detach().cpu().numpy(), dtype=np.float64
-        ).reshape(-1)
-
-        design_labels = getattr(experiment, 'design_labels', list(gc.design_grid.names))
+        design_labels = getattr(experiment, "design_labels", list(gc.design_grid.names))
         plotter.eig_designs(
             eig_values=eig_flat,
             input_designs=input_designs,
@@ -1570,10 +1725,7 @@ def main():
             save_dir=gc.plt_save_path,
         )
 
-        # Posterior plot
-        posterior = gc.get_posterior(nominal=True)
-        gc_samples = gc.draw_samples(pdf=posterior, num_samples=50000)
-
+        posterior_title = None
         if experiment.name == "num_visits":
             posterior_title = f"Grid Posterior (nominal), T = {experiment.temperature:.0f} K"
 
@@ -1582,15 +1734,87 @@ def main():
             grid_samples=gc_samples,
             title=posterior_title,
             plot_size_ratio=0.8,
-            guide_samples=50000,
+            guide_samples=100000,
             plot_prior=True,
             filename="posterior",
             save_dir=gc.plt_save_path,
         )
 
-        # Marginal P(y|xi) plot for nominal design
         fig_marg, _ = gc.plot_marginal(design_type="nominal")
         plotter.save_figure(fig_marg, filename="marginal", save_dir=gc.plt_save_path)
+
+    if args.nf_eig_data:
+        if gc_samples is None:
+            print("Warning: skipping NF overlay (--nf-eig-data) because grid posterior samples were not computed.")
+        else:
+            samples_path = str(out_dir / "grid_samples_nominal_overlay.npy")
+            np.save(samples_path, np.asarray(gc_samples))
+            try:
+                with open(args.nf_eig_data, "r") as f:
+                    nf_eig = json.load(f)
+                _eval_num, step_key = _resolve_nf_eval_step_key(nf_eig, args.nf_overlay_eval_step)
+                own_eig = _standalone_grid_eig_for_overlay(
+                    step_key=step_key,
+                    eig_flat=eig_flat,
+                    result=result,
+                    input_designs=input_designs,
+                    nominal_design=nominal_design,
+                    grid_samples_path=samples_path,
+                )
+                overlay_device = args.device if args.device else "cpu"
+                if args.nf_checkpoint:
+                    ck = torch.load(
+                        args.nf_checkpoint, map_location="cpu", weights_only=False
+                    )
+                    if NF_INIT_CONFIG_KEY not in ck:
+                        run_id_nf = args.nf_overlay_run_id or _infer_run_id_from_nf_eig_json(
+                            nf_eig
+                        )
+                        if not run_id_nf:
+                            raise ValueError(
+                                f"Checkpoint has no {NF_INIT_CONFIG_KEY}; pass "
+                                "--nf-overlay-run-id (MLflow run) or re-save checkpoints with a current trainer."
+                            )
+                        render_overlay(
+                            own_eig_data=own_eig,
+                            own_role="grid",
+                            other_eig_data_path=args.nf_eig_data,
+                            plotter=RunPlotter(run_id=run_id_nf, cosmo_exp=args.cosmo_exp),
+                            eval_step=_eval_num,
+                            overlay_save_dir=gc.plt_save_path,
+                            device=overlay_device,
+                            nf_checkpoint_path=args.nf_checkpoint,
+                            grid_experiment=None,
+                        )
+                    else:
+                        render_overlay(
+                            own_eig_data=own_eig,
+                            own_role="grid",
+                            other_eig_data_path=args.nf_eig_data,
+                            plotter=BasePlotter(cosmo_exp=args.cosmo_exp),
+                            eval_step=_eval_num,
+                            overlay_save_dir=gc.plt_save_path,
+                            device=overlay_device,
+                            nf_checkpoint_path=args.nf_checkpoint,
+                            grid_experiment=experiment,
+                        )
+                else:
+                    render_overlay(
+                        own_eig_data=own_eig,
+                        own_role="grid",
+                        other_eig_data_path=args.nf_eig_data,
+                        plotter=BasePlotter(cosmo_exp=args.cosmo_exp),
+                        eval_step=_eval_num,
+                        overlay_save_dir=gc.plt_save_path,
+                        device=overlay_device,
+                        nf_checkpoint_path=None,
+                        grid_experiment=experiment,
+                    )
+            except Exception as e:
+                import traceback as _tb
+
+                _tb.print_exc()
+                print(f"Warning: standalone NF overlay failed: {e}")
 
     print(f"All outputs saved to: {out_dir}")
 

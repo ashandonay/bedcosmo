@@ -12,6 +12,7 @@ from getdist import plots
 from bedcosmo.util import (
     get_runs_data, init_experiment, init_nf, load_model, auto_seed, convert_color,
     load_nominal_samples, get_contour_area, get_nominal_samples, sort_key_for_group_tuple,
+    GETDIST_SETTINGS,
 )
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
@@ -484,6 +485,26 @@ class BasePlotter:
  
         return fig, (ax0, ax1)
 
+    def _mark_central_parameter_values(self, g, experiment):
+        """Mark ``experiment.central_params`` on GetDist triangle-plot axes."""
+        central_params = getattr(experiment, "central_params", None)
+        if not central_params:
+            return
+
+        line_kw = dict(color='black', linestyle='--', linewidth=1.0)
+        params = experiment.cosmo_params
+        n = g.subplots.shape[0]
+
+        for i, pi in enumerate(params):
+            if pi not in central_params or i >= n:
+                continue
+            g.subplots[i, i].axvline(central_params[pi], **line_kw)
+            for j in range(i):
+                pj = params[j]
+                if pj in central_params:
+                    g.subplots[i, j].axvline(central_params[pj], **line_kw)
+                g.subplots[i, j].axhline(central_params[pi], **line_kw)
+
     def generate_posterior(
         self,
         experiment,
@@ -633,6 +654,7 @@ class BasePlotter:
                     samples=grid_samples_np,
                     names=experiment.cosmo_params,
                     labels=experiment.latex_labels,
+                    settings=GETDIST_SETTINGS,
                 )
 
             all_samples.append(grid_samples_gd)
@@ -687,8 +709,8 @@ class BasePlotter:
             plot_size_ratio=plot_size_ratio,
         )
 
-        if self.cosmo_exp == 'num_visits':
-            g.subplots[0, 0].axvline(experiment.central_z, color='black', linestyle='--')
+        if getattr(experiment, "central_params", None):
+            self._mark_central_parameter_values(g, experiment)
 
         # Calculate dynamic font sizes
         n_params = len(all_samples[0].paramNames.names)
@@ -699,6 +721,8 @@ class BasePlotter:
         legend_fontsize = base_fontsize * 0.65
         if n_params == 1:
             legend_fontsize = max(legend_fontsize, 10)
+        elif n_params == 2:
+            legend_fontsize = max(legend_fontsize * 1.25, 12)
 
         if g.fig.legends:
             for legend in g.fig.legends:
@@ -865,6 +889,14 @@ class BasePlotter:
         contour_colors = [adjust_color_brightness(c, 0.8) for c in colors]  # Darker contours
         scatter_colors = [adjust_color_brightness(c, 1.2) for c in colors]  # Lighter scatter
 
+        def blend_with_white(color, blend_factor):
+            """Lighten color by blending with white (0=no change, 1=white)."""
+            import matplotlib.colors as mcolors
+            rgb = np.array(mcolors.to_rgb(color))
+            white = np.array([1.0, 1.0, 1.0])
+            mixed = rgb * (1.0 - blend_factor) + white * blend_factor
+            return mcolors.to_hex(np.clip(mixed, 0.0, 1.0))
+
         if isinstance(line_style, str):
             line_style = [line_style] * len(samples)
         elif isinstance(line_style, list):
@@ -922,6 +954,30 @@ class BasePlotter:
             },
             show=False
         )
+        
+        # Slightly differentiate colors between contour levels (e.g., 68% vs 95%)
+        # so both confidence lines are easier to distinguish in 2D panels.
+        if levels is not None and len(levels) > 1:
+            level_lighten = [0.0, 0.22]  # inner level keeps base color; outer is slightly lighter
+            n_levels = len(levels)
+            n_params = len(samples[0].paramNames.names)
+            for i in range(1, n_params):
+                for j in range(i):
+                    ax = g.subplots[i, j]
+                    if ax is None:
+                        continue
+                    collections = ax.collections
+                    expected = len(samples) * n_levels
+                    if len(collections) < expected:
+                        continue
+                    for sample_idx in range(len(samples)):
+                        base_color = contour_colors[sample_idx]
+                        for level_idx in range(n_levels):
+                            coll_idx = sample_idx * n_levels + level_idx
+                            if coll_idx >= len(collections):
+                                continue
+                            lighten = level_lighten[min(level_idx, len(level_lighten) - 1)]
+                            collections[coll_idx].set_color(blend_with_white(base_color, lighten))
         
         # If alpha is a list, manually set alpha for each sample's lines and contours
         if isinstance(alpha, list):
@@ -1091,7 +1147,7 @@ class RunPlotter(BasePlotter):
         The cached experiment is only used when no per-call ``design_args`` or ``overrides``
         are supplied. When either is provided a fresh experiment is built and returned
         without touching the cache, so callers can safely sweep parameter values
-        (e.g. ``central_z=0.5``) without disturbing the default instance.
+        (e.g. ``central_params={'z': 0.5}``) without disturbing the default instance.
 
         Args:
             device (str): Torch device. Falls back to cpu if cuda unavailable.
@@ -1275,7 +1331,7 @@ class RunPlotter(BasePlotter):
                         nominal_samples, target_labels, latex_labels = load_nominal_samples(
                             run_params['cosmo_exp'], run_params['cosmo_model'], dataset=run_params['dataset'])
                         with contextlib.redirect_stdout(io.StringIO()):
-                            nominal_samples_gd = getdist.MCSamples(samples=nominal_samples, names=target_labels, labels=latex_labels)
+                            nominal_samples_gd = getdist.MCSamples(samples=nominal_samples, names=target_labels, labels=latex_labels, settings=GETDIST_SETTINGS)
                         nominal_area = get_contour_area([nominal_samples_gd], 0.68, param1, param2)[0]["nominal_area_"+pair_name]
                         ax_area.plot(plot_area_steps, plot_area_values/nominal_area, 
                                     color=line_color, label=pair_name.replace('_', ', '))
@@ -1936,9 +1992,9 @@ class RunPlotter(BasePlotter):
         plot_width = 12
         g = self.plot_posterior(all_samples, all_colors, levels=levels, width_inch=plot_width)
         
-        if self.cosmo_exp == 'num_visits':
-            g.subplots[0, 0].axvline(experiment.central_z, color='black', linestyle='--')
-            
+        if getattr(experiment, "central_params", None):
+            self._mark_central_parameter_values(g, experiment)
+
         # Calculate dynamic font sizes
         n_params = len(all_samples[0].paramNames.names)
         base_fontsize = max(6, min(18, plot_width * (0.2 + 0.42 * np.sqrt(n_params))))
@@ -1948,6 +2004,8 @@ class RunPlotter(BasePlotter):
         legend_fontsize = base_fontsize * 0.65
         if n_params == 1:
             legend_fontsize = max(legend_fontsize, 10)
+        elif n_params == 2:
+            legend_fontsize = max(legend_fontsize * 1.25, 12)
 
         if g.fig.legends:
             for legend in g.fig.legends:
@@ -2470,7 +2528,7 @@ class ComparisonPlotter(BasePlotter):
         nominal_samples, target_labels, latex_labels = load_nominal_samples(
             self.cosmo_exp, cosmo_model_for_desi, dataset=run_data_list[0]['params']['dataset'])
         with contextlib.redirect_stdout(io.StringIO()):
-            nominal_samples_gd = getdist.MCSamples(samples=nominal_samples, names=target_labels, labels=latex_labels)
+            nominal_samples_gd = getdist.MCSamples(samples=nominal_samples, names=target_labels, labels=latex_labels, settings=GETDIST_SETTINGS)
         nominal_label = f'Nominal ({cosmo_model_for_desi})'
         
         all_samples.append(nominal_samples_gd)
@@ -4004,7 +4062,7 @@ class ComparisonPlotter(BasePlotter):
                         try:
                             nominal_samples, target_labels, latex_labels = load_nominal_samples(run_params['cosmo_exp'], run_params['cosmo_model'], dataset=run_params['dataset'])
                             with contextlib.redirect_stdout(io.StringIO()):
-                                nominal_samples_gd = getdist.MCSamples(samples=nominal_samples, names=target_labels, labels=latex_labels)
+                                nominal_samples_gd = getdist.MCSamples(samples=nominal_samples, names=target_labels, labels=latex_labels, settings=GETDIST_SETTINGS)
                             nominal_area = get_contour_area([nominal_samples_gd], 0.68, param1, param2)[0]["nominal_area_"+f"{param1}_{param2}"]
                             ax_area.plot(plot_area_steps, plot_area_values/nominal_area, 
                                         alpha=base_alpha, color=color, label=plot_label)

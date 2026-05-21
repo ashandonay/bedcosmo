@@ -643,6 +643,9 @@ class Trainer:
             checkpoint['input_dim'] = len(self.experiment.cosmo_params)
             checkpoint['context_dim'] = self.experiment.context_dim
 
+        if getattr(self, "run_args", None) is not None:
+            checkpoint[NF_INIT_CONFIG_KEY] = build_nf_init_config_from_run_args(self.run_args)
+
         # Always include global rank information
         if global_rank is not None:
             if additional_state is None:
@@ -1462,11 +1465,22 @@ if __name__ == '__main__':
             # For lists, we'll accept them as JSON strings and parse them
             parser.add_argument(f'--{cli_key}', type=str, default=None,
                               help=f'Override {key} as JSON string (default: {value})')
+        elif isinstance(value, dict):
+            if key == "central_params":
+                # Overrides use --central-param-<name> <value> (see parse_extra_args).
+                continue
+            parser.add_argument(
+                f'--{cli_key}',
+                type=str,
+                default=None,
+                help=f'Override {key} as JSON object (default: {value})',
+            )
         else:
             print(f"Warning: Argument type for key '{key}' not explicitly handled ({arg_type}). Treating as string.")
             parser.add_argument(f'--{cli_key}', type=str, default=None, help=f'Override {key} (default: {value})')
 
-    args = parser.parse_args()
+    # unknown: extension flags (e.g. --central-param-z) not registered on the parser
+    args, unknown = parser.parse_known_args()
     # Validate checkpoint loading arguments
     if args.resume_id and args.restart_id:
         raise ValueError("Cannot use --resume-id with --restart-id. Choose one:\n"
@@ -1493,79 +1507,10 @@ if __name__ == '__main__':
     if args.add_steps > 0 and args.resume_id is None:
         raise ValueError("--add-steps can only be used with --resume-id")
 
-    # Project root for resolving relative paths (e.g. input_designs JSON)
     project_root = str(get_experiments_dir().parent)
-
-    # Override default run_args with any provided command-line arguments
-    run_args = vars(args)
-
-    for key, value in run_args.items():
-        if key in run_args_dict.keys():
-            if value is not None:
-                # Special handling for input_designs
-                if key == 'input_designs':
-                    if isinstance(value, str):
-                        input_design_str = value.strip()
-                        
-                        # Check if it's the special "nominal" keyword
-                        if input_design_str.lower() == 'nominal':
-                            run_args[key] = 'nominal'
-                            continue
-                        
-                        # Check if it's a file path (ends with .json and file exists)
-                        if (input_design_str.endswith('.json') or input_design_str.endswith('.JSON')):
-                            # Try current directory first, then project root
-                            file_path = input_design_str
-                            if not os.path.isfile(file_path) and not os.path.isabs(file_path):
-                                # Try relative to project root
-                                file_path = os.path.join(project_root, input_design_str)
-                            
-                            if os.path.isfile(file_path):
-                                # Read from JSON file
-                                try:
-                                    with open(file_path, 'r') as f:
-                                        parsed_value = json.load(f)
-                                    run_args[key] = parsed_value
-                                    if os.environ.get('RANK', '0') == '0':
-                                        print(f"Loaded input_designs from file: {file_path}")
-                                except json.JSONDecodeError as e:
-                                    raise ValueError(f"Failed to parse JSON file {file_path}: {e}")
-                                except Exception as e:
-                                    raise ValueError(f"Failed to read file {file_path}: {e}")
-                            else:
-                                # File doesn't exist, try to parse as JSON string
-                                try:
-                                    parsed_value = json.loads(input_design_str)
-                                    run_args[key] = parsed_value
-                                except json.JSONDecodeError as e:
-                                    if os.environ.get('RANK', '0') == '0':
-                                        print(f"Warning: Could not parse 'input_designs' as JSON and file not found: {input_design_str}. Using as-is.")
-                                    run_args[key] = value
-                        else:
-                            # Try to parse as JSON string
-                            try:
-                                parsed_value = json.loads(input_design_str)
-                                run_args[key] = parsed_value
-                            except json.JSONDecodeError as e:
-                                if os.environ.get('RANK', '0') == '0':
-                                    print(f"Warning: Could not parse 'input_designs' as JSON: {e}. Using as-is.")
-                                run_args[key] = value
-                    else:
-                        run_args[key] = value
-                elif isinstance(run_args_dict[key], bool) and isinstance(value, bool):
-                    run_args[key] = value
-                elif isinstance(run_args_dict[key], list):
-                    # Parse JSON string back to list
-                    try:
-                        parsed_value = json.loads(value)
-                        run_args[key] = parsed_value
-                    except json.JSONDecodeError as e:
-                        if os.environ.get('RANK', '0') == '0':
-                            print(f"Warning: Could not parse '{key}' as JSON: {e}. Keeping default value.")
-                elif not isinstance(run_args_dict[key], float):
-                    run_args[key] = value
-            else:
-                run_args[key] = run_args_dict[key]
+    run_args = finalize_train_run_args(
+        vars(args), run_args_dict, unknown_argv=unknown, project_root=project_root
+    )
 
     trainer = Trainer(
         cosmo_exp=args.cosmo_exp,

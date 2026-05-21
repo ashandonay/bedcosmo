@@ -1,3 +1,7 @@
-base:
+bb:
   parameters: ["z"]
   latex_labels: ["z"]
+
+bb_temp:
+  parameters: ["z", "T"]
+  latex_labels: ["z", "T\\,[\\mathrm{K}]"]

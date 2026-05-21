@@ -1,11 +1,12 @@
 #!/bin/bash
 #SBATCH -A desi
-#SBATCH -C cpu
+#SBATCH -C gpu
 #SBATCH -q debug
 #SBATCH -J brute_force
 #SBATCH -N 1
-#SBATCH --ntasks=1
-#SBATCH --cpus-per-task=8
+#SBATCH --ntasks-per-node=1
+#SBATCH --cpus-per-task=32
+#SBATCH --gpus-per-node=1
 #SBATCH --mem=0
 #SBATCH -t 00:30:00
 #SBATCH -o logs/%x_%j.out
@@ -28,15 +29,27 @@ grep -i "^MemTotal" /proc/meminfo
 echo "free -h:"
 free -h
 
+# Reduce JAX/XLA upfront GPU reservation to lower OOM risk.
+export XLA_PYTHON_CLIENT_PREALLOCATE=false
+
+# If no GPU is visible to the job, force JAX onto the CPU backend so it doesn't
+# try (and noisily fail) to initialize the bundled CUDA12 plugin.
+if ! nvidia-smi -L >/dev/null 2>&1; then
+    export JAX_PLATFORMS=cpu
+    echo "No GPU detected — forcing JAX_PLATFORMS=cpu"
+else
+    unset JAX_PLATFORMS
+fi
+
 srun python -m bedcosmo.grid_calc num_visits \
     --design-args-path design_args_2d.yaml \
-    --prior-args-path prior_args_uniform.yaml \
-    --device cpu \
-    --param-pts 1000 \
-    --feature-pts 500
+    --prior-args-path /pscratch/sd/a/ashandon/bedcosmo/num_visits/mlruns/228253452122836442/2c669af599124f08a4f5666f9e15d36b/artifacts/prior_args.yaml \
+    --device cuda:0 \
+    --param-pts 200 \
+    --feature-pts 120 \
     --temperature 10000 \
     --param-dense-range z:0.1,0.7 \
     --param-dense-fraction 0.9 \
     --feature-range u:-15,100 \
-    --feature-range g:15,55 \
+    --feature-range g:0,80 \
     --central-z 1.0

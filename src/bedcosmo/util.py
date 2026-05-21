@@ -23,6 +23,15 @@ import concurrent.futures
 import warnings
 import threading
 from itertools import combinations
+
+# GetDist KDE settings used for all MCSamples constructions. Keep 2D smoothing
+# modest so contour structure is preserved while still reducing pixel noise.
+GETDIST_SETTINGS = {
+    "smooth_scale_2D": 0.1,
+    "fine_bins_2D": 256,
+    "mult_bias_correction_order": 1,
+    "boundary_correction_order": 1,
+}
 from PIL import Image, ImageDraw, ImageFont
 import glob
 import argparse
@@ -827,7 +836,7 @@ def init_nf(
 
         # Move to the correct device
         posterior_flow.to(device)
-        
+
         with torch.no_grad():
             # 1) Generic linear layers: Use He initialization for ReLU networks
             for module in posterior_flow.modules():
@@ -896,6 +905,36 @@ def init_nf(
                             if getattr(last_layer, "bias", None) is not None:
                                 torch.nn.init.normal_(last_layer.bias, mean=0.0, std=0.1)  # Add small bias instead of zero
     return posterior_flow
+
+
+# Keys stored in checkpoints so :func:`init_nf` can rebuild the architecture without MLflow.
+NF_INIT_CONFIG_KEY = "nf_init_config"
+
+
+def build_nf_init_config_from_run_args(run_args: dict) -> dict:
+    """Snapshot of parameters read by :func:`init_nf` for self-contained checkpoints."""
+    if not run_args:
+        raise ValueError("run_args is required to build nf_init_config")
+    cfg = {
+        "flow_type": run_args.get("flow_type"),
+        "n_transforms": int(run_args.get("n_transforms", 2)),
+        "cond_n_layers": int(run_args.get("cond_n_layers", 2)),
+        "cond_hidden_size": int(run_args.get("cond_hidden_size", 64)),
+        "activation": str(run_args.get("activation", "ReLU")),
+        "spline_bins": run_args.get("spline_bins"),
+        "mnn_signal": run_args.get("mnn_signal"),
+        "mnn_hidden_size": run_args.get("mnn_hidden_size"),
+        "mnn_n_layers": run_args.get("mnn_n_layers"),
+        "nf_transform": run_args.get("nf_transform"),
+        "transform_input": run_args.get("transform_input", False),
+    }
+    if cfg["spline_bins"] is not None:
+        cfg["spline_bins"] = int(cfg["spline_bins"])
+    for k in ("mnn_signal", "mnn_hidden_size", "mnn_n_layers"):
+        if cfg[k] is not None:
+            cfg[k] = int(cfg[k])
+    return cfg
+
 
 def create_scheduler(optimizer, run_args):
     # Setup
@@ -1246,7 +1285,8 @@ def init_experiment(
     
     # Merge kwargs into run_args
     run_args.update(kwargs)
-    
+    run_args = apply_central_param_cli_flags(run_args)
+
     if cosmo_exp == 'num_tracers':
         from bedcosmo.num_tracers import NumTracers
         valid_params = inspect.signature(NumTracers.__init__).parameters.keys()
@@ -1294,7 +1334,9 @@ def init_experiment(
 def load_prior_flow_from_file(prior_flow_path, device, global_rank=0):
     """
     Load a prior flow model from a .pt checkpoint file.
-    Run ID is extracted from the checkpoint path.
+
+    If the checkpoint embeds :data:`NF_INIT_CONFIG_KEY`, no MLflow run is contacted.
+    Otherwise the run id is inferred from the checkpoint path to fetch ``run_args``.
 
     Expects input_dim and context_dim in the checkpoint (saved at train time, or added via
     scripts/add_checkpoint_dims.py). The full experiment is not initialized.
@@ -1312,26 +1354,8 @@ def load_prior_flow_from_file(prior_flow_path, device, global_rank=0):
     if not os.path.exists(prior_flow_path):
         raise FileNotFoundError(f"Prior flow file not found: {prior_flow_path}")
 
-    # Extract run_id from the checkpoint path
-    prior_run_id, prior_exp_id, prior_cosmo_exp = extract_run_info_from_checkpoint_path(prior_flow_path)
-
-    if global_rank == 0:
-        print(f"Extracted run_id {prior_run_id} from checkpoint path")
-
-    # Load checkpoint first (needed for state_dict and possibly input_dim/context_dim)
     checkpoint = torch.load(prior_flow_path, map_location=device, weights_only=False)
 
-    # Use the cosmo_exp from the path to find the run
-    storage_path = os.environ["SCRATCH"] + f"/bedcosmo/{prior_cosmo_exp}"
-    mlflow.set_tracking_uri(storage_path + "/mlruns")
-    client = MlflowClient()
-    prior_run = client.get_run(prior_run_id)
-    prior_run_args = parse_mlflow_params(prior_run.data.params)
-
-    if global_rank == 0:
-        print(f"Found run in {prior_cosmo_exp} experiment")
-    
-    # Require input_dim and context_dim in checkpoint (saved at train time, or via scripts/add_checkpoint_dims.py)
     if 'input_dim' not in checkpoint or 'context_dim' not in checkpoint:
         raise ValueError(
             f"Checkpoint {prior_flow_path} is missing 'input_dim' and/or 'context_dim'. "
@@ -1339,6 +1363,27 @@ def load_prior_flow_from_file(prior_flow_path, device, global_rank=0):
         )
     input_dim = int(checkpoint['input_dim'])
     context_dim = int(checkpoint['context_dim'])
+
+    nf_cfg = checkpoint.get(NF_INIT_CONFIG_KEY)
+    if nf_cfg is not None:
+        if global_rank == 0:
+            print(f"Using embedded {NF_INIT_CONFIG_KEY} from prior checkpoint (no MLflow run fetch).")
+        prior_run_args = nf_cfg
+    else:
+        prior_run_id, prior_exp_id, prior_cosmo_exp = extract_run_info_from_checkpoint_path(prior_flow_path)
+
+        if global_rank == 0:
+            print(f"Extracted run_id {prior_run_id} from checkpoint path")
+
+        storage_path = os.environ["SCRATCH"] + f"/bedcosmo/{prior_cosmo_exp}"
+        mlflow.set_tracking_uri(storage_path + "/mlruns")
+        client = MlflowClient()
+        prior_run = client.get_run(prior_run_id)
+        prior_run_args = parse_mlflow_params(prior_run.data.params)
+
+        if global_rank == 0:
+            print(f"Found run in {prior_cosmo_exp} experiment")
+
     if global_rank == 0:
         print(f"Using input_dim={input_dim}, context_dim={context_dim} from checkpoint")
     
@@ -1363,8 +1408,12 @@ def load_prior_flow_from_file(prior_flow_path, device, global_rank=0):
     posterior_flow.eval()
     
     # Store metadata in a dict to return alongside the flow
+    transform_input = False
+    if isinstance(prior_run_args, dict):
+        transform_input = prior_run_args.get("transform_input", False)
+
     prior_flow_metadata = {
-        'transform_input': prior_run_args.get("transform_input", False),
+        'transform_input': transform_input,
         'nominal_context': None,
         'bijector_state': checkpoint.get('bijector_state', None)
     }
@@ -1396,18 +1445,10 @@ def load_model(experiment, step, run_obj, run_args, device, global_rank=0):
     exp_id = run_obj.info.experiment_id
     input_dim = len(experiment.cosmo_params)
 
-    posterior_flow = init_nf(
-        run_args, 
-        input_dim, 
-        experiment.context_dim,
-        device,
-        seed=None
-        )
-
     effective_step = step
-    if step == 'last': 
+    if step == 'last':
         effective_step = run_args.get("total_steps")
-    
+
     checkpoint_dir = f'{storage_path}/mlruns/{exp_id}/{current_run_id}/artifacts/checkpoints'
     if not os.path.isdir(checkpoint_dir):
          print(f"ERROR: Checkpoint directory not found: {checkpoint_dir}")
@@ -1417,12 +1458,158 @@ def load_model(experiment, step, run_obj, run_args, device, global_rank=0):
     if selected_step != effective_step:
         print(f"Warning: Step {effective_step} not found in checkpoints. Loading checkpoint for step {selected_step} instead.")
         effective_step = selected_step
-    
+
+    nf_cfg = checkpoint.get(NF_INIT_CONFIG_KEY)
+    init_args = nf_cfg if nf_cfg is not None else run_args
+    posterior_flow = init_nf(
+        init_args,
+        input_dim,
+        experiment.context_dim,
+        device,
+        seed=None
+    )
+
     posterior_flow.load_state_dict(checkpoint['model_state_dict'], strict=True)
     posterior_flow.to(device)
     posterior_flow.eval()
     
     return posterior_flow, selected_step
+
+
+def load_posterior_flow_from_checkpoint_file(
+    experiment,
+    checkpoint_path: str,
+    run_args=None,
+    device: str = "cpu",
+    global_rank: int = 0,
+):
+    """
+    Load a trained NF posterior flow from a single ``.pt`` checkpoint file.
+
+    New checkpoints embed :data:`NF_INIT_CONFIG_KEY` so :func:`init_nf` can rebuild
+    the architecture without MLflow ``run_args``. Older checkpoints require ``run_args``.
+    """
+    checkpoint_path = os.path.abspath(os.path.expanduser(checkpoint_path))
+    if not os.path.isfile(checkpoint_path):
+        raise FileNotFoundError(f"Checkpoint file not found: {checkpoint_path}")
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    nf_cfg = checkpoint.get(NF_INIT_CONFIG_KEY)
+    if nf_cfg is not None:
+        init_args = nf_cfg
+        if "input_dim" not in checkpoint or "context_dim" not in checkpoint:
+            raise ValueError(
+                f"Checkpoint {checkpoint_path} has {NF_INIT_CONFIG_KEY} but is missing "
+                "input_dim and/or context_dim."
+            )
+        input_dim = int(checkpoint["input_dim"])
+        context_dim = int(checkpoint["context_dim"])
+    else:
+        if run_args is None:
+            raise ValueError(
+                f"Checkpoint {checkpoint_path} has no {NF_INIT_CONFIG_KEY}; pass run_args from "
+                "the training run, or re-save checkpoints with a current trainer."
+            )
+        init_args = run_args
+        input_dim = len(experiment.cosmo_params)
+        context_dim = experiment.context_dim
+    posterior_flow = init_nf(
+        init_args,
+        input_dim,
+        context_dim,
+        device,
+        seed=None,
+    )
+    posterior_flow.load_state_dict(checkpoint["model_state_dict"], strict=True)
+    posterior_flow.to(device)
+    posterior_flow.eval()
+    _ = global_rank
+    return posterior_flow
+
+
+def _posterior_kwds_from_merged_eig(combined: dict, step_key: str) -> dict:
+    """Build ``generate_posterior`` kwargs from merged NF+grid eig_data (no MLflow read)."""
+    step_data = combined[step_key]
+    variable_data = step_data.get("variable", {})
+    nominal_data = step_data.get("nominal", {})
+    input_designs = np.asarray(combined.get("input_designs", []))
+    if input_designs.size == 0:
+        raise ValueError("No input designs in merged eig_data")
+    eig_values = np.asarray(variable_data.get("eigs_avg", []))
+    if eig_values.size == 0:
+        raise ValueError("No NF EIG values (variable/eigs_avg) in merged eig_data")
+    nominal_eig = nominal_data.get("eigs_avg")
+    if isinstance(nominal_eig, list):
+        nominal_eig = nominal_eig[0] if len(nominal_eig) > 0 else None
+    nominal_eig = float(nominal_eig) if nominal_eig is not None else None
+    nominal_grid_eig = None
+    nominal_grid_data = nominal_data.get("grid", {})
+    if isinstance(nominal_grid_data, dict) and "eigs_avg" in nominal_grid_data:
+        nominal_grid_eig = nominal_grid_data.get("eigs_avg")
+        if isinstance(nominal_grid_eig, list):
+            nominal_grid_eig = nominal_grid_eig[0] if len(nominal_grid_eig) > 0 else None
+        nominal_grid_eig = float(nominal_grid_eig) if nominal_grid_eig is not None else None
+    return dict(
+        input_designs=input_designs,
+        eig_values=eig_values,
+        nominal_eig=nominal_eig,
+        nominal_grid_eig=nominal_grid_eig,
+        title="Posterior (NF + grid)",
+    )
+
+
+def _eig_design_kwds_from_merged_eig(
+    combined: dict,
+    step_key: str,
+    experiment,
+    include_nominal: bool,
+):
+    """Build ``eig_designs`` kwargs from merged eig_data using a local experiment instance."""
+    step_data = combined[step_key]
+    variable_data = step_data.get("variable", {})
+    nominal_data = step_data.get("nominal", {})
+    input_designs = np.asarray(combined.get("input_designs", []))
+    if input_designs.size == 0:
+        raise ValueError("No input designs in merged eig_data")
+    eig_values = np.asarray(variable_data.get("eigs_avg", []))
+    eig_std_values = (
+        np.asarray(variable_data.get("eigs_std", np.zeros_like(eig_values)))
+        if "eigs_std" in variable_data
+        else np.zeros_like(eig_values)
+    )
+    grid_data = variable_data.get("grid", {}) or {}
+    grid_eig_values = (
+        np.asarray(grid_data["eigs_avg"]) if grid_data and "eigs_avg" in grid_data else None
+    )
+    grid_eig_std_values = (
+        np.asarray(grid_data["eigs_std"]) if grid_data and "eigs_std" in grid_data else None
+    )
+    nominal_eig = None
+    nominal_grid_eig = None
+    if include_nominal:
+        nominal_eig = nominal_data.get("eigs_avg")
+        if isinstance(nominal_eig, list):
+            nominal_eig = nominal_eig[0] if len(nominal_eig) > 0 else None
+        nominal_eig = float(nominal_eig) if nominal_eig is not None else None
+        nominal_grid_data = nominal_data.get("grid", {})
+        if isinstance(nominal_grid_data, dict) and "eigs_avg" in nominal_grid_data:
+            nominal_grid_eig = nominal_grid_data.get("eigs_avg")
+            if isinstance(nominal_grid_eig, list):
+                nominal_grid_eig = nominal_grid_eig[0] if len(nominal_grid_eig) > 0 else None
+            nominal_grid_eig = float(nominal_grid_eig) if nominal_grid_eig is not None else None
+    return dict(
+        eig_values=eig_values,
+        eig_std_values=eig_std_values,
+        grid_eig_values=grid_eig_values,
+        grid_eig_std_values=grid_eig_std_values,
+        input_designs=input_designs,
+        design_labels=experiment.design_labels,
+        nominal_design=experiment.nominal_design.detach().cpu().numpy(),
+        nominal_eig=nominal_eig,
+        nominal_grid_eig=nominal_grid_eig,
+        include_nominal=include_nominal,
+        title="EIG per design (NF vs grid)",
+    )
+
 
 def load_nominal_samples(cosmo_exp, cosmo_model, dataset='dr2'):
     home_dir = os.environ["HOME"]
@@ -1538,6 +1725,166 @@ def parse_float_or_list(value):
         except ValueError:
             raise argparse.ArgumentTypeError("Invalid value '{}'. Must be a float or JSON list of floats.".format(value))
             
+# Planck18-style fiducial cosmology used for central feature generation / reference markers.
+PLANCK18_FIDUCIAL = {
+    "Om": 0.3152,
+    "hrdrag": 99.079,
+    "Ok": 0.0,
+    "w0": -1.0,
+    "wa": 0.0,
+}
+
+
+CENTRAL_PARAM_CLI_PREFIX = "central_param_"
+
+
+def parse_json_object(value):
+    """Parse a YAML/config value into a dict (for ``central_params``)."""
+    if isinstance(value, dict):
+        return value
+    if not isinstance(value, str):
+        raise TypeError(f"Expected dict or JSON object string, got {type(value)}")
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        import ast
+
+        parsed = ast.literal_eval(value)
+    if not isinstance(parsed, dict):
+        raise ValueError(f"Expected JSON object, got {type(parsed).__name__}")
+    return parsed
+
+
+def _central_params_as_dict(value):
+    """Coerce ``central_params`` from YAML, MLflow, or CLI into a dict."""
+    if not value:
+        return {}
+    if isinstance(value, dict):
+        return dict(value)
+    return parse_json_object(value)
+
+
+def apply_central_param_cli_flags(kwargs):
+    """
+    Fold ``--central-param-<name> <value>`` flags into ``central_params``.
+
+    CLI args become keys like ``central_param_z`` after dash normalization; the
+    parameter name is the suffix after ``central_param_``.
+    """
+    kwargs = dict(kwargs)
+    central_params = _central_params_as_dict(kwargs.get("central_params"))
+
+    for key in list(kwargs):
+        if not key.startswith(CENTRAL_PARAM_CLI_PREFIX) or key == "central_params":
+            continue
+        param_name = key[len(CENTRAL_PARAM_CLI_PREFIX) :]
+        if not param_name:
+            raise ValueError(f"Invalid central parameter flag '{key}'; expected central_param_<name>.")
+        central_params[param_name] = kwargs.pop(key)
+
+    if central_params:
+        kwargs["central_params"] = central_params
+    return kwargs
+
+
+def merge_central_params(cosmo_params, central_params=None, defaults=None):
+    """
+    Merge defaults and overrides into a normalized ``central_params`` dict.
+
+    Only parameters listed in ``cosmo_params`` are kept. Values are coerced to float.
+    """
+    merged = dict(defaults or {})
+    if central_params:
+        merged.update(central_params)
+    unknown = set(merged) - set(cosmo_params)
+    if unknown:
+        raise ValueError(
+            f"central_params keys {sorted(unknown)} are not in cosmo_params {cosmo_params}."
+        )
+    return {p: float(merged[p]) for p in cosmo_params if p in merged}
+
+
+def fiducial_central_defaults(cosmo_params):
+    """Return Planck18 fiducial entries present in ``cosmo_params``."""
+    return {p: PLANCK18_FIDUCIAL[p] for p in cosmo_params if p in PLANCK18_FIDUCIAL}
+
+
+def _coerce_train_arg_override(key, value, yaml_default, project_root):
+    """Coerce a single train CLI override according to the YAML default type."""
+    if key == "input_designs":
+        if isinstance(value, str):
+            input_design_str = value.strip()
+            if input_design_str.lower() == "nominal":
+                return "nominal"
+            if input_design_str.endswith(".json") or input_design_str.endswith(".JSON"):
+                file_path = input_design_str
+                if not os.path.isfile(file_path) and not os.path.isabs(file_path):
+                    file_path = os.path.join(project_root, input_design_str)
+                if os.path.isfile(file_path):
+                    with open(file_path, "r") as f:
+                        return json.load(f)
+                try:
+                    return json.loads(input_design_str)
+                except json.JSONDecodeError:
+                    return value
+            try:
+                return json.loads(input_design_str)
+            except json.JSONDecodeError:
+                return value
+        return value
+
+    if isinstance(yaml_default, bool) and isinstance(value, bool):
+        return value
+    if isinstance(yaml_default, list):
+        try:
+            return json.loads(value)
+        except json.JSONDecodeError as e:
+            if os.environ.get("RANK", "0") == "0":
+                print(f"Warning: Could not parse '{key}' as JSON: {e}. Keeping default value.")
+            return yaml_default
+    if isinstance(yaml_default, dict) and key != "central_params":
+        try:
+            return json.loads(value)
+        except json.JSONDecodeError as e:
+            if os.environ.get("RANK", "0") == "0":
+                print(f"Warning: Could not parse '{key}' as JSON object: {e}. Keeping default value.")
+            return yaml_default
+    if not isinstance(yaml_default, float):
+        return value
+    return value
+
+
+def finalize_train_run_args(parsed_args, yaml_config, unknown_argv=None, project_root="."):
+    """
+    Merge argparse output, train_args.yaml defaults, and extension CLI flags.
+
+    Flags registered on the train parser override YAML when set. Extension flags
+    (not registered), including ``--central-param-<name>``, are taken from
+    ``unknown_argv`` — the return value of ``parse_known_args()`` — and parsed
+    via :func:`parse_extra_args`.
+    """
+    run_args = dict(parsed_args)
+
+    for key, default in yaml_config.items():
+        cli_value = run_args.get(key)
+        if cli_value is not None:
+            run_args[key] = _coerce_train_arg_override(key, cli_value, default, project_root)
+        else:
+            run_args[key] = default
+
+    if unknown_argv:
+        extra = parse_extra_args(unknown_argv)
+        if "central_params" in extra:
+            base = _central_params_as_dict(run_args.get("central_params"))
+            base.update(_central_params_as_dict(extra.pop("central_params")))
+            run_args["central_params"] = base
+        for key, value in extra.items():
+            if value is not None:
+                run_args[key] = value
+
+    return apply_central_param_cli_flags(run_args)
+
+
 def parse_extra_args(extra_args: list) -> dict:
     """
     Parse a list of unknown CLI args into a kwargs dict, auto-converting value types.
@@ -1579,7 +1926,7 @@ def parse_extra_args(extra_args: list) -> dict:
                 i += 1
         else:
             i += 1
-    return kwargs
+    return apply_central_param_cli_flags(kwargs)
 
 
 def sort_key_for_group_tuple(group_tuple_key):
@@ -2279,6 +2626,10 @@ def render_overlay(
     transform_output=True,
     include_nominal=False,
     sort=True,
+    overlay_save_dir=None,
+    device=None,
+    nf_checkpoint_path=None,
+    grid_experiment=None,
 ):
     """Render NF+grid overlay plots if the sibling eig_data file is complete.
 
@@ -2291,15 +2642,28 @@ def render_overlay(
         own_eig_data: In-memory eig_data dict produced by the current job.
         own_role: 'nf' or 'grid'.
         other_eig_data_path: Path to sibling JSON (may be None or missing).
-        plotter: RunPlotter instance.
+        plotter: ``RunPlotter`` (MLflow run, and optionally explicit checkpoint) or
+            ``BasePlotter`` together with ``grid_experiment`` for EIG-only / grid-posterior overlays.
         eval_step: Step to render plots for.
         levels: Contour levels.
         transform_output: Whether to transform samples to physical space.
         include_nominal: Passed to eig_designs.
         sort: Passed to eig_designs.
+        overlay_save_dir: If set, figures are written here instead of the default
+            MLflow artifacts path (used by standalone ``grid_calc`` overlays).
+        device: Torch device string for loading the NF checkpoint (default: cuda if
+            available, else cpu).
+        nf_checkpoint_path: If set, load NF weights from this ``.pt`` file. When the file embeds
+            :data:`NF_INIT_CONFIG_KEY`, MLflow ``run_args`` are not required. Otherwise pass
+            ``RunPlotter`` so ``run_data['params']`` can be used, or extend the checkpoint via training.
+        grid_experiment: Used with ``BasePlotter`` for EIG / grid-only posteriors, and with an explicit
+            ``nf_checkpoint_path`` when the checkpoint is self-contained (embedded NF init config).
 
     Returns True if overlay plots were rendered, False otherwise.
     """
+    # Local import avoids circular dependency (plotting imports util at module load).
+    from bedcosmo.plotting import BasePlotter, RunPlotter
+
     if own_role not in ('nf', 'grid'):
         raise ValueError(f"own_role must be 'nf' or 'grid', got {own_role!r}")
 
@@ -2334,32 +2698,115 @@ def render_overlay(
             except Exception as e:
                 print(f"Warning: could not load grid samples from {samples_path}: {e}")
 
+    if device is None:
+        device = "cuda:0" if torch.cuda.is_available() else "cpu"
+
+    posterior_kwargs = {"device": device}
+    eig_kwargs = {}
+    if overlay_save_dir is not None:
+        posterior_kwargs["save_dir"] = overlay_save_dir
+        eig_kwargs["save_dir"] = overlay_save_dir
+
     print(f"Rendering overlay plots (own_role={own_role}) using sibling {other_eig_data_path}...")
+
+    # --- Posterior ---
     try:
-        plotter.generate_posterior(
-            eval_step=eval_step,
-            display=['nominal', 'optimal'],
-            guide_samples=50000,
-            levels=list(levels),
-            plot_prior=True,
-            transform_output=transform_output,
-            grid_samples=grid_samples,
-            eig_data=combined,
-            filename='posterior_samples_overlay',
-        )
+        if nf_checkpoint_path:
+            if grid_experiment is not None:
+                experiment_pf = grid_experiment
+                cosmo_exp = grid_experiment.name
+                run_params = None
+            elif isinstance(plotter, RunPlotter):
+                experiment_pf = plotter.get_experiment(device=device)
+                cosmo_exp = plotter.cosmo_exp
+                run_params = plotter.run_data["params"]
+            else:
+                raise ValueError(
+                    "nf_checkpoint_path requires grid_experiment or a RunPlotter plotter."
+                )
+            post_flow = load_posterior_flow_from_checkpoint_file(
+                experiment_pf, nf_checkpoint_path, run_params, device, global_rank=0
+            )
+            pk = _posterior_kwds_from_merged_eig(combined, step_key)
+            bp = BasePlotter(cosmo_exp=cosmo_exp)
+            bp.generate_posterior(
+                experiment=experiment_pf,
+                posterior_flow=post_flow,
+                display=['nominal', 'optimal'],
+                guide_samples=50000,
+                levels=list(levels),
+                plot_prior=True,
+                transform_output=transform_output,
+                grid_samples=grid_samples,
+                filename='posterior_samples_overlay',
+                **posterior_kwargs,
+                **pk,
+            )
+        elif isinstance(plotter, RunPlotter) and nf_checkpoint_path is None:
+            plotter.generate_posterior(
+                eval_step=eval_step,
+                display=['nominal', 'optimal'],
+                guide_samples=50000,
+                levels=list(levels),
+                plot_prior=True,
+                transform_output=transform_output,
+                grid_samples=grid_samples,
+                eig_data=combined,
+                filename='posterior_samples_overlay',
+                **posterior_kwargs,
+            )
+        elif grid_experiment is not None and isinstance(plotter, BasePlotter) and not isinstance(plotter, RunPlotter):
+            if grid_samples is None:
+                print("No grid_samples available; skipping posterior overlay figure.")
+            else:
+                plotter.generate_posterior(
+                    experiment=grid_experiment,
+                    posterior_flow=None,
+                    display=(),
+                    guide_samples=50000,
+                    levels=list(levels),
+                    plot_prior=True,
+                    transform_output=transform_output,
+                    grid_samples=grid_samples,
+                    device=device,
+                    filename='posterior_samples_overlay',
+                    title="Posterior (grid nominal + prior)",
+                    **eig_kwargs,
+                )
+        else:
+            print(
+                "Warning: skipped posterior overlay (need RunPlotter for NF posteriors, or "
+                "BasePlotter + grid_experiment for grid-only)."
+            )
     except Exception as e:
         print(f"Warning: overlay generate_posterior failed: {e}")
         traceback.print_exc()
 
+    # --- EIG designs ---
     try:
-        plotter.eig_designs(
-            eval_step=eval_step,
-            sort=sort,
-            include_nominal=include_nominal,
-            eig_data=combined,
-            color='black',
-            filename='eig_designs_overlay',
-        )
+        if isinstance(plotter, RunPlotter):
+            plotter.eig_designs(
+                eval_step=eval_step,
+                sort=sort,
+                include_nominal=include_nominal,
+                eig_data=combined,
+                color='black',
+                filename='eig_designs_overlay',
+                **eig_kwargs,
+            )
+        elif grid_experiment is not None and isinstance(plotter, BasePlotter) and not isinstance(plotter, RunPlotter):
+            ek = _eig_design_kwds_from_merged_eig(
+                combined, step_key, grid_experiment, include_nominal=include_nominal
+            )
+            plotter.eig_designs(
+                sort=sort,
+                color='black',
+                filename='eig_designs_overlay',
+                **eig_kwargs,
+                **ek,
+            )
+        else:
+            print("Warning: skipped EIG overlay (unsupported plotter configuration).")
     except Exception as e:
         print(f"Warning: overlay eig_designs failed: {e}")
         traceback.print_exc()

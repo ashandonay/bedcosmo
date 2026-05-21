@@ -1084,7 +1084,7 @@ class Evaluator:
         # Make some evaluation plots
         try:
             self.plotter.generate_posterior(
-                eval_step=eval_step, display=['nominal', 'optimal'],  guide_samples=50000,
+                eval_step=eval_step, display=['nominal', 'optimal'],  guide_samples=100000,
                 levels=self.levels, plot_prior=True, transform_output=self.nf_transform_output,
                 )
             self._update_runtime()

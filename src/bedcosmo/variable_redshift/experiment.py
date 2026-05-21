@@ -51,7 +51,8 @@ class VariableRedshift(BaseExperiment, CosmologyMixin):
         device="cuda:0",
         mode='eval',
         verbose=False,
-        profile=False
+        profile=False,
+        central_params=None,
     ):
 
         self.name = 'variable_redshift'
@@ -153,7 +154,13 @@ class VariableRedshift(BaseExperiment, CosmologyMixin):
             raise ValueError(f"nominal_design must have length {self.n_redshifts}, got {nominal_values.shape[-1]}")
         self.nominal_design = nominal_values.reshape(-1)
         
-        # Compute central values using fiducial cosmology
+        from bedcosmo.util import fiducial_central_defaults
+
+        self._init_central_params(
+            self.cosmo_params,
+            central_params=central_params,
+            defaults=fiducial_central_defaults(self.cosmo_params),
+        )
         self.central_val = self._compute_central_values()
         
         # Update nominal context with central values
@@ -417,26 +424,14 @@ class VariableRedshift(BaseExperiment, CosmologyMixin):
         Returns:
             torch.Tensor: Central values for observations as 1D tensor [D_H] or [D_H, D_M]
         """
-        # Fiducial cosmology parameters (Planck18)
-        fiducial_Om = torch.tensor(0.3152, device=self.device, dtype=torch.float64)
-        fiducial_hrdrag = torch.tensor(99.079, device=self.device, dtype=torch.float64)
-        
         # Use nominal design redshift (ensure it's properly shaped)
         z_nominal = self.nominal_design.flatten()
-        
-        # Prepare parameters for D_H_func and D_M_func
+
         params = {
-            'Om': fiducial_Om.unsqueeze(-1),
-            'hrdrag': fiducial_hrdrag.unsqueeze(-1)
+            name: torch.tensor(self.central_params[name], device=self.device, dtype=torch.float64).unsqueeze(-1)
+            for name in self.cosmo_params
+            if name in self.central_params
         }
-        
-        # Add Ok, w0, wa if they're in the model (use fiducial values)
-        if 'Ok' in self.cosmo_params:
-            params['Ok'] = torch.tensor(0.0, device=self.device, dtype=torch.float64).unsqueeze(-1)
-        if 'w0' in self.cosmo_params:
-            params['w0'] = torch.tensor(-1.0, device=self.device, dtype=torch.float64).unsqueeze(-1)
-        if 'wa' in self.cosmo_params:
-            params['wa'] = torch.tensor(0.0, device=self.device, dtype=torch.float64).unsqueeze(-1)
         
         # Compute D_H at nominal redshift
         D_H_central = self.D_H_func(z_nominal, **params)

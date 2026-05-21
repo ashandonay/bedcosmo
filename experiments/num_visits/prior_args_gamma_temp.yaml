@@ -1,0 +1,21 @@
+parameters:
+  z:
+    distribution:
+      type: "gamma"
+      shape: 3.0
+      z_0: 0.3
+    plot:
+      lower: 0.1
+      upper: 3.0
+    latex: "z"
+  T:
+    distribution:
+      type: "uniform"
+      lower: 9500.0
+      upper: 10500.0
+    plot:
+      lower: 9500.0
+      upper: 10500.0
+    latex: "T\\,[\\mathrm{K}]"
+
+constraints: {}

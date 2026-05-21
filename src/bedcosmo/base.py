@@ -16,7 +16,13 @@ from pyro import distributions as dist
 from pyro.contrib.util import lexpand
 import torch
 
-from bedcosmo.util import Bijector, profile_method
+from bedcosmo.util import (
+    Bijector,
+    GETDIST_SETTINGS,
+    merge_central_params,
+    parse_json_object,
+    profile_method,
+)
 
 
 class BaseExperiment(ABC):
@@ -56,6 +62,9 @@ class BaseExperiment(ABC):
         - context_dim: Dimension of context vector
         - nominal_context: Nominal context for guide sampling
         - transform_input: Whether to transform parameters to unconstrained space
+        - central_params: dict mapping cosmological parameter names to reference
+          values used for synthetic data (via central_val) and posterior plot markers
+        - central_val: tensor of central feature / observation values in context space
     """
 
     @abstractmethod
@@ -276,7 +285,7 @@ class BaseExperiment(ABC):
                     print(f"Restoring bijector state from {source}.")
                 self.param_bijector.set_state(bijector_state, device=self.device)
 
-        # 2. Build self.prior_flow_bijector if the prior_flow was trained with
+        # Build self.prior_flow_bijector if the prior_flow was trained with
         # transform_input=True. The prior_flow's log_prob lives in *its* training
         # space, which uses *its* bijector -- not necessarily the current
         # experiment's. Keeping it as a separate object lets the EIG code apply
@@ -301,6 +310,24 @@ class BaseExperiment(ABC):
             self.prior_flow_bijector.set_state(pf_state, device=self.device)
             if getattr(self, "global_rank", 0) == 0:
                 print("Built prior_flow_bijector from prior_flow checkpoint state.")
+
+    def _init_central_params(
+        self,
+        cosmo_params,
+        central_params=None,
+        defaults=None,
+    ):
+        """Set ``self.central_params`` from experiment defaults and an optional override dict."""
+        cp = {}
+        if central_params is not None:
+            cp.update(parse_json_object(central_params))
+        self.central_params = merge_central_params(cosmo_params, cp, defaults=defaults)
+
+    def get_central_param(self, name, default=None):
+        """Return a central reference value for a cosmological parameter, if set."""
+        if not hasattr(self, "central_params"):
+            return default
+        return self.central_params.get(name, default)
 
     @profile_method
     def params_to_unconstrained(self, params, bijector_class=None):
@@ -426,6 +453,7 @@ class BaseExperiment(ABC):
                 samples=param_samples.cpu().numpy(),
                 names=names,
                 labels=labels,
+                settings=GETDIST_SETTINGS,
             )
 
         return param_samples_gd
@@ -484,6 +512,7 @@ class BaseExperiment(ABC):
                 samples=param_samples.cpu().numpy(),
                 names=self.cosmo_params,
                 labels=self.latex_labels,
+                settings=GETDIST_SETTINGS,
             )
         return samples_gd
 

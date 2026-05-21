@@ -25,9 +25,11 @@ if [ $# -eq 0 ]; then
     echo "  resume               - Resume training job"
     echo "  restart              - Restart training job"
     echo "  grid                 - Grid-based EIG calculation (CPU or GPU node)"
+    echo "                         Optional: --nf-eig-data; add --nf-checkpoint PATH.pt (+ run id) for NF posteriors, else EIG-only + grid posterior"
     echo ""
     echo "Grid options:"
-    echo "  --node-type <cpu|gpu> - SLURM node type for grid jobs (default: cpu)"
+    echo "  --node-type <cpu|gpu> - SLURM node type for grid jobs (default: cpu). This selects the node;"
+    echo "                         --device alone does not (use --node-type gpu for GPU nodes)."
     echo ""
     echo "Available cosmo_models:"
     echo "  base, base_omegak, base_w, base_w_wa, base_omegak_w_wa"
@@ -73,6 +75,9 @@ if [ $# -eq 0 ]; then
     echo "  ./submit.sh restart num_tracers abc123 10000"
     echo "  ./submit.sh grid num_visits --param-pts 1000 --feature-pts 500"
     echo "  ./submit.sh grid num_visits --node-type gpu --param-pts 1000 --feature-pts 500"
+    echo "  ./submit.sh grid num_visits --param-pts 500 --nf-eig-data /path/to/eig_data_nf.json"
+    echo "  ./submit.sh grid num_visits --param-pts 500 --nf-eig-data /path/to/eig_data_nf.json --nf-checkpoint /path/to/checkpoint_rank_0_50000.pt"
+    echo "    (new checkpoints embed nf_init_config; old .pt files also need --nf-overlay-run-id)"
     echo "  ./submit.sh eval num_visits <run_id> --grid --grid-param-pts 2000 --grid-feature-pts 800"
     echo "  ./submit.sh train num_tracers base_w_wa --initial-lr 0.0001 --log-usage"
     exit 1
@@ -683,6 +688,12 @@ for key, value in data.items():
     elif isinstance(value, list):
         formatted = json.dumps(value)
         print(f'{key}={formatted}')
+    elif isinstance(value, dict):
+        if key == 'central_params':
+            for pname, pval in value.items():
+                print(f'central_param_{pname}={pval}')
+        else:
+            print(f'{key}={json.dumps(value)}')
     elif isinstance(value, bool):
         print(f'{key}={str(value).lower()}')
     else:
@@ -852,6 +863,18 @@ case $JOB_TYPE in
                 YAML_ARGS+=("--device" "cuda")
             else
                 YAML_ARGS+=("--device" "cpu")
+            fi
+        fi
+
+        # --device alone does not allocate a GPU node; grid.sh forces JAX_PLATFORMS=cpu on CPU nodes.
+        if [ "$EXECUTION_MODE" = "slurm" ] && [ "$GRID_NODE_TYPE" = "cpu" ] && [[ -v CLI_ARGS["device"] ]]; then
+            dev_lc=$(printf '%s' "${CLI_ARGS["device"]}" | tr '[:upper:]' '[:lower:]')
+            if [[ "$dev_lc" == gpu || "$dev_lc" == cuda* ]]; then
+                echo ""
+                echo "Warning: --device ${CLI_ARGS["device"]} asks for GPU-backed compute, but --node-type is cpu (the default)."
+                echo "         SLURM will use a CPU node; scripts/slurm/grid.sh sets JAX_PLATFORMS=cpu there."
+                echo "         For GPU grid runs, pass --node-type gpu (optionally with --gpus N)."
+                echo ""
             fi
         fi
 
@@ -1207,6 +1230,12 @@ for key, value in data.items():
     elif isinstance(value, list):
         formatted = json.dumps(value)
         print(f'{key}={formatted}')
+    elif isinstance(value, dict):
+        if key == 'central_params':
+            for pname, pval in value.items():
+                print(f'central_param_{pname}={pval}')
+        else:
+            print(f'{key}={json.dumps(value)}')
     elif isinstance(value, bool):
         print(f'{key}={str(value).lower()}')
     else:
@@ -1285,7 +1314,7 @@ else
     echo ""
 
     if [ "$JOB_TYPE" = "grid" ]; then
-        # grid_calc is CPU-only, no torchrun needed
+        # grid_calc: single-process python (no torchrun); use --node-type gpu for GPU SLURM nodes
         echo "Executing: python -m $PYTHON_MODULE [${#FINAL_ARGS[@]} arguments]"
         echo ""
         python -m "$PYTHON_MODULE" "${FINAL_ARGS[@]}" > "$LOG_FILE" 2>&1
@@ -1388,6 +1417,12 @@ for key, value in data.items():
     elif isinstance(value, list):
         formatted = json.dumps(value)
         print(f'{key}={formatted}')
+    elif isinstance(value, dict):
+        if key == 'central_params':
+            for pname, pval in value.items():
+                print(f'central_param_{pname}={pval}')
+        else:
+            print(f'{key}={json.dumps(value)}')
     elif isinstance(value, bool):
         print(f'{key}={str(value).lower()}')
     else:
