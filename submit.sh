@@ -24,7 +24,12 @@ if [ $# -eq 0 ]; then
     echo "  eval                 - Evaluation job"
     echo "  resume               - Resume training job"
     echo "  restart              - Restart training job"
-    echo "  grid                 - Grid-based EIG calculation (CPU)"
+    echo "  grid                 - Grid-based EIG calculation (CPU or GPU node)"
+    echo "                         Optional: --nf-eig-data; add --nf-checkpoint PATH.pt (+ run id) for NF posteriors, else EIG-only + grid posterior"
+    echo ""
+    echo "Grid options:"
+    echo "  --node-type <cpu|gpu> - SLURM node type for grid jobs (default: cpu). This selects the node;"
+    echo "                         --device alone does not (use --node-type gpu for GPU nodes)."
     echo ""
     echo "Available cosmo_models:"
     echo "  base, base_omegak, base_w, base_w_wa, base_omegak_w_wa"
@@ -53,6 +58,12 @@ if [ $# -eq 0 ]; then
     echo "  --no-eval           - Disable auto-eval (on by default, off for --debug)"
     echo "  --eval-<arg> <val>  - Pass args to auto-eval (e.g. --eval-grid --eval-param-pts 2000)"
     echo "  --eval-time <HH:MM> - SLURM time limit for auto-eval job (default: 00:30)"
+    echo "  --grid              - (eval only) Dispatch a sibling CPU grid job in parallel with NF eval"
+    echo "                        Unprefixed --<arg> are forwarded to BOTH eval and grid jobs."
+    echo "  --grid-eig-data <p> - (eval only, without --grid) Overlay an existing grid eig_data JSON"
+    echo "                        on the NF eval. Pass-through to evaluate.py."
+    echo "  --grid-<arg> <val>  - Override args for the grid job only (wins over unprefixed --<arg>)"
+    echo "  --grid-time <HH:MM> - SLURM time limit for sibling grid job (default: same as --time)"
     echo "  --log-usage, --profile, --restart-optimizer"
     echo ""
     echo "Examples:"
@@ -63,6 +74,11 @@ if [ $# -eq 0 ]; then
     echo "  ./submit.sh resume num_tracers abc123 5000 --time 01:00 --queue regular"
     echo "  ./submit.sh restart num_tracers abc123 10000"
     echo "  ./submit.sh grid num_visits --param-pts 1000 --feature-pts 500"
+    echo "  ./submit.sh grid num_visits --node-type gpu --param-pts 1000 --feature-pts 500"
+    echo "  ./submit.sh grid num_visits --param-pts 500 --nf-eig-data /path/to/eig_data_nf.json"
+    echo "  ./submit.sh grid num_visits --param-pts 500 --nf-eig-data /path/to/eig_data_nf.json --nf-checkpoint /path/to/checkpoint_rank_0_50000.pt"
+    echo "    (new checkpoints embed nf_init_config; old .pt files also need --nf-overlay-run-id)"
+    echo "  ./submit.sh eval num_visits <run_id> --grid --grid-param-pts 2000 --grid-feature-pts 800"
     echo "  ./submit.sh train num_tracers base_w_wa --initial-lr 0.0001 --log-usage"
     exit 1
 fi
@@ -96,6 +112,10 @@ AUTO_EVAL=true
 AUTO_EVAL_SET_BY_USER=false
 EVAL_TIME="00:30"
 EVAL_EXTRA_ARGS=()  # Args prefixed with --eval_ to pass to auto-eval job
+GRID_NODE_TYPE="cpu"  # For grid jobs: cpu or gpu SLURM node
+GRID=false  # Eval --grid flag: also dispatch a sibling grid job
+GRID_TIME=""  # SLURM time for sibling grid job (defaults to SLURM_TIME if unset)
+GRID_EXTRA_ARGS=()  # Args prefixed with --grid- to pass to the sibling grid job
 
 # New unified options
 SLURM_TIME="00:30"
@@ -209,6 +229,34 @@ while [[ $# -gt 0 ]]; do
             EVAL_TIME="$2"
             shift 2
             ;;
+        --node-type)
+            GRID_NODE_TYPE="$2"
+            shift 2
+            ;;
+        --grid)
+            GRID=true
+            shift 1
+            ;;
+        --grid-time)
+            GRID_TIME="$2"
+            shift 2
+            ;;
+        --grid-eig-data)
+            # Pass-through to the eval job (overlay an existing grid eig_data file).
+            CLI_ARGS["grid-eig-data"]="$2"
+            CLI_ARGS_LIST+=("--grid-eig-data" "$2")
+            shift 2
+            ;;
+        --grid-*)
+            grid_key="${1#--grid-}"
+            if [[ $# -gt 1 ]] && [[ ! $2 =~ ^-- ]]; then
+                GRID_EXTRA_ARGS+=("--$grid_key" "$2")
+                shift 2
+            else
+                GRID_EXTRA_ARGS+=("--$grid_key")
+                shift 1
+            fi
+            ;;
         --exclude)
             SBATCH_ARGS+=("--exclude=$2")
             shift 2
@@ -296,6 +344,9 @@ if [[ "$SLURM_TIME" =~ ^[0-9]+:[0-9]+$ ]]; then
 fi
 if [[ "$EVAL_TIME" =~ ^[0-9]+:[0-9]+$ ]]; then
     EVAL_TIME="${EVAL_TIME}:00"
+fi
+if [[ "$GRID_TIME" =~ ^[0-9]+:[0-9]+$ ]]; then
+    GRID_TIME="${GRID_TIME}:00"
 fi
 
 # --debug implies SLURM debug queue (unless --queue was explicitly set)
@@ -484,6 +535,46 @@ except Exception as e:
 fi
 
 # ──────────────────────────────────────────────────────────────────────
+# For eval --grid, look up MLflow experiment_id to derive linked output paths.
+# ──────────────────────────────────────────────────────────────────────
+GRID_EXP_ID=""
+GRID_NF_PATH=""
+GRID_GRID_PATH=""
+if [ "$JOB_TYPE" = "eval" ] && [ "$GRID" = true ]; then
+    if [[ -v CLI_ARGS["grid-eig-data"] ]] || [[ -v CLI_ARGS["nf-eig-data"] ]]; then
+        echo "Error: --grid implies auto-generated sibling output paths; cannot combine with --grid-eig-data/--nf-eig-data"
+        echo "       Drop --grid to overlay an existing grid eig_data file with a fresh NF eval."
+        exit 1
+    fi
+    echo "Looking up MLflow experiment_id for run ${RUN_ID}..."
+    GRID_EXP_ID=$(timeout 30 python3 -c "
+import mlflow, os, sys, warnings
+from mlflow.tracking import MlflowClient
+warnings.filterwarnings('ignore', category=FutureWarning)
+mlflow.set_tracking_uri('file:' + os.environ['SCRATCH'] + '/bedcosmo/${COSMO_EXP}/mlruns')
+try:
+    run = MlflowClient().get_run('${RUN_ID}')
+    print(run.info.experiment_id, flush=True)
+except Exception as e:
+    print(f'ERROR: {e}', file=sys.stderr)
+    sys.exit(1)
+" 2>/dev/null)
+    if [ -z "$GRID_EXP_ID" ]; then
+        echo "Error: Could not resolve MLflow experiment_id for run ${RUN_ID}; cannot submit sibling grid job"
+        exit 1
+    fi
+    GRID_T=$(date +"%Y%m%d_%H%M%S")
+    GRID_ARTIFACTS_DIR="$SCRATCH/bedcosmo/$COSMO_EXP/mlruns/$GRID_EXP_ID/$RUN_ID/artifacts"
+    mkdir -p "$GRID_ARTIFACTS_DIR"
+    GRID_NF_PATH="$GRID_ARTIFACTS_DIR/eig_data_nf_${GRID_T}.json"
+    GRID_GRID_PATH="$GRID_ARTIFACTS_DIR/eig_data_grid_${GRID_T}.json"
+    echo "Eval --grid: linking sibling jobs via"
+    echo "  NF output:   $GRID_NF_PATH"
+    echo "  Grid output: $GRID_GRID_PATH"
+    echo ""
+fi
+
+# ──────────────────────────────────────────────────────────────────────
 # Load YAML config
 # ──────────────────────────────────────────────────────────────────────
 if [ "$JOB_TYPE" = "resume" ] || [ "$JOB_TYPE" = "restart" ]; then
@@ -597,6 +688,12 @@ for key, value in data.items():
     elif isinstance(value, list):
         formatted = json.dumps(value)
         print(f'{key}={formatted}')
+    elif isinstance(value, dict):
+        if key == 'central_params':
+            for pname, pval in value.items():
+                print(f'central_param_{pname}={pval}')
+        else:
+            print(f'{key}={json.dumps(value)}')
     elif isinstance(value, bool):
         print(f'{key}={str(value).lower()}')
     else:
@@ -663,6 +760,9 @@ case $JOB_TYPE in
             exit 1
         fi
         FINAL_ARGS=("--cosmo-exp" "$COSMO_EXP" "--run-id" "$RUN_ID" "${YAML_ARGS[@]}")
+        if [ "$GRID" = true ]; then
+            FINAL_ARGS+=("--nf-eig-data" "$GRID_NF_PATH" "--grid-eig-data" "$GRID_GRID_PATH")
+        fi
         echo ""
         echo "Eval job configuration:"
         echo "  Cosmo experiment: $COSMO_EXP"
@@ -674,6 +774,12 @@ case $JOB_TYPE in
             echo "  Eval params from YAML: ${#YAML_ARGS[@]} arguments"
         else
             echo "  Eval params from YAML: none (using defaults or command-line only)"
+        fi
+        if [ "$GRID" = true ]; then
+            echo "  Sibling grid job: enabled (CPU)"
+            if [ ${#GRID_EXTRA_ARGS[@]} -gt 0 ]; then
+                echo "  Grid extra args: ${GRID_EXTRA_ARGS[*]}"
+            fi
         fi
         ;;
 
@@ -742,10 +848,40 @@ case $JOB_TYPE in
     grid)
         SLURM_SCRIPT_FILE="grid.sh"
         PYTHON_MODULE="bedcosmo.grid_calc"
+
+        # Validate node-type selection
+        if [ "$GRID_NODE_TYPE" != "cpu" ] && [ "$GRID_NODE_TYPE" != "gpu" ]; then
+            echo "Error: --node-type must be 'cpu' or 'gpu' (got '$GRID_NODE_TYPE')"
+            exit 1
+        fi
+
+        # Auto-set --device to match node type unless user explicitly passed it.
+        # Use "cuda" (not "gpu") for GPU — torch needs "cuda"/"cpu", and grid_calc's
+        # _normalize_bed_jax_device() maps "cuda" -> JAX "gpu" internally.
+        if [[ ! -v CLI_ARGS["device"] ]]; then
+            if [ "$GRID_NODE_TYPE" = "gpu" ]; then
+                YAML_ARGS+=("--device" "cuda")
+            else
+                YAML_ARGS+=("--device" "cpu")
+            fi
+        fi
+
+        # --device alone does not allocate a GPU node; grid.sh forces JAX_PLATFORMS=cpu on CPU nodes.
+        if [ "$EXECUTION_MODE" = "slurm" ] && [ "$GRID_NODE_TYPE" = "cpu" ] && [[ -v CLI_ARGS["device"] ]]; then
+            dev_lc=$(printf '%s' "${CLI_ARGS["device"]}" | tr '[:upper:]' '[:lower:]')
+            if [[ "$dev_lc" == gpu || "$dev_lc" == cuda* ]]; then
+                echo ""
+                echo "Warning: --device ${CLI_ARGS["device"]} asks for GPU-backed compute, but --node-type is cpu (the default)."
+                echo "         SLURM will use a CPU node; scripts/slurm/grid.sh sets JAX_PLATFORMS=cpu there."
+                echo "         For GPU grid runs, pass --node-type gpu (optionally with --gpus N)."
+                echo ""
+            fi
+        fi
+
         # For SLURM: pass --cosmo-exp so grid.sh can parse it (same pattern as other scripts)
         # For local: FINAL_ARGS are passed directly to python -m, which expects positional cosmo_exp
         if [ "$EXECUTION_MODE" = "slurm" ]; then
-            FINAL_ARGS=("--cosmo-exp" "$COSMO_EXP" "${YAML_ARGS[@]}")
+            FINAL_ARGS=("--cosmo-exp" "$COSMO_EXP" "--node-type" "$GRID_NODE_TYPE" "${YAML_ARGS[@]}")
         else
             FINAL_ARGS=("$COSMO_EXP" "${YAML_ARGS[@]}")
         fi
@@ -760,9 +896,10 @@ case $JOB_TYPE in
         ;;
 esac
 
-# Log/job name: use job type so logs are labeled train, eval, resume, restart (or just "debug" when --debug)
+# Log/job name: use job type so logs are labeled train, eval, resume, restart, grid.
+# In --debug mode, train/resume/restart get relabeled to "debug"; grid/eval keep their own names.
 LOG_NAME="$JOB_TYPE"
-if [ "$DEBUG" = true ]; then
+if [ "$DEBUG" = true ] && [ "$JOB_TYPE" != "grid" ] && [ "$JOB_TYPE" != "eval" ]; then
     LOG_NAME="debug"
 fi
 
@@ -910,6 +1047,14 @@ if [ "$EXECUTION_MODE" = "slurm" ]; then
     if [ "$GPUS_SET_BY_USER" = true ]; then
         SBATCH_ARGS+=("--gpus-per-node=$GPUS")
     fi
+    # For grid jobs, always set the node-type constraint (grid.sh has no #SBATCH -C).
+    # For gpu mode, also request GPU(s) — default to 1 if user didn't set --gpus.
+    if [ "$JOB_TYPE" = "grid" ]; then
+        SBATCH_ARGS+=("--constraint=$GRID_NODE_TYPE")
+        if [ "$GRID_NODE_TYPE" = "gpu" ] && [ "$GPUS_SET_BY_USER" = false ]; then
+            SBATCH_ARGS+=("--gpus-per-node=1")
+        fi
+    fi
     if [ "$DEBUG" = true ]; then
         SBATCH_ARGS+=("--mail-type=NONE")
     fi
@@ -953,6 +1098,52 @@ if [ "$EXECUTION_MODE" = "slurm" ]; then
     echo "$SBATCH_OUTPUT"
     echo ""
     echo "Check status with: squeue -u $USER"
+
+    # ──────────────────────────────────────────────────────────────
+    # Sibling grid job (eval --grid): dispatch a CPU grid job that
+    # writes to the same MLflow artifacts dir; runs in parallel with eval.
+    # ──────────────────────────────────────────────────────────────
+    if [ "$JOB_TYPE" = "eval" ] && [ "$GRID" = true ]; then
+        echo ""
+        echo "==========================================="
+        echo "Submitting sibling grid job (CPU)"
+        echo "==========================================="
+
+        GRID_SLURM_TIME="${GRID_TIME:-$SLURM_TIME}"
+        GRID_SBATCH_ARGS=("--job-name=grid" "--time=$GRID_SLURM_TIME" "--qos=$SLURM_QUEUE" "--nodes=1" "--constraint=cpu")
+        # Forward unprefixed --* args (CLI_ARGS_LIST) so they reach grid_calc too;
+        # GRID_EXTRA_ARGS comes last so --grid-* overrides any same-named unprefixed arg.
+        # --device cpu is appended after CLI_ARGS_LIST so the sibling stays CPU even if
+        # the user passed --device cuda for the eval job.
+        GRID_FINAL_ARGS=("--cosmo-exp" "$COSMO_EXP" "--node-type" "cpu" "--run-id" "$RUN_ID" \
+            "--nf-eig-data" "$GRID_NF_PATH" "--grid-eig-data" "$GRID_GRID_PATH" \
+            "${CLI_ARGS_LIST[@]}" "--device" "cpu" \
+            "${GRID_EXTRA_ARGS[@]}")
+
+        GRID_CLI_OVERRIDES_STR=""
+        for arg in "${CLI_ARGS_LIST[@]}" "${GRID_EXTRA_ARGS[@]}"; do
+            GRID_CLI_OVERRIDES_STR+="$arg "
+        done
+        GRID_CLI_OVERRIDES_STR="${GRID_CLI_OVERRIDES_STR% }"
+        export BED_CLI_OVERRIDES="$GRID_CLI_OVERRIDES_STR"
+
+        TEMP_GRID_OUTPUT=$(mktemp)
+        set +e
+        sbatch "${GRID_SBATCH_ARGS[@]}" "$SLURM_SCRIPT_DIR/grid.sh" "${GRID_FINAL_ARGS[@]}" > "$TEMP_GRID_OUTPUT" 2>&1
+        GRID_EXIT_CODE=$?
+        set -e
+        GRID_OUTPUT=$(cat "$TEMP_GRID_OUTPUT")
+        rm -f "$TEMP_GRID_OUTPUT"
+
+        if [ $GRID_EXIT_CODE -ne 0 ]; then
+            echo "Warning: Failed to submit sibling grid job (exit code: $GRID_EXIT_CODE)"
+            echo "$GRID_OUTPUT"
+        else
+            echo "$GRID_OUTPUT"
+            echo ""
+            echo "Grid job runs in parallel with eval; whichever finishes second renders overlay plots."
+        fi
+    fi
 
     # ──────────────────────────────────────────────────────────────
     # Auto-eval: submit dependent eval job after training completes
@@ -1039,6 +1230,12 @@ for key, value in data.items():
     elif isinstance(value, list):
         formatted = json.dumps(value)
         print(f'{key}={formatted}')
+    elif isinstance(value, dict):
+        if key == 'central_params':
+            for pname, pval in value.items():
+                print(f'central_param_{pname}={pval}')
+        else:
+            print(f'{key}={json.dumps(value)}')
     elif isinstance(value, bool):
         print(f'{key}={str(value).lower()}')
     else:
@@ -1117,7 +1314,7 @@ else
     echo ""
 
     if [ "$JOB_TYPE" = "grid" ]; then
-        # grid_calc is CPU-only, no torchrun needed
+        # grid_calc: single-process python (no torchrun); use --node-type gpu for GPU SLURM nodes
         echo "Executing: python -m $PYTHON_MODULE [${#FINAL_ARGS[@]} arguments]"
         echo ""
         python -m "$PYTHON_MODULE" "${FINAL_ARGS[@]}" > "$LOG_FILE" 2>&1
@@ -1134,7 +1331,26 @@ else
     else
         echo "Executing: torchrun --nproc_per_node=$GPUS -m $PYTHON_MODULE [${#FINAL_ARGS[@]} arguments]"
         echo ""
-        torchrun --nproc_per_node=$GPUS -m "$PYTHON_MODULE" "${FINAL_ARGS[@]}" > "$LOG_FILE" 2>&1
+        torchrun --nproc_per_node=$GPUS -m "$PYTHON_MODULE" "${FINAL_ARGS[@]}" > "$LOG_FILE" 2>&1 &
+        TRAIN_PID=$!
+
+        if [ "$JOB_TYPE" = "eval" ] && [ "$GRID" = true ]; then
+            GRID_LOG_FILE="${LOG_BASE_DIR}/${TIMESTAMP}_grid.log"
+            # Forward unprefixed --* args (CLI_ARGS_LIST) so they reach grid_calc too;
+            # GRID_EXTRA_ARGS comes last so --grid-* overrides any same-named unprefixed arg.
+            GRID_FINAL_ARGS=("$COSMO_EXP" "--run-id" "$RUN_ID" \
+                "--nf-eig-data" "$GRID_NF_PATH" "--grid-eig-data" "$GRID_GRID_PATH" \
+                "${CLI_ARGS_LIST[@]}" "--device" "cpu" "${GRID_EXTRA_ARGS[@]}")
+            echo "Executing sibling grid job: python -m bedcosmo.grid_calc [${#GRID_FINAL_ARGS[@]} arguments]"
+            echo "Grid log: $GRID_LOG_FILE"
+            python -m bedcosmo.grid_calc "${GRID_FINAL_ARGS[@]}" > "$GRID_LOG_FILE" 2>&1 &
+            GRID_PID=$!
+            wait "$GRID_PID"
+            GRID_EXIT_CODE=$?
+            echo "Sibling grid job exited with code $GRID_EXIT_CODE"
+        fi
+
+        wait "$TRAIN_PID"
         TRAIN_EXIT_CODE=$?
     fi
 
@@ -1201,6 +1417,12 @@ for key, value in data.items():
     elif isinstance(value, list):
         formatted = json.dumps(value)
         print(f'{key}={formatted}')
+    elif isinstance(value, dict):
+        if key == 'central_params':
+            for pname, pval in value.items():
+                print(f'central_param_{pname}={pval}')
+        else:
+            print(f'{key}={json.dumps(value)}')
     elif isinstance(value, bool):
         print(f'{key}={str(value).lower()}')
     else:

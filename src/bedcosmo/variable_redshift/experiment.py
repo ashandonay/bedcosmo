@@ -4,6 +4,7 @@ import yaml
 import json
 import mlflow
 import pandas as pd
+import jax.numpy as jnp
 import numpy as np
 import pyro
 from pyro import distributions as dist
@@ -22,7 +23,7 @@ import math
 import inspect
 
 from bedcosmo.custom_dist import ConstrainedUniform2D
-from bedcosmo.util import Bijector, auto_seed, profile_method, get_experiment_config_path
+from bedcosmo.util import auto_seed, load_prior_flow_from_file, profile_method, get_experiment_config_path
 from bedcosmo.base import BaseExperiment
 from bedcosmo.cosmology import CosmologyMixin, _interp1
 
@@ -50,7 +51,8 @@ class VariableRedshift(BaseExperiment, CosmologyMixin):
         device="cuda:0",
         mode='eval',
         verbose=False,
-        profile=False
+        profile=False,
+        central_params=None,
     ):
 
         self.name = 'variable_redshift'
@@ -114,24 +116,8 @@ class VariableRedshift(BaseExperiment, CosmologyMixin):
         self.cosmo_params = list(self.prior.keys())
         
         self.transform_input = transform_input
-        if self.transform_input:
-            # Initialize bijector for parameter transformation
-            self.param_bijector = Bijector(self, cdf_bins=5000, cdf_samples=1e7)
-            if bijector_state is not None:
-                if self.global_rank == 0:
-                    print(f"Restoring bijector state from checkpoint.")
-                self.param_bijector.set_state(bijector_state)
-            
-            # For consistency with desi bijector (even though we may not have DESI data)
-            self.desi_bijector = self.param_bijector
-        
-        # Store parameter indices for transformations
-        self._idx_Om = [self.cosmo_params.index('Om')] if 'Om' in self.cosmo_params else []
-        self._idx_Ok = [self.cosmo_params.index('Ok')] if 'Ok' in self.cosmo_params else []
-        self._idx_w0 = [self.cosmo_params.index('w0')] if 'w0' in self.cosmo_params else []
-        self._idx_wa = [self.cosmo_params.index('wa')] if 'wa' in self.cosmo_params else []
-        self._idx_hr = [self.cosmo_params.index('hrdrag')] if 'hrdrag' in self.cosmo_params else []
-        
+        self._init_param_bijector(bijector_state=bijector_state)
+
         # Observation labels
         self.observation_labels = ["y"]  # Single observation label for MultivariateNormal
         
@@ -168,7 +154,13 @@ class VariableRedshift(BaseExperiment, CosmologyMixin):
             raise ValueError(f"nominal_design must have length {self.n_redshifts}, got {nominal_values.shape[-1]}")
         self.nominal_design = nominal_values.reshape(-1)
         
-        # Compute central values using fiducial cosmology
+        from bedcosmo.util import fiducial_central_defaults
+
+        self._init_central_params(
+            self.cosmo_params,
+            central_params=central_params,
+            defaults=fiducial_central_defaults(self.cosmo_params),
+        )
         self.central_val = self._compute_central_values()
         
         # Update nominal context with central values
@@ -373,6 +365,22 @@ class VariableRedshift(BaseExperiment, CosmologyMixin):
         if 'hrdrag' not in model_parameters:
             setattr(self, 'hrdrag_multiplier', 100.0)
 
+        # Load prior flow if specified (absolute path required).
+        if prior_flow:
+            if not os.path.isabs(prior_flow):
+                raise ValueError(
+                    f"prior_flow path '{prior_flow}' must be an absolute path. "
+                    "Relative paths are not supported."
+                )
+            self.prior_flow, self.prior_flow_metadata = load_prior_flow_from_file(
+                prior_flow, self.device, self.global_rank,
+            )
+            if self.global_rank == 0:
+                print("Using trained posterior model as prior for parameter sampling (loaded from prior_args.yaml)")
+        else:
+            self.prior_flow = None
+            self.prior_flow_metadata = None
+
         return prior, param_constraints, latex_labels
 
     def error_func(self, z, D_H, D_M=None):
@@ -416,26 +424,14 @@ class VariableRedshift(BaseExperiment, CosmologyMixin):
         Returns:
             torch.Tensor: Central values for observations as 1D tensor [D_H] or [D_H, D_M]
         """
-        # Fiducial cosmology parameters (Planck18)
-        fiducial_Om = torch.tensor(0.3152, device=self.device, dtype=torch.float64)
-        fiducial_hrdrag = torch.tensor(99.079, device=self.device, dtype=torch.float64)
-        
         # Use nominal design redshift (ensure it's properly shaped)
         z_nominal = self.nominal_design.flatten()
-        
-        # Prepare parameters for D_H_func and D_M_func
+
         params = {
-            'Om': fiducial_Om.unsqueeze(-1),
-            'hrdrag': fiducial_hrdrag.unsqueeze(-1)
+            name: torch.tensor(self.central_params[name], device=self.device, dtype=torch.float64).unsqueeze(-1)
+            for name in self.cosmo_params
+            if name in self.central_params
         }
-        
-        # Add Ok, w0, wa if they're in the model (use fiducial values)
-        if 'Ok' in self.cosmo_params:
-            params['Ok'] = torch.tensor(0.0, device=self.device, dtype=torch.float64).unsqueeze(-1)
-        if 'w0' in self.cosmo_params:
-            params['w0'] = torch.tensor(-1.0, device=self.device, dtype=torch.float64).unsqueeze(-1)
-        if 'wa' in self.cosmo_params:
-            params['wa'] = torch.tensor(0.0, device=self.device, dtype=torch.float64).unsqueeze(-1)
         
         # Compute D_H at nominal redshift
         D_H_central = self.D_H_func(z_nominal, **params)
@@ -462,75 +458,6 @@ class VariableRedshift(BaseExperiment, CosmologyMixin):
                 print(f"  D_M/r_d = {D_M_val.reshape(-1)[0].item():.4f}")
         
         return central_vals
-
-    @profile_method
-    def params_to_unconstrained(self, params, bijector_class=None):
-        """Vectorized: map PHYSICAL space -> unconstrained R^D."""
-        D = len(self.cosmo_params)
-        assert params.shape[-1] == D, f"Expected last dim {D}, got {params.shape[-1]}"
-        y = params.clone()
-
-        if bijector_class is None:
-            bijector_class = self.param_bijector
-
-        # Om in (0,1): use empirical prior transformation
-        if self._idx_Om:
-            x = params[..., self._idx_Om]
-            y[..., self._idx_Om] = bijector_class.prior_to_gaussian(x, 'Om')
-
-        # Ok in (-0.3, 0.3): use empirical prior transformation
-        if self._idx_Ok:
-            x = params[..., self._idx_Ok]
-            y[..., self._idx_Ok] = bijector_class.prior_to_gaussian(x, 'Ok')
-
-        # w0 in (-3, 1): use empirical prior transformation
-        if self._idx_w0:
-            x = params[..., self._idx_w0]
-            y[..., self._idx_w0] = bijector_class.prior_to_gaussian(x, 'w0')
-
-        # wa in (-3, 2): use empirical prior transformation
-        if self._idx_wa:
-            x = params[..., self._idx_wa]
-            y[..., self._idx_wa] = bijector_class.prior_to_gaussian(x, 'wa')
-
-        # hrdrag > 0: use empirical prior transformation
-        if self._idx_hr:
-            x = params[..., self._idx_hr]
-            y[..., self._idx_hr] = bijector_class.prior_to_gaussian(x, 'hrdrag')
-
-        return y
-
-    @profile_method
-    def params_from_unconstrained(self, y, bijector_class=None):
-        """Vectorized: map unconstrained R^D -> PHYSICAL space."""
-        D = len(self.cosmo_params)
-        assert y.shape[-1] == D, f"Expected last dim {D}, got {y.shape[-1]}"
-        x = y.clone()
-
-        if bijector_class is None:
-            bijector_class = self.param_bijector
-        
-        # Om: use empirical prior inverse transformation
-        if self._idx_Om:
-            x[..., self._idx_Om] = bijector_class.gaussian_to_prior(y[..., self._idx_Om], 'Om')
-
-        # Ok: use empirical prior inverse transformation
-        if self._idx_Ok:
-            x[..., self._idx_Ok] = bijector_class.gaussian_to_prior(y[..., self._idx_Ok], 'Ok')
-
-        # w0: use empirical prior inverse transformation
-        if self._idx_w0:
-            x[..., self._idx_w0] = bijector_class.gaussian_to_prior(y[..., self._idx_w0], 'w0')
-
-        # wa: use empirical prior inverse transformation
-        if self._idx_wa:
-            x[..., self._idx_wa] = bijector_class.gaussian_to_prior(y[..., self._idx_wa], 'wa')
-
-        # hrdrag: use empirical prior inverse transformation
-        if self._idx_hr:
-            x[..., self._idx_hr] = bijector_class.gaussian_to_prior(y[..., self._idx_hr], 'hrdrag')
-
-        return x
 
     # Note: _E_of_z, D_H_func, D_M_func are inherited from CosmologyMixin
 
@@ -788,7 +715,7 @@ class VariableRedshift(BaseExperiment, CosmologyMixin):
         # Grid values need .unsqueeze(-1) to have shape (..., 1) for plate broadcasting
         parameters = {}
         for key in params.names:
-            param_array = torch.tensor(getattr(params, key), device=self.device, dtype=torch.float64)
+            param_array = torch.tensor(np.asarray(getattr(params, key)), device=self.device, dtype=torch.float64)
             # Add trailing dimension for plate system
             parameters[key] = param_array.unsqueeze(-1)
         
@@ -800,24 +727,24 @@ class VariableRedshift(BaseExperiment, CosmologyMixin):
             raise ValueError(
                 f"Design axis '{design_axis}' not found in grid names {list(designs.names)}."
             )
-        z_array = torch.tensor(getattr(designs, design_axis), device=self.device, dtype=torch.float64)
+        z_array = torch.tensor(np.asarray(getattr(designs, design_axis)), device=self.device, dtype=torch.float64)
         # z also needs proper shape for broadcasting
         z = z_array.unsqueeze(-1)
 
         # Compute D_H mean and likelihood
         D_H_mean = self.D_H_func(z, **parameters)
-        
-        # Extract feature values (convert to numpy for comparison)
-        D_H_obs = getattr(features, features.names[0])
-        D_H_diff = D_H_obs - D_H_mean.cpu().numpy()
-        likelihood = np.exp(-0.5 * (D_H_diff / self.sigma_D_H) ** 2)
-        
+
+        # Extract feature values (convert to jnp for comparison)
+        D_H_obs = jnp.asarray(getattr(features, features.names[0]))
+        D_H_diff = D_H_obs - jnp.asarray(D_H_mean.cpu().numpy())
+        likelihood = jnp.exp(-0.5 * (D_H_diff / self.sigma_D_H) ** 2)
+
         # If including D_M, add its contribution
         if self.include_D_M:
             D_M_mean = self.D_M_func(z, **parameters)
-            D_M_obs = getattr(features, features.names[1])
-            D_M_diff = D_M_obs - D_M_mean.cpu().numpy()
-            D_M_likelihood = np.exp(-0.5 * (D_M_diff / self.sigma_D_M) ** 2)
+            D_M_obs = jnp.asarray(getattr(features, features.names[1]))
+            D_M_diff = D_M_obs - jnp.asarray(D_M_mean.cpu().numpy())
+            D_M_likelihood = jnp.exp(-0.5 * (D_M_diff / self.sigma_D_M) ** 2)
             likelihood = likelihood * D_M_likelihood
         if (
             getattr(params, "_stack_offset", 0) == 0
@@ -825,7 +752,7 @@ class VariableRedshift(BaseExperiment, CosmologyMixin):
             and getattr(designs, "_stack_offset", 0) == 0
         ):
             param_shape = tuple(params.shape)
-            likelihood = np.asarray(likelihood, dtype=np.float64)
+            likelihood = jnp.asarray(likelihood, dtype=jnp.float64)
             if likelihood.shape != param_shape and likelihood.size == int(np.prod(param_shape)):
                 likelihood = likelihood.reshape(param_shape)
 

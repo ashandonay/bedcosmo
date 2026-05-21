@@ -12,6 +12,7 @@ from getdist import plots
 from bedcosmo.util import (
     get_runs_data, init_experiment, init_nf, load_model, auto_seed, convert_color,
     load_nominal_samples, get_contour_area, get_nominal_samples, sort_key_for_group_tuple,
+    GETDIST_SETTINGS,
 )
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
@@ -120,27 +121,36 @@ class BasePlotter:
         else:
             return f"{self.storage_path}/{subdir}"
     
-    def save_figure(self, fig, filename, run_id=None, experiment_id=None, 
-                   subdir="plots", dpi=300, close_fig=True, display_fig=True):
+    def save_figure(
+        self, fig, filename=None, save_dir=None, dpi=400, 
+        run_id=None, experiment_id=None, subdir="plots", 
+        close_fig=True, display_fig=True
+        ):
         """
         Save a figure to the appropriate directory.
         
         Args:
             fig: Matplotlib figure object.
-            filename (str): Filename for the saved figure.
+            filename (str, optional): Filename for the saved figure.
+            save_dir (str, optional): Directory to save the plot to.
+            dpi (int, optional): DPI for saving the figure.
             run_id (str, optional): Specific run ID for run-specific plots.
             experiment_id (str, optional): Experiment ID for experiment-level plots.
-            subdir (str): Subdirectory name (default: "plots").
-            dpi (int): DPI for saving the figure.
-            close_fig (bool): Whether to close the figure after saving.
-            display_fig (bool): Whether to display the figure.
+            subdir (str, optional): Subdirectory name (default: "plots").
+            close_fig (bool, optional): Whether to close the figure after saving.
+            display_fig (bool, optional): Whether to display the figure.
             
         Returns:
             str: Path to the saved figure.
         """
-        save_dir = self.get_save_dir(run_id=run_id, experiment_id=experiment_id, subdir=subdir)
-        os.makedirs(save_dir, exist_ok=True)
-        save_path = os.path.join(save_dir, filename)
+        filename = self.generate_filename(filename)
+        if save_dir is None:
+            dir = self.get_save_dir(run_id=run_id, experiment_id=experiment_id, subdir=subdir)
+        else:
+            dir = save_dir
+        os.makedirs(dir, exist_ok=True)
+
+        save_path = os.path.join(dir, filename)
         
         # Save the figure
         fig.savefig(save_path, dpi=dpi, bbox_inches='tight', pad_inches=0.1)
@@ -182,6 +192,8 @@ class BasePlotter:
         Returns:
             str: Generated filename.
         """
+        if prefix is None:
+            prefix = 'plot'
         if timestamp:
             timestamp_str = datetime.now().strftime('%Y%m%d_%H%M%S')
             return f"{prefix}_{timestamp_str}.{suffix}"
@@ -203,8 +215,12 @@ class BasePlotter:
         sort=True,
         include_nominal=True,
         title=None,
-        save_path=None,
         color="tab:green",
+        experiment_id=None,
+        run_id=None,
+        filename=None,
+        save_dir=None,
+        dpi=400
     ):
         """
         Plots sorted EIG values and corresponding designs.
@@ -232,7 +248,7 @@ class BasePlotter:
             sort (bool): Whether to sort designs by EIG (default: True).
             include_nominal (bool): Whether to include the nominal EIG in the plot (default: True).
             title (str, optional): Custom title for the plot.
-            save_path (str, optional): Explicit save path. If None, uses self.save_figure/generate_filename.
+            color (str, optional): Color of the plot.
 
         Returns:
             tuple: (fig, (ax0, ax1)) matplotlib figure and axes objects. ax1 may be None for 1D designs without sorting.
@@ -461,13 +477,33 @@ class BasePlotter:
             title = f'{sort_title} EIG per Design'
         fig.suptitle(title, fontsize=16, y=0.95, weight='bold')
 
-        # Save figure
-        if save_path is not None:
-            os.makedirs(os.path.dirname(save_path), exist_ok=True)
-            fig.savefig(save_path, dpi=400, bbox_inches='tight', pad_inches=0.1)
-            print(f"Saved plot to {save_path}")
-
+        if filename is None:
+            filename = 'eig_designs'
+        self.save_figure(
+            fig, filename=filename, save_dir=save_dir, dpi=dpi, 
+            experiment_id=experiment_id, run_id=run_id, close_fig=False, display_fig=False)
+ 
         return fig, (ax0, ax1)
+
+    def _mark_central_parameter_values(self, g, experiment):
+        """Mark ``experiment.central_params`` on GetDist triangle-plot axes."""
+        central_params = getattr(experiment, "central_params", None)
+        if not central_params:
+            return
+
+        line_kw = dict(color='black', linestyle='--', linewidth=1.0)
+        params = experiment.cosmo_params
+        n = g.subplots.shape[0]
+
+        for i, pi in enumerate(params):
+            if pi not in central_params or i >= n:
+                continue
+            g.subplots[i, i].axvline(central_params[pi], **line_kw)
+            for j in range(i):
+                pj = params[j]
+                if pj in central_params:
+                    g.subplots[i, j].axvline(central_params[pj], **line_kw)
+                g.subplots[i, j].axhline(central_params[pi], **line_kw)
 
     def generate_posterior(
         self,
@@ -487,7 +523,11 @@ class BasePlotter:
         title=None,
         grid_samples=None,
         nominal_grid_eig=None,
-        save_path=None
+        experiment_id=None,
+        run_id=None,
+        filename=None,
+        save_dir=None,
+        dpi=400
     ):
         """
         Generates posterior plots for nominal and/or optimal designs.
@@ -511,7 +551,6 @@ class BasePlotter:
             title (str, optional): Title of the plot.
             grid_samples (np.ndarray, optional): Grid-based posterior parameter samples.
             nominal_grid_eig (float, optional): Nominal grid EIG value.
-            save_path (str, optional): Explicit save path. If None, figure is not auto-saved by this method.
 
         Returns:
             GetDist plotter object.
@@ -615,6 +654,7 @@ class BasePlotter:
                     samples=grid_samples_np,
                     names=experiment.cosmo_params,
                     labels=experiment.latex_labels,
+                    settings=GETDIST_SETTINGS,
                 )
 
             all_samples.append(grid_samples_gd)
@@ -669,8 +709,8 @@ class BasePlotter:
             plot_size_ratio=plot_size_ratio,
         )
 
-        if self.cosmo_exp == 'num_visits':
-            g.subplots[0, 0].axvline(experiment.central_z, color='black', linestyle='--')
+        if getattr(experiment, "central_params", None):
+            self._mark_central_parameter_values(g, experiment)
 
         # Calculate dynamic font sizes
         n_params = len(all_samples[0].paramNames.names)
@@ -681,6 +721,8 @@ class BasePlotter:
         legend_fontsize = base_fontsize * 0.65
         if n_params == 1:
             legend_fontsize = max(legend_fontsize, 10)
+        elif n_params == 2:
+            legend_fontsize = max(legend_fontsize * 1.25, 12)
 
         if g.fig.legends:
             for legend in g.fig.legends:
@@ -702,10 +744,12 @@ class BasePlotter:
         leg.set_in_layout(False)
 
         # Save figure
-        if save_path is not None:
-            os.makedirs(os.path.dirname(save_path), exist_ok=True)
-            g.fig.savefig(save_path, dpi=400, bbox_inches='tight', pad_inches=0.1)
-            print(f"Saved plot to {save_path}")
+        if filename is None:
+            filename = 'posterior'
+        self.save_figure(
+            g.fig, filename=filename, save_dir=save_dir, dpi=dpi, 
+            experiment_id=experiment_id, run_id=run_id, close_fig=False, display_fig=False
+            )
 
         return g
 
@@ -845,6 +889,14 @@ class BasePlotter:
         contour_colors = [adjust_color_brightness(c, 0.8) for c in colors]  # Darker contours
         scatter_colors = [adjust_color_brightness(c, 1.2) for c in colors]  # Lighter scatter
 
+        def blend_with_white(color, blend_factor):
+            """Lighten color by blending with white (0=no change, 1=white)."""
+            import matplotlib.colors as mcolors
+            rgb = np.array(mcolors.to_rgb(color))
+            white = np.array([1.0, 1.0, 1.0])
+            mixed = rgb * (1.0 - blend_factor) + white * blend_factor
+            return mcolors.to_hex(np.clip(mixed, 0.0, 1.0))
+
         if isinstance(line_style, str):
             line_style = [line_style] * len(samples)
         elif isinstance(line_style, list):
@@ -902,6 +954,30 @@ class BasePlotter:
             },
             show=False
         )
+        
+        # Slightly differentiate colors between contour levels (e.g., 68% vs 95%)
+        # so both confidence lines are easier to distinguish in 2D panels.
+        if levels is not None and len(levels) > 1:
+            level_lighten = [0.0, 0.22]  # inner level keeps base color; outer is slightly lighter
+            n_levels = len(levels)
+            n_params = len(samples[0].paramNames.names)
+            for i in range(1, n_params):
+                for j in range(i):
+                    ax = g.subplots[i, j]
+                    if ax is None:
+                        continue
+                    collections = ax.collections
+                    expected = len(samples) * n_levels
+                    if len(collections) < expected:
+                        continue
+                    for sample_idx in range(len(samples)):
+                        base_color = contour_colors[sample_idx]
+                        for level_idx in range(n_levels):
+                            coll_idx = sample_idx * n_levels + level_idx
+                            if coll_idx >= len(collections):
+                                continue
+                            lighten = level_lighten[min(level_idx, len(level_lighten) - 1)]
+                            collections[coll_idx].set_color(blend_with_white(base_color, lighten))
         
         # If alpha is a list, manually set alpha for each sample's lines and contours
         if isinstance(alpha, list):
@@ -1064,18 +1140,48 @@ class RunPlotter(BasePlotter):
             _ = self.run_data  # Trigger lazy loading
         return self._experiment_id
 
-    def get_experiment(self, device="cuda:0"):
-        """Initialize (or return cached) experiment with experiment_args overrides applied."""
-        if self._experiment is None:
-            run_obj = self.run_data['run_obj']
-            run_args = self.run_data['params'].copy()
-            self._experiment = init_experiment(run_obj, run_args, device=device, **self.experiment_args)
-        return self._experiment
+    def get_experiment(self, device="cuda:0", design_args=None, **overrides):
+        """
+        Initialize (or return cached) experiment with experiment_args overrides applied.
+
+        The cached experiment is only used when no per-call ``design_args`` or ``overrides``
+        are supplied. When either is provided a fresh experiment is built and returned
+        without touching the cache, so callers can safely sweep parameter values
+        (e.g. ``central_params={'z': 0.5}``) without disturbing the default instance.
+
+        Args:
+            device (str): Torch device. Falls back to cpu if cuda unavailable.
+            design_args (dict, optional): Forwarded to init_experiment.
+            **overrides: run_args overrides merged with self.experiment_args
+                (overrides take precedence) and forwarded to init_experiment.
+        """
+        if str(device).startswith("cuda") and not torch.cuda.is_available():
+            device = "cpu"
+
+        merged = {**self.experiment_args, **overrides}
+        use_cache = design_args is None and not overrides
+
+        if use_cache and self._experiment is not None:
+            return self._experiment
+
+        run_obj = self.run_data['run_obj']
+        run_args = self.run_data['params'].copy()
+        experiment = init_experiment(
+            run_obj, run_args, device=device,
+            design_args=design_args, global_rank=0,
+            **merged
+        )
+
+        if use_cache:
+            self._experiment = experiment
+        return experiment
     
-    def plot_training(self, var=None, log_scale=True, loss_step_freq=10, 
-                     start_step=0, area_step_freq=100, lr_step_freq=1,
-                     show_area=True, area_limits=[0.5, 2.0], show_lr=True,
-                     dpi=300, step_range=None):
+    def plot_training(
+        self, var=None, log_scale=True, loss_step_freq=10, 
+        start_step=0, area_step_freq=100, lr_step_freq=1,
+        show_area=True, area_limits=[0.5, 2.0], show_lr=True,
+        step_range=None, filename=None, save_dir=None, dpi=400
+        ):
         """
         Plot training loss, learning rate, and posterior contour area evolution
         for this run using three vertically stacked subplots sharing the x-axis.
@@ -1090,8 +1196,8 @@ class RunPlotter(BasePlotter):
             show_area (bool): If True, show the area subplot.
             area_limits (list): Y-axis limits for area plot.
             show_lr (bool): If True, show the learning rate subplot.
-            dpi (int): DPI for saving the figure.
             step_range (tuple, optional): Tuple of (min_step, max_step) to limit the x-axis range.
+
             
         Returns:
             tuple: (fig, axes) matplotlib figure and axes objects.
@@ -1225,7 +1331,7 @@ class RunPlotter(BasePlotter):
                         nominal_samples, target_labels, latex_labels = load_nominal_samples(
                             run_params['cosmo_exp'], run_params['cosmo_model'], dataset=run_params['dataset'])
                         with contextlib.redirect_stdout(io.StringIO()):
-                            nominal_samples_gd = getdist.MCSamples(samples=nominal_samples, names=target_labels, labels=latex_labels)
+                            nominal_samples_gd = getdist.MCSamples(samples=nominal_samples, names=target_labels, labels=latex_labels, settings=GETDIST_SETTINGS)
                         nominal_area = get_contour_area([nominal_samples_gd], 0.68, param1, param2)[0]["nominal_area_"+pair_name]
                         ax_area.plot(plot_area_steps, plot_area_values/nominal_area, 
                                     color=line_color, label=pair_name.replace('_', ', '))
@@ -1270,15 +1376,22 @@ class RunPlotter(BasePlotter):
         fig.set_constrained_layout(True)
         fig.suptitle(f"Training History - Run: {self.run_id[:8]}", fontsize=16)
         
+        if filename is None:
+            filename = 'training'
         # Save figure
-        filename = self.generate_filename("training")
-        self.save_figure(fig, filename, run_id=self.run_id, experiment_id=self.experiment_id, dpi=dpi)
+        self.save_figure(fig, filename=filename, save_dir=save_dir, dpi=dpi, run_id=self.run_id, experiment_id=self.experiment_id)
         
         return fig, axes
     
-    def _extract_posterior_data(self, eval_step=None, device="cuda:0"):
-        """Extract posterior plotting data from MLflow artifacts into a kwargs dict for generate_posterior()."""
-        eig_data, artifacts_dir = self._get_eig_data(eval_step=eval_step)
+    def _extract_run_posterior_data(
+        self,
+        eval_step=None,
+        device="cuda:0",
+        eig_data=None,
+        ):
+        """Extract posterior plotting data from run's MLflow artifacts into a kwargs dict for generate_posterior()."""
+        if eig_data is None:
+            eig_data = self._get_eig_data(eval_step=eval_step)
         eval_step, step_str = self._resolve_step(eig_data, eval_step)
 
         step_data = eig_data[step_str]
@@ -1325,11 +1438,6 @@ class RunPlotter(BasePlotter):
 
         title = f"Posterior Evaluation - Run: {self.run_id[:8]}"
 
-        filename = self.generate_filename("posterior_eval")
-        save_dir = self.get_save_dir(run_id=self.run_id, experiment_id=self.experiment_id)
-        os.makedirs(save_dir, exist_ok=True)
-        save_path = os.path.join(save_dir, filename)
-
         return dict(
             experiment=experiment,
             posterior_flow=posterior_flow,
@@ -1337,32 +1445,41 @@ class RunPlotter(BasePlotter):
             eig_values=eig_values,
             nominal_eig=nominal_eig,
             nominal_grid_eig=nominal_grid_eig,
-            title=title,
-            save_path=save_path,
+            title=title
         )
 
-    def generate_posterior(self, eval_step=None, display=['nominal', 'optimal'], levels=[0.68],
-                          guide_samples=1000, device="cuda:0", seed=1, plot_prior=False,
-                          transform_output=True, title=None, grid_samples=None):
+    def generate_posterior(self, **kwargs):
         """Loads EIG data and model from MLflow artifacts and calls BasePlotter.generate_posterior()."""
+        # Extract levels if present (normalize to list)
+        levels = kwargs.get('levels', [0.68])
         if isinstance(levels, (int, float)):
             levels = [levels]
+        kwargs['levels'] = levels
 
-        data = self._extract_posterior_data(eval_step, device=device)
-        if title is not None:
-            data['title'] = title
+        # Pass eval_step and device to data extraction
+        device = kwargs.get("device", "cuda:0" if torch.cuda.is_available() else "cpu")
+        kwargs['device'] = device
+        eval_step = kwargs.get('eval_step', None)
+        eig_data_override = kwargs.pop('eig_data', None)
+        explicit_grid_samples = kwargs.pop('grid_samples', None) if eig_data_override is not None else None
+        data = self._extract_run_posterior_data(eval_step, device=device, eig_data=eig_data_override)
+        # Allow override of title
+        if 'title' in kwargs and kwargs['title'] is not None:
+            data['title'] = kwargs['title']
 
-        return super().generate_posterior(
-            **data,
-            display=display,
-            levels=levels,
-            guide_samples=guide_samples,
-            device=device,
-            seed=seed,
-            plot_prior=plot_prior,
-            transform_output=transform_output,
-            grid_samples=grid_samples,
-        )
+        # Remove arguments that are only for this wrapper, not for BasePlotter
+        for skip in ['eval_step', 'title']:
+            if skip in kwargs:
+                kwargs.pop(skip)
+
+        # Update kwargs with extracted data
+        kwargs.update(**data)
+        # Explicit grid_samples (from sibling overlay) wins over anything in data
+        if explicit_grid_samples is not None:
+            kwargs['grid_samples'] = explicit_grid_samples
+
+        # Merge and call
+        return super().generate_posterior(experiment_id=self.experiment_id, run_id=self.run_id, **kwargs)
     
     def plot_designs(
         self,
@@ -1376,8 +1493,10 @@ class RunPlotter(BasePlotter):
         cmap='viridis',
         color_dim=0,
         labels=None,
-        save_path=None,
-        title=None
+        title=None,
+        filename=None,
+        save_dir=None,
+        dpi=400
     ):
         """
         Plot design space using either parallel coordinates or spatial plots.
@@ -1400,9 +1519,11 @@ class RunPlotter(BasePlotter):
             cmap (str): Colormap for coloring (default: 'viridis').
             color_dim (int): Dimension index to use for coloring in parallel mode (default: 0).
             labels (list/tuple, optional): Custom labels for each dimension.
-            save_path (str, optional): Path to save the figure.
             title (str, optional): Figure title.
-        
+            filename (str, optional): Name of the file to save the plot to.
+            save_dir (str, optional): Directory to save the plot to.
+            dpi (int, optional): DPI for saving the figure.
+            
         Returns:
             matplotlib.figure.Figure: The created figure.
         """
@@ -1622,28 +1743,24 @@ class RunPlotter(BasePlotter):
             
             plt.tight_layout()
 
-        if save_path:
-            # If save_path is provided, extract filename and use it
-            filename = os.path.basename(save_path)
-            self.save_figure(fig, filename, run_id=self.run_id, experiment_id=self.experiment_id, dpi=300, close_fig=False, display_fig=False)
-        else:
-            # Auto-save with generated filename
-            filename = self.generate_filename(f"designs_{mode}")
-            self.save_figure(fig, filename, run_id=self.run_id, experiment_id=self.experiment_id, dpi=300, close_fig=False, display_fig=False)
+        self.save_figure(fig, filename=filename, save_dir=save_dir, dpi=dpi, close_fig=False, display_fig=False)
         
         return fig
     
-    def _get_eig_data(self, eval_step=None):
+    def _get_eig_data(self, eval_step=None, eig_data=None):
         """
         Helper method to load EIG data from artifacts directory.
         Finds the artifacts directory by searching for the run_id without needing experiment_id.
-        
+
         Args:
             eval_step (str or int, optional): Step to load data for.
-            
+            eig_data (dict, optional): Pre-loaded eig_data to use instead of reading from disk.
+
         Returns:
             tuple: (eig_data_dict, artifacts_dir)
         """
+        if eig_data is not None:
+            return eig_data
         if self._experiment_id is not None:
             artifacts_dir = f"{self.storage_path}/mlruns/{self._experiment_id}/{self.run_id}/artifacts"
         else:
@@ -1667,25 +1784,10 @@ class RunPlotter(BasePlotter):
                 raise ValueError(f"Could not find artifacts directory for run {self.run_id}")
         
         json_path, eig_data = self.load_eig_data_file(artifacts_dir, eval_step=eval_step)
-        return eig_data, artifacts_dir
+        return eig_data
     
-    def _init_experiment_for_plotting(self):
-        """
-        Helper method to initialize experiment for plotting (needed for design labels, nominal design, etc.).
-        
-        Returns:
-            experiment object
-        """
-        device = "cuda:0"
-        run_obj = self.run_data['run_obj']
-        run_args = self.run_data['params']
-        experiment = init_experiment(
-            run_obj, run_args, device=device, 
-            design_args=None, global_rank=0
-        )
-        return experiment
     
-    def design_comparison(self, eval_step=None, width=0.2, log_scale=True, use_fractional=False):
+    def design_comparison(self, eval_step=None, width=0.2, log_scale=True, use_fractional=False, filename=None, save_dir=None, dpi=400, **kwargs):
         """
         Plots a bar chart comparing the nominal and optimal design.
         
@@ -1701,7 +1803,7 @@ class RunPlotter(BasePlotter):
         print(f"Generating design comparison plot...")
         
         # Load EIG data
-        eig_data, artifacts_dir = self._get_eig_data(eval_step=eval_step)
+        eig_data = self._get_eig_data(eval_step=eval_step)
         
         # Get step data
         if eval_step is None:
@@ -1743,7 +1845,7 @@ class RunPlotter(BasePlotter):
         nominal_eig = float(nominal_eig) if nominal_eig is not None else None
         
         # Initialize experiment to get design labels and nominal design
-        experiment = self._init_experiment_for_plotting()
+        experiment = self.get_experiment()
         nominal_design = experiment.nominal_design.cpu().numpy()
         nominal_total_obs = experiment.nominal_total_obs
         design_labels = experiment.design_labels
@@ -1803,12 +1905,23 @@ class RunPlotter(BasePlotter):
         plt.tight_layout()
         
         # Save figure automatically
-        filename = self.generate_filename("design_comparison")
-        self.save_figure(fig, filename, run_id=self.run_id, experiment_id=self.experiment_id, dpi=400, close_fig=False, display_fig=False)
+        self.save_figure(
+            fig, filename=filename, save_dir=save_dir, dpi=dpi, 
+            run_id=self.run_id, experiment_id=self.experiment_id, close_fig=False, display_fig=False
+            )
         
         return fig
     
-    def posterior_steps(self, steps, levels=[0.68], eval_step=None):
+    def posterior_steps(
+        self, 
+        steps, 
+        levels=[0.68], 
+        filename=None, 
+        save_dir=None, 
+        dpi=400, 
+        guide_samples=1000,
+        **kwargs
+    ):
         """
         Plots posterior distributions at different training steps for a single run.
         
@@ -1831,12 +1944,12 @@ class RunPlotter(BasePlotter):
         all_colors = []
         custom_legend = []
         
-        device = "cuda:0"
+        device = "cuda:0" if torch.cuda.is_available() else "cpu"
         run_obj = self.run_data['run_obj']
         run_args = self.run_data['params']
-        
-        # Initialize experiment once
-        experiment = init_experiment(run_obj, run_args, device=device, design_args=None, global_rank=0)
+
+        # Initialize experiment once (experiment_args overrides flow through get_experiment)
+        experiment = self.get_experiment(device=device)
         
         for i, step in enumerate(steps):
             # Load model for this step
@@ -1847,7 +1960,7 @@ class RunPlotter(BasePlotter):
             nominal_context = experiment.nominal_context
             samples_gd = experiment.get_guide_samples(
                 posterior_flow, nominal_context, 
-                num_samples=1000,
+                num_samples=guide_samples,
                 transform_output=None
             )
             
@@ -1867,61 +1980,104 @@ class RunPlotter(BasePlotter):
             )
         
         # Get nominal samples using reference experiment (already initialized above)
+        nominal_added = False
         try:
             nominal_samples_gd = experiment.get_nominal_samples(transform_output=None)
             all_samples.append(nominal_samples_gd)
             all_colors.append('black')
+            nominal_added = True
         except NotImplementedError:
-            print(f"Warning: get_nominal_samples not implemented for {self.cosmo_exp}, skipping nominal design plot.")
+            print(f"Warning: get_nominal_samples not implemented for {self.cosmo_exp}, skipping posterior_steps plot.")
         
         plot_width = 12
         g = self.plot_posterior(all_samples, all_colors, levels=levels, width_inch=plot_width)
         
+        if getattr(experiment, "central_params", None):
+            self._mark_central_parameter_values(g, experiment)
+
         # Calculate dynamic font sizes
         n_params = len(all_samples[0].paramNames.names)
         base_fontsize = max(6, min(18, plot_width * (0.2 + 0.42 * np.sqrt(n_params))))
+        if n_params == 1:
+            base_fontsize = max(base_fontsize, 12)
         title_fontsize = base_fontsize * 1.15
-        legend_fontsize = base_fontsize * 0.80
+        legend_fontsize = base_fontsize * 0.65
+        if n_params == 1:
+            legend_fontsize = max(legend_fontsize, 10)
+        elif n_params == 2:
+            legend_fontsize = max(legend_fontsize * 1.25, 12)
 
         if g.fig.legends:
             for legend in g.fig.legends:
                 legend.remove()
 
-        custom_legend.append(
-            Line2D([0], [0], color='black', label=f'DESI', linewidth=1.2)
-        )
+        if nominal_added:
+            nominal_label = 'DESI' if self.cosmo_exp == 'num_tracers' else 'Nominal Design'
+            custom_legend.append(
+                Line2D([0], [0], color='black', label=nominal_label, linewidth=1.2)
+            )
         g.fig.set_constrained_layout(True)
         leg = g.fig.legend(handles=custom_legend, loc='upper right', bbox_to_anchor=(0.99, 0.96), fontsize=legend_fontsize)
         leg.set_in_layout(False)
         title = f"Posterior Steps - Run: {self.run_id[:8]}"
         g.fig.suptitle(title, fontsize=title_fontsize, weight='bold')
         
+        if filename is None:
+            filename = 'posterior_steps'
         # Save figure automatically
-        filename = self.generate_filename("posterior_steps")
-        self.save_figure(g.fig, filename, run_id=self.run_id, experiment_id=self.experiment_id, dpi=400, close_fig=False, display_fig=False)
+        self.save_figure(
+            g.fig, filename=filename, save_dir=save_dir, dpi=dpi, 
+            run_id=self.run_id, experiment_id=self.experiment_id, close_fig=False, display_fig=False
+            )
         
         return g
     
     def _resolve_step(self, eig_data, eval_step):
-        """Resolve eval_step to a step string key in eig_data."""
+        """Resolve eval_step to a step string key in eig_data.
+
+        If eval_step is None, returns the largest available step.
+        If eval_step is specified and not present, rounds DOWN to the nearest available step below or equal,
+        or returns (None, None) if all available steps are above the requested step.
+        Prints a warning if no step is found.
+        """
+        # Find available steps
+        step_keys = [k for k in eig_data.keys() if k.startswith('step_')]
+        if not step_keys:
+            print("Warning: No step keys found in EIG data.")
+            return None, None
+        step_ints = sorted([int(k.split('_')[1]) for k in step_keys])
+
         if eval_step is None:
-            step_keys = [k for k in eig_data.keys() if k.startswith('step_')]
-            if not step_keys:
-                raise ValueError("No step data found in EIG data file")
-            eval_step = max(step_keys, key=lambda x: int(x.split('_')[1]))
+            nearest = step_ints[-1]
+            step_str = f"step_{nearest}"
+            return nearest, step_str
 
-        step_str = str(eval_step) if not isinstance(eval_step, str) or not eval_step.startswith('step_') else eval_step
-        if not step_str.startswith('step_'):
-            step_str = f"step_{step_str}"
+        # Convert eval_step to int if necessary
+        if isinstance(eval_step, str) and eval_step.startswith('step_'):
+            eval_step_int = int(eval_step.split('_')[1])
+        else:
+            try:
+                eval_step_int = int(eval_step)
+            except Exception:
+                print(f"Warning: Could not interpret eval_step '{eval_step}' as an integer step.")
+                return None, None
 
-        if step_str not in eig_data:
-            raise ValueError(f"Step {eval_step} not found in EIG data")
+        # Find greatest available step <= eval_step_int
+        available = [s for s in step_ints if s <= eval_step_int]
+        if not available:
+            print(f"Warning: No steps found in EIG data below or equal to requested step {eval_step_int}.")
+            return None, None
+        nearest = max(available)
+        step_str = f"step_{nearest}"
+        return nearest, step_str
 
-        return eval_step, step_str
-
-    def _extract_eig_data(self, eval_step=None, include_nominal=True):
-        """Extract EIG plotting data from MLflow artifacts into a kwargs dict for eig_designs()."""
-        eig_data, artifacts_dir = self._get_eig_data(eval_step=eval_step)
+    def _extract_run_eig_data(self, eval_step=None, include_nominal=True, eig_data=None):
+        """
+        Extract EIG plotting data from run's MLflow artifacts into a kwargs dict for eig_designs().
+        Accepts: eval_step, include_nominal, and any future options.
+        """
+        if eig_data is None:
+            eig_data = self._get_eig_data(eval_step=eval_step)
         eval_step, step_str = self._resolve_step(eig_data, eval_step)
 
         step_data = eig_data[step_str]
@@ -1952,17 +2108,12 @@ class RunPlotter(BasePlotter):
                     nominal_grid_eig = nominal_grid_eig[0] if len(nominal_grid_eig) > 0 else None
                 nominal_grid_eig = float(nominal_grid_eig) if nominal_grid_eig is not None else None
 
-        experiment = self._init_experiment_for_plotting()
+        experiment = self.get_experiment()
 
         sort_title = "Sorted"
         title = f'{sort_title} EIG per Design - Run: {self.run_id[:8]}'
 
-        filename = self.generate_filename("eig_designs")
-        save_dir = self.get_save_dir(run_id=self.run_id, experiment_id=self.experiment_id)
-        os.makedirs(save_dir, exist_ok=True)
-        save_path = os.path.join(save_dir, filename)
-
-        return dict(
+        data_dict = dict(
             eig_values=eig_values,
             input_designs=input_designs,
             design_labels=experiment.design_labels,
@@ -1973,20 +2124,28 @@ class RunPlotter(BasePlotter):
             grid_eig_std_values=grid_eig_std_values,
             nominal_grid_eig=nominal_grid_eig,
             include_nominal=include_nominal,
-            title=title,
-            save_path=save_path,
-        ), eval_step, eig_data
+            title=title
+        )
 
-    def eig_designs(self, eval_step=None, sort=True, sort_step=None, include_nominal=True):
-        """Loads EIG data from MLflow artifacts and calls BasePlotter.eig_designs().
+        return data_dict, eval_step, eig_data
 
-        eval_step can be a single step or a list of steps. When a list is
-        provided, each step's EIG curve is overlaid; the last step is used for
-        sorting and the optimal-design marker.
+    def eig_designs(self, **kwargs):
+        """
+        Loads EIG data from MLflow artifacts and calls BasePlotter.eig_designs().
+
+        Accepts: eval_step, sort, sort_step, include_nominal, passes extra kwargs to plotting method.
+
+        eval_step can be a single step or a list of steps. When a list is provided, each step's
+        EIG curve is overlaid; the last step is used for sorting and the optimal-design marker.
         """
         # Use the last step as primary for _extract_eig_data (grid, nominal, etc.)
+        eval_step = kwargs.get('eval_step', None)
+        include_nominal = kwargs.get('include_nominal', True)
+        eig_data_override = kwargs.pop('eig_data', None)
         primary_step = eval_step[-1] if isinstance(eval_step, list) else eval_step
-        data, _, eig_data = self._extract_eig_data(primary_step, include_nominal)
+        data, _, eig_data = self._extract_run_eig_data(
+            eval_step=primary_step, include_nominal=include_nominal, eig_data=eig_data_override,
+        )
 
         if isinstance(eval_step, list) and len(eval_step) > 1:
             eig_values_list = []
@@ -1994,6 +2153,9 @@ class RunPlotter(BasePlotter):
             eig_labels_list = []
             for s in eval_step:
                 _, sk = self._resolve_step(eig_data, s)
+                if sk is None:
+                    print(f"Warning: Step {s} not found in EIG data, skipping...")
+                    continue
                 variable_data = eig_data[sk].get('variable', {})
                 eig_vals = variable_data.get('eigs_avg')
                 if eig_vals is None:
@@ -2006,7 +2168,15 @@ class RunPlotter(BasePlotter):
             data['eig_std_values'] = eig_std_list
             data['eig_labels'] = eig_labels_list
 
-        return super().eig_designs(**data, sort=sort, color="black")
+        # Remove arguments that are only for this wrapper, not for BasePlotter
+        for skip in ['eval_step']:
+            if skip in kwargs:
+                kwargs.pop(skip)
+
+        kwargs.update(**data)
+
+        return super().eig_designs(experiment_id=self.experiment_id, run_id=self.run_id, **kwargs)
+ 
 
 
 # ============================================================================
@@ -2180,8 +2350,8 @@ class ComparisonPlotter(BasePlotter):
     
     def compare_posterior(self, var=None, guide_samples=10000, show_scatter=False,
                          step='loss_best', seed=1, device="cuda:0",
-                         global_rank=0, dpi=300, levels=[0.68, 0.95], width_inch=10,
-                         colors=None, filter_string=None):
+                         global_rank=0, levels=[0.68, 0.95], width_inch=10,
+                         colors=None, filter_string=None, filename=None, save_dir=None, dpi=400, **kwargs):
         """
         Compare posterior distributions across multiple runs in a triangle plot.
         
@@ -2193,7 +2363,6 @@ class ComparisonPlotter(BasePlotter):
             seed (int): Random seed.
             device (str): Device to use.
             global_rank (int or list): Global rank(s) to evaluate.
-            dpi (int): DPI for saving the figure.
             levels (list): List of contour levels to plot.
             width_inch (float): Width of the triangle plot in inches.
             colors (list, optional): List of colors to use for each group.
@@ -2359,7 +2528,7 @@ class ComparisonPlotter(BasePlotter):
         nominal_samples, target_labels, latex_labels = load_nominal_samples(
             self.cosmo_exp, cosmo_model_for_desi, dataset=run_data_list[0]['params']['dataset'])
         with contextlib.redirect_stdout(io.StringIO()):
-            nominal_samples_gd = getdist.MCSamples(samples=nominal_samples, names=target_labels, labels=latex_labels)
+            nominal_samples_gd = getdist.MCSamples(samples=nominal_samples, names=target_labels, labels=latex_labels, settings=GETDIST_SETTINGS)
         nominal_label = f'Nominal ({cosmo_model_for_desi})'
         
         all_samples.append(nominal_samples_gd)
@@ -2388,18 +2557,17 @@ class ComparisonPlotter(BasePlotter):
         # Save figure
         filename_prefix = "posterior_comp"
         single_run_id_for_path = None
-        if self.mlflow_exp and experiment_id_for_save_path:
-            save_dir = self.get_save_dir(experiment_id=experiment_id_for_save_path)
-        elif not self.mlflow_exp and self.run_ids and len(run_data_list) == 1 and experiment_id_for_save_path:
+        if not self.mlflow_exp and self.run_ids and len(run_data_list) == 1 and experiment_id_for_save_path:
             single_run_id_for_path = run_data_list[0]['run_id']
-            save_dir = self.get_save_dir(run_id=single_run_id_for_path, experiment_id=experiment_id_for_save_path)
             filename_prefix = f"posterior_step_{step}"
-        else:
-            save_dir = self.get_save_dir()
-        
-        filename = self.generate_filename(filename_prefix)
-        save_path = self.save_figure(g.fig, filename, run_id=single_run_id_for_path, 
-                                     experiment_id=experiment_id_for_save_path, dpi=dpi)
+
+        if filename is None:
+            filename = filename_prefix
+        self.save_figure(
+            g.fig, filename=filename, save_dir=save_dir, dpi=dpi, 
+            run_id=single_run_id_for_path, experiment_id=experiment_id_for_save_path
+            )
+ 
         
         if hasattr(g, 'fig') and g.fig in plt.get_fignums():
             plt.close(g.fig)
@@ -2410,9 +2578,7 @@ class ComparisonPlotter(BasePlotter):
         self,
         var=None,
         eval_step=None,
-        save_path=None,
         figsize=(14, 8),
-        dpi=400,
         colors=None,
         x_lim=None,
         y_lim=None,
@@ -2425,7 +2591,10 @@ class ComparisonPlotter(BasePlotter):
         show_errorbars=True,
         plot_input_design=False,
         design_labels=None,
-        show_ratio_to_nominal=True
+        show_ratio_to_nominal=True,
+        filename=None,
+        save_dir=None,
+        dpi=400
     ):
         """
         Compare EIG values across multiple runs.
@@ -2434,9 +2603,7 @@ class ComparisonPlotter(BasePlotter):
             var (str or list, optional): Parameter(s) from MLflow run params to include in the label.
                                         If provided and self.run_labels is None, labels will be generated from these parameters. Otherwise run ID (first 8 chars).
             eval_step (str or int, optional): Step identifier (if omitted the most recent step is used).
-            save_path (str, optional): File path to persist the figure.
             figsize (tuple): Matplotlib figure size.
-            dpi (int): Save resolution.
             colors (list, optional): Explicit colors for each run. Must be the same length as `run_ids`.
             x_lim (tuple, optional): X-axis limits.
             y_lim (tuple, optional): Y-axis limits.
@@ -2451,6 +2618,9 @@ class ComparisonPlotter(BasePlotter):
                                     Only plots if they match the evaluation designs. Default False.
             design_labels (list, optional): Custom labels for each design dimension. Must be the same length as the number of design dimensions.
             show_ratio_to_nominal (bool): If True, display designs as ratio to nominal design (like eig_designs). Default True.
+            filename (str, optional): Filename for the plot.
+            save_dir (str, optional): Directory to save the plot.
+            dpi (int, optional): DPI for the plot.
         
         Returns:
             tuple: (fig, (ax_line, ax_heat)) matplotlib figure and axes objects.
@@ -2955,45 +3125,27 @@ class ComparisonPlotter(BasePlotter):
                 title = 'EIG per Design Comparison'
         fig.suptitle(title, fontsize=16, y=0.95, weight='bold')
 
-        if save_path is not None:
-            # Extract filename from save_path
-            filename = os.path.basename(save_path)
-            # Determine run_id and experiment_id from save_path or use defaults
-            # If save_path contains run_id, extract it; otherwise use None
-            save_path_dir = os.path.dirname(save_path)
-            run_id_for_save = None
-            experiment_id_for_save = None
-            # Try to extract from path structure: .../mlruns/{exp_id}/{run_id}/artifacts/plots/...
-            if 'mlruns' in save_path_dir:
-                parts = save_path_dir.split('mlruns/')
-                if len(parts) > 1:
-                    remaining = parts[1]
-                    path_parts = remaining.split('/')
-                    if len(path_parts) >= 2:
-                        experiment_id_for_save = path_parts[0]
-                        run_id_for_save = path_parts[1] if len(path_parts) > 1 else None
-            # Use self.save_figure() which handles directory creation
-            actual_save_path = self.save_figure(fig, filename, run_id=run_id_for_save, 
-                                               experiment_id=experiment_id_for_save, dpi=dpi)
-            print(f"Saved comparison plot to {actual_save_path}")
-
+        if filename is None:
+            filename = 'compare_eigs'
+        self.save_figure(fig, filename=filename, save_dir=save_dir, dpi=dpi)
+   
         return fig, (ax_line, ax_heat)
     
     def compare_optimal_designs(
         self,
         eval_step=None,
         top_n=1,
-        save_path=None,
         figsize=(14, 8),
-        dpi=400,
         colors=None,
         title=None,
         log_scale=True,
         display_mode='absolute',
         include_nominal=False,
-        # Additional params for top_n > 1 (heatmap mode)
         cmap='viridis',
-        nominal_design=None
+        nominal_design=None,
+        filename=None,
+        save_dir=None,
+        dpi=400
     ):
         """
         Compare optimal designs (or top N best designs) across multiple runs.
@@ -3004,7 +3156,6 @@ class ComparisonPlotter(BasePlotter):
         Args:
             eval_step (str or int, optional): Which step to use. If None, finds most recent eig_data file
             top_n (int): Number of designs to plot from each run (default: 1). When top_n=1, uses bar chart. When top_n>1, uses heatmap.
-            save_path (str, optional): Path to save the comparison plot. If None, doesn't save
             figsize (tuple): Figure size (width, height)
             dpi (int): Resolution for saved figure
             colors (list, optional): Colors for each run. If None, uses default color cycle (only used for top_n=1)
@@ -3545,32 +3696,14 @@ class ComparisonPlotter(BasePlotter):
         
         plt.tight_layout()
         
-        # Save figure (auto-save if save_path not provided)
-        if save_path is not None:
-            # Extract filename from save_path
-            filename = os.path.basename(save_path)
-            # Determine run_id and experiment_id from save_path or use defaults
-            save_path_dir = os.path.dirname(save_path)
-            run_id_for_save = None
-            experiment_id_for_save = None
-            # Try to extract from path structure: .../mlruns/{exp_id}/{run_id}/artifacts/plots/...
-            if 'mlruns' in save_path_dir:
-                parts = save_path_dir.split('mlruns/')
-                if len(parts) > 1:
-                    remaining = parts[1]
-                    path_parts = remaining.split('/')
-                    if len(path_parts) >= 2:
-                        experiment_id_for_save = path_parts[0]
-                        run_id_for_save = path_parts[1] if len(path_parts) > 1 else None
-            # Use self.save_figure() which handles directory creation
-            actual_save_path = self.save_figure(fig, filename, run_id=run_id_for_save, 
-                                               experiment_id=experiment_id_for_save, dpi=dpi)
-            print(f"Saved comparison plot to {actual_save_path}")
-        else:
-            # Auto-save with generated filename to experiment's plots directory
-            filename = self.generate_filename("optimal_designs_comparison")
-            self.save_figure(fig, filename, run_id=None, experiment_id=experiment_id_for_save_path, dpi=dpi, close_fig=False, display_fig=False)
-        
+        # Save figure depending on filename/save_dir in kwargs
+        if filename is None:
+            filename = 'optimal_designs_comparison'
+        self.save_figure(
+            fig, filename=filename, save_dir=save_dir, 
+            dpi=dpi, close_fig=False, display_fig=False
+            )
+     
         return fig, ax
     
     def compare_training(
@@ -3586,9 +3719,11 @@ class ComparisonPlotter(BasePlotter):
         param_pair=None,
         area_limits=None,
         show_lr=True,
-        dpi=300,
         colors=None,
-        step_range=None
+        step_range=None,
+        filename=None,
+        save_dir=None,
+        dpi=400
         ):
         """
         Compares training loss, learning rate, and posterior contour area evolution
@@ -3927,7 +4062,7 @@ class ComparisonPlotter(BasePlotter):
                         try:
                             nominal_samples, target_labels, latex_labels = load_nominal_samples(run_params['cosmo_exp'], run_params['cosmo_model'], dataset=run_params['dataset'])
                             with contextlib.redirect_stdout(io.StringIO()):
-                                nominal_samples_gd = getdist.MCSamples(samples=nominal_samples, names=target_labels, labels=latex_labels)
+                                nominal_samples_gd = getdist.MCSamples(samples=nominal_samples, names=target_labels, labels=latex_labels, settings=GETDIST_SETTINGS)
                             nominal_area = get_contour_area([nominal_samples_gd], 0.68, param1, param2)[0]["nominal_area_"+f"{param1}_{param2}"]
                             ax_area.plot(plot_area_steps, plot_area_values/nominal_area, 
                                         alpha=base_alpha, color=color, label=plot_label)
@@ -4019,43 +4154,39 @@ class ComparisonPlotter(BasePlotter):
         fig.suptitle(title, fontsize=16)
 
         # Determine save path
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        filename = None
         run_id_for_save = None
         experiment_id_for_save = experiment_id_for_save_path
 
-        if self.mlflow_exp and experiment_id_for_save:
-            filename = f"training_comparison_{timestamp}.png"
-        elif len(run_data_list) == 1:
-            single_run_id = run_data_list[0]['run_id']
-            run_id_for_save = single_run_id
-            if not experiment_id_for_save:
-                try:
-                    single_run_data_item = run_data_list[0]
-                    if 'run_obj' in single_run_data_item and single_run_data_item['run_obj'] is not None:
-                        experiment_id_for_save = single_run_data_item['run_obj'].info.experiment_id
-                    else:
-                        fallback_run_obj = client.get_run(single_run_id)
-                        experiment_id_for_save = fallback_run_obj.info.experiment_id
-                except Exception as e:
-                    print(f"COMPARE_TRAINING: Warning: Could not determine experiment ID for run {single_run_id} for save_dir: {e}. Defaulting.")
-            
-            filename = f"training_{timestamp}.png"
-        else:
-            filename = f"training_comparison_{timestamp}.png"
+        if filename is None:
+            if self.mlflow_exp and experiment_id_for_save:
+                filename = 'training_comparison'
+            elif len(run_data_list) == 1:
+                single_run_id = run_data_list[0]['run_id']
+                run_id_for_save = single_run_id
+                if not experiment_id_for_save:
+                    try:
+                        single_run_data_item = run_data_list[0]
+                        if 'run_obj' in single_run_data_item and single_run_data_item['run_obj'] is not None:
+                            experiment_id_for_save = single_run_data_item['run_obj'].info.experiment_id
+                        else:
+                            fallback_run_obj = client.get_run(single_run_id)
+                            experiment_id_for_save = fallback_run_obj.info.experiment_id
+                    except Exception as e:
+                        print(f"COMPARE_TRAINING: Warning: Could not determine experiment ID for run {single_run_id}: {e}. Defaulting.")
 
-        # Use self.save_figure() which handles directory creation
-        save_path = self.save_figure(fig, filename, run_id=run_id_for_save, 
-                                     experiment_id=experiment_id_for_save, dpi=dpi)
+                filename = 'training'
+            else:
+                filename = 'training_comparison'
+ 
+        self.save_figure(fig, filename=filename, save_dir=save_dir, dpi=dpi, run_id=run_id_for_save, experiment_id=experiment_id_for_save)
+     
         plt.close(fig)
 
     def plot_design_dim_by_eig(
         self,
         run_labels=None,
         eval_step=None,
-        save_path=None,
         figsize=(16, 10),
-        dpi=400,
         design_labels=None,
         title=None,
         nominal_design=None,
@@ -4063,7 +4194,10 @@ class ComparisonPlotter(BasePlotter):
         moving_avg_window=50,
         top_n=None,
         ratio=False,
-        show_nominal=False
+        show_nominal=False,
+        filename=None,
+        save_dir=None,
+        dpi=400
     ):
         """
         Plot eig values for each design dimension across multiple runs, sorted by EIG.
@@ -4345,11 +4479,9 @@ class ComparisonPlotter(BasePlotter):
         
         plt.tight_layout()
         
-        # Save if requested
-        if save_path is not None:
-            os.makedirs(os.path.dirname(save_path) if os.path.dirname(save_path) else '.', exist_ok=True)
-            fig.savefig(save_path, dpi=dpi)
-            print(f"Saved plot to {save_path}")
+        if filename is None:
+            filename = 'design_dim_by_eig'
+        self.save_figure(fig, filename=filename, save_dir=save_dir, dpi=dpi)
         
         return fig, axes
     

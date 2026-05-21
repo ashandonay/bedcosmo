@@ -105,6 +105,9 @@ export NCCL_CROSS_NIC=1
 export NCCL_SOCKET_IFNAME=hsn # high-speed network interface
 export NCCL_DEBUG=WARN
 
+# Reduce JAX/XLA upfront GPU reservation to lower OOM risk.
+export XLA_PYTHON_CLIENT_PREALLOCATE=false
+
 # Define number of DDP processes per node
 NPROC_PER_NODE=$SLURM_GPUS_PER_NODE
 

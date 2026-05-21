@@ -4,6 +4,7 @@ import yaml
 import json
 import mlflow
 import pandas as pd
+import jax.numpy as jnp
 import numpy as np
 import pyro
 from pyro import distributions as dist
@@ -122,7 +123,8 @@ class NumTracers(BaseExperiment, CosmologyMixin):
         
 
         self.prior, self.param_constraints, self.latex_labels, self.prior_flow, self.prior_flow_metadata = self.init_prior(**self.prior_args)
-        
+        self.cosmo_params = list(self.prior.keys())
+
         # Extract prior_flow settings for use in _sample_prior_flow
         if self.prior_flow_metadata is not None:
             self.prior_flow_transform_input = self.prior_flow_metadata.get('transform_input', False)
@@ -140,42 +142,28 @@ class NumTracers(BaseExperiment, CosmologyMixin):
         else:
             # If DESI prior not found, use the same as the main prior
             self.desi_prior = self.prior
-        self.cosmo_params = list(self.prior.keys())
-        
-        # Determine which bijector_state to use:
-        # 1. If bijector_state argument is provided (resume training), use that
-        # 2. Else if prior_flow has bijector_state (using prior_flow as prior), use that
-        # 3. Else create new bijector by sampling
-        effective_bijector_state = bijector_state
-        bijector_source = "checkpoint"
-        
-        if effective_bijector_state is None and self.prior_flow_metadata is not None:
-            prior_flow_bijector_state = self.prior_flow_metadata.get('bijector_state')
-            if prior_flow_bijector_state is not None:
-                effective_bijector_state = prior_flow_bijector_state
-                bijector_source = "prior_flow"
-        
-        skip_bijector_sampling = effective_bijector_state is not None
-        self.param_bijector = Bijector(self, cdf_bins=5000, cdf_samples=1e5, skip_sampling=skip_bijector_sampling)
-        if effective_bijector_state is not None:
-            if self.global_rank == 0:
-                print(f"Restoring bijector state from {bijector_source}.")
-            self.param_bijector.set_state(effective_bijector_state, device=self.device)
-        # if the prior is not the same as the DESI prior, create a new bijector for the DESI samples
+
+        self.transform_input = transform_input
+
+        # param_bijector is built unconditionally (DESI sampling consumes it
+        # even when transform_input is False). State resolution (explicit
+        # arg vs prior_flow_metadata fallback) lives in the helper.
+        self._init_param_bijector(
+            bijector_state=bijector_state,
+            cdf_samples=int(1e5),
+            always_build=True,
+        )
+
+        # If the main prior differs from the DESI prior, build a separate
+        # bijector against the uniform DESI prior (not the prior_flow).
         if self.prior.items() != self.desi_prior.items():
-            # desi_bijector uses the uniform desi_prior, not the prior_flow
-            self.desi_bijector = Bijector(self, prior=self.desi_prior, cdf_bins=5000, cdf_samples=1e6,
-                                         use_prior_flow=False)
+            self.desi_bijector = Bijector(
+                self, prior=self.desi_prior, cdf_bins=5000, cdf_samples=1e6,
+                use_prior_flow=False,
+            )
         else:
             self.desi_bijector = self.param_bijector
 
-        self.transform_input = transform_input
-        # store as Python lists of ints; works for advanced indexing
-        self._idx_Om = [self.cosmo_params.index('Om')] if 'Om' in self.cosmo_params else []
-        self._idx_Ok = [self.cosmo_params.index('Ok')] if 'Ok' in self.cosmo_params else []
-        self._idx_w0 = [self.cosmo_params.index('w0')] if 'w0' in self.cosmo_params else []
-        self._idx_wa = [self.cosmo_params.index('wa')] if 'wa' in self.cosmo_params else []
-        self._idx_hr = [self.cosmo_params.index('hrdrag')] if 'hrdrag' in self.cosmo_params else []
         self.observation_labels = ["y"]
         
         # Pass design_args using ** unpacking if provided, otherwise use defaults
@@ -457,87 +445,6 @@ class NumTracers(BaseExperiment, CosmologyMixin):
 
         return prior, param_constraints, latex_labels, prior_flow, prior_flow_metadata
 
-    @profile_method
-    def params_to_unconstrained(self, params, bijector_class=None):
-        """
-        Vectorized: map PHYSICAL space -> unconstrained R^D.
-        Expected input shape: (..., D) where D == len(self.cosmo_params).
-
-        Returns:
-            y (torch.Tensor): The unconstrained parameters.
-        """
-        D = len(self.cosmo_params)
-        assert params.shape[-1] == D, f"Expected last dim {D}, got {params.shape[-1]}"
-        y = params.clone()
-
-        if bijector_class is None:
-            bijector_class = self.param_bijector
-
-        # Om in (0,1): use empirical prior transformation
-        if self._idx_Om:
-            x = params[..., self._idx_Om]
-            y[..., self._idx_Om] = bijector_class.prior_to_gaussian(x, 'Om')
-
-        # Ok in (-0.3, 0.3): use empirical prior transformation
-        if self._idx_Ok:
-            x = params[..., self._idx_Ok]
-            y[..., self._idx_Ok] = bijector_class.prior_to_gaussian(x, 'Ok')
-
-        # w0 in (-3, 1): use empirical prior transformation
-        if self._idx_w0:
-            x = params[..., self._idx_w0]
-            y[..., self._idx_w0] = bijector_class.prior_to_gaussian(x, 'w0')
-
-        # wa in (-3, 2): use empirical prior transformation
-        if self._idx_wa:
-            x = params[..., self._idx_wa]
-            y[..., self._idx_wa] = bijector_class.prior_to_gaussian(x, 'wa')
-
-        # hrdrag > 0: use empirical prior transformation
-        if self._idx_hr:
-            x = params[..., self._idx_hr]
-            y[..., self._idx_hr] = bijector_class.prior_to_gaussian(x, 'hrdrag')
-
-        return y
-
-    @profile_method
-    def params_from_unconstrained(self, y, bijector_class=None):
-        """
-        Vectorized: map unconstrained R^D -> PHYSICAL space.
-        Expected input shape: (..., D) where D == len(self.cosmo_params).
-
-        Returns:
-            x (torch.Tensor): The physical parameters.
-        """
-        D = len(self.cosmo_params)
-        assert y.shape[-1] == D, f"Expected last dim {D}, got {y.shape[-1]}"
-        x = y.clone()
-
-        if bijector_class is None:
-            bijector_class = self.param_bijector
-        
-        # Om: use empirical prior inverse transformation
-        if self._idx_Om:
-            x[..., self._idx_Om] = bijector_class.gaussian_to_prior(y[..., self._idx_Om], 'Om')
-
-        # Ok: use empirical prior inverse transformation
-        if self._idx_Ok:
-            x[..., self._idx_Ok] = bijector_class.gaussian_to_prior(y[..., self._idx_Ok], 'Ok')
-
-        # w0: use empirical prior inverse transformation
-        if self._idx_w0:
-            x[..., self._idx_w0] = bijector_class.gaussian_to_prior(y[..., self._idx_w0], 'w0')
-
-        # wa: use empirical prior inverse transformation
-        if self._idx_wa:
-            x[..., self._idx_wa] = bijector_class.gaussian_to_prior(y[..., self._idx_wa], 'wa')
-
-        # hrdrag: use empirical prior inverse transformation
-        if self._idx_hr:
-            x[..., self._idx_hr] = bijector_class.gaussian_to_prior(y[..., self._idx_hr], 'hrdrag')
-
-        return x
-            
     @profile_method
     def sigma_scaling_factor(self, passed_ratio, class_ratio, index):
         """
@@ -1319,20 +1226,24 @@ class NumTracers(BaseExperiment, CosmologyMixin):
     def unnorm_lfunc(self, params, features, designs):
         parameters = { }
         for key in params.names:
-            parameters[key] = torch.tensor(getattr(params, key), device=self.device, dtype=torch.float64)
-        likelihood = 1
+            parameters[key] = torch.tensor(np.asarray(getattr(params, key)), device=self.device, dtype=torch.float64)
+        likelihood = jnp.asarray(1.0, dtype=jnp.float64)
         passed_ratio = self.calc_passed(designs)
         for i in range(len(self.tracer_bins)):
             D_H_mean = self.D_H_func(**parameters)
-            D_H_diff = getattr(features, features.names[i]) - D_H_mean.cpu().numpy()
-            D_H_sigma = self.sigmas[self.DH_idx].cpu().numpy()[i] * np.sqrt(self.nominal_passed_ratio[i].cpu().numpy()/passed_ratio[i])
-            likelihood = np.exp(-0.5 * (D_H_diff / D_H_sigma) ** 2) * likelihood
-            
+            D_H_diff = jnp.asarray(getattr(features, features.names[i])) - jnp.asarray(D_H_mean.cpu().numpy())
+            D_H_sigma = jnp.asarray(self.sigmas[self.DH_idx].cpu().numpy()[i]) * jnp.sqrt(
+                jnp.asarray(self.nominal_passed_ratio[i].cpu().numpy()) / jnp.asarray(passed_ratio[i])
+            )
+            likelihood = jnp.exp(-0.5 * (D_H_diff / D_H_sigma) ** 2) * likelihood
+
             if self.include_D_M:
                 D_M_mean = self.D_M_func(**parameters)
-                D_M_diff = getattr(features, features.names[i+len(self.tracer_bins)]) - D_M_mean.cpu().numpy()
-                D_M_sigma = self.sigmas[self.DM_idx].cpu().numpy()[i] * np.sqrt(self.nominal_passed_ratio[i].cpu().numpy()/passed_ratio[i])
-                likelihood = np.exp(-0.5 * (D_M_diff / D_M_sigma) ** 2) * likelihood
+                D_M_diff = jnp.asarray(getattr(features, features.names[i+len(self.tracer_bins)])) - jnp.asarray(D_M_mean.cpu().numpy())
+                D_M_sigma = jnp.asarray(self.sigmas[self.DM_idx].cpu().numpy()[i]) * jnp.sqrt(
+                    jnp.asarray(self.nominal_passed_ratio[i].cpu().numpy()) / jnp.asarray(passed_ratio[i])
+                )
+                likelihood = jnp.exp(-0.5 * (D_M_diff / D_M_sigma) ** 2) * likelihood
 
         if (
             getattr(params, "_stack_offset", 0) == 0
@@ -1340,7 +1251,7 @@ class NumTracers(BaseExperiment, CosmologyMixin):
             and getattr(designs, "_stack_offset", 0) == 0
         ):
             param_shape = tuple(params.shape)
-            likelihood = np.asarray(likelihood, dtype=np.float64)
+            likelihood = jnp.asarray(likelihood, dtype=jnp.float64)
             if likelihood.shape != param_shape and likelihood.size == int(np.prod(param_shape)):
                 likelihood = likelihood.reshape(param_shape)
 

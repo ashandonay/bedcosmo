@@ -20,22 +20,22 @@ import traceback
 from bedcosmo.pyro_oed_src import nf_loss, LikelihoodDataset
 from matplotlib.patches import Rectangle
 from bedcosmo.util import (
-    auto_seed, init_experiment, init_nf, load_model, get_runs_data,
-    get_experiment_config_path, profile_method, parse_float_or_list,
-    get_rng_state, parse_extra_args,
+    auto_seed, init_experiment, load_model, get_runs_data,
+    profile_method, parse_float_or_list,
+    get_rng_state, parse_extra_args, render_overlay,
+    get_checkpoint,
 )
 import mlflow
 import inspect
 import yaml
-from bedcosmo.grid_calc import GridCalculation
 
 class Evaluator:
     def __init__(
             self, run_id, guide_samples=1000, design_chunk_size=None, seed=1, cosmo_exp='num_tracers',
-            levels=[0.68, 0.95], global_rank=0, eig_file_path=None, n_evals=10, n_particles=1000,
+            levels=[0.68, 0.95], global_rank=0, n_evals=10, n_particles=1000,
             param_space='physical', display_run=False, verbose=False, device="cuda:0", profile=False,
             sort=True, include_nominal=False, batch_size=1, particle_batch_size=None, design_args_path=None,
-            grid=False, grid_args=None, experiment_args=None
+            experiment_args=None, nf_eig_data=None, grid_eig_data=None,
             ):
         self.cosmo_exp = cosmo_exp
         
@@ -64,8 +64,10 @@ class Evaluator:
         self.n_particles = n_particles
         self.particle_batch_size = particle_batch_size
         self.seed = seed
-        # Load eig_file_path early to get seed for reproducibility
-        self.eig_file_path = eig_file_path
+        # --nf-eig-data is the unified own-role path: write target, and also load
+        # target if the file already exists (resume-from-file behavior).
+        self.output_path = nf_eig_data
+        self.eig_file_path = nf_eig_data if (nf_eig_data and os.path.exists(nf_eig_data)) else None
         self._init_eig_data()
         
         # Set seed before any operations that might use randomness
@@ -85,11 +87,8 @@ class Evaluator:
         self.sort = sort
         self.include_nominal = include_nominal
         self.batch_size = batch_size  # Batch size for sample_posterior to reduce memory usage
-        self.grid = grid
-        self.grid_args = grid_args or {}
-        self._grid_experiment = None
-        self._grid_samples = None
-        
+        self.other_eig_data = grid_eig_data
+
         # Parse experiment_args override
         if isinstance(experiment_args, str):
             self.experiment_args = json.loads(experiment_args)
@@ -108,11 +107,31 @@ class Evaluator:
             # Will default to the run's artifacts design_args.yaml
             self.design_args = None
 
+        # If the run was trained with transform_input=True, load the bijector
+        # state from the latest checkpoint so the evaluator's bijector matches
+        # the one the flow was trained against. Without transform_input there
+        # is no bijector to seed, so we skip the checkpoint peek entirely.
+        eval_checkpoint = None
+        if self.run_args.get("transform_input", False):
+            checkpoint_dir = f"{self.save_path}/checkpoints"
+            eval_checkpoint, _ = get_checkpoint(
+                'last', checkpoint_dir, self.device, self.global_rank,
+                self.total_steps,
+            )
+            if 'bijector_state' not in eval_checkpoint:
+                raise RuntimeError(
+                    f"Run {self.run_id} has transform_input=True but its "
+                    f"checkpoint does not contain a bijector_state. The flow "
+                    f"cannot be evaluated against a bijector it was not "
+                    f"trained against -- retrain on current HEAD."
+                )
+
         # Initialize experiment - it will handle input_design and generate designs accordingly
         # (single design, multiple designs, or grid)
         self.experiment = init_experiment(
             self.run_obj, self.run_args, device=self.device,
             design_args=self.design_args, global_rank=self.global_rank,
+            checkpoint=eval_checkpoint,
             **self.experiment_args
         )
         if self.eig_file_path is not None and 'input_designs' in self.eig_data:
@@ -143,108 +162,26 @@ class Evaluator:
         # Initialize timing mechanism
         self.session_start_time = None
 
-    def _compute_grid_eig(self, step_key):
-        print("Running grid EIG calculation with ExperimentDesigner...")
-        # Grid path is pinned to CPU for stability / compatibility.
-        # Keep a separate experiment instance so the main evaluator can still run on GPU.
-        if self._grid_experiment is None:
-            print("Initializing CPU experiment for grid EIG...")
-            self._grid_experiment = init_experiment(
-                self.run_obj,
-                self.run_args,
-                device="cpu",
-                design_args=self.design_args,
-                global_rank=self.global_rank,
-                **self.experiment_args,
-            )
-
-        # Use class-based BruteForceDesigner with experiment's prior
-        gc = GridCalculation(
-            experiment=self._grid_experiment,
-            **self.grid_args,
-        )
-
-        # Compute prior PDF from experiment's prior distributions
-        prior_pdf = gc.compute_prior_pdf(use_experiment_prior=True)
-        print(f"Computed prior PDF with shape {prior_pdf.shape}")
-
-        result = gc.run(prior=prior_pdf)
-        eig = np.asarray(result["eig"], dtype=float)
-        best_design = result["best_design"]
-
-        step_dict = self.eig_data.setdefault(step_key, {})
-        variable_data = step_dict.setdefault("variable", {})
-        nominal_data = step_dict.setdefault("nominal", {})
-
-        eig_flat = eig.reshape(-1)
-        max_idx = int(np.argmax(eig_flat))
-        optimal_eig = float(eig_flat[max_idx])
-        variable_data["grid"] = {
-            "eigs_avg": eig_flat.tolist(),
-            "eigs_std": np.zeros_like(eig_flat).tolist(),
-            "optimal_eig": optimal_eig,
-            "optimal_eig_std": 0.0,
-            "optimal_design": best_design,
-            "design_grid_shape": list(result["design_grid_shape"]),
-            "feature_grid_shape": list(result["feature_grid_shape"]),
-            "parameter_grid_shape": list(result["parameter_grid_shape"]),
-        }
-
-        nominal_design = np.asarray(self.experiment.nominal_design.detach().cpu().numpy(), dtype=float).reshape(1, -1)
-        input_designs_np = np.asarray(self.input_designs.detach().cpu().numpy(), dtype=float)
-        nominal_idx = int(np.argmin(np.linalg.norm(input_designs_np - nominal_design, axis=1)))
-        nominal_data["grid"] = {
-            "eigs_avg": float(eig_flat[nominal_idx]),
-            "eigs_std": 0.0,
-        }
-
-        try:
-            pdf = gc.get_posterior(nominal=True)
-            self._grid_samples = gc.draw_samples(
-                pdf=pdf,
-                num_samples=50000,
-                seed=self.seed,
-            )
-        except Exception as e:
-            traceback.print_exc()
-            self._grid_samples = None
-            print(f"Warning: grid posterior sampling failed: {e}")
-
-        # Save marginal plot to run artifacts
-        try:
-            fig_marginal, _ = gc.plot_marginal(
-                design_type="nominal",
-                param_overlay=True,
-            )
-            filename = f"grid_marginal_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
-            self.plotter.save_figure(
-                fig_marginal, filename,
-                run_id=self.run_id, experiment_id=self.exp_id, dpi=400,
-            )
-        except Exception as e:
-            traceback.print_exc()
-            print(f"Warning: grid marginal plot failed: {e}")
-
-        print(
-            f"Grid EIG complete: nominal={nominal_data['grid']['eigs_avg']:.4f}, "
-            f"optimal={optimal_eig:.4f}"
-        )
-
     def _update_runtime(self):
         """Update and print session runtime."""
         if self.session_start_time is None:
             # First call - initialize session start time
             self.session_start_time = time.time()
             return
-        
+
         # Calculate session runtime
         session_runtime = time.time() - self.session_start_time
-        
+
         # Print current runtime
         hours = int(session_runtime // 3600)
         minutes = int((session_runtime % 3600) // 60)
         seconds = int(session_runtime % 60)
         print(f"Evaluation runtime: {hours}h {minutes}m {seconds}s")
+
+    def _eig_data_save_path(self, timestamp):
+        if self.output_path:
+            return self.output_path
+        return f"{self.save_path}/eig_data_{timestamp}.json"
 
     def _init_eig_data(self):
         if self.eig_file_path is not None:
@@ -513,8 +450,7 @@ class Evaluator:
         else:
             title = f"Posterior Evaluations for {num_data_samples} Likelihood Samples"
         g.fig.suptitle(title, fontsize=title_fontsize, weight='bold')
-        filename = f"posterior_samples_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
-        self.plotter.save_figure(g.fig, filename, run_id=self.run_id, experiment_id=self.exp_id, dpi=400)
+        self.plotter.save_figure(g.fig, filename="posterior_samples", dpi=400, run_id=self.run_id, experiment_id=self.exp_id)
 
     def _compute_eig(self, flow_model, nominal_design=False, designs=None):
         """
@@ -777,7 +713,7 @@ class Evaluator:
                         step_data['optimal_design'] = optimal_design
                     timestamp = getattr(self, 'timestamp', None) or datetime.now().strftime('%Y%m%d_%H%M')
                     self.eig_data['status'] = 'incomplete'  # Mark as incomplete during evaluation
-                    eig_data_save_path = f"{self.save_path}/eig_data_{timestamp}.json"
+                    eig_data_save_path = self._eig_data_save_path(timestamp)
                     with open(eig_data_save_path, "w") as f:
                         json.dump(self.eig_data, f, indent=2)
                     return (result, result_std)
@@ -843,7 +779,7 @@ class Evaluator:
             # Save EIG data to file
             timestamp = getattr(self, 'timestamp', None) or datetime.now().strftime('%Y%m%d_%H%M')
             self.eig_data['status'] = 'incomplete'  # Mark as incomplete during evaluation
-            eig_data_save_path = f"{self.save_path}/eig_data_{timestamp}.json"
+            eig_data_save_path = self._eig_data_save_path(timestamp)
             with open(eig_data_save_path, "w") as f:
                 json.dump(self.eig_data, f, indent=2)
             
@@ -892,7 +828,7 @@ class Evaluator:
 
         timestamp = getattr(self, 'timestamp', None) or datetime.now().strftime('%Y%m%d_%H%M')
         self.eig_data['status'] = 'incomplete'  # Mark as incomplete during evaluation
-        eig_data_save_path = f"{self.save_path}/eig_data_{timestamp}.json"
+        eig_data_save_path = self._eig_data_save_path(timestamp)
         with open(eig_data_save_path, "w") as f:
             json.dump(self.eig_data, f, indent=2)
         print(f"Saved EIG data to {eig_data_save_path}")
@@ -1033,8 +969,7 @@ class Evaluator:
         fig.suptitle(title, fontsize=16, y=0.995, weight='bold')
         
         plt.tight_layout()
-        filename = f"eig_grid_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
-        self.plotter.save_figure(fig, filename, run_id=self.run_id, experiment_id=self.exp_id, dpi=400)
+        self.plotter.save_figure(fig, filename="eig_grid", dpi=400, run_id=self.run_id, experiment_id=self.exp_id)
 
     def compute_eig_steps(self, steps, n_evals=1):
         """
@@ -1069,7 +1004,7 @@ class Evaluator:
         # Save updated eig_data (restore 'complete' status since get_eig marks it 'incomplete' during evaluation)
         self.eig_data['status'] = 'complete'
         timestamp = getattr(self, 'timestamp', None) or datetime.now().strftime('%Y%m%d_%H%M')
-        eig_data_save_path = f"{self.save_path}/eig_data_{timestamp}.json"
+        eig_data_save_path = self._eig_data_save_path(timestamp)
         with open(eig_data_save_path, "w") as f:
             json.dump(self.eig_data, f, indent=2)
         print(f"Saved EIG steps data to {eig_data_save_path}")
@@ -1127,14 +1062,7 @@ class Evaluator:
         self.eig_data["design_type"] = eig_label.lower()  # 'optimal' or 'fixed'
         self.eig_data['status'] = 'incomplete'  # Mark as incomplete during evaluation
 
-        if self.grid:
-            try:
-                self._compute_grid_eig(step_key=step_key)
-            except Exception as e:
-                print(f"Warning: grid EIG calculation failed: {e}")
-                traceback.print_exc()
-
-        eig_data_save_path = f"{self.save_path}/eig_data_{self.timestamp}.json"
+        eig_data_save_path = self._eig_data_save_path(self.timestamp)
         with open(eig_data_save_path, "w") as f:
             json.dump(self.eig_data, f, indent=2)
         print(f"Saved EIG data to {eig_data_save_path}")
@@ -1148,7 +1076,7 @@ class Evaluator:
         # If not complete, mark as complete and save
         if not is_complete:
             self.eig_data['status'] = 'complete'  # Mark as complete when evaluation finishes
-            eig_data_save_path = f"{self.save_path}/eig_data_{self.timestamp}.json"
+            eig_data_save_path = self._eig_data_save_path(self.timestamp)
             with open(eig_data_save_path, "w") as f:
                 json.dump(self.eig_data, f, indent=2)
             print(f"Saved EIG data to {eig_data_save_path}")
@@ -1156,9 +1084,8 @@ class Evaluator:
         # Make some evaluation plots
         try:
             self.plotter.generate_posterior(
-                eval_step=eval_step, display=['nominal', 'optimal'],  guide_samples=50000,
+                eval_step=eval_step, display=['nominal', 'optimal'],  guide_samples=100000,
                 levels=self.levels, plot_prior=True, transform_output=self.nf_transform_output,
-                grid_samples=self._grid_samples
                 )
             self._update_runtime()
         except Exception as e:
@@ -1183,7 +1110,7 @@ class Evaluator:
         try:
             # Plot posterior at different training steps
             steps_to_plot = [self.total_steps//4, self.total_steps//2, self.total_steps*3//4, 'last']
-            self.plotter.posterior_steps(steps=steps_to_plot, levels=self.levels)
+            self.plotter.posterior_steps(steps=steps_to_plot, levels=self.levels, guide_samples=50000, filename='posterior_steps')
             self._update_runtime()
         except Exception as e:
             print(f"Warning: posterior_steps failed: {e}")
@@ -1195,10 +1122,26 @@ class Evaluator:
             self.compute_eig_steps(steps=eig_steps_to_compute, n_evals=1)
             # Plot EIG across training steps (intermediate + final eval_step)
             all_eig_steps = eig_steps_to_compute + [eval_step]
-            self.plotter.eig_designs(eval_step=all_eig_steps, sort=self.sort, include_nominal=self.include_nominal)
+            self.plotter.eig_designs(eval_step=all_eig_steps, sort=self.sort, include_nominal=self.include_nominal, filename="eig_designs_steps")
             self._update_runtime()
         except Exception as e:
             print(f"Warning: eig_designs (multi-step) failed: {e}")
+            traceback.print_exc()
+
+        try:
+            render_overlay(
+                own_eig_data=self.eig_data,
+                own_role='nf',
+                other_eig_data_path=self.other_eig_data,
+                plotter=self.plotter,
+                eval_step=eval_step,
+                levels=self.levels,
+                transform_output=self.nf_transform_output,
+                include_nominal=self.include_nominal,
+                sort=self.sort,
+            )
+        except Exception as e:
+            print(f"Warning: overlay rendering failed: {e}")
             traceback.print_exc()
 
         print(f"Evaluation completed successfully!")
@@ -1222,22 +1165,11 @@ if __name__ == "__main__":
     parser.add_argument('--verbose', action='store_true', help='Enable verbose output')
     parser.add_argument('--no-sort', dest='sort', action='store_false', help='Disable sorting of designs by EIG (default: sorting enabled)')
     parser.add_argument('--include-nominal', action='store_true', default=False, help='Include nominal EIG in eig_designs plot (default: False)')
-    parser.add_argument('--eig-file-path', type=str, default=None, help='Path to previously calculated eig_data JSON file to load instead of recalculating')
     parser.add_argument('--batch-size', type=int, default=1, help='Batch size for sample_posterior to reduce memory usage (default: 1)')
     parser.add_argument('--particle-batch-size', type=int, default=None, help='Batch size for processing particles in LikelihoodDataset to reduce memory usage (default: None to use all particles)')
     parser.add_argument('--design-args-path', type=str, default=None, help='Path to design_args.yaml file. If None, defaults to the run\'s artifacts/design_args.yaml')
-    parser.add_argument('--grid', action='store_true', default=False, help='Run grid EIG using bayesdesign ExperimentDesigner')
-
-    # GridCalculation args (passed through to GridCalculation.__init__)
-    parser.add_argument('--param-pts', type=int, default=None, help='Number of points per parameter axis for grid')
-    parser.add_argument('--feature-pts', type=int, default=None, help='Number of points per feature axis for grid')
-    parser.add_argument('--adaptive-features', action='store_true', default=None, help='Use adaptive feature grid spacing')
-    parser.add_argument('--adaptive-floor', type=float, default=None, help='Floor value for adaptive feature grid')
-    parser.add_argument('--feature-dense-fraction', type=float, default=None, help='Fraction of feature points in dense region')
-    parser.add_argument('--param-dense-fraction', type=float, default=None, help='Fraction of param points in dense region')
-    parser.add_argument('--feature-range', dest='feature_ranges', action='append', default=None, help='Feature range as name:lo,hi (repeatable, e.g. --feature-range u:-15,100 --feature-range g:15,55)')
-    parser.add_argument('--feature-dense-range', dest='feature_dense_ranges', action='append', default=None, help='Feature dense range as name:lo,hi (repeatable)')
-    parser.add_argument('--param-dense-range', dest='param_dense_ranges', action='append', default=None, help='Param dense range as name:lo,hi (repeatable)')
+    parser.add_argument('--nf-eig-data', type=str, default=None, help='Path for this NF job to write its eig_data JSON. If the file already exists, it is loaded first (inheriting seed, n_particles, particle_batch_size, n_evals, rng_state, input_designs, and cached per-step EIGs) and then overwritten at end of run.')
+    parser.add_argument('--grid-eig-data', type=str, default=None, help='Path to the sibling grid job eig_data JSON. If it is complete at end of run, overlay plots are generated.')
 
     args, extra_args = parser.parse_known_args()
 
@@ -1245,32 +1177,10 @@ if __name__ == "__main__":
     if experiment_args:
         print(f"Experiment args overrides: {experiment_args}")
 
-    def parse_range_args(raw_list):
-        """Parse ['name:lo,hi', ...] into {'name': (lo, hi), ...}."""
-        result = {}
-        for item in raw_list:
-            name, vals = item.split(':', 1)
-            lo, hi = vals.split(',')
-            result[name] = (float(lo), float(hi))
-        return result
-
-    # Collect grid_args from CLI (only include non-None values)
-    grid_scalar_names = ['param_pts', 'feature_pts', 'adaptive_features', 'adaptive_floor',
-                         'feature_dense_fraction', 'param_dense_fraction']
-    grid_range_names = ['feature_ranges', 'feature_dense_ranges', 'param_dense_ranges']
-    grid_arg_names = grid_scalar_names + grid_range_names
-    grid_args = {k: getattr(args, k) for k in grid_scalar_names if getattr(args, k) is not None}
-    for k in grid_range_names:
-        raw = getattr(args, k)
-        if raw is not None:
-            grid_args[k] = parse_range_args(raw)
-
     valid_params = inspect.signature(Evaluator.__init__).parameters.keys()
     valid_params = [k for k in valid_params if k != 'self']
-    eval_args = {k: v for k, v in vars(args).items() if k in valid_params and k not in grid_arg_names}
+    eval_args = {k: v for k, v in vars(args).items() if k in valid_params}
     eval_args['experiment_args'] = experiment_args
-    if grid_args:
-        eval_args['grid_args'] = grid_args
 
     print(f"Evaluating with parameters:")
     print(json.dumps(eval_args, indent=2))

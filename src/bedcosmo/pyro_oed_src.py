@@ -626,12 +626,36 @@ class LikelihoodDataset(Dataset):
     def _compute_prior_log_probs(self, samples, trace):
         """Compute log probabilities from prior (either prior_flow or uniform)."""
         if hasattr(self.experiment, 'prior_flow') and self.experiment.prior_flow is not None:
-            # Compute log probabilities from prior_flow
+            # Two transform_input flags are in play:
+            #   prior_transform_input -- whether the prior_flow expects T_pf(theta)
+            #   cur_transform_input   -- whether the current flow expects T_cur(theta)
+            # The current flow's log_prob (computed in nf_loss) lives in T_cur space
+            # if cur_transform_input else theta space. To make prior_entropy and
+            # posterior_entropy unit-matched we evaluate prior_flow.log_prob in its
+            # native space, change-of-variables to theta space, then change-of-
+            # variables again to T_cur space. Either change-of-variables drops out
+            # when the corresponding transform_input flag is False, and both drop
+            # out together when T_cur ~~ T_pf (same bijector state).
             nominal_context = self.experiment.prior_flow_metadata['nominal_context'].to(self.device)
             batch_shape = samples.shape[:-1]
             flattened_samples = samples.view(-1, samples.shape[-1])
-            
+
             prior_transform_input = self.experiment.prior_flow_metadata['transform_input']
+            cur_transform_input = getattr(self.experiment, 'transform_input', False)
+            prior_flow_bijector = getattr(self.experiment, 'prior_flow_bijector', None)
+            param_bijector = getattr(self.experiment, 'param_bijector', None)
+
+            if prior_transform_input and prior_flow_bijector is None:
+                raise RuntimeError(
+                    "prior_flow was trained with transform_input=True but the "
+                    "experiment has no prior_flow_bijector attached. _init_param_bijector "
+                    "should have built one from prior_flow_metadata['bijector_state']."
+                )
+            if cur_transform_input and param_bijector is None:
+                raise RuntimeError(
+                    "experiment.transform_input=True but no param_bijector is attached."
+                )
+
             total_samples = flattened_samples.shape[0]
             chunk_size = min(self.particle_batch_size, total_samples)
 
@@ -640,20 +664,58 @@ class LikelihoodDataset(Dataset):
                 for start in range(0, total_samples, chunk_size):
                     end = min(start + chunk_size, total_samples)
                     chunk_samples = flattened_samples[start:end]
+
+                    # Step 1: native input for the prior_flow (T_pf(theta) or theta).
                     if prior_transform_input:
-                        chunk_samples_for_log_prob = self.experiment.params_to_unconstrained(chunk_samples)
+                        pf_input = torch.empty_like(chunk_samples)
+                        for i, name in enumerate(self.experiment.cosmo_params):
+                            pf_input[..., i:i + 1] = prior_flow_bijector.prior_to_gaussian(
+                                chunk_samples[..., i:i + 1], name
+                            )
                     else:
-                        chunk_samples_for_log_prob = chunk_samples
+                        pf_input = chunk_samples
+
                     expanded_context = nominal_context.unsqueeze(0).expand(end - start, -1)
                     prior_dist = self.experiment.prior_flow(expanded_context)
-                    log_prob_all[start:end] = prior_dist.log_prob(chunk_samples_for_log_prob)
+                    chunk_log_prob = prior_dist.log_prob(pf_input)
+
+                    # Step 2: change-of-variables to theta space (only if T_pf was applied).
+                    if prior_transform_input:
+                        log_det_pf = chunk_samples.new_zeros(chunk_samples.shape[0])
+                        for i, name in enumerate(self.experiment.cosmo_params):
+                            log_det_pf = log_det_pf + prior_flow_bijector.log_abs_det_jacobian(
+                                chunk_samples[..., i:i + 1], name
+                            ).flatten()
+                        chunk_log_prob = chunk_log_prob + log_det_pf
+
+                    # Step 3: change-of-variables from theta space into T_cur space
+                    # (only if the current flow operates in T_cur space).
+                    if cur_transform_input:
+                        log_det_cur = chunk_samples.new_zeros(chunk_samples.shape[0])
+                        for i, name in enumerate(self.experiment.cosmo_params):
+                            log_det_cur = log_det_cur + param_bijector.log_abs_det_jacobian(
+                                chunk_samples[..., i:i + 1], name
+                            ).flatten()
+                        chunk_log_prob = chunk_log_prob - log_det_cur
+
+                    log_prob_all[start:end] = chunk_log_prob
 
             log_prob_all = log_prob_all.reshape(batch_shape)
             return {"joint": log_prob_all}
         else:
-            # Use standard trace.compute_log_prob() for uniform priors
             trace.compute_log_prob()
-            return {l: trace.nodes[l]["log_prob"] for l in self.experiment.cosmo_params}
+            log_probs = {l: trace.nodes[l]["log_prob"] for l in self.experiment.cosmo_params}
+            if getattr(self.experiment, "transform_input", False):
+                # nf_loss feeds the flow params_to_unconstrained(samples), so its
+                # log_prob is in the post-bijector space. Apply change-of-variables
+                # to express the prior log_prob in the same space:
+                #     log p_T(T(x)) = log p_x(x) - log|dT/dx|
+                # so prior_entropy - posterior_entropy matches in units.
+                bijector = self.experiment.param_bijector
+                for i, name in enumerate(self.experiment.cosmo_params):
+                    log_det = bijector.log_abs_det_jacobian(samples[..., i:i + 1], name)
+                    log_probs[name] = log_probs[name] - log_det.reshape(log_probs[name].shape)
+            return log_probs
 
     @profile_method
     def _process_particles(self, n_particles):

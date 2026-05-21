@@ -1,12 +1,26 @@
 # Evaluation arguments for num_visits experiment
 
-base:
-  cosmo_model: base
+bb:
+  cosmo_model: bb
   eval_step: last
   levels: [0.68, 0.95]
   guide_samples: 100000
   n_particles: 100001
-  particle_batch_size: 10000  
+  particle_batch_size: 10000
+  n_evals: 10
+  param_space: physical
+  design_args_path: null
+  design_chunk_size: 1
+  profile: true
+  verbose: true
+
+bb_temp:
+  cosmo_model: bb_temp
+  eval_step: last
+  levels: [0.68, 0.95]
+  guide_samples: 100000
+  n_particles: 100001
+  particle_batch_size: 10000
   n_evals: 10
   param_space: physical
   design_args_path: null

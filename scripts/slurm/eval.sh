@@ -146,6 +146,9 @@ export NCCL_CROSS_NIC=1
 export NCCL_SOCKET_IFNAME=hsn # high-speed network interface
 export NCCL_DEBUG=WARN
 
+# Reduce JAX/XLA upfront GPU reservation to lower OOM risk.
+export XLA_PYTHON_CLIENT_PREALLOCATE=false
+
 # PyTorch CUDA memory allocation configuration to reduce fragmentation
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
