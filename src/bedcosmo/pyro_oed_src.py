@@ -712,7 +712,10 @@ class LikelihoodDataset(Dataset):
                 #     log p_T(T(x)) = log p_x(x) - log|dT/dx|
                 # so prior_entropy - posterior_entropy matches in units.
                 bijector = self.experiment.param_bijector
+                bijector_names = self.experiment._bijector_param_names()
                 for i, name in enumerate(self.experiment.cosmo_params):
+                    if name not in bijector_names:
+                        continue
                     log_det = bijector.log_abs_det_jacobian(samples[..., i:i + 1], name)
                     log_probs[name] = log_probs[name] - log_det.reshape(log_probs[name].shape)
             return log_probs

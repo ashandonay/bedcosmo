@@ -2,6 +2,7 @@ import contextlib
 import io
 import math
 import os
+from pathlib import Path
 
 from astropy import units as u
 from astropy.constants import sigma_sb, h, c, k_B
@@ -17,8 +18,23 @@ import yaml
 from speclite import filters as speclite_filters
 from astropy.constants import h, c
 import getdist
-from bedcosmo.util import load_prior_flow_from_file, profile_method
+from bedcosmo.util import (
+    EmpiricalPrior,
+    get_experiment_config_path,
+    load_prior_flow_from_file,
+    profile_method,
+)
 from bedcosmo.base import BaseExperiment
+from bedcosmo.num_visits.sed_prior.prior_sampler import (
+    build_gpu_prior_pool,
+    load_empirical_prior,
+    sample_prior_batch,
+)
+from bedcosmo.num_visits.sed_prior.simplex import (
+    PARAMETERIZATION_LOGITS,
+    logits_to_weights_torch,
+)
+from bedcosmo.num_visits.sed_prior.templates import load_eazy_template_bank
 from bedcosmo.cosmology import CosmologyMixin, _cumsimpson
 
 # LSST photometric zeropoints (AB magnitudes that produce 1 count per second)
@@ -74,6 +90,7 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         self,
         prior_args=None,
         design_args=None,
+        cosmo_model=None,
         temperature=10000,
         central_params=None,
         nominal_design=None,
@@ -87,7 +104,11 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         mag_err_cap=10.0,
         device="cuda:0",
         transform_input=False,
+        transform_cosmo_params=None,
+        logit_flow_scale=8.0,
         bijector_state=None,
+        cdf_bins=5000,
+        cdf_samples=int(1e7),
         profile=False,
         verbose=False,
         global_rank=0,
@@ -97,6 +118,8 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         self.profile = profile
         self.verbose = verbose
         self.transform_input = transform_input
+        self.transform_cosmo_params = transform_cosmo_params
+        self.logit_flow_scale = float(logit_flow_scale)
         self.global_rank = global_rank
 
         self.filters_list = design_args.get('labels', ["u", "g", "r", "i", "z", "y"])
@@ -111,12 +134,22 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         else:
             self.temperature = temperature
         
-        # initialize the prior
-        self.prior_args = prior_args
-        self.prior, self.latex_labels = self.init_prior(**self.prior_args)
-        self.cosmo_params = list(self.prior.keys())
+        self.prior_args = prior_args or {}
+        self.cosmo_model = cosmo_model
+        self.use_eazy_sed = False
+        self.prior_pool = None
+        self.prior_feature_names = None
 
-        self._init_param_bijector(bijector_state=bijector_state)
+        self.prior, self.latex_labels, self.cosmo_params = self.init_prior(
+            cosmo_model=cosmo_model,
+            **self.prior_args,
+        )
+
+        self._init_param_bijector(
+            bijector_state=bijector_state,
+            cdf_bins=cdf_bins,
+            cdf_samples=cdf_samples,
+        )
 
         if nominal_design is None:
             self.nominal_design = torch.tensor(
@@ -205,21 +238,39 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         self._transmission_tensor = torch.tensor(transmission_array, device=self.device, dtype=torch.float64)  # (n_filters, n_wlen)
         self._wlen_over_hc_tensor = torch.tensor(wlen_over_hc_common, device=self.device, dtype=torch.float64)  # (n_wlen,)
 
+        defaults = {"z": 1.0}
+        if self.use_eazy_sed:
+            if getattr(self, "_prior_parameterization", None) == PARAMETERIZATION_LOGITS:
+                defaults.update(
+                    {f"f{k}": 0.0 for k in range(1, self._n_eazy_templates)}
+                )
+            else:
+                defaults.update(
+                    {f"a{k}": 1.0 / self._n_eazy_templates for k in range(1, self._n_eazy_templates + 1)}
+                )
+            defaults["log_c_scale"] = 7.0
+        else:
+            defaults["T"] = 10000.0
         self._init_central_params(
             self.cosmo_params,
             central_params=central_params,
-            defaults={"z": 1.0, "T": 10000.0}
+            defaults=defaults,
         )
-        z_central = torch.tensor(
-            [self.central_params["z"]], device=self.device, dtype=torch.float64
-        )
-        if "T" in self.central_params:
-            T_central = torch.tensor(
-                [self.central_params["T"]], device=self.device, dtype=torch.float64
-            )
-            self.central_val = self._calculate_magnitudes(z_central, T_tensor=T_central).squeeze(0)
+        if self.use_eazy_sed:
+            self.central_val = self._central_magnitudes_eazy_from_dict(self.central_params)
         else:
-            self.central_val = self._calculate_magnitudes(z_central).squeeze(0)
+            z_central = torch.tensor(
+                [self.central_params["z"]], device=self.device, dtype=torch.float64
+            )
+            if "T" in self.central_params:
+                T_central = torch.tensor(
+                    [self.central_params["T"]], device=self.device, dtype=torch.float64
+                )
+                self.central_val = self._calculate_magnitudes(
+                    z_central, T_tensor=T_central
+                ).squeeze(0)
+            else:
+                self.central_val = self._calculate_magnitudes(z_central).squeeze(0)
         self.nominal_context = torch.cat([self.nominal_design, self.central_val], dim=-1)
         if hasattr(self, "prior_flow") and self.prior_flow is not None:
             self.prior_flow_nominal_context = self.nominal_context
@@ -247,32 +298,80 @@ class NumVisits(BaseExperiment, CosmologyMixin):
             return [float(v) for v in value]
         raise TypeError(f"{label} must be a float or sequence, got {type(value)}")
 
+    @staticmethod
+    def _strip_math_delimiters(label: str) -> str:
+        """GetDist adds $ around labels; strip pre-wrapped delimiters to avoid $$."""
+        s = str(label).strip()
+        if len(s) >= 2 and s.startswith("$") and s.endswith("$"):
+            return s[1:-1].strip()
+        return s
+
     @profile_method
     def init_prior(
         self,
         parameters,
         prior_flow_path=None,
-        **kwargs
+        prior_kde_path=None,
+        cosmo_model=None,
+        prior_pool_size=65536,
+        prior_pool_seed=7,
+        eazy_templates_dir="~/data/num_visits/eazy",
+        eazy_param="templates/fsps_full/fsps_QSF_12_v3.param",
+        **kwargs,
     ):
         """
-        Load cosmological prior from prior arguments.
-        
-        Args:
-            parameters (dict): Dictionary defining each parameter with distribution type and bounds.
-                Each parameter should have:
-                - distribution: dict with 'type' and distribution-specific parameters:
-                    - For 'uniform': 'lower', 'upper'
-                    - For 'gamma': 'shape', 'z_0' (rate = 1/z_0)
-                    - For 'gaussian': 'loc' (mean), 'scale' (std)
-                - latex: LaTeX label for the parameter
-            prior_flow_path (str, optional): Absolute path to prior flow checkpoint file.
-                Must be an absolute path. Required if using a trained posterior as prior.
-            **kwargs: Additional arguments (ignored, for compatibility with YAML structure).
+        Load prior from prior_args and models.yaml.
+
+        For ``eazy_kde``, uses ``prior_kde_path`` (absolute) and a GPU prior pool.
+        Otherwise uses analytic Pyro distributions and optional ``prior_flow_path``.
         """
+        if cosmo_model is None:
+            cosmo_model = self.cosmo_model
+        if cosmo_model is None:
+            raise ValueError("cosmo_model must be set for NumVisits (e.g. bb, bb_temp, eazy_kde)")
+
+        models_yaml_path = get_experiment_config_path("num_visits", "models.yaml")
+        with open(models_yaml_path, "r") as f:
+            cosmo_models = yaml.safe_load(f)
+        if cosmo_model not in cosmo_models:
+            raise ValueError(
+                f"cosmo_model '{cosmo_model}' not in {models_yaml_path}. "
+                f"Available: {list(cosmo_models.keys())}"
+            )
+        model_cfg = cosmo_models[cosmo_model]
+        model_parameters = list(model_cfg["parameters"])
+        latex_labels = [
+            self._strip_math_delimiters(lbl) for lbl in model_cfg["latex_labels"]
+        ]
+        if len(model_parameters) != len(latex_labels):
+            raise ValueError("models.yaml parameters and latex_labels length mismatch")
+
+        if cosmo_model == "eazy_kde" or prior_kde_path:
+            if not prior_kde_path:
+                raise ValueError(
+                    "cosmo_model 'eazy_kde' requires prior_kde_path: an absolute path to "
+                    "sed_prior_kde.joblib in prior_args_eazy_kde.yaml (or pass via CLI)."
+                )
+            return self._init_prior_eazy_kde(
+                parameters,
+                model_parameters,
+                latex_labels,
+                prior_kde_path=prior_kde_path,
+                prior_pool_size=int(prior_pool_size),
+                prior_pool_seed=int(prior_pool_seed),
+                eazy_templates_dir=eazy_templates_dir,
+                eazy_param=eazy_param,
+            )
+
         prior = {}
-        latex_labels = []
-        
-        for name, cfg in parameters.items():
+
+        for name in model_parameters:
+            if name not in parameters:
+                raise ValueError(
+                    f"Parameter '{name}' required by model '{cosmo_model}' "
+                    f"missing from prior_args parameters"
+                )
+            cfg = parameters[name]
             dist_cfg = cfg.get("distribution", {})
             dist_type = dist_cfg.get("type", "uniform")
             
@@ -314,9 +413,14 @@ class NumVisits(BaseExperiment, CosmologyMixin):
                 )
 
             else:
-                raise ValueError(f"Distribution type '{dist_type}' not supported. Supported types: uniform, gamma, normal")
-            
-            latex_labels.append(cfg.get("latex", name))
+                raise ValueError(
+                    f"Distribution type '{dist_type}' not supported. "
+                    "Supported types: uniform, gamma, normal"
+                )
+
+        for name in model_parameters:
+            if name not in prior:
+                raise KeyError(f"Model parameter '{name}' was not added to prior dict")
         
         # Load prior flow if specified
         # Note: prior_flow_path must be an absolute path
@@ -339,7 +443,81 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         else:
             self.prior_flow = None
 
-        return prior, latex_labels
+        return prior, latex_labels, model_parameters
+
+    def _init_prior_eazy_kde(
+        self,
+        parameters: dict,
+        model_parameters: list[str],
+        latex_labels: list[str],
+        *,
+        prior_kde_path: str,
+        prior_pool_size: int,
+        prior_pool_seed: int,
+        eazy_templates_dir: str,
+        eazy_param: str,
+    ) -> tuple[dict, list[str], list[str]]:
+        kde_path = Path(os.path.expanduser(prior_kde_path)).resolve()
+        if not kde_path.is_file():
+            raise FileNotFoundError(f"prior_kde_path not found: {kde_path}")
+
+        artifact = load_empirical_prior(kde_path)
+        self.sed_prior_artifact = artifact
+        self.prior_feature_names = list(artifact["feature_names"])
+        self._prior_parameterization = artifact.get("parameterization", "weights")
+        self._n_eazy_templates = int(artifact["n_templates"])
+        if list(model_parameters) != self.prior_feature_names:
+            raise ValueError(
+                f"models.yaml parameters {model_parameters} must match KDE "
+                f"feature_names {self.prior_feature_names}. "
+                "Rebuild sed_prior_kde.joblib with --parameterization logits for f1..fK-1."
+            )
+
+        if self.global_rank == 0 and self.verbose:
+            print(f"Loading empirical SED KDE prior from {kde_path}")
+            print(f"  Building GPU prior pool (n={prior_pool_size})...")
+        self.prior_pool = build_gpu_prior_pool(
+            artifact,
+            prior_pool_size,
+            seed=prior_pool_seed,
+            device=self.device,
+        )
+        self.use_eazy_sed = True
+
+        wave_rest, template_stack, _ = load_eazy_template_bank(
+            eazy_param,
+            templates_dir=eazy_templates_dir,
+        )
+        self._template_wave_rest = torch.tensor(
+            wave_rest, device=self.device, dtype=torch.float64
+        )
+        self._template_flux = torch.tensor(
+            template_stack, device=self.device, dtype=torch.float64
+        )
+
+        name_to_idx = {n: i for i, n in enumerate(self.prior_feature_names)}
+        prior = {}
+        for name in model_parameters:
+            if name not in parameters:
+                raise ValueError(f"Missing prior_args entry for '{name}'")
+            if name not in name_to_idx:
+                raise ValueError(
+                    f"Parameter '{name}' not in KDE feature_names {self.prior_feature_names}"
+                )
+            idx = name_to_idx[name]
+            low = float(self.prior_pool.bounds_min[idx].cpu())
+            high = float(self.prior_pool.bounds_max[idx].cpu())
+            span = max(high - low, 1e-12)
+            pad = max(1e-6, 0.02 * span)
+            prior[name] = EmpiricalPrior(low - pad, high + pad, device=self.device)
+
+        if self.global_rank == 0 and self.verbose:
+            print(
+                f"  EAZY templates: {self._n_eazy_templates} on "
+                f"{self._template_wave_rest.shape[0]} rest-frame grid points"
+            )
+
+        return prior, latex_labels, model_parameters
 
     @profile_method
     def _calculate_base_profile(self):
@@ -457,22 +635,148 @@ class NumVisits(BaseExperiment, CosmologyMixin):
             )
         self.designs = design_pts.to(self.device)
 
+    @staticmethod
+    def _interp1d_linear(x_src: torch.Tensor, y_src: torch.Tensor, x_q: torch.Tensor) -> torch.Tensor:
+        """Linear interpolation; x_src (N,), y_src (N,), x_q (...) -> same shape as x_q."""
+        x_q_flat = x_q.reshape(-1)
+        x_q_clamped = torch.clamp(x_q_flat, float(x_src[0]), float(x_src[-1]))
+        idx = torch.searchsorted(x_src, x_q_clamped, right=False)
+        idx = torch.clamp(idx, 1, x_src.numel() - 1)
+        x0 = x_src[idx - 1]
+        x1 = x_src[idx]
+        y0 = y_src[idx - 1]
+        y1 = y_src[idx]
+        w = (x_q_clamped - x0) / (x1 - x0 + 1e-30)
+        y_out = y0 + w * (y1 - y0)
+        return y_out.reshape(x_q.shape)
+
+    def _coeffs_from_a_log_s(self, a: torch.Tensor, log_s: torch.Tensor) -> torch.Tensor:
+        """Raw coefficients c_k = exp(log s) * a_k."""
+        return torch.exp(log_s).unsqueeze(-1) * a
+
+    @profile_method
+    def _calculate_magnitudes_eazy(
+        self,
+        z: torch.Tensor,
+        a: torch.Tensor,
+        log_s: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        LSST magnitudes from EAZY template mixture in observed frame.
+
+        f_obs(lambda) = sum_k c_k T_k(lambda / (1+z)) / (1+z),  c_k = exp(log s) a_k.
+        """
+        z_flat = z.reshape(-1)
+        a_flat = a.reshape(-1, self._n_eazy_templates)
+        log_s_flat = log_s.reshape(-1)
+        n_batch = z_flat.shape[0]
+        one_plus_z = (1.0 + z_flat).unsqueeze(-1)
+        wlen_rest = self._wlen_aa_tensor.unsqueeze(0) / one_plus_z
+        c = self._coeffs_from_a_log_s(a_flat, log_s_flat)
+
+        flux_obs = torch.zeros(
+            n_batch,
+            self._wlen_aa_tensor.shape[0],
+            device=self.device,
+            dtype=torch.float64,
+        )
+        for k in range(self._n_eazy_templates):
+            T_at = self._interp1d_linear(
+                self._template_wave_rest,
+                self._template_flux[k],
+                wlen_rest,
+            )
+            flux_obs = flux_obs + c[:, k : k + 1] * T_at
+        flux_obs = flux_obs / one_plus_z
+
+        flux_expanded = flux_obs.unsqueeze(1)
+        transmission_expanded = self._transmission_tensor.unsqueeze(0)
+        wlen_over_hc_expanded = self._wlen_over_hc_tensor.unsqueeze(0).unsqueeze(0)
+        integrand = flux_expanded * transmission_expanded * wlen_over_hc_expanded
+        photon_flux = torch.trapezoid(integrand, self._wlen_aa_tensor, dim=-1)
+
+        s0_vals = torch.tensor(
+            [s0[band] for band in self.filters_list],
+            device=self.device,
+            dtype=torch.float64,
+        ).unsqueeze(0)
+        min_flux = torch.finfo(photon_flux.dtype).tiny * 1e10
+        A_cm2 = (319 / 9.6) * 1e4
+        photon_flux_pixel = torch.clamp(photon_flux * A_cm2, min=min_flux)
+        flux_ratio = photon_flux_pixel / s0_vals
+        mags = 24.0 - 2.5 * torch.log10(torch.clamp(flux_ratio, min=min_flux))
+        return mags.reshape(*z.shape, self.num_filters)
+
+    def _weights_from_param_dict(self, params: dict[str, torch.Tensor]) -> torch.Tensor:
+        """Build (batch, K) simplex weights from cosmo_params (logits or legacy a_k)."""
+        if getattr(self, "_prior_parameterization", None) == PARAMETERIZATION_LOGITS:
+            eta = torch.stack(
+                [params[f"f{k}"].squeeze(-1) for k in range(1, self._n_eazy_templates)],
+                dim=-1,
+            )
+            return logits_to_weights_torch(eta)
+        return torch.stack(
+            [params[f"a{k}"].squeeze(-1) for k in range(1, self._n_eazy_templates + 1)],
+            dim=-1,
+        )
+
+    def _central_magnitudes_eazy_from_dict(self, central: dict) -> torch.Tensor:
+        if getattr(self, "_prior_parameterization", None) == PARAMETERIZATION_LOGITS:
+            eta = torch.tensor(
+                [[float(central.get(f"f{k}", 0.0)) for k in range(1, self._n_eazy_templates)]],
+                device=self.device,
+                dtype=torch.float64,
+            )
+            a = logits_to_weights_torch(eta)
+        else:
+            a = torch.tensor(
+                [[float(central.get(f"a{k}", 0.0)) for k in range(1, self._n_eazy_templates + 1)]],
+                device=self.device,
+                dtype=torch.float64,
+            )
+        log_s = torch.tensor(
+            [float(central["log_c_scale"])],
+            device=self.device,
+            dtype=torch.float64,
+        )
+        z = torch.tensor(
+            [float(central["z"])],
+            device=self.device,
+            dtype=torch.float64,
+        )
+        return self._calculate_magnitudes_eazy(z, a, log_s).squeeze(0)
+
+    def _prior_rows_to_param_dict(
+        self,
+        rows: torch.Tensor,
+        sample_shape: tuple[int, ...],
+    ) -> dict[str, torch.Tensor]:
+        """Map prior pool rows to parameter tensors with trailing dim 1."""
+        col = {n: i for i, n in enumerate(self.prior_feature_names)}
+        out: dict[str, torch.Tensor] = {}
+        flat = sample_shape if sample_shape else (rows.shape[0],)
+        for name in self.cosmo_params:
+            if name.startswith("a") or name.startswith("f"):
+                idx = col[name]
+                out[name] = rows[:, idx].reshape(*flat, 1)
+            elif name == "log_c_scale":
+                out[name] = rows[:, col["log_c_scale"]].reshape(*flat, 1)
+            elif name == "z":
+                out[name] = rows[:, col["z"]].reshape(*flat, 1)
+            else:
+                raise KeyError(f"Unknown prior parameter '{name}'")
+        return out
+
     @profile_method
     def sample_parameters(self, sample_shape, prior=None, use_prior_flow=True, **kwargs):
         """
-        Sample valid parameters from prior.
-
-        NumVisits samples z directly in pyro_model using prior["z"] or prior_flow.
-        This method is provided as a stub to satisfy the BaseExperiment interface.
-
-        Args:
-            sample_shape: Shape of samples to draw
-            prior: Optional prior dictionary (defaults to self.prior)
-            **kwargs: Additional arguments (ignored)
-
-        Returns:
-            Dictionary with parameter samples
+        Sample parameters from analytic prior, prior flow, or empirical KDE pool.
         """
+        if getattr(self, "use_eazy_sed", False) and self.prior_pool is not None:
+            n = int(np.prod(sample_shape)) if sample_shape else 1
+            rows = sample_prior_batch(self.prior_pool, n)
+            return self._prior_rows_to_param_dict(rows, sample_shape)
+
         if prior is None:
             prior = self.prior
 
@@ -843,23 +1147,31 @@ class NumVisits(BaseExperiment, CosmologyMixin):
             nvisits = nvisits.view(1, 1, -1)
 
         batch_shape = nvisits.shape[:-1]
-        
-        # Check if we should use a posterior model as prior
-        if hasattr(self, 'prior_flow') and self.prior_flow is not None:
-            # prior_flow path currently assumes single z parameter.
+
+        if getattr(self, "use_eazy_sed", False) and self.prior_pool is not None:
+            n = int(np.prod(batch_shape))
+            rows = sample_prior_batch(self.prior_pool, n)
+            params = self._prior_rows_to_param_dict(rows, batch_shape)
+            for name, val in params.items():
+                pyro.sample(name, dist.Delta(val.squeeze(-1)).to_event(0))
+            a = self._weights_from_param_dict(params)
+            log_s = params["log_c_scale"].squeeze(-1)
+            z = params["z"].squeeze(-1)
+            means = self._calculate_magnitudes_eazy(z, a, log_s)
+        elif hasattr(self, "prior_flow") and self.prior_flow is not None:
             samples = self._sample_prior_flow_cache(batch_shape)
             z = samples.squeeze(-1)
             z = pyro.sample("z", dist.Delta(z))
+            means = self._calculate_magnitudes(z)
         else:
             z_dist = self.prior["z"].expand(batch_shape).to_event(0)
             z = pyro.sample("z", z_dist)
-
-        if "T" in self.prior:
-            T_dist = self.prior["T"].expand(batch_shape).to_event(0)
-            T = pyro.sample("T", T_dist)
-            means = self._calculate_magnitudes(z, T_tensor=T)
-        else:
-            means = self._calculate_magnitudes(z)
+            if "T" in self.prior:
+                T_dist = self.prior["T"].expand(batch_shape).to_event(0)
+                T = pyro.sample("T", T_dist)
+                means = self._calculate_magnitudes(z, T_tensor=T)
+            else:
+                means = self._calculate_magnitudes(z)
         sigmas = self._magnitude_errors(means, nvisits)
         covariance = torch.diag_embed(sigmas**2)
         return pyro.sample(self.observation_labels[0], dist.MultivariateNormal(means, covariance))

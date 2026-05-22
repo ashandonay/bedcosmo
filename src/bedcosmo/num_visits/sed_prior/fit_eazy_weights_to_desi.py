@@ -44,114 +44,21 @@ from scipy.optimize import nnls
 from tqdm import tqdm
 
 
-EAZY_RAW_BASE = "https://raw.githubusercontent.com/gbrammer/eazy-photoz/master/"
-EAZY_TEMPLATES_DIR = Path(os.path.expanduser("~/data/num_visits/eazy"))
-DEFAULT_PARAM_12D = "templates/fsps_full/fsps_QSF_12_v3.param"
+try:
+    from .templates import (
+        DEFAULT_PARAM_12D,
+        DEFAULT_TEMPLATES_DIR,
+        load_eazy_templates,
+    )
+except ImportError:
+    from templates import (
+        DEFAULT_PARAM_12D,
+        DEFAULT_TEMPLATES_DIR,
+        load_eazy_templates,
+    )
+
 DEFAULT_PARAM_6D = "templates/eazy_v1.0.spectra.param"
-
-
-def download(url: str, path: Path, overwrite: bool = False) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if path.exists() and not overwrite:
-        return
-    print(f"Downloading {url}")
-    urlretrieve(url, path)
-
-
-def read_template_param(param_path: Path) -> list[str]:
-    """Return template file paths listed in an EAZY .param file."""
-    template_paths: list[str] = []
-    for line in param_path.read_text().splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        parts = line.split()
-        if len(parts) >= 2 and parts[0].isdigit():
-            template_paths.append(parts[1])
-        elif parts[0].endswith((".dat", ".sed")):
-            template_paths.append(parts[0])
-    if not template_paths:
-        raise ValueError(f"No templates found in {param_path}")
-    return template_paths
-
-
-def load_two_column_template(path: Path) -> tuple[np.ndarray, np.ndarray]:
-    arr = np.loadtxt(path)
-    if arr.ndim != 2 or arr.shape[1] < 2:
-        raise ValueError(f"Expected at least two columns in {path}, got shape {arr.shape}")
-
-    wave = arr[:, 0].astype(float)
-    flux = arr[:, 1].astype(float)
-
-    good = np.isfinite(wave) & np.isfinite(flux) & (wave > 0)
-    wave = wave[good]
-    flux = flux[good]
-
-    order = np.argsort(wave)
-    return wave[order], flux[order]
-
-
-def normalize_shape(
-    wave: np.ndarray,
-    flux: np.ndarray,
-    norm_min: float,
-    norm_max: float,
-) -> np.ndarray:
-    """Normalize an SED shape by integrated positive flux in a wavelength window."""
-    wave = np.asarray(wave, dtype=float)
-    flux = np.asarray(flux, dtype=float)
-
-    flux = np.clip(flux, 0.0, None)
-    mask = (wave >= norm_min) & (wave <= norm_max)
-
-    if mask.sum() < 3:
-        mask = np.ones_like(wave, dtype=bool)
-
-    norm = np.trapz(flux[mask], wave[mask])
-    if not np.isfinite(norm) or norm <= 0:
-        raise ValueError("Template has non-positive normalization")
-
-    return flux / norm
-
-
-def load_eazy_templates(
-    param: str,
-    overwrite: bool,
-    norm_min: float,
-    norm_max: float,
-    templates_dir: Path = EAZY_TEMPLATES_DIR,
-) -> tuple[list[np.ndarray], list[np.ndarray], list[str]]:
-    """
-    Download/load EAZY templates.
-
-    Returns
-    -------
-    template_waves
-        List of per-template rest-frame wavelength arrays.
-    template_fluxes
-        List of per-template normalized flux arrays.
-    rel_template_paths
-        EAZY template filenames.
-    """
-    local_param = templates_dir / param
-    download(EAZY_RAW_BASE + param, local_param, overwrite=overwrite)
-
-    rel_template_paths = read_template_param(local_param)
-
-    waves: list[np.ndarray] = []
-    fluxes: list[np.ndarray] = []
-
-    for rel in rel_template_paths:
-        local_path = templates_dir / rel
-        download(EAZY_RAW_BASE + rel, local_path, overwrite=overwrite)
-
-        wave, flux = load_two_column_template(local_path)
-        flux = normalize_shape(wave, flux, norm_min=norm_min, norm_max=norm_max)
-
-        waves.append(np.asarray(wave, dtype=float))
-        fluxes.append(np.asarray(flux, dtype=float))
-
-    return waves, fluxes, rel_template_paths
+EAZY_TEMPLATES_DIR = DEFAULT_TEMPLATES_DIR
 
 
 def healpix_subdir(healpix: int) -> str:

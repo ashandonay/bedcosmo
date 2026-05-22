@@ -127,12 +127,20 @@ The Pyro probabilistic model ties the components together:
 
 ## Cosmology Models (`models.yaml`)
 
-Defines which parameters belong to each named model variant. Currently there is a single model:
+Defines which parameters belong to each named training variant. `train_args.yaml` selects a block via `--cosmo-model`.
+
+| Model | Parameters | SED forward model | Prior |
+|-------|------------|-------------------|-------|
+| `bb` | `z` | Blackbody (fixed T) | Analytic gamma on `z` |
+| `bb_temp` | `z`, `T` | Blackbody | Analytic gamma + uniform `T` |
+| `eazy_kde` | `f1`…`f11`, `log_c_scale`, `z` (13D; simplex logits) | EAZY template mixture | Masked KDE v2 (`prior_kde_path`; rebuild with `--parameterization logits`) |
+
+Example:
 
 ```yaml
-base:
-  parameters: ["z"]
-  latex_labels: ["z"]
+eazy_kde:
+  parameters: [f1, ..., f11, log_c_scale, z]  # softmax → a1..a12
+  latex_labels: ["$a_1$", ..., "$z$"]
 ```
 
-Additional model variants (e.g. adding galaxy SED parameters) can be added here.
+For `eazy_kde`, set an **absolute** path to `sed_prior_kde.joblib` in [`prior_args_eazy_kde.yaml`](prior_args_eazy_kde.yaml) (built with `src/bedcosmo/num_visits/sed_prior/`). Training draws from a GPU-resident pool of KDE samples and integrates template SEDs on the GPU. See [`sed_prior/README.md`](../../src/bedcosmo/num_visits/sed_prior/README.md).

@@ -87,10 +87,20 @@ def extract_run_info_from_checkpoint_path(checkpoint_path: str) -> tuple[str, st
     return run_id, exp_id, cosmo_exp
 
 
+class EmpiricalPrior:
+    """Marker for KDE/empirical priors; supplies bijector bracket bounds only."""
+
+    def __init__(self, low: float, high: float, device: str | torch.device = "cpu"):
+        dev = torch.device(device)
+        self.low = torch.tensor(float(low), device=dev, dtype=torch.float64)
+        self.high = torch.tensor(float(high), device=dev, dtype=torch.float64)
+
+
 class Bijector:
     def __init__(self, experiment, prior=None, cdf_bins=1000, cdf_samples=500000,
-                 skip_sampling=False, use_prior_flow=True):
+                 skip_sampling=False, use_prior_flow=True, param_keys=None):
         self.experiment = experiment
+        self._param_keys = param_keys
         self.use_prior_flow = use_prior_flow
         if prior is not None:
             self.prior = prior
@@ -122,7 +132,10 @@ class Bijector:
                 (num_samples,), prior=self.prior, use_prior_flow=self.use_prior_flow
             )
         cdfs = {}
+        param_keys = self._param_keys
         for key, samples in empirical_prior.items():
+            if param_keys is not None and key not in param_keys:
+                continue
             sorted_samples, _ = torch.sort(samples.flatten())
             n_samples = len(sorted_samples)
 
@@ -170,6 +183,8 @@ class Bijector:
             mean = prior_dist.mean
             std = torch.sqrt(prior_dist.variance)
             return mean - n_std * std, mean + n_std * std
+        if isinstance(prior_dist, EmpiricalPrior):
+            return prior_dist.low, prior_dist.high
         raise NotImplementedError(
             f"Bijector bin bracket not defined for prior type {type(prior_dist).__name__} "
             f"on parameter '{key}'."
@@ -365,11 +380,32 @@ class Bijector:
         return x.to(gaussian_samples.dtype).reshape(gaussian_samples.shape)
     
 
-    # Helper function for linear interpolation
-    def _interpolate_cdf(self, samples, bin_low, bin_high, cdf_low, cdf_high):
-        """Interpolate CDF values between two bins"""
-        distances = (samples - bin_low) / (bin_high - bin_low)
-        return cdf_low + distances * (cdf_high - cdf_low)
+    def _interpolate_cdf(self, x_query, x0, x1, y0, y1):
+        """
+        Linear interpolation on segment (x0, y0)–(x1, y1) at x_query.
+
+        Handles flat segments (zero change in x or y) so sparse empirical priors
+        do not produce NaNs in gaussian_to_prior / prior_to_gaussian.
+        """
+        eps = 1e-12
+        dx = x1 - x0
+        dy = y1 - y0
+        if not torch.is_tensor(x_query):
+            if abs(float(dx)) < eps:
+                return y0
+            if abs(float(dy)) < eps:
+                return 0.5 * (float(x0) + float(x1))
+            t = (float(x_query) - float(x0)) / float(dx)
+            return y0 + t * dy
+
+        dx_safe = torch.clamp(dx, min=eps)
+        t = (x_query - x0) / dx_safe
+        y = y0 + t * dy
+        flat_y = torch.isclose(dy, torch.zeros_like(dy), atol=eps)
+        y = torch.where(flat_y, 0.5 * (x0 + x1), y)
+        flat_x = torch.isclose(dx, torch.zeros_like(dx), atol=eps)
+        y = torch.where(flat_x, y0, y)
+        return y
 
     def log_abs_det_jacobian(self, samples, param_key):
         """

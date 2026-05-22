@@ -3,10 +3,10 @@ parameters:
     distribution:
       type: "uniform"
       lower: 0.1
-      upper: 3.0
+      upper: 2.0
     plot:
       lower: 0.1
-      upper: 3.0
+      upper: 2.0
     latex: "z"
 
 constraints: {}

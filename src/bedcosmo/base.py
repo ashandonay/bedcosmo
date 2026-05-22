@@ -18,6 +18,7 @@ import torch
 
 from bedcosmo.util import (
     Bijector,
+    EmpiricalPrior,
     GETDIST_SETTINGS,
     merge_central_params,
     parse_json_object,
@@ -274,11 +275,15 @@ class BaseExperiment(ABC):
                         source = "prior_flow"
 
             skip = bijector_state is not None
+            bijector_keys = None
+            if getattr(self, "transform_cosmo_params", None) is not None:
+                bijector_keys = list(self.transform_cosmo_params)
             self.param_bijector = Bijector(
                 self,
                 cdf_bins=cdf_bins,
                 cdf_samples=cdf_samples,
                 skip_sampling=skip,
+                param_keys=bijector_keys,
             )
             if bijector_state is not None:
                 if getattr(self, "global_rank", 0) == 0:
@@ -329,6 +334,24 @@ class BaseExperiment(ABC):
             return default
         return self.central_params.get(name, default)
 
+    def _bijector_param_names(self) -> set[str]:
+        """Parameters that use the empirical CDF → Gaussian bijector."""
+        if not getattr(self, "transform_input", False):
+            return set()
+        names = getattr(self, "transform_cosmo_params", None)
+        if names is None:
+            return set(self.cosmo_params)
+        return set(names)
+
+    def _squash_logit_for_flow(self, x: torch.Tensor) -> torch.Tensor:
+        """Bounded tanh map for logit coords left in physical space for the NF."""
+        h = float(getattr(self, "logit_flow_scale", 8.0))
+        return h * torch.tanh(x / h)
+
+    def _unsquash_logit_for_flow(self, y: torch.Tensor) -> torch.Tensor:
+        h = float(getattr(self, "logit_flow_scale", 8.0))
+        return h * torch.atanh(torch.clamp(y / h, -1.0 + 1e-6, 1.0 - 1e-6))
+
     @profile_method
     def params_to_unconstrained(self, params, bijector_class=None):
         """
@@ -354,9 +377,15 @@ class BaseExperiment(ABC):
         if bijector_class is None:
             bijector_class = self.param_bijector
 
+        bijector_names = self._bijector_param_names()
         for i, param_name in enumerate(self.cosmo_params):
             sl = slice(i, i + 1)
-            y[..., sl] = bijector_class.prior_to_gaussian(params[..., sl], param_name)
+            if param_name in bijector_names:
+                y[..., sl] = bijector_class.prior_to_gaussian(params[..., sl], param_name)
+            elif param_name.startswith("f"):
+                y[..., sl] = self._squash_logit_for_flow(params[..., sl])
+            else:
+                y[..., sl] = params[..., sl]
 
         return y
 
@@ -385,10 +414,32 @@ class BaseExperiment(ABC):
         if bijector_class is None:
             bijector_class = self.param_bijector
 
+        bijector_names = self._bijector_param_names()
         for i, param_name in enumerate(self.cosmo_params):
             sl = slice(i, i + 1)
-            x[..., sl] = bijector_class.gaussian_to_prior(y[..., sl], param_name)
+            if param_name in bijector_names:
+                x[..., sl] = bijector_class.gaussian_to_prior(y[..., sl], param_name)
+            elif param_name.startswith("f"):
+                x[..., sl] = self._unsquash_logit_for_flow(y[..., sl])
+            else:
+                x[..., sl] = y[..., sl]
 
+        return x
+
+    def _sanitize_physical_samples(self, param_samples: torch.Tensor) -> torch.Tensor:
+        """Clamp empirical-prior parameters and replace non-finite values for plotting."""
+        if not getattr(self, "prior", None):
+            return param_samples
+        x = param_samples.clone()
+        for i, param_name in enumerate(self.cosmo_params):
+            prior_dist = self.prior.get(param_name)
+            if not isinstance(prior_dist, EmpiricalPrior):
+                continue
+            sl = slice(i, i + 1)
+            col = torch.clamp(x[..., sl], prior_dist.low, prior_dist.high)
+            mid = 0.5 * (prior_dist.low + prior_dist.high)
+            col = torch.where(torch.isfinite(col), col, mid)
+            x[..., sl] = col
         return x
 
     # =========================================================================
@@ -426,6 +477,7 @@ class BaseExperiment(ABC):
         # Transform if needed
         if getattr(self, "transform_input", False) and transform_output:
             param_samples = self.params_from_unconstrained(param_samples)
+            param_samples = self._sanitize_physical_samples(param_samples)
 
         self.apply_multipliers(param_samples)
 
@@ -506,6 +558,7 @@ class BaseExperiment(ABC):
             param_samples = param_samples.to(torch.float64)
 
         self.apply_multipliers(param_samples)
+        param_samples = self._sanitize_physical_samples(param_samples)
 
         with contextlib.redirect_stdout(io.StringIO()):
             samples_gd = getdist.MCSamples(

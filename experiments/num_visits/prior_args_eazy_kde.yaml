@@ -1,0 +1,51 @@
+# Empirical SED prior from DESI+EAZY KDE (simplex logit parameterization).
+# Rebuild joblib with build_empirical_sed_prior_kde.py --parameterization logits (v2).
+
+prior_kde_path: "/home/ashandonay/scratch/bedcosmo/desi_eazy_empirical_prior_nnls/sed_prior_kde.joblib"
+eazy_templates_dir: "~/data/num_visits/eazy"
+eazy_param: "templates/fsps_full/fsps_QSF_12_v3.param"
+prior_pool_size: 65536
+prior_pool_seed: 7
+
+parameters:
+  f1:
+    distribution: { type: empirical }
+    plot: { lower: -8.0, upper: 8.0 }
+  f2:
+    distribution: { type: empirical }
+    plot: { lower: -8.0, upper: 8.0 }
+  f3:
+    distribution: { type: empirical }
+    plot: { lower: -8.0, upper: 8.0 }
+  f4:
+    distribution: { type: empirical }
+    plot: { lower: -8.0, upper: 8.0 }
+  f5:
+    distribution: { type: empirical }
+    plot: { lower: -8.0, upper: 8.0 }
+  f6:
+    distribution: { type: empirical }
+    plot: { lower: -8.0, upper: 8.0 }
+  f7:
+    distribution: { type: empirical }
+    plot: { lower: -8.0, upper: 8.0 }
+  f8:
+    distribution: { type: empirical }
+    plot: { lower: -8.0, upper: 8.0 }
+  f9:
+    distribution: { type: empirical }
+    plot: { lower: -8.0, upper: 8.0 }
+  f10:
+    distribution: { type: empirical }
+    plot: { lower: -8.0, upper: 8.0 }
+  f11:
+    distribution: { type: empirical }
+    plot: { lower: -8.0, upper: 8.0 }
+  log_c_scale:
+    distribution: { type: empirical }
+    plot: { lower: 4.0, upper: 10.5 }
+  z:
+    distribution: { type: empirical }
+    plot: { lower: 0.0, upper: 1.75 }
+
+constraints: {}

@@ -1,8 +1,8 @@
 # Empirical galaxy SED prior (`sed_prior`)
 
-This package builds and samples a **14-dimensional empirical prior** over galaxy spectral energy distributions for the `num_visits` BED experiment. It fits EAZY rest-frame templates to DESI HEALPix coadd spectra (NNLS), pools fits across patches, trains a masked Gaussian KDE on \((a_k, \log s, z)\), and provides utilities to draw prior samples and reconstruct template coefficients.
+This package builds and samples an empirical prior over galaxy SEDs for the `num_visits` BED experiment. It fits EAZY templates to DESI spectra (NNLS), pools fits, trains a masked Gaussian KDE, and provides GPU pool sampling for `NumVisits` (`eazy_kde`).
 
-`NumVisits` in `../experiment.py` still defaults to a **blackbody** SED; wiring this prior into Pyro is the next integration step.
+**Default KDE coordinates (v2):** \(K-1\) log-ratios \(f_k = \log(a_k/a_K)\) on the template simplex, plus \(\log s\) and \(z\) — **13 dimensions** for \(K=12\). Legacy v1 artifacts store \(a_1,\ldots,a_K\) directly (14D).
 
 ---
 
@@ -28,15 +28,17 @@ This package builds and samples a **14-dimensional empirical prior** over galaxy
 
 ---
 
-## Production prior: 14D coordinates
+## Production prior: simplex logits + \(\log s\), \(z\)
 
-For \(K=12\) EAZY templates, each prior-quality galaxy is summarized by **14 numbers**:
+CSV fits still store **`a1`…`aK`** (normalized weights). The KDE is trained on **`f1`…`f_{K-1}`** with \(f_k = \log(a_k/a_K)\) and reference template \(K\); weights recover as \(a = \mathrm{softmax}(f_1,\ldots,f_{K-1},0)\), so \(a_k\ge 0\) and \(\sum_k a_k = 1\) by construction.
 
-| Index | Symbol | CSV / feature | Meaning |
-|-------|--------|---------------|---------|
-| 1–12 | \(a_1,\ldots,a_{12}\) | `a1` … `a12` | Template mixture **shape** (normalized weights) |
-| 13 | \(\log s\) | `log_c_scale` | \(\log s = \log\sum_k \|c_k\|\) (overall amplitude) |
-| 14 | \(z\) | `z` | Redshift (from DESI redrock for the fit; also a KDE feature) |
+For \(K=12\) templates, KDE features are **13 numbers**:
+
+| Index | Symbol | Feature | Meaning |
+|-------|--------|---------|---------|
+| 1–11 | \(f_1,\ldots,f_{11}\) | `f1` … `f11` | Log-ratios vs template 12 |
+| 12 | \(\log s\) | `log_c_scale` | \(\log s = \log\sum_k \|c_k\|\) |
+| 13 | \(z\) | `z` | Redshift |
 
 Raw fitted amplitudes are stored as `c1` … `cK`. **Reconstruction** (rest-frame SED):
 
@@ -61,7 +63,7 @@ combine_healpix_weights.py     →  pooled CSV (optional, multi-patch)
         ↓
 build_empirical_sed_prior_kde.py →  sed_prior_kde.joblib
         ↓
-sample_sed_prior()               →  draws in ℝ¹⁴ → SED → LSST (future NumVisits)
+sample_sed_prior()               →  draws in ℝ¹³ (logits) → simplex \(a_k\) → SED → LSST
 ```
 
 **Quality cut:** default `chi2/dof ≤ 1.2` (`quality_pass=True`). Rows failing the cut remain in the CSV and `dropped_fits.csv` but are excluded from training triangles and KDE training.
@@ -312,18 +314,53 @@ python generate_template_sed_examples.py --n-samples 12 --outdir outputs/sed_exa
 
 ---
 
-## Toward `NumVisits` (not yet wired)
+## `NumVisits` integration (`eazy_kde` model)
 
-Target Pyro pattern:
+Training uses `cosmo_model: eazy_kde` with **13 cosmology parameters** (`f1`…`f11`, `log_c_scale`, `z`) in [`models.yaml`](../../../../experiments/num_visits/models.yaml).
 
-```python
-x = sample_sed_prior(artifact, 1, seed=...)[0]   # a1..a12, log_c_scale, z
-# pyro.sample("sed_prior", ...)  # Delta or dequantized empirical
-# build rest-frame SED from a_k, log_s, z and template bank T_k
-# then existing visit / noise / cosmology likelihood
+Rebuild the KDE after changing parameterization:
+
+```bash
+python -m bedcosmo.num_visits.sed_prior.build_empirical_sed_prior_kde \
+  --weights-csv ~/scratch/bedcosmo/desi_eazy_empirical_prior_nnls/desi_eazy_empirical_weights.csv \
+  --parameterization logits
 ```
 
-The blackbody path in `experiment.py` samples temperature \(T\) instead of \((a_k, \log s, z)\).
+- **`simplex.py`**: `weights_to_logits` / `logits_to_weights` (numpy + torch).
+- **`prior_sampler.py`**: GPU pool of KDE rows in logit space.
+- **`NumVisits`**: maps \(f_k\) → \(a_k\) via softmax before `_calculate_magnitudes_eazy`.
+
+Legacy v1 joblib files (`a1`…`a12` features) must be rebuilt to match `models.yaml`.
+
+Blackbody models (`bb`, `bb_temp`) are unchanged.
+
+### `transform_input` and logit coordinates
+
+Marginal CDF → Gaussian on every `f_k` is a poor match when logits are **multimodal**
+(spike at KDE clip bounds plus an “active template” mode). The Gaussian triangle then shows
+heavy tails at ±6.36 and distorted 2D panels.
+
+**Recommended for `eazy_kde` training** (`train_args.yaml`):
+
+```yaml
+transform_cosmo_params: [log_c_scale, z]   # bijector only on these
+logit_flow_scale: 8.0                    # f_k → H*tanh(f/H) for the NF
+```
+
+Retrain after changing this; old runs that bijector-transformed all 13 dims are not comparable.
+
+### Diagnose `transform_input` (triangle plots)
+
+```bash
+python -m bedcosmo.num_visits.sed_prior.diagnose_transform_input \
+  --kde-path ~/scratch/bedcosmo/desi_eazy_empirical_prior_nnls/sed_prior_kde.joblib \
+  --outdir ~/scratch/bedcosmo/desi_eazy_empirical_prior_nnls/transform_diagnostic \
+  --n-samples 8000 --cdf-samples 200000
+```
+
+Writes `triangle_physical_before_transform.png` (**$a_k$, $\\log s$, $z$**) and
+`triangle_gaussian_after_transform.png`. Add `--also-logits-triangle` for $f_k$ marginals
+(often multimodal — not the same as weight space).
 
 ---
 

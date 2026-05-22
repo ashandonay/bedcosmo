@@ -3,9 +3,9 @@
 Fit and save a KDE prior on DESI EAZY template-fit coordinates.
 
 Training targets (per galaxy, quality_pass only):
-    a1..aK  (normalized coefficients a_k; c_k = exp(log s) * a_k)
-    log_c_scale  (log s = log sum_k |c_k|)
-    z
+    Default (--parameterization logits): f1..f_{K-1} log-ratios vs template K,
+    log_c_scale, z — maps to simplex weights a_k via softmax.
+    Legacy (--parameterization weights): a1..aK directly.
 
 Sample with load_sed_prior_kde() / sample_sed_prior(), then reconstruct:
     c_k = exp(log_s) * a_k
@@ -54,13 +54,33 @@ except ImportError:
         save_triangle_plot,
     )
 
-PRIOR_KDE_VERSION = 1
+PRIOR_KDE_VERSION = 2
+PRIOR_KDE_VERSION_LEGACY = 1
 DEFAULT_KDE_BANDWIDTH = 0.3
 A_ZERO_EPS = 1e-12
 
-
-def prior_feature_names(n_templates: int) -> list[str]:
-    return [f"a{k + 1}" for k in range(n_templates)] + ["log_c_scale", "z"]
+try:
+    from .simplex import (
+        PARAMETERIZATION_LOGITS,
+        PARAMETERIZATION_WEIGHTS,
+        logits_to_weights,
+        prior_feature_names,
+        prior_logit_feature_names,
+        prior_weights_feature_names,
+        split_feature_matrix,
+        weights_to_logits,
+    )
+except ImportError:
+    from simplex import (
+        PARAMETERIZATION_LOGITS,
+        PARAMETERIZATION_WEIGHTS,
+        logits_to_weights,
+        prior_feature_names,
+        prior_logit_feature_names,
+        prior_weights_feature_names,
+        split_feature_matrix,
+        weights_to_logits,
+    )
 
 
 def load_prior_training_table(
@@ -81,17 +101,29 @@ def load_prior_training_table(
     return df
 
 
-def build_feature_matrix(df: pd.DataFrame) -> tuple[np.ndarray, list[str]]:
+def build_feature_matrix(
+    df: pd.DataFrame,
+    *,
+    parameterization: str = PARAMETERIZATION_LOGITS,
+) -> tuple[np.ndarray, list[str]]:
     n_templates = n_template_coeff_columns(df)
     a_cols = prior_a_column_names(df)
-    names = prior_feature_names(n_templates)
-    if a_cols != names[:n_templates]:
-        raise ValueError(f"Expected columns {names[:n_templates]}, got {a_cols}")
+    weight_names = prior_weights_feature_names(n_templates)[:n_templates]
+    if a_cols != weight_names:
+        raise ValueError(f"Expected columns {weight_names}, got {a_cols}")
     extra = ["log_c_scale", "z"]
-    missing = [c for c in names if c not in df.columns]
+    missing = [c for c in extra if c not in df.columns]
     if missing:
         raise KeyError(f"Missing columns in weights table: {missing}")
-    x = df[a_cols + extra].to_numpy(dtype=float)
+    a = df[a_cols].to_numpy(dtype=float)
+    log_s = df["log_c_scale"].to_numpy(dtype=float)
+    z = df["z"].to_numpy(dtype=float)
+    if parameterization == PARAMETERIZATION_LOGITS:
+        eta = weights_to_logits(a)
+        x = np.column_stack([eta, log_s, z])
+    else:
+        x = np.column_stack([a, log_s, z])
+    names = prior_feature_names(n_templates, parameterization=parameterization)
     if not np.all(np.isfinite(x)):
         raise ValueError("Non-finite values in prior feature matrix")
     return x, names
@@ -139,6 +171,10 @@ def apply_training_support_mask(
     return np.array(a, dtype=float) * mask
 
 
+def get_parameterization(artifact: dict[str, Any]) -> str:
+    return artifact.get("parameterization", PARAMETERIZATION_WEIGHTS)
+
+
 def get_training_matrix(artifact: dict[str, Any]) -> np.ndarray:
     if "training_x" in artifact:
         return np.asarray(artifact["training_x"], dtype=float)
@@ -146,8 +182,19 @@ def get_training_matrix(artifact: dict[str, Any]) -> np.ndarray:
     if not weights_csv:
         raise KeyError("Artifact has no training_x and no metadata['weights_csv'] to reload.")
     df = load_prior_training_table(Path(weights_csv).expanduser())
-    x, _ = build_feature_matrix(df)
+    param = get_parameterization(artifact)
+    x, _ = build_feature_matrix(df, parameterization=param)
     return x
+
+
+def get_training_weights(artifact: dict[str, Any]) -> np.ndarray:
+    """Template weights a_k for support-mask reference (always K columns)."""
+    x = get_training_matrix(artifact)
+    n_templates = int(artifact["n_templates"])
+    a, _, _ = split_feature_matrix(
+        x, n_templates, parameterization=get_parameterization(artifact)
+    )
+    return a
 
 
 def fit_sed_prior_kde(
@@ -171,10 +218,17 @@ def pack_kde_artifact(
     *,
     metadata: dict[str, Any],
     enforce_nonnegative_a: bool = False,
+    parameterization: str = PARAMETERIZATION_LOGITS,
 ) -> dict[str, Any]:
-    n_templates = len(feature_names) - 2
+    if "n_templates" in metadata:
+        n_templates = int(metadata["n_templates"])
+    elif parameterization == PARAMETERIZATION_LOGITS:
+        n_templates = len(feature_names) - 1
+    else:
+        n_templates = len(feature_names) - 2
     return {
         "version": PRIOR_KDE_VERSION,
+        "parameterization": parameterization,
         "kde": kde,
         "scaler": scaler,
         "feature_names": feature_names,
@@ -196,6 +250,7 @@ def postprocess_kde_samples(
     seed: int | None = None,
 ) -> np.ndarray:
     n_templates = int(artifact["n_templates"])
+    parameterization = get_parameterization(artifact)
     bounds_min = artifact.get("feature_bounds_min")
     bounds_max = artifact.get("feature_bounds_max")
     if bounds_min is not None and bounds_max is not None:
@@ -205,18 +260,27 @@ def postprocess_kde_samples(
         return np.asarray(x, dtype=float)
 
     out = np.array(x, dtype=float, copy=True)
+    a, log_s, z = split_feature_matrix(out, n_templates, parameterization=parameterization)
+
     if apply_support_mask is None:
         apply_support_mask = _artifact_enforces_nonnegative_a(artifact)
     if apply_support_mask:
         rng = np.random.default_rng(seed)
-        training_a = get_training_matrix(artifact)[:, :n_templates]
-        out[:, :n_templates] = apply_training_support_mask(
-            out[:, :n_templates], training_a, rng
-        )
+        training_a = get_training_weights(artifact)
+        a = apply_training_support_mask(a, training_a, rng)
 
     if _artifact_enforces_nonnegative_a(artifact):
-        return project_a_simplex(out, n_templates)
-    return renormalize_a_rows(out, n_templates)
+        a = project_a_simplex(
+            np.column_stack([a, log_s, z]), n_templates
+        )[:, :n_templates]
+    else:
+        stacked = renormalize_a_rows(np.column_stack([a, log_s, z]), n_templates)
+        a = stacked[:, :n_templates]
+
+    if parameterization == PARAMETERIZATION_LOGITS:
+        eta = weights_to_logits(a)
+        return np.column_stack([eta, log_s, z])
+    return np.column_stack([a, log_s, z])
 
 
 def save_sed_prior_kde(path: Path, artifact: dict[str, Any]) -> None:
@@ -227,11 +291,15 @@ def save_sed_prior_kde(path: Path, artifact: dict[str, Any]) -> None:
 
 def load_sed_prior_kde(path: Path) -> dict[str, Any]:
     artifact = joblib.load(path)
-    if artifact.get("version") != PRIOR_KDE_VERSION:
+    version = artifact.get("version")
+    if version not in (PRIOR_KDE_VERSION, PRIOR_KDE_VERSION_LEGACY):
         raise ValueError(
-            f"Unsupported sed prior KDE version {artifact.get('version')!r}, "
-            f"expected {PRIOR_KDE_VERSION}"
+            f"Unsupported sed prior KDE version {version!r}, "
+            f"expected {PRIOR_KDE_VERSION} or {PRIOR_KDE_VERSION_LEGACY}"
         )
+    if version == PRIOR_KDE_VERSION_LEGACY and "parameterization" not in artifact:
+        artifact = dict(artifact)
+        artifact["parameterization"] = PARAMETERIZATION_WEIGHTS
     return artifact
 
 
@@ -277,11 +345,10 @@ def sample_sed_prior(
 def samples_to_coeffs(
     x: np.ndarray,
     n_templates: int,
+    *,
+    parameterization: str = PARAMETERIZATION_LOGITS,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    a = x[:, :n_templates]
-    log_s = x[:, n_templates]
-    z = x[:, n_templates + 1]
-    return a, log_s, z
+    return split_feature_matrix(x, n_templates, parameterization=parameterization)
 
 
 def coeffs_from_sample_row(a: np.ndarray, log_s: float) -> np.ndarray:
@@ -333,6 +400,12 @@ def main() -> None:
         help="Save kde_samples_triangle.png when --sample > 0.",
     )
     parser.add_argument("--seed", type=int, default=7)
+    parser.add_argument(
+        "--parameterization",
+        choices=(PARAMETERIZATION_LOGITS, PARAMETERIZATION_WEIGHTS),
+        default=PARAMETERIZATION_LOGITS,
+        help="logits: K-1 log-ratios on simplex (recommended). weights: legacy a1..aK.",
+    )
     args = parser.parse_args()
 
     weights_csv = Path(args.weights_csv).expanduser()
@@ -347,8 +420,9 @@ def main() -> None:
 
     max_chi2 = None if args.no_quality_cuts else args.max_chi2_dof
     df = load_prior_training_table(weights_csv, max_chi2_dof=max_chi2)
-    x, feature_names = build_feature_matrix(df)
-    n_templates = len(feature_names) - 2
+    param = args.parameterization
+    x, feature_names = build_feature_matrix(df, parameterization=param)
+    n_templates = n_template_coeff_columns(df)
 
     bandwidth: float | str = (
         args.bandwidth_rule if args.bandwidth_rule is not None else float(args.bandwidth)
@@ -363,6 +437,8 @@ def main() -> None:
     metadata = {
         "weights_csv": str(weights_csv.resolve()),
         "n_train": int(x.shape[0]),
+        "n_templates": n_templates,
+        "parameterization": param,
         "max_chi2_dof": max_chi2,
         "fit_method": args.fit_method,
         "bandwidth": kde.bandwidth,
@@ -379,6 +455,7 @@ def main() -> None:
         x,
         metadata=metadata,
         enforce_nonnegative_a=enforce_nonnegative_a,
+        parameterization=param,
     )
     save_sed_prior_kde(out_path, artifact)
     out_path.with_suffix(".json").write_text(json.dumps(metadata, indent=2) + "\n")
@@ -393,8 +470,8 @@ def main() -> None:
             renormalize_a=not args.no_renormalize_a,
             apply_support_mask=mask,
         )
-        a, log_s, z = samples_to_coeffs(draws, n_templates)
-        train_a = x[:, :n_templates]
+        a, log_s, z = samples_to_coeffs(draws, n_templates, parameterization=param)
+        train_a, _, _ = split_feature_matrix(x, n_templates, parameterization=param)
         fz = lambda arr, k: float((arr[:, k] <= A_ZERO_EPS).mean())
         print(f"\nTest sample n={args.sample}:")
         print(f"  z in [{z.min():.3f}, {z.max():.3f}]  log s in [{log_s.min():.2f}, {log_s.max():.2f}]")
