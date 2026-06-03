@@ -411,10 +411,11 @@ class TestComparisonPlotter:
     def test_compare_posterior_no_samples(self, comparison_plotter, mock_run_data_list):
         """Test compare_posterior when no samples are generated."""
         with patch('bedcosmo.plotting.get_runs_data') as mock_get_runs, \
-             patch('bedcosmo.plotting.get_nominal_samples') as mock_get_samples:
+             patch.object(
+                 ComparisonPlotter, '_nf_display_samples', side_effect=RuntimeError("fail")
+             ):
 
             mock_get_runs.return_value = (mock_run_data_list, 'exp_123', 'test_exp')
-            mock_get_samples.return_value = (None, None)
 
             result = comparison_plotter.compare_posterior()
             assert result is None
@@ -422,11 +423,9 @@ class TestComparisonPlotter:
     def test_compare_posterior_success(self, comparison_plotter, mock_run_data_list, tmp_path):
         """Test successful compare_posterior call."""
         with patch('bedcosmo.plotting.get_runs_data') as mock_get_runs, \
-             patch('bedcosmo.plotting.get_nominal_samples') as mock_get_samples, \
-             patch('bedcosmo.plotting.load_nominal_samples') as mock_load_nominal, \
+             patch.object(ComparisonPlotter, '_nf_display_samples') as mock_nf_samples, \
              patch.object(ComparisonPlotter, 'plot_posterior') as mock_plot_posterior, \
              patch.object(comparison_plotter, 'save_figure') as mock_save, \
-             patch('bedcosmo.plotting.getdist.MCSamples') as mock_mcsamples, \
              patch.object(comparison_plotter, 'get_save_dir') as mock_get_dir, \
              patch.object(comparison_plotter, 'generate_filename') as mock_gen_filename:
 
@@ -436,18 +435,7 @@ class TestComparisonPlotter:
             # Create mock GetDist samples
             mock_sample = Mock()
             mock_sample.paramNames.names = ['param1', 'param2']
-            mock_get_samples.return_value = (mock_sample, 'step_1000')
-
-            # Mock nominal samples
-            mock_load_nominal.return_value = (
-                np.random.randn(100, 2),
-                ['param1', 'param2'],
-                ['$\\theta_1$', '$\\theta_2$']
-            )
-
-            # Mock GetDist MCSamples
-            mock_gd_sample = Mock()
-            mock_mcsamples.return_value = mock_gd_sample
+            mock_nf_samples.return_value = ([{'samples': mock_sample}], 'step_1000')
 
             # Mock plot_posterior (inherited from BasePlotter)
             mock_plotter = Mock()
@@ -469,23 +457,16 @@ class TestComparisonPlotter:
     def test_compare_posterior_with_colors(self, comparison_plotter, mock_run_data_list):
         """Test compare_posterior with custom colors."""
         with patch('bedcosmo.plotting.get_runs_data') as mock_get_runs, \
-             patch('bedcosmo.plotting.get_nominal_samples') as mock_get_samples, \
-             patch('bedcosmo.plotting.load_nominal_samples') as mock_load_nominal, \
+             patch.object(ComparisonPlotter, '_nf_display_samples') as mock_nf_samples, \
              patch.object(ComparisonPlotter, 'plot_posterior') as mock_plot_posterior, \
              patch.object(comparison_plotter, 'save_figure'), \
-             patch('bedcosmo.plotting.getdist.MCSamples'), \
              patch.object(comparison_plotter, 'get_save_dir'), \
              patch.object(comparison_plotter, 'generate_filename'):
 
             mock_get_runs.return_value = (mock_run_data_list, 'exp_123', 'test_exp')
             mock_sample = Mock()
             mock_sample.paramNames.names = ['param1', 'param2']
-            mock_get_samples.return_value = (mock_sample, 'step_1000')
-            mock_load_nominal.return_value = (
-                np.random.randn(100, 2),
-                ['param1', 'param2'],
-                ['$\\theta_1$', '$\\theta_2$']
-            )
+            mock_nf_samples.return_value = ([{'samples': mock_sample}], 'step_1000')
             mock_plotter = Mock()
             mock_plotter.fig = Mock()
             mock_plotter.fig.legends = []
@@ -930,19 +911,15 @@ class TestCompareContours:
     
     def test_compare_contours_no_runs(self, mock_scratch_env):
         """Test compare_contours when no runs are found."""
-        with patch('bedcosmo.plotting.get_nominal_samples') as mock_get_samples, \
+        with patch('bedcosmo.plotting.BasePlotter._nf_display_samples') as mock_nf_samples, \
              patch('bedcosmo.plotting.getdist.MCSamples') as mock_mcsamples, \
              patch('bedcosmo.plotting.os.makedirs'):  # Mock os.makedirs to avoid permission errors
-            # Mock to return None samples
-            mock_get_samples.return_value = (None, None)
+            mock_nf_samples.return_value = ([], None)
 
-            # compare_contours takes run_ids directly, not mlflow_exp
-            # When samples are None, the function will fail - we test it returns/handles gracefully
             try:
                 result = compare_contours(run_ids=['nonexistent'], param1='param1', param2='param2', cosmo_exp='test_exp')
                 assert result is None or isinstance(result, (list, tuple))
-            except (TypeError, AttributeError):
-                # Expected when get_nominal_samples returns None
+            except (TypeError, AttributeError, ValueError):
                 pass
 
 

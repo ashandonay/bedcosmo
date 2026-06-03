@@ -204,12 +204,7 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         self._wlen_cm_tensor = torch.tensor(wlen_common_cm, device=self.device, dtype=torch.float64)  # (n_wlen,)
         self._transmission_tensor = torch.tensor(transmission_array, device=self.device, dtype=torch.float64)  # (n_filters, n_wlen)
         self._wlen_over_hc_tensor = torch.tensor(wlen_over_hc_common, device=self.device, dtype=torch.float64)  # (n_wlen,)
-
-        self._init_central_params(
-            self.cosmo_params,
-            central_params=central_params,
-            defaults={"z": 1.0, "T": 10000.0}
-        )
+        self.central_params = central_params
         z_central = torch.tensor(
             [self.central_params["z"]], device=self.device, dtype=torch.float64
         )

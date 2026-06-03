@@ -19,8 +19,6 @@ import torch
 from bedcosmo.util import (
     Bijector,
     GETDIST_SETTINGS,
-    merge_central_params,
-    parse_json_object,
     profile_method,
 )
 
@@ -310,18 +308,6 @@ class BaseExperiment(ABC):
             self.prior_flow_bijector.set_state(pf_state, device=self.device)
             if getattr(self, "global_rank", 0) == 0:
                 print("Built prior_flow_bijector from prior_flow checkpoint state.")
-
-    def _init_central_params(
-        self,
-        cosmo_params,
-        central_params=None,
-        defaults=None,
-    ):
-        """Set ``self.central_params`` from experiment defaults and an optional override dict."""
-        cp = {}
-        if central_params is not None:
-            cp.update(parse_json_object(central_params))
-        self.central_params = merge_central_params(cosmo_params, cp, defaults=defaults)
 
     def get_central_param(self, name, default=None):
         """Return a central reference value for a cosmological parameter, if set."""
