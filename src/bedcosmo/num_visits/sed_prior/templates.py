@@ -11,6 +11,10 @@ import numpy as np
 EAZY_RAW_BASE = "https://raw.githubusercontent.com/gbrammer/eazy-photoz/master/"
 DEFAULT_TEMPLATES_DIR = Path(os.path.expanduser("~/data/num_visits/eazy"))
 DEFAULT_PARAM_12D = "templates/fsps_full/fsps_QSF_12_v3.param"
+# Rest-frame tabulation range for NumVisits / template bank (Angstrom).
+# Native EAZY files span ~91–1e8 Å; LSST needs dense sampling in the optical/NIR only.
+DEFAULT_BANK_WAVE_MIN_AA = 500.0
+DEFAULT_BANK_WAVE_MAX_AA = 50000.0
 
 
 def download(url: str, path: Path, overwrite: bool = False) -> None:
@@ -96,10 +100,27 @@ def build_common_rest_grid(
     template_waves: list[np.ndarray],
     *,
     n_points: int = 4000,
+    wave_min: float | None = None,
+    wave_max: float | None = None,
+    log_spacing: bool = True,
 ) -> np.ndarray:
-    """Union rest-frame wavelength grid covering all templates."""
-    wmin = min(float(w.min()) for w in template_waves)
-    wmax = max(float(w.max()) for w in template_waves)
+    """
+    Common rest-frame wavelength grid for stacking template SEDs.
+
+    Defaults clip the native EAZY span to ``[500, 50000]`` Å and use log spacing
+    so the optical (1–12 µm rest) is densely sampled. A linear grid over the
+    full native 91–1e8 Å range leaves no points in the optical.
+    """
+    native_min = min(float(w.min()) for w in template_waves)
+    native_max = max(float(w.max()) for w in template_waves)
+    wmin = DEFAULT_BANK_WAVE_MIN_AA if wave_min is None else float(wave_min)
+    wmax = DEFAULT_BANK_WAVE_MAX_AA if wave_max is None else float(wave_max)
+    wmin = max(wmin, native_min)
+    wmax = min(wmax, native_max)
+    if wmin >= wmax:
+        raise ValueError(f"Invalid template bank grid: {wmin} >= {wmax}")
+    if log_spacing:
+        return np.logspace(np.log10(wmin), np.log10(wmax), n_points, dtype=np.float64)
     return np.linspace(wmin, wmax, n_points, dtype=np.float64)
 
 
@@ -121,6 +142,9 @@ def load_eazy_template_bank(
     *,
     templates_dir: Path | str = DEFAULT_TEMPLATES_DIR,
     n_grid: int = 4000,
+    wave_min: float | None = None,
+    wave_max: float | None = None,
+    log_spacing: bool = True,
     overwrite: bool = False,
 ) -> tuple[np.ndarray, np.ndarray, list[str]]:
     """
@@ -133,6 +157,12 @@ def load_eazy_template_bank(
     waves, fluxes, rel_paths = load_eazy_templates(
         param, templates_dir=templates_dir, overwrite=overwrite
     )
-    wave_common = build_common_rest_grid(waves, n_points=n_grid)
+    wave_common = build_common_rest_grid(
+        waves,
+        n_points=n_grid,
+        wave_min=wave_min,
+        wave_max=wave_max,
+        log_spacing=log_spacing,
+    )
     stack = stack_templates_on_grid(waves, fluxes, wave_common)
     return wave_common, stack, rel_paths

@@ -15,6 +15,8 @@ import torch
 
 PARAMETERIZATION_WEIGHTS = "weights"
 PARAMETERIZATION_LOGITS = "logits"
+PARAMETERIZATION_CLR = "clr"
+DEFAULT_CLR_EPS = 1e-5
 
 
 def prior_logit_feature_names(n_templates: int) -> list[str]:
@@ -29,15 +31,42 @@ def prior_weights_feature_names(n_templates: int) -> list[str]:
     return [f"a{k + 1}" for k in range(n_templates)] + ["log_c_scale", "z"]
 
 
+def prior_clr_feature_names(n_templates: int) -> list[str]:
+    """Feature names for CLR rows: f1..fK, log_c_scale, z."""
+    if n_templates < 2:
+        raise ValueError("n_templates must be >= 2 for CLR simplex parameterization")
+    return [f"f{k + 1}" for k in range(n_templates)] + ["log_c_scale", "z"]
+
+
 def prior_feature_names(n_templates: int, *, parameterization: str = PARAMETERIZATION_LOGITS) -> list[str]:
     if parameterization == PARAMETERIZATION_LOGITS:
         return prior_logit_feature_names(n_templates)
+    if parameterization == PARAMETERIZATION_CLR:
+        return prior_clr_feature_names(n_templates)
     if parameterization == PARAMETERIZATION_WEIGHTS:
         return prior_weights_feature_names(n_templates)
     raise ValueError(f"Unknown parameterization {parameterization!r}")
 
 
-def weights_to_logits(w: np.ndarray, eps: float = 1e-12) -> np.ndarray:
+def weights_to_clr(w: np.ndarray, eps: float = DEFAULT_CLR_EPS) -> np.ndarray:
+    """Map simplex weights (..., K) to centered log-ratios clr_i = log a_i - mean_j log a_j."""
+    w = np.asarray(w, dtype=float)
+    w = np.clip(w, eps, None)
+    s = w.sum(axis=-1, keepdims=True)
+    w = w / np.where(s > 0, s, 1.0)
+    logw = np.log(w)
+    return logw - logw.mean(axis=-1, keepdims=True)
+
+
+def clr_to_weights(clr: np.ndarray) -> np.ndarray:
+    """Map centered log-ratio coordinates (..., K) back to simplex weights."""
+    clr = np.asarray(clr, dtype=float)
+    x = clr - clr.max(axis=-1, keepdims=True)
+    expx = np.exp(x)
+    return expx / expx.sum(axis=-1, keepdims=True)
+
+
+def weights_to_logits(w: np.ndarray, eps: float = 1e-4) -> np.ndarray:
     """
     Map simplex weights (..., K) to log-ratios (..., K-1) vs template K.
     """
@@ -88,6 +117,9 @@ def feature_matrix_from_weights(
     if parameterization == PARAMETERIZATION_LOGITS:
         eta = weights_to_logits(a)
         return np.hstack([eta, log_s, z])
+    if parameterization == PARAMETERIZATION_CLR:
+        clr = weights_to_clr(a)
+        return np.hstack([clr, log_s, z])
     return np.hstack([a, log_s, z])
 
 
@@ -104,6 +136,12 @@ def split_feature_matrix(
         a = logits_to_weights(eta)
         log_s = x[:, n_templates - 1]
         z = x[:, n_templates]
+        return a, log_s, z
+    if parameterization == PARAMETERIZATION_CLR:
+        clr = x[:, :n_templates]
+        a = clr_to_weights(clr)
+        log_s = x[:, n_templates]
+        z = x[:, n_templates + 1]
         return a, log_s, z
     a = x[:, :n_templates]
     log_s = x[:, n_templates]

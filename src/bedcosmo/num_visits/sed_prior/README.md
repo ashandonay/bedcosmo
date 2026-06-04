@@ -1,139 +1,121 @@
 # Empirical galaxy SED prior (`sed_prior`)
 
-This package builds and samples an empirical prior over galaxy SEDs for the `num_visits` BED experiment. It fits EAZY templates to DESI spectra (NNLS), pools fits, trains a masked Gaussian KDE, and provides GPU pool sampling for `NumVisits` (`eazy_kde`).
+Build and sample an empirical prior over galaxy SEDs for the `num_visits` BED experiment: fit EAZY templates to DESI spectra (NNLS), pool HEALPix patches, train a **smooth CLR KDE**, and sample through a GPU prior pool in `NumVisits` (`cosmo_model: empirical`).
 
-**Default KDE coordinates (v2):** \(K-1\) log-ratios \(f_k = \log(a_k/a_K)\) on the template simplex, plus \(\log s\) and \(z\) — **13 dimensions** for \(K=12\). Legacy v1 artifacts store \(a_1,\ldots,a_K\) directly (14D).
+**Production parameterization (KDE v3):** centered log-ratios \(f_k = \log a_k - \mathrm{mean}_j\log a_j\) for \(K=12\) templates, plus \(\log s\) and \(z\) — **14 features** (`f1`…`f12`, `log_c_scale`, `z`). Legacy artifacts used raw weights, logits, or masked support projection.
 
 ---
 
 ## Directory layout
 
-| Script | Role |
-|--------|------|
-| `desi_get_dr_subset.py` | Download DESI DR1 spectra for selected HEALPix patches |
-| `fit_eazy_weights_to_desi.py` | Fit template coefficients per galaxy; write weights CSV + diagnostics |
+| File | Role |
+|------|------|
+| `desi_get_dr_subset.py` | Download DESI DR1 coadd + redrock for selected HEALPix patches |
+| `fit_eazy_weights_to_desi.py` | Per-galaxy NNLS template fit → weights CSV + fit diagnostics |
 | `combine_healpix_weights.py` | Concatenate per-patch CSVs into one training table |
-| `compare_healpix_prior_params.py` | Overlay / compare prior coordinates across HEALPix |
-| `build_empirical_sed_prior_kde.py` | Train KDE, save `sed_prior_kde.joblib`, sample prior draws |
-| `run_healpix_fits.sh` | Batch NNLS fits over the default HEALPix list |
-| `generate_template_sed_examples.py` | Legacy: download EAZY templates, synthetic softmax mixtures (not production) |
+| `run_healpix_fits.sh` | Batch fits over the default 9 HEALPix patches |
+| `compare_healpix_prior_params.py` | Cross-patch overlays of prior coordinates |
+| `build_empirical_sed_prior_kde.py` | Train KDE + gaussianizer → `sed_prior_kde.joblib` |
+| `diagnostic_plots.py` | Post-build diagnostics (CLR triangles, redshift, SED examples, mag leakage) |
+| `diagnose_transform_input.py` | NumVisits `transform_input` triangle diagnostics |
+| `prior_sampler.py` | GPU pool of KDE feature rows for training |
+| `simplex.py` | Weight ↔ logit / CLR maps (numpy + torch) |
+| `templates.py` | Load EAZY template bank |
 
-**Data paths (typical):**
+**Typical paths**
 
-- EAZY templates: `~/data/num_visits/eazy/`
-- DESI tiny DR1: `~/data/desi/tiny_dr1/`
-- Scratch outputs: `~/scratch/bedcosmo/desi_eazy_hp{HEALPIX}/`, combined `~/scratch/bedcosmo/desi_eazy_empirical_prior_nnls/`
+| What | Path |
+|------|------|
+| EAZY templates | `~/data/num_visits/eazy/` |
+| DESI tiny DR1 | `~/data/desi/tiny_dr1/` |
+| Per-patch fits | `~/scratch/desi_eazy_hp{HEALPIX}/` or `$SCRATCH/desi_eazy_hp{HEALPIX}/` |
+| **Production prior build** | `~/scratch/bedcosmo/desi_eazy_empirical_prior_full/` |
+| Training KDE path | [`experiments/num_visits/prior_args_empirical.yaml`](../../../../experiments/num_visits/prior_args_empirical.yaml) |
 
-**Analysis notebook:** `experiments/num_visits/notebooks/empircal_prior.ipynb`
+**Notebook:** `experiments/num_visits/notebooks/empircal_prior.ipynb`
 
 ---
 
-## Production prior: simplex logits + \(\log s\), \(z\)
+## Production prior: CLR + smooth KDE
 
-CSV fits still store **`a1`…`aK`** (normalized weights). The KDE is trained on **`f1`…`f_{K-1}`** with \(f_k = \log(a_k/a_K)\) and reference template \(K\); weights recover as \(a = \mathrm{softmax}(f_1,\ldots,f_{K-1},0)\), so \(a_k\ge 0\) and \(\sum_k a_k = 1\) by construction.
+### Coordinates
 
-For \(K=12\) templates, KDE features are **13 numbers**:
+CSV fits store **`a1`…`aK`**, **`c1`…`cK`**, **`log_c_scale`**, **`z`**.
 
-| Index | Symbol | Feature | Meaning |
-|-------|--------|---------|---------|
-| 1–11 | \(f_1,\ldots,f_{11}\) | `f1` … `f11` | Log-ratios vs template 12 |
-| 12 | \(\log s\) | `log_c_scale` | \(\log s = \log\sum_k \|c_k\|\) |
-| 13 | \(z\) | `z` | Redshift |
+The KDE is trained on **CLR** features after a small simplex floor:
 
-Raw fitted amplitudes are stored as `c1` … `cK`. **Reconstruction** (rest-frame SED):
+1. \(a_k \leftarrow (a_k + \varepsilon) / \sum_j (a_j + \varepsilon)\) with default \(\varepsilon = 10^{-5}\)
+2. \(f_k = \log a_k - \mathrm{mean}_j \log a_j\) (row sums to zero; **no** reference template)
+3. KDE in \((f_1,\ldots,f_K, \log s, z)\); decode weights via softmax on CLR
 
-\[
-c_k = e^{\log s}\, a_k,
-\qquad
-f_\mathrm{rest}(\lambda) \propto \sum_k c_k\, T_k(\lambda).
-\]
+For \(K=12\):
 
-**NNLS** (recommended): \(c_k \ge 0\), so \(a_k \ge 0\) and \(\sum_k a_k = 1\). Many \(a_k\) are **exactly zero** (inactive templates). **WLS** allows signed \(c_k\); not used for the production prior.
+| Feature | Meaning |
+|---------|---------|
+| `f1`…`f12` | Centered log-ratios (symmetric; 12 numbers, \(K{-}1\) DOF) |
+| `log_c_scale` | \(\log s = \log\sum_k \|c_k\|\) |
+| `z` | DESI redrock redshift |
+
+Rest-frame SED: \(c_k = e^{\log s}\, a_k\), \(f_\mathrm{rest}(\lambda) \propto \sum_k c_k T_k(\lambda)\).
+
+**NNLS** (\(c_k \ge 0\)): many training \(a_k\) are **exactly zero** (inactive templates). The smooth CLR prior keeps tiny positive KDE mass on inactive directions instead of hard support masks.
 
 ### End-to-end pipeline
 
 ```text
 EAZY templates (~/data/num_visits/eazy/)
         ↓
-desi_get_dr_subset.py          →  local DESI coadd + redrock FITS
+desi_get_dr_subset.py
         ↓
-fit_eazy_weights_to_desi.py    →  desi_eazy_empirical_weights.csv (per HEALPix)
+fit_eazy_weights_to_desi.py     →  desi_eazy_hp{HEALPIX}/desi_eazy_empirical_weights.csv
         ↓
-combine_healpix_weights.py     →  pooled CSV (optional, multi-patch)
+combine_healpix_weights.py      →  desi_eazy_empirical_prior_full/desi_eazy_empirical_weights.csv
         ↓
-build_empirical_sed_prior_kde.py →  sed_prior_kde.joblib
+build_empirical_sed_prior_kde.py →  sed_prior_kde.joblib (+ KDE build triangles)
         ↓
-sample_sed_prior()               →  draws in ℝ¹³ (logits) → simplex \(a_k\) → SED → LSST
+diagnostic_plots.py all         →  diagnostics/{clr_triangle,redshift_histograms,...}/
+        ↓
+NumVisits (empirical)           →  GPU prior pool → SED → LSST magnitudes
 ```
 
-**Quality cut:** default `chi2/dof ≤ 1.2` (`quality_pass=True`). Rows failing the cut remain in the CSV and `dropped_fits.csv` but are excluded from training triangles and KDE training.
+**Selection cuts (fit):** `SPECTYPE == GALAXY`, `ZWARN == 0`, default **`z >= 0.01`** (`--z-min`, `--no-z-min` to disable).
+
+**Quality cut:** default `chi2/dof <= 1.2` (`quality_pass`). Failed rows stay in the CSV / `dropped_fits.csv` but are excluded from KDE training.
 
 ---
 
 ## Step 0: DESI data (`desi_get_dr_subset.py`)
 
-Downloads DESI DR1 coadd and redrock FITS for HEALPix patches into a local tree matching the layout expected by the fit script:
+Downloads coadd + redrock FITS into a tree matching the fit script:
 
 ```text
-~/data/desi/tiny_dr1/
-  spectro/redux/iron/healpix/main/dark/230/23040/
-    coadd-main-dark-23040.fits
-    redrock-main-dark-23040.fits
+~/data/desi/tiny_dr1/spectro/redux/iron/healpix/main/dark/{prefix}/{healpix}/
+  coadd-main-dark-{healpix}.fits
+  redrock-main-dark-{healpix}.fits
 ```
 
-Useful flags: `--top-n-healpix N`, `--healpix ID ...`, `--skip-existing`. See script `--help` for tile vs healpix modes.
+Flags: `--healpix ID ...`, `--top-n-healpix N`, `--skip-existing`. See `--help` for tile vs HEALPix modes.
 
 ---
 
-## Step 1: Fit EAZY weights to DESI (`fit_eazy_weights_to_desi.py`)
+## Step 1: Fit EAZY weights (`fit_eazy_weights_to_desi.py`)
 
 ### Spectral model
-
-Observed-frame flux:
 
 \[
 f_\mathrm{DESI}(\lambda_\mathrm{obs})
 \approx
-\sum_{k=1}^{K}
-c_k\,
+\sum_k c_k \,
 \frac{T_k(\lambda_\mathrm{obs}/(1+z))}{1+z},
 \]
 
-with DESI redrock redshift \(z\). Template amplitudes \(c_k\) are fit by minimizing weighted \(\chi^2\) on unmasked pixels.
+with DESI \(z\). Minimize weighted \(\chi^2\) on unmasked pixels (NNLS: \(c_k \ge 0\)).
 
-### Normalization (default `--coeff-norm l1`)
+### Normalization (`--coeff-norm l1`, default)
 
-\[
-s = \sum_{j=1}^{K} |c_j|,
-\qquad
-a_k = \frac{c_k}{s}.
-\]
+\(s = \sum_j |c_j|\), \(a_k = c_k/s\). For NNLS, \(a\) is on the simplex.
 
-- For NNLS, \(c_k \ge 0\) so \(s = \sum_j c_j\) and \(a_k\) lie on the **simplex** (\(\sum_k a_k = 1\)).
-- KDE is trained on \((a_1,\ldots,a_K, \log s, z)\).
-
-Optional `--coeff-norm max` uses \(s = \max_j |c_j|\); the default pipeline assumes **l1**.
-
-### WLS vs NNLS
-
-| | NNLS (`--fit-method nnls`) | WLS (`--fit-method wls`) |
-|---|---------------------------|--------------------------|
-| Constraint | \(c_k \ge 0\) | none (signed \(c_k\)) |
-| Prior geometry | simplex + sparse zeros | signed L1 shell |
-| SED interpretation | physical positive mixtures | can subtract templates |
-| Production prior | **yes** | debugging / comparison only |
-
-For Pyro / BED, use **NNLS** and build the KDE with `--fit-method nnls`.
-
-### Per-galaxy workflow
-
-1. Load EAZY templates from `~/data/num_visits/eazy/`.
-2. Read HEALPix coadd + redrock (`--desi-dir`, `--healpix`).
-3. Select `SPECTYPE == GALAXY`, `ZWARN == 0`, targets present in coadd.
-4. Fit \(c_k\) (WLS or NNLS); compute \(a_k\), \(s\), \(\log s\).
-5. Write `desi_eazy_empirical_weights.csv` and diagnostic plots.
-
-### Example: single HEALPix
+### Single HEALPix
 
 ```bash
 cd src/bedcosmo/num_visits/sed_prior
@@ -142,102 +124,116 @@ python fit_eazy_weights_to_desi.py \
   --desi-dir ~/data/desi/tiny_dr1 \
   --healpix 23040 \
   --fit-method nnls \
-  --n-max 600 \
-  --outdir ~/scratch/bedcosmo/desi_eazy_hp23040
+  --z-min 0.01 \
+  --outdir ~/scratch/desi_eazy_hp23040
 ```
 
-### Multi-patch batch fit
+Omit `--n-max` to fit **all** passing candidates. Use `--n-max 600` only for quick tests.
+
+### Multi-patch batch
 
 ```bash
 ./run_healpix_fits.sh
-# Env: DESI_DIR, SCRATCH (default ~/scratch/bedcosmo), N_MAX=600
 ```
 
-Default HEALPix list: 23040, 27257, 27245, 27259, 27247, 27256, 27258, 27344, 26282.
+| Env var | Default | Notes |
+|---------|---------|--------|
+| `DESI_DIR` | `~/data/desi/tiny_dr1` | |
+| `SCRATCH` | `~/scratch/bedcosmo` | Per-patch `desi_eazy_hp*` under this base |
+| `Z_MIN` | `0.01` | Redshift floor at candidate selection |
+| `N_MAX` | *(unset)* | If set, subsample per patch (e.g. `600`) |
+| `FORCE` | `0` | `FORCE=1` refits even if CSV exists |
+| `SEED` | `7` | |
+
+Default HEALPix: `23040 27257 27245 27259 27247 27256 27258 27344 26282`.
+
+The script disables heavy triangle plots (`--no-triangle-plots`) for batch speed; use `--plot-only` on one patch for visuals.
 
 ### Combine patches
 
 ```bash
 python combine_healpix_weights.py \
-  --scratch-base ~/scratch/bedcosmo \
-  --out ~/scratch/bedcosmo/desi_eazy_empirical_prior_nnls/desi_eazy_empirical_weights.csv
+  --scratch-base ~/scratch \
+  --out ~/scratch/bedcosmo/desi_eazy_empirical_prior_full/desi_eazy_empirical_weights.csv
 ```
+
+Use the same `--scratch-base` as `SCRATCH` in `run_healpix_fits.sh` (often `~/scratch`, not `~/scratch/bedcosmo`).
 
 ### Compare patches
 
 ```bash
 python compare_healpix_prior_params.py \
-  --scratch-base ~/scratch/bedcosmo \
-  --outdir ~/scratch/bedcosmo/healpix_prior_comparison
+  --scratch-base ~/scratch \
+  --outdir ~/scratch/healpix_prior_comparison
 ```
 
 ### Fit outputs
 
 | File | Contents |
 |------|----------|
-| `desi_eazy_empirical_weights.csv` | All fits: `a1..aK`, `c1..cK`, `log_c_scale`, `z`, `chi2_dof`, `quality_pass`, … |
+| `desi_eazy_empirical_weights.csv` | `a*`, `c*`, `log_c_scale`, `z`, `chi2_dof`, `quality_pass`, … |
 | `dropped_fits.csv` | Quality failures |
-| `prior_params_triangle.png` | Training \((a_k, \log s, z)\), quality-pass only |
+| `prior_params_triangle.png` | Training \((a_k,\log s,z)\), quality-pass |
 | `coeffs_raw_triangle.png` | Raw \(c_k\) vs \(z\) |
-| `spectrum_fit_examples.png` / `_flux.png` | Random spectrum + \(c_k\) bar charts |
-| `chi2_dof_histogram.png` | Fit quality |
+| `spectrum_fit_examples*.png` | Spectrum + \(c_k\) bars |
+| `chi2_dof_histogram.png` | \(\chi^2/\mathrm{dof}\) |
 
-**Replot from CSV (`--plot-only`):** loads an existing weights table and regenerates triangles and spectrum plots (must pass `--healpix` matching the loaded coadd for spectrum panels).
+**Replot only:**
 
 ```bash
 python fit_eazy_weights_to_desi.py --plot-only --fit-method nnls \
-  --outdir ~/scratch/bedcosmo/desi_eazy_empirical_prior_nnls \
-  --weights-csv ~/scratch/bedcosmo/desi_eazy_empirical_prior_nnls/desi_eazy_empirical_weights.csv \
-  --desi-dir ~/data/desi/tiny_dr1 --healpix 23040 --plot-n-examples 6
+  --outdir ~/scratch/desi_eazy_hp23040 \
+  --weights-csv ~/scratch/desi_eazy_hp23040/desi_eazy_empirical_weights.csv \
+  --desi-dir ~/data/desi/tiny_dr1 --healpix 23040
 ```
 
-### Key fit CLI flags
+### Key fit flags
 
 | Flag | Default | Notes |
 |------|---------|--------|
-| `--fit-method` | `nnls` | `wls` or `nnls` |
-| `--coeff-norm` | `l1` | `l1` or `max` for \(a_k\) |
-| `--max-chi2-dof` | `1.2` | prior-quality cut |
-| `--n-max` | all candidates | subsample for speed |
-| `--plot-only` | off | replot from existing CSV |
-| `--no-triangle-plots` | off | skip corner plots |
-| `--plot-n-examples` | `6` | spectrum example count (`0` disables) |
+| `--fit-method` | `nnls` | `wls` for debugging only |
+| `--z-min` | `0.01` | `--no-z-min` disables |
+| `--max-chi2-dof` | `1.2` | `quality_pass` |
+| `--n-max` | all | Subsample cap |
+| `--coeff-norm` | `l1` | |
 
 ---
 
 ## Step 2: KDE prior (`build_empirical_sed_prior_kde.py`)
 
-Turns the pooled weights CSV into a **smooth, sampleable** prior on \((a_k, \log s, z)\).
+### Recommended mode (defaults)
 
-### Why masked KDE (not naive Gaussian KDE alone)
+| Setting | Value |
+|---------|--------|
+| `--parameterization` | `clr` |
+| `--support-mode` | `smooth` (no random NNLS support mask) |
+| `--simplex-smoothing-eps` | `1e-5` |
+| `--bandwidth` | `0.3` (scaled space) |
+| `--z-min` | `0.01` |
+| `--gaussianizer-fit-source` | `kde` (100k reference draws) |
+| `--gaussianizer-whitening` | `cholesky` |
+| `--sample` | `20000` (post-save diagnostic triangles) |
 
-Gaussian KDE smooths interior mass but cannot place density on **boundaries** \(a_k = 0\). NNLS training rows have many exact zeros (inactive templates). After each draw:
+Legacy **`--support-mode masked`** applies a random training-galaxy zero pattern after sampling; large LSST mag shifts — not recommended for production.
 
-1. Sample \(\mathbf{x} = (a_1,\ldots,a_K, \log s, z)\) from a global KDE (bandwidth **0.3** in standardized space by default).
-2. Clip each coordinate to training min/max.
-3. **Support mask:** pick a random training galaxy; set \(a_k = 0\) wherever that galaxy had \(a_k = 0\).
-4. **Renormalize** active templates so \(\sum_k a_k = 1\).
-
-Disable the mask with `--no-support-mask` (not recommended for NNLS). Optional `--bandwidth-rule scott` or `silverman` instead of fixed `0.3`.
-
-### Build and sample
+### Build
 
 ```bash
 python build_empirical_sed_prior_kde.py \
-  --weights-csv ~/scratch/bedcosmo/desi_eazy_empirical_prior_nnls/desi_eazy_empirical_weights.csv \
-  --fit-method nnls \
-  --bandwidth 0.3 \
-  --sample 10000 --seed 7 --plot-kde-triangle \
-  --out ~/scratch/bedcosmo/desi_eazy_empirical_prior_nnls/sed_prior_kde.joblib
+  --weights-csv ~/scratch/bedcosmo/desi_eazy_empirical_prior_full/desi_eazy_empirical_weights.csv \
+  --out ~/scratch/bedcosmo/desi_eazy_empirical_prior_full/sed_prior_kde.joblib
 ```
+
+**Conda:** use `bedcosmo` (needs `torch` for gaussianizer). Fits use `sedprior`.
 
 ### Artifacts
 
 | File | Contents |
 |------|----------|
-| `sed_prior_kde.joblib` | sklearn KDE + scaler, `training_x`, bounds, metadata |
-| `sed_prior_kde.json` | Human-readable metadata |
-| `kde_samples_triangle.png` | Optional (`--plot-kde-triangle` with `--sample > 0`) |
+| `sed_prior_kde.joblib` | KDE, scaler, `training_x`, gaussianizer, bounds, metadata |
+| `sed_prior_kde.json` | Metadata summary |
+| `kde_samples_*.png` | Diagnostic triangles when `--sample > 0` |
+| `training_gaussianized_triangle.png` | Gaussianized training/coords |
 
 ### Python API
 
@@ -245,139 +241,122 @@ python build_empirical_sed_prior_kde.py \
 from pathlib import Path
 
 from bedcosmo.num_visits.sed_prior import (
-    coeffs_from_sample_row,
     load_sed_prior_kde,
     sample_sed_prior,
     samples_to_coeffs,
 )
 
 artifact = load_sed_prior_kde(
-    Path("~/scratch/bedcosmo/desi_eazy_empirical_prior_nnls/sed_prior_kde.joblib").expanduser()
+    Path("~/scratch/bedcosmo/desi_eazy_empirical_prior_full/sed_prior_kde.joblib").expanduser()
 )
-
-x = sample_sed_prior(artifact, n_samples=5000, seed=0)  # shape (5000, 14)
-
+x = sample_sed_prior(artifact, n_samples=5000, seed=0)  # (N, 14) CLR features
 n = artifact["n_templates"]
-a, log_s, z = samples_to_coeffs(x, n)
-c = np.exp(log_s)[:, None] * a
-
-# single galaxy
-c_one = coeffs_from_sample_row(a[0], float(log_s[0]))
+a, log_s, z = samples_to_coeffs(x, n, parameterization="clr")
 ```
 
-Or add `sed_prior` to `sys.path` and import from `build_empirical_sed_prior_kde` directly (as in the notebook).
-
-### KDE CLI flags
-
-| Flag | Default | Notes |
-|------|---------|--------|
-| `--fit-method` | `nnls` | enables simplex projection + default support mask |
-| `--bandwidth` | `0.3` | scaled-space KDE bandwidth |
-| `--sample` | `0` | test draws after save |
-| `--plot-kde-triangle` | off | corner plot of KDE samples |
-| `--no-support-mask` | off | skip zeroing inactive \(a_k\) |
-
 ---
 
-## Diagnostics summary
+## Diagnostics (`diagnostic_plots.py`)
 
-| Plot | Source |
-|------|--------|
-| `prior_params_triangle.png` | Training coordinates (fit script) |
-| `coeffs_raw_triangle.png` | Raw \(c_k\) vs \(z\) (fit script) |
-| `kde_samples_triangle.png` | KDE draws (build script) |
-| `spectrum_fit_examples*.png` | DESI vs model (fit script, needs coadd) |
-| `compact_triangle_by_healpix.png` | Cross-patch comparison |
-
-Sharp edges in training triangles are expected (simplex facets, exact NNLS zeros), not a KDE bug.
-
----
-
-## Legacy: `generate_template_sed_examples.py`
-
-**Not** the production prior. Useful for:
-
-- First-time download of EAZY templates into `~/data/num_visits/eazy/`
-- Quick plots of **synthetic** softmax mixtures (uniform \(z\), no DESI, no sparsity)
+Not part of the build pipeline. All subcommands take a **prior build directory** and write under **`diagnostics/<name>/`** (override with `--outdir`).
 
 ```bash
-python generate_template_sed_examples.py --n-samples 12 --outdir outputs/sed_examples
+python -m bedcosmo.num_visits.sed_prior.diagnostic_plots all \
+  --prior-dir ~/scratch/bedcosmo/desi_eazy_empirical_prior_full
 ```
 
-| | Synthetic script | Production 14D prior |
-|---|------------------|----------------------|
-| Weights | Dirichlet / softmax | DESI NNLS \(a_k\) |
-| Scale | shape only | \(\log s\) in prior |
-| \(z\) | uniform box | DESI + KDE on training \(z\) |
-| Sparsity | none | many \(a_k = 0\) |
-| Output | `sample_seds.npz` | CSV + `sed_prior_kde.joblib` |
+| Subcommand | Output subdir | What it checks |
+|------------|---------------|----------------|
+| `clr-triangle` | `clr_triangle/` | Low-weight template highlighting in KDE (and optional training) draws |
+| `redshift-histograms` | `redshift_histograms/` | Redrock GALAXY vs STAR vs weights CSV; dashed line at KDE `z_min` |
+| `sed-examples` | `sed_examples/` | NumVisits SEDs, LSST mags, weight heatmap, `empirical_seds.npz` |
+| `mag-leakage` | `mag_leakage/` | Smooth KDE vs threshold-zeroed vs masked weights → \(\Delta m\) |
+| `all` | all of the above | One-shot |
+
+**Mag leakage (typical):** thresholding inactive templates (\(a_k \le 10^{-4}\)) changes LSST mags at the **sub-millimag** level; legacy masked support can shift by \(\sim 1\) mag.
+
+Individual runs:
+
+```bash
+python -m bedcosmo.num_visits.sed_prior.diagnostic_plots clr-triangle \
+  --prior-dir ~/scratch/bedcosmo/desi_eazy_empirical_prior_full --also-training
+```
 
 ---
 
-## `NumVisits` integration (`eazy_kde` model)
+## `NumVisits` integration (`empirical`)
 
-Training uses `cosmo_model: eazy_kde` with **13 cosmology parameters** (`f1`…`f11`, `log_c_scale`, `z`) in [`models.yaml`](../../../../experiments/num_visits/models.yaml).
+### Config
 
-Rebuild the KDE after changing parameterization:
-
-```bash
-python -m bedcosmo.num_visits.sed_prior.build_empirical_sed_prior_kde \
-  --weights-csv ~/scratch/bedcosmo/desi_eazy_empirical_prior_nnls/desi_eazy_empirical_weights.csv \
-  --parameterization logits
-```
-
-- **`simplex.py`**: `weights_to_logits` / `logits_to_weights` (numpy + torch).
-- **`prior_sampler.py`**: GPU pool of KDE rows in logit space.
-- **`NumVisits`**: maps \(f_k\) → \(a_k\) via softmax before `_calculate_magnitudes_eazy`.
-
-Legacy v1 joblib files (`a1`…`a12` features) must be rebuilt to match `models.yaml`.
-
-Blackbody models (`bb`, `bb_temp`) are unchanged.
-
-### `transform_input` and logit coordinates
-
-Marginal CDF → Gaussian on every `f_k` is a poor match when logits are **multimodal**
-(spike at KDE clip bounds plus an “active template” mode). The Gaussian triangle then shows
-heavy tails at ±6.36 and distorted 2D panels.
-
-**Recommended for `eazy_kde` training** (`train_args.yaml`):
+- **Parameters:** `f1`…`f12`, `log_c_scale`, `z` in [`models.yaml`](../../../../experiments/num_visits/models.yaml)
+- **KDE path:** absolute path in [`prior_args_empirical.yaml`](../../../../experiments/num_visits/prior_args_empirical.yaml):
 
 ```yaml
-transform_cosmo_params: [log_c_scale, z]   # bijector only on these
+prior_kde_path: "/home/ashandonay/scratch/bedcosmo/desi_eazy_empirical_prior_full/sed_prior_kde.joblib"
+```
+
+- **Training:** [`train_args.yaml`](../../../../experiments/num_visits/train_args.yaml) `empirical` block:
+
+```yaml
+transform_cosmo_params: [log_c_scale, z]   # bijector on these only
 logit_flow_scale: 8.0                    # f_k → H*tanh(f/H) for the NF
 ```
 
-Retrain after changing this; old runs that bijector-transformed all 13 dims are not comparable.
+`NumVisits` decodes CLR rows → simplex \(a_k\) → `_calculate_magnitudes`. Rebuild the KDE after changing parameterization or `feature_names`.
 
-### Diagnose `transform_input` (triangle plots)
+### `transform_input` diagnostics
 
 ```bash
 python -m bedcosmo.num_visits.sed_prior.diagnose_transform_input \
-  --kde-path ~/scratch/bedcosmo/desi_eazy_empirical_prior_nnls/sed_prior_kde.joblib \
-  --outdir ~/scratch/bedcosmo/desi_eazy_empirical_prior_nnls/transform_diagnostic \
-  --n-samples 8000 --cdf-samples 200000
+  --kde-path ~/scratch/bedcosmo/desi_eazy_empirical_prior_full/sed_prior_kde.joblib \
+  --outdir ~/scratch/bedcosmo/desi_eazy_empirical_prior_full/transform_diagnostic
 ```
 
-Writes `triangle_physical_before_transform.png` (**$a_k$, $\\log s$, $z$**) and
-`triangle_gaussian_after_transform.png`. Add `--also-logits-triangle` for $f_k$ marginals
-(often multimodal — not the same as weight space).
+Writes physical \((a_k, \log s, z)\) and post-transform Gaussian triangles.
+
+### Submit training
+
+```bash
+./submit.sh train num_visits empirical
+```
 
 ---
 
-## Quick reference: recommended production settings
+## Legacy / comparison notes
+
+### Parameterizations
+
+| Mode | Features | Status |
+|------|----------|--------|
+| **CLR + smooth** | `f1`…`fK`, `log_s`, `z` | **Production (v3)** |
+| Logits | `f1`…`f_{K-1}`, `log_s`, `z` | Supported; not default |
+| Raw weights | `a1`…`aK`, `log_s`, `z` | Legacy v1 |
+| Masked support | post-sample zero mask | Legacy; distorts mags |
+
+Use `diagnostic_plots sed-examples` for production-pipeline SED checks (KDE-sampled weights, not synthetic mixtures).
+
+### Older scratch trees
+
+| Directory | Role |
+|-----------|------|
+| `desi_eazy_empirical_prior_nnls` | Earlier 600/patch capped build |
+| `desi_eazy_empirical_prior_full` | **Current** all-candidate multi-patch build |
+
+---
+
+## Quick reference
 
 | Step | Setting |
 |------|---------|
-| Fit method | **NNLS** |
-| Normalization | **L1** (`--coeff-norm l1`) |
-| Quality cut | `chi2/dof ≤ 1.2` |
-| KDE bandwidth | **0.3** (scaled space) |
-| Sampling | `sample_sed_prior()` with default support mask |
+| Fit | **NNLS**, **L1** norm, **`z_min=0.01`**, fit **all** candidates (no `N_MAX`) |
+| Combine | `desi_eazy_empirical_prior_full` |
+| KDE | **CLR**, **smooth**, \(\varepsilon=10^{-5}\), bandwidth **0.3** |
+| Training | `prior_kde_path` → `_full/sed_prior_kde.joblib` |
+| Diagnostics | `diagnostic_plots all --prior-dir .../_full` |
 
 ---
 
 ## References
 
-- EAZY templates: [gbrammer/eazy-photoz](https://github.com/gbrammer/eazy-photoz), default `templates/fsps_full/fsps_QSF_12_v3.param`
-- Brammer, van Dokkum & Coppi (2008), EAZY
-- DESI DR1 coadd + redrock (local paths under `~/data/desi/tiny_dr1`)
+- EAZY: [gbrammer/eazy-photoz](https://github.com/gbrammer/eazy-photoz), default `templates/fsps_full/fsps_QSF_12_v3.param`
+- DESI DR1 coadd + redrock under `~/data/desi/tiny_dr1`

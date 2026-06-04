@@ -99,14 +99,25 @@ def unpack_prior_rows(
     parameterization: str | None = None,
 ) -> dict[str, torch.Tensor]:
     """Split pool rows into simplex weights a, log_s, and z."""
-    from .simplex import PARAMETERIZATION_LOGITS, split_feature_matrix
+    from .simplex import (
+        PARAMETERIZATION_CLR,
+        PARAMETERIZATION_LOGITS,
+        PARAMETERIZATION_WEIGHTS,
+        split_feature_matrix,
+    )
 
     if parameterization is None:
-        parameterization = (
-            PARAMETERIZATION_LOGITS
-            if feature_names and feature_names[0].startswith("f")
-            else "weights"
+        n_f = sum(
+            1
+            for name in feature_names
+            if name.startswith("f") and name[1:].isdigit()
         )
+        if n_f == n_templates:
+            parameterization = PARAMETERIZATION_CLR
+        elif n_f == n_templates - 1:
+            parameterization = PARAMETERIZATION_LOGITS
+        else:
+            parameterization = PARAMETERIZATION_WEIGHTS
     arr = x.detach().cpu().numpy()
     a, log_s, z = split_feature_matrix(arr, n_templates, parameterization=parameterization)
     dev, dtype = x.device, x.dtype

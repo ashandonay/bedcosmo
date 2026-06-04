@@ -29,11 +29,7 @@ Legacy sparse/masked behavior is still available with --support-mode masked or
 Example:
 
   python build_empirical_sed_prior_kde.py \
-    --weights-csv ~/scratch/bedcosmo/desi_eazy_empirical_prior_nnls/desi_eazy_empirical_weights.csv \
-    --parameterization clr \
-    --simplex-smoothing-eps 1e-4 \
-    --sample 10000 \
-    --plot-kde-triangle
+    --weights-csv ~/scratch/bedcosmo/desi_eazy_empirical_prior_nnls/desi_eazy_empirical_weights.csv
 """
 
 from __future__ import annotations
@@ -48,8 +44,6 @@ import numpy as np
 import pandas as pd
 from sklearn.neighbors import KernelDensity
 from sklearn.preprocessing import StandardScaler
-from scipy.special import ndtr, ndtri
-from scipy.linalg import cholesky
 
 try:
     from .fit_eazy_weights_to_desi import (
@@ -74,22 +68,33 @@ except ImportError:
 
 try:
     from .simplex import (
+        PARAMETERIZATION_CLR,
         PARAMETERIZATION_LOGITS,
         PARAMETERIZATION_WEIGHTS,
+        clr_to_weights,
+        prior_clr_feature_names,
         prior_feature_names,
         prior_weights_feature_names,
         split_feature_matrix,
+        weights_to_clr,
         weights_to_logits,
     )
 except ImportError:
     from simplex import (
+        PARAMETERIZATION_CLR,
         PARAMETERIZATION_LOGITS,
         PARAMETERIZATION_WEIGHTS,
+        clr_to_weights,
+        prior_clr_feature_names,
         prior_feature_names,
         prior_weights_feature_names,
         split_feature_matrix,
+        weights_to_clr,
         weights_to_logits,
     )
+
+
+from bedcosmo.transform import Bijector, _whitening_to_apply_joint
 
 PRIOR_KDE_VERSION = 3
 PRIOR_KDE_VERSION_SMOOTH_LOGIT = 3
@@ -97,188 +102,14 @@ PRIOR_KDE_VERSION_PREVIOUS = 2
 PRIOR_KDE_VERSION_LEGACY = 1
 
 DEFAULT_KDE_BANDWIDTH = 0.3
+DEFAULT_KDE_DIAGNOSTIC_SAMPLES = 20_000
+DEFAULT_Z_MIN = 0.01
 DEFAULT_SIMPLEX_SMOOTHING_EPS = 1e-5
+DEFAULT_GAUSSIANIZER_WHITENING = "cholesky"
+DEFAULT_GAUSSIANIZER_FIT_SOURCE = "kde"
 A_ZERO_EPS = 1e-12
 
-PARAMETERIZATION_CLR = "clr"
-
 SupportMode = Literal["smooth", "masked", "none"]
-
-
-class EmpiricalGaussianizer:
-    """Empirical-CDF Gaussianization with optional Gaussian-copula whitening.
-
-    The map is fit on the KDE feature space x, e.g.
-        [clr_1..clr_K, log_c_scale, z]
-
-    Forward:
-        x_j -> u_j = Fhat_j(x_j) -> g_j = Phi^{-1}(u_j)
-        optionally, y = L^{-1} g
-
-    Inverse:
-        y -> optionally g = L y -> u = Phi(g) -> x_j = Fhat_j^{-1}(u_j)
-
-    Marginal-only gaussianization makes each feature close to N(0, 1).
-    Cholesky whitening additionally removes linear correlation in the
-    normal-score space, but it will not erase genuine multimodality and may make
-    nonlinear structure look visually more complicated.
-
-    eps controls tail clipping in CDF space. Values like 1e-3 deliberately
-    compress tiny empirical tail populations instead of mapping them to very
-    large Gaussian coordinates, which is often better conditioned for NF input.
-    """
-
-    def __init__(
-        self,
-        feature_names: list[str],
-        quantile_x: list[np.ndarray],
-        quantile_u: list[np.ndarray],
-        corr: np.ndarray,
-        L: np.ndarray,
-        L_inv: np.ndarray,
-        shrinkage: float,
-        eps: float,
-    ):
-        self.feature_names = list(feature_names)
-        self.quantile_x = [np.asarray(q, dtype=float) for q in quantile_x]
-        self.quantile_u = [np.asarray(q, dtype=float) for q in quantile_u]
-        self.corr = np.asarray(corr, dtype=float)
-        self.L = np.asarray(L, dtype=float)
-        self.L_inv = np.asarray(L_inv, dtype=float)
-        self.shrinkage = float(shrinkage)
-        self.eps = float(eps)
-
-    @staticmethod
-    def _monotone_cdf_grid(x: np.ndarray, eps: float) -> tuple[np.ndarray, np.ndarray]:
-        x = np.asarray(x, dtype=float)
-        x = x[np.isfinite(x)]
-        if x.size < 2:
-            raise ValueError("Need at least two finite values to fit empirical CDF")
-        xs = np.sort(x)
-        n = xs.size
-        u = (np.arange(n, dtype=float) + 0.5) / n
-        u = np.clip(u, eps, 1.0 - eps)
-
-        # np.interp needs an increasing x grid. For tied x values, collapse to
-        # one point and use the midpoint of the tied CDF range. This avoids flat
-        # CDF artifacts and duplicate-grid interpolation surprises.
-        uniq, start, counts = np.unique(xs, return_index=True, return_counts=True)
-        if uniq.size == xs.size:
-            return xs, u
-        u_mid = np.empty_like(uniq, dtype=float)
-        for i, (s, c) in enumerate(zip(start, counts)):
-            u_mid[i] = 0.5 * (u[s] + u[s + c - 1])
-        u_mid = np.maximum.accumulate(u_mid)
-        u_mid = np.clip(u_mid, eps, 1.0 - eps)
-        return uniq, u_mid
-
-    @staticmethod
-    def _make_pd_corr(corr: np.ndarray, shrinkage: float) -> np.ndarray:
-        corr = np.asarray(corr, dtype=float)
-        corr = np.nan_to_num(corr, nan=0.0, posinf=0.0, neginf=0.0)
-        corr = 0.5 * (corr + corr.T)
-        np.fill_diagonal(corr, 1.0)
-        d = corr.shape[0]
-        if d == 1:
-            return np.ones((1, 1), dtype=float)
-        lam = float(shrinkage)
-        # Diagonal loading until Cholesky succeeds.
-        for _ in range(8):
-            try:
-                cholesky(corr, lower=True)
-                return corr
-            except Exception:
-                corr = (1.0 - lam) * corr + lam * np.eye(d)
-                np.fill_diagonal(corr, 1.0)
-                lam = min(0.5, lam * 2.0)
-        eigval, eigvec = np.linalg.eigh(corr)
-        eigval = np.clip(eigval, 1e-6, None)
-        corr = (eigvec * eigval) @ eigvec.T
-        sd = np.sqrt(np.diag(corr))
-        corr = corr / sd[:, None] / sd[None, :]
-        np.fill_diagonal(corr, 1.0)
-        return corr
-
-    @classmethod
-    def fit(
-        cls,
-        x: np.ndarray,
-        feature_names: list[str],
-        *,
-        shrinkage: float = 1e-3,
-        eps: float = 1e-6,
-        max_rows: int | None = 50_000,
-        seed: int = 0,
-    ) -> "EmpiricalGaussianizer":
-        x = np.asarray(x, dtype=float)
-        if x.ndim != 2:
-            raise ValueError(f"Expected 2D feature matrix, got shape {x.shape}")
-        if x.shape[1] != len(feature_names):
-            raise ValueError("feature_names length does not match x.shape[1]")
-
-        fit_x = x
-        if max_rows is not None and x.shape[0] > max_rows:
-            rng = np.random.default_rng(seed)
-            idx = rng.choice(x.shape[0], size=int(max_rows), replace=False)
-            fit_x = x[idx]
-
-        qx: list[np.ndarray] = []
-        qu: list[np.ndarray] = []
-        gcols = []
-        for j in range(fit_x.shape[1]):
-            xj, uj = cls._monotone_cdf_grid(fit_x[:, j], eps=eps)
-            qx.append(xj)
-            qu.append(uj)
-            u_all = np.interp(fit_x[:, j], xj, uj, left=eps, right=1.0 - eps)
-            gcols.append(ndtri(np.clip(u_all, eps, 1.0 - eps)))
-        g = np.column_stack(gcols)
-        corr = np.corrcoef(g, rowvar=False)
-        if corr.ndim == 0:
-            corr = np.ones((1, 1), dtype=float)
-        corr = cls._make_pd_corr(corr, shrinkage=shrinkage)
-        L = cholesky(corr, lower=True)
-        L_inv = np.linalg.inv(L)
-        return cls(feature_names, qx, qu, corr, L, L_inv, shrinkage, eps)
-
-    def to_normal_scores(self, x: np.ndarray) -> np.ndarray:
-        x = np.asarray(x, dtype=float)
-        out = np.empty_like(x, dtype=float)
-        for j, (qx, qu) in enumerate(zip(self.quantile_x, self.quantile_u)):
-            u = np.interp(x[:, j], qx, qu, left=self.eps, right=1.0 - self.eps)
-            out[:, j] = ndtri(np.clip(u, self.eps, 1.0 - self.eps))
-        return out
-
-    def to_gaussian(self, x: np.ndarray, *, whitening: str = "none") -> np.ndarray:
-        """Map feature rows to gaussianized coordinates.
-
-        whitening="none" returns marginal normal scores only:
-            g_j = Phi^{-1}(Fhat_j(x_j))
-
-        whitening="cholesky" additionally applies the Gaussian-copula linear
-        decorrelation y = L^{-1} g. This can be useful for nearly elliptical
-        copulas, but for the SED CLR prior it may expose/rotate nonlinear
-        manifold structure into visually odd branches.
-        """
-        g = self.to_normal_scores(x)
-        if whitening == "none":
-            return g
-        if whitening == "cholesky":
-            return g @ self.L_inv.T
-        raise ValueError(f"Unknown whitening mode {whitening!r}; expected 'none' or 'cholesky'")
-
-    def from_gaussian(self, y: np.ndarray, *, whitening: str = "none") -> np.ndarray:
-        y = np.asarray(y, dtype=float)
-        if whitening == "none":
-            g = y
-        elif whitening == "cholesky":
-            g = y @ self.L.T
-        else:
-            raise ValueError(f"Unknown whitening mode {whitening!r}; expected 'none' or 'cholesky'")
-        x = np.empty_like(g, dtype=float)
-        for j, (qx, qu) in enumerate(zip(self.quantile_x, self.quantile_u)):
-            u = np.clip(ndtr(g[:, j]), self.eps, 1.0 - self.eps)
-            x[:, j] = np.interp(u, qu, qx, left=qx[0], right=qx[-1])
-        return x
 
 
 def fit_empirical_gaussianizer(
@@ -289,26 +120,72 @@ def fit_empirical_gaussianizer(
     eps: float = 1e-6,
     max_rows: int | None = 50_000,
     seed: int = 0,
-) -> EmpiricalGaussianizer:
-    return EmpiricalGaussianizer.fit(
+) -> Bijector:
+    """Fit a torch ``Bijector`` on the reference feature matrix (joint whitening by default)."""
+    x = np.asarray(x, dtype=float)
+    if x.ndim != 2:
+        raise ValueError(f"Expected 2D feature matrix, got shape {x.shape}")
+    if x.shape[1] != len(feature_names):
+        raise ValueError("feature_names length does not match x.shape[1]")
+
+    max_fit = max_rows if max_rows is not None else x.shape[0]
+    return Bijector.fit_from_matrix(
         x,
         feature_names,
-        shrinkage=shrinkage,
-        eps=eps,
-        max_rows=max_rows,
-        seed=seed,
+        input_transform_type="joint",
+        cdf_eps=float(eps),
+        shrinkage=float(shrinkage),
+        max_rows=int(max_fit),
+        seed=int(seed),
     )
+
+
+def get_empirical_gaussianizer(artifact: dict[str, Any]) -> Bijector:
+    """Reconstruct the empirical gaussianizer from artifact state."""
+    state = artifact.get("gaussianizer_state")
+    if state is None:
+        raise KeyError(
+            "Artifact does not contain gaussianizer_state; rebuild without --no-gaussianizer"
+        )
+    bj = Bijector.from_state(state)
+    if bj.matrix_columns is None and artifact.get("feature_names"):
+        bj.matrix_columns = list(artifact["feature_names"])
+    return bj
+
+
+def gaussianize_with(
+    gaussianizer: Bijector,
+    x: np.ndarray,
+    whitening: str = "cholesky",
+) -> np.ndarray:
+    """Apply either marginal-only or joint-whitened gaussianization."""
+    y = gaussianizer.matrix_to_gaussian(
+        x, apply_joint=_whitening_to_apply_joint(whitening)
+    )
+    return y.detach().cpu().numpy()
+
+
+def degaussianize_with(
+    gaussianizer: Bijector,
+    y: np.ndarray,
+    whitening: str = "cholesky",
+) -> np.ndarray:
+    """Invert either marginal-only or joint-whitened gaussianization."""
+    x = gaussianizer.matrix_from_gaussian(
+        y, apply_joint=_whitening_to_apply_joint(whitening)
+    )
+    return x.detach().cpu().numpy()
 
 
 def get_gaussianizer_whitening(artifact: dict[str, Any]) -> str:
     """Return the artifact default gaussianizer whitening mode.
 
     ``none`` means marginal normal scores only. ``cholesky`` means apply the
-    additional Gaussian-copula/linear whitening rotation. Marginal-only is the
-    recommended default for the SED prior because the CLR features have strong
-    nonlinear/multimodal dependencies.
+    additional Gaussian-copula/linear whitening rotation (production default).
     """
-    mode = artifact.get("metadata", {}).get("gaussianizer_whitening", "none")
+    mode = artifact.get("metadata", {}).get(
+        "gaussianizer_whitening", DEFAULT_GAUSSIANIZER_WHITENING
+    )
     if mode not in ("none", "cholesky"):
         return "none"
     return mode
@@ -320,12 +197,10 @@ def gaussianize_sed_prior_features(
     *,
     whitening: str | None = None,
 ) -> np.ndarray:
-    gaussianizer = artifact.get("gaussianizer")
-    if gaussianizer is None:
-        raise KeyError("Artifact does not contain a gaussianizer; rebuild without --no-gaussianizer")
+    gaussianizer = get_empirical_gaussianizer(artifact)
     if whitening is None:
         whitening = get_gaussianizer_whitening(artifact)
-    return gaussianizer.to_gaussian(x, whitening=whitening)
+    return gaussianize_with(gaussianizer, x, whitening=whitening)
 
 
 def degaussianize_sed_prior_features(
@@ -334,50 +209,14 @@ def degaussianize_sed_prior_features(
     *,
     whitening: str | None = None,
 ) -> np.ndarray:
-    gaussianizer = artifact.get("gaussianizer")
-    if gaussianizer is None:
-        raise KeyError("Artifact does not contain a gaussianizer; rebuild without --no-gaussianizer")
+    gaussianizer = get_empirical_gaussianizer(artifact)
     if whitening is None:
         whitening = get_gaussianizer_whitening(artifact)
-    x = gaussianizer.from_gaussian(y, whitening=whitening)
+    x = degaussianize_with(gaussianizer, y, whitening=whitening)
     return postprocess_kde_samples(x, artifact)
 
 
-def prior_clr_feature_names(n_templates: int) -> list[str]:
-    """Feature names for CLR rows: f1..fK, log_c_scale, z."""
-    if n_templates < 2:
-        raise ValueError("n_templates must be >= 2 for CLR simplex parameterization")
-    return [f"f{k + 1}" for k in range(n_templates)] + ["log_c_scale", "z"]
-
-
-def weights_to_clr(w: np.ndarray, eps: float = DEFAULT_SIMPLEX_SMOOTHING_EPS) -> np.ndarray:
-    """Map simplex weights (..., K) to centered log-ratio coordinates (..., K).
-
-    CLR uses all templates symmetrically:
-        clr_i = log(a_i) - mean_j log(a_j)
-
-    The output has K coordinates but lies in a K-1 dimensional subspace because
-    each row sums to zero. This avoids choosing a fragile reference template.
-    """
-    w = np.asarray(w, dtype=float)
-    w = np.clip(w, eps, None)
-    s = w.sum(axis=-1, keepdims=True)
-    w = w / np.where(s > 0, s, 1.0)
-    logw = np.log(w)
-    return logw - logw.mean(axis=-1, keepdims=True)
-
-
-def clr_to_weights(clr: np.ndarray) -> np.ndarray:
-    """Map centered log-ratio coordinates (..., K) back to simplex weights."""
-    clr = np.asarray(clr, dtype=float)
-    x = clr - clr.max(axis=-1, keepdims=True)
-    expx = np.exp(x)
-    return expx / expx.sum(axis=-1, keepdims=True)
-
-
 def _prior_feature_names_any(n_templates: int, *, parameterization: str) -> list[str]:
-    if parameterization == PARAMETERIZATION_CLR:
-        return prior_clr_feature_names(n_templates)
     return prior_feature_names(n_templates, parameterization=parameterization)
 
 
@@ -387,13 +226,6 @@ def _split_feature_matrix_any(
     *,
     parameterization: str,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    x = np.asarray(x, dtype=float)
-    if parameterization == PARAMETERIZATION_CLR:
-        clr = x[:, :n_templates]
-        a = clr_to_weights(clr)
-        log_s = x[:, n_templates]
-        z = x[:, n_templates + 1]
-        return a, log_s, z
     return split_feature_matrix(x, n_templates, parameterization=parameterization)
 
 
@@ -402,12 +234,12 @@ def load_prior_training_table(
     *,
     max_chi2_dof: float | None = DEFAULT_MAX_CHI2_DOF,
     require_quality_pass: bool = True,
-    z_min: float | None = 0.0,
+    z_min: float | None = DEFAULT_Z_MIN,
 ) -> pd.DataFrame:
     """Load fitted-weight CSV and apply quality/physical cuts used by the prior.
 
-    z_min defaults to 0.0 so unphysical negative-redshift rows are not used
-    to train the empirical SED prior. The comparison is inclusive: z >= z_min.
+    z_min defaults to 0.01 to drop near-zero redshifts (likely stellar
+    contaminants in DESI GALAXY samples). The comparison is inclusive: z >= z_min.
     """
     df = pd.read_csv(weights_csv)
     n_raw = len(df)
@@ -610,7 +442,7 @@ def pack_kde_artifact(
     metadata: dict[str, Any],
     parameterization: str = PARAMETERIZATION_LOGITS,
     support_mode: SupportMode = "smooth",
-    gaussianizer: EmpiricalGaussianizer | None = None,
+    gaussianizer: Bijector | None = None,
 ) -> dict[str, Any]:
     if "n_templates" in metadata:
         n_templates = int(metadata["n_templates"])
@@ -635,7 +467,7 @@ def pack_kde_artifact(
         # Retained for old downstream code that checks this key.
         "enforce_nonnegative_a": parameterization in (PARAMETERIZATION_LOGITS, PARAMETERIZATION_CLR) or support_mode in ("smooth", "masked"),
         "metadata": metadata,
-        "gaussianizer": gaussianizer,
+        "gaussianizer_state": None if gaussianizer is None else gaussianizer.get_state(),
     }
 
 
@@ -854,11 +686,11 @@ def main() -> None:
     parser.add_argument(
         "--z-min",
         type=float,
-        default=0.0,
+        default=DEFAULT_Z_MIN,
         help=(
             "Minimum redshift to use when training the empirical prior. "
             "Rows with non-finite z or z < z_min are filtered before KDE fitting. "
-            "Default 0.0 removes unphysical negative-redshift rows."
+            f"Default {DEFAULT_Z_MIN:g} drops near-zero redshifts."
         ),
     )
     parser.add_argument(
@@ -881,7 +713,7 @@ def main() -> None:
     parser.add_argument(
         "--parameterization",
         choices=(PARAMETERIZATION_CLR, PARAMETERIZATION_LOGITS, PARAMETERIZATION_WEIGHTS),
-        default="clr",
+        default=PARAMETERIZATION_CLR,
         help=(
             "clr: recommended centered log-ratio features f1..fK; "
             "logits: K-1 log-ratios against the last template; "
@@ -894,7 +726,7 @@ def main() -> None:
         default=DEFAULT_SIMPLEX_SMOOTHING_EPS,
         help=(
             "Positive floor added to every a_k before logit training. "
-            "Use 1e-4 or 1e-3 for smooth NF-friendly priors."
+            "Use 1e-5 (default) or 1e-4 for smooth NF-friendly priors."
         ),
     )
     parser.add_argument(
@@ -956,13 +788,12 @@ def main() -> None:
     parser.add_argument(
         "--gaussianizer-fit-source",
         choices=("training", "kde"),
-        default="kde",
+        default=DEFAULT_GAUSSIANIZER_FIT_SOURCE,
         help=(
             "Data used to fit the empirical gaussianizer. "
             "training uses the filtered input table features directly. "
-            "kde first fits the KDE, draws --gaussianizer-fit-samples reference "
-            "samples from it, and fits the gaussianizer on those samples. "
-            "Use kde if gaussianized KDE samples show hard CDF-clipping edges."
+            "kde (default) first fits the KDE, draws --gaussianizer-fit-samples "
+            "reference samples from it, and fits the gaussianizer on those samples."
         ),
     )
     parser.add_argument(
@@ -983,20 +814,21 @@ def main() -> None:
     parser.add_argument(
         "--gaussianizer-whitening",
         choices=("none", "cholesky"),
-        default="cholesky",
+        default=DEFAULT_GAUSSIANIZER_WHITENING,
         help=(
             "Which gaussianized coordinate to use by default. "
-            "none = marginal normal scores only, recommended for the SED prior; "
-            "cholesky = additionally apply Gaussian-copula linear whitening."
+            "cholesky (default) = marginal normal scores plus Gaussian-copula "
+            "linear whitening; none = marginal normal scores only."
         ),
     )
-    parser.add_argument("--sample", type=int, default=0, help="Test draws after save.")
     parser.add_argument(
-        "--plot-kde-triangle",
-        action="store_true",
-        help=("Save diagnostic triangle plots when --sample > 0: "
-              "decoded weights in kde_samples_triangle.png and, for clr/logits, "
-              "feature space in kde_samples_clr_triangle.png or kde_samples_logit_triangle.png."),
+        "--sample",
+        type=int,
+        default=DEFAULT_KDE_DIAGNOSTIC_SAMPLES,
+        help=(
+            "Diagnostic KDE draws after save (console stats and triangle plots). "
+            f"Default {DEFAULT_KDE_DIAGNOSTIC_SAMPLES}. Use 0 to skip."
+        ),
     )
     parser.add_argument("--seed", type=int, default=7)
     args = parser.parse_args()
@@ -1111,9 +943,9 @@ def main() -> None:
             max_rows=max_rows,
             seed=args.seed,
         )
-        y_train = gaussianizer.to_gaussian(x, whitening=args.gaussianizer_whitening)
-        y_train_marginal = gaussianizer.to_gaussian(x, whitening="none")
-        y_train_whitened = gaussianizer.to_gaussian(x, whitening="cholesky")
+        y_train = gaussianize_with(gaussianizer, x, args.gaussianizer_whitening)
+        y_train_marginal = gaussianize_with(gaussianizer, x, "none")
+        y_train_whitened = gaussianize_with(gaussianizer, x, "cholesky")
         print("  gaussianizer:    enabled")
         print(f"  gaussianizer fit source: {args.gaussianizer_fit_source}")
         if args.gaussianizer_fit_source == "kde":
@@ -1215,10 +1047,10 @@ def main() -> None:
         gaussian_draws_whitened = None
         training_gaussian_draws_whitened = None
         if gaussianizer is not None:
-            gaussian_draws_marginal = gaussianizer.to_gaussian(draws, whitening="none")
-            training_gaussian_draws_marginal = gaussianizer.to_gaussian(x, whitening="none")
-            gaussian_draws_whitened = gaussianizer.to_gaussian(draws, whitening="cholesky")
-            training_gaussian_draws_whitened = gaussianizer.to_gaussian(x, whitening="cholesky")
+            gaussian_draws_marginal = gaussianize_with(gaussianizer, draws, "none")
+            training_gaussian_draws_marginal = gaussianize_with(gaussianizer, x, "none")
+            gaussian_draws_whitened = gaussianize_with(gaussianizer, draws, "cholesky")
+            training_gaussian_draws_whitened = gaussianize_with(gaussianizer, x, "cholesky")
 
             gaussian_draws = (
                 gaussian_draws_marginal
@@ -1244,168 +1076,92 @@ def main() -> None:
                     f"max |corr offdiag|={np.max(np.abs(offdiag)):.3f}"
                 )
 
-        if args.plot_kde_triangle:
-            # Plot 1: decoded physical simplex weights a_k plus log scale and z.
-            # This is the plot you should use to inspect the actual SED mixture
-            # coefficients that will be passed downstream. Even when the KDE is
-            # trained in logit space, this plot is in decoded weight space.
-            joint, labels = build_prior_parameter_samples(a, log_s, z)
-            decoded_name = "kde_samples_triangle.png"
+        # Plot 1: decoded physical simplex weights a_k plus log scale and z.
+        # This is the plot you should use to inspect the actual SED mixture
+        # coefficients that will be passed downstream. Even when the KDE is
+        # trained in logit space, this plot is in decoded weight space.
+        joint, labels = build_prior_parameter_samples(a, log_s, z)
+        decoded_name = "kde_samples_triangle.png"
+        save_triangle_plot(
+            out_path.parent,
+            joint,
+            labels,
+            filename=decoded_name,
+            title=(
+                rf"Decoded KDE prior weights "
+                rf"($N={args.sample}$, {args.parameterization}, {support_mode})"
+            ),
+            panel_size=1.35,
+        )
+        print(f"Saved decoded-weight triangle: {out_path.parent / decoded_name}")
+
+        # Plot 2: actual KDE feature coordinates. For the recommended CLR
+        # parameterization this shows f_i = log(a_i) - mean_j log(a_j),
+        # log_c_scale, z. This is the space where smoothness/Gaussianization
+        # should be judged.
+        if args.parameterization in (PARAMETERIZATION_LOGITS, PARAMETERIZATION_CLR):
+            suffix = "clr" if args.parameterization == PARAMETERIZATION_CLR else "logit"
+            feature_name = f"kde_samples_{suffix}_triangle.png"
             save_triangle_plot(
                 out_path.parent,
-                joint,
-                labels,
-                filename=decoded_name,
+                draws,
+                feature_names,
+                filename=feature_name,
                 title=(
-                    rf"Decoded KDE prior weights "
-                    rf"($N={args.sample}$, {args.parameterization}, {support_mode})"
+                    rf"KDE prior feature/{suffix} samples "
+                    rf"($N={args.sample}$, {support_mode})"
                 ),
                 panel_size=1.35,
             )
-            print(f"Saved decoded-weight triangle: {out_path.parent / decoded_name}")
+            print(f"Saved {suffix}-feature triangle: {out_path.parent / feature_name}")
 
-            # Plot 2: actual KDE feature coordinates. For the recommended CLR
-            # parameterization this shows f_i = log(a_i) - mean_j log(a_j),
-            # log_c_scale, z. This is the space where smoothness/Gaussianization
-            # should be judged.
-            if args.parameterization in (PARAMETERIZATION_LOGITS, PARAMETERIZATION_CLR):
-                suffix = "clr" if args.parameterization == PARAMETERIZATION_CLR else "logit"
-                feature_name = f"kde_samples_{suffix}_triangle.png"
+        if gaussianizer is not None:
+            gaussian_names = [f"g_{name}" for name in feature_names]
+
+            def _subsample_training(arr: np.ndarray) -> np.ndarray:
+                n_plot = min(args.sample, arr.shape[0])
+                rng = np.random.default_rng(args.seed)
+                if arr.shape[0] > n_plot:
+                    idx = rng.choice(arr.shape[0], size=n_plot, replace=False)
+                    return arr[idx]
+                return arr
+
+            # Plot 3: gaussianized coordinates using --gaussianizer-whitening
+            # (none = marginal normal scores; cholesky = copula whitening).
+            if gaussian_draws is not None:
+                gaussian_name = "kde_samples_gaussianized_triangle.png"
                 save_triangle_plot(
                     out_path.parent,
-                    draws,
-                    feature_names,
-                    filename=feature_name,
+                    gaussian_draws,
+                    gaussian_names,
+                    filename=gaussian_name,
                     title=(
-                        rf"KDE prior feature/{suffix} samples "
-                        rf"($N={args.sample}$, {support_mode})"
+                        rf"Gaussianized KDE prior samples "
+                        rf"($N={args.sample}$, {args.parameterization}, {support_mode}, "
+                        rf"whitening={args.gaussianizer_whitening})"
                     ),
                     panel_size=1.35,
                 )
-                print(f"Saved {suffix}-feature triangle: {out_path.parent / feature_name}")
+                print(f"Saved default gaussianized triangle: {out_path.parent / gaussian_name}")
 
-            if gaussianizer is not None:
-                gaussian_names = [f"g_{name}" for name in feature_names]
-
-                def _subsample_training(arr: np.ndarray) -> np.ndarray:
-                    n_plot = min(args.sample, arr.shape[0])
-                    rng = np.random.default_rng(args.seed)
-                    if arr.shape[0] > n_plot:
-                        idx = rng.choice(arr.shape[0], size=n_plot, replace=False)
-                        return arr[idx]
-                    return arr
-
-                # Plot 3a: marginal-only gaussianized KDE samples. This is the
-                # recommended NF/BED coordinate for this SED prior: each axis is
-                # a standard-normal marginal, but we do not force a linear
-                # whitening rotation on nonlinear/multimodal dependencies.
-                if gaussian_draws_marginal is not None:
-                    marginal_name = "kde_samples_marginal_gaussianized_triangle.png"
-                    save_triangle_plot(
-                        out_path.parent,
-                        gaussian_draws_marginal,
-                        gaussian_names,
-                        filename=marginal_name,
-                        title=(
-                            rf"Marginal gaussianized KDE prior samples "
-                            rf"($N={args.sample}$, {args.parameterization}, {support_mode})"
-                        ),
-                        panel_size=1.35,
-                    )
-                    print(f"Saved marginal gaussianized triangle: {out_path.parent / marginal_name}")
-
-                    train_plot = _subsample_training(training_gaussian_draws_marginal)
-                    training_marginal_name = "training_marginal_gaussianized_triangle.png"
-                    save_triangle_plot(
-                        out_path.parent,
-                        train_plot,
-                        gaussian_names,
-                        filename=training_marginal_name,
-                        title=(
-                            rf"Marginal gaussianized training prior data "
-                            rf"($N={train_plot.shape[0]}$, {args.parameterization}, {support_mode})"
-                        ),
-                        panel_size=1.35,
-                    )
-                    print(
-                        f"Saved marginal gaussianized training triangle: "
-                        f"{out_path.parent / training_marginal_name}"
-                    )
-
-                # Plot 3b: Cholesky-whitened gaussianized coordinates. This is
-                # useful as a diagnostic, but it is not the default for the SED
-                # prior because a single linear whitening transform can make
-                # nonlinear CLR structure look like branches/starfish patterns.
-                if gaussian_draws_whitened is not None:
-                    whitened_name = "kde_samples_whitened_gaussianized_triangle.png"
-                    save_triangle_plot(
-                        out_path.parent,
-                        gaussian_draws_whitened,
-                        gaussian_names,
-                        filename=whitened_name,
-                        title=(
-                            rf"Whitened gaussianized KDE prior samples "
-                            rf"($N={args.sample}$, {args.parameterization}, {support_mode})"
-                        ),
-                        panel_size=1.35,
-                    )
-                    print(f"Saved whitened gaussianized triangle: {out_path.parent / whitened_name}")
-
-                    train_plot = _subsample_training(training_gaussian_draws_whitened)
-                    training_whitened_name = "training_whitened_gaussianized_triangle.png"
-                    save_triangle_plot(
-                        out_path.parent,
-                        train_plot,
-                        gaussian_names,
-                        filename=training_whitened_name,
-                        title=(
-                            rf"Whitened gaussianized training prior data "
-                            rf"($N={train_plot.shape[0]}$, {args.parameterization}, {support_mode})"
-                        ),
-                        panel_size=1.35,
-                    )
-                    print(
-                        f"Saved whitened gaussianized training triangle: "
-                        f"{out_path.parent / training_whitened_name}"
-                    )
-
-                # Backward-compatible aliases using the configured default mode.
-                # With the new default --gaussianizer-whitening none, these are
-                # identical to the marginal plots above.
-                if gaussian_draws is not None:
-                    gaussian_name = "kde_samples_gaussianized_triangle.png"
-                    save_triangle_plot(
-                        out_path.parent,
-                        gaussian_draws,
-                        gaussian_names,
-                        filename=gaussian_name,
-                        title=(
-                            rf"Gaussianized KDE prior samples "
-                            rf"($N={args.sample}$, {args.parameterization}, {support_mode}, "
-                            rf"whitening={args.gaussianizer_whitening})"
-                        ),
-                        panel_size=1.35,
-                    )
-                    print(f"Saved default gaussianized triangle: {out_path.parent / gaussian_name}")
-
-                    train_plot = _subsample_training(training_gaussian_draws)
-                    training_gaussian_name = "training_gaussianized_triangle.png"
-                    save_triangle_plot(
-                        out_path.parent,
-                        train_plot,
-                        gaussian_names,
-                        filename=training_gaussian_name,
-                        title=(
-                            rf"Gaussianized training prior data "
-                            rf"($N={train_plot.shape[0]}$, {args.parameterization}, {support_mode}, "
-                            rf"whitening={args.gaussianizer_whitening})"
-                        ),
-                        panel_size=1.35,
-                    )
-                    print(
-                        f"Saved default gaussianized training triangle: "
-                        f"{out_path.parent / training_gaussian_name}"
-                    )
+                train_plot = _subsample_training(training_gaussian_draws)
+                training_gaussian_name = "training_gaussianized_triangle.png"
+                save_triangle_plot(
+                    out_path.parent,
+                    train_plot,
+                    gaussian_names,
+                    filename=training_gaussian_name,
+                    title=(
+                        rf"Gaussianized training prior data "
+                        rf"($N={train_plot.shape[0]}$, {args.parameterization}, {support_mode}, "
+                        rf"whitening={args.gaussianizer_whitening})"
+                    ),
+                    panel_size=1.35,
+                )
+                print(
+                    f"Saved default gaussianized training triangle: "
+                    f"{out_path.parent / training_gaussian_name}"
+                )
 
 
 if __name__ == "__main__":

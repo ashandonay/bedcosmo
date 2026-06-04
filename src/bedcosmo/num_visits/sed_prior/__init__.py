@@ -17,14 +17,18 @@ from .prior_sampler import (
     unpack_prior_rows,
 )
 from .simplex import (
+    PARAMETERIZATION_CLR,
     PARAMETERIZATION_LOGITS,
     PARAMETERIZATION_WEIGHTS,
+    clr_to_weights,
     logits_to_weights,
     logits_to_weights_torch,
+    prior_clr_feature_names,
     prior_feature_names,
     prior_logit_feature_names,
     prior_weights_feature_names,
     split_feature_matrix,
+    weights_to_clr,
     weights_to_logits,
     weights_to_logits_torch,
 )
@@ -36,8 +40,10 @@ from .templates import (
 )
 
 __all__ = [
+    "PARAMETERIZATION_CLR",
     "PARAMETERIZATION_LOGITS",
     "PARAMETERIZATION_WEIGHTS",
+    "clr_to_weights",
     "DEFAULT_PARAM_12D",
     "DEFAULT_TEMPLATES_DIR",
     "EmpiricalPriorPool",
@@ -51,8 +57,10 @@ __all__ = [
     "logits_to_weights",
     "logits_to_weights_torch",
     "prior_feature_names",
+    "prior_clr_feature_names",
     "prior_logit_feature_names",
     "prior_weights_feature_names",
+    "weights_to_clr",
     "sample_prior_batch",
     "split_feature_matrix",
     "weights_to_logits",

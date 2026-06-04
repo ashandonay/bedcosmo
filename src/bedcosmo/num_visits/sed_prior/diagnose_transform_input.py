@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Triangle plots for NumVisits ``transform_input`` (marginal bijector).
+Triangle plots for NumVisits ``transform_input`` (marginal or joint Gaussianizer).
 
-Draws KDE prior samples, applies ``params_to_unconstrained`` (marginal bijector), and writes:
+Draws KDE prior samples, applies ``params_to_unconstrained``, and writes:
 
 - **Physical (interpretable):** simplex weights $a_k$, $\\log s$, $z$
 - **NF input coords:** log-ratios $f_k$ (can look multimodal; clipped at training bounds)
@@ -124,22 +124,10 @@ def _print_summary(name: str, x: np.ndarray, names: list[str]) -> None:
 
 
 def _roundtrip_error(experiment, physical: torch.Tensor) -> float:
-    bj = experiment.param_bijector
-    err_max = 0.0
     with torch.no_grad():
-        for i, pname in enumerate(experiment.cosmo_params):
-            sl = slice(i, i + 1)
-            x = physical[..., sl]
-            if pname in experiment._bijector_param_names():
-                z = bj.prior_to_gaussian(x, pname)
-                x_back = bj.gaussian_to_prior(z, pname)
-            elif pname.startswith("f"):
-                z = experiment._squash_logit_for_flow(x)
-                x_back = experiment._unsquash_logit_for_flow(z)
-            else:
-                continue
-            err_max = max(err_max, float((x_back - x).abs().max().cpu()))
-    return err_max
+        z = experiment.params_to_unconstrained(physical)
+        x_back = experiment.params_from_unconstrained(z)
+    return float((x_back - physical).abs().max().cpu())
 
 
 def main() -> None:
@@ -156,7 +144,7 @@ def main() -> None:
         "--prior-args",
         type=Path,
         default=None,
-        help="prior_args YAML (default: experiments/num_visits/prior_args_eazy_kde.yaml).",
+        help="prior_args YAML (default: experiments/num_visits/prior_args_empirical.yaml).",
     )
     parser.add_argument(
         "--outdir",
@@ -173,13 +161,26 @@ def main() -> None:
     )
     parser.add_argument("--cdf-bins", type=int, default=5000)
     parser.add_argument("--device", default="cpu")
-    parser.add_argument("--cosmo-model", default="eazy_kde")
+    parser.add_argument("--cosmo-model", default="empirical")
+    parser.add_argument(
+        "--input-transform-type",
+        choices=("marginal", "joint"),
+        default="marginal",
+        help="marginal: per-param CDF (+ tanh on f*). joint: empirical joint Gaussianizer.",
+    )
+    parser.add_argument(
+        "--joint-transform-params",
+        nargs="*",
+        default=None,
+        help="Joint block (default: transform_cosmo_params or all cosmo_params).",
+    )
     parser.add_argument(
         "--transform-cosmo-params",
         nargs="*",
         default=None,
-        help="Subset for CDF bijector (default: all). Use log_c_scale z for recommended eazy_kde.",
+        help="Marginal CDF subset; in joint mode, also default for the joint block if unset.",
     )
+    parser.add_argument("--joint-transform-shrinkage", type=float, default=1e-3)
     parser.add_argument("--logit-flow-scale", type=float, default=8.0)
     parser.add_argument("--panel-size", type=float, default=1.25)
     parser.add_argument(
@@ -202,7 +203,7 @@ def main() -> None:
     prior_args_path = (
         Path(args.prior_args).expanduser()
         if args.prior_args
-        else _get_experiment_config_path("num_visits", "prior_args_eazy_kde.yaml")
+        else _get_experiment_config_path("num_visits", "prior_args_empirical.yaml")
     )
     prior_args = _merge_prior_parameters(
         _load_prior_args_from_yaml(prior_args_path),
@@ -218,7 +219,8 @@ def main() -> None:
     from bedcosmo.num_visits.experiment import NumVisits
 
     print(
-        f"\nInitializing NumVisits (transform_input=True, cdf_samples={args.cdf_samples})..."
+        f"\nInitializing NumVisits (transform_input=True, input_transform_type={args.input_transform_type}, "
+        f"cdf_samples={args.cdf_samples})..."
     )
     experiment = NumVisits(
         prior_args=prior_args,
@@ -228,21 +230,44 @@ def main() -> None:
         cdf_samples=args.cdf_samples,
         cdf_bins=args.cdf_bins,
         transform_input=True,
+        input_transform_type=args.input_transform_type,
+        joint_transform_params=args.joint_transform_params,
+        joint_transform_shrinkage=args.joint_transform_shrinkage,
         transform_cosmo_params=args.transform_cosmo_params,
         logit_flow_scale=args.logit_flow_scale,
         verbose=True,
     )
-    bj_names = sorted(experiment._bijector_param_names())
-    print(f"  Bijector on: {bj_names}")
-    print(f"  Logit tanh scale: {experiment.logit_flow_scale}")
+    print(f"  input_transform_type: {experiment.input_transform_type}")
+    if experiment._uses_joint_transform():
+        print(f"  Joint block ({len(experiment._joint_transform_param_names())} params): "
+              f"{experiment._joint_transform_param_names()}")
+        if experiment.param_bijector.uses_joint_gaussianizer():
+            print("  Joint gaussianizer fitted: yes")
+    else:
+        bj_names = sorted(experiment._bijector_param_names())
+        squash = sorted(experiment._flow_squash_param_names())
+        print(f"  Marginal bijector on: {bj_names}")
+        print(f"  Flow squash (tanh) on: {squash}")
+        print(f"  Logit tanh scale: {experiment.logit_flow_scale}")
     if not experiment.use_eazy_sed:
-        raise RuntimeError("Expected eazy_kde / empirical KDE prior.")
+        raise RuntimeError("Expected empirical KDE prior.")
 
     n = args.n_samples
     physical = _sample_physical_tensor(experiment, n)
     physical = experiment._sanitize_physical_samples(physical)
     with torch.no_grad():
         gaussian = experiment.params_to_unconstrained(physical)
+        normal_scores = None
+        bj = experiment.param_bijector
+        if bj.uses_joint_gaussianizer():
+            cols = []
+            for name, idx in zip(
+                bj.joint_state["param_names"], bj.joint_state["param_indices"]
+            ):
+                cols.append(
+                    bj.prior_to_gaussian(physical[..., idx : idx + 1], name).reshape(-1)
+                )
+            normal_scores = torch.stack(cols, dim=1)
 
     names = experiment.cosmo_params
     x_phys = physical.cpu().numpy()
@@ -261,6 +286,13 @@ def main() -> None:
         "Simplex weights a_k (decoded)", joint_weights, [f"a{k}" for k in range(1, n_tpl + 1)] + ["log_c_scale", "z"]
     )
     _print_summary("NF input (after transform_input)", x_gauss, names)
+    if normal_scores is not None:
+        y_np = normal_scores.cpu().numpy()
+        _print_summary(
+            "Normal scores Phi^-1(F(x)) before L^-1 (should be ~N(0,1) per dim)",
+            y_np,
+            names,
+        )
     clamp = 6.3613
     print(f"\nFraction at |NF| > {clamp - 0.01:.1f} (bijector saturation):")
     for j, pname in enumerate(names):
@@ -288,16 +320,34 @@ def main() -> None:
         title=rf"Prior on simplex weights ($N={n}$, before transform_input)",
         panel_size=args.panel_size,
     )
+    tag = args.input_transform_type
+    gauss_name = f"triangle_gaussian_after_transform_{tag}.png"
     save_triangle_plot(
         outdir,
         x_gauss,
         labels_g,
-        filename="triangle_gaussian_after_transform.png",
-        title=rf"Gaussianized NF input ($N={n}$, after transform_input)",
+        filename=gauss_name,
+        title=rf"NF input after {tag} transform ($N={n}$, $D={len(names)}$)",
         panel_size=args.panel_size,
     )
     print(f"\nSaved {outdir / 'triangle_physical_before_transform.png'}  (a_k, log s, z)")
-    print(f"Saved {outdir / 'triangle_gaussian_after_transform.png'}")
+    print(f"Saved {outdir / gauss_name}")
+    if args.input_transform_type == "joint" and normal_scores is not None:
+        save_triangle_plot(
+            outdir,
+            y_np,
+            labels_g,
+            filename="triangle_normal_scores_before_Linv.png",
+            title=rf"Normal scores $y=\Phi^{{-1}}(F(x))$ ($N={n}$, before $L^{{-1}}$)",
+            panel_size=args.panel_size,
+        )
+        print(f"Saved {outdir / 'triangle_normal_scores_before_Linv.png'}")
+        print(
+            "\nNote: Marginal Gaussianization is in y-space (triangle_normal_scores_before_Linv). "
+            "NF input z = L^{-1} y mixes coordinates, so z marginals need not be N(0,1). "
+            "Joint whitening targets an approximately factorized Gaussian in z; one-hot f_k "
+            "multimodality in x still appears in y and z."
+        )
 
     if args.also_logits_triangle and param == PARAMETERIZATION_LOGITS:
         labels_phys = _labels_physical(experiment)
