@@ -10,8 +10,8 @@ import getdist
 import numpy as np
 from getdist import plots
 from bedcosmo.util import (
-    get_runs_data, init_experiment, init_nf, load_model, auto_seed, convert_color,
-    load_nominal_samples, get_contour_area, get_nominal_samples, sort_key_for_group_tuple,
+    get_runs_data, init_experiment, load_model, auto_seed, convert_color,
+    load_nominal_samples, get_contour_area, parse_mlflow_params, sort_key_for_group_tuple,
     GETDIST_SETTINGS,
 )
 import matplotlib.pyplot as plt
@@ -485,25 +485,182 @@ class BasePlotter:
  
         return fig, (ax0, ax1)
 
-    def _mark_central_parameter_values(self, g, experiment):
+    @staticmethod
+    def resolve_nf_transform_output(transform_output=None, param_space="physical"):
+        """Match Evaluator nf_transform_output: physical plots use transformed NF samples."""
+        if transform_output is not None:
+            return transform_output
+        if param_space == "physical":
+            return True
+        if param_space == "unconstrained":
+            return False
+        raise ValueError(f"Invalid parameter space: {param_space}")
+
+    def _mark_central_parameter_values(self, g, experiment, transform_output=True):
         """Mark ``experiment.central_params`` on GetDist triangle-plot axes."""
         central_params = getattr(experiment, "central_params", None)
         if not central_params:
             return
+
+        marker_values = dict(central_params)
+        if getattr(experiment, "transform_input", False) and not transform_output:
+            phys = torch.tensor(
+                [
+                    [
+                        marker_values.get(p, experiment.get_central_param(p, 0.0))
+                        for p in experiment.cosmo_params
+                    ]
+                ],
+                device=experiment.device,
+                dtype=torch.float64,
+            )
+            unconstrained = experiment.params_to_unconstrained(phys)
+            marker_values = {
+                p: float(unconstrained[0, i].item())
+                for i, p in enumerate(experiment.cosmo_params)
+                if p in central_params
+            }
 
         line_kw = dict(color='black', linestyle='--', linewidth=1.0)
         params = experiment.cosmo_params
         n = g.subplots.shape[0]
 
         for i, pi in enumerate(params):
-            if pi not in central_params or i >= n:
+            if pi not in marker_values or i >= n:
                 continue
-            g.subplots[i, i].axvline(central_params[pi], **line_kw)
+            g.subplots[i, i].axvline(marker_values[pi], **line_kw)
             for j in range(i):
                 pj = params[j]
-                if pj in central_params:
-                    g.subplots[i, j].axvline(central_params[pj], **line_kw)
-                g.subplots[i, j].axhline(central_params[pi], **line_kw)
+                if pj in marker_values:
+                    g.subplots[i, j].axvline(marker_values[pj], **line_kw)
+                g.subplots[i, j].axhline(marker_values[pi], **line_kw)
+
+    @staticmethod
+    def _normalize_display(display):
+        if isinstance(display, str):
+            display = (display,)
+        return tuple(display)
+
+    def _nf_display_samples(
+        self,
+        display,
+        guide_samples,
+        transform_output=True,
+        *,
+        experiment=None,
+        posterior_flow=None,
+        input_designs=None,
+        eig_values=None,
+        nominal_eig=None,
+        device=None,
+        run_obj=None,
+        run_args=None,
+        exp_id=None,
+        step=None,
+        seed=1,
+        global_rank=0,
+        eval_step=None,
+    ):
+        """
+        NF guide samples for each entry in display ('nominal' and/or 'optimal').
+
+        Pass experiment + posterior_flow directly (generate_posterior), or pass
+        run_obj + run_args + exp_id + step to load them from MLflow (compare_posterior).
+
+        Returns:
+            (entries, selected_step) where entries is a list of dicts with keys
+            samples, label, color, line_style, alpha; selected_step is set when
+            loading from a run, else None.
+        """
+        display = self._normalize_display(display)
+        selected_step = None
+
+        if run_obj is not None:
+            if run_args is None or exp_id is None or step is None:
+                raise ValueError("run_args, exp_id, and step required when run_obj is provided")
+            if str(device).startswith("cuda") and not torch.cuda.is_available():
+                device = "cpu"
+            experiment = init_experiment(
+                run_obj, run_args, device=device, global_rank=global_rank, verbose=False
+            )
+            posterior_flow, selected_step = load_model(
+                experiment, step, run_obj, run_args, device, global_rank=global_rank
+            )
+            auto_seed(seed)
+            if 'optimal' in display:
+                run_id = run_obj.info.run_id
+                artifacts_dir = f"{self.storage_path}/mlruns/{exp_id}/{run_id}/artifacts"
+                _, eig_data = self.load_eig_data_file(artifacts_dir, eval_step=eval_step)
+                input_designs, eig_values, nominal_eig = self._parse_eig_for_posterior(
+                    eig_data, eval_step
+                )
+        elif experiment is None:
+            raise ValueError("Either experiment or run_obj must be provided")
+
+        if posterior_flow is None:
+            return [], selected_step
+
+        if device is None:
+            device = experiment.device
+
+        entries = []
+
+        if 'nominal' in display:
+            nominal_samples_gd = experiment.get_guide_samples(
+                posterior_flow,
+                experiment.nominal_context,
+                num_samples=guide_samples,
+                transform_output=transform_output,
+            )
+            eig_str = f", EIG: {nominal_eig:.3f} bits" if nominal_eig is not None else ""
+            entries.append({
+                'samples': nominal_samples_gd,
+                'label': f'Nominal Design (NF){eig_str}',
+                'color': 'tab:blue',
+                'line_style': '-',
+                'alpha': 1.0,
+            })
+
+        if 'optimal' in display:
+            if input_designs is None:
+                raise ValueError("input_designs required when display includes 'optimal'")
+            input_designs = np.asarray(input_designs)
+            has_multiple_designs = len(input_designs) > 1
+
+            if has_multiple_designs and eig_values is not None:
+                eig_values = np.asarray(eig_values)
+                optimal_idx = int(np.argmax(eig_values))
+                optimal_design = input_designs[optimal_idx]
+                optimal_eig = float(eig_values[optimal_idx])
+                eig_str = f", EIG: {optimal_eig:.3f} bits"
+                label = f'Optimal Design (NF){eig_str}'
+            elif len(input_designs) >= 1:
+                optimal_design = input_designs[0]
+                optimal_eig = float(np.asarray(eig_values)[0]) if eig_values is not None else None
+                eig_str = f", EIG: {optimal_eig:.3f} bits" if optimal_eig is not None else ""
+                label = f'Input Design (NF){eig_str}'
+            else:
+                raise ValueError("No input designs available for optimal posterior")
+
+            optimal_design_tensor = torch.tensor(
+                optimal_design, device=device, dtype=torch.float64
+            )
+            optimal_context = torch.cat([optimal_design_tensor, experiment.central_val], dim=-1)
+            optimal_samples_gd = experiment.get_guide_samples(
+                posterior_flow,
+                optimal_context,
+                num_samples=guide_samples,
+                transform_output=transform_output,
+            )
+            entries.append({
+                'samples': optimal_samples_gd,
+                'label': label,
+                'color': 'tab:orange',
+                'line_style': '-',
+                'alpha': 1.0,
+            })
+
+        return entries, selected_step
 
     def generate_posterior(
         self,
@@ -567,65 +724,23 @@ class BasePlotter:
         all_line_styles = []
         legend_labels = []
 
-        # Generate samples for nominal design if requested
-        if 'nominal' in display and posterior_flow is not None:
-            nominal_context = experiment.nominal_context
-            nominal_samples_gd = experiment.get_guide_samples(
-                posterior_flow, nominal_context,
-                num_samples=guide_samples,
-                transform_output=transform_output
-            )
-
-            all_samples.append(nominal_samples_gd)
-            all_colors.append('tab:blue')
-            all_alphas.append(1.0)
-            all_line_styles.append('-')
-            eig_str = f", EIG: {nominal_eig:.3f} bits" if nominal_eig is not None else ""
-            legend_labels.append(f'Nominal Design (NF){eig_str}')
-
-        # Generate samples for optimal design if requested
-        if input_designs is not None:
-            input_designs = np.asarray(input_designs)
-        has_multiple_designs = input_designs is not None and len(input_designs) > 1
-
-        if 'optimal' in display and posterior_flow is not None and has_multiple_designs and eig_values is not None:
-            eig_values = np.asarray(eig_values)
-            optimal_idx = np.argmax(eig_values)
-            optimal_design = input_designs[optimal_idx]
-            optimal_eig = float(eig_values[optimal_idx])
-
-            optimal_design_tensor = torch.tensor(optimal_design, device=device, dtype=torch.float64)
-            optimal_context = torch.cat([optimal_design_tensor, experiment.central_val], dim=-1)
-
-            optimal_samples_gd = experiment.get_guide_samples(
-                posterior_flow, optimal_context,
-                num_samples=guide_samples,
-                transform_output=transform_output
-            )
-
-            all_samples.append(optimal_samples_gd)
-            all_colors.append('tab:orange')
-            all_alphas.append(1.0)
-            all_line_styles.append('-')
-            eig_str = f", EIG: {optimal_eig:.3f} bits"
-            legend_labels.append(f'Optimal Design (NF){eig_str}')
-        elif 'optimal' in display and posterior_flow is not None and input_designs is not None and not has_multiple_designs:
-            input_design_tensor = torch.tensor(input_designs[0], device=device, dtype=torch.float64)
-            input_context = torch.cat([input_design_tensor, experiment.central_val], dim=-1)
-
-            input_samples_gd = experiment.get_guide_samples(
-                posterior_flow, input_context,
-                num_samples=guide_samples,
-                transform_output=transform_output
-            )
-
-            all_samples.append(input_samples_gd)
-            all_colors.append('tab:orange')
-            all_alphas.append(1.0)
-            all_line_styles.append('-')
-            optimal_eig = float(np.asarray(eig_values)[0]) if eig_values is not None else None
-            eig_str = f", EIG: {optimal_eig:.3f} bits" if optimal_eig is not None else ""
-            legend_labels.append(f'Input Design (NF){eig_str}')
+        nf_entries, _ = self._nf_display_samples(
+            display,
+            guide_samples,
+            transform_output=transform_output,
+            experiment=experiment,
+            posterior_flow=posterior_flow,
+            input_designs=input_designs,
+            eig_values=eig_values,
+            nominal_eig=nominal_eig,
+            device=device,
+        )
+        for entry in nf_entries:
+            all_samples.append(entry['samples'])
+            all_colors.append(entry['color'])
+            all_alphas.append(entry['alpha'])
+            all_line_styles.append(entry['line_style'])
+            legend_labels.append(entry['label'])
 
         if grid_samples is not None:
             grid_samples_np = np.asarray(grid_samples, dtype=np.float64)
@@ -710,7 +825,7 @@ class BasePlotter:
         )
 
         if getattr(experiment, "central_params", None):
-            self._mark_central_parameter_values(g, experiment)
+            self._mark_central_parameter_values(g, experiment, transform_output=transform_output)
 
         # Calculate dynamic font sizes
         n_params = len(all_samples[0].paramNames.names)
@@ -812,6 +927,58 @@ class BasePlotter:
             raise ValueError(f"No completed eig_data files with step {eval_step} found in {artifacts_dir}")
         else:
             raise ValueError(f"No completed eig_data files found in {artifacts_dir}")
+
+    def _resolve_step(self, eig_data, eval_step):
+        """Resolve eval_step to a step string key in eig_data (see RunPlotter usage)."""
+        step_keys = [k for k in eig_data.keys() if k.startswith('step_')]
+        if not step_keys:
+            print("Warning: No step keys found in EIG data.")
+            return None, None
+        step_ints = sorted([int(k.split('_')[1]) for k in step_keys])
+
+        if eval_step is None:
+            nearest = step_ints[-1]
+            return nearest, f"step_{nearest}"
+
+        if isinstance(eval_step, str) and eval_step.startswith('step_'):
+            eval_step_int = int(eval_step.split('_')[1])
+        else:
+            try:
+                eval_step_int = int(eval_step)
+            except Exception:
+                print(f"Warning: Could not interpret eval_step '{eval_step}' as an integer step.")
+                return None, None
+
+        available = [s for s in step_ints if s <= eval_step_int]
+        if not available:
+            print(f"Warning: No steps found in EIG data below or equal to requested step {eval_step_int}.")
+            return None, None
+        nearest = max(available)
+        return nearest, f"step_{nearest}"
+
+    def _parse_eig_for_posterior(self, eig_data, eval_step=None):
+        """Extract input_designs, eig_values, and nominal_eig from eig_data for posterior plots."""
+        _, step_str = self._resolve_step(eig_data, eval_step)
+        if step_str is None:
+            raise ValueError("Could not resolve eval step in EIG data")
+        step_data = eig_data[step_str]
+        variable_data = step_data.get('variable', {})
+        nominal_data = step_data.get('nominal', {})
+
+        input_designs = np.array(eig_data.get('input_designs', []))
+        if input_designs.size == 0:
+            raise ValueError("No input designs found in EIG data")
+
+        eig_values = np.array(variable_data.get('eigs_avg', []))
+        if eig_values.size == 0:
+            raise ValueError("No EIG values found in EIG data")
+
+        nominal_eig = nominal_data.get('eigs_avg')
+        if isinstance(nominal_eig, list):
+            nominal_eig = nominal_eig[0] if len(nominal_eig) > 0 else None
+        nominal_eig = float(nominal_eig) if nominal_eig is not None else None
+
+        return input_designs, eig_values, nominal_eig
     
     def plot_posterior(
         self,
@@ -1159,6 +1326,7 @@ class RunPlotter(BasePlotter):
             device = "cpu"
 
         merged = {**self.experiment_args, **overrides}
+        merged.setdefault('verbose', False)
         use_cache = design_args is None and not overrides
 
         if use_cache and self._experiment is not None:
@@ -1392,24 +1560,10 @@ class RunPlotter(BasePlotter):
         """Extract posterior plotting data from run's MLflow artifacts into a kwargs dict for generate_posterior()."""
         if eig_data is None:
             eig_data = self._get_eig_data(eval_step=eval_step)
-        eval_step, step_str = self._resolve_step(eig_data, eval_step)
-
+        input_designs, eig_values, nominal_eig = self._parse_eig_for_posterior(eig_data, eval_step)
+        _, step_str = self._resolve_step(eig_data, eval_step)
         step_data = eig_data[step_str]
-        variable_data = step_data.get('variable', {})
         nominal_data = step_data.get('nominal', {})
-
-        input_designs = np.array(eig_data.get('input_designs', []))
-        if input_designs.size == 0:
-            raise ValueError("No input designs found in EIG data")
-
-        eig_values = np.array(variable_data.get('eigs_avg', []))
-        if eig_values.size == 0:
-            raise ValueError("No EIG values found in EIG data")
-
-        nominal_eig = nominal_data.get('eigs_avg')
-        if isinstance(nominal_eig, list):
-            nominal_eig = nominal_eig[0] if len(nominal_eig) > 0 else None
-        nominal_eig = float(nominal_eig) if nominal_eig is not None else None
         nominal_grid_eig = None
         nominal_grid_data = nominal_data.get('grid', {})
         if isinstance(nominal_grid_data, dict) and 'eigs_avg' in nominal_grid_data:
@@ -1590,8 +1744,8 @@ class RunPlotter(BasePlotter):
             
             # Initialize experiment to get designs
             experiment = init_experiment(
-                run_obj, run_args, device=device, 
-                design_args=design_args, global_rank=0
+                run_obj, run_args, device=device,
+                design_args=design_args, global_rank=0, verbose=False
             )
             
             designs = experiment.designs.cpu().numpy()
@@ -1920,6 +2074,7 @@ class RunPlotter(BasePlotter):
         save_dir=None, 
         dpi=400, 
         guide_samples=1000,
+        transform_output=None,
         **kwargs
     ):
         """
@@ -1928,6 +2083,9 @@ class RunPlotter(BasePlotter):
         Args:
             steps (list): List of steps to plot. Can include 'last' or 'loss_best' as special values.
             levels (float or list): Contour level(s) to plot (default: [0.68]).
+            transform_output (bool, optional): Transform NF samples to physical space when
+                transform_input is enabled. Defaults to True for param_space=physical (same as
+                generate_posterior / Evaluator nf_transform_output).
             eval_step (str or int, optional): If provided, used to load EIG data for reference.
             
         Returns:
@@ -1947,6 +2105,9 @@ class RunPlotter(BasePlotter):
         device = "cuda:0" if torch.cuda.is_available() else "cpu"
         run_obj = self.run_data['run_obj']
         run_args = self.run_data['params']
+        transform_output = self.resolve_nf_transform_output(
+            transform_output, run_args.get("param_space", "physical")
+        )
 
         # Initialize experiment once (experiment_args overrides flow through get_experiment)
         experiment = self.get_experiment(device=device)
@@ -1961,7 +2122,7 @@ class RunPlotter(BasePlotter):
             samples_gd = experiment.get_guide_samples(
                 posterior_flow, nominal_context, 
                 num_samples=guide_samples,
-                transform_output=None
+                transform_output=transform_output,
             )
             
             all_samples.append(samples_gd)
@@ -1982,18 +2143,23 @@ class RunPlotter(BasePlotter):
         # Get nominal samples using reference experiment (already initialized above)
         nominal_added = False
         try:
-            nominal_samples_gd = experiment.get_nominal_samples(transform_output=None)
+            nominal_samples_gd = experiment.get_nominal_samples(
+                transform_output=not transform_output
+            )
             all_samples.append(nominal_samples_gd)
             all_colors.append('black')
             nominal_added = True
         except NotImplementedError:
-            print(f"Warning: get_nominal_samples not implemented for {self.cosmo_exp}, skipping posterior_steps plot.")
+            print(
+                f"Warning: get_nominal_samples not implemented for {self.cosmo_exp}, "
+                "plotting NF step posteriors only."
+            )
         
         plot_width = 12
         g = self.plot_posterior(all_samples, all_colors, levels=levels, width_inch=plot_width)
         
         if getattr(experiment, "central_params", None):
-            self._mark_central_parameter_values(g, experiment)
+            self._mark_central_parameter_values(g, experiment, transform_output=transform_output)
 
         # Calculate dynamic font sizes
         n_params = len(all_samples[0].paramNames.names)
@@ -2032,45 +2198,6 @@ class RunPlotter(BasePlotter):
         
         return g
     
-    def _resolve_step(self, eig_data, eval_step):
-        """Resolve eval_step to a step string key in eig_data.
-
-        If eval_step is None, returns the largest available step.
-        If eval_step is specified and not present, rounds DOWN to the nearest available step below or equal,
-        or returns (None, None) if all available steps are above the requested step.
-        Prints a warning if no step is found.
-        """
-        # Find available steps
-        step_keys = [k for k in eig_data.keys() if k.startswith('step_')]
-        if not step_keys:
-            print("Warning: No step keys found in EIG data.")
-            return None, None
-        step_ints = sorted([int(k.split('_')[1]) for k in step_keys])
-
-        if eval_step is None:
-            nearest = step_ints[-1]
-            step_str = f"step_{nearest}"
-            return nearest, step_str
-
-        # Convert eval_step to int if necessary
-        if isinstance(eval_step, str) and eval_step.startswith('step_'):
-            eval_step_int = int(eval_step.split('_')[1])
-        else:
-            try:
-                eval_step_int = int(eval_step)
-            except Exception:
-                print(f"Warning: Could not interpret eval_step '{eval_step}' as an integer step.")
-                return None, None
-
-        # Find greatest available step <= eval_step_int
-        available = [s for s in step_ints if s <= eval_step_int]
-        if not available:
-            print(f"Warning: No steps found in EIG data below or equal to requested step {eval_step_int}.")
-            return None, None
-        nearest = max(available)
-        step_str = f"step_{nearest}"
-        return nearest, step_str
-
     def _extract_run_eig_data(self, eval_step=None, include_nominal=True, eig_data=None):
         """
         Extract EIG plotting data from run's MLflow artifacts into a kwargs dict for eig_designs().
@@ -2351,15 +2478,20 @@ class ComparisonPlotter(BasePlotter):
     def compare_posterior(self, var=None, guide_samples=10000, show_scatter=False,
                          step='loss_best', seed=1, device="cuda:0",
                          global_rank=0, levels=[0.68, 0.95], width_inch=10,
-                         colors=None, filter_string=None, filename=None, save_dir=None, dpi=400, **kwargs):
+                         colors=None, filter_string=None, filename=None, save_dir=None,
+                         dpi=400, transform_output=True, display=('nominal', 'optimal'),
+                         eval_step=None, **kwargs):
         """
         Compare posterior distributions across multiple runs in a triangle plot.
-        
+
+        For each run, loads the posterior flow and samples via experiment.get_guide_samples
+        using the same display options as generate_posterior.
+
         Args:
             var (str or list, optional): Parameter(s) to group runs by.
             guide_samples (int): Number of samples to draw from the posterior.
             show_scatter (bool): Whether to show scatter points.
-            step (str or int): Checkpoint to evaluate.
+            step (str or int): Checkpoint to evaluate for the posterior flow.
             seed (int): Random seed.
             device (str): Device to use.
             global_rank (int or list): Global rank(s) to evaluate.
@@ -2367,11 +2499,21 @@ class ComparisonPlotter(BasePlotter):
             width_inch (float): Width of the triangle plot in inches.
             colors (list, optional): List of colors to use for each group.
             filter_string (str, optional): Override filter_string from __init__.
-            
+            transform_output (bool): Transform NF samples to physical space (default True).
+            display (tuple or str): 'nominal' and/or 'optimal' (default both).
+            eval_step (str or int, optional): EIG eval step for optimal design; latest if None.
+
         Returns:
             GetDist plotter object.
         """
         global_ranks = global_rank if isinstance(global_rank, list) else [global_rank]
+
+        display = self._normalize_display(display)
+        invalid = set(display) - {'nominal', 'optimal'}
+        if invalid:
+            raise ValueError(f"display must contain 'nominal' and/or 'optimal', got {display}")
+        if not display:
+            raise ValueError("display must not be empty")
         
         if not isinstance(levels, list):
             levels = [levels]
@@ -2382,11 +2524,6 @@ class ComparisonPlotter(BasePlotter):
         )
         if not run_data_list:
             return None
-        
-        if 'params' in run_data_list[0] and 'cosmo_model' in run_data_list[0]['params']:
-            cosmo_model_for_desi = run_data_list[0]['params']['cosmo_model']
-        else:
-            raise ValueError("Could not determine cosmo_model from the first run for DESI plot.")
         
         # Create groups based on var parameter
         vars_list = var if isinstance(var, list) else [var] if var is not None else []
@@ -2466,19 +2603,33 @@ class ComparisonPlotter(BasePlotter):
             group_samples = []
             
             for run_data_item in group_runs:
+                exp_id = run_data_item.get('exp_id')
+                if exp_id is None:
+                    print(f"Warning: No experiment id for run {run_data_item['run_id']}, skipping.")
+                    continue
                 for rank in global_ranks:
-                    samples_obj, selected_step = get_nominal_samples(
-                        run_data_item['run_obj'], 
-                        run_data_item['params'], 
-                        guide_samples=guide_samples,
-                        seed=seed,
-                        device=device,
-                        step=step, 
-                        cosmo_exp=self.cosmo_exp, 
-                        global_rank=rank
-                    )
-                    if samples_obj is not None:
-                        group_samples.append(samples_obj)
+                    try:
+                        nf_entries, _ = self._nf_display_samples(
+                            display,
+                            guide_samples,
+                            transform_output=transform_output,
+                            run_obj=run_data_item['run_obj'],
+                            run_args=run_data_item['params'],
+                            exp_id=exp_id,
+                            step=step,
+                            seed=seed,
+                            device=device,
+                            global_rank=rank,
+                            eval_step=eval_step,
+                        )
+                        run_samples = [entry['samples'] for entry in nf_entries]
+                    except Exception as e:
+                        print(
+                            f"Warning: Could not get guide samples for run "
+                            f"{run_data_item['run_id']} (rank {rank}): {e}"
+                        )
+                        continue
+                    group_samples.extend(run_samples)
             
             if not group_samples:
                 print(f"Warning: No valid samples for group {group_key}. Skipping.")
@@ -2525,18 +2676,32 @@ class ComparisonPlotter(BasePlotter):
             print("No samples generated for any group. Cannot plot.")
             return None
 
-        nominal_samples, target_labels, latex_labels = load_nominal_samples(
-            self.cosmo_exp, cosmo_model_for_desi, dataset=run_data_list[0]['params']['dataset'])
-        with contextlib.redirect_stdout(io.StringIO()):
-            nominal_samples_gd = getdist.MCSamples(samples=nominal_samples, names=target_labels, labels=latex_labels, settings=GETDIST_SETTINGS)
-        nominal_label = f'Nominal ({cosmo_model_for_desi})'
-        
-        all_samples.append(nominal_samples_gd)
-        all_colors.append('black')
-        
-        legend_handles.append(
-            Line2D([0], [0], color='black', label=nominal_label)
-        )
+        if self.cosmo_exp == 'num_tracers':
+            cosmo_model_for_desi = run_data_list[0]['params'].get('cosmo_model')
+            try:
+                ref_run = run_data_list[0]
+                ref_experiment = init_experiment(
+                    ref_run['run_obj'],
+                    ref_run['params'].copy(),
+                    device=device,
+                    global_rank=0,
+                    verbose=False,
+                )
+                nominal_samples_gd = ref_experiment.get_nominal_samples(
+                    transform_output=not transform_output
+                )
+                nominal_label = (
+                    f'Nominal Design (MCMC) ({cosmo_model_for_desi})'
+                    if cosmo_model_for_desi
+                    else 'Nominal Design (MCMC)'
+                )
+                all_samples.append(nominal_samples_gd)
+                all_colors.append('black')
+                legend_handles.append(
+                    Line2D([0], [0], color='black', label=nominal_label)
+                )
+            except (NotImplementedError, FileNotFoundError, OSError) as e:
+                print(f"Warning: Could not load MCMC reference samples: {e}")
         
         g = self.plot_posterior(all_samples, all_colors, show_scatter=show_scatter, levels=levels, width_inch=width_inch)
 
@@ -2544,7 +2709,7 @@ class ComparisonPlotter(BasePlotter):
             for legend in g.fig.legends:
                 legend.remove()
         
-        title = f'Posterior Comparison, Step: {step}'
+        title = f'Posterior Comparison ({", ".join(display)}), Step: {step}'
         filter_str = filter_string if filter_string is not None else self.filter_string
         if filter_str:
             title += f' (filter: {filter_str})'
@@ -2846,7 +3011,8 @@ class ComparisonPlotter(BasePlotter):
                         run_params,
                         device=device,
                         design_args=None,
-                        global_rank=0
+                        global_rank=0,
+                        verbose=False,
                     )
                     if hasattr(experiment, 'nominal_design'):
                         nominal_design = experiment.nominal_design.cpu().numpy()
@@ -3308,10 +3474,11 @@ class ComparisonPlotter(BasePlotter):
                         
                         # init_experiment will automatically load prior_args from artifacts
                         experiment = init_experiment(
-                            run_data['run_obj'], 
+                            run_data['run_obj'],
                             run_params,
-                            device=device, 
-                            global_rank=0
+                            device=device,
+                            global_rank=0,
+                            verbose=False,
                         )
                         
                         if display_mode == 'absolute' or display_mode == 'ratio':
@@ -3595,7 +3762,8 @@ class ComparisonPlotter(BasePlotter):
                     first_run_data['run_obj'],
                     run_params,
                     device=device,
-                    global_rank=0
+                    global_rank=0,
+                    verbose=False,
                 )
                 if hasattr(experiment, 'design_labels'):
                     design_labels = experiment.design_labels
@@ -4338,11 +4506,12 @@ class ComparisonPlotter(BasePlotter):
                 first_run_data = run_data_list[0]
                 device = "cuda:0"
                 experiment = init_experiment(
-                    first_run_data['run_obj'], 
-                    first_run_data['params'], 
-                    device=device, 
-                    design_args={}, 
-                    global_rank=0
+                    first_run_data['run_obj'],
+                    first_run_data['params'],
+                    device=device,
+                    design_args={},
+                    global_rank=0,
+                    verbose=False,
                 )
                 if hasattr(experiment, 'design_labels'):
                     design_labels = experiment.design_labels
@@ -4801,11 +4970,12 @@ def compare_increasing_design(
             device = "cuda:0"
             # We don't need to initialize designs, just need the experiment object
             experiment = init_experiment(
-                run_data_for_init['run_obj'], 
-                run_data_for_init['params'], 
-                device=device, 
-                design_args={}, 
-                global_rank=0
+                run_data_for_init['run_obj'],
+                run_data_for_init['params'],
+                device=device,
+                design_args={},
+                global_rank=0,
+                verbose=False,
             )
             # Always get nominal_total_obs when use_fractional=False (needed for conversion)
             # Also get it if design_labels is missing or include_nominal=True (needed for nominal design conversion)
@@ -5113,32 +5283,43 @@ def compare_increasing_design(
     return fig, ax
     
 def compare_contours(
-        run_ids, 
-        param1, 
-        param2, 
+        run_ids,
+        param1,
+        param2,
         guide_samples=10000,
         seed=1,
         device="cuda:0",
         global_rank=0,
-        steps='best', 
+        steps='best',
         cosmo_exp='num_tracers',
-        level=0.68, 
+        level=0.68,
         show_grid=False
         ):
+    plotter = BasePlotter(cosmo_exp=cosmo_exp)
+    mlflow.set_tracking_uri(plotter.storage_path + "/mlruns")
+    client = plotter.client
+
     samples = []
     run_ids = [run_ids] if type(run_ids) != list else run_ids
     steps = [steps] if type(steps) != list else steps
     for run_id in run_ids:
+        run_obj = client.get_run(run_id)
+        run_args = parse_mlflow_params(run_obj.data.params)
+        exp_id = run_obj.info.experiment_id
         for step in steps:
-            samples.append(get_nominal_samples(
-                run_id, 
-                guide_samples=guide_samples,
+            nf_entries, _ = plotter._nf_display_samples(
+                'nominal',
+                guide_samples,
+                run_obj=run_obj,
+                run_args=run_args,
+                exp_id=exp_id,
+                step=step,
                 seed=seed,
                 device=device,
-                step=step, 
-                cosmo_exp=cosmo_exp, 
-                global_rank=global_rank
-                )[0])
+                global_rank=global_rank,
+            )
+            if nf_entries:
+                samples.append(nf_entries[0]['samples'])
     
     areas_shoelace = []
     areas_grid = []

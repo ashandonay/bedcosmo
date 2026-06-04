@@ -237,40 +237,17 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         self._wlen_cm_tensor = torch.tensor(wlen_common_cm, device=self.device, dtype=torch.float64)  # (n_wlen,)
         self._transmission_tensor = torch.tensor(transmission_array, device=self.device, dtype=torch.float64)  # (n_filters, n_wlen)
         self._wlen_over_hc_tensor = torch.tensor(wlen_over_hc_common, device=self.device, dtype=torch.float64)  # (n_wlen,)
-
-        defaults = {"z": 1.0}
-        if self.use_eazy_sed:
-            if getattr(self, "_prior_parameterization", None) == PARAMETERIZATION_LOGITS:
-                defaults.update(
-                    {f"f{k}": 0.0 for k in range(1, self._n_eazy_templates)}
-                )
-            else:
-                defaults.update(
-                    {f"a{k}": 1.0 / self._n_eazy_templates for k in range(1, self._n_eazy_templates + 1)}
-                )
-            defaults["log_c_scale"] = 7.0
-        else:
-            defaults["T"] = 10000.0
-        self._init_central_params(
-            self.cosmo_params,
-            central_params=central_params,
-            defaults=defaults,
+        self.central_params = central_params
+        z_central = torch.tensor(
+            [self.central_params["z"]], device=self.device, dtype=torch.float64
         )
-        if self.use_eazy_sed:
-            self.central_val = self._central_magnitudes_eazy_from_dict(self.central_params)
-        else:
-            z_central = torch.tensor(
-                [self.central_params["z"]], device=self.device, dtype=torch.float64
+        if "T" in self.central_params:
+            T_central = torch.tensor(
+                [self.central_params["T"]], device=self.device, dtype=torch.float64
             )
-            if "T" in self.central_params:
-                T_central = torch.tensor(
-                    [self.central_params["T"]], device=self.device, dtype=torch.float64
-                )
-                self.central_val = self._calculate_magnitudes(
-                    z_central, T_tensor=T_central
-                ).squeeze(0)
-            else:
-                self.central_val = self._calculate_magnitudes(z_central).squeeze(0)
+            self.central_val = self._calculate_magnitudes(z_central, T_tensor=T_central).squeeze(0)
+        else:
+            self.central_val = self._calculate_magnitudes(z_central).squeeze(0)
         self.nominal_context = torch.cat([self.nominal_design, self.central_val], dim=-1)
         if hasattr(self, "prior_flow") and self.prior_flow is not None:
             self.prior_flow_nominal_context = self.nominal_context

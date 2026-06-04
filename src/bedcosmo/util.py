@@ -1213,23 +1213,6 @@ def get_runs_data(mlflow_exp=None, run_ids=None, excluded_runs=[], filter_string
     return run_data_list, experiment_id, actual_mlflow_exp
 
 
-def get_nominal_samples(run_obj, run_args, guide_samples=101, seed=1, device="cuda:0", step='loss_best', cosmo_exp='num_tracers', global_rank=0):
-    storage_path = os.environ["SCRATCH"] + f"/bedcosmo/{cosmo_exp}"
-    mlflow.set_tracking_uri(storage_path + "/mlruns")
-
-    # Pass run_obj, run_args (which should be consistent with run_obj), and classes
-    experiment = init_experiment(run_obj, run_args, device=device, global_rank=global_rank)
-    posterior_flow, selected_step = load_model(experiment, step, run_obj, run_args, device, global_rank=global_rank)
-    auto_seed(seed)
-
-    nominal_design = torch.tensor(experiment.desi_tracers.groupby('class').sum()['observed'].reindex(experiment.design_labels).values, device=device, dtype=torch.float64)
-    central_vals = experiment.central_val if run_args.get("include_D_M", False) else experiment.central_val[1::2]
-    nominal_context = torch.cat([nominal_design, central_vals], dim=-1)
-
-    nominal_samples = experiment.get_guide_samples(posterior_flow, nominal_context, num_samples=guide_samples)
-
-    return nominal_samples, selected_step
-
 def init_experiment(
         run_obj=None,
         run_args=None,
@@ -1760,20 +1743,7 @@ def parse_float_or_list(value):
             return float(value)
         except ValueError:
             raise argparse.ArgumentTypeError("Invalid value '{}'. Must be a float or JSON list of floats.".format(value))
-            
-# Planck18-style fiducial cosmology used for central feature generation / reference markers.
-PLANCK18_FIDUCIAL = {
-    "Om": 0.3152,
-    "hrdrag": 99.079,
-    "Ok": 0.0,
-    "w0": -1.0,
-    "wa": 0.0,
-}
-
-
-CENTRAL_PARAM_CLI_PREFIX = "central_param_"
-
-
+        
 def parse_json_object(value):
     """Parse a YAML/config value into a dict (for ``central_params``)."""
     if isinstance(value, dict):
@@ -1811,9 +1781,9 @@ def apply_central_param_cli_flags(kwargs):
     central_params = _central_params_as_dict(kwargs.get("central_params"))
 
     for key in list(kwargs):
-        if not key.startswith(CENTRAL_PARAM_CLI_PREFIX) or key == "central_params":
+        if not key.startswith("central_param_") or key == "central_params":
             continue
-        param_name = key[len(CENTRAL_PARAM_CLI_PREFIX) :]
+        param_name = key[len("central_param_") :]
         if not param_name:
             raise ValueError(f"Invalid central parameter flag '{key}'; expected central_param_<name>.")
         central_params[param_name] = kwargs.pop(key)
@@ -1821,28 +1791,6 @@ def apply_central_param_cli_flags(kwargs):
     if central_params:
         kwargs["central_params"] = central_params
     return kwargs
-
-
-def merge_central_params(cosmo_params, central_params=None, defaults=None):
-    """
-    Merge defaults and overrides into a normalized ``central_params`` dict.
-
-    Only parameters listed in ``cosmo_params`` are kept. Values are coerced to float.
-    """
-    merged = dict(defaults or {})
-    if central_params:
-        merged.update(central_params)
-    unknown = set(merged) - set(cosmo_params)
-    if unknown:
-        raise ValueError(
-            f"central_params keys {sorted(unknown)} are not in cosmo_params {cosmo_params}."
-        )
-    return {p: float(merged[p]) for p in cosmo_params if p in merged}
-
-
-def fiducial_central_defaults(cosmo_params):
-    """Return Planck18 fiducial entries present in ``cosmo_params``."""
-    return {p: PLANCK18_FIDUCIAL[p] for p in cosmo_params if p in PLANCK18_FIDUCIAL}
 
 
 def _coerce_train_arg_override(key, value, yaml_default, project_root):

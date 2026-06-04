@@ -1110,7 +1110,13 @@ class Evaluator:
         try:
             # Plot posterior at different training steps
             steps_to_plot = [self.total_steps//4, self.total_steps//2, self.total_steps*3//4, 'last']
-            self.plotter.posterior_steps(steps=steps_to_plot, levels=self.levels, guide_samples=50000, filename='posterior_steps')
+            self.plotter.posterior_steps(
+                steps=steps_to_plot,
+                levels=self.levels,
+                guide_samples=50000,
+                filename='posterior_steps',
+                transform_output=self.nf_transform_output,
+            )
             self._update_runtime()
         except Exception as e:
             print(f"Warning: posterior_steps failed: {e}")

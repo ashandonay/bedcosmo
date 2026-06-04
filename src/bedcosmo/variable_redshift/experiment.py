@@ -23,13 +23,28 @@ import math
 import inspect
 
 from bedcosmo.custom_dist import ConstrainedUniform2D
-from bedcosmo.util import auto_seed, load_prior_flow_from_file, profile_method, get_experiment_config_path
+from bedcosmo.util import (
+    auto_seed,
+    get_experiment_config_path,
+    load_prior_flow_from_file,
+    parse_json_object,
+    profile_method,
+)
 from bedcosmo.base import BaseExperiment
 from bedcosmo.cosmology import CosmologyMixin, _interp1
 
 storage_path = os.environ["SCRATCH"] + "/bedcosmo/variable_redshift"
 home_dir = os.environ["HOME"]
 mlflow.set_tracking_uri(storage_path + "/mlruns")
+
+# Planck18-style fiducial cosmology for central feature generation and plot markers.
+PLANCK18_FIDUCIAL = {
+    "Om": 0.3152,
+    "hrdrag": 99.079,
+    "Ok": 0.0,
+    "w0": -1.0,
+    "wa": 0.0,
+}
 
 
 class VariableRedshift(BaseExperiment, CosmologyMixin):
@@ -154,13 +169,16 @@ class VariableRedshift(BaseExperiment, CosmologyMixin):
             raise ValueError(f"nominal_design must have length {self.n_redshifts}, got {nominal_values.shape[-1]}")
         self.nominal_design = nominal_values.reshape(-1)
         
-        from bedcosmo.util import fiducial_central_defaults
-
-        self._init_central_params(
-            self.cosmo_params,
-            central_params=central_params,
-            defaults=fiducial_central_defaults(self.cosmo_params),
-        )
+        merged = {p: PLANCK18_FIDUCIAL[p] for p in self.cosmo_params if p in PLANCK18_FIDUCIAL}
+        if central_params is not None:
+            overrides = parse_json_object(central_params)
+            unknown = set(overrides) - set(self.cosmo_params)
+            if unknown:
+                raise ValueError(
+                    f"central_params keys {sorted(unknown)} are not in cosmo_params {self.cosmo_params}."
+                )
+            merged.update(overrides)
+        self.central_params = {p: float(merged[p]) for p in self.cosmo_params if p in merged}
         self.central_val = self._compute_central_values()
         
         # Update nominal context with central values
