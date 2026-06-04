@@ -18,7 +18,12 @@ import yaml
 from speclite import filters as speclite_filters
 from astropy.constants import h, c
 import getdist
-from bedcosmo.util import get_experiment_config_path, load_prior_flow_from_file, profile_method
+from bedcosmo.util import (
+    _central_params_as_dict,
+    get_experiment_config_path,
+    load_prior_flow_from_file,
+    profile_method,
+)
 from bedcosmo.base import BaseExperiment
 from bedcosmo.custom_dist import EmpiricalPrior
 from bedcosmo.num_visits.sed_prior.build_empirical_sed_prior_kde import (
@@ -250,17 +255,35 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         self._wlen_cm_tensor = torch.tensor(wlen_common_cm, device=self.device, dtype=torch.float64)  # (n_wlen,)
         self._transmission_tensor = torch.tensor(transmission_array, device=self.device, dtype=torch.float64)  # (n_filters, n_wlen)
         self._wlen_over_hc_tensor = torch.tensor(wlen_over_hc_common, device=self.device, dtype=torch.float64)  # (n_wlen,)
-        self.central_params = central_params
-        z_central = torch.tensor(
-            [self.central_params["z"]], device=self.device, dtype=torch.float64
-        )
-        if "T" in self.central_params:
-            T_central = torch.tensor(
-                [self.central_params["T"]], device=self.device, dtype=torch.float64
-            )
-            self.central_val = self._calculate_magnitudes(z_central, T_tensor=T_central).squeeze(0)
+        defaults = {"z": 1.0}
+        if self.cosmo_model == "empirical":
+            defaults = mode_central_params_from_artifact(self.sed_prior_artifact)
+            if self.global_rank == 0 and self.verbose:
+                n_train = len(self.sed_prior_artifact.get("training_x", []))
+                print(
+                    f"  central_params defaults: KDE-prior marginal modes "
+                    f"(training N={n_train}); override via train_args central_params"
+                )
+        elif "T" in self.cosmo_params:
+            defaults["T"] = 10000.0
+        self.central_params = dict(defaults)
+        self.central_params.update(_central_params_as_dict(central_params))
+
+        if self.cosmo_model == "empirical":
+            self.central_val = self._central_magnitudes_from_dict(self.central_params)
         else:
-            self.central_val = self._calculate_magnitudes(z_central).squeeze(0)
+            z_central = torch.tensor(
+                [self.central_params["z"]], device=self.device, dtype=torch.float64
+            )
+            if "T" in self.central_params:
+                T_central = torch.tensor(
+                    [self.central_params["T"]], device=self.device, dtype=torch.float64
+                )
+                flux_aa = self._observed_spectral_flux(z_central, T=T_central)
+            else:
+                flux_aa = self._observed_spectral_flux(z_central)
+            self.central_val = self._calculate_magnitudes(flux_aa).squeeze(0)
+
         self.nominal_context = torch.cat([self.nominal_design, self.central_val], dim=-1)
         if hasattr(self, "prior_flow") and self.prior_flow is not None:
             self.prior_flow_nominal_context = self.nominal_context

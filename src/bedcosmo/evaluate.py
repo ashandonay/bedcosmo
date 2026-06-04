@@ -1118,16 +1118,11 @@ class Evaluator:
             # Plot posterior at different training steps
             steps_to_plot = [self.total_steps//4, self.total_steps//2, self.total_steps*3//4, 'last']
             self.plotter.posterior_steps(
-                
                 steps=steps_to_plot,
-               
                 levels=self.levels,
-               
                 guide_samples=self.guide_samples,
-               
                 filename='posterior_steps',
-            ,
-                transform_output=self.nf_transform_output,
+                transform_output=self.nf_transform_output
             )
             self._update_runtime()
         except Exception as e:

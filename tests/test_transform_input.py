@@ -18,7 +18,7 @@ import torch
 from pyro import distributions as dist
 
 from bedcosmo.base import BaseExperiment
-from bedcosmo.util import Bijector
+from bedcosmo.transform import Bijector
 
 
 # Bijector resolution settings used across round-trip tests. 30k samples + 1k
