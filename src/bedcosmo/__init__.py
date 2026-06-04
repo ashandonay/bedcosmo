@@ -10,7 +10,7 @@ __version__ = "0.1.0"
 # `import bedcosmo` or `from bedcosmo.util import ...`.
 
 _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
-    "Bijector": ("bedcosmo.util", "Bijector"),
+    "Bijector": ("bedcosmo.transform", "Bijector"),
     "auto_seed": ("bedcosmo.util", "auto_seed"),
     "init_experiment": ("bedcosmo.util", "init_experiment"),
     "init_nf": ("bedcosmo.util", "init_nf"),

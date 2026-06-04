@@ -6,7 +6,7 @@ bb_temp:
   parameters: ["z", "T"]
   latex_labels: ["z", "T\\,[\\mathrm{K}]"]
 
-eazy_kde:
+empirical:
   parameters:
     - f1
     - f2
@@ -19,6 +19,7 @@ eazy_kde:
     - f9
     - f10
     - f11
+    - f12
     - log_c_scale
     - z
   latex_labels:
@@ -33,5 +34,6 @@ eazy_kde:
     - "f_9"
     - "f_{10}"
     - "f_{11}"
+    - "f_{12}"
     - "\\log s"
     - "z"

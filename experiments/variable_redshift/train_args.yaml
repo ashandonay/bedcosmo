@@ -9,6 +9,7 @@ base_om:
   prior_args_path: prior_args_hrdrag.yaml
   flow_type: MAF
   transform_input: true
+  input_transform_type: marginal
   activation: elu
   n_transforms: 4
   cond_hidden_size: 256
@@ -46,6 +47,7 @@ base:
   prior_args_path: prior_args_hrdrag.yaml
   flow_type: MAF
   transform_input: true
+  input_transform_type: marginal
   activation: elu
   n_transforms: 4
   cond_hidden_size: 256
@@ -83,6 +85,7 @@ base_omegak:
   prior_args_path: prior_args_hrdrag.yaml
   flow_type: MAF
   transform_input: true
+  input_transform_type: marginal
   activation: elu
   n_transforms: 4
   cond_hidden_size: 256
@@ -120,6 +123,7 @@ base_w:
   prior_args_path: prior_args_hrdrag.yaml
   flow_type: MAF
   transform_input: true
+  input_transform_type: marginal
   activation: elu
   n_transforms: 4
   cond_hidden_size: 256
@@ -157,6 +161,7 @@ base_w_wa:
   prior_args_path: prior_args_hrdrag.yaml
   flow_type: MAF
   transform_input: true
+  input_transform_type: marginal
   activation: elu
   n_transforms: 4
   cond_hidden_size: 256
@@ -194,6 +199,7 @@ base_omegak_w_wa:
   prior_path: prior_args_hrdrag.yaml
   flow_type: MAF
   transform_input: true
+  input_transform_type: marginal
   activation: elu
   n_transforms: 4
   cond_hidden_size: 256

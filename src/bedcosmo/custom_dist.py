@@ -224,3 +224,11 @@ class ConstrainedUniform2D(TorchDistribution):
         logp = torch.full_like(x0, -float('inf'))
         logp[valid] = - math.log(total_area)
         return logp
+
+class EmpiricalPrior:
+    """Marker for KDE/empirical priors; supplies bijector bracket bounds only."""
+
+    def __init__(self, low: float, high: float, device: str | torch.device = "cpu"):
+        dev = torch.device(device)
+        self.low = torch.tensor(float(low), device=dev, dtype=torch.float64)
+        self.high = torch.tensor(float(high), device=dev, dtype=torch.float64)

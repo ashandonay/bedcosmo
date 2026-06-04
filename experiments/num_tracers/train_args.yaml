@@ -11,6 +11,7 @@ base:
   analysis: bao
   flow_type: NAF
   transform_input: false
+  input_transform_type: marginal
   activation: elu
   n_transforms: 4
   cond_hidden_size: 128
@@ -47,6 +48,7 @@ base_omegak:
   dataset: dr2
   flow_type: NAF
   transform_input: true
+  input_transform_type: marginal
   activation: elu
   n_transforms: 6
   cond_hidden_size: 256
@@ -83,6 +85,7 @@ base_w:
   dataset: dr2
   flow_type: NAF
   transform_input: true
+  input_transform_type: marginal
   activation: elu
   n_transforms: 6
   cond_hidden_size: 256
@@ -119,6 +122,7 @@ base_w_wa:
   dataset: dr2
   flow_type: NAF
   transform_input: true
+  input_transform_type: marginal
   activation: elu
   n_transforms: 6
   cond_hidden_size: 512
@@ -155,6 +159,7 @@ base_omegak_w_wa:
   dataset: dr2
   flow_type: NAF
   transform_input: true
+  input_transform_type: marginal
   activation: elu
   n_transforms: 6
   cond_hidden_size: 512
