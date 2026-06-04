@@ -18,13 +18,12 @@ import yaml
 from speclite import filters as speclite_filters
 from astropy.constants import h, c
 import getdist
-from bedcosmo.util import (
-    EmpiricalPrior,
-    get_experiment_config_path,
-    load_prior_flow_from_file,
-    profile_method,
-)
+from bedcosmo.util import get_experiment_config_path, load_prior_flow_from_file, profile_method
 from bedcosmo.base import BaseExperiment
+from bedcosmo.custom_dist import EmpiricalPrior
+from bedcosmo.num_visits.sed_prior.build_empirical_sed_prior_kde import (
+    mode_central_params_from_artifact,
+)
 from bedcosmo.num_visits.sed_prior.prior_sampler import (
     build_gpu_prior_pool,
     load_empirical_prior,
@@ -106,6 +105,12 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         transform_input=False,
         transform_cosmo_params=None,
         logit_flow_scale=8.0,
+        input_transform_type="joint",
+        joint_transform_params=None,
+        joint_transform_shrinkage=1e-3,
+        joint_transform_fit_path=None,
+        joint_transform_fit_samples=None,
+        flow_squash_params=None,
         bijector_state=None,
         cdf_bins=5000,
         cdf_samples=int(1e7),
@@ -121,6 +126,15 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         self.transform_cosmo_params = transform_cosmo_params
         self.logit_flow_scale = float(logit_flow_scale)
         self.global_rank = global_rank
+        self.prior_kde_path = None
+        self._init_input_transform_options(
+            input_transform_type=input_transform_type,
+            joint_transform_params=joint_transform_params,
+            joint_transform_shrinkage=joint_transform_shrinkage,
+            joint_transform_fit_path=joint_transform_fit_path,
+            joint_transform_fit_samples=joint_transform_fit_samples,
+            flow_squash_params=flow_squash_params,
+        )
 
         self.filters_list = design_args.get('labels', ["u", "g", "r", "i", "z", "y"])
         self.design_labels = self.filters_list
@@ -136,7 +150,6 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         
         self.prior_args = prior_args or {}
         self.cosmo_model = cosmo_model
-        self.use_eazy_sed = False
         self.prior_pool = None
         self.prior_feature_names = None
 
@@ -239,25 +252,23 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         self._wlen_over_hc_tensor = torch.tensor(wlen_over_hc_common, device=self.device, dtype=torch.float64)  # (n_wlen,)
 
         defaults = {"z": 1.0}
-        if self.use_eazy_sed:
-            if getattr(self, "_prior_parameterization", None) == PARAMETERIZATION_LOGITS:
-                defaults.update(
-                    {f"f{k}": 0.0 for k in range(1, self._n_eazy_templates)}
+        if self.cosmo_model == "empirical":
+            defaults = mode_central_params_from_artifact(self.sed_prior_artifact)
+            if self.global_rank == 0 and self.verbose:
+                n_train = len(self.sed_prior_artifact.get("training_x", []))
+                print(
+                    f"  central_params defaults: KDE-prior marginal modes "
+                    f"(training N={n_train}); override via train_args central_params"
                 )
-            else:
-                defaults.update(
-                    {f"a{k}": 1.0 / self._n_eazy_templates for k in range(1, self._n_eazy_templates + 1)}
-                )
-            defaults["log_c_scale"] = 7.0
-        else:
+        elif "T" in self.cosmo_params:
             defaults["T"] = 10000.0
         self._init_central_params(
             self.cosmo_params,
             central_params=central_params,
             defaults=defaults,
         )
-        if self.use_eazy_sed:
-            self.central_val = self._central_magnitudes_eazy_from_dict(self.central_params)
+        if self.cosmo_model == "empirical":
+            self.central_val = self._central_magnitudes_from_dict(self.central_params)
         else:
             z_central = torch.tensor(
                 [self.central_params["z"]], device=self.device, dtype=torch.float64
@@ -266,11 +277,12 @@ class NumVisits(BaseExperiment, CosmologyMixin):
                 T_central = torch.tensor(
                     [self.central_params["T"]], device=self.device, dtype=torch.float64
                 )
-                self.central_val = self._calculate_magnitudes(
-                    z_central, T_tensor=T_central
-                ).squeeze(0)
+                flux_aa = self._observed_spectral_flux(
+                    z_central, T=T_central
+                )
             else:
-                self.central_val = self._calculate_magnitudes(z_central).squeeze(0)
+                flux_aa = self._observed_spectral_flux(z_central)
+            self.central_val = self._calculate_magnitudes(flux_aa).squeeze(0)
         self.nominal_context = torch.cat([self.nominal_design, self.central_val], dim=-1)
         if hasattr(self, "prior_flow") and self.prior_flow is not None:
             self.prior_flow_nominal_context = self.nominal_context
@@ -306,6 +318,27 @@ class NumVisits(BaseExperiment, CosmologyMixin):
             return s[1:-1].strip()
         return s
 
+    def get_joint_transform_fit_matrix(self, n_max: int) -> np.ndarray | None:
+        """Use empirical-prior training rows to fit the joint Gaussianizing transform."""
+        if getattr(self, "cosmo_model", None) != "empirical":
+            return None
+        artifact = getattr(self, "sed_prior_artifact", None)
+        if artifact is None:
+            return None
+        from bedcosmo.num_visits.sed_prior.build_empirical_sed_prior_kde import (
+            get_training_matrix,
+        )
+
+        x_full = get_training_matrix(artifact)
+        names = self._joint_transform_param_names()
+        fn = list(self.prior_feature_names or self.cosmo_params)
+        cols = [fn.index(n) for n in names]
+        x = x_full[:, cols]
+        if len(x) > n_max:
+            rng = np.random.default_rng(0)
+            x = x[rng.choice(len(x), size=n_max, replace=False)]
+        return x
+
     @profile_method
     def init_prior(
         self,
@@ -322,13 +355,13 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         """
         Load prior from prior_args and models.yaml.
 
-        For ``eazy_kde``, uses ``prior_kde_path`` (absolute) and a GPU prior pool.
+        For ``empirical``, uses ``prior_kde_path`` (absolute) and a GPU prior pool.
         Otherwise uses analytic Pyro distributions and optional ``prior_flow_path``.
         """
         if cosmo_model is None:
             cosmo_model = self.cosmo_model
         if cosmo_model is None:
-            raise ValueError("cosmo_model must be set for NumVisits (e.g. bb, bb_temp, eazy_kde)")
+            raise ValueError("cosmo_model must be set for NumVisits (e.g. bb, bb_temp, empirical)")
 
         models_yaml_path = get_experiment_config_path("num_visits", "models.yaml")
         with open(models_yaml_path, "r") as f:
@@ -346,13 +379,13 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         if len(model_parameters) != len(latex_labels):
             raise ValueError("models.yaml parameters and latex_labels length mismatch")
 
-        if cosmo_model == "eazy_kde" or prior_kde_path:
+        if cosmo_model == "empirical" or prior_kde_path:
             if not prior_kde_path:
                 raise ValueError(
-                    "cosmo_model 'eazy_kde' requires prior_kde_path: an absolute path to "
-                    "sed_prior_kde.joblib in prior_args_eazy_kde.yaml (or pass via CLI)."
+                    "cosmo_model 'empirical' requires prior_kde_path: an absolute path to "
+                    "sed_prior_kde.joblib in prior_args_empirical.yaml (or pass via CLI)."
                 )
-            return self._init_prior_eazy_kde(
+            return self._init_prior_empirical(
                 parameters,
                 model_parameters,
                 latex_labels,
@@ -445,7 +478,7 @@ class NumVisits(BaseExperiment, CosmologyMixin):
 
         return prior, latex_labels, model_parameters
 
-    def _init_prior_eazy_kde(
+    def _init_prior_empirical(
         self,
         parameters: dict,
         model_parameters: list[str],
@@ -462,6 +495,7 @@ class NumVisits(BaseExperiment, CosmologyMixin):
             raise FileNotFoundError(f"prior_kde_path not found: {kde_path}")
 
         artifact = load_empirical_prior(kde_path)
+        self.prior_kde_path = str(kde_path)
         self.sed_prior_artifact = artifact
         self.prior_feature_names = list(artifact["feature_names"])
         self._prior_parameterization = artifact.get("parameterization", "weights")
@@ -470,7 +504,7 @@ class NumVisits(BaseExperiment, CosmologyMixin):
             raise ValueError(
                 f"models.yaml parameters {model_parameters} must match KDE "
                 f"feature_names {self.prior_feature_names}. "
-                "Rebuild sed_prior_kde.joblib with --parameterization logits for f1..fK-1."
+                "models.yaml must match artifact['feature_names']; for the current CLR empirical prior this should be f1..fK, log_c_scale, z."
             )
 
         if self.global_rank == 0 and self.verbose:
@@ -482,7 +516,6 @@ class NumVisits(BaseExperiment, CosmologyMixin):
             seed=prior_pool_seed,
             device=self.device,
         )
-        self.use_eazy_sed = True
 
         wave_rest, template_stack, _ = load_eazy_template_bank(
             eazy_param,
@@ -655,45 +688,37 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         return torch.exp(log_s).unsqueeze(-1) * a
 
     @profile_method
-    def _calculate_magnitudes_eazy(
-        self,
-        z: torch.Tensor,
-        a: torch.Tensor,
-        log_s: torch.Tensor,
-    ) -> torch.Tensor:
+    def _calculate_magnitudes(self, flux_aa: torch.Tensor) -> torch.Tensor:
         """
-        LSST magnitudes from EAZY template mixture in observed frame.
+        LSST AB magnitudes from observed-frame spectral flux on the instrument grid.
 
-        f_obs(lambda) = sum_k c_k T_k(lambda / (1+z)) / (1+z),  c_k = exp(log s) a_k.
+        Args:
+            flux_aa: Observed-frame flux per Angstrom on ``self._wlen_aa_tensor``,
+                shape ``(..., n_wlen)``.
+
+        Returns:
+            Magnitudes with shape ``flux_aa.shape[:-1] + (n_filters,)``.
         """
-        z_flat = z.reshape(-1)
-        a_flat = a.reshape(-1, self._n_eazy_templates)
-        log_s_flat = log_s.reshape(-1)
-        n_batch = z_flat.shape[0]
-        one_plus_z = (1.0 + z_flat).unsqueeze(-1)
-        wlen_rest = self._wlen_aa_tensor.unsqueeze(0) / one_plus_z
-        c = self._coeffs_from_a_log_s(a_flat, log_s_flat)
-
-        flux_obs = torch.zeros(
-            n_batch,
-            self._wlen_aa_tensor.shape[0],
-            device=self.device,
-            dtype=torch.float64,
-        )
-        for k in range(self._n_eazy_templates):
-            T_at = self._interp1d_linear(
-                self._template_wave_rest,
-                self._template_flux[k],
-                wlen_rest,
+        n_wlen = self._wlen_aa_tensor.shape[0]
+        if flux_aa.shape[-1] != n_wlen:
+            raise ValueError(
+                f"spectral flux last dim {flux_aa.shape[-1]} != wavelength grid {n_wlen}"
             )
-            flux_obs = flux_obs + c[:, k : k + 1] * T_at
-        flux_obs = flux_obs / one_plus_z
+        batch_shape = flux_aa.shape[:-1]
+        flux_flat = flux_aa.reshape(-1, n_wlen)
 
-        flux_expanded = flux_obs.unsqueeze(1)
+        flux_expanded = flux_flat.unsqueeze(1)
         transmission_expanded = self._transmission_tensor.unsqueeze(0)
         wlen_over_hc_expanded = self._wlen_over_hc_tensor.unsqueeze(0).unsqueeze(0)
         integrand = flux_expanded * transmission_expanded * wlen_over_hc_expanded
         photon_flux = torch.trapezoid(integrand, self._wlen_aa_tensor, dim=-1)
+
+        if torch.any(photon_flux < 0) and self.global_rank == 0:
+            negative_count = (photon_flux < 0).sum().item()
+            print(
+                f"WARNING: {negative_count} negative photon_flux values found! "
+                f"Min: {photon_flux[photon_flux < 0].min().item():.2e}"
+            )
 
         s0_vals = torch.tensor(
             [s0[band] for band in self.filters_list],
@@ -703,37 +728,228 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         min_flux = torch.finfo(photon_flux.dtype).tiny * 1e10
         A_cm2 = (319 / 9.6) * 1e4
         photon_flux_pixel = torch.clamp(photon_flux * A_cm2, min=min_flux)
-        flux_ratio = photon_flux_pixel / s0_vals
-        mags = 24.0 - 2.5 * torch.log10(torch.clamp(flux_ratio, min=min_flux))
-        return mags.reshape(*z.shape, self.num_filters)
+        flux_ratio = torch.clamp(photon_flux_pixel / s0_vals, min=min_flux)
+        mags_flat = 24.0 - 2.5 * torch.log10(flux_ratio)
+        return mags_flat.reshape(*batch_shape, self.num_filters)
 
-    def _weights_from_param_dict(self, params: dict[str, torch.Tensor]) -> torch.Tensor:
-        """Build (batch, K) simplex weights from cosmo_params (logits or legacy a_k)."""
-        if getattr(self, "_prior_parameterization", None) == PARAMETERIZATION_LOGITS:
-            eta = torch.stack(
-                [params[f"f{k}"].squeeze(-1) for k in range(1, self._n_eazy_templates)],
-                dim=-1,
+    @profile_method
+    def _observed_spectral_flux(
+        self,
+        z: torch.Tensor,
+        *,
+        T: torch.Tensor | None = None,
+        a: torch.Tensor | None = None,
+        log_s: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """
+        Observed-frame spectral flux per Angstrom on ``self._wlen_aa_tensor``.
+
+        Pass ``a`` and ``log_s`` for the EAZY template mixture (empirical prior).
+        Omit them for a blackbody, using ``self.temperature`` or optional ``T``.
+
+        Returns:
+            Flux with shape ``z.shape + (n_wlen,)``.
+        """
+        if a is not None or log_s is not None:
+            if a is None or log_s is None:
+                raise ValueError("template SED requires both a and log_s")
+            z_flat = z.reshape(-1)
+            a_flat = a.reshape(-1, self._n_eazy_templates)
+            log_s_flat = log_s.reshape(-1)
+            n_batch = z_flat.shape[0]
+            one_plus_z = (1.0 + z_flat).unsqueeze(-1)
+            wlen_rest = self._wlen_aa_tensor.unsqueeze(0) / one_plus_z
+            c = self._coeffs_from_a_log_s(a_flat, log_s_flat)
+
+            flux_obs = torch.zeros(
+                n_batch,
+                self._wlen_aa_tensor.shape[0],
+                device=self.device,
+                dtype=torch.float64,
             )
-            return logits_to_weights_torch(eta)
-        return torch.stack(
-            [params[f"a{k}"].squeeze(-1) for k in range(1, self._n_eazy_templates + 1)],
-            dim=-1,
+            for k in range(self._n_eazy_templates):
+                T_at = self._interp1d_linear(
+                    self._template_wave_rest,
+                    self._template_flux[k],
+                    wlen_rest,
+                )
+                flux_obs = flux_obs + c[:, k : k + 1] * T_at
+            flux_obs = flux_obs / one_plus_z
+            return flux_obs.reshape(*z.shape, self._wlen_aa_tensor.shape[0])
+
+        z_tensor = z
+        T_tensor = T
+        if T_tensor is None:
+            z_flat = z_tensor.flatten()
+            z_unique, inverse_indices = torch.unique(z_flat, return_inverse=True)
+            lum_dist = self._luminosity_distance(z_unique)
+
+            if not hasattr(self, "_T_K_tensor"):
+                if hasattr(self.temperature, "value"):
+                    self._T_K_tensor = torch.tensor(
+                        self.temperature.to(u.K).value,
+                        device=self.device,
+                        dtype=torch.float64,
+                    )
+                else:
+                    self._T_K_tensor = torch.tensor(
+                        float(self.temperature),
+                        device=self.device,
+                        dtype=torch.float64,
+                    )
+            T_K = self._T_K_tensor
+
+            if not hasattr(self, "_four_pi_R2_tensor"):
+                L_sun = 3.826e33
+                L_bol = 1e9 * L_sun
+                sigma_sb_cgs = sigma_sb.to(u.erg / (u.s * u.cm**2 * u.K**4)).value
+                T_K_4 = T_K**4
+                R_eff_val = torch.sqrt(
+                    torch.tensor(
+                        L_bol / (4 * np.pi * sigma_sb_cgs),
+                        device=self.device,
+                        dtype=torch.float64,
+                    )
+                    / T_K_4
+                )
+                self._four_pi_R2_tensor = (
+                    torch.tensor(4 * np.pi, device=self.device, dtype=torch.float64)
+                    * R_eff_val**2
+                )
+            four_pi_R2 = self._four_pi_R2_tensor
+            T_K_for_bb = T_K
+            four_pi_R2_for_L = four_pi_R2
+        else:
+            z_t = torch.as_tensor(z_tensor, device=self.device, dtype=torch.float64)
+            T_t = torch.as_tensor(T_tensor, device=self.device, dtype=torch.float64)
+            z_b, T_b = torch.broadcast_tensors(z_t, T_t)
+            joint_shape = z_b.shape
+            z_unique = z_b.flatten()
+            T_K = T_b.flatten()
+            inverse_indices = None
+            lum_dist = self._luminosity_distance(z_unique)
+
+            L_sun = 3.826e33
+            L_bol = 1e9 * L_sun
+            sigma_sb_cgs = sigma_sb.to(u.erg / (u.s * u.cm**2 * u.K**4)).value
+            L_bol_const = torch.tensor(
+                L_bol / (4 * np.pi * sigma_sb_cgs),
+                device=self.device,
+                dtype=torch.float64,
+            )
+            R_eff = torch.sqrt(L_bol_const / (T_K**4))
+            four_pi_R2 = (
+                torch.tensor(4 * np.pi, device=self.device, dtype=torch.float64) * R_eff**2
+            )
+            T_K_for_bb = T_K.unsqueeze(-1)
+            four_pi_R2_for_L = four_pi_R2.unsqueeze(-1)
+
+        z_2d = z_unique.unsqueeze(-1)
+        wlen_2d = self._wlen_aa_tensor.unsqueeze(0)
+
+        if not hasattr(self, "_1e8_tensor_f64"):
+            self._1e8_tensor_f64 = torch.tensor(1e-8, device=self.device, dtype=torch.float64)
+        one_plus_z = 1 + z_2d
+        wlen_rest_aa = wlen_2d / one_plus_z
+        wlen_rest_cm = wlen_rest_aa * self._1e8_tensor_f64
+
+        F = self._blackbody_flux(wlen_rest_cm, T_K_for_bb)
+        L = four_pi_R2_for_L * F
+
+        lum_dist_2d = lum_dist.unsqueeze(-1)
+        if not hasattr(self, "_four_pi_tensor"):
+            self._four_pi_tensor = torch.tensor(4 * np.pi, device=self.device, dtype=torch.float64)
+        flux = L / (one_plus_z * self._four_pi_tensor * lum_dist_2d**2)
+
+        if torch.any(~torch.isfinite(flux)) or torch.any(flux <= 0):
+            problematic_flux = (~torch.isfinite(flux)) | (flux <= 0)
+            problematic_count = problematic_flux.sum().item()
+            if self.global_rank == 0 and problematic_count > 0:
+                print(f"WARNING: {problematic_count} problematic flux values found!")
+                print(f"  flux range: [{flux.min().item():.2e}, {flux.max().item():.2e}]")
+                print(f"  L range: [{L.min().item():.2e}, {L.max().item():.2e}]")
+                print(f"  lum_dist range: [{lum_dist.min().item():.2e}, {lum_dist.max().item():.2e}]")
+                print(f"  z_unique range: [{z_unique.min().item():.4f}, {z_unique.max().item():.4f}]")
+
+        n_wlen = self._wlen_aa_tensor.shape[0]
+        if T_tensor is not None:
+            return flux.reshape(*joint_shape, n_wlen)
+        flux_flat = flux[inverse_indices]
+        return flux_flat.reshape(*z_tensor.shape, n_wlen)
+
+    def _empirical_rows_to_physical(
+        self,
+        rows: torch.Tensor,
+        sample_shape: tuple[int, ...],
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Decode empirical-prior feature rows into physical SED quantities.
+
+        Rows are in the artifact feature space:
+            weights: a1..aK, log_c_scale, z
+            logits:  f1..fK-1, log_c_scale, z
+            clr:     f1..fK, log_c_scale, z
+        """
+        parameterization = getattr(self, "_prior_parameterization", "weights")
+        K = int(self._n_eazy_templates)
+        flat = sample_shape if sample_shape else (rows.shape[0],)
+
+        if parameterization == "clr":
+            clr = rows[:, :K]
+            shifted = clr - torch.amax(clr, dim=-1, keepdim=True)
+            exp = torch.exp(shifted)
+            a = exp / exp.sum(dim=-1, keepdim=True).clamp_min(1e-300)
+            log_s = rows[:, K]
+            z = rows[:, K + 1]
+
+        elif parameterization == PARAMETERIZATION_LOGITS:
+            eta = rows[:, : K - 1]
+            a = logits_to_weights_torch(eta)
+            log_s = rows[:, K - 1]
+            z = rows[:, K]
+
+        else:
+            a = rows[:, :K]
+            a = a / a.sum(dim=-1, keepdim=True).clamp_min(1e-300)
+            log_s = rows[:, K]
+            z = rows[:, K + 1]
+
+        return (
+            a.reshape(*flat, K),
+            log_s.reshape(*flat),
+            z.reshape(*flat),
         )
 
-    def _central_magnitudes_eazy_from_dict(self, central: dict) -> torch.Tensor:
-        if getattr(self, "_prior_parameterization", None) == PARAMETERIZATION_LOGITS:
+    def _central_magnitudes_from_dict(self, central: dict) -> torch.Tensor:
+        parameterization = getattr(self, "_prior_parameterization", "weights")
+        K = int(self._n_eazy_templates)
+
+        if parameterization == "clr":
+            clr = torch.tensor(
+                [[float(central.get(f"f{k}", 0.0)) for k in range(1, K + 1)]],
+                device=self.device,
+                dtype=torch.float64,
+            )
+            shifted = clr - torch.amax(clr, dim=-1, keepdim=True)
+            exp = torch.exp(shifted)
+            a = exp / exp.sum(dim=-1, keepdim=True).clamp_min(1e-300)
+
+        elif parameterization == PARAMETERIZATION_LOGITS:
             eta = torch.tensor(
-                [[float(central.get(f"f{k}", 0.0)) for k in range(1, self._n_eazy_templates)]],
+                [[float(central.get(f"f{k}", 0.0)) for k in range(1, K)]],
                 device=self.device,
                 dtype=torch.float64,
             )
             a = logits_to_weights_torch(eta)
+
         else:
             a = torch.tensor(
-                [[float(central.get(f"a{k}", 0.0)) for k in range(1, self._n_eazy_templates + 1)]],
+                [[float(central.get(f"a{k}", 0.0)) for k in range(1, K + 1)]],
                 device=self.device,
                 dtype=torch.float64,
             )
+            a = a / a.sum(dim=-1, keepdim=True).clamp_min(1e-300)
+
         log_s = torch.tensor(
             [float(central["log_c_scale"])],
             device=self.device,
@@ -744,27 +960,25 @@ class NumVisits(BaseExperiment, CosmologyMixin):
             device=self.device,
             dtype=torch.float64,
         )
-        return self._calculate_magnitudes_eazy(z, a, log_s).squeeze(0)
+        flux_aa = self._observed_spectral_flux(z, a=a, log_s=log_s)
+        return self._calculate_magnitudes(flux_aa).squeeze(0)
 
     def _prior_rows_to_param_dict(
         self,
         rows: torch.Tensor,
         sample_shape: tuple[int, ...],
     ) -> dict[str, torch.Tensor]:
-        """Map prior pool rows to parameter tensors with trailing dim 1."""
+        """Map empirical-prior feature rows to parameter tensors with trailing dim 1."""
         col = {n: i for i, n in enumerate(self.prior_feature_names)}
         out: dict[str, torch.Tensor] = {}
         flat = sample_shape if sample_shape else (rows.shape[0],)
         for name in self.cosmo_params:
-            if name.startswith("a") or name.startswith("f"):
-                idx = col[name]
-                out[name] = rows[:, idx].reshape(*flat, 1)
-            elif name == "log_c_scale":
-                out[name] = rows[:, col["log_c_scale"]].reshape(*flat, 1)
-            elif name == "z":
-                out[name] = rows[:, col["z"]].reshape(*flat, 1)
-            else:
-                raise KeyError(f"Unknown prior parameter '{name}'")
+            if name not in col:
+                raise KeyError(
+                    f"Unknown empirical prior parameter '{name}'. "
+                    f"Available: {self.prior_feature_names}"
+                )
+            out[name] = rows[:, col[name]].reshape(*flat, 1)
         return out
 
     @profile_method
@@ -772,7 +986,7 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         """
         Sample parameters from analytic prior, prior flow, or empirical KDE pool.
         """
-        if getattr(self, "use_eazy_sed", False) and self.prior_pool is not None:
+        if self.cosmo_model == "empirical" and self.prior_pool is not None:
             n = int(np.prod(sample_shape)) if sample_shape else 1
             rows = sample_prior_batch(self.prior_pool, n)
             return self._prior_rows_to_param_dict(rows, sample_shape)
@@ -921,176 +1135,6 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         
         # Convert back to float64 for consistency
         return F_per_AA.to(torch.float64)
-    
-    @profile_method
-    def _calculate_magnitudes(self, z_tensor, T_tensor=None):
-        """
-        Calculate magnitudes across each filter.
-
-        Args:
-            z_tensor: Tensor of redshift values, shape (n_z,)
-            T_tensor: Optional tensor of blackbody temperatures (K), broadcast-compatible
-                with z_tensor. When None, uses fixed self.temperature.
-
-        Returns:
-            Tensor of magnitudes with shape z_tensor.shape + (n_filters,)
-        """
-        if T_tensor is None:
-            # Flatten and find unique z values to avoid redundant calculations
-            z_flat = z_tensor.flatten()  # (n_z,)
-            z_unique, inverse_indices = torch.unique(z_flat, return_inverse=True)
-            lum_dist = self._luminosity_distance(z_unique)
-
-            # Extract T value (cache it)
-            if not hasattr(self, '_T_K_tensor'):
-                if hasattr(self.temperature, 'value'):
-                    self._T_K_tensor = torch.tensor(self.temperature.to(u.K).value, device=self.device, dtype=torch.float64)
-                else:
-                    self._T_K_tensor = torch.tensor(float(self.temperature), device=self.device, dtype=torch.float64)
-            T_K = self._T_K_tensor
-
-            # Pre-compute luminosity constants (cache them)
-            if not hasattr(self, '_R_eff_tensor'):
-                L_sun = 3.826e33
-                L_bol = 1e9 * L_sun
-                sigma_sb_cgs = sigma_sb.to(u.erg / (u.s * u.cm**2 * u.K**4)).value
-                T_K_4 = T_K**4
-                R_eff_val = torch.sqrt(torch.tensor(L_bol / (4 * np.pi * sigma_sb_cgs), device=self.device, dtype=torch.float64) / T_K_4)
-                self._R_eff_tensor = R_eff_val
-                self._four_pi_R2_tensor = torch.tensor(4 * np.pi, device=self.device, dtype=torch.float64) * self._R_eff_tensor**2
-            four_pi_R2 = self._four_pi_R2_tensor
-        else:
-            # Joint (z, T) path: skip the unique-z dedup since identical z with
-            # different T must be kept distinct.
-            z_t = torch.as_tensor(z_tensor, device=self.device, dtype=torch.float64)
-            T_t = torch.as_tensor(T_tensor, device=self.device, dtype=torch.float64)
-            z_b, T_b = torch.broadcast_tensors(z_t, T_t)
-            joint_shape = z_b.shape
-            z_unique = z_b.flatten()
-            T_K = T_b.flatten()
-            inverse_indices = None
-            lum_dist = self._luminosity_distance(z_unique)
-
-            L_sun = 3.826e33
-            L_bol = 1e9 * L_sun
-            sigma_sb_cgs = sigma_sb.to(u.erg / (u.s * u.cm**2 * u.K**4)).value
-            L_bol_const = torch.tensor(L_bol / (4 * np.pi * sigma_sb_cgs), device=self.device, dtype=torch.float64)
-            R_eff = torch.sqrt(L_bol_const / (T_K**4))
-            four_pi_R2 = torch.tensor(4 * np.pi, device=self.device, dtype=torch.float64) * R_eff**2  # (N,)
-
-        # Reshape for broadcasting: z is (n_z,), wlen is (n_wlen,)
-        z_2d = z_unique.unsqueeze(-1)  # (n_z, 1)
-        wlen_2d = self._wlen_aa_tensor.unsqueeze(0)  # (1, n_wlen)
-
-        # Rest-frame wavelength
-        if not hasattr(self, '_1e8_tensor_f64'):
-            self._1e8_tensor_f64 = torch.tensor(1e-8, device=self.device, dtype=torch.float64)
-        one_plus_z = 1 + z_2d  # (n_z, 1)
-        wlen_rest_aa = wlen_2d / one_plus_z  # (n_z, n_wlen)
-        wlen_rest_cm = wlen_rest_aa * self._1e8_tensor_f64  # Convert Angstrom to cm
-
-        # Blackbody flux. Reshape T to (N, 1) when per-sample so it broadcasts
-        # against wavelength dim.
-        if T_tensor is None:
-            T_K_for_bb = T_K
-            four_pi_R2_for_L = four_pi_R2
-        else:
-            T_K_for_bb = T_K.unsqueeze(-1)  # (N, 1)
-            four_pi_R2_for_L = four_pi_R2.unsqueeze(-1)  # (N, 1)
-        F = self._blackbody_flux(wlen_rest_cm, T_K_for_bb)  # (n_z, n_wlen)
-        L = four_pi_R2_for_L * F  # (n_z, n_wlen)
-
-        # Observed flux
-        lum_dist_2d = lum_dist.unsqueeze(-1)  # (n_z, 1)
-        if not hasattr(self, '_four_pi_tensor'):
-            self._four_pi_tensor = torch.tensor(4 * np.pi, device=self.device, dtype=torch.float64)
-        flux = L / (one_plus_z * self._four_pi_tensor * lum_dist_2d**2)  # (n_z, n_wlen)
-        
-        # Check for extreme flux values that could cause magnitude issues
-        if torch.any(~torch.isfinite(flux)) or torch.any(flux <= 0):
-            problematic_flux = (~torch.isfinite(flux)) | (flux <= 0)
-            problematic_count = problematic_flux.sum().item()
-            if self.global_rank == 0 and problematic_count > 0:
-                print(f"WARNING: {problematic_count} problematic flux values found!")
-                print(f"  flux range: [{flux.min().item():.2e}, {flux.max().item():.2e}]")
-                print(f"  L range: [{L.min().item():.2e}, {L.max().item():.2e}]")
-                print(f"  lum_dist range: [{lum_dist.min().item():.2e}, {lum_dist.max().item():.2e}]")
-                print(f"  z_unique range: [{z_unique.min().item():.4f}, {z_unique.max().item():.4f}]")
-        
-        # Expand flux for all filters: (n_z, 1, n_wlen)
-        flux_expanded = flux.unsqueeze(1)  # (n_z, 1, n_wlen)
-        
-        # Expand transmission: (1, n_filters, n_wlen)
-        transmission_expanded = self._transmission_tensor.unsqueeze(0)  # (1, n_filters, n_wlen)
-        
-        # Expand wlen_over_hc: (1, 1, n_wlen)
-        wlen_over_hc_expanded = self._wlen_over_hc_tensor.unsqueeze(0).unsqueeze(0)  # (1, 1, n_wlen)
-        
-        # Integrand for all filters: (n_z, n_filters, n_wlen)
-        integrand = flux_expanded * transmission_expanded * wlen_over_hc_expanded
-        
-        # Use torch.trapezoid to integrate over wavelength dimension (last dimension)
-        photon_flux = torch.trapezoid(integrand, self._wlen_aa_tensor, dim=-1)  # (n_z, n_filters)
-        
-        # Check for negative or problematic photon_flux values
-        if torch.any(photon_flux < 0):
-            negative_count = (photon_flux < 0).sum().item()
-            negative_min = photon_flux[photon_flux < 0].min().item()
-            if self.global_rank == 0:
-                print(f"WARNING: {negative_count} negative photon_flux values found! Min: {negative_min:.2e}")
-                # Check if integrand has negative values
-                negative_integrand = (integrand < 0).sum().item()
-                if negative_integrand > 0:
-                    print(f"  {negative_integrand} negative integrand values found!")
-                    print(f"  integrand range: [{integrand.min().item():.2e}, {integrand.max().item():.2e}]")
-                    print(f"  flux range: [{flux.min().item():.2e}, {flux.max().item():.2e}]")
-                    print(f"  transmission range: [{transmission_expanded.min().item():.2e}, {transmission_expanded.max().item():.2e}]")
-                    print(f"  wlen_over_hc range: [{wlen_over_hc_expanded.min().item():.2e}, {wlen_over_hc_expanded.max().item():.2e}]")
-        
-        # Convert to magnitude for all filters
-        A_cm2 = (319/9.6) * 1e4  # cm^2
-        photon_flux_pixel = photon_flux * A_cm2  # (n_z, n_filters)
-        
-        # Check for extreme values before log10
-        if torch.any(photon_flux_pixel <= 0):
-            non_positive_count = (photon_flux_pixel <= 0).sum().item()
-            if self.global_rank == 0:
-                print(f"WARNING: {non_positive_count} non-positive photon_flux_pixel values found!")
-                print(f"  photon_flux range: [{photon_flux.min().item():.2e}, {photon_flux.max().item():.2e}]")
-                print(f"  photon_flux_pixel range: [{photon_flux_pixel.min().item():.2e}, {photon_flux_pixel.max().item():.2e}]")
-        
-        # s0 values for all filters: (n_filters,)
-        s0_vals = torch.tensor([s0[band] for band in self.filters_list], device=self.device, dtype=torch.float64)
-        s0_vals = s0_vals.unsqueeze(0)  # (1, n_filters) for broadcasting
-        
-        # Clamp photon_flux_pixel to avoid log10 of negative/zero values
-        # Use a very small positive value as minimum
-        min_flux = torch.finfo(photon_flux_pixel.dtype).tiny * 1e10
-        photon_flux_pixel_clamped = torch.clamp(photon_flux_pixel, min=min_flux)
-        
-        # Check ratio before log10
-        flux_ratio = photon_flux_pixel_clamped / s0_vals
-        if torch.any(flux_ratio <= 0) or torch.any(~torch.isfinite(flux_ratio)):
-            problematic_count = ((flux_ratio <= 0) | (~torch.isfinite(flux_ratio))).sum().item()
-            if self.global_rank == 0:
-                print(f"WARNING: {problematic_count} problematic flux_ratio values before log10!")
-                print(f"  flux_ratio range: [{flux_ratio.min().item():.2e}, {flux_ratio.max().item():.2e}]")
-        
-        # Magnitudes: (n_z, n_filters)
-        # Clamp the ratio to ensure positive values for log10
-        flux_ratio_clamped = torch.clamp(flux_ratio, min=min_flux)
-        mags_unique = 24.0 - 2.5 * torch.log10(flux_ratio_clamped)
-        
-        if inverse_indices is None:
-            # Joint (z, T) path: reshape directly to broadcast joint shape
-            mags_reshaped = mags_unique.reshape(*joint_shape, self.num_filters)
-        else:
-            # Map back to original z values
-            mags_flat = mags_unique[inverse_indices]  # (n_z, n_filters)
-            # Reshape to match z_tensor shape, then add filter dimension
-            mags_reshaped = mags_flat.reshape(*z_tensor.shape, self.num_filters)
-
-        return mags_reshaped
 
     @profile_method
     def _magnitude_errors(self, mags, nvisits):
@@ -1148,30 +1192,31 @@ class NumVisits(BaseExperiment, CosmologyMixin):
 
         batch_shape = nvisits.shape[:-1]
 
-        if getattr(self, "use_eazy_sed", False) and self.prior_pool is not None:
+        if self.cosmo_model == "empirical" and self.prior_pool is not None:
             n = int(np.prod(batch_shape))
             rows = sample_prior_batch(self.prior_pool, n)
             params = self._prior_rows_to_param_dict(rows, batch_shape)
             for name, val in params.items():
                 pyro.sample(name, dist.Delta(val.squeeze(-1)).to_event(0))
-            a = self._weights_from_param_dict(params)
-            log_s = params["log_c_scale"].squeeze(-1)
-            z = params["z"].squeeze(-1)
-            means = self._calculate_magnitudes_eazy(z, a, log_s)
+            a, log_s, z = self._empirical_rows_to_physical(rows, batch_shape)
+            flux_aa = self._observed_spectral_flux(z, a=a, log_s=log_s)
+            means = self._calculate_magnitudes(flux_aa)
         elif hasattr(self, "prior_flow") and self.prior_flow is not None:
             samples = self._sample_prior_flow_cache(batch_shape)
             z = samples.squeeze(-1)
             z = pyro.sample("z", dist.Delta(z))
-            means = self._calculate_magnitudes(z)
+            flux_aa = self._observed_spectral_flux(z)
+            means = self._calculate_magnitudes(flux_aa)
         else:
             z_dist = self.prior["z"].expand(batch_shape).to_event(0)
             z = pyro.sample("z", z_dist)
             if "T" in self.prior:
                 T_dist = self.prior["T"].expand(batch_shape).to_event(0)
                 T = pyro.sample("T", T_dist)
-                means = self._calculate_magnitudes(z, T_tensor=T)
+                flux_aa = self._observed_spectral_flux(z, T=T)
             else:
-                means = self._calculate_magnitudes(z)
+                flux_aa = self._observed_spectral_flux(z)
+            means = self._calculate_magnitudes(flux_aa)
         sigmas = self._magnitude_errors(means, nvisits)
         covariance = torch.diag_embed(sigmas**2)
         return pyro.sample(self.observation_labels[0], dist.MultivariateNormal(means, covariance))
@@ -1245,13 +1290,15 @@ class NumVisits(BaseExperiment, CosmologyMixin):
             z_shape = z_b.shape
             z_tensor = torch.as_tensor(np.asarray(z_b), device=self.device, dtype=torch.float64)
             T_tensor = torch.as_tensor(np.asarray(T_b), device=self.device, dtype=torch.float64)
+            flux_aa = self._observed_spectral_flux(z_tensor, T=T_tensor)
             mags_model = jnp.asarray(
-                self._calculate_magnitudes(z_tensor, T_tensor=T_tensor).detach().cpu().numpy()
+                self._calculate_magnitudes(flux_aa).detach().cpu().numpy()
             )
         else:
             z_shape = z_values.shape
             z_tensor = torch.as_tensor(np.asarray(z_values), device=self.device, dtype=torch.float64)
-            mags_model = jnp.asarray(self._calculate_magnitudes(z_tensor).detach().cpu().numpy())
+            flux_aa = self._observed_spectral_flux(z_tensor)
+            mags_model = jnp.asarray(self._calculate_magnitudes(flux_aa).detach().cpu().numpy())
         # mags_model shape: P + (num_filters,)
 
         # Feature grid (magnitudes): broadcast per-filter axes to a common feature shape X

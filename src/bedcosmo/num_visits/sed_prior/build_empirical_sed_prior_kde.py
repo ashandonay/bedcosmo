@@ -42,6 +42,7 @@ from typing import Any, Literal
 import joblib
 import numpy as np
 import pandas as pd
+from scipy import stats
 from sklearn.neighbors import KernelDensity
 from sklearn.preprocessing import StandardScaler
 
@@ -418,6 +419,53 @@ def get_training_weights(artifact: dict[str, Any]) -> np.ndarray:
         parameterization=get_parameterization(artifact),
     )
     return a
+
+
+def _marginal_central_value_1d(values: np.ndarray) -> float:
+    """Central value for one feature column from KDE prior draws.
+
+    Uses the 1D Gaussian-KDE mode when it agrees with the sample median (same sign).
+    For bimodal marginals where the global KDE mode sits on a secondary peak, falls
+    back to the median so central params match triangle-plot bulk (e.g. positive f1).
+    """
+    col = np.asarray(values, dtype=np.float64)
+    col = col[np.isfinite(col)]
+    if col.size == 0:
+        raise ValueError("cannot compute marginal central value from empty column")
+    median = float(np.median(col))
+    if col.size < 2:
+        return median
+    kde1d = stats.gaussian_kde(col)
+    grid = np.linspace(float(col.min()), float(col.max()), 4000)
+    mode = float(grid[int(np.argmax(kde1d(grid)))])
+    if np.sign(mode) == np.sign(median) or median == 0.0:
+        return mode
+    return median
+
+
+def mode_central_params_from_artifact(
+    artifact: dict[str, Any],
+    *,
+    n_samples: int = DEFAULT_KDE_DIAGNOSTIC_SAMPLES,
+    seed: int = 0,
+) -> dict[str, float]:
+    """
+    Per-feature central values from marginals of the fitted KDE prior.
+
+    Draws ``n_samples`` from the artifact KDE (same distribution as diagnostic
+    triangle plots), then estimates each marginal mode with a median fallback for
+    bimodal columns where the global 1D mode lies on a low-mass secondary peak.
+    """
+    draws = sample_sed_prior(artifact, n_samples, seed=seed)
+    names = list(artifact["feature_names"])
+    if draws.shape[1] != len(names):
+        raise ValueError(
+            f"KDE sample columns {draws.shape[1]} != len(feature_names) {len(names)}"
+        )
+    return {
+        name: _marginal_central_value_1d(draws[:, i])
+        for i, name in enumerate(names)
+    }
 
 
 def fit_sed_prior_kde(
