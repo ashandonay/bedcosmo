@@ -43,22 +43,39 @@ COMPONENT_COLORS = {
 }
 
 
-def make_experiment(temperature, filters_list, mag_err_cap=None, device="cpu"):
+def make_experiment(
+    temperature,
+    filters_list,
+    mag_err_cap=None,
+    device="cpu",
+    cosmo_model="bb",
+):
     prior_args = {
         "parameters": {
             "z": {
                 "distribution": {"type": "uniform", "lower": 0.1, "upper": 3.0},
+                "plot": {"lower": 0.1, "upper": 3.0},
                 "latex": r"$z$",
             }
-        }
+        },
+        "constraints": {},
     }
+    if cosmo_model == "bb_temp":
+        prior_args["parameters"]["T"] = {
+            "distribution": {"type": "uniform", "lower": 2000.0, "upper": 30000.0},
+            "plot": {"lower": 2000.0, "upper": 30000.0},
+            "latex": r"$T\,\mathrm{[K]}$",
+        }
     design_args = {"input_type": "nominal", "labels": filters_list}
     kwargs = dict(
         prior_args=prior_args,
         design_args=design_args,
+        cosmo_model=cosmo_model,
         temperature=temperature,
         device=device,
         verbose=False,
+        cdf_samples=2000,
+        transform_input=False,
     )
     if mag_err_cap is not None:
         kwargs["mag_err_cap"] = mag_err_cap
@@ -73,7 +90,8 @@ def plot_filter_flux(temperature, filters_list):
     exp = make_experiment(temperature, filters_list)
     z_grid = np.linspace(0.01, 3.0, 500)
     z_tensor = torch.tensor(z_grid, device=exp.device, dtype=torch.float64)
-    mags = exp._calculate_magnitudes(z_tensor).detach().cpu().numpy()
+    flux_aa = exp._observed_spectral_flux(z_tensor)
+    mags = exp._calculate_magnitudes(flux_aa).detach().cpu().numpy()
 
     s0_arr = np.array([s0[band] for band in filters_list])
     photon_flux = 10.0 ** (-0.4 * (mags - s0_arr[np.newaxis, :]))
@@ -106,7 +124,8 @@ def decompose_errors(exp, z_grid):
     pixel-weighted SNR.
     """
     z_tensor = torch.tensor(z_grid, device=exp.device, dtype=torch.float64)
-    mags = exp._calculate_magnitudes(z_tensor).detach().cpu().numpy()
+    flux_aa = exp._observed_spectral_flux(z_tensor)
+    mags = exp._calculate_magnitudes(flux_aa).detach().cpu().numpy()
     nvisits_np = exp.nominal_design.unsqueeze(0).expand(len(z_grid), -1).cpu().numpy()
 
     pad_shape = (1,) * (mags.ndim - 1) + (exp.num_filters,)
@@ -230,7 +249,8 @@ def plot_sigma_decomposition(temperature, filters_list):
 
 def compute_likelihood_components(exp, z_grid, m_obs, nvisits):
     z_tensor = torch.tensor(z_grid, device=exp.device, dtype=torch.float64)
-    m_model = exp._calculate_magnitudes(z_tensor).detach().cpu().numpy()
+    flux_aa = exp._observed_spectral_flux(z_tensor)
+    m_model = exp._calculate_magnitudes(flux_aa).detach().cpu().numpy()
     nvisits_exp = nvisits.unsqueeze(0).expand(len(z_grid), -1)
     sigmas = exp._magnitude_errors(
         torch.tensor(m_model, device=exp.device, dtype=torch.float64),
@@ -265,7 +285,8 @@ def plot_degeneracy(filters_list, temperatures, mag_err_cap, z_decomp):
         for T, tc in zip(temperatures, temp_cmap):
             exp = experiments[T]
             z_t = torch.tensor([z_true], device=exp.device, dtype=torch.float64)
-            m_obs = exp._calculate_magnitudes(z_t).detach().cpu().numpy().squeeze()
+            flux_aa = exp._observed_spectral_flux(z_t)
+            m_obs = exp._calculate_magnitudes(flux_aa).detach().cpu().numpy().squeeze()
             log_like, raw_resid_sq = compute_likelihood_components(
                 exp, z_grid, m_obs, exp.nominal_design
             )

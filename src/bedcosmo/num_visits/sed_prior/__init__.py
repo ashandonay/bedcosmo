@@ -4,6 +4,7 @@ from .build_empirical_sed_prior_kde import (
     coeffs_from_sample_row,
     load_prior_training_table,
     load_sed_prior_kde,
+    mode_central_params_from_artifact,
     sample_sed_prior,
     sample_sed_prior_kde,
     samples_to_coeffs,
@@ -17,14 +18,18 @@ from .prior_sampler import (
     unpack_prior_rows,
 )
 from .simplex import (
+    PARAMETERIZATION_CLR,
     PARAMETERIZATION_LOGITS,
     PARAMETERIZATION_WEIGHTS,
+    clr_to_weights,
     logits_to_weights,
     logits_to_weights_torch,
+    prior_clr_feature_names,
     prior_feature_names,
     prior_logit_feature_names,
     prior_weights_feature_names,
     split_feature_matrix,
+    weights_to_clr,
     weights_to_logits,
     weights_to_logits_torch,
 )
@@ -36,8 +41,10 @@ from .templates import (
 )
 
 __all__ = [
+    "PARAMETERIZATION_CLR",
     "PARAMETERIZATION_LOGITS",
     "PARAMETERIZATION_WEIGHTS",
+    "clr_to_weights",
     "DEFAULT_PARAM_12D",
     "DEFAULT_TEMPLATES_DIR",
     "EmpiricalPriorPool",
@@ -48,11 +55,14 @@ __all__ = [
     "load_eazy_templates",
     "load_prior_training_table",
     "load_sed_prior_kde",
+    "mode_central_params_from_artifact",
     "logits_to_weights",
     "logits_to_weights_torch",
     "prior_feature_names",
+    "prior_clr_feature_names",
     "prior_logit_feature_names",
     "prior_weights_feature_names",
+    "weights_to_clr",
     "sample_prior_batch",
     "split_feature_matrix",
     "weights_to_logits",

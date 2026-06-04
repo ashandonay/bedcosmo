@@ -16,6 +16,13 @@ T_CMB = 2.7255  # CMB temperature in Kelvin
 KB_eV_per_K = 8.617333262e-5  # Boltzmann constant in eV/K
 Tnu0_eV = (4.0 / 11.0) ** (1.0 / 3.0) * T_CMB * KB_eV_per_K  # Neutrino temperature today in eV
 
+# Fiducial values for cosmological parameters when not explicitly specified
+FIDUCIAL_PARAMS = {
+    'Ok': 0.0,
+    'w0': -1.0,
+    'wa': 0.0,
+}
+
 
 def _interp1(xg, yg, x):
     """
@@ -307,9 +314,9 @@ class CosmologyMixin:
             return t.view(*([1] * len(plate)), 1).expand(plate + (1,))
 
         Om = to_plate1(Om)
-        Ok = to_plate1(0.0 if Ok is None else Ok)
-        w0 = to_plate1(-1.0 if w0 is None else w0)
-        wa = to_plate1(0.0 if wa is None else wa)
+        Ok = to_plate1(FIDUCIAL_PARAMS['Ok'] if Ok is None else Ok)
+        w0 = to_plate1(FIDUCIAL_PARAMS['w0'] if w0 is None else w0)
+        wa = to_plate1(FIDUCIAL_PARAMS['wa'] if wa is None else wa)
         hrdrag = to_plate1(hrdrag)
 
         h_t = None if h is None else torch.as_tensor(h, device=dev, dtype=DTYPE)
@@ -422,9 +429,9 @@ class CosmologyMixin:
             return t.view(*([1] * len(plate)), 1).expand(plate + (1,))
 
         Om = to_plate1(Om)
-        Ok = to_plate1(0.0 if Ok is None else Ok)
-        w0 = to_plate1(-1.0 if w0 is None else w0)
-        wa = to_plate1(0.0 if wa is None else wa)
+        Ok = to_plate1(FIDUCIAL_PARAMS['Ok'] if Ok is None else Ok)
+        w0 = to_plate1(FIDUCIAL_PARAMS['w0'] if w0 is None else w0)
+        wa = to_plate1(FIDUCIAL_PARAMS['wa'] if wa is None else wa)
         hrdrag = to_plate1(hrdrag)
 
         # targets in z / ln a

@@ -23,13 +23,14 @@ import getdist
 import math
 import inspect
 from bedcosmo.util import (
-    load_prior_flow_from_file, Bijector, auto_seed, profile_method,
+    load_prior_flow_from_file, auto_seed, profile_method,
     load_nominal_samples, get_experiment_config_path,
 )
+from bedcosmo.transform import Bijector
 from cosmopower_jax.cosmopower_jax import CosmoPowerJAX
 from bedcosmo.custom_dist import ConstrainedUniform2D
 from bedcosmo.base import BaseExperiment
-from bedcosmo.cosmology import CosmologyMixin, _infer_plate_shape
+from bedcosmo.cosmology import CosmologyMixin, FIDUCIAL_PARAMS, _infer_plate_shape
 
 storage_path = os.environ["SCRATCH"] + "/bedcosmo/num_tracers"
 home_dir = os.environ["HOME"]
@@ -63,7 +64,15 @@ class NumTracers(BaseExperiment, CosmologyMixin):
         fullshape_covariance=None,
         fullshape_k_bins=None,
         fullshape_z_eff=None,
-        fullshape_ells=(0, 2, 4)
+        fullshape_ells=(0, 2, 4),
+        likelihood_mode='scaling',
+        emulator_args_path=None,
+        input_transform_type="marginal",
+        joint_transform_params=None,
+        joint_transform_shrinkage=1e-3,
+        joint_transform_fit_path=None,
+        joint_transform_fit_samples=None,
+        flow_squash_params=None,
     ):
 
         self.name = 'num_tracers'
@@ -144,6 +153,14 @@ class NumTracers(BaseExperiment, CosmologyMixin):
             self.desi_prior = self.prior
 
         self.transform_input = transform_input
+        self._init_input_transform_options(
+            input_transform_type=input_transform_type,
+            joint_transform_params=joint_transform_params,
+            joint_transform_shrinkage=joint_transform_shrinkage,
+            joint_transform_fit_path=joint_transform_fit_path,
+            joint_transform_fit_samples=joint_transform_fit_samples,
+            flow_squash_params=flow_squash_params,
+        )
 
         # param_bijector is built unconditionally (DESI sampling consumes it
         # even when transform_input is False). State resolution (explicit
@@ -171,7 +188,22 @@ class NumTracers(BaseExperiment, CosmologyMixin):
             self.init_designs(**design_args)
         else:
             self.init_designs()
-        
+
+        # Initialize emulator-based likelihood mode
+        self.likelihood_mode = likelihood_mode
+        if self.likelihood_mode == 'emulator':
+            if emulator_args_path is None:
+                raise ValueError("emulator_args_path must be provided when likelihood_mode='emulator'")
+            with open(emulator_args_path, 'r') as f:
+                all_emulator_config = yaml.safe_load(f)
+            if self.cosmo_model not in all_emulator_config:
+                raise ValueError(
+                    f"Cosmo model '{self.cosmo_model}' not found in emulator_args. "
+                    f"Available: {list(all_emulator_config.keys())}"
+                )
+            self._emulator_config = all_emulator_config[self.cosmo_model]
+            self._load_emulators()
+
         # Initialize full shape data if provided
         if fullshape_mocks is not None:
             self.fullshape_covariance = self.compute_covariance_from_mocks(fullshape_mocks)
@@ -874,37 +906,314 @@ class NumTracers(BaseExperiment, CosmologyMixin):
 
         return parameters
 
+    def _load_emulators(self):
+        """Load trained NN emulators for each tracer bin from checkpoint files."""
+        from bedcosmo.num_tracers.emulator.util import build_model
+
+        self._emulators = {}
+        for tracer_bin, ckpt_path in self._emulator_config['checkpoints'].items():
+            ckpt = torch.load(ckpt_path, map_location=self.device, weights_only=False)
+            model = build_model(
+                analysis=ckpt.get("analysis", "bao"),
+                architecture=ckpt.get("architecture", "resnet"),
+                in_dim=len(ckpt["param_names"]),
+                out_dim=len(ckpt["target_names"]),
+                hidden_dim=ckpt["hidden_dim"],
+                n_hidden=ckpt["n_hidden"],
+                dropout=ckpt.get("dropout", 0.0),
+                expand=ckpt.get("expand", 4),
+            ).to(self.device)
+            model.load_state_dict(ckpt["state_dict"])
+            model.eval()
+            model.requires_grad_(False)
+
+            self._emulators[tracer_bin] = {
+                'model': model,
+                'param_names': list(ckpt["param_names"]),
+                'x_mu': ckpt["x_mu"].to(self.device),
+                'x_sigma': ckpt["x_sigma"].to(self.device),
+                'y_mu': ckpt["y_mu"].to(self.device),
+                'y_sigma': ckpt["y_sigma"].to(self.device),
+                'log_normalize': ckpt.get("log_normalize", False),
+                'y_linthresh': ckpt["y_linthresh"].to(self.device) if ckpt.get("y_linthresh") is not None else None,
+            }
+
+        if self.global_rank == 0:
+            print(f"Loaded emulators for tracer bins: {list(self._emulators.keys())}")
+
+    def _emulator_predict(self, tracer_bin, emulator_input):
+        """Run differentiable inference through an emulator.
+
+        Args:
+            tracer_bin: Key into self._emulators (e.g. 'LRG1')
+            emulator_input: Tensor of shape (..., in_dim) with columns
+                [N_tracers, Om, Ok, w0, wa, hrdrag]
+
+        Returns:
+            Tensor of shape (..., 3) — [cov_DH_DH, cov_DH_DM, cov_DM_DM]
+        """
+        emu = self._emulators[tracer_bin]
+        model_dtype = next(emu['model'].parameters()).dtype
+        x = emulator_input.to(model_dtype)
+        x_mu = emu['x_mu'].to(model_dtype)
+        x_sigma = emu['x_sigma'].to(model_dtype)
+        y_mu = emu['y_mu'].to(model_dtype)
+        y_sigma = emu['y_sigma'].to(model_dtype)
+        x_norm = (x - x_mu) / x_sigma
+        y_norm = emu['model'](x_norm)
+        y = y_norm * y_sigma + y_mu
+        if emu['log_normalize'] and emu['y_linthresh'] is not None:
+            y_linthresh = emu['y_linthresh'].to(model_dtype)
+            y = torch.sign(y) * y_linthresh * torch.expm1(torch.abs(y))
+        return y
+
+    def _calc_n_tracers(self, class_ratio):
+        """Convert class ratios [BGS, LRG, ELG, QSO] to absolute N_tracers per tracer bin.
+
+        Args:
+            class_ratio: Tensor of shape (..., 4) with class fractions.
+
+        Returns:
+            Dict mapping tracer bin name to tensor of N_tracers with batch shape.
+        """
+        label_to_index = {str(label): i for i, label in enumerate(self.design_labels)}
+        total_obs_multiplier = class_ratio.sum(dim=-1, keepdim=True)
+
+        idx_BGS = label_to_index["BGS"]
+        idx_LRG = label_to_index["LRG"]
+        idx_ELG = label_to_index["ELG"]
+        idx_QSO = label_to_index["QSO"]
+
+        BGSs = self.desi_tracers.loc[self.desi_tracers["class"] == "BGS"]["observed"]
+        BGS_frac = torch.tensor((BGSs / BGSs.sum()).values, device=self.device)
+
+        LRGs = self.desi_tracers.loc[self.desi_tracers["class"] == "LRG"]["observed"]
+        LRG_frac = torch.tensor((LRGs / LRGs.sum()).values, device=self.device)
+
+        ELGs = self.desi_tracers.loc[self.desi_tracers["class"] == "ELG"]["observed"]
+        ELG_frac = torch.tensor((ELGs / ELGs.sum()).values, device=self.device)
+
+        QSOs = self.desi_tracers.loc[self.desi_tracers["class"] == "QSO"]["observed"]
+        QSO_frac = torch.tensor((QSOs / QSOs.sum()).values, device=self.device)
+
+        nominal_total = self.nominal_total_obs
+
+        n_tracers = {}
+        n_tracers["BGS"] = class_ratio[..., idx_BGS] * BGS_frac[..., 0] * nominal_total
+        n_tracers["LRG1"] = class_ratio[..., idx_LRG] * LRG_frac[..., 0] * nominal_total
+        n_tracers["LRG2"] = class_ratio[..., idx_LRG] * LRG_frac[..., 1] * nominal_total
+        # LRG3+ELG1: sum of LRG third sub-bin and ELG first sub-bin
+        n_tracers["LRG3_ELG1"] = (class_ratio[..., idx_LRG] * LRG_frac[..., 2]
+                                   + class_ratio[..., idx_ELG] * ELG_frac[..., 0]) * nominal_total
+        n_tracers["ELG2"] = class_ratio[..., idx_ELG] * ELG_frac[..., 1] * nominal_total
+        n_tracers["QSO"] = class_ratio[..., idx_QSO] * QSO_frac[..., 0] * nominal_total
+        n_tracers["Lya_QSO"] = class_ratio[..., idx_QSO] * QSO_frac[..., 1] * nominal_total
+
+        return n_tracers
+
+    def _build_emulator_covariance(self, class_ratio, parameters):
+        """Build 13x13 block-diagonal covariance from emulator predictions.
+
+        Args:
+            class_ratio: Tensor of shape (..., 4) with class fractions.
+            parameters: Dict of cosmological parameter tensors (from sample_parameters).
+
+        Returns:
+            Tensor of shape (..., 13, 13) — block-diagonal covariance matrix.
+        """
+        n_tracers = self._calc_n_tracers(class_ratio)
+
+        # Extract cosmo params, filling missing ones with FIDUCIAL_PARAMS from cosmology.py
+        Om = parameters['Om'].squeeze(-1) if 'Om' in parameters else torch.tensor(FIDUCIAL_PARAMS.get('Om', 0.3), device=self.device)
+        Ok = parameters['Ok'].squeeze(-1) if 'Ok' in parameters else torch.tensor(FIDUCIAL_PARAMS['Ok'], device=self.device)
+        w0 = parameters['w0'].squeeze(-1) if 'w0' in parameters else torch.tensor(FIDUCIAL_PARAMS['w0'], device=self.device)
+        wa = parameters['wa'].squeeze(-1) if 'wa' in parameters else torch.tensor(FIDUCIAL_PARAMS['wa'], device=self.device)
+        hrdrag = parameters['hrdrag'].squeeze(-1) if 'hrdrag' in parameters else torch.tensor(FIDUCIAL_PARAMS.get('hrdrag', 1.0), device=self.device)
+
+        # Determine batch shape from class_ratio
+        batch_shape = class_ratio.shape[:-1]
+        cov_size = len(self.desi_data)  # 13
+        covariance = torch.zeros(batch_shape + (cov_size, cov_size), device=self.device, dtype=torch.float64)
+
+        # Tracer bins and their data indices (matching desi_data.csv layout)
+        # BGS: idx 0 (DV_over_rs) — needs Jacobian transform
+        # LRG1: idx 1 (DM), 2 (DH)
+        # LRG2: idx 3 (DM), 4 (DH)
+        # LRG3+ELG1: idx 5 (DM), 6 (DH)
+        # ELG2: idx 7 (DM), 8 (DH)
+        # QSO: idx 9 (DM), 10 (DH)
+        # Lya QSO: idx 11 (DH), 12 (DM)
+        tracer_data_map = {
+            'LRG1': (1, 2),       # (DM_idx, DH_idx) in data
+            'LRG2': (3, 4),
+            'LRG3_ELG1': (5, 6),
+            'ELG2': (7, 8),
+            'QSO': (9, 10),
+            'Lya_QSO': (11, 12),  # data order is (DH, DM)
+        }
+
+        def _to_broadcastable(value):
+            if not isinstance(value, torch.Tensor):
+                value = torch.tensor(value, device=self.device, dtype=torch.float64)
+            return torch.broadcast_to(value.to(torch.float32), batch_shape)
+
+        def _build_emulator_input(tracer_bin):
+            # Build emulator inputs in the exact feature order expected by the
+            # checkpoint (e.g. current BAO models use ['N_tracers', 'Om', 'hrdrag']).
+            emu = self._emulators[tracer_bin]
+            feature_values = {
+                'N_tracers': n_tracers[tracer_bin],
+                'Om': Om,
+                'Omega_m': Om,  # alias safety
+                'Ok': Ok,
+                'w0': w0,
+                'wa': wa,
+                'hrdrag': hrdrag,
+            }
+
+            expanded = []
+            for name in emu['param_names']:
+                if name not in feature_values:
+                    raise ValueError(
+                        f"Unsupported emulator input '{name}' in tracer '{tracer_bin}'. "
+                        f"Available features: {sorted(feature_values.keys())}"
+                    )
+                expanded.append(_to_broadcastable(feature_values[name]))
+            return torch.stack(expanded, dim=-1)
+
+        # Fill 2x2 blocks for DH/DM tracers
+        for tracer_bin, (idx_a, idx_b) in tracer_data_map.items():
+            emu_input = _build_emulator_input(tracer_bin)
+            # Emulator returns [cov_DH_DH, cov_DH_DM, cov_DM_DM]
+            cov_pred = self._emulator_predict(tracer_bin, emu_input).to(torch.float64)
+
+            if tracer_bin == 'Lya_QSO':
+                # Data order is [DH, DM] — matches emulator order
+                covariance[..., idx_a, idx_a] = cov_pred[..., 0]  # cov_DH_DH
+                covariance[..., idx_a, idx_b] = cov_pred[..., 1]  # cov_DH_DM
+                covariance[..., idx_b, idx_a] = cov_pred[..., 1]  # symmetric
+                covariance[..., idx_b, idx_b] = cov_pred[..., 2]  # cov_DM_DM
+            else:
+                # Data order is [DM, DH] — need to reorder from emulator [DH, DM]
+                covariance[..., idx_a, idx_a] = cov_pred[..., 2]  # cov_DM_DM
+                covariance[..., idx_a, idx_b] = cov_pred[..., 1]  # cov_DH_DM = cov_DM_DH
+                covariance[..., idx_b, idx_a] = cov_pred[..., 1]  # symmetric
+                covariance[..., idx_b, idx_b] = cov_pred[..., 0]  # cov_DH_DH
+
+        # BGS (idx 0): DV_over_rs — Jacobian propagation from DH/DM covariance
+        bgs_emu_input = _build_emulator_input('BGS')
+        bgs_cov_pred = self._emulator_predict('BGS', bgs_emu_input).to(torch.float64)
+        # bgs_cov_pred: [cov_DH_DH, cov_DH_DM, cov_DM_DM]
+
+        # Get mean DH, DM, DV at BGS z_eff for Jacobian
+        bgs_z_eff = torch.tensor(
+            self.desi_data[self.desi_data["tracer"] == "BGS"]["z"].values[0],
+            device=self.device, dtype=torch.float64
+        )
+        DH_mean = self.D_H_func(bgs_z_eff, **parameters)  # (..., 1)
+        DM_mean = self.D_M_func(bgs_z_eff, **parameters)  # (..., 1)
+        DV_mean = self.D_V_func(bgs_z_eff, **parameters)  # (..., 1)
+
+        # Squeeze trailing Nz dim
+        DH_mean = DH_mean.squeeze(-1)
+        DM_mean = DM_mean.squeeze(-1)
+        DV_mean = DV_mean.squeeze(-1)
+
+        # Jacobian: dDV/dDH = (1/3)*DV/DH, dDV/dDM = (2/3)*DV/DM
+        dDV_dDH = (1.0 / 3.0) * DV_mean / DH_mean
+        dDV_dDM = (2.0 / 3.0) * DV_mean / DM_mean
+
+        # Var(DV) = J @ Cov(DH,DM) @ J^T
+        # = dDV_dDH^2 * cov_DH_DH + 2 * dDV_dDH * dDV_dDM * cov_DH_DM + dDV_dDM^2 * cov_DM_DM
+        var_DV = (dDV_dDH ** 2 * bgs_cov_pred[..., 0].to(torch.float64)
+                  + 2.0 * dDV_dDH * dDV_dDM * bgs_cov_pred[..., 1].to(torch.float64)
+                  + dDV_dDM ** 2 * bgs_cov_pred[..., 2].to(torch.float64))
+        covariance[..., 0, 0] = var_DV
+
+        return covariance
+
+    def _stabilize_covariance(self, covariance_matrix):
+        """Make covariance numerically SPD for MultivariateNormal sampling."""
+        cov = 0.5 * (covariance_matrix + covariance_matrix.transpose(-1, -2))
+        n_dim = cov.shape[-1]
+        eye = torch.eye(n_dim, device=cov.device, dtype=cov.dtype)
+        eye = eye.view(*([1] * (cov.ndim - 2)), n_dim, n_dim)
+
+        # Ensure strictly positive diagonal entries.
+        diag = torch.diagonal(cov, dim1=-2, dim2=-1)
+        cov = cov.clone()
+        idx = torch.arange(n_dim, device=cov.device)
+        cov[..., idx, idx] = torch.clamp(diag, min=1e-12)
+
+        # Try adaptive diagonal jitter first.
+        mean_diag = torch.diagonal(cov, dim1=-2, dim2=-1).abs().mean(dim=-1)
+        jitter = torch.clamp(mean_diag, min=1.0) * 1e-10
+        for _ in range(6):
+            info = torch.linalg.cholesky_ex(cov).info
+            if torch.all(info == 0):
+                return cov
+            failing = (info > 0).to(cov.dtype)
+            cov = cov + failing[..., None, None] * jitter[..., None, None] * eye
+            jitter = jitter * 10.0
+
+        # Final robust fallback: project to SPD by clipping eigenvalues.
+        evals, evecs = torch.linalg.eigh(cov)
+        evals = torch.clamp(evals, min=1e-10)
+        cov = evecs @ torch.diag_embed(evals) @ evecs.transpose(-1, -2)
+        cov = 0.5 * (cov + cov.transpose(-1, -2))
+        return cov
+
     @profile_method
     def pyro_model(self, tracer_ratio):
         passed_ratio = self.calc_passed(tracer_ratio)
         with pyro.plate_stack("plate", passed_ratio.shape[:-1]):
             parameters = self.sample_parameters(passed_ratio.shape[:-1])
-            means = torch.zeros(passed_ratio.shape[:-1] + (self.sigmas.shape[-1],), device=self.device)
-            rescaled_sigmas = torch.zeros(passed_ratio.shape[:-1] + (self.sigmas.shape[-1],), device=self.device)
-            z_eff = torch.tensor(self.desi_data[self.desi_data["quantity"] == "DH_over_rs"]["z"].to_list(), device=self.device)
-            means[:, :, self.DH_idx] = self.D_H_func(z_eff, **parameters)
-            rescaled_sigmas[:, :, self.DH_idx] = self.sigmas[self.DH_idx] * self.sigma_scaling_factor(passed_ratio, tracer_ratio, self.DH_idx)
-            if self.include_D_M:
-                z_eff = torch.tensor(self.desi_data[self.desi_data["quantity"] == "DM_over_rs"]["z"].to_list(), device=self.device)
-                means[:, :, self.DM_idx] = self.D_M_func(z_eff, **parameters)
-                rescaled_sigmas[:, :, self.DM_idx] = self.sigmas[self.DM_idx] * self.sigma_scaling_factor(passed_ratio, tracer_ratio, self.DM_idx)
 
-            if self.include_D_V:
-                z_eff = torch.tensor(self.desi_data[self.desi_data["quantity"] == "DV_over_rs"]["z"].to_list(), device=self.device)
-                means[:, :, self.DV_idx] = self.D_V_func(z_eff, **parameters)
-                rescaled_sigmas[:, :, self.DV_idx] = self.sigmas[self.DV_idx] * self.sigma_scaling_factor(passed_ratio, tracer_ratio, self.DV_idx)
-
-            # extract correlation matrix from DESI covariance matrix
-            if self.include_D_V and self.include_D_M:
+            if self.likelihood_mode == 'emulator':
+                # Means: same D_H, D_M, D_V computation as scaling mode
+                means = torch.zeros(passed_ratio.shape[:-1] + (self.sigmas.shape[-1],), device=self.device)
+                z_eff = torch.tensor(self.desi_data[self.desi_data["quantity"] == "DH_over_rs"]["z"].to_list(), device=self.device)
+                means[:, :, self.DH_idx] = self.D_H_func(z_eff, **parameters)
+                if self.include_D_M:
+                    z_eff = torch.tensor(self.desi_data[self.desi_data["quantity"] == "DM_over_rs"]["z"].to_list(), device=self.device)
+                    means[:, :, self.DM_idx] = self.D_M_func(z_eff, **parameters)
+                if self.include_D_V:
+                    z_eff = torch.tensor(self.desi_data[self.desi_data["quantity"] == "DV_over_rs"]["z"].to_list(), device=self.device)
+                    means[:, :, self.DV_idx] = self.D_V_func(z_eff, **parameters)
                 means = means.to(self.device)
-                # convert correlation matrix to covariance matrix using rescaled sigmas
-                covariance_matrix = self.corr_matrix * (rescaled_sigmas.unsqueeze(-1) * rescaled_sigmas.unsqueeze(-2))
-            else:
-                # only use D_H values for mean and covariance matrix
-                means = means[:, :, self.DH_idx].to(self.device)
-                covariance_matrix = self.corr_matrix[self.DH_idx, self.DH_idx] * (rescaled_sigmas[:, :, self.DH_idx].unsqueeze(-1) * rescaled_sigmas[:, :, self.DH_idx].unsqueeze(-2))
 
-            return pyro.sample(self.observation_labels[0], dist.MultivariateNormal(means, covariance_matrix))
+                # Covariance: from emulators
+                covariance_matrix = self._build_emulator_covariance(tracer_ratio, parameters)
+                covariance_matrix = self._stabilize_covariance(covariance_matrix)
+                return pyro.sample(self.observation_labels[0], dist.MultivariateNormal(means, covariance_matrix))
+            else:
+                # Existing scaling code
+                means = torch.zeros(passed_ratio.shape[:-1] + (self.sigmas.shape[-1],), device=self.device)
+                rescaled_sigmas = torch.zeros(passed_ratio.shape[:-1] + (self.sigmas.shape[-1],), device=self.device)
+                z_eff = torch.tensor(self.desi_data[self.desi_data["quantity"] == "DH_over_rs"]["z"].to_list(), device=self.device)
+                means[:, :, self.DH_idx] = self.D_H_func(z_eff, **parameters)
+                rescaled_sigmas[:, :, self.DH_idx] = self.sigmas[self.DH_idx] * self.sigma_scaling_factor(passed_ratio, tracer_ratio, self.DH_idx)
+                if self.include_D_M:
+                    z_eff = torch.tensor(self.desi_data[self.desi_data["quantity"] == "DM_over_rs"]["z"].to_list(), device=self.device)
+                    means[:, :, self.DM_idx] = self.D_M_func(z_eff, **parameters)
+                    rescaled_sigmas[:, :, self.DM_idx] = self.sigmas[self.DM_idx] * self.sigma_scaling_factor(passed_ratio, tracer_ratio, self.DM_idx)
+
+                if self.include_D_V:
+                    z_eff = torch.tensor(self.desi_data[self.desi_data["quantity"] == "DV_over_rs"]["z"].to_list(), device=self.device)
+                    means[:, :, self.DV_idx] = self.D_V_func(z_eff, **parameters)
+                    rescaled_sigmas[:, :, self.DV_idx] = self.sigmas[self.DV_idx] * self.sigma_scaling_factor(passed_ratio, tracer_ratio, self.DV_idx)
+
+                # extract correlation matrix from DESI covariance matrix
+                if self.include_D_V and self.include_D_M:
+                    means = means.to(self.device)
+                    # convert correlation matrix to covariance matrix using rescaled sigmas
+                    covariance_matrix = self.corr_matrix * (rescaled_sigmas.unsqueeze(-1) * rescaled_sigmas.unsqueeze(-2))
+                else:
+                    # only use D_H values for mean and covariance matrix
+                    means = means[:, :, self.DH_idx].to(self.device)
+                    covariance_matrix = self.corr_matrix[self.DH_idx, self.DH_idx] * (rescaled_sigmas[:, :, self.DH_idx].unsqueeze(-1) * rescaled_sigmas[:, :, self.DH_idx].unsqueeze(-2))
+
+                return pyro.sample(self.observation_labels[0], dist.MultivariateNormal(means, covariance_matrix))
 
     @profile_method
     def Pk_multipoles(self, k_bins, z_eff, omega_cdm, omega_b, h, ln10A_s, n_s,

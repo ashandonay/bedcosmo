@@ -8,6 +8,7 @@ bb:
   prior_args_path: prior_args_gamma.yaml
   flow_type: NAF
   transform_input: true
+  input_transform_type: marginal
   activation: elu
   n_transforms: 4
   cond_hidden_size: 128
@@ -46,6 +47,7 @@ bb_temp:
   prior_args_path: prior_args_gamma_temp.yaml
   flow_type: NAF
   transform_input: true
+  input_transform_type: marginal
   activation: elu
   n_transforms: 4
   cond_hidden_size: 128
@@ -76,15 +78,15 @@ bb_temp:
   log_nominal_area: false
   verbose: true
 
-eazy_kde:
-  cosmo_model: eazy_kde
-  mlflow_exp: eazy_kde
+empirical:
+  cosmo_model: empirical
+  mlflow_exp: empirical
   pyro_seed: 1
   nf_seed: 1
-  prior_args_path: prior_args_eazy_kde.yaml
+  prior_args_path: prior_args_empirical.yaml
   flow_type: NAF
   transform_input: true
-  # Only Gaussianize well-behaved marginals; f_k use tanh squash into NF (see sed_prior README).
+  input_transform_type: joint
   transform_cosmo_params:
     - log_c_scale
     - z
@@ -99,9 +101,9 @@ eazy_kde:
   nf_transform: affine
   spline_bins: 16
   design_args_path: design_args.yaml
-  total_steps: 10000
+  total_steps: 100000
   optimizer: Adam
-  initial_lr: 0.0001
+  initial_lr: 0.0005
   final_lr: 0.00001
   grad_clip: 0.0
   warmup_fraction: 0.05
@@ -114,20 +116,22 @@ eazy_kde:
   mag_err_cap: 10
   cdf_bins: 5000
   cdf_samples: 1000000
+  # KDE prior marginal modes (desi_eazy_empirical_prior_full); f7 uses median (bimodal)
   central_params:
-    z: 0.85
-    log_c_scale: 7.0
-    f1: 0.0
-    f2: 0.0
-    f3: 0.0
-    f4: 0.0
-    f5: 0.0
-    f6: 0.0
-    f7: 0.0
-    f8: 0.0
-    f9: 0.0
-    f10: 0.0
-    f11: 0.0
+    f1: 7.485695
+    f2: -2.556071
+    f3: -2.458513
+    f4: -2.475593
+    f5: -2.587700
+    f6: -2.455915
+    f7: 3.552354
+    f8: -2.464153
+    f9: -2.771274
+    f10: -2.704496
+    f11: -2.582472
+    f12: -2.691376
+    log_c_scale: 6.588856
+    z: 0.926622
   condition_design: true
   log_nominal_area: false
   verbose: true

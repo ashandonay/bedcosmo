@@ -505,6 +505,7 @@ def _plot_coefficient_bars(
 
 
 DEFAULT_MAX_CHI2_DOF = 1.2
+DEFAULT_Z_MIN = 0.01
 
 
 def apply_quality_cuts(
@@ -1158,7 +1159,22 @@ def main() -> None:
         default=None,
         help="Max spectra to fit after selection (random subsample). Default: fit all passing candidates.",
     )
-    parser.add_argument("--z-min", type=float, default=None)
+    parser.add_argument(
+        "--z-min",
+        type=float,
+        default=DEFAULT_Z_MIN,
+        help=(
+            "Minimum redshift for candidate selection. "
+            f"Default {DEFAULT_Z_MIN:g} drops near-zero redshifts."
+        ),
+    )
+    parser.add_argument(
+        "--no-z-min",
+        dest="z_min",
+        action="store_const",
+        const=None,
+        help="Disable the default redshift floor.",
+    )
     parser.add_argument("--z-max", type=float, default=None)
     parser.add_argument("--target-spectype", default="GALAXY")
 

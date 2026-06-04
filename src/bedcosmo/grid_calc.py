@@ -446,11 +446,15 @@ class GridCalculation:
                         z_b, T_b = np.broadcast_arrays(z, T)
                         T_tensor = torch.as_tensor(T_b, device=exp_device, dtype=torch.float64)
                         z_tensor = torch.as_tensor(z_b, device=exp_device, dtype=torch.float64)
+                        flux_aa = self.experiment._observed_spectral_flux(
+                            z_tensor, T=T_tensor
+                        )
                         features = self.experiment._calculate_magnitudes(
-                            z_tensor, T_tensor=T_tensor
+                            flux_aa
                         ).detach().cpu().numpy()
                     else:
-                        features = self.experiment._calculate_magnitudes(z_tensor).detach().cpu().numpy()
+                        flux_aa = self.experiment._observed_spectral_flux(z_tensor)
+                        features = self.experiment._calculate_magnitudes(flux_aa).detach().cpu().numpy()
             else:
                 raise NotImplementedError(f"Feature grid inference not implemented for {self.experiment.name}.")
 
@@ -1017,7 +1021,9 @@ class GridCalculation:
                         )
                         p_low, p_high = 0.0, 1.0
                     with torch.no_grad():
-                        track_features = self.experiment._calculate_magnitudes(z_arr).detach().cpu().numpy()
+                        track_features = self.experiment._calculate_magnitudes(
+                            self.experiment._observed_spectral_flux(z_arr)
+                        ).detach().cpu().numpy()
                 else:
                     raise NotImplementedError(f"Feature grid inference not implemented for {self.experiment.name}.")
                 filter_to_idx = {f"y_{d}": i for i, d in enumerate(self.experiment.design_labels)}
@@ -1166,7 +1172,9 @@ class GridCalculation:
                         )
                         p_low, p_high = 0.0, 1.0
                     with torch.no_grad():
-                        track_features = self.experiment._calculate_magnitudes(z_arr).detach().cpu().numpy()
+                        track_features = self.experiment._calculate_magnitudes(
+                            self.experiment._observed_spectral_flux(z_arr)
+                        ).detach().cpu().numpy()
                     filter_to_idx = {f"y_{d}": i for i, d in enumerate(self.experiment.design_labels)}
                     ix = filter_to_idx.get(feature_names[0])
                     iy = filter_to_idx.get(feature_names[1])

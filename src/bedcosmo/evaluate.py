@@ -145,6 +145,9 @@ class Evaluator:
         
         # Initialize plotter for saving figures
         self.plotter = RunPlotter(run_id=self.run_id, cosmo_exp=self.cosmo_exp, experiment_args=self.experiment_args)
+        # Plotting must reuse this experiment so param_bijector comes from the checkpoint,
+        # not a second init_experiment() that refits the joint Gaussianizer.
+        self.plotter._experiment = self.experiment
         
         # Cache for EIG calculations to avoid redundant computations
         self._eig_cache = {}
@@ -1084,9 +1087,13 @@ class Evaluator:
         # Make some evaluation plots
         try:
             self.plotter.generate_posterior(
-                eval_step=eval_step, display=['nominal', 'optimal'],  guide_samples=100000,
-                levels=self.levels, plot_prior=True, transform_output=self.nf_transform_output,
-                )
+                eval_step=eval_step,
+                display=['nominal', 'optimal'],
+                guide_samples=self.guide_samples,
+                levels=self.levels,
+                plot_prior=True,
+                transform_output=self.nf_transform_output,
+            )
             self._update_runtime()
         except Exception as e:
             print(f"Warning: generate_posterior failed: {e}")
@@ -1111,10 +1118,15 @@ class Evaluator:
             # Plot posterior at different training steps
             steps_to_plot = [self.total_steps//4, self.total_steps//2, self.total_steps*3//4, 'last']
             self.plotter.posterior_steps(
+                
                 steps=steps_to_plot,
+               
                 levels=self.levels,
-                guide_samples=50000,
+               
+                guide_samples=self.guide_samples,
+               
                 filename='posterior_steps',
+            ,
                 transform_output=self.nf_transform_output,
             )
             self._update_runtime()

@@ -266,12 +266,13 @@ def nf_loss(
         if log_probs is None:
             raise ValueError("Log probabilities are not provided")
         
-        # Check if experiment uses prior_flow - if so, use joint log_prob directly
-        if hasattr(experiment, 'prior_flow') and experiment.prior_flow is not None:
+        if log_probs is not None and "joint" in log_probs:
             prior_entropy = -1 * log_probs["joint"].mean(dim=0)
         else:
-            # Per-parameter log_probs from uniform priors: sum them
-            prior_entropy = -1 * sum(log_probs[l].mean(dim=0) for l in experiment.cosmo_params)
+            prior_entropy = -1 * sum(
+                log_probs[l].mean(dim=0)
+                for l in experiment.cosmo_params
+            )
         
         loss = prior_entropy - loss
 
@@ -557,100 +558,128 @@ def _create_condition_input(design, y_dict, observation_labels, condition_design
         return torch.cat(ys[1:], dim=-1)
 
 class LikelihoodDataset(Dataset):
-    def __init__(self, experiment, n_particles_per_device, designs=None, device="cuda", evaluation=False, particle_batch_size=None, profile=False, global_rank=0):
+    def __init__(
+        self,
+        experiment,
+        n_particles_per_device,
+        designs=None,
+        device="cuda",
+        evaluation=False,
+        particle_batch_size=None,
+        profile=False,
+        global_rank=0,
+    ):
         self.experiment = experiment
         self.n_particles_per_device = n_particles_per_device
         self.device = device
         self.evaluation = evaluation
         self.profile = profile
         self.global_rank = global_rank
+
         if particle_batch_size is None:
             self.particle_batch_size = n_particles_per_device
         else:
             self.particle_batch_size = min(particle_batch_size, n_particles_per_device)
+
         if designs is None:
             self.designs = experiment.designs
         else:
             self.designs = designs
 
     def __len__(self):
-        # We only have one "batch" of designs, so return 1
+        # We only have one "batch" of designs, so return 1.
         return 1
 
     def __getitem__(self, idx):
-        # Process particles in batches to reduce memory usage
+        # Process particles in batches to reduce memory usage.
         if self.particle_batch_size >= self.n_particles_per_device:
-            # No batching needed - process all particles at once
             return self._process_particles(self.n_particles_per_device)
-        else:
-            # Process in batches and concatenate results
-            batch_results = []
-            n_batches = (self.n_particles_per_device + self.particle_batch_size - 1) // self.particle_batch_size
-            
-            for batch_idx in range(n_batches):
-                start_idx = batch_idx * self.particle_batch_size
-                end_idx = min(start_idx + self.particle_batch_size, self.n_particles_per_device)
-                n_particles_in_batch = end_idx - start_idx
-                
-                # Process this batch
-                batch_result = self._process_particles(n_particles_in_batch)
-                batch_results.append(batch_result)
-                
-                # Clear GPU cache between batches to free memory
-                if torch.cuda.is_available() and batch_idx < n_batches - 1:
-                    torch.cuda.empty_cache()
-            
-            # Concatenate results from all batches
-            samples_list, condition_input_list, log_probs_list = zip(*batch_results)
-            samples = torch.cat(samples_list, dim=0)
-            condition_input = torch.cat(condition_input_list, dim=0)
-            
-            if self.evaluation:
-                log_probs = {}
-                for key in log_probs_list[0].keys():
-                    log_probs[key] = torch.cat([lp[key] for lp in log_probs_list], dim=0)
-                return samples, condition_input, log_probs
-            else:
-                return samples, condition_input
-    
+
+        batch_results = []
+        n_batches = (
+            self.n_particles_per_device + self.particle_batch_size - 1
+        ) // self.particle_batch_size
+
+        for batch_idx in range(n_batches):
+            start_idx = batch_idx * self.particle_batch_size
+            end_idx = min(
+                start_idx + self.particle_batch_size,
+                self.n_particles_per_device,
+            )
+            n_particles_in_batch = end_idx - start_idx
+
+            batch_result = self._process_particles(n_particles_in_batch)
+            batch_results.append(batch_result)
+
+            if torch.cuda.is_available() and batch_idx < n_batches - 1:
+                torch.cuda.empty_cache()
+
+        samples_list, condition_input_list, log_probs_list = zip(*batch_results)
+        samples = torch.cat(samples_list, dim=0)
+        condition_input = torch.cat(condition_input_list, dim=0)
+
+        if self.evaluation:
+            log_probs = {}
+            for key in log_probs_list[0].keys():
+                log_probs[key] = torch.cat([lp[key] for lp in log_probs_list], dim=0)
+            return samples, condition_input, log_probs
+
+        return samples, condition_input
+
     @profile_method
     def _sample_from_model(self, expanded_design):
         """Sample from the pyro model and return trace, y_dict, theta_dict."""
         with torch.no_grad():
             trace = poutine.trace(self.experiment.pyro_model).get_trace(expanded_design)
-            y_dict = {l: trace.nodes[l]["value"] for l in self.experiment.observation_labels}
-            theta_dict = {l: trace.nodes[l]["value"] for l in self.experiment.cosmo_params}
+            y_dict = {
+                l: trace.nodes[l]["value"]
+                for l in self.experiment.observation_labels
+            }
+            theta_dict = {
+                l: trace.nodes[l]["value"]
+                for l in self.experiment.cosmo_params
+            }
         return trace, y_dict, theta_dict
 
     @profile_method
     def _compute_prior_log_probs(self, samples, trace):
-        """Compute log probabilities from prior (either prior_flow or uniform)."""
-        if hasattr(self.experiment, 'prior_flow') and self.experiment.prior_flow is not None:
-            # Two transform_input flags are in play:
-            #   prior_transform_input -- whether the prior_flow expects T_pf(theta)
-            #   cur_transform_input   -- whether the current flow expects T_cur(theta)
-            # The current flow's log_prob (computed in nf_loss) lives in T_cur space
-            # if cur_transform_input else theta space. To make prior_entropy and
-            # posterior_entropy unit-matched we evaluate prior_flow.log_prob in its
-            # native space, change-of-variables to theta space, then change-of-
-            # variables again to T_cur space. Either change-of-variables drops out
-            # when the corresponding transform_input flag is False, and both drop
-            # out together when T_cur ~~ T_pf (same bijector state).
-            nominal_context = self.experiment.prior_flow_metadata['nominal_context'].to(self.device)
+        """
+        Compute prior log probabilities.
+
+        If a learned prior_flow exists, evaluate it with the correct
+        change-of-variables accounting between:
+            theta-space,
+            prior_flow transform space,
+            current-flow transform space.
+
+        Otherwise, use the Pyro trace prior log_probs and, when
+        transform_input=True, convert them into the current NF coordinate
+        space by subtracting log|dT/dtheta|.
+        """
+        if hasattr(self.experiment, "prior_flow") and self.experiment.prior_flow is not None:
+            nominal_context = self.experiment.prior_flow_metadata[
+                "nominal_context"
+            ].to(self.device)
+
             batch_shape = samples.shape[:-1]
             flattened_samples = samples.view(-1, samples.shape[-1])
 
-            prior_transform_input = self.experiment.prior_flow_metadata['transform_input']
-            cur_transform_input = getattr(self.experiment, 'transform_input', False)
-            prior_flow_bijector = getattr(self.experiment, 'prior_flow_bijector', None)
-            param_bijector = getattr(self.experiment, 'param_bijector', None)
+            prior_transform_input = self.experiment.prior_flow_metadata[
+                "transform_input"
+            ]
+            cur_transform_input = getattr(self.experiment, "transform_input", False)
+
+            prior_flow_bijector = getattr(self.experiment, "prior_flow_bijector", None)
+            param_bijector = getattr(self.experiment, "param_bijector", None)
 
             if prior_transform_input and prior_flow_bijector is None:
                 raise RuntimeError(
                     "prior_flow was trained with transform_input=True but the "
-                    "experiment has no prior_flow_bijector attached. _init_param_bijector "
-                    "should have built one from prior_flow_metadata['bijector_state']."
+                    "experiment has no prior_flow_bijector attached. "
+                    "_init_param_bijector should have built one from "
+                    "prior_flow_metadata['bijector_state']."
                 )
+
             if cur_transform_input and param_bijector is None:
                 raise RuntimeError(
                     "experiment.transform_input=True but no param_bijector is attached."
@@ -659,92 +688,137 @@ class LikelihoodDataset(Dataset):
             total_samples = flattened_samples.shape[0]
             chunk_size = min(self.particle_batch_size, total_samples)
 
-            log_prob_all = torch.empty(total_samples, device=flattened_samples.device)
+            log_prob_all = torch.empty(
+                total_samples,
+                device=flattened_samples.device,
+            )
+
             with torch.no_grad():
                 for start in range(0, total_samples, chunk_size):
                     end = min(start + chunk_size, total_samples)
                     chunk_samples = flattened_samples[start:end]
 
-                    # Step 1: native input for the prior_flow (T_pf(theta) or theta).
+                    # Step 1: evaluate prior_flow in its native input space.
                     if prior_transform_input:
-                        pf_input = torch.empty_like(chunk_samples)
-                        for i, name in enumerate(self.experiment.cosmo_params):
-                            pf_input[..., i:i + 1] = prior_flow_bijector.prior_to_gaussian(
-                                chunk_samples[..., i:i + 1], name
-                            )
+                        pf_input = self.experiment.params_to_unconstrained(
+                            chunk_samples,
+                            bijector_class=prior_flow_bijector,
+                        )
                     else:
                         pf_input = chunk_samples
 
-                    expanded_context = nominal_context.unsqueeze(0).expand(end - start, -1)
+                    expanded_context = nominal_context.unsqueeze(0).expand(
+                        end - start,
+                        -1,
+                    )
                     prior_dist = self.experiment.prior_flow(expanded_context)
                     chunk_log_prob = prior_dist.log_prob(pf_input)
 
-                    # Step 2: change-of-variables to theta space (only if T_pf was applied).
+                    # Step 2: convert prior_flow density back to theta-space.
                     if prior_transform_input:
-                        log_det_pf = chunk_samples.new_zeros(chunk_samples.shape[0])
-                        for i, name in enumerate(self.experiment.cosmo_params):
-                            log_det_pf = log_det_pf + prior_flow_bijector.log_abs_det_jacobian(
-                                chunk_samples[..., i:i + 1], name
-                            ).flatten()
+                        log_det_pf = self.experiment._transform_log_abs_det_flat(
+                            prior_flow_bijector,
+                            chunk_samples,
+                        )
                         chunk_log_prob = chunk_log_prob + log_det_pf
 
-                    # Step 3: change-of-variables from theta space into T_cur space
-                    # (only if the current flow operates in T_cur space).
+                    # Step 3: convert theta-space density to current NF space.
                     if cur_transform_input:
-                        log_det_cur = chunk_samples.new_zeros(chunk_samples.shape[0])
-                        for i, name in enumerate(self.experiment.cosmo_params):
-                            log_det_cur = log_det_cur + param_bijector.log_abs_det_jacobian(
-                                chunk_samples[..., i:i + 1], name
-                            ).flatten()
+                        log_det_cur = self.experiment._transform_log_abs_det_flat(
+                            param_bijector,
+                            chunk_samples,
+                        )
                         chunk_log_prob = chunk_log_prob - log_det_cur
 
                     log_prob_all[start:end] = chunk_log_prob
 
             log_prob_all = log_prob_all.reshape(batch_shape)
             return {"joint": log_prob_all}
-        else:
-            trace.compute_log_prob()
-            log_probs = {l: trace.nodes[l]["log_prob"] for l in self.experiment.cosmo_params}
-            if getattr(self.experiment, "transform_input", False):
-                # nf_loss feeds the flow params_to_unconstrained(samples), so its
-                # log_prob is in the post-bijector space. Apply change-of-variables
-                # to express the prior log_prob in the same space:
-                #     log p_T(T(x)) = log p_x(x) - log|dT/dx|
-                # so prior_entropy - posterior_entropy matches in units.
-                bijector = self.experiment.param_bijector
-                bijector_names = self.experiment._bijector_param_names()
-                for i, name in enumerate(self.experiment.cosmo_params):
-                    if name not in bijector_names:
-                        continue
-                    log_det = bijector.log_abs_det_jacobian(samples[..., i:i + 1], name)
-                    log_probs[name] = log_probs[name] - log_det.reshape(log_probs[name].shape)
-            return log_probs
+
+        trace.compute_log_prob()
+
+        if getattr(self.experiment, "transform_input", False):
+            bijector = self.experiment.param_bijector
+
+            # If we are using a joint empirical Gaussianizer, the transformed samples
+            # are already the natural prior space for the NF. For empirical-CDF +
+            # whitening, this space is approximately N(0, I), so evaluate the prior
+            # directly there instead of relying on Delta log_probs from the Pyro trace.
+            if bijector.uses_joint_gaussianizer():
+                batch_shape = samples.shape[:-1]
+                flat_samples = samples.reshape(-1, samples.shape[-1])
+
+                with torch.no_grad():
+                    y_flat = self.experiment.params_to_unconstrained(
+                        flat_samples,
+                        bijector_class=bijector,
+                    )
+
+                    # Standard-normal prior in transformed NF space.
+                    # Shape: [n_flat]
+                    joint_log_prob_flat = -0.5 * (
+                        y_flat.pow(2).sum(dim=-1)
+                        + y_flat.shape[-1] * math.log(2.0 * math.pi)
+                    )
+                
+                return {
+                    "joint": joint_log_prob_flat.reshape(batch_shape)
+                }
+
+        # Otherwise fall back to Pyro trace log-probs.
+        log_probs = {
+            l: trace.nodes[l]["log_prob"]
+            for l in self.experiment.cosmo_params
+        }
+
+        if getattr(self.experiment, "transform_input", False):
+            bijector = self.experiment.param_bijector
+
+            total_log_det = self.experiment._transform_log_abs_det_flat(
+                bijector,
+                samples,
+            )
+
+            applied_transform_correction = False
+            transformed_names = set(self.experiment._bijector_param_names())
+            transformed_names |= set(self.experiment._joint_transform_param_name_set())
+
+            for name in self.experiment.cosmo_params:
+                if name in transformed_names and not applied_transform_correction:
+                    log_probs[name] = log_probs[name] - total_log_det.reshape(
+                        log_probs[name].shape
+                    )
+                    applied_transform_correction = True
+
+        return log_probs
 
     @profile_method
     def _process_particles(self, n_particles):
         """Process a batch of particles and return results."""
-        # Dynamically expand the designs on each access
         expanded_design = lexpand(self.designs, n_particles).to(self.device)
 
-        # Sample from pyro model
         trace, y_dict, theta_dict = self._sample_from_model(expanded_design)
 
-        # Extract the target samples (theta)
-        samples = torch.cat([theta_dict[k].unsqueeze(dim=-1) for k in self.experiment.cosmo_params], dim=-1)
+        samples = torch.cat(
+            [
+                theta_dict[k].unsqueeze(dim=-1)
+                for k in self.experiment.cosmo_params
+            ],
+            dim=-1,
+        )
 
-        # Create the condition input
         condition_input = _create_condition_input(
             design=expanded_design,
             y_dict=y_dict,
             observation_labels=self.experiment.observation_labels,
-            condition_design=True
+            condition_design=True,
         )
 
         if self.evaluation:
             log_probs = self._compute_prior_log_probs(samples, trace)
             del trace, expanded_design, y_dict, theta_dict
             return samples, condition_input, log_probs
-        else:
-            del trace, expanded_design, y_dict, theta_dict
-            return samples, condition_input
+
+        del trace, expanded_design, y_dict, theta_dict
+        return samples, condition_input
 

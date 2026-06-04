@@ -28,12 +28,12 @@ bb_temp:
   profile: true
   verbose: true
 
-eazy_kde:
-  cosmo_model: eazy_kde
+empirical:
+  cosmo_model: empirical
   eval_step: last
   levels: [0.68, 0.95]
   guide_samples: 100000
-  n_particles: 25          # or tune via CLI
+  n_particles: 200         # or tune via CLI
   particle_batch_size: 10  # helps GPU memory for eazy
   n_evals: 5
   param_space: physical

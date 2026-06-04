@@ -8,6 +8,7 @@ the common interface and shared functionality for all experiment classes.
 import contextlib
 import io
 from abc import ABC, abstractmethod
+from pathlib import Path
 
 import getdist
 import numpy as np
@@ -15,10 +16,9 @@ import pyro
 from pyro import distributions as dist
 from pyro.contrib.util import lexpand
 import torch
-
+from bedcosmo.transform import Bijector
+from bedcosmo.custom_dist import EmpiricalPrior
 from bedcosmo.util import (
-    Bijector,
-    EmpiricalPrior,
     GETDIST_SETTINGS,
     profile_method,
 )
@@ -234,6 +234,113 @@ class BaseExperiment(ABC):
     # Parameter Transformation Methods
     # =========================================================================
 
+    def _init_input_transform_options(
+        self,
+        input_transform_type="marginal",
+        joint_transform_params=None,
+        joint_transform_shrinkage=1e-3,
+        joint_transform_fit_path=None,
+        joint_transform_fit_samples=None,
+        flow_squash_params=None,
+    ):
+        """Store input-transform settings (per-param CDF vs joint empirical Gaussianizer)."""
+        from bedcosmo.transform import _normalize_input_transform_type
+
+        self.input_transform_type = _normalize_input_transform_type(
+            str(input_transform_type)
+        )
+        self.joint_transform_params = joint_transform_params
+        self.joint_transform_shrinkage = float(joint_transform_shrinkage)
+        self.joint_transform_fit_path = joint_transform_fit_path
+        self.joint_transform_fit_samples = joint_transform_fit_samples
+        self.flow_squash_params = flow_squash_params
+
+    def get_joint_transform_fit_matrix(self, n_max: int) -> np.ndarray | None:
+        """Optional override: return (N, D_c) physical samples for joint transform correlation fit."""
+        return None
+
+    def _uses_joint_transform(self) -> bool:
+        return (
+            getattr(self, "transform_input", False)
+            and getattr(self, "input_transform_type", "marginal") == "joint"
+        )
+
+    def _joint_transform_param_names(self) -> list[str]:
+        names = getattr(self, "joint_transform_params", None)
+        if names is not None:
+            return list(names)
+        tc = getattr(self, "transform_cosmo_params", None)
+        if tc is not None:
+            return list(tc)
+        return list(self.cosmo_params)
+
+    def _joint_transform_param_indices(self) -> list[int]:
+        names = self._joint_transform_param_names()
+        return [self.cosmo_params.index(n) for n in names]
+
+    def _flow_squash_param_names(self) -> set[str]:
+        explicit = getattr(self, "flow_squash_params", None)
+        if explicit is not None:
+            return set(explicit)
+        return {n for n in self.cosmo_params if n.startswith("f")}
+
+    def _resolve_joint_transform_fit_matrix(self, n_max: int) -> np.ndarray:
+        """Physical samples (N, D_c) for fitting the joint empirical Gaussianizer."""
+        names = self._joint_transform_param_names()
+        dc = len(names)
+
+        custom = self.get_joint_transform_fit_matrix(n_max)
+        if custom is not None:
+            x = np.asarray(custom, dtype=np.float64)
+            if x.shape[-1] != dc:
+                raise ValueError(
+                    f"get_joint_transform_fit_matrix expected {dc} columns, got {x.shape[-1]}"
+                )
+            if len(x) > n_max:
+                rng = np.random.default_rng(0)
+                x = x[rng.choice(len(x), size=n_max, replace=False)]
+            return x
+
+        fit_path = getattr(self, "joint_transform_fit_path", None)
+        if fit_path is not None:
+            return self._load_joint_transform_fit_path(fit_path, n_max, dc)
+
+        n_draw = getattr(self, "joint_transform_fit_samples", None)
+        if n_draw is None:
+            n_draw = n_max
+        n_draw = int(min(n_draw, n_max))
+
+        with pyro.plate_stack("plate", (n_draw,)):
+            drawn = self.sample_parameters((n_draw,), use_prior_flow=True)
+        cols = [
+            drawn[name].detach().cpu().numpy().reshape(-1)
+            for name in names
+        ]
+        return np.column_stack(cols)
+
+    @staticmethod
+    def _load_joint_transform_fit_path(path, n_max: int, n_cols: int) -> np.ndarray:
+        p = Path(path).expanduser()
+        if not p.exists():
+            raise FileNotFoundError(f"joint_transform_fit_path not found: {p}")
+        if p.suffix == ".npz":
+            data = np.load(p)
+            if "x" in data:
+                x = np.asarray(data["x"], dtype=np.float64)
+            else:
+                key = list(data.files)[0]
+                x = np.asarray(data[key], dtype=np.float64)
+        else:
+            x = np.asarray(np.load(p), dtype=np.float64)
+        if x.ndim != 2 or x.shape[1] != n_cols:
+            raise ValueError(
+                f"joint_transform_fit_path array must be (N, {n_cols}), got {x.shape}"
+            )
+        if len(x) > n_max:
+            rng = np.random.default_rng(0)
+            x = x[rng.choice(len(x), size=n_max, replace=False)]
+        return x
+
     def _init_param_bijector(
         self,
         bijector_state=None,
@@ -273,9 +380,12 @@ class BaseExperiment(ABC):
                         source = "prior_flow"
 
             skip = bijector_state is not None
-            bijector_keys = None
-            if getattr(self, "transform_cosmo_params", None) is not None:
+            if self._uses_joint_transform():
+                bijector_keys = list(self._joint_transform_param_names())
+            elif getattr(self, "transform_cosmo_params", None) is not None:
                 bijector_keys = list(self.transform_cosmo_params)
+            else:
+                bijector_keys = None
             self.param_bijector = Bijector(
                 self,
                 cdf_bins=cdf_bins,
@@ -287,6 +397,26 @@ class BaseExperiment(ABC):
                 if getattr(self, "global_rank", 0) == 0:
                     print(f"Restoring bijector state from {source}.")
                 self.param_bijector.set_state(bijector_state, device=self.device)
+
+            if self._uses_joint_transform() and not self.param_bijector.uses_joint_gaussianizer():
+                n_fit = int(
+                    getattr(self, "joint_transform_fit_samples", None) or cdf_samples
+                )
+                n_fit = min(n_fit, 50_000)
+                x_fit = self._resolve_joint_transform_fit_matrix(n_fit)
+                if getattr(self, "global_rank", 0) == 0:
+                    print(
+                        f"Fitting joint empirical Gaussianizer on {x_fit.shape[0]} samples, "
+                        f"D_c={x_fit.shape[1]} ({', '.join(self._joint_transform_param_names())})."
+                    )
+                self.param_bijector.fit_joint_gaussianizer(
+                    x_fit,
+                    param_names=self._joint_transform_param_names(),
+                    param_indices=self._joint_transform_param_indices(),
+                    shrinkage=getattr(self, "joint_transform_shrinkage", 1e-3),
+                    max_rows=50_000,
+                    device=self.device,
+                )
 
         # Build self.prior_flow_bijector if the prior_flow was trained with
         # transform_input=True. The prior_flow's log_prob lives in *its* training
@@ -321,13 +451,24 @@ class BaseExperiment(ABC):
         return self.central_params.get(name, default)
 
     def _bijector_param_names(self) -> set[str]:
-        """Parameters that use the empirical CDF → Gaussian bijector."""
+        """Parameters that use marginal CDF bijector (per-dimension, not joint transform block)."""
         if not getattr(self, "transform_input", False):
             return set()
+        if self._uses_joint_transform():
+            joint_transform = set(self._joint_transform_param_names())
+            tc = getattr(self, "transform_cosmo_params", None)
+            if tc is None:
+                return set()
+            return set(tc) - joint_transform
         names = getattr(self, "transform_cosmo_params", None)
         if names is None:
             return set(self.cosmo_params)
         return set(names)
+
+    def _joint_transform_param_name_set(self) -> set[str]:
+        if not self._uses_joint_transform():
+            return set()
+        return set(self._joint_transform_param_names())
 
     def _squash_logit_for_flow(self, x: torch.Tensor) -> torch.Tensor:
         """Bounded tanh map for logit coords left in physical space for the NF."""
@@ -337,6 +478,26 @@ class BaseExperiment(ABC):
     def _unsquash_logit_for_flow(self, y: torch.Tensor) -> torch.Tensor:
         h = float(getattr(self, "logit_flow_scale", 8.0))
         return h * torch.atanh(torch.clamp(y / h, -1.0 + 1e-6, 1.0 - 1e-6))
+
+    def _transform_log_abs_det_flat(self, bijector, samples: torch.Tensor) -> torch.Tensor:
+        """log|det dT/dx| for physical -> NF input; flattened batch dimension."""
+        flat = samples.reshape(-1, samples.shape[-1])
+        n = flat.shape[0]
+        if bijector.uses_joint_gaussianizer():
+            log_det = bijector.joint_log_abs_det_jacobian(flat)
+            for name in self._bijector_param_names():
+                idx = self.cosmo_params.index(name)
+                log_det = log_det + bijector.log_abs_det_jacobian(
+                    flat[:, idx : idx + 1], name
+                ).reshape(n)
+            return log_det
+        log_det = flat.new_zeros(n)
+        for i, name in enumerate(self.cosmo_params):
+            if name in self._bijector_param_names():
+                log_det = log_det + bijector.log_abs_det_jacobian(
+                    flat[:, i : i + 1], name
+                ).reshape(n)
+        return log_det
 
     @profile_method
     def params_to_unconstrained(self, params, bijector_class=None):
@@ -363,12 +524,29 @@ class BaseExperiment(ABC):
         if bijector_class is None:
             bijector_class = self.param_bijector
 
+        if bijector_class.uses_joint_gaussianizer():
+            y = bijector_class.prior_to_gaussian_joint(params)
+            bijector_names = self._bijector_param_names()
+            squash = self._flow_squash_param_names()
+            for i, param_name in enumerate(self.cosmo_params):
+                if param_name in self._joint_transform_param_name_set():
+                    continue
+                sl = slice(i, i + 1)
+                if param_name in bijector_names:
+                    y[..., sl] = bijector_class.prior_to_gaussian(
+                        params[..., sl], param_name
+                    )
+                elif param_name in squash:
+                    y[..., sl] = self._squash_logit_for_flow(params[..., sl])
+            return y
+
         bijector_names = self._bijector_param_names()
+        squash = self._flow_squash_param_names()
         for i, param_name in enumerate(self.cosmo_params):
             sl = slice(i, i + 1)
             if param_name in bijector_names:
                 y[..., sl] = bijector_class.prior_to_gaussian(params[..., sl], param_name)
-            elif param_name.startswith("f"):
+            elif param_name in squash:
                 y[..., sl] = self._squash_logit_for_flow(params[..., sl])
             else:
                 y[..., sl] = params[..., sl]
@@ -400,12 +578,27 @@ class BaseExperiment(ABC):
         if bijector_class is None:
             bijector_class = self.param_bijector
 
+        if bijector_class.uses_joint_gaussianizer():
+            x = bijector_class.gaussian_to_prior_joint(y)
+            bijector_names = self._bijector_param_names()
+            squash = self._flow_squash_param_names()
+            for i, param_name in enumerate(self.cosmo_params):
+                if param_name in self._joint_transform_param_name_set():
+                    continue
+                sl = slice(i, i + 1)
+                if param_name in bijector_names:
+                    x[..., sl] = bijector_class.gaussian_to_prior(y[..., sl], param_name)
+                elif param_name in squash:
+                    x[..., sl] = self._unsquash_logit_for_flow(y[..., sl])
+            return x
+
         bijector_names = self._bijector_param_names()
+        squash = self._flow_squash_param_names()
         for i, param_name in enumerate(self.cosmo_params):
             sl = slice(i, i + 1)
             if param_name in bijector_names:
                 x[..., sl] = bijector_class.gaussian_to_prior(y[..., sl], param_name)
-            elif param_name.startswith("f"):
+            elif param_name in squash:
                 x[..., sl] = self._unsquash_logit_for_flow(y[..., sl])
             else:
                 x[..., sl] = y[..., sl]
