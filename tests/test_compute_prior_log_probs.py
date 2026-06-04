@@ -28,7 +28,7 @@ from pyro import distributions as dist
 
 from bedcosmo.base import BaseExperiment
 from bedcosmo.pyro_oed_src import LikelihoodDataset
-from bedcosmo.util import Bijector
+from bedcosmo.transform import Bijector
 
 # Smaller-than-default bijector resolution so each fixture builds in <1s.
 _CDF_SAMPLES = 30_000
