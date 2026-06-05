@@ -349,7 +349,7 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         cosmo_model=None,
         prior_pool_size=65536,
         prior_pool_seed=7,
-        eazy_templates_dir="~/data/num_visits/eazy",
+        eazy_templates_dir=None,
         eazy_param="templates/fsps_full/fsps_QSF_12_v3.param",
         **kwargs,
     ):
@@ -382,10 +382,9 @@ class NumVisits(BaseExperiment, CosmologyMixin):
 
         if cosmo_model == "empirical" or prior_kde_path:
             if not prior_kde_path:
-                raise ValueError(
-                    "cosmo_model 'empirical' requires prior_kde_path: an absolute path to "
-                    "sed_prior_kde.joblib in prior_args_empirical.yaml (or pass via CLI)."
-                )
+                from bedcosmo.num_visits.sed_prior.paths import get_prior_kde_path
+
+                prior_kde_path = str(get_prior_kde_path())
             return self._init_prior_empirical(
                 parameters,
                 model_parameters,
@@ -488,10 +487,15 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         prior_kde_path: str,
         prior_pool_size: int,
         prior_pool_seed: int,
-        eazy_templates_dir: str,
+        eazy_templates_dir: str | None,
         eazy_param: str,
     ) -> tuple[dict, list[str], list[str]]:
-        kde_path = Path(os.path.expanduser(prior_kde_path)).resolve()
+        if not eazy_templates_dir:
+            from bedcosmo.num_visits.sed_prior.paths import get_eazy_templates_dir
+
+            eazy_templates_dir = str(get_eazy_templates_dir())
+
+        kde_path = Path(os.path.expandvars(os.path.expanduser(prior_kde_path))).resolve()
         if not kde_path.is_file():
             raise FileNotFoundError(f"prior_kde_path not found: {kde_path}")
 

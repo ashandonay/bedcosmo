@@ -8,8 +8,10 @@ from urllib.request import urlretrieve
 
 import numpy as np
 
+from .paths import get_eazy_templates_dir
+
 EAZY_RAW_BASE = "https://raw.githubusercontent.com/gbrammer/eazy-photoz/master/"
-DEFAULT_TEMPLATES_DIR = Path(os.path.expanduser("~/data/num_visits/eazy"))
+DEFAULT_TEMPLATES_DIR = get_eazy_templates_dir()
 DEFAULT_PARAM_12D = "templates/fsps_full/fsps_QSF_12_v3.param"
 # Rest-frame tabulation range for NumVisits / template bank (Angstrom).
 # Native EAZY files span ~91–1e8 Å; LSST needs dense sampling in the optical/NIR only.

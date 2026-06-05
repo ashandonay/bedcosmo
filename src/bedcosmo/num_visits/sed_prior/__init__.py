@@ -1,5 +1,6 @@
 """Empirical galaxy SED prior from DESI spectra and EAZY template fits."""
 
+from .build_empirical_prior import build_empirical_prior
 from .build_empirical_sed_prior_kde import (
     coeffs_from_sample_row,
     load_prior_training_table,
@@ -9,6 +10,22 @@ from .build_empirical_sed_prior_kde import (
     sample_sed_prior_kde,
     samples_to_coeffs,
     save_sed_prior_kde,
+)
+from .combine_healpix_weights import combine_healpix_weights
+from .desi_data import ensure_desi_healpix, get_local_desi_paths
+from .paths import (
+    DEFAULT_HEALPIX,
+    DEFAULT_EMPIRICAL_PRIOR_DIR,
+    NUM_VISITS_EXPERIMENT,
+    get_bedcosmo_scratch,
+    get_desi_data_dir,
+    get_eazy_templates_dir,
+    get_healpix_fit_dir,
+    get_num_visits_scratch,
+    get_prior_build_dir,
+    get_prior_kde_path,
+    get_prior_weights_csv,
+    get_scratch_root,
 )
 from .prior_sampler import (
     EmpiricalPriorPool,
@@ -41,15 +58,31 @@ from .templates import (
 )
 
 __all__ = [
+    "DEFAULT_EMPIRICAL_PRIOR_DIR",
+    "DEFAULT_HEALPIX",
+    "DEFAULT_PARAM_12D",
+    "DEFAULT_TEMPLATES_DIR",
+    "NUM_VISITS_EXPERIMENT",
     "PARAMETERIZATION_CLR",
     "PARAMETERIZATION_LOGITS",
     "PARAMETERIZATION_WEIGHTS",
     "clr_to_weights",
-    "DEFAULT_PARAM_12D",
-    "DEFAULT_TEMPLATES_DIR",
     "EmpiricalPriorPool",
+    "build_empirical_prior",
     "build_gpu_prior_pool",
+    "combine_healpix_weights",
     "coeffs_from_sample_row",
+    "ensure_desi_healpix",
+    "get_bedcosmo_scratch",
+    "get_desi_data_dir",
+    "get_eazy_templates_dir",
+    "get_healpix_fit_dir",
+    "get_local_desi_paths",
+    "get_num_visits_scratch",
+    "get_prior_build_dir",
+    "get_prior_kde_path",
+    "get_prior_weights_csv",
+    "get_scratch_root",
     "load_empirical_prior",
     "load_eazy_template_bank",
     "load_eazy_templates",

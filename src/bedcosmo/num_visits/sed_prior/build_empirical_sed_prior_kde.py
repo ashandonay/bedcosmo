@@ -46,56 +46,30 @@ from scipy import stats
 from sklearn.neighbors import KernelDensity
 from sklearn.preprocessing import StandardScaler
 
-try:
-    from .fit_eazy_weights_to_desi import (
-        DEFAULT_MAX_CHI2_DOF,
-        apply_quality_cuts,
-        build_prior_parameter_samples,
-        n_template_coeff_columns,
-        prior_a_column_names,
-        prior_quality_mask,
-        save_triangle_plot,
-    )
-except ImportError:
-    from fit_eazy_weights_to_desi import (
-        DEFAULT_MAX_CHI2_DOF,
-        apply_quality_cuts,
-        build_prior_parameter_samples,
-        n_template_coeff_columns,
-        prior_a_column_names,
-        prior_quality_mask,
-        save_triangle_plot,
-    )
-
-try:
-    from .simplex import (
-        PARAMETERIZATION_CLR,
-        PARAMETERIZATION_LOGITS,
-        PARAMETERIZATION_WEIGHTS,
-        clr_to_weights,
-        prior_clr_feature_names,
-        prior_feature_names,
-        prior_weights_feature_names,
-        split_feature_matrix,
-        weights_to_clr,
-        weights_to_logits,
-    )
-except ImportError:
-    from simplex import (
-        PARAMETERIZATION_CLR,
-        PARAMETERIZATION_LOGITS,
-        PARAMETERIZATION_WEIGHTS,
-        clr_to_weights,
-        prior_clr_feature_names,
-        prior_feature_names,
-        prior_weights_feature_names,
-        split_feature_matrix,
-        weights_to_clr,
-        weights_to_logits,
-    )
-
-
 from bedcosmo.transform import Bijector, _whitening_to_apply_joint
+
+from .fit_eazy_weights_to_desi import (
+    DEFAULT_MAX_CHI2_DOF,
+    apply_quality_cuts,
+    build_prior_parameter_samples,
+    n_template_coeff_columns,
+    prior_a_column_names,
+    prior_quality_mask,
+    save_triangle_plot,
+)
+from .paths import DEFAULT_EMPIRICAL_PRIOR_DIR, get_prior_kde_path, get_prior_weights_csv
+from .simplex import (
+    PARAMETERIZATION_CLR,
+    PARAMETERIZATION_LOGITS,
+    PARAMETERIZATION_WEIGHTS,
+    clr_to_weights,
+    prior_clr_feature_names,
+    prior_feature_names,
+    prior_weights_feature_names,
+    split_feature_matrix,
+    weights_to_clr,
+    weights_to_logits,
+)
 
 PRIOR_KDE_VERSION = 3
 PRIOR_KDE_VERSION_SMOOTH_LOGIT = 3
@@ -718,10 +692,15 @@ def _format_weight_summary(a: np.ndarray, label: str) -> str:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Fit KDE prior on DESI EAZY fit table.")
     parser.add_argument(
+        "--build-name",
+        default=DEFAULT_EMPIRICAL_PRIOR_DIR,
+        help="Prior build directory name under num_visits (used when --weights-csv/--out omitted).",
+    )
+    parser.add_argument(
         "--weights-csv",
         type=Path,
-        default=Path.home()
-        / "scratch/bedcosmo/desi_eazy_empirical_prior_nnls/desi_eazy_empirical_weights.csv",
+        default=None,
+        help="Combined fit weights CSV (default: .../num_visits/<build-name>/desi_eazy_empirical_weights.csv).",
     )
     parser.add_argument(
         "--out",
@@ -881,7 +860,11 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=7)
     args = parser.parse_args()
 
-    weights_csv = Path(args.weights_csv).expanduser()
+    weights_csv = (
+        Path(args.weights_csv).expanduser()
+        if args.weights_csv is not None
+        else get_prior_weights_csv(args.build_name)
+    )
     if not weights_csv.exists():
         raise FileNotFoundError(weights_csv)
 
@@ -903,7 +886,7 @@ def main() -> None:
     out_path = (
         Path(args.out).expanduser()
         if args.out is not None
-        else weights_csv.parent / "sed_prior_kde.joblib"
+        else get_prior_kde_path(args.build_name)
     )
 
     max_chi2 = None if args.no_quality_cuts else args.max_chi2_dof

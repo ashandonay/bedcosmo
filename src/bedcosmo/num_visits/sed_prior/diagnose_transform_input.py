@@ -26,14 +26,9 @@ import numpy as np
 import torch
 import yaml
 
-try:
-    from .build_empirical_sed_prior_kde import load_sed_prior_kde
-    from .fit_eazy_weights_to_desi import save_triangle_plot
-    from .simplex import PARAMETERIZATION_LOGITS, split_feature_matrix
-except ImportError:
-    from build_empirical_sed_prior_kde import load_sed_prior_kde
-    from fit_eazy_weights_to_desi import save_triangle_plot
-    from simplex import PARAMETERIZATION_LOGITS, split_feature_matrix
+from .build_empirical_sed_prior_kde import load_sed_prior_kde
+from .fit_eazy_weights_to_desi import save_triangle_plot
+from .simplex import PARAMETERIZATION_LOGITS, split_feature_matrix
 
 
 def _get_experiment_config_path(cosmo_exp: str, config_name: str) -> Path:
@@ -138,7 +133,7 @@ def main() -> None:
         "--kde-path",
         type=Path,
         default=Path.home()
-        / "scratch/bedcosmo/desi_eazy_empirical_prior_nnls/sed_prior_kde.joblib",
+        / "scratch/bedcosmo/num_visits/empirical_prior_full/sed_prior_kde.joblib",
     )
     parser.add_argument(
         "--prior-args",

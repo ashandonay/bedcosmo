@@ -16,39 +16,38 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-try:
-    from .fit_eazy_weights_to_desi import build_prior_parameter_samples, prior_quality_mask
-except ImportError:
-    from fit_eazy_weights_to_desi import build_prior_parameter_samples, prior_quality_mask
+from .fit_eazy_weights_to_desi import (
+    build_prior_parameter_samples,
+    prior_a_column_names,
+    prior_quality_mask,
+    save_triangle_plot,
+)
+from .paths import (
+    DEFAULT_EMPIRICAL_PRIOR_DIR,
+    DEFAULT_HEALPIX,
+    find_healpix_weights_csv,
+    get_prior_build_dir,
+)
 
 
-DEFAULT_HEALPIX = [
-    23040,
-    27257,
-    27245,
-    27259,
-    27247,
-    27256,
-    27258,
-    27344,
-    26282,
-]
-
-
-def resolve_weights_csv(healpix: int, outdir: Path | None, scratch_base: Path) -> Path:
+def resolve_weights_csv(
+    healpix: int,
+    outdir: Path | None,
+    prior_dir: Path,
+) -> Path:
     if outdir is not None:
         p = outdir / "desi_eazy_empirical_weights.csv"
         if p.exists():
             return p
         raise FileNotFoundError(f"Missing weights CSV for healpix {healpix}: {p}")
-    if healpix == 23040:
-        legacy = scratch_base / "desi_eazy_empirical_prior_nnls/desi_eazy_empirical_weights.csv"
-        if legacy.exists():
-            return legacy
-    p = scratch_base / f"desi_eazy_hp{healpix}/desi_eazy_empirical_weights.csv"
-    if p.exists():
-        return p
-    raise FileNotFoundError(f"No weights CSV for healpix {healpix} (tried {p})")
+
+    found = find_healpix_weights_csv(healpix, prior_dir=prior_dir)
+    if found is not None:
+        return found
+    raise FileNotFoundError(
+        f"No weights CSV for healpix {healpix} under {prior_dir} "
+        "(expected healpix/hp{id}/ or legacy desi_eazy_hp{id}/)"
+    )
 
 
 def load_prior_sample(
@@ -72,11 +71,6 @@ def load_prior_sample(
 
 
 def a_columns(df: pd.DataFrame) -> list[str]:
-    try:
-        from .fit_eazy_weights_to_desi import prior_a_column_names
-    except ImportError:
-        from fit_eazy_weights_to_desi import prior_a_column_names
-
     return prior_a_column_names(df)
 
 
@@ -218,11 +212,6 @@ def plot_per_healpix_triangles(
     outdir: Path,
 ) -> None:
     """One small triangle per healpix (same 4 params as compact overlay)."""
-    try:
-        from .fit_eazy_weights_to_desi import save_triangle_plot
-    except ImportError:
-        from fit_eazy_weights_to_desi import save_triangle_plot
-
     sub = outdir / "per_healpix"
     sub.mkdir(parents=True, exist_ok=True)
     idx = (3, 9, 12, 13)
@@ -258,13 +247,20 @@ def main() -> None:
         default=DEFAULT_HEALPIX,
     )
     parser.add_argument(
-        "--scratch-base",
-        default="~/scratch/bedcosmo",
-        help="Base dir for desi_eazy_hp<HEALPIX>/ and desi_eazy_empirical_prior_nnls/",
+        "--build-name",
+        default=DEFAULT_EMPIRICAL_PRIOR_DIR,
+        help="Prior build directory under num_visits (parent of healpix/hp* subdirs).",
+    )
+    parser.add_argument(
+        "--prior-dir",
+        type=Path,
+        default=None,
+        help="Override prior build root (default: $SCRATCH/bedcosmo/num_visits/<build-name>).",
     )
     parser.add_argument(
         "--outdir",
-        default="~/scratch/bedcosmo/healpix_prior_comparison",
+        default=None,
+        help="Comparison plot output directory (default: <prior-dir>/healpix_prior_comparison).",
     )
     parser.add_argument(
         "--n-subsample",
@@ -282,8 +278,16 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    scratch = Path(os.path.expanduser(args.scratch_base))
-    outdir = Path(os.path.expanduser(args.outdir))
+    prior_dir = (
+        Path(os.path.expanduser(args.prior_dir))
+        if args.prior_dir is not None
+        else get_prior_build_dir(args.build_name)
+    )
+    outdir = (
+        Path(os.path.expanduser(args.outdir))
+        if args.outdir is not None
+        else prior_dir / "healpix_prior_comparison"
+    )
     outdir.mkdir(parents=True, exist_ok=True)
 
     overrides: dict[int, Path] = {}
@@ -299,7 +303,7 @@ def main() -> None:
             if hp in overrides:
                 csv_path = overrides[hp]
             else:
-                csv_path = resolve_weights_csv(hp, None, scratch)
+                csv_path = resolve_weights_csv(hp, None, prior_dir)
             df = load_prior_sample(
                 csv_path,
                 hp,

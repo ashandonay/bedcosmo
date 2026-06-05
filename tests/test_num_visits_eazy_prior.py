@@ -32,7 +32,7 @@ KDE_PATH = Path(
     os.environ.get(
         "BEDCOSMO_TEST_KDE_PATH",
         Path.home()
-        / "scratch/bedcosmo/desi_eazy_empirical_prior_full/sed_prior_kde.joblib",
+        / "scratch/bedcosmo/num_visits/empirical_prior_full/sed_prior_kde.joblib",
     )
 ).expanduser()
 

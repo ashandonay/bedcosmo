@@ -19,13 +19,10 @@ and excluded from prior-quality triangles. See README.md.
 
 Example:
 
-  python fit_eazy_weights_to_desi.py \
-    --desi-dir ~/data/desi/tiny_dr1 \
-    --healpix 23040 \
-    --survey main \
-    --program dark \
-    --specprod iron \
-    --outdir outputs/desi_eazy_empirical_prior
+  python fit_eazy_weights_to_desi.py \\
+    --healpix 23040 \\
+    --build-name empirical_prior_full \\
+    --plot-only
 """
 
 from __future__ import annotations
@@ -43,51 +40,21 @@ from scipy.ndimage import gaussian_filter1d
 from scipy.optimize import nnls
 from tqdm import tqdm
 
-
-try:
-    from .templates import (
-        DEFAULT_PARAM_12D,
-        DEFAULT_TEMPLATES_DIR,
-        load_eazy_templates,
-    )
-except ImportError:
-    from templates import (
-        DEFAULT_PARAM_12D,
-        DEFAULT_TEMPLATES_DIR,
-        load_eazy_templates,
-    )
+from .desi_data import ensure_desi_healpix, get_local_desi_paths
+from .paths import (
+    DEFAULT_EMPIRICAL_PRIOR_DIR,
+    add_desi_dir_argument,
+    get_healpix_fit_dir,
+    resolve_desi_dir,
+)
+from .templates import (
+    DEFAULT_PARAM_12D,
+    DEFAULT_TEMPLATES_DIR,
+    load_eazy_templates,
+)
 
 DEFAULT_PARAM_6D = "templates/eazy_v1.0.spectra.param"
 EAZY_TEMPLATES_DIR = DEFAULT_TEMPLATES_DIR
-
-
-def healpix_subdir(healpix: int) -> str:
-    """DESI HEALPix directories use prefix/healpix, e.g. 230/23040."""
-    hp = str(int(healpix))
-    prefix = hp if len(hp) < 3 else hp[:3]
-    return f"{prefix}/{hp}"
-
-
-def get_local_desi_paths(
-    desi_dir: Path,
-    specprod: str,
-    survey: str,
-    program: str,
-    healpix: int,
-) -> tuple[Path, Path]:
-    hpdir = (
-        desi_dir
-        / "spectro"
-        / "redux"
-        / specprod
-        / "healpix"
-        / survey
-        / program
-        / healpix_subdir(healpix)
-    )
-    coadd = hpdir / f"coadd-{survey}-{program}-{healpix}.fits"
-    redrock = hpdir / f"redrock-{survey}-{program}-{healpix}.fits"
-    return coadd, redrock
 
 
 def read_redrock(redrock_path: Path):
@@ -1143,13 +1110,22 @@ def save_diagnostic_plots(
 def main() -> None:
     parser = argparse.ArgumentParser()
 
-    parser.add_argument("--desi-dir", default="~/data/desi/tiny_dr1")
+    add_desi_dir_argument(parser)
     parser.add_argument("--specprod", default="iron")
     parser.add_argument("--survey", default="main")
     parser.add_argument("--program", default="dark")
     parser.add_argument("--healpix", type=int, default=23040)
 
-    parser.add_argument("--outdir", default="outputs/desi_eazy_empirical_prior")
+    parser.add_argument(
+        "--build-name",
+        default=DEFAULT_EMPIRICAL_PRIOR_DIR,
+        help="Prior build name; fit output goes under num_visits/<build-name>/healpix/hp<HEALPIX>/.",
+    )
+    parser.add_argument(
+        "--outdir",
+        default=None,
+        help="Fit output directory (default: .../num_visits/<build-name>/healpix/hp<HEALPIX>).",
+    )
     parser.add_argument("--param", default=DEFAULT_PARAM_12D)
     parser.add_argument("--overwrite-templates", action="store_true")
 
@@ -1290,24 +1266,55 @@ def main() -> None:
         ),
     )
 
-    args = parser.parse_args()
-
-    desi_dir = Path(os.path.expanduser(args.desi_dir))
-    outdir = Path(args.outdir)
-    outdir.mkdir(parents=True, exist_ok=True)
-
-    coadd_path, redrock_path = get_local_desi_paths(
-        desi_dir=desi_dir,
-        specprod=args.specprod,
-        survey=args.survey,
-        program=args.program,
-        healpix=args.healpix,
+    parser.add_argument(
+        "--auto-download-desi",
+        action="store_true",
+        default=True,
+        help="Download missing DESI coadd/redrock FITS before fitting (default: on).",
+    )
+    parser.add_argument(
+        "--no-auto-download-desi",
+        dest="auto_download_desi",
+        action="store_false",
+        help="Do not download DESI data; require local coadd/redrock files.",
     )
 
-    if not coadd_path.exists():
-        raise FileNotFoundError(f"Missing coadd file: {coadd_path}")
-    if not redrock_path.exists():
-        raise FileNotFoundError(f"Missing redrock file: {redrock_path}")
+    args = parser.parse_args()
+
+    desi_dir = resolve_desi_dir(args.desi_dir)
+    outdir = (
+        Path(args.outdir)
+        if args.outdir
+        else get_healpix_fit_dir(args.healpix, build_name=args.build_name)
+    )
+    outdir.mkdir(parents=True, exist_ok=True)
+
+    if args.auto_download_desi:
+        coadd_path, redrock_path = ensure_desi_healpix(
+            args.healpix,
+            desi_dir=desi_dir,
+            specprod=args.specprod,
+            survey=args.survey,
+            program=args.program,
+        )
+    else:
+        coadd_path, redrock_path = get_local_desi_paths(
+            desi_dir=desi_dir,
+            specprod=args.specprod,
+            survey=args.survey,
+            program=args.program,
+            healpix=args.healpix,
+        )
+        if not coadd_path.exists():
+            raise FileNotFoundError(
+                f"Missing coadd file: {coadd_path}. Re-run with --auto-download-desi or "
+                "download data via desi_get_dr_subset.py."
+            )
+        if not redrock_path.exists():
+            raise FileNotFoundError(
+                f"Missing redrock file: {redrock_path}. Re-run with --auto-download-desi or "
+                "download data via desi_get_dr_subset.py."
+            )
 
     print(f"Using coadd:   {coadd_path}")
     print(f"Using redrock: {redrock_path}")

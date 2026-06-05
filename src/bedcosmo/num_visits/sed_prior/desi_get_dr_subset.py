@@ -415,6 +415,137 @@ def get_healpix_survey_path(data_release):
     # Use the mapping or default to main
     return DR_HEALPIX_PATH.get(data_release, 'main')
 
+def download_healpix_patches(
+    healpix_ids: list[int],
+    *,
+    local_base_path: str | os.PathLike[str],
+    data_release: str = "dr1",
+    specprod: str | None = None,
+    skip_existing: bool = True,
+    skip_catalog: bool = True,
+    no_tiles: bool = True,
+) -> bool:
+    """
+    Download DESI coadd + redrock FITS for the given HEALPix patch IDs.
+
+    Parameters
+    ----------
+    local_base_path
+        Root directory for the DESI tree (e.g. ``$SCRATCH/bedcosmo/desi/tiny_dr1``).
+    skip_catalog
+        When True and the zall-pix catalog already exists locally, skip re-downloading
+        catalog/tile CSVs.
+    no_tiles
+        When True (default for SED prior fits), skip per-tile cumulative downloads.
+    """
+    local_base_path = os.fspath(local_base_path)
+    remote_base_url, specprod_to_use, requires_auth = get_base_url(data_release, specprod)
+    success = True
+
+    auth = None
+    if requires_auth:
+        user, pwd = get_desi_login_password()
+        auth = (user, pwd)
+        print(f"Using authenticated access for {specprod_to_use}")
+
+    print(f"Starting downloads from {remote_base_url}")
+    print(f"Using spectroscopic production: {specprod_to_use}")
+    print(f"Files will be saved to {local_base_path}")
+    print(f"HEALPix list: {list(healpix_ids)}")
+
+    catalog_subpath = get_catalog_path(data_release, specprod_to_use)
+    catalog_file = os.path.join(
+        local_base_path,
+        f"spectro/redux/{specprod_to_use}/{catalog_subpath}/zall-pix-{specprod_to_use}.fits",
+    )
+
+    if not (skip_catalog and os.path.exists(catalog_file)):
+        print("\nDownloading tile and exposure CSV files...")
+        tiles_url = f"{remote_base_url}spectro/redux/{specprod_to_use}/tiles-{specprod_to_use}.csv"
+        tiles_file = os.path.join(
+            local_base_path, f"spectro/redux/{specprod_to_use}/tiles-{specprod_to_use}.csv"
+        )
+        if not download_file(tiles_url, tiles_file, auth=auth):
+            print(f"Warning: Failed to download tiles CSV file: {tiles_url}")
+
+        exposures_url = (
+            f"{remote_base_url}spectro/redux/{specprod_to_use}/exposures-{specprod_to_use}.csv"
+        )
+        exposures_file = os.path.join(
+            local_base_path, f"spectro/redux/{specprod_to_use}/exposures-{specprod_to_use}.csv"
+        )
+        if not download_file(exposures_url, exposures_file, auth=auth):
+            print(f"Warning: Failed to download exposures CSV file: {exposures_url}")
+
+        print("\nDownloading redshift catalog...")
+        catalog_url = (
+            f"{remote_base_url}spectro/redux/{specprod_to_use}/{catalog_subpath}/"
+            f"zall-pix-{specprod_to_use}.fits"
+        )
+        if not download_file(catalog_url, catalog_file, auth=auth):
+            print("Failed to download redshift catalog. Cannot continue.")
+            return False
+    elif not os.path.exists(catalog_file):
+        print(f"Catalog not found at {catalog_file}; cannot continue.")
+        return False
+    else:
+        print(f"\nUsing existing catalog: {catalog_file}")
+
+    healpix_survey = get_healpix_survey_path(data_release)
+    if not healpix_ids:
+        return success
+
+    for healpix_id in healpix_ids:
+        coadd_local = healpix_coadd_path(
+            local_base_path, specprod_to_use, data_release, healpix_id
+        )
+        if skip_existing and os.path.exists(coadd_local):
+            print(f"\nSkipping HEALPIX {healpix_id} (coadd exists): {coadd_local}")
+            continue
+
+        print(f"\nDownloading files for healpix {healpix_id}...")
+        prefix, healpix_path = get_healpix_path(healpix_id)
+        healpix_url = (
+            f"{remote_base_url}spectro/redux/{specprod_to_use}/healpix/"
+            f"{healpix_survey}/dark/{healpix_path}/"
+        )
+        success &= download_directory(healpix_url, local_base_path, remote_base_url, auth)
+
+    if no_tiles:
+        print("\nSkipping tile data downloads (no_tiles=True)")
+    elif len(healpix_ids) == 1:
+        healpix_id = healpix_ids[0]
+        prefix, healpix_path = get_healpix_path(healpix_id)
+        redrock_file = os.path.join(
+            local_base_path,
+            f"spectro/redux/{specprod_to_use}/healpix/{healpix_survey}/dark/{healpix_path}",
+            f"redrock-{healpix_survey}-dark-{healpix_id}.fits",
+        )
+        print("\nAnalyzing redrock file for tileIDs...")
+        tileids = analyze_tiles(redrock_file)
+        if tileids is not None:
+            print(f"\nPreparing to download data for {len(tileids)} tiles...")
+            print("\nDownloading tile data...")
+            for tileid in tileids:
+                print(f"\nProcessing TILEID {tileid}...")
+                date = get_tile_date(remote_base_url, tileid, specprod_to_use, auth)
+                if date is None:
+                    print(f"Could not find date directory for tile {tileid}")
+                    continue
+                print(f"Found date directory: {date}")
+                tile_url = (
+                    f"{remote_base_url}spectro/redux/{specprod_to_use}/tiles/cumulative/"
+                    f"{tileid}/{date}/"
+                )
+                success &= download_directory(tile_url, local_base_path, remote_base_url, auth)
+
+    if success:
+        print("\nAll downloads completed successfully!")
+    else:
+        print("\nDownloads completed with some errors. Please check the messages above.")
+    return success
+
+
 def main():
     """
     Main function to run the DESI data downloader.
@@ -467,9 +598,13 @@ def main():
         help='Do not download zall-pix / tile CSVs if catalog FITS already exists.',
     )
     
-    # Default output directory based on data release
-    default_dir = lambda dr: f"./tiny_{dr.lower()}"
-    parser.add_argument('--base-dir', help=f'Base directory for downloads (default: depends on data release, e.g., ./tiny_dr1)')
+    parser.add_argument(
+        '--base-dir',
+        help=(
+            'Base directory for downloads '
+            '(default: $SCRATCH/bedcosmo/desi/tiny_<dr> when SCRATCH is set, else ./tiny_<dr>)'
+        ),
+    )
     args = parser.parse_args()
     # No need to validate dr/specprod since dr has a default value
     
@@ -492,27 +627,12 @@ def main():
     
     # Set base directory if not explicitly provided
     if args.base_dir is None:
-        if args.dr:
-            local_base_path = f"./tiny_{args.dr.lower()}"
-        else:
-            # If only specprod is provided, use it for the directory name
-            local_base_path = f"./tiny_{specprod.lower()}"
+        from bedcosmo.num_visits.sed_prior.paths import get_desi_data_dir
+
+        local_base_path = str(get_desi_data_dir(dr=args.dr))
     else:
         local_base_path = args.base_dir
-    
-    auth = None
-    if requires_auth:
-        try:
-            user, pwd = get_desi_login_password()
-            auth = (user, pwd)
-            print(f"Using authenticated access for {specprod}")
-        except Exception as e:
-            print(f"Error getting credentials: {str(e)}")
-            return
-    
-    print(f"Starting downloads from {remote_base_url}")
-    print(f"Using spectroscopic production: {specprod}")
-    print(f"Files will be saved to {local_base_path}")
+
     use_position_search = args.healpix is None and args.top_n_healpix is None
     if use_position_search:
         print(
@@ -524,99 +644,68 @@ def main():
         else:
             print("(Default coordinates for DR1/DR2 retrieve healpix 23040)")
     
-    # Get the appropriate catalog path based on data release
-    catalog_subpath = get_catalog_path(args.dr, specprod)
-    catalog_file = os.path.join(
-        local_base_path,
-        f'spectro/redux/{specprod}/{catalog_subpath}/zall-pix-{specprod}.fits',
-    )
-
-    if not (args.skip_catalog and os.path.exists(catalog_file)):
-        print("\nDownloading tile and exposure CSV files...")
-        tiles_url = f"{remote_base_url}spectro/redux/{specprod}/tiles-{specprod}.csv"
-        tiles_file = os.path.join(local_base_path, f'spectro/redux/{specprod}/tiles-{specprod}.csv')
-        if not download_file(tiles_url, tiles_file, auth=auth):
-            print(f"Warning: Failed to download tiles CSV file: {tiles_url}")
-
-        exposures_url = f"{remote_base_url}spectro/redux/{specprod}/exposures-{specprod}.csv"
-        exposures_file = os.path.join(
-            local_base_path, f'spectro/redux/{specprod}/exposures-{specprod}.csv'
-        )
-        if not download_file(exposures_url, exposures_file, auth=auth):
-            print(f"Warning: Failed to download exposures CSV file: {exposures_url}")
-
-        print("\nDownloading redshift catalog...")
-        catalog_url = (
-            f"{remote_base_url}spectro/redux/{specprod}/{catalog_subpath}/zall-pix-{specprod}.fits"
-        )
-        if not download_file(catalog_url, catalog_file, auth=auth):
-            print("Failed to download redshift catalog. Cannot continue.")
-            return
-    elif not os.path.exists(catalog_file):
-        print(f"Catalog not found at {catalog_file}; cannot continue.")
-        return
-    else:
-        print(f"\nUsing existing catalog: {catalog_file}")
-
     if args.healpix is not None:
         healpix_ids = list(args.healpix)
         print(f"\nHEALPix list from --healpix: {healpix_ids}")
     elif args.top_n_healpix is not None:
+        catalog_subpath = get_catalog_path(args.dr, specprod)
+        catalog_file = os.path.join(
+            local_base_path,
+            f"spectro/redux/{specprod}/{catalog_subpath}/zall-pix-{specprod}.fits",
+        )
+        if not os.path.exists(catalog_file):
+            if args.skip_catalog:
+                print(
+                    f"Catalog not found at {catalog_file}; run without --skip-catalog first "
+                    "or download the catalog separately."
+                )
+                return
+            download_healpix_patches(
+                [],
+                local_base_path=local_base_path,
+                data_release=args.dr,
+                specprod=specprod,
+                skip_existing=args.skip_existing,
+                skip_catalog=False,
+                no_tiles=True,
+            )
         healpix_ids = top_healpix_from_catalog(catalog_file, args.top_n_healpix)
         print(f"\nTop {args.top_n_healpix} HEALPix by catalog count: {healpix_ids}")
     else:
+        catalog_subpath = get_catalog_path(args.dr, specprod)
+        catalog_file = os.path.join(
+            local_base_path,
+            f"spectro/redux/{specprod}/{catalog_subpath}/zall-pix-{specprod}.fits",
+        )
+        if not os.path.exists(catalog_file):
+            if args.skip_catalog:
+                print(
+                    f"Catalog not found at {catalog_file}; run without --skip-catalog first "
+                    "or download the catalog separately."
+                )
+                return
+            download_healpix_patches(
+                [],
+                local_base_path=local_base_path,
+                data_release=args.dr,
+                specprod=specprod,
+                skip_existing=args.skip_existing,
+                skip_catalog=False,
+                no_tiles=True,
+            )
         healpix_id = find_best_healpix(catalog_file, args.ra, args.dec, args.radius)
         print(f"\nSelected HEALPIX {healpix_id} with most targets in search region")
         healpix_ids = [healpix_id]
 
-    healpix_survey = get_healpix_survey_path(args.dr)
-    success = True
-    for healpix_id in healpix_ids:
-        coadd_local = healpix_coadd_path(local_base_path, specprod, args.dr, healpix_id)
-        if args.skip_existing and os.path.exists(coadd_local):
-            print(f"\nSkipping HEALPIX {healpix_id} (coadd exists): {coadd_local}")
-            continue
-
-        print(f"\nDownloading files for healpix {healpix_id}...")
-        prefix, healpix_path = get_healpix_path(healpix_id)
-        healpix_url = (
-            f"{remote_base_url}spectro/redux/{specprod}/healpix/"
-            f"{healpix_survey}/dark/{healpix_path}/"
-        )
-        success &= download_directory(healpix_url, local_base_path, remote_base_url, auth)
-
-    if args.no_tiles:
-        print("\nSkipping tile data downloads (--no-tiles option specified)")
-    elif len(healpix_ids) == 1:
-        healpix_id = healpix_ids[0]
-        prefix, healpix_path = get_healpix_path(healpix_id)
-        redrock_file = os.path.join(
-            local_base_path,
-            f'spectro/redux/{specprod}/healpix/{healpix_survey}/dark/{healpix_path}',
-            f'redrock-{healpix_survey}-dark-{healpix_id}.fits',
-        )
-        print("\nAnalyzing redrock file for tileIDs...")
-        tileids = analyze_tiles(redrock_file)
-        if tileids is not None:
-            print(f"\nPreparing to download data for {len(tileids)} tiles...")
-            print("\nDownloading tile data...")
-            for tileid in tileids:
-                print(f"\nProcessing TILEID {tileid}...")
-                date = get_tile_date(remote_base_url, tileid, specprod, auth)
-                if date is None:
-                    print(f"Could not find date directory for tile {tileid}")
-                    continue
-                print(f"Found date directory: {date}")
-                tile_url = (
-                    f"{remote_base_url}spectro/redux/{specprod}/tiles/cumulative/"
-                    f"{tileid}/{date}/"
-                )
-                success &= download_directory(tile_url, local_base_path, remote_base_url, auth)
-    
-    if success:
-        print("\nAll downloads completed successfully!")
-    else:
-        print("\nDownloads completed with some errors. Please check the messages above.")
+    download_healpix_patches(
+        healpix_ids,
+        local_base_path=local_base_path,
+        data_release=args.dr,
+        specprod=specprod,
+        skip_existing=args.skip_existing,
+        skip_catalog=args.skip_catalog,
+        no_tiles=args.no_tiles,
+    )
 
 if __name__ == "__main__":
     main()

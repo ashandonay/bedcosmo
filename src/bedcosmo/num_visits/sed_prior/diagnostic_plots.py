@@ -22,10 +22,13 @@ Subcommands:
 Examples:
 
   python -m bedcosmo.num_visits.sed_prior.diagnostic_plots all \\
-    --prior-dir ~/scratch/bedcosmo/desi_eazy_empirical_prior_full
+    --prior-dir ~/scratch/bedcosmo/num_visits/empirical_prior_full
+
+  python -m bedcosmo.num_visits.sed_prior.diagnostic_plots redshift-histograms \\
+    --prior-dir ~/scratch/bedcosmo/num_visits/empirical_prior_full
 
   python -m bedcosmo.num_visits.sed_prior.diagnostic_plots clr-triangle \\
-    --prior-dir ~/scratch/bedcosmo/desi_eazy_empirical_prior_full \\
+    --prior-dir ~/scratch/bedcosmo/num_visits/empirical_prior_full \\
     --also-training
 """
 
@@ -46,36 +49,21 @@ import yaml
 from bedcosmo.num_visits import NumVisits
 from bedcosmo.util import get_experiment_config_path
 
-try:
-    from .build_empirical_sed_prior_kde import (
-        DEFAULT_KDE_DIAGNOSTIC_SAMPLES,
-        apply_training_support_mask,
-        clr_to_weights,
-        load_prior_training_table,
-        load_sed_prior_kde,
-        prior_clr_feature_names,
-        sample_sed_prior,
-    )
-    from .fit_eazy_weights_to_desi import prior_a_column_names, read_redrock
-    from .prior_sampler import sample_prior_batch
-except ImportError:
-    from build_empirical_sed_prior_kde import (
-        DEFAULT_KDE_DIAGNOSTIC_SAMPLES,
-        apply_training_support_mask,
-        clr_to_weights,
-        load_prior_training_table,
-        load_sed_prior_kde,
-        prior_clr_feature_names,
-        sample_sed_prior,
-    )
-    from fit_eazy_weights_to_desi import prior_a_column_names, read_redrock
-    from prior_sampler import sample_prior_batch
+from .build_empirical_sed_prior_kde import (
+    DEFAULT_KDE_DIAGNOSTIC_SAMPLES,
+    apply_training_support_mask,
+    clr_to_weights,
+    load_prior_training_table,
+    load_sed_prior_kde,
+    prior_clr_feature_names,
+    sample_sed_prior,
+)
+from .fit_eazy_weights_to_desi import prior_a_column_names, read_redrock
+from .paths import add_desi_dir_argument, get_prior_build_dir, resolve_desi_dir
+from .prior_sampler import sample_prior_batch
 
 DEFAULT_INACTIVE_WEIGHT_THRESHOLD = 1e-4
-DEFAULT_PRIOR_DIR = (
-    Path.home() / "scratch/bedcosmo/desi_eazy_empirical_prior_full"
-)
-DEFAULT_DESI_DIR = Path.home() / "data/desi/tiny_dr1"
+DEFAULT_PRIOR_DIR = get_prior_build_dir()
 PRIOR_KDE_FILENAME = "sed_prior_kde.joblib"
 PRIOR_WEIGHTS_FILENAME = "desi_eazy_empirical_weights.csv"
 DIAGNOSTICS_DIRNAME = "diagnostics"
@@ -742,7 +730,7 @@ def run_clr_triangle(args: argparse.Namespace) -> None:
 
 def run_redshift_histograms(args: argparse.Namespace) -> None:
     build = prior_build_from_args(args)
-    desi_dir = Path(args.desi_dir).expanduser()
+    desi_dir = resolve_desi_dir(args.desi_dir)
     weights_csv = build.weights_csv
     outdir = diagnostics_subdir(args, "redshift_histograms")
     print(f"Prior dir: {build.prior_dir}")
@@ -988,7 +976,7 @@ def build_parser() -> argparse.ArgumentParser:
         parents=[common],
         help="Run all diagnostic plot subcommands.",
     )
-    p_all.add_argument("--desi-dir", type=Path, default=DEFAULT_DESI_DIR)
+    add_desi_dir_argument(p_all)
     p_all.add_argument("--seed", type=int, default=7)
     p_all.add_argument(
         "--sample",
@@ -1055,7 +1043,7 @@ def build_parser() -> argparse.ArgumentParser:
         parents=[common],
         help="Low-z redshift histograms (redrock spectypes vs weights CSV).",
     )
-    p_z.add_argument("--desi-dir", type=Path, default=DEFAULT_DESI_DIR)
+    add_desi_dir_argument(p_z)
     p_z.add_argument(
         "--weights-csv",
         type=Path,
