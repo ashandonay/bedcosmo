@@ -10,7 +10,7 @@ DEFAULT_SPECPROD = "iron"
 DEFAULT_SURVEY = "main"
 DEFAULT_PROGRAM = "dark"
 NUM_VISITS_EXPERIMENT = "num_visits"
-DEFAULT_EMPIRICAL_PRIOR_DIR = "empirical_prior_full"
+DEFAULT_EMPIRICAL_PRIOR_DIR = "empirical_prior"
 HEALPIX_FITS_SUBDIR = "healpix"
 HEALPIX_DIR_PREFIX = "hp"
 

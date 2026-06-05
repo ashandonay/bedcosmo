@@ -22,13 +22,13 @@ Subcommands:
 Examples:
 
   python -m bedcosmo.num_visits.sed_prior.diagnostic_plots all \\
-    --prior-dir ~/scratch/bedcosmo/num_visits/empirical_prior_full
+    --prior-dir ~/scratch/bedcosmo/num_visits/empirical_prior
 
   python -m bedcosmo.num_visits.sed_prior.diagnostic_plots redshift-histograms \\
-    --prior-dir ~/scratch/bedcosmo/num_visits/empirical_prior_full
+    --prior-dir ~/scratch/bedcosmo/num_visits/empirical_prior
 
   python -m bedcosmo.num_visits.sed_prior.diagnostic_plots clr-triangle \\
-    --prior-dir ~/scratch/bedcosmo/num_visits/empirical_prior_full \\
+    --prior-dir ~/scratch/bedcosmo/num_visits/empirical_prior \\
     --also-training
 """
 

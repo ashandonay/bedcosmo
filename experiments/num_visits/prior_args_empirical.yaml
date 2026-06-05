@@ -1,8 +1,11 @@
 # Empirical SED prior from DESI+EAZY KDE (CLR parameterization, v3).
 # Rebuild: build_empirical_sed_prior_kde.py on desi_eazy_empirical_weights.csv
+#
+# Default KDE location: $SCRATCH/bedcosmo/num_visits/empirical_prior/sed_prior_kde.joblib
+# Omit or set null to use that default at runtime.
 
-prior_kde_path: "/home/ashandonay/scratch/bedcosmo/desi_eazy_empirical_prior_full/sed_prior_kde.joblib"
-eazy_templates_dir: "~/data/num_visits/eazy"
+prior_kde_path: null
+eazy_templates_dir: null
 eazy_param: "templates/fsps_full/fsps_QSF_12_v3.param"
 prior_pool_size: 65536
 prior_pool_seed: 7

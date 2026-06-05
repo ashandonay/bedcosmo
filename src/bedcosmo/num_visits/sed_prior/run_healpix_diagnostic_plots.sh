@@ -2,7 +2,7 @@
 # Per-HEALPix fit diagnostic plots (--plot-only; see build_empirical_prior.py for full pipeline).
 set -euo pipefail
 
-BUILD_NAME="${BUILD_NAME:-empirical_prior_full}"
+BUILD_NAME="${BUILD_NAME:-empirical_prior}"
 NUM_VISITS_SCRATCH="${NUM_VISITS_SCRATCH:-${SCRATCH:+${SCRATCH}/bedcosmo/num_visits}}"
 NUM_VISITS_SCRATCH="${NUM_VISITS_SCRATCH:-${HOME}/scratch/bedcosmo/num_visits}"
 PRIOR_DIR="${NUM_VISITS_SCRATCH}/${BUILD_NAME}"

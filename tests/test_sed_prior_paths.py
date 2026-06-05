@@ -30,14 +30,14 @@ def test_scratch_paths_use_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) 
     assert get_desi_data_dir() == scratch / "bedcosmo" / "desi" / "tiny_dr1"
     assert get_eazy_templates_dir() == scratch / "bedcosmo" / "eazy"
     assert get_healpix_fit_dir(23040) == (
-        scratch / "bedcosmo" / "num_visits" / "empirical_prior_full" / "healpix" / "hp23040"
+        scratch / "bedcosmo" / "num_visits" / "empirical_prior" / "healpix" / "hp23040"
     )
-    assert get_prior_build_dir() == scratch / "bedcosmo" / "num_visits" / "empirical_prior_full"
+    assert get_prior_build_dir() == scratch / "bedcosmo" / "num_visits" / "empirical_prior"
     assert get_prior_weights_csv() == (
-        scratch / "bedcosmo" / "num_visits" / "empirical_prior_full" / "desi_eazy_empirical_weights.csv"
+        scratch / "bedcosmo" / "num_visits" / "empirical_prior" / "desi_eazy_empirical_weights.csv"
     )
     assert get_prior_kde_path() == (
-        scratch / "bedcosmo" / "num_visits" / "empirical_prior_full" / "sed_prior_kde.joblib"
+        scratch / "bedcosmo" / "num_visits" / "empirical_prior" / "sed_prior_kde.joblib"
     )
 
 

@@ -2,9 +2,9 @@
 """
 End-to-end empirical SED prior build: DESI download → NNLS fits → combine → KDE.
 
-Default output tree (``--build-name empirical_prior_full``)::
+Default output tree (``--build-name empirical_prior``)::
 
-    $SCRATCH/bedcosmo/num_visits/empirical_prior_full/
+    $SCRATCH/bedcosmo/num_visits/empirical_prior/
       healpix/hp23040/desi_eazy_empirical_weights.csv
       healpix/hp27257/...
       desi_eazy_empirical_weights.csv   # combined

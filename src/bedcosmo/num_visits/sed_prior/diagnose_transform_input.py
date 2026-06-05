@@ -133,7 +133,7 @@ def main() -> None:
         "--kde-path",
         type=Path,
         default=Path.home()
-        / "scratch/bedcosmo/num_visits/empirical_prior_full/sed_prior_kde.joblib",
+        / "scratch/bedcosmo/num_visits/empirical_prior/sed_prior_kde.joblib",
     )
     parser.add_argument(
         "--prior-args",
