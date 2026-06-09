@@ -163,18 +163,6 @@ def main() -> None:
         default="marginal",
         help="marginal: per-param CDF (+ tanh on f*). joint: empirical joint Gaussianizer.",
     )
-    parser.add_argument(
-        "--joint-transform-params",
-        nargs="*",
-        default=None,
-        help="Joint block (default: transform_cosmo_params or all cosmo_params).",
-    )
-    parser.add_argument(
-        "--transform-cosmo-params",
-        nargs="*",
-        default=None,
-        help="Marginal CDF subset; in joint mode, also default for the joint block if unset.",
-    )
     parser.add_argument("--joint-transform-shrinkage", type=float, default=1e-3)
     parser.add_argument("--logit-flow-scale", type=float, default=8.0)
     parser.add_argument("--panel-size", type=float, default=1.25)
@@ -226,9 +214,7 @@ def main() -> None:
         cdf_bins=args.cdf_bins,
         transform_input=True,
         input_transform_type=args.input_transform_type,
-        joint_transform_params=args.joint_transform_params,
         joint_transform_shrinkage=args.joint_transform_shrinkage,
-        transform_cosmo_params=args.transform_cosmo_params,
         logit_flow_scale=args.logit_flow_scale,
         verbose=True,
     )

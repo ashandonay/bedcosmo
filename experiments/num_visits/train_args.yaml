@@ -2,7 +2,7 @@
 
 bb:
   cosmo_model: bb
-  mlflow_exp: base
+  mlflow_exp: bb
   pyro_seed: 1
   nf_seed: 1
   prior_args_path: prior_args_gamma.yaml
@@ -41,7 +41,7 @@ bb:
 
 bb_temp:
   cosmo_model: bb_temp
-  mlflow_exp: base_temp
+  mlflow_exp: bb_temp
   pyro_seed: 1
   nf_seed: 1
   prior_args_path: prior_args_gamma_temp.yaml
@@ -87,9 +87,6 @@ empirical:
   flow_type: NAF
   transform_input: true
   input_transform_type: joint
-  transform_cosmo_params:
-    - log_c_scale
-    - z
   logit_flow_scale: 8.0
   activation: elu
   n_transforms: 4
@@ -103,7 +100,7 @@ empirical:
   design_args_path: design_args.yaml
   total_steps: 100000
   optimizer: Adam
-  initial_lr: 0.001
+  initial_lr: 0.002
   final_lr: 0.0
   grad_clip: 0.0
   warmup_fraction: 0.05
@@ -116,7 +113,6 @@ empirical:
   mag_err_cap: 10
   cdf_bins: 5000
   cdf_samples: 1000000
-  # KDE prior marginal modes (desi_eazy_empirical_prior_full); f7 uses median (bimodal)
   central_params:
     f1: 7.485695
     f2: -2.556071
@@ -124,7 +120,7 @@ empirical:
     f4: -2.475593
     f5: -2.587700
     f6: -2.455915
-    f7: 3.552354
+    f7: -3.078100
     f8: -2.464153
     f9: -2.771274
     f10: -2.704496

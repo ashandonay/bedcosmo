@@ -406,7 +406,7 @@ Override with an absolute path when using a non-default `--build-name`.
 - **Training:** [`train_args.yaml`](../../../../experiments/num_visits/train_args.yaml) `empirical` block:
 
 ```yaml
-transform_cosmo_params: [log_c_scale, z]   # bijector on these only
+transform_input: true                    # transform all cosmo_params
 logit_flow_scale: 8.0                    # f_k → H*tanh(f/H) for the NF
 ```
 

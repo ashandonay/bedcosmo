@@ -237,7 +237,6 @@ class BaseExperiment(ABC):
     def _init_input_transform_options(
         self,
         input_transform_type="marginal",
-        joint_transform_params=None,
         joint_transform_shrinkage=1e-3,
         joint_transform_fit_path=None,
         joint_transform_fit_samples=None,
@@ -249,7 +248,6 @@ class BaseExperiment(ABC):
         self.input_transform_type = _normalize_input_transform_type(
             str(input_transform_type)
         )
-        self.joint_transform_params = joint_transform_params
         self.joint_transform_shrinkage = float(joint_transform_shrinkage)
         self.joint_transform_fit_path = joint_transform_fit_path
         self.joint_transform_fit_samples = joint_transform_fit_samples
@@ -266,12 +264,6 @@ class BaseExperiment(ABC):
         )
 
     def _joint_transform_param_names(self) -> list[str]:
-        names = getattr(self, "joint_transform_params", None)
-        if names is not None:
-            return list(names)
-        tc = getattr(self, "transform_cosmo_params", None)
-        if tc is not None:
-            return list(tc)
         return list(self.cosmo_params)
 
     def _joint_transform_param_indices(self) -> list[int]:
@@ -382,8 +374,6 @@ class BaseExperiment(ABC):
             skip = bijector_state is not None
             if self._uses_joint_transform():
                 bijector_keys = list(self._joint_transform_param_names())
-            elif getattr(self, "transform_cosmo_params", None) is not None:
-                bijector_keys = list(self.transform_cosmo_params)
             else:
                 bijector_keys = None
             self.param_bijector = Bijector(
@@ -456,14 +446,8 @@ class BaseExperiment(ABC):
             return set()
         if self._uses_joint_transform():
             joint_transform = set(self._joint_transform_param_names())
-            tc = getattr(self, "transform_cosmo_params", None)
-            if tc is None:
-                return set()
-            return set(tc) - joint_transform
-        names = getattr(self, "transform_cosmo_params", None)
-        if names is None:
-            return set(self.cosmo_params)
-        return set(names)
+            return set(self.cosmo_params) - joint_transform
+        return set(self.cosmo_params)
 
     def _joint_transform_param_name_set(self) -> set[str]:
         if not self._uses_joint_transform():

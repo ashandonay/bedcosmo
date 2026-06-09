@@ -108,10 +108,8 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         mag_err_cap=10.0,
         device="cuda:0",
         transform_input=False,
-        transform_cosmo_params=None,
         logit_flow_scale=8.0,
         input_transform_type="joint",
-        joint_transform_params=None,
         joint_transform_shrinkage=1e-3,
         joint_transform_fit_path=None,
         joint_transform_fit_samples=None,
@@ -128,13 +126,11 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         self.profile = profile
         self.verbose = verbose
         self.transform_input = transform_input
-        self.transform_cosmo_params = transform_cosmo_params
         self.logit_flow_scale = float(logit_flow_scale)
         self.global_rank = global_rank
         self.prior_kde_path = None
         self._init_input_transform_options(
             input_transform_type=input_transform_type,
-            joint_transform_params=joint_transform_params,
             joint_transform_shrinkage=joint_transform_shrinkage,
             joint_transform_fit_path=joint_transform_fit_path,
             joint_transform_fit_samples=joint_transform_fit_samples,

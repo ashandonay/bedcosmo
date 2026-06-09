@@ -69,7 +69,6 @@ class VariableRedshift(BaseExperiment, CosmologyMixin):
         profile=False,
         central_params=None,
         input_transform_type="marginal",
-        joint_transform_params=None,
         joint_transform_shrinkage=1e-3,
         joint_transform_fit_path=None,
         joint_transform_fit_samples=None,
@@ -139,7 +138,6 @@ class VariableRedshift(BaseExperiment, CosmologyMixin):
         self.transform_input = transform_input
         self._init_input_transform_options(
             input_transform_type=input_transform_type,
-            joint_transform_params=joint_transform_params,
             joint_transform_shrinkage=joint_transform_shrinkage,
             joint_transform_fit_path=joint_transform_fit_path,
             joint_transform_fit_samples=joint_transform_fit_samples,
