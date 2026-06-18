@@ -2,7 +2,70 @@
 
 Build and sample an empirical prior over galaxy SEDs for the `num_visits` BED experiment: fit EAZY templates to DESI spectra (NNLS), pool HEALPix patches, train a **smooth CLR KDE**, and sample through a GPU prior pool in `NumVisits` (`cosmo_model: empirical`).
 
-**Production parameterization (KDE v3):** centered log-ratios \(f_k = \log a_k - \mathrm{mean}_j\log a_j\) for \(K=12\) templates, plus \(\log s\) and \(z\) — **14 features** (`f1`…`f12`, `log_c_scale`, `z`). Legacy artifacts used raw weights, logits, or masked support projection.
+**Production parameterization:** centered log-ratios \(f_k = \log a_k - \mathrm{mean}_j\log a_j\) for \(K=12\) templates, plus \(\log s\) and \(z\) — **14 features** (`f1`…`f12`, `log_c_scale`, `z`). Legacy artifacts used raw weights, logits, or masked support projection.
+
+---
+
+### Prerequisites
+
+- `conda activate bedcosmo` with editable install: `pip install -e ".[sed-prior]"`
+- DESI HTTP credentials in `~/.desi_http_user` (`username:password`) for first-time DESI download
+- `$SCRATCH` set or writes under `~/scratch/bedcosmo/`
+
+### Data build
+
+To generate the empirical prior data for BED training:
+```bash
+python -m bedcosmo.num_visits.sed_prior.build_empirical_prior
+```
+
+Default `--build-name empirical_prior` writes:
+
+```text
+$SCRATCH/bedcosmo/num_visits/empirical_prior/
+  healpix/hp23040/desi_eazy_empirical_weights.csv
+  healpix/hp27257/...
+  desi_eazy_empirical_weights.csv
+  sed_prior_kde.joblib
+  sed_prior_kde.json
+```
+
+Shared inputs (reused across builds): `$SCRATCH/bedcosmo/desi/tiny_dr1/`, `$SCRATCH/bedcosmo/eazy/`.
+
+Default HEALPix patches: `23040 27257 27245 27259 27247 27256 27258 27344 26282`.
+
+### Resume / partial runs
+
+Existing outputs are skipped unless `--force-desi` or `--force-fit` is set.
+
+```bash
+# KDE only (fits + combine already done)
+python -m bedcosmo.num_visits.sed_prior.build_empirical_prior \
+  --build-name empirical_prior \
+  --skip-desi --skip-fit --skip-combine
+
+# Single patch, no KDE
+python -m bedcosmo.num_visits.sed_prior.build_empirical_prior \
+  --healpix 23040 --skip-kde
+
+# Refit all patches after changing fit settings
+python -m bedcosmo.num_visits.sed_prior.build_empirical_prior --force-fit
+```
+
+### Key flags
+
+| Flag | Default | Notes |
+|------|---------|--------|
+| `--build-name` | `empirical_prior` | Subdir under `num_visits/` |
+| `--healpix` | 9 patches above | Override patch list |
+| `--desi-dir` | `$SCRATCH/bedcosmo/desi/tiny_dr1` | Local DESI tree root |
+| `--n-max` | all candidates | Subsample per patch (testing only) |
+| `--z-min` | `0.01` | Redshift floor at candidate selection |
+| `--max-chi2-dof` | `1.2` | Quality cut in fits and KDE table |
+| `--force-desi` | off | Re-download DESI even if coadd exists |
+| `--force-fit` | off | Re-fit even if per-patch CSV exists |
+| `--skip-desi/fit/combine/kde` | off | Run subset of steps |
+| `--kde-sample` | `20000` | Post-save KDE diagnostic triangles (`0` to skip) |
 
 ---
 
@@ -88,108 +151,6 @@ NumVisits (empirical)           →  GPU prior pool → SED → LSST magnitudes
 
 **Scope:** default build uses **9 HEALPix patches** from DESI DR1 `tiny_dr1` (not the full survey sky). Omit `--n-max` to fit all quality-passing galaxies per patch.
 
----
-
-## Recommended: `build_empirical_prior`
-
-Single orchestrator for the production prior. Wraps the four steps above, auto-downloads missing DESI/EAZY data, and skips steps whose outputs already exist.
-
-### Prerequisites
-
-- `conda activate bedcosmo` with editable install: `pip install -e ".[sed-prior]"`
-- DESI HTTP credentials in `~/.desi_http_user` (`username:password`) for first-time DESI download
-- `$SCRATCH` set (NERSC) or writes under `~/scratch/bedcosmo/`
-
-### Full production build
-
-```bash
-python -m bedcosmo.num_visits.sed_prior.build_empirical_prior
-```
-
-Default `--build-name empirical_prior` writes:
-
-```text
-$SCRATCH/bedcosmo/num_visits/empirical_prior/
-  healpix/hp23040/desi_eazy_empirical_weights.csv
-  healpix/hp27257/...
-  desi_eazy_empirical_weights.csv
-  sed_prior_kde.joblib
-  sed_prior_kde.json
-```
-
-Shared inputs (reused across builds): `$SCRATCH/bedcosmo/desi/tiny_dr1/`, `$SCRATCH/bedcosmo/eazy/`.
-
-Default HEALPix patches: `23040 27257 27245 27259 27247 27256 27258 27344 26282`.
-
-### Quick test build
-
-```bash
-python -m bedcosmo.num_visits.sed_prior.build_empirical_prior \
-  --build-name empirical_prior_test \
-  --n-max 600
-```
-
-### Resume / partial runs
-
-Existing outputs are skipped unless `--force-desi` or `--force-fit` is set.
-
-```bash
-# KDE only (fits + combine already done)
-python -m bedcosmo.num_visits.sed_prior.build_empirical_prior \
-  --build-name empirical_prior \
-  --skip-desi --skip-fit --skip-combine
-
-# Single patch, no KDE
-python -m bedcosmo.num_visits.sed_prior.build_empirical_prior \
-  --healpix 23040 --skip-kde
-
-# Refit all patches after changing fit settings
-python -m bedcosmo.num_visits.sed_prior.build_empirical_prior --force-fit
-```
-
-### Key flags
-
-| Flag | Default | Notes |
-|------|---------|--------|
-| `--build-name` | `empirical_prior` | Subdir under `num_visits/` |
-| `--healpix` | 9 patches above | Override patch list |
-| `--desi-dir` | `$SCRATCH/bedcosmo/desi/tiny_dr1` | Local DESI tree root |
-| `--n-max` | all candidates | Subsample per patch (testing only) |
-| `--z-min` | `0.01` | Redshift floor at candidate selection |
-| `--max-chi2-dof` | `1.2` | Quality cut in fits and KDE table |
-| `--force-desi` | off | Re-download DESI even if coadd exists |
-| `--force-fit` | off | Re-fit even if per-patch CSV exists |
-| `--skip-desi/fit/combine/kde` | off | Run subset of steps |
-| `--kde-sample` | `20000` | Post-save KDE diagnostic triangles (`0` to skip) |
-
-The build disables heavy per-patch plots during step 2 (`--plot-n-examples 0`, `--no-triangle-plots`). Run `./run_healpix_diagnostic_plots.sh` afterward for triangles and spectrum examples.
-
-### Python API
-
-```python
-from bedcosmo.num_visits.sed_prior import build_empirical_prior
-
-result = build_empirical_prior(
-    build_name="empirical_prior",
-    n_max=None,          # fit all passing candidates
-    skip_kde=False,
-)
-print(result["kde_path"])
-```
-
-Path helpers (same defaults as the orchestrator):
-
-```python
-from bedcosmo.num_visits.sed_prior.paths import (
-    get_prior_kde_path,
-    get_prior_build_dir,
-    get_desi_data_dir,
-)
-
-get_prior_kde_path()       # .../num_visits/empirical_prior/sed_prior_kde.joblib
-get_prior_build_dir()      # .../num_visits/empirical_prior
-get_desi_data_dir()        # .../desi/tiny_dr1
-```
 
 ---
 
