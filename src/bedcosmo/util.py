@@ -31,6 +31,34 @@ GETDIST_SETTINGS = {
     "mult_bias_correction_order": 1,
     "boundary_correction_order": 1,
 }
+
+import getdist
+import io
+
+
+def restrict_mcsamples(gd, params):
+    """Return a new MCSamples restricted to ``params`` (a list of names).
+
+    Used to build marginal triangle plots so every plotted distribution
+    contains only the requested subset of parameters.
+    """
+    if gd is None or params is None:
+        return gd
+    names = [p.name for p in gd.paramNames.names]
+    idx = [names.index(p) for p in params if p in names]
+    if not idx:
+        return gd
+    sub_labels = [gd.paramNames.names[i].label for i in idx]
+    with contextlib.redirect_stdout(io.StringIO()):
+        restricted = getdist.MCSamples(
+            samples=gd.samples[:, idx],
+            names=[names[i] for i in idx],
+            labels=sub_labels,
+            settings=GETDIST_SETTINGS,
+        )
+    return restricted
+
+
 from PIL import Image, ImageDraw, ImageFont
 import glob
 import argparse
@@ -1205,7 +1233,34 @@ def parse_float_or_list(value):
             return float(value)
         except ValueError:
             raise argparse.ArgumentTypeError("Invalid value '{}'. Must be a float or JSON list of floats.".format(value))
-        
+
+
+def parse_param_subsets(value):
+    """Parse marginal-EIG subsets from a CLI/YAML string.
+
+    Accepts a JSON list-of-lists (e.g. '[["log_c_scale", "z"]]') or a plain
+    string of semicolon-separated groups of comma-separated names
+    (e.g. 'log_c_scale,z; f1,f2'). Returns a list of lists of names, or None.
+    """
+    if value is None:
+        return None
+    if isinstance(value, list):
+        return value
+    value = value.strip()
+    if not value:
+        return None
+    if value.startswith("["):
+        parsed = json.loads(value)
+        if parsed and all(isinstance(p, str) for p in parsed):
+            return [parsed]
+        return parsed
+    return [
+        [name.strip() for name in group.split(",") if name.strip()]
+        for group in value.split(";")
+        if group.strip()
+    ]
+
+
 def parse_json_object(value):
     """Parse a YAML/config value into a dict (for ``central_params``)."""
     if isinstance(value, dict):

@@ -12,7 +12,7 @@ from getdist import plots
 from bedcosmo.util import (
     get_runs_data, init_experiment, load_model, auto_seed, convert_color,
     load_nominal_samples, get_contour_area, parse_mlflow_params, sort_key_for_group_tuple,
-    GETDIST_SETTINGS,
+    GETDIST_SETTINGS, restrict_mcsamples,
 )
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
@@ -30,6 +30,7 @@ import yaml
 from IPython.display import display
 import glob as glob_module
 import traceback
+
 
 home_dir = os.environ["HOME"]
 try:
@@ -560,6 +561,8 @@ class BasePlotter:
         seed=1,
         global_rank=0,
         eval_step=None,
+        params=None,
+        marginal_eig=False,
     ):
         """
         NF guide samples for each entry in display ('nominal' and/or 'optimal').
@@ -604,15 +607,19 @@ class BasePlotter:
             device = experiment.device
 
         entries = []
+        eig_label = "Marginal EIG" if marginal_eig else "EIG"
 
         if 'nominal' in display:
             nominal_samples_gd = experiment.get_guide_samples(
                 posterior_flow,
                 experiment.nominal_context,
                 num_samples=guide_samples,
+                params=params,
                 transform_output=transform_output,
             )
-            eig_str = f", EIG: {nominal_eig:.3f} bits" if nominal_eig is not None else ""
+            eig_str = (
+                f", {eig_label}: {nominal_eig:.3f} bits" if nominal_eig is not None else ""
+            )
             entries.append({
                 'samples': nominal_samples_gd,
                 'label': f'Nominal Design (NF){eig_str}',
@@ -632,12 +639,14 @@ class BasePlotter:
                 optimal_idx = int(np.argmax(eig_values))
                 optimal_design = input_designs[optimal_idx]
                 optimal_eig = float(eig_values[optimal_idx])
-                eig_str = f", EIG: {optimal_eig:.3f} bits"
+                eig_str = f", {eig_label}: {optimal_eig:.3f} bits"
                 label = f'Optimal Design (NF){eig_str}'
             elif len(input_designs) >= 1:
                 optimal_design = input_designs[0]
                 optimal_eig = float(np.asarray(eig_values)[0]) if eig_values is not None else None
-                eig_str = f", EIG: {optimal_eig:.3f} bits" if optimal_eig is not None else ""
+                eig_str = (
+                    f", {eig_label}: {optimal_eig:.3f} bits" if optimal_eig is not None else ""
+                )
                 label = f'Input Design (NF){eig_str}'
             else:
                 raise ValueError("No input designs available for optimal posterior")
@@ -650,6 +659,7 @@ class BasePlotter:
                 posterior_flow,
                 optimal_context,
                 num_samples=guide_samples,
+                params=params,
                 transform_output=transform_output,
             )
             entries.append({
@@ -674,6 +684,7 @@ class BasePlotter:
         guide_samples=1000,
         device="cuda:0",
         seed=1,
+        params=None,
         plot_prior=False,
         transform_output=True,
         plot_size_ratio=1.0,
@@ -684,7 +695,8 @@ class BasePlotter:
         run_id=None,
         filename=None,
         save_dir=None,
-        dpi=400
+        dpi=400,
+        marginal_eig=False,
     ):
         """
         Generates posterior plots for nominal and/or optimal designs.
@@ -734,6 +746,8 @@ class BasePlotter:
             eig_values=eig_values,
             nominal_eig=nominal_eig,
             device=device,
+            params=params,
+            marginal_eig=marginal_eig,
         )
         for entry in nf_entries:
             all_samples.append(entry['samples'])
@@ -772,6 +786,7 @@ class BasePlotter:
                     settings=GETDIST_SETTINGS,
                 )
 
+            grid_samples_gd = restrict_mcsamples(grid_samples_gd, params)
             all_samples.append(grid_samples_gd)
             all_colors.append('tab:green')
             all_alphas.append(1.0)
@@ -787,6 +802,7 @@ class BasePlotter:
         if self.cosmo_exp == 'num_tracers':
             try:
                 nominal_samples_mcmc = experiment.get_nominal_samples(transform_output = not transform_output)
+                nominal_samples_mcmc = restrict_mcsamples(nominal_samples_mcmc, params)
                 all_samples.append(nominal_samples_mcmc)
                 all_colors.append('black')
                 all_alphas.append(1.0)
@@ -797,6 +813,7 @@ class BasePlotter:
 
         if plot_prior and hasattr(experiment, 'get_prior_samples'):
             prior_samples_gd = experiment.get_prior_samples(num_samples=guide_samples)
+            prior_samples_gd = restrict_mcsamples(prior_samples_gd, params)
             all_samples.append(prior_samples_gd)
             all_colors.append('black')
             all_alphas.append(1.0)
@@ -1556,6 +1573,7 @@ class RunPlotter(BasePlotter):
         eval_step=None,
         device="cuda:0",
         eig_data=None,
+        params=None,
         ):
         """Extract posterior plotting data from run's MLflow artifacts into a kwargs dict for generate_posterior()."""
         if eig_data is None:
@@ -1563,6 +1581,18 @@ class RunPlotter(BasePlotter):
         input_designs, eig_values, nominal_eig = self._parse_eig_for_posterior(eig_data, eval_step)
         _, step_str = self._resolve_step(eig_data, eval_step)
         step_data = eig_data[step_str]
+        marginal_eig = False
+        title = f"Posterior Evaluation - Run: {self.run_id[:8]}"
+        if params is not None:
+            subset_id = "+".join(list(params))
+            marginal_block = step_data.get("marginal", {})
+            if subset_id in marginal_block:
+                marginal = marginal_block[subset_id]
+                eig_values = np.array(marginal.get("eigs_avg", []), dtype=float)
+                nominal_eig = float(marginal["nominal"]["eigs_avg"])
+                marginal_eig = True
+                param_labels = ", ".join(marginal.get("params", params))
+                title = f"Marginal Posterior ({param_labels}) - Run: {self.run_id[:8]}"
         nominal_data = step_data.get('nominal', {})
         nominal_grid_eig = None
         nominal_grid_data = nominal_data.get('grid', {})
@@ -1590,8 +1620,6 @@ class RunPlotter(BasePlotter):
         run_args = self.run_data['params'].copy()
         posterior_flow, selected_step = load_model(experiment, step_for_model, run_obj, run_args, device, global_rank=0)
 
-        title = f"Posterior Evaluation - Run: {self.run_id[:8]}"
-
         return dict(
             experiment=experiment,
             posterior_flow=posterior_flow,
@@ -1599,7 +1627,8 @@ class RunPlotter(BasePlotter):
             eig_values=eig_values,
             nominal_eig=nominal_eig,
             nominal_grid_eig=nominal_grid_eig,
-            title=title
+            title=title,
+            marginal_eig=marginal_eig,
         )
 
     def generate_posterior(self, **kwargs):
@@ -1616,7 +1645,9 @@ class RunPlotter(BasePlotter):
         eval_step = kwargs.get('eval_step', None)
         eig_data_override = kwargs.pop('eig_data', None)
         explicit_grid_samples = kwargs.pop('grid_samples', None) if eig_data_override is not None else None
-        data = self._extract_run_posterior_data(eval_step, device=device, eig_data=eig_data_override)
+        data = self._extract_run_posterior_data(
+            eval_step, device=device, eig_data=eig_data_override, params=kwargs.get("params")
+        )
         # Allow override of title
         if 'title' in kwargs and kwargs['title'] is not None:
             data['title'] = kwargs['title']
@@ -2303,7 +2334,63 @@ class RunPlotter(BasePlotter):
         kwargs.update(**data)
 
         return super().eig_designs(experiment_id=self.experiment_id, run_id=self.run_id, **kwargs)
- 
+
+    def eig_designs_marginal(self, subset, eval_step=None, sort=True, include_nominal=False,
+                             eig_data=None, **kwargs):
+        """Plot marginal EIG-vs-design for a parameter subset.
+
+        Reads the ``marginal`` block written by Evaluator.get_marginal_eig
+        (``eig_data[step_N]["marginal"][subset_id]``) and reuses
+        BasePlotter.eig_designs for rendering, restricted to the subset.
+
+        Args:
+            subset (list[str]): Parameter names defining the marginal subset.
+            eval_step: Step to plot (defaults to latest available).
+            sort (bool): Sort designs by EIG.
+            include_nominal (bool): Overlay the nominal-design marginal EIG.
+        """
+        if eig_data is None:
+            eig_data = self._get_eig_data(eval_step=eval_step)
+        eval_step, step_str = self._resolve_step(eig_data, eval_step)
+        if step_str is None:
+            raise ValueError("No step data found for marginal EIG plot")
+
+        subset_id = "+".join(subset)
+        marginal_all = eig_data[step_str].get('marginal', {})
+        if subset_id not in marginal_all:
+            raise ValueError(
+                f"Marginal EIG for subset '{subset_id}' not found in {step_str}. "
+                f"Available: {list(marginal_all.keys())}"
+            )
+        marginal = marginal_all[subset_id]
+
+        input_designs = np.array(eig_data.get('input_designs', []))
+        if input_designs.size == 0:
+            raise ValueError("No input designs found in EIG data")
+
+        nominal_eig = None
+        if include_nominal:
+            nom = marginal.get('nominal', {}).get('eigs_avg')
+            nominal_eig = float(nom) if nom is not None else None
+
+        experiment = self.get_experiment()
+        labels = ", ".join(marginal.get('params', subset))
+        title = f'Sorted Marginal EIG ({labels}) - Run: {self.run_id[:8]}'
+
+        data = dict(
+            eig_values=np.array(marginal.get('eigs_avg', []), dtype=float),
+            eig_std_values=np.array(marginal.get('eigs_std', []), dtype=float),
+            input_designs=input_designs,
+            design_labels=experiment.design_labels,
+            nominal_design=experiment.nominal_design.cpu().numpy(),
+            nominal_eig=nominal_eig,
+            include_nominal=include_nominal,
+            sort=sort,
+            title=title,
+            filename=f"eig_designs_marginal_{subset_id}",
+        )
+        data.update(**kwargs)
+        return super().eig_designs(experiment_id=self.experiment_id, run_id=self.run_id, **data)
 
 
 # ============================================================================

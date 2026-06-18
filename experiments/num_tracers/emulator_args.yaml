@@ -1,11 +1,11 @@
 base:
   checkpoints:
-    BGS: /home/ashandonay/scratch/bedcosmo/num_tracers/emulator/models/dr1/base/config/v1/BGS.pt
-    LRG1: /home/ashandonay/scratch/bedcosmo/num_tracers/emulator/models/dr1/base/config/v1/LRG1.pt
-    LRG2: /home/ashandonay/scratch/bedcosmo/num_tracers/emulator/models/dr1/base/config/v1/LRG2.pt
-    LRG3_ELG1: /home/ashandonay/scratch/bedcosmo/num_tracers/emulator/models/dr1/base/config/v1/LRG3_ELG1.pt
-    ELG2: /home/ashandonay/scratch/bedcosmo/num_tracers/emulator/models/dr1/base/config/v1/ELG2.pt
-    QSO: /home/ashandonay/scratch/bedcosmo/num_tracers/emulator/models/dr1/base/config/v1/QSO.pt
+    BGS: /home/ashandonay/scratch/bedcosmo/num_tracers/emulator/models/dr1/base/config/v3/BGS.pt
+    LRG1: /home/ashandonay/scratch/bedcosmo/num_tracers/emulator/models/dr1/base/config/v3/LRG1.pt
+    LRG2: /home/ashandonay/scratch/bedcosmo/num_tracers/emulator/models/dr1/base/config/v3/LRG2.pt
+    LRG3_ELG1: /home/ashandonay/scratch/bedcosmo/num_tracers/emulator/models/dr1/base/config/v3/LRG3_ELG1.pt
+    ELG2: /home/ashandonay/scratch/bedcosmo/num_tracers/emulator/models/dr1/base/config/v3/ELG2.pt
+    QSO: /home/ashandonay/scratch/bedcosmo/num_tracers/emulator/models/dr1/base/config/v3/QSO.pt
     Lya_QSO: null
 
 base_omegak:

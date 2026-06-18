@@ -32,12 +32,19 @@ empirical:
   cosmo_model: empirical
   eval_step: last
   levels: [0.68, 0.95]
-  guide_samples: 50000
-  n_particles: 10000
-  particle_batch_size: 10
+  guide_samples: 100000
+  n_particles: 100000
+  particle_batch_size: 10000
   n_evals: 5
   param_space: physical
   design_args_path: null
   design_chunk_size: 1
   profile: true
   verbose: true
+  # Marginal EIG over parameter subsets (marginalizing all other params).
+  # Each inner list is one subset; e.g. constrain log_c_scale and z while
+  # marginalizing the f_i. Computed for all input designs.
+  marginal_eig_subsets: [[log_c_scale, z]]
+  marginal_outer_y: 8             # outer y ~ p(y|d) samples per design
+  marginal_inner_samples: 200     # guide samples per outer y
+  marginal_knn_k: 3             # k for the k-NN entropy estimator

@@ -38,6 +38,8 @@ base:
   log_nominal_area: true
   include_D_M: true
   condition_design: true
+  likelihood_mode: emulator
+  emulator_args_path: emulator_args.yaml
 
 base_omegak:
   cosmo_model: base_omegak

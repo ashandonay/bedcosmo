@@ -144,3 +144,63 @@ empirical:
 ```
 
 For `empirical`, set an **absolute** path to `sed_prior_kde.joblib` in [`prior_args_empirical.yaml`](prior_args_empirical.yaml) (built with `src/bedcosmo/num_visits/sed_prior/`). Training draws from a GPU-resident pool of KDE samples and integrates template SEDs on the GPU. See [`sed_prior/README.md`](../../src/bedcosmo/num_visits/sed_prior/README.md).
+
+## Marginal EIG over parameter subsets (`eval_args.yaml`)
+
+In addition to the joint EIG over all cosmological parameters, evaluation can
+compute the **marginal EIG** over a chosen subset `S` of parameters,
+marginalizing over the rest. For the `empirical` model this is useful to ask,
+e.g., how informative a design is about `log_c_scale` and `z` alone while
+marginalizing the SED mixture weights `f_i`.
+
+For a subset `S`:
+
+```
+EIG_S(d) = H[p(θ_S)] − E_y[ H[ q(θ_S | y, d) ] ]
+```
+
+Because the trained guide `q(θ|y,d)` is a joint normalizing flow and the
+empirical prior is a joint KDE, neither marginal is available in closed form.
+Both entropies are estimated from samples in **physical** parameter space with a
+k-nearest-neighbor (Kozachenko–Leonenko) estimator (`src/bedcosmo/entropy.py`).
+The marginal posterior entropy is a nested Monte Carlo estimate: outer samples
+`y ~ p(y|d)` and, for each, `K` guide samples whose subset marginal entropy is
+estimated and averaged.
+
+For the empirical KDE prior, prior rows are drawn **without replacement** from
+the GPU pool (up to pool size) so k-NN entropy is not biased by duplicate pool
+rows. The prior sample count tracks `marginal_inner_samples * marginal_outer_y`
+(with a floor of 4096), matching the posterior MC depth rather than a fixed 20k.
+Per design, inner posterior samples are drawn for each outer ``y ~ p(y|d)``;
+k-NN entropy is computed per outer ``y`` (on ``K`` samples) and averaged over
+``M`` outers, matching ``E_y[H(q(theta_S|y,d))]``. Do not pool ``K×M`` rows
+into one k-NN call — that estimates mixture entropy ``H[q(theta_S|d)]``, which
+is larger and biases marginal EIG low (often negative).
+
+YAML fields (under a cosmo-model block):
+
+| Field | Meaning | Default |
+|-------|---------|---------|
+| `marginal_eig_subsets` | List of subsets; each inner list is the param names to keep (e.g. `[[log_c_scale, z]]`). Empty/absent disables the feature. | none |
+| `marginal_outer_y` | Outer `y ~ p(y|d)` samples per design | 8 |
+| `marginal_inner_samples` | Guide samples `K` per outer `y` | 200 |
+| `marginal_knn_k` | Neighbor rank `k` for the k-NN estimator | 3 |
+
+One-off cross-check (nf_loss joint EIG vs full-parameter k-NN): run
+[`scripts/compare_marginal_eig.py`](../../scripts/compare_marginal_eig.py) manually
+(no extra args needed; optional ``--extra-subsets`` for 2D marginals). Not part of eval.
+
+CLI override (manual eval, or `--eval-`-prefixed for auto-eval):
+
+```bash
+./submit.sh eval num_visits <run_id> --marginal-eig-subsets "log_c_scale,z"
+# multiple subsets: semicolon-separated groups, or a JSON list-of-lists
+./submit.sh eval num_visits <run_id> --marginal-eig-subsets "log_c_scale,z; f1,f2"
+```
+
+Results are written into the same `eig_data` JSON under
+`step_{N}["marginal"][subset_id]` (where `subset_id = "+".join(params)`), with
+per-design `eigs_avg`/`eigs_std`, the nominal-design value, and the marginal
+prior entropy. Evaluation also produces `eig_designs_marginal_<subset_id>` (EIG
+vs design for the subset, over all input designs) and
+`posterior_marginal_<subset_id>` (triangle plot restricted to the subset).
