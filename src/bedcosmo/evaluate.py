@@ -18,16 +18,25 @@ import argparse
 from bedcosmo.plotting import RunPlotter
 import traceback
 from bedcosmo.pyro_oed_src import nf_loss, LikelihoodDataset
+from bedcosmo.entropy import knn_entropy
 from matplotlib.patches import Rectangle
+from bedcosmo.profiling import (
+    profile_method,
+    profile_loop,
+    profile_section,
+    ProfileTimerGroup,
+)
 from bedcosmo.util import (
     auto_seed, init_experiment, load_model, get_runs_data,
-    profile_method, parse_float_or_list,
+    parse_float_or_list,
+    parse_param_subsets,
     get_rng_state, parse_extra_args, render_overlay,
     get_checkpoint,
 )
 import mlflow
 import inspect
 import yaml
+
 
 class Evaluator:
     def __init__(
@@ -36,6 +45,8 @@ class Evaluator:
             param_space='physical', display_run=False, verbose=False, device="cuda:0", profile=False,
             sort=True, include_nominal=False, batch_size=1, particle_batch_size=None, design_args_path=None,
             experiment_args=None, nf_eig_data=None, grid_eig_data=None,
+            marginal_eig_subsets=None, marginal_outer_y=8, marginal_inner_samples=200,
+            marginal_knn_k=3,
             ):
         self.cosmo_exp = cosmo_exp
         
@@ -89,6 +100,13 @@ class Evaluator:
         self.batch_size = batch_size  # Batch size for sample_posterior to reduce memory usage
         self.other_eig_data = grid_eig_data
 
+        # Marginal EIG over parameter subsets (validated against cosmo_params below,
+        # once the experiment is initialized).
+        self._raw_marginal_eig_subsets = marginal_eig_subsets
+        self.marginal_outer_y = int(marginal_outer_y)
+        self.marginal_inner_samples = int(marginal_inner_samples)
+        self.marginal_knn_k = int(marginal_knn_k)
+
         # Parse experiment_args override
         if isinstance(experiment_args, str):
             self.experiment_args = json.loads(experiment_args)
@@ -141,7 +159,12 @@ class Evaluator:
             # save to eig_data object
             self.eig_data['input_designs'] = self.input_designs.cpu().numpy().tolist()
             self.eig_data['nominal_design'] = self.experiment.nominal_design.cpu().numpy().tolist()
-            
+
+        # Validate marginal-EIG subsets against the experiment's parameter names.
+        self.marginal_eig_subsets = self._normalize_marginal_subsets(self._raw_marginal_eig_subsets)
+        if self.marginal_eig_subsets:
+            print(f"Marginal EIG subsets: {self.marginal_eig_subsets}")
+
         
         # Initialize plotter for saving figures
         self.plotter = RunPlotter(run_id=self.run_id, cosmo_exp=self.cosmo_exp, experiment_args=self.experiment_args)
@@ -455,7 +478,7 @@ class Evaluator:
         g.fig.suptitle(title, fontsize=title_fontsize, weight='bold')
         self.plotter.save_figure(g.fig, filename="posterior_samples", dpi=400, run_id=self.run_id, experiment_id=self.exp_id)
 
-    def _compute_eig(self, flow_model, nominal_design=False, designs=None):
+    def _compute_eig(self, flow_model, nominal_design=False, designs=None, timers=None):
         """
         Helper function that evaluates the EIG of a single flow model.
 
@@ -484,23 +507,27 @@ class Evaluator:
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
             torch.cuda.synchronize()
-        
-        # Create dataset with explicit device - this creates Pyro trace
-        # Each call samples from p(y|θ,d) using Pyro's RNG, which advances state.
-        # This means different ranks (or multiple calls) get different likelihood samples,
-        # causing Monte Carlo variance in EIG that decreases with n_particles.
-        # Process particles in batches to reduce memory usage
-        dataset_result = LikelihoodDataset(
-            experiment=self.experiment,
-            n_particles_per_device=self.n_particles,
-            device=self.device,
-            evaluation=True,
-            designs=designs,
-            particle_batch_size=self.particle_batch_size
-        )[0]
-        
+
+        dataset_cm = (
+            timers.track("LikelihoodDataset") if timers is not None else contextlib.nullcontext()
+        )
+        with dataset_cm:
+            # Create dataset with explicit device - this creates Pyro trace
+            # Each call samples from p(y|θ,d) using Pyro's RNG, which advances state.
+            # This means different ranks (or multiple calls) get different likelihood samples,
+            # causing Monte Carlo variance in EIG that decreases with n_particles.
+            # Process particles in batches to reduce memory usage
+            dataset_result = LikelihoodDataset(
+                experiment=self.experiment,
+                n_particles_per_device=self.n_particles,
+                device=self.device,
+                evaluation=True,
+                designs=designs,
+                particle_batch_size=self.particle_batch_size
+            )[0]
+
         samples, context, log_probs = dataset_result
-        
+
         # Clear GPU cache after dataset creation to free memory from trace operations
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
@@ -512,18 +539,22 @@ class Evaluator:
             log_probs = {k: v.to(device_obj) for k, v in log_probs.items()}
         flow_model = flow_model.to(device_obj)
 
+        nfloss_cm = (
+            timers.track("nf_loss") if timers is not None else contextlib.nullcontext()
+        )
         with torch.no_grad():
-            _, eigs = nf_loss(
-                samples=samples,
-                context=context,
-                guide=flow_model,
-                experiment=self.experiment,
-                rank=0,
-                verbose_shapes=False,
-                log_probs=log_probs,
-                evaluation=True,
-                chunk_size=(self.n_particles // 10)
-            )
+            with nfloss_cm:
+                _, eigs = nf_loss(
+                    samples=samples,
+                    context=context,
+                    guide=flow_model,
+                    experiment=self.experiment,
+                    rank=0,
+                    verbose_shapes=False,
+                    log_probs=log_probs,
+                    evaluation=True,
+                    chunk_size=(self.n_particles // 10)
+                )
         eigs = eigs.detach().cpu()  # Move to CPU immediately to free GPU memory
         # release temporary tensors to avoid graph retention and free GPU caches after each chunk
         del dataset_result, samples, context, log_probs
@@ -532,6 +563,307 @@ class Evaluator:
             torch.cuda.synchronize()  # Ensure all operations complete before clearing cache
 
         return eigs
+
+    # =========================================================================
+    # Marginal EIG over parameter subsets
+    # =========================================================================
+
+    @staticmethod
+    def _subset_id(subset):
+        """Stable, filesystem-friendly id for a parameter subset."""
+        return "+".join(subset)
+
+    def _normalize_marginal_subsets(self, subsets):
+        """Coerce the requested subsets into a validated list-of-lists of param names.
+
+        Accepts None, a flat list of names (single subset), or a list of lists.
+        Drops names not present in experiment.cosmo_params (with a warning) and
+        discards empty subsets.
+        """
+        if not subsets:
+            return []
+        # A flat list of strings is treated as a single subset.
+        if all(isinstance(s, str) for s in subsets):
+            subsets = [subsets]
+
+        cosmo_params = self.experiment.cosmo_params
+        normalized = []
+        for subset in subsets:
+            valid = [p for p in subset if p in cosmo_params]
+            missing = [p for p in subset if p not in cosmo_params]
+            if missing:
+                print(
+                    f"  Warning: marginal-EIG subset {subset} references unknown "
+                    f"parameters {missing}; ignoring them. Available: {cosmo_params}"
+                )
+            if valid:
+                normalized.append(valid)
+        return normalized
+
+    def _marginal_knn_space(self) -> str:
+        """Coordinate system for k-NN marginal entropy.
+
+        Per-parameter (marginal) bijectors (bb, bb_temp): unconstrained flow space,
+        matching joint nf_loss. Joint empirical Gaussianizer (empirical): physical
+        space so subset marginals are in interpretable units.
+        """
+        exp = self.experiment
+        if getattr(exp, "transform_input", False) and not exp._uses_joint_transform():
+            return "unconstrained"
+        return "physical"
+
+    def _marginal_knn_coords_from_physical(self, physical: np.ndarray) -> np.ndarray:
+        if self._marginal_knn_space() == "physical":
+            return physical
+        t = torch.tensor(physical, dtype=torch.float64, device=self.experiment.device)
+        u = self.experiment.params_to_unconstrained(t)
+        return u.detach().cpu().numpy()
+
+    def _marginal_flow_samples_to_knn_coords(self, samples: torch.Tensor) -> torch.Tensor:
+        if self._marginal_knn_space() == "unconstrained":
+            return samples
+        return self._marginal_inner_to_physical(samples)
+
+    def _marginal_inner_to_physical(self, samples):
+        """Transform guide samples to the same (physical) space as the prior samples.
+
+        Mirrors BaseExperiment.get_guide_samples so the marginal posterior and
+        marginal prior entropies are estimated in a common coordinate system.
+        Operates on tensors of shape (..., n_params).
+        """
+        if getattr(self.experiment, "transform_input", False) and self.nf_transform_output:
+            samples = self.experiment.params_from_unconstrained(samples)
+            samples = self.experiment._sanitize_physical_samples(samples)
+        self.experiment.apply_multipliers(samples)
+        return samples
+
+    def _marginal_prior_physical_samples(self, num_samples: int) -> np.ndarray:
+        """Physical cosmo-parameter matrix for marginal prior entropy estimation.
+
+        Empirical GPU prior pools are subsampled *without replacement* so k-NN
+        entropy is not biased by duplicate rows (with-replacement pool draws
+        collapse neighbor distances at large ``num_samples``). Other experiments
+        use :meth:`BaseExperiment.get_prior_samples`.
+        """
+        exp = self.experiment
+        pool = getattr(exp, "prior_pool", None)
+        n_want = int(num_samples)
+        if pool is not None:
+            from bedcosmo.num_visits.sed_prior.prior_sampler import sample_prior_pool_unique
+
+            n_pool = int(pool.pool.shape[0])
+            n_draw = min(n_want, n_pool)
+            gen = torch.Generator(device=pool.pool.device)
+            gen.manual_seed(int(self.seed))
+            rows = sample_prior_pool_unique(pool, n_draw, generator=gen)
+            params = exp._prior_rows_to_param_dict(rows, (n_draw,))
+            param_samples = torch.stack(
+                [params[k].squeeze(-1) for k in exp.cosmo_params], dim=-1
+            )
+            exp.apply_multipliers(param_samples)
+            param_samples = exp._sanitize_physical_samples(param_samples)
+            return param_samples.detach().cpu().numpy()
+
+        return exp.get_prior_samples(num_samples=n_want).samples
+
+    @staticmethod
+    def _marginal_prior_sample_count(marginal_inner_samples: int, marginal_outer_y: int) -> int:
+        """Prior rows for k-NN entropy: match posterior MC depth, modest floor."""
+        return max(int(marginal_inner_samples) * int(marginal_outer_y), 4096)
+
+    def _find_nominal_design_index(self, designs=None, atol=1e-5):
+        """Index of nominal design in ``designs``, or None if not present."""
+        if designs is None:
+            designs = self.input_designs
+        nominal = self.experiment.nominal_design.detach().cpu().numpy()
+        for i, row in enumerate(designs.detach().cpu().numpy()):
+            if np.allclose(row, nominal, rtol=0.0, atol=atol):
+                return i
+        return None
+
+    @profile_loop("per-design flow sample", total_from="n_designs")
+    def _marginal_design_indices(self, n_designs):
+        yield from range(n_designs)
+
+    @profile_loop(
+        "_compute_eig chunk",
+        total_from="num_designs",
+        on_interim_from="eig_timers",
+    )
+    def _eig_design_chunk_indices(self, design_chunks, num_designs, eig_timers):
+        yield from design_chunks
+
+    @profile_method
+    def _marginal_posterior_entropy(self, flow_model, designs, subset_ids, subset_idx):
+        """E_y[ H(theta_S | y, d) ] in bits, for each subset and each design.
+
+        Draws M_outer outer samples y ~ p(y|d) (reusing LikelihoodDataset to build
+        the [y, design] contexts), draws K_inner posterior samples from the guide
+        for each context, and estimates E_y[H(q(theta_S | y, d))] by applying k-NN
+        to each outer ``y`` (on ``K`` inner samples) and averaging over ``M``.
+
+        Same estimator for every subset S, including S = all cosmo_params (full
+        joint); full-joint marginal EIG should then be comparable to joint nf_loss.
+
+        Returns:
+            dict {subset_id: np.ndarray of shape (n_designs,)} in bits.
+        """
+        device_obj = torch.device(self.device)
+        designs = designs.to(device_obj)
+        n_designs = designs.shape[0]
+        M = self.marginal_outer_y
+        K = self.marginal_inner_samples
+        k = self.marginal_knn_k
+
+        # Outer y ~ p(y|d): context rows are [y, design], shape (M, n_designs, ctx_dim).
+        with profile_section(self, "LikelihoodDataset (outer y)"):
+            _, context = LikelihoodDataset(
+                experiment=self.experiment,
+                n_particles_per_device=M,
+                device=self.device,
+                evaluation=False,
+                designs=designs,
+            )[0]
+        context = context.to(device_obj)
+
+        out = {sid: np.zeros(n_designs) for sid in subset_ids}
+        with torch.inference_mode():
+            for j in self._marginal_design_indices(n_designs):
+                ctx_j = context[:, j, :]  # (M, ctx_dim)
+                inner_np = (
+                    self._marginal_flow_samples_to_knn_coords(
+                        flow_model(ctx_j).sample((K,))
+                    )
+                    .detach()
+                    .cpu()
+                    .numpy()
+                )  # (K, M, n_params)
+                if self.verbose and (
+                    j == 0 or (j + 1) % 20 == 0 or j == n_designs - 1
+                ):
+                    print(f"    Marginal posterior entropy: design {j + 1}/{n_designs}")
+                for sid, idx in zip(subset_ids, subset_idx):
+                    cols = inner_np[..., idx]  # (K, M, |S|)
+                    H_per_y = [knn_entropy(cols[:, m, :], k=k) for m in range(M)]
+                    out[sid][j] = float(np.mean(H_per_y))
+        del context
+        return out
+
+    @profile_method
+    def get_marginal_eig(self, step, subsets=None, n_evals=None):
+        """Compute marginal EIG over parameter subsets for all input designs.
+
+        For a subset S:  EIG_S(d) = H[p(theta_S)] - E_y[ H[q(theta_S | y, d)] ],
+        with both entropies estimated from samples (k-NN Kozachenko-Leonenko) in
+        physical parameter space. When S is all cosmo_params, this is the full
+        joint EIG and should be compared to joint nf_loss. Results are stored under
+        ``eig_data[step_{N}]["marginal"][subset_id]`` and the JSON is re-saved.
+
+        Args:
+            step: Training step (int or "last") whose guide is evaluated.
+            subsets: List-of-lists of parameter names. Defaults to
+                self.marginal_eig_subsets.
+            n_evals: Number of repeats to average over (defaults to self.n_evals).
+
+        Returns:
+            tuple (marginal_dict, selected_step). marginal_dict is keyed by
+            subset_id, or {} if there is nothing to compute.
+        """
+        if subsets is None:
+            subsets = self.marginal_eig_subsets
+        if not subsets:
+            return {}, None
+        if n_evals is None:
+            n_evals = self.n_evals
+
+        flow_model, selected_step = load_model(
+            self.experiment, step, self.run_obj,
+            self.run_args, self.device, global_rank=self.global_rank,
+        )
+        flow_model = flow_model.to(self.device)
+        flow_model.eval()
+
+        cosmo_params = self.experiment.cosmo_params
+        subset_ids = [self._subset_id(s) for s in subsets]
+        subset_idx = [[cosmo_params.index(p) for p in s] for s in subsets]
+        n_designs = len(self.input_designs)
+        n_prior = self._marginal_prior_sample_count(
+            self.marginal_inner_samples, self.marginal_outer_y
+        )
+        nominal_idx = self._find_nominal_design_index()
+
+        # Marginal prior entropy (design-independent), k-NN coordinate space, bits.
+        prior_samples = self._marginal_prior_physical_samples(n_prior)
+        prior_coords = self._marginal_knn_coords_from_physical(prior_samples)
+        if self.verbose:
+            print(f"  Marginal k-NN entropy space: {self._marginal_knn_space()}")
+        prior_H = {
+            sid: knn_entropy(prior_coords[:, idx], k=self.marginal_knn_k)
+            for sid, idx in zip(subset_ids, subset_idx)
+        }
+
+        prior_H_acc = {sid: [] for sid in subset_ids}
+        var_eig_acc = {sid: [] for sid in subset_ids}
+        nom_eig_acc = {sid: [] for sid in subset_ids}
+
+        for eval_idx in range(int(n_evals)):
+            if self.verbose:
+                print(f"  Marginal EIG evaluation {eval_idx + 1}/{int(n_evals)}")
+
+            var_post_H = self._marginal_posterior_entropy(
+                flow_model, self.input_designs, subset_ids, subset_idx
+            )
+            if nominal_idx is not None:
+                nom_post_H = {
+                    sid: np.array([var_post_H[sid][nominal_idx]]) for sid in subset_ids
+                }
+            else:
+                nom_post_H = self._marginal_posterior_entropy(
+                    flow_model,
+                    self.experiment.nominal_design.unsqueeze(0),
+                    subset_ids,
+                    subset_idx,
+                )
+            for sid in subset_ids:
+                prior_H_acc[sid].append(prior_H[sid])
+                var_eig_acc[sid].append(prior_H[sid] - var_post_H[sid])
+                nom_eig_acc[sid].append(prior_H[sid] - nom_post_H[sid][0])
+
+        marginal = {}
+        for sid, subset in zip(subset_ids, subsets):
+            var = np.array(var_eig_acc[sid])  # (n_evals, n_designs)
+            eigs_avg = var.mean(axis=0)
+            eigs_std = var.std(axis=0)
+            nom = np.array(nom_eig_acc[sid])  # (n_evals,)
+            optimal_idx = int(np.argmax(eigs_avg)) if n_designs > 0 else 0
+            optimal_design = self.input_designs[optimal_idx].detach().cpu().numpy().tolist()
+            marginal[sid] = {
+                "params": list(subset),
+                "prior_entropy": float(np.mean(prior_H_acc[sid])),
+                "eigs_avg": eigs_avg.tolist(),
+                "eigs_std": eigs_std.tolist(),
+                "nominal": {"eigs_avg": float(nom.mean()), "eigs_std": float(nom.std())},
+                "optimal_eig": float(eigs_avg[optimal_idx]),
+                "optimal_eig_std": float(eigs_std[optimal_idx]),
+                "optimal_design": optimal_design,
+            }
+            print(
+                f"  Marginal EIG [{sid}]: nominal {marginal[sid]['nominal']['eigs_avg']:.3f} bits, "
+                f"optimal {marginal[sid]['optimal_eig']:.3f} bits"
+            )
+
+        # Persist into the same eig_data JSON under the resolved step.
+        step_key = f"step_{selected_step}"
+        step_dict = self.eig_data.setdefault(step_key, {})
+        step_dict["marginal"] = marginal
+        self.eig_data["marginal_subsets"] = [list(s) for s in subsets]
+        timestamp = getattr(self, 'timestamp', None) or datetime.now().strftime('%Y%m%d_%H%M')
+        eig_data_save_path = self._eig_data_save_path(timestamp)
+        with open(eig_data_save_path, "w") as f:
+            json.dump(self.eig_data, f, indent=2)
+        print(f"Saved marginal EIG data to {eig_data_save_path}")
+
+        return marginal, selected_step
 
     @profile_method
     def get_eig(self, step, nominal_design=False, n_evals=None):
@@ -750,16 +1082,20 @@ class Evaluator:
             
             # Evaluate each chunk and combine results for this evaluation
             full_eigs = np.zeros(num_designs)
-            
-            for chunk_idx, design_indices in enumerate(design_chunks):
+            eig_timers = ProfileTimerGroup(self)
+
+            for design_indices in self._eig_design_chunk_indices(
+                design_chunks, num_designs, eig_timers
+            ):
                 # Get designs for this chunk
                 chunk_designs = all_designs[design_indices].to(self.device)
-                
+
                 # Evaluate this chunk
                 eig_result = self._compute_eig(
                     flow_model,
                     nominal_design=nominal_design,
-                    designs=chunk_designs
+                    designs=chunk_designs,
+                    timers=eig_timers,
                 )
                 
                 # Store results for this chunk (eig_result is already on CPU)
@@ -774,7 +1110,9 @@ class Evaluator:
                     # Multiple designs in chunk
                     for idx, eig_val in zip(design_indices, eig_array.flatten()):
                         full_eigs[idx] = eig_val
-            
+
+            eig_timers.report_all()
+
             all_eval_results.append(full_eigs)
             # Save to step_data, converting numpy arrays to lists for JSON serialization
             step_data['eigs'] = [r.tolist() if isinstance(r, np.ndarray) else r for r in all_eval_results]
@@ -1070,20 +1408,29 @@ class Evaluator:
             json.dump(self.eig_data, f, indent=2)
         print(f"Saved EIG data to {eig_data_save_path}")
 
-        # Update timing after EIG computation
+        # Update timing after joint EIG computation
         self._update_runtime()
-        
-        # Check if EIG data is already complete (from loaded file)
+
+        # Marginal EIG over requested parameter subsets (stored in the same JSON).
+        marginal_ok = True
+        if self.marginal_eig_subsets:
+            try:
+                self.get_marginal_eig(step=eval_step, subsets=self.marginal_eig_subsets)
+                self._update_runtime()
+            except Exception as e:
+                marginal_ok = False
+                print(f"Warning: marginal EIG computation failed: {e}")
+                traceback.print_exc()
+
+        # Mark complete only after joint EIG and any requested marginal EIG succeed.
         is_complete = self.eig_data.get('status', 'incomplete') == 'complete'
-        
-        # If not complete, mark as complete and save
-        if not is_complete:
-            self.eig_data['status'] = 'complete'  # Mark as complete when evaluation finishes
+        if not is_complete and marginal_ok:
+            self.eig_data['status'] = 'complete'
             eig_data_save_path = self._eig_data_save_path(self.timestamp)
             with open(eig_data_save_path, "w") as f:
                 json.dump(self.eig_data, f, indent=2)
             print(f"Saved EIG data to {eig_data_save_path}")
-        
+
         # Make some evaluation plots
         try:
             self.plotter.generate_posterior(
@@ -1098,6 +1445,47 @@ class Evaluator:
         except Exception as e:
             print(f"Warning: generate_posterior failed: {e}")
             traceback.print_exc()
+
+        # Marginal posterior triangles + marginal EIG-vs-design plots per subset.
+        for subset in self.marginal_eig_subsets:
+            subset_id = self._subset_id(subset)
+            try:
+                self.plotter.generate_posterior(
+                    eval_step=eval_step,
+                    display=['nominal', 'optimal'],
+                    guide_samples=self.guide_samples,
+                    levels=self.levels,
+                    plot_prior=True,
+                    transform_output=self.nf_transform_output,
+                    params=subset,
+                    filename=f"posterior_marginal_{subset_id}",
+                )
+                self._update_runtime()
+            except Exception as e:
+                print(f"Warning: posterior_marginal ({subset_id}) failed: {e}")
+                traceback.print_exc()
+            step_key = f"step_{eval_step}"
+            has_marginal = (
+                subset_id
+                in self.eig_data.get(step_key, {}).get("marginal", {})
+            )
+            if not has_marginal:
+                print(
+                    f"Warning: skipping eig_designs_marginal ({subset_id}): "
+                    f"marginal EIG not in {step_key}"
+                )
+                continue
+            try:
+                self.plotter.eig_designs_marginal(
+                    eval_step=eval_step,
+                    subset=subset,
+                    sort=self.sort,
+                    include_nominal=self.include_nominal,
+                )
+                self._update_runtime()
+            except Exception as e:
+                print(f"Warning: eig_designs_marginal ({subset_id}) failed: {e}")
+                traceback.print_exc()
         
         try:
             if self.cosmo_exp == 'num_tracers':
@@ -1183,6 +1571,10 @@ if __name__ == "__main__":
     parser.add_argument('--design-args-path', type=str, default=None, help='Path to design_args.yaml file. If None, defaults to the run\'s artifacts/design_args.yaml')
     parser.add_argument('--nf-eig-data', type=str, default=None, help='Path for this NF job to write its eig_data JSON. If the file already exists, it is loaded first (inheriting seed, n_particles, particle_batch_size, n_evals, rng_state, input_designs, and cached per-step EIGs) and then overwritten at end of run.')
     parser.add_argument('--grid-eig-data', type=str, default=None, help='Path to the sibling grid job eig_data JSON. If it is complete at end of run, overlay plots are generated.')
+    parser.add_argument('--marginal-eig-subsets', type=parse_param_subsets, default=None, help='Parameter subsets for marginal EIG. JSON list-of-lists (e.g. \'[["log_c_scale","z"]]\') or semicolon/comma string (e.g. "log_c_scale,z; f1,f2").')
+    parser.add_argument('--marginal-outer-y', type=int, default=8, help='Outer y ~ p(y|d) samples per design for marginal posterior entropy (default: 8)')
+    parser.add_argument('--marginal-inner-samples', type=int, default=200, help='Guide samples per outer y for marginal posterior entropy (default: 200)')
+    parser.add_argument('--marginal-knn-k', type=int, default=3, help='Neighbor rank k for the k-NN entropy estimator (default: 3)')
 
     args, extra_args = parser.parse_known_args()
 

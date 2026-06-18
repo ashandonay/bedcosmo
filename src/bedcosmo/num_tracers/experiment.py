@@ -22,8 +22,9 @@ import io
 import getdist
 import math
 import inspect
+from bedcosmo.profiling import profile_method
 from bedcosmo.util import (
-    load_prior_flow_from_file, auto_seed, profile_method,
+    load_prior_flow_from_file, auto_seed,
     load_nominal_samples, get_experiment_config_path,
 )
 from bedcosmo.transform import Bijector
@@ -192,6 +193,8 @@ class NumTracers(BaseExperiment, CosmologyMixin):
         if self.likelihood_mode == 'emulator':
             if emulator_args_path is None:
                 raise ValueError("emulator_args_path must be provided when likelihood_mode='emulator'")
+            if not os.path.isabs(emulator_args_path):
+                emulator_args_path = str(get_experiment_config_path('num_tracers', emulator_args_path))
             with open(emulator_args_path, 'r') as f:
                 all_emulator_config = yaml.safe_load(f)
             if self.cosmo_model not in all_emulator_config:
@@ -905,11 +908,22 @@ class NumTracers(BaseExperiment, CosmologyMixin):
         return parameters
 
     def _load_emulators(self):
-        """Load trained NN emulators for each tracer bin from checkpoint files."""
-        from bedcosmo.num_tracers.emulator.util import build_model
+        """Load trained NN emulators for each tracer bin from checkpoint files.
+
+        Tracer bins whose checkpoint is null (None) are skipped and recorded in
+        ``self._emulator_fallback_bins``; their covariance blocks fall back to the
+        fixed DESI nominal covariance in ``_build_emulator_covariance``.
+        """
+        from desilike_emulator.util import build_model, DEFAULT_SIGMA_FLOOR
+
+        self._sigma_floor = DEFAULT_SIGMA_FLOOR
 
         self._emulators = {}
+        self._emulator_fallback_bins = []
         for tracer_bin, ckpt_path in self._emulator_config['checkpoints'].items():
+            if ckpt_path is None:
+                self._emulator_fallback_bins.append(tracer_bin)
+                continue
             ckpt = torch.load(ckpt_path, map_location=self.device, weights_only=False)
             model = build_model(
                 analysis=ckpt.get("analysis", "bao"),
@@ -928,16 +942,23 @@ class NumTracers(BaseExperiment, CosmologyMixin):
             self._emulators[tracer_bin] = {
                 'model': model,
                 'param_names': list(ckpt["param_names"]),
+                'target_names': list(ckpt["target_names"]),
                 'x_mu': ckpt["x_mu"].to(self.device),
                 'x_sigma': ckpt["x_sigma"].to(self.device),
                 'y_mu': ckpt["y_mu"].to(self.device),
                 'y_sigma': ckpt["y_sigma"].to(self.device),
                 'log_normalize': ckpt.get("log_normalize", False),
+                'log_sigma': ckpt.get("log_sigma", False),
                 'y_linthresh': ckpt["y_linthresh"].to(self.device) if ckpt.get("y_linthresh") is not None else None,
             }
 
         if self.global_rank == 0:
             print(f"Loaded emulators for tracer bins: {list(self._emulators.keys())}")
+            if self._emulator_fallback_bins:
+                print(
+                    f"No emulator checkpoint for tracer bins {self._emulator_fallback_bins}; "
+                    f"falling back to fixed DESI nominal covariance for these."
+                )
 
     def _emulator_predict(self, tracer_bin, emulator_input):
         """Run differentiable inference through an emulator.
@@ -948,8 +969,12 @@ class NumTracers(BaseExperiment, CosmologyMixin):
                 [N_tracers, Om, Ok, w0, wa, hrdrag]
 
         Returns:
-            Tensor of shape (..., 3) — [cov_DH_DH, cov_DH_DM, cov_DM_DM]
+            Tensor of shape (..., n_targets) in physical units (σ ≥ sigma_floor;
+            ρ from tanh decode). Target order matches the checkpoint's
+            ``target_names``.
         """
+        from desilike_emulator.util import decode_emulator_outputs
+
         emu = self._emulators[tracer_bin]
         model_dtype = next(emu['model'].parameters()).dtype
         x = emulator_input.to(model_dtype)
@@ -959,11 +984,16 @@ class NumTracers(BaseExperiment, CosmologyMixin):
         y_sigma = emu['y_sigma'].to(model_dtype)
         x_norm = (x - x_mu) / x_sigma
         y_norm = emu['model'](x_norm)
-        y = y_norm * y_sigma + y_mu
-        if emu['log_normalize'] and emu['y_linthresh'] is not None:
-            y_linthresh = emu['y_linthresh'].to(model_dtype)
-            y = torch.sign(y) * y_linthresh * torch.expm1(torch.abs(y))
-        return y
+        return decode_emulator_outputs(
+            y_norm,
+            y_mu,
+            y_sigma,
+            emu['target_names'],
+            log_normalize=emu['log_normalize'],
+            y_linthresh=emu['y_linthresh'],
+            log_sigma=emu.get('log_sigma', False),
+            sigma_floor=self._sigma_floor,
+        )
 
     def _calc_n_tracers(self, class_ratio):
         """Convert class ratios [BGS, LRG, ELG, QSO] to absolute N_tracers per tracer bin.
@@ -1009,15 +1039,35 @@ class NumTracers(BaseExperiment, CosmologyMixin):
 
         return n_tracers
 
+    # Maps emulator tracer-bin keys (emulator_args.yaml / checkpoints) to the
+    # tracer names used in desi_data.csv.
+    _EMULATOR_TRACER_TO_DESI = {
+        'BGS': 'BGS',
+        'LRG1': 'LRG1',
+        'LRG2': 'LRG2',
+        'LRG3_ELG1': 'LRG3+ELG1',
+        'ELG2': 'ELG2',
+        'QSO': 'QSO',
+        'Lya_QSO': 'Lya QSO',
+    }
+
     def _build_emulator_covariance(self, class_ratio, parameters):
-        """Build 13x13 block-diagonal covariance from emulator predictions.
+        """Build the block-diagonal covariance from emulator predictions.
+
+        The emulator for each tracer bin predicts per-tracer targets:
+
+        - Isotropic tracers (BGS; BGS+QSO for dr1): ``[sigma_DV_over_rd]`` only.
+        - Anisotropic tracers: ``[sigma_DH_over_rd, sigma_DM_over_rd, rho_DH_DM]``
+          assembled directly into the 2×2 block (PSD by construction).
+        - Tracer bins with a null checkpoint (e.g. Lya_QSO in base): the
+          within-tracer block falls back to the fixed DESI nominal covariance.
 
         Args:
             class_ratio: Tensor of shape (..., 4) with class fractions.
             parameters: Dict of cosmological parameter tensors (from sample_parameters).
 
         Returns:
-            Tensor of shape (..., 13, 13) — block-diagonal covariance matrix.
+            Tensor of shape (..., n_data, n_data) — block-diagonal covariance.
         """
         n_tracers = self._calc_n_tracers(class_ratio)
 
@@ -1030,30 +1080,27 @@ class NumTracers(BaseExperiment, CosmologyMixin):
 
         # Determine batch shape from class_ratio
         batch_shape = class_ratio.shape[:-1]
-        cov_size = len(self.desi_data)  # 13
+        cov_size = len(self.desi_data)
         covariance = torch.zeros(batch_shape + (cov_size, cov_size), device=self.device, dtype=torch.float64)
 
-        # Tracer bins and their data indices (matching desi_data.csv layout)
-        # BGS: idx 0 (DV_over_rs) — needs Jacobian transform
-        # LRG1: idx 1 (DM), 2 (DH)
-        # LRG2: idx 3 (DM), 4 (DH)
-        # LRG3+ELG1: idx 5 (DM), 6 (DH)
-        # ELG2: idx 7 (DM), 8 (DH)
-        # QSO: idx 9 (DM), 10 (DH)
-        # Lya QSO: idx 11 (DH), 12 (DM)
-        tracer_data_map = {
-            'LRG1': (1, 2),       # (DM_idx, DH_idx) in data
-            'LRG2': (3, 4),
-            'LRG3_ELG1': (5, 6),
-            'ELG2': (7, 8),
-            'QSO': (9, 10),
-            'Lya_QSO': (11, 12),  # data order is (DH, DM)
-        }
+        # Fixed DESI nominal covariance, used as fallback for tracer bins whose
+        # emulator checkpoint was null (e.g. Lya_QSO in the base config).
+        nominal_cov = torch.as_tensor(
+            self.nominal_cov, device=self.device, dtype=torch.float64
+        )
 
         def _to_broadcastable(value):
             if not isinstance(value, torch.Tensor):
                 value = torch.tensor(value, device=self.device, dtype=torch.float64)
             return torch.broadcast_to(value.to(torch.float32), batch_shape)
+
+        # Convert bedcosmo's hrdrag parameter to the emulator's hrdrag feature,
+        # which is the physical h*r_d (desilike _FID convention, fiducial ~99.08).
+        # bedcosmo:  D_H/rd = c / (hrdrag_multiplier * hrdrag * E(z))
+        # emulator:  D_H/rd = (c/100) / (h*r_d * E(z))
+        # => h*r_d = hrdrag_multiplier * hrdrag / 100  (= 100*hrdrag when mult=1e4).
+        hrdrag_multiplier = getattr(self, "hrdrag_multiplier", 100.0)
+        hrdrag_phys = hrdrag * hrdrag_multiplier / 100.0
 
         def _build_emulator_input(tracer_bin):
             # Build emulator inputs in the exact feature order expected by the
@@ -1066,7 +1113,7 @@ class NumTracers(BaseExperiment, CosmologyMixin):
                 'Ok': Ok,
                 'w0': w0,
                 'wa': wa,
-                'hrdrag': hrdrag,
+                'hrdrag': hrdrag_phys,
             }
 
             expanded = []
@@ -1079,60 +1126,84 @@ class NumTracers(BaseExperiment, CosmologyMixin):
                 expanded.append(_to_broadcastable(feature_values[name]))
             return torch.stack(expanded, dim=-1)
 
-        # Fill 2x2 blocks for DH/DM tracers
-        for tracer_bin, (idx_a, idx_b) in tracer_data_map.items():
+        def _predict_sigmas(tracer_bin):
+            """Return dict {target_name: tensor} of emulator sigma predictions."""
             emu_input = _build_emulator_input(tracer_bin)
-            # Emulator returns [cov_DH_DH, cov_DH_DM, cov_DM_DM]
-            cov_pred = self._emulator_predict(tracer_bin, emu_input).to(torch.float64)
+            pred = self._emulator_predict(tracer_bin, emu_input).to(torch.float64)
+            return {
+                name: pred[..., k]
+                for k, name in enumerate(self._emulators[tracer_bin]['target_names'])
+            }
 
-            if tracer_bin == 'Lya_QSO':
-                # Data order is [DH, DM] — matches emulator order
-                covariance[..., idx_a, idx_a] = cov_pred[..., 0]  # cov_DH_DH
-                covariance[..., idx_a, idx_b] = cov_pred[..., 1]  # cov_DH_DM
-                covariance[..., idx_b, idx_a] = cov_pred[..., 1]  # symmetric
-                covariance[..., idx_b, idx_b] = cov_pred[..., 2]  # cov_DM_DM
+        # Iterate over every tracer bin declared in the emulator config and fill
+        # its covariance block, driven by the actual desi_data row layout.
+        for tracer_bin in self._emulator_config['checkpoints']:
+            desi_name = self._EMULATOR_TRACER_TO_DESI.get(tracer_bin)
+            if desi_name is None:
+                raise ValueError(
+                    f"No desi_data mapping for emulator tracer bin '{tracer_bin}'. "
+                    f"Known: {sorted(self._EMULATOR_TRACER_TO_DESI.keys())}"
+                )
+            rows = self.desi_data.index[self.desi_data['tracer'] == desi_name].tolist()
+            if not rows:
+                # Tracer not present in this dataset's data vector — skip.
+                continue
+            quantities = self.desi_data.loc[rows, 'quantity'].tolist()
+
+            # Null checkpoint -> fixed DESI nominal covariance within-tracer block.
+            if tracer_bin in self._emulator_fallback_bins:
+                for i in rows:
+                    for j in rows:
+                        covariance[..., i, j] = nominal_cov[i, j]
+                continue
+
+            sig = _predict_sigmas(tracer_bin)
+            emu_targets = set(self._emulators[tracer_bin]['target_names'])
+
+            if quantities == ['DV_over_rs']:
+                if 'sigma_DV_over_rd' not in sig:
+                    raise ValueError(
+                        f"Tracer '{tracer_bin}' is isotropic (DV only) but its "
+                        f"emulator has no 'sigma_DV_over_rd' target."
+                    )
+                idx = rows[0]
+                covariance[..., idx, idx] = sig['sigma_DV_over_rd'] ** 2
+            elif set(quantities) == {'DM_over_rs', 'DH_over_rs'}:
+                dm_row = rows[quantities.index('DM_over_rs')]
+                dh_row = rows[quantities.index('DH_over_rs')]
+
+                required = {'sigma_DH_over_rd', 'sigma_DM_over_rd', 'rho_DH_DM'}
+                if not required.issubset(emu_targets):
+                    raise ValueError(
+                        f"Tracer '{tracer_bin}' anisotropic layout requires emulator "
+                        f"targets {sorted(required)}; got {sorted(emu_targets)}."
+                    )
+                from desilike_emulator.util import cov_block_from_marginals
+
+                c11, c12, c22 = cov_block_from_marginals(
+                    sig['sigma_DH_over_rd'],
+                    sig['sigma_DM_over_rd'],
+                    sig['rho_DH_DM'],
+                )
+                covariance[..., dh_row, dh_row] = c11
+                covariance[..., dm_row, dm_row] = c22
+                covariance[..., dh_row, dm_row] = c12
+                covariance[..., dm_row, dh_row] = c12
             else:
-                # Data order is [DM, DH] — need to reorder from emulator [DH, DM]
-                covariance[..., idx_a, idx_a] = cov_pred[..., 2]  # cov_DM_DM
-                covariance[..., idx_a, idx_b] = cov_pred[..., 1]  # cov_DH_DM = cov_DM_DH
-                covariance[..., idx_b, idx_a] = cov_pred[..., 1]  # symmetric
-                covariance[..., idx_b, idx_b] = cov_pred[..., 0]  # cov_DH_DH
-
-        # BGS (idx 0): DV_over_rs — Jacobian propagation from DH/DM covariance
-        bgs_emu_input = _build_emulator_input('BGS')
-        bgs_cov_pred = self._emulator_predict('BGS', bgs_emu_input).to(torch.float64)
-        # bgs_cov_pred: [cov_DH_DH, cov_DH_DM, cov_DM_DM]
-
-        # Get mean DH, DM, DV at BGS z_eff for Jacobian
-        bgs_z_eff = torch.tensor(
-            self.desi_data[self.desi_data["tracer"] == "BGS"]["z"].values[0],
-            device=self.device, dtype=torch.float64
-        )
-        DH_mean = self.D_H_func(bgs_z_eff, **parameters)  # (..., 1)
-        DM_mean = self.D_M_func(bgs_z_eff, **parameters)  # (..., 1)
-        DV_mean = self.D_V_func(bgs_z_eff, **parameters)  # (..., 1)
-
-        # Squeeze trailing Nz dim
-        DH_mean = DH_mean.squeeze(-1)
-        DM_mean = DM_mean.squeeze(-1)
-        DV_mean = DV_mean.squeeze(-1)
-
-        # Jacobian: dDV/dDH = (1/3)*DV/DH, dDV/dDM = (2/3)*DV/DM
-        dDV_dDH = (1.0 / 3.0) * DV_mean / DH_mean
-        dDV_dDM = (2.0 / 3.0) * DV_mean / DM_mean
-
-        # Var(DV) = J @ Cov(DH,DM) @ J^T
-        # = dDV_dDH^2 * cov_DH_DH + 2 * dDV_dDH * dDV_dDM * cov_DH_DM + dDV_dDM^2 * cov_DM_DM
-        var_DV = (dDV_dDH ** 2 * bgs_cov_pred[..., 0].to(torch.float64)
-                  + 2.0 * dDV_dDH * dDV_dDM * bgs_cov_pred[..., 1].to(torch.float64)
-                  + dDV_dDM ** 2 * bgs_cov_pred[..., 2].to(torch.float64))
-        covariance[..., 0, 0] = var_DV
+                raise ValueError(
+                    f"Unexpected quantity layout {quantities} for tracer "
+                    f"'{tracer_bin}' ({desi_name}); expected ['DV_over_rs'] or "
+                    f"{{'DM_over_rs', 'DH_over_rs'}}."
+                )
 
         return covariance
 
     def _stabilize_covariance(self, covariance_matrix):
         """Make covariance numerically SPD for MultivariateNormal sampling."""
         cov = 0.5 * (covariance_matrix + covariance_matrix.transpose(-1, -2))
+        if not torch.isfinite(cov).all():
+            cov = torch.nan_to_num(cov, nan=0.0, posinf=0.0, neginf=0.0)
+            cov = 0.5 * (cov + cov.transpose(-1, -2))
         n_dim = cov.shape[-1]
         eye = torch.eye(n_dim, device=cov.device, dtype=cov.dtype)
         eye = eye.view(*([1] * (cov.ndim - 2)), n_dim, n_dim)
@@ -1155,7 +1226,13 @@ class NumTracers(BaseExperiment, CosmologyMixin):
             jitter = jitter * 10.0
 
         # Final robust fallback: project to SPD by clipping eigenvalues.
-        evals, evecs = torch.linalg.eigh(cov)
+        try:
+            evals, evecs = torch.linalg.eigh(cov)
+        except RuntimeError:
+            cov_cpu = cov.detach().cpu()
+            evals, evecs = torch.linalg.eigh(cov_cpu)
+            evals = evals.to(device=cov.device, dtype=cov.dtype)
+            evecs = evecs.to(device=cov.device, dtype=cov.dtype)
         evals = torch.clamp(evals, min=1e-10)
         cov = evecs @ torch.diag_embed(evals) @ evecs.transpose(-1, -2)
         cov = 0.5 * (cov + cov.transpose(-1, -2))

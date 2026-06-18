@@ -18,9 +18,9 @@ from pyro.contrib.util import lexpand
 import torch
 from bedcosmo.transform import Bijector
 from bedcosmo.custom_dist import EmpiricalPrior
+from bedcosmo.profiling import profile_method
 from bedcosmo.util import (
     GETDIST_SETTINGS,
-    profile_method,
 )
 
 
