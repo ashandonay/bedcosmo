@@ -23,13 +23,13 @@ import math
 import inspect
 
 from bedcosmo.custom_dist import ConstrainedUniform2D
+from bedcosmo.profiling import profile_method
 from bedcosmo.util import (
     auto_seed,
     get_experiment_config_path,
     load_prior_flow_from_file,
     parse_json_object,
-    profile_method,
-)
+ )
 from bedcosmo.base import BaseExperiment
 from bedcosmo.cosmology import CosmologyMixin, _interp1
 

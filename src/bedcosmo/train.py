@@ -30,6 +30,7 @@ from tqdm import tqdm
 import shutil
 import psutil
 import gc
+from bedcosmo.profiling import get_profile_depth, profile_method
 from bedcosmo.util import *
 import json
 import yaml

@@ -22,8 +22,9 @@ import io
 import getdist
 import math
 import inspect
+from bedcosmo.profiling import profile_method
 from bedcosmo.util import (
-    load_prior_flow_from_file, auto_seed, profile_method,
+    load_prior_flow_from_file, auto_seed,
     load_nominal_samples, get_experiment_config_path,
 )
 from bedcosmo.transform import Bijector

@@ -13,7 +13,9 @@ bedcosmo/
 ├── src/bedcosmo/           # Source code (installable package)
 │   ├── train.py            # Trainer class for distributed training
 │   ├── evaluate.py         # Evaluator class for model evaluation
-│   ├── util.py             # Bijector, helper functions, config loading
+│   ├── util.py             # Helper functions, config loading (re-exports Bijector)
+│   ├── transform.py        # Bijector: empirical-CDF Gaussianization for NF inputs
+│   ├── profiling.py        # Method/loop/section timing helpers (--profile flag)
 │   ├── plotting.py         # Visualization classes
 │   ├── pyro_oed_src.py     # OED loss functions
 │   ├── num_tracers/        # NumTracers experiment class
@@ -105,7 +107,9 @@ SLURM infrastructure flags also support prefixes: `--train-time`, `--train-queue
 - **train.py**: `Trainer` class handles distributed training (DDP), neural flow learning, checkpointing, MLflow logging
 - **evaluate.py**: `Evaluator` class loads trained models, computes Expected Information Gain (EIG), generates posterior samples
 - **plotting.py**: `BasePlotter`, `RunPlotter`, `ComparisonPlotter` for visualization
-- **util.py**: `Bijector` class for parameter space normalization (CDF-based), `get_experiment_config_path()` for config loading
+- **util.py**: Shared helpers (`get_experiment_config_path()`, seeding, MLflow utilities). Re-exports `Bijector` from `transform.py` for backward-compatible imports
+- **transform.py**: `Bijector` maps physical parameters to approximately Gaussian NF coordinates via per-dimension empirical CDF + normal scores (`input_transform_type="marginal"`), with optional joint Cholesky whitening on a parameter block (`input_transform_type="joint"`). Fit from experiment prior samples (`create_cdfs`) or a fixed reference matrix (`fit_from_matrix`, used by the SED KDE pipeline). State is serializable (`get_state` / `set_state` / `from_state`) for checkpoints and joblib artifacts
+- **profiling.py**: Lightweight timing instrumentation gated by `owner.profile` (rank 0 only in DDP). `@profile_method` decorates hot methods on `Trainer`, `Evaluator`, and experiments; `profile_loop` times iteration-heavy loops; `profile_section` times single blocks; `ProfileTimerGroup` breaks down substages inside a loop. Enable with `./submit.sh ... --profile`
 - **pyro_oed_src.py**: OED loss functions (`nf_loss`), `LikelihoodDataset`
 
 ### Experiment Code (src/bedcosmo/{experiment}/)
@@ -146,6 +150,7 @@ from bedcosmo import init_experiment, auto_seed, Bijector
 from bedcosmo.num_tracers import NumTracers
 from bedcosmo.train import Trainer
 from bedcosmo.util import get_experiment_config_path
+from bedcosmo.transform import Bijector  # canonical import (also available via util / bedcosmo)
 ```
 
 ### Config Path Resolution

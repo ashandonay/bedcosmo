@@ -18,11 +18,11 @@ import yaml
 from speclite import filters as speclite_filters
 from astropy.constants import h, c
 import getdist
+from bedcosmo.profiling import profile_method
 from bedcosmo.util import (
     _central_params_as_dict,
     get_experiment_config_path,
-    load_prior_flow_from_file,
-    profile_method,
+    load_prior_flow_from_file
 )
 from bedcosmo.base import BaseExperiment
 from bedcosmo.custom_dist import EmpiricalPrior

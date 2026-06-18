@@ -21,13 +21,12 @@ import time
 import inspect
 import concurrent.futures
 import warnings
-import threading
 from itertools import combinations
 
-# GetDist KDE settings used for all MCSamples constructions. Keep 2D smoothing
-# modest so contour structure is preserved while still reducing pixel noise.
+# GetDist KDE settings used for all MCSamples constructions. 2D smoothing
+# reduces contour pixel noise while preserving broad structure.
 GETDIST_SETTINGS = {
-    "smooth_scale_2D": 0.1,
+    "smooth_scale_2D": 0.2,
     "fine_bins_2D": 256,
     "mult_bias_correction_order": 1,
     "boundary_correction_order": 1,
@@ -35,7 +34,6 @@ GETDIST_SETTINGS = {
 from PIL import Image, ImageDraw, ImageFont
 import glob
 import argparse
-import psutil
 import pandas as pd
 import yaml
 
@@ -88,78 +86,6 @@ def extract_run_info_from_checkpoint_path(checkpoint_path: str) -> tuple[str, st
 
     return run_id, exp_id, cosmo_exp
 
-def get_profile_depth():
-    """Get current profile nesting depth for indentation."""
-    if not hasattr(_profile_depth, 'depth'):
-        return 0
-    return _profile_depth.depth
-    
-def _get_memory_usage():
-    """Get current memory usage in MB. Returns None if unavailable."""
-    try:
-        process = psutil.Process(os.getpid())
-        mem_info = process.memory_info()
-        return mem_info.rss / (1024 * 1024)
-    except Exception:
-        return None
-
-# Thread-local storage for tracking profile nesting depth
-_profile_depth = threading.local()
-
-def profile_method(func):
-    """Decorator to profile method execution time and memory usage - checks self.profile"""
-    @functools.wraps(func)
-    def wrapper(*args, **kwargs):
-        if hasattr(args[0], 'profile') and args[0].profile:
-            # Only print on rank 0 to avoid duplicate output in distributed training
-            print_profile = not hasattr(args[0], 'global_rank') or args[0].global_rank == 0
-            
-            # Track nesting depth for indentation
-            if not hasattr(_profile_depth, 'depth'):
-                _profile_depth.depth = 0
-            _profile_depth.depth += 1
-            indent = "  " * (_profile_depth.depth - 1)
-            
-            start_time = time.time()
-            start_memory = _get_memory_usage()
-            result = func(*args, **kwargs)
-            end_time = time.time()
-            end_memory = _get_memory_usage()
-            execution_time = end_time - start_time
-            
-            if print_profile:
-                if start_memory is not None and end_memory is not None:
-                    memory_diff = end_memory - start_memory
-                    print(f"{indent}{func.__name__} took {execution_time:.5f} seconds, memory: {end_memory:.2f} MB (Δ: {memory_diff:+.2f} MB)")
-                elif end_memory is not None:
-                    print(f"{indent}{func.__name__} took {execution_time:.5f} seconds, memory: {end_memory:.2f} MB")
-                else:
-                    print(f"{indent}{func.__name__} took {execution_time:.5f} seconds")
-            
-            _profile_depth.depth -= 1
-            return result
-        else:
-            # No profiling overhead when disabled
-            return func(*args, **kwargs)
-    return wrapper
-
-def profile_function(profile=False):
-    """Decorator to profile function execution time - only active when profile is True"""
-    def decorator(func):
-        @functools.wraps(func)
-        def wrapper(*args, **kwargs):
-            if profile:
-                start_time = time.time()
-                result = func(*args, **kwargs)
-                end_time = time.time()
-                execution_time = end_time - start_time
-                print(f"⏱️  {func.__name__} took {execution_time:.2f} seconds")
-                return result
-            else:
-                # No profiling overhead when disabled
-                return func(*args, **kwargs)
-        return wrapper
-    return decorator
 
 def auto_seed(base_seed=0, rank=0):
     if base_seed < 0:

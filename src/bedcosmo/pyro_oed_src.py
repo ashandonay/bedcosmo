@@ -5,7 +5,7 @@ from pyro.contrib.util import lexpand
 from pyro.infer.autoguide.utils import mean_field_entropy
 import math
 from torch.utils.data import Dataset
-from bedcosmo.util import profile_method
+from bedcosmo.profiling import profile_method
 
 def nmc_eig(
     model,

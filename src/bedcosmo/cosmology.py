@@ -9,7 +9,7 @@ import math
 import torch
 from astropy import constants
 
-from bedcosmo.util import profile_method
+from bedcosmo.profiling import profile_method
 
 # Physical constants for cosmology calculations
 T_CMB = 2.7255  # CMB temperature in Kelvin
