@@ -28,7 +28,7 @@ Legacy sparse/masked behavior is still available with --support-mode masked or
 
 Example:
 
-  python build_empirical_sed_prior_kde.py \
+  python -m bedcosmo.num_visits.sed_prior.fit_sed_prior_kde \
     --weights-csv ~/scratch/bedcosmo/desi_eazy_empirical_prior_nnls/desi_eazy_empirical_weights.csv
 """
 

@@ -26,7 +26,7 @@ from bedcosmo.util import (
 )
 from bedcosmo.base import BaseExperiment
 from bedcosmo.custom_dist import EmpiricalPrior
-from bedcosmo.num_visits.sed_prior.build_empirical_sed_prior_kde import (
+from bedcosmo.num_visits.sed_prior.fit_sed_prior_kde import (
     mode_central_params_from_artifact,
 )
 from bedcosmo.num_visits.sed_prior.prior_sampler import (
@@ -322,7 +322,7 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         artifact = getattr(self, "sed_prior_artifact", None)
         if artifact is None:
             return None
-        from bedcosmo.num_visits.sed_prior.build_empirical_sed_prior_kde import (
+        from bedcosmo.num_visits.sed_prior.fit_sed_prior_kde import (
             get_training_matrix,
         )
 

@@ -9,7 +9,7 @@ from typing import Any
 import numpy as np
 import torch
 
-from .build_empirical_sed_prior_kde import load_sed_prior_kde, sample_sed_prior
+from .fit_sed_prior_kde import load_sed_prior_kde, sample_sed_prior
 
 
 @dataclass

@@ -50,7 +50,7 @@ DEFAULT_MAX_CHI2_DOF = 1.2
 DEFAULT_Z_MIN = 0.01
 
 FIT_MODULE = "bedcosmo.num_visits.sed_prior.fit_eazy_weights_to_desi"
-KDE_MODULE = "bedcosmo.num_visits.sed_prior.build_empirical_sed_prior_kde"
+KDE_MODULE = "bedcosmo.num_visits.sed_prior.fit_sed_prior_kde"
 
 
 def resolve_kde_python(explicit: str | None = None) -> str:

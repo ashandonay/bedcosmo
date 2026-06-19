@@ -78,7 +78,7 @@ python -m bedcosmo.num_visits.sed_prior.build_empirical_prior --force-fit
 | `desi_get_dr_subset.py` | Download DESI DR1 coadd + redrock for selected HEALPix patches |
 | `fit_eazy_weights_to_desi.py` | Per-galaxy NNLS template fit → weights CSV + fit diagnostics |
 | `combine_healpix_weights.py` | Concatenate per-patch CSVs into one training table |
-| `build_empirical_sed_prior_kde.py` | Train KDE + gaussianizer → `sed_prior_kde.joblib` |
+| `fit_sed_prior_kde.py` | Train KDE + gaussianizer → `sed_prior_kde.joblib` |
 | `run_healpix_fits.sh` | Batch fits only (no combine/KDE; see orchestrator instead) |
 | `run_healpix_diagnostic_plots.sh` | Per-patch `--plot-only` triangles + cross-patch comparison |
 | `compare_healpix_prior_params.py` | Cross-patch overlays of prior coordinates |
@@ -137,7 +137,7 @@ build_empirical_prior.py  (one command; steps skip existing outputs)
   Step 1  ensure DESI coadd + redrock under desi/tiny_dr1/
   Step 2  fit_eazy_weights_to_desi.py  →  num_visits/<build>/healpix/hp*/desi_eazy_empirical_weights.csv
   Step 3  combine_healpix_weights.py   →  num_visits/<build>/desi_eazy_empirical_weights.csv
-  Step 4  build_empirical_sed_prior_kde.py → sed_prior_kde.joblib
+  Step 4  fit_sed_prior_kde.py → sed_prior_kde.joblib
         ↓
 diagnostic_plots.py all         →  diagnostics/{clr_triangle,redshift_histograms,...}/
 run_healpix_diagnostic_plots.sh →  per-patch fit triangles (optional; skipped during build)
@@ -266,7 +266,7 @@ Or all patches: `./run_healpix_diagnostic_plots.sh`
 
 ---
 
-## Step 2: KDE prior (`build_empirical_sed_prior_kde.py`)
+## Step 2: KDE prior (`fit_sed_prior_kde.py`)
 
 ### Recommended mode (defaults)
 
@@ -288,7 +288,7 @@ Legacy **`--support-mode masked`** applies a random training-galaxy zero pattern
 Normally run via `build_empirical_prior` (step 4). Standalone:
 
 ```bash
-python -m bedcosmo.num_visits.sed_prior.build_empirical_sed_prior_kde \
+python -m bedcosmo.num_visits.sed_prior.fit_sed_prior_kde \
   --build-name empirical_prior
 ```
 

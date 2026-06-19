@@ -58,7 +58,7 @@ def kde_artifact():
     if artifact.get("parameterization", "weights") != PARAMETERIZATION_CLR:
         pytest.skip(
             "KDE artifact is not CLR parameterization; rebuild with "
-            "build_empirical_sed_prior_kde.py (default --parameterization clr)"
+            "fit_sed_prior_kde.py (default --parameterization clr)"
         )
     return artifact
 

@@ -1,7 +1,7 @@
 """Empirical galaxy SED prior from DESI spectra and EAZY template fits."""
 
 from .build_empirical_prior import build_empirical_prior
-from .build_empirical_sed_prior_kde import (
+from .fit_sed_prior_kde import (
     coeffs_from_sample_row,
     load_prior_training_table,
     load_sed_prior_kde,
