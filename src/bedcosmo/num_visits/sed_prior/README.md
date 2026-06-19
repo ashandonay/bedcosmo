@@ -333,7 +333,7 @@ python -m bedcosmo.num_visits.sed_prior.diagnostic_plots all \
 
 | Subcommand | Output subdir | What it checks |
 |------------|---------------|----------------|
-| `clr-triangle` | `clr_triangle/` | Low-weight template highlighting in KDE (and optional training) draws |
+| `clr-triangle` | `clr_triangle/` | Low-weight template highlighting in CLR and Cholesky-whitened gaussianized KDE (and optional training) draws |
 | `redshift-histograms` | `redshift_histograms/` | Redrock GALAXY vs STAR vs weights CSV; dashed line at KDE `z_min` |
 | `sed-examples` | `sed_examples/` | NumVisits SEDs, LSST mags, weight heatmap, `empirical_seds.npz` |
 | `mag-leakage` | `mag_leakage/` | Smooth KDE vs threshold-zeroed vs masked weights → \(\Delta m\) |

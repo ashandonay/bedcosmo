@@ -5,7 +5,9 @@ SED prior diagnostic plots (not part of the production build pipeline).
 Subcommands:
 
   clr-triangle
-      CLR-feature triangle with low-weight template highlighting.
+      CLR-feature triangle with low-weight template highlighting, plus the same
+      highlighting in Cholesky-whitened gaussianized coordinates when the KDE
+      artifact includes a gaussianizer.
 
   redshift-histograms
       Low-z redshift distributions: DESI redrock GALAXY vs STAR, plus empirical
@@ -53,6 +55,8 @@ from .fit_sed_prior_kde import (
     DEFAULT_KDE_DIAGNOSTIC_SAMPLES,
     apply_training_support_mask,
     clr_to_weights,
+    gaussianize_with,
+    get_empirical_gaussianizer,
     load_prior_training_table,
     load_sed_prior_kde,
     prior_clr_feature_names,
@@ -572,6 +576,22 @@ def save_clr_triangle_zero_highlight(
     plt.close(fig)
 
 
+def _clr_param_labels(
+    feature_names: list[str],
+    n_templates: int,
+) -> list[str]:
+    if feature_names == prior_clr_feature_names(n_templates):
+        return [rf"$f_{{{k + 1}}}$" for k in range(n_templates)] + [
+            r"$\log s$",
+            r"$z$",
+        ]
+    return [rf"${name}$" for name in feature_names]
+
+
+def _gaussianized_param_labels(feature_names: list[str]) -> list[str]:
+    return [f"g_{name}" for name in feature_names]
+
+
 def collect_redrock_redshifts(
     desi_dir: Path,
     *,
@@ -757,14 +777,8 @@ def run_clr_triangle(args: argparse.Namespace) -> None:
         seed=args.seed,
         apply_support_mask=mask_arg,
     )
-    if feature_names := list(artifact["feature_names"]):
-        if feature_names == prior_clr_feature_names(n_templates):
-            labels = [rf"$f_{{{k + 1}}}$" for k in range(n_templates)] + [
-                r"$\log s$",
-                r"$z$",
-            ]
-        else:
-            labels = [rf"${name}$" for name in feature_names]
+    feature_names = list(artifact["feature_names"])
+    labels = _clr_param_labels(feature_names, n_templates)
 
     a_kde = clr_to_weights(draws[:, :n_templates])
     zero_mask = inactive_mask_from_weights(
@@ -819,6 +833,52 @@ def run_clr_triangle(args: argparse.Namespace) -> None:
             panel_size=1.35,
         )
         print(f"Saved {outdir / train_name}")
+
+    if artifact.get("gaussianizer_state") is not None:
+        gaussianizer = get_empirical_gaussianizer(artifact)
+        gaussian_labels = _gaussianized_param_labels(feature_names)
+        draws_whitened = gaussianize_with(gaussianizer, draws, whitening="cholesky")
+        whitened_name = "kde_samples_whitened_gaussianized_triangle_zero_highlight.png"
+        save_clr_triangle_zero_highlight(
+            outdir,
+            draws_whitened,
+            gaussian_labels,
+            zero_mask,
+            filename=whitened_name,
+            title=(
+                rf"Cholesky-whitened gaussianized KDE samples with low-weight templates "
+                rf"highlighted ($N={args.sample}$, red = $a_k \leq {thresh_label}$)"
+            ),
+            panel_size=1.35,
+        )
+        print(f"Saved {outdir / whitened_name}")
+
+        if args.also_training:
+            training_whitened = gaussianize_with(
+                gaussianizer, training_x, whitening="cholesky"
+            )
+            train_whitened_name = (
+                "training_whitened_gaussianized_triangle_zero_highlight.png"
+            )
+            save_clr_triangle_zero_highlight(
+                outdir,
+                training_whitened,
+                gaussian_labels,
+                train_mask,
+                filename=train_whitened_name,
+                title=(
+                    rf"Cholesky-whitened gaussianized training data with low-weight "
+                    rf"templates highlighted ($N={training_x.shape[0]}, "
+                    rf"red = $a_k \leq {thresh_label}$)"
+                ),
+                panel_size=1.35,
+            )
+            print(f"Saved {outdir / train_whitened_name}")
+    else:
+        print(
+            "Skipping whitened gaussianized zero-highlight plots "
+            "(artifact has no gaussianizer_state)."
+        )
 
 
 def run_redshift_histograms(args: argparse.Namespace) -> None:
