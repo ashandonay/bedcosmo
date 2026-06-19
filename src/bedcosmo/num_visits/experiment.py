@@ -762,21 +762,32 @@ class NumVisits(BaseExperiment, CosmologyMixin):
             wlen_rest = self._wlen_aa_tensor.unsqueeze(0) / one_plus_z
             c = self._coeffs_from_a_log_s(a_flat, log_s_flat)
 
-            flux_obs = torch.zeros(
-                n_batch,
-                self._wlen_aa_tensor.shape[0],
-                device=self.device,
-                dtype=torch.float64,
-            )
-            for k in range(self._n_eazy_templates):
-                T_at = self._interp1d_linear(
-                    self._template_wave_rest,
-                    self._template_flux[k],
-                    wlen_rest,
-                )
-                flux_obs = flux_obs + c[:, k : k + 1] * T_at
+            # All templates share the same source grid (_template_wave_rest) and
+            # the same per-particle query points (wlen_rest depends only on z),
+            # so the searchsorted/index/weight geometry is identical across
+            # templates. Compute it once, then gather + lerp all templates in a
+            # single batched op instead of looping (the per-template Python loop
+            # recomputed searchsorted 12x redundantly).
+            n_wlen = self._wlen_aa_tensor.shape[0]
+            x_src = self._template_wave_rest
+            x_q = wlen_rest.reshape(-1)
+            x_q_clamped = torch.clamp(x_q, float(x_src[0]), float(x_src[-1]))
+            idx = torch.searchsorted(x_src, x_q_clamped, right=False)
+            idx = torch.clamp(idx, 1, x_src.numel() - 1)
+            x0 = x_src[idx - 1]
+            x1 = x_src[idx]
+            w = (x_q_clamped - x0) / (x1 - x0 + 1e-30)  # (n_batch * n_wlen,)
+
+            # Gather every template at the shared indices: (n_templates, M).
+            y0 = self._template_flux[:, idx - 1]
+            y1 = self._template_flux[:, idx]
+            T_all = y0 + w.unsqueeze(0) * (y1 - y0)
+            T_all = T_all.reshape(self._n_eazy_templates, n_batch, n_wlen)
+
+            # Per-particle weighted sum over templates: replaces the loop's accumulation.
+            flux_obs = torch.einsum("bk,kbw->bw", c, T_all)
             flux_obs = flux_obs / one_plus_z
-            return flux_obs.reshape(*z.shape, self._wlen_aa_tensor.shape[0])
+            return flux_obs.reshape(*z.shape, n_wlen)
 
         z_tensor = z
         T_tensor = T
