@@ -59,7 +59,12 @@ from .build_empirical_sed_prior_kde import (
     sample_sed_prior,
 )
 from .fit_eazy_weights_to_desi import prior_a_column_names, read_redrock
-from .paths import add_desi_dir_argument, get_prior_build_dir, resolve_desi_dir
+from .paths import (
+    ZWARN_UNSTABLE_BIT,
+    add_desi_dir_argument,
+    get_prior_build_dir,
+    resolve_desi_dir,
+)
 from .prior_sampler import sample_prior_batch
 
 DEFAULT_INACTIVE_WEIGHT_THRESHOLD = 1e-4
@@ -571,6 +576,7 @@ def collect_redrock_redshifts(
     desi_dir: Path,
     *,
     zwarn_zero: bool = True,
+    zwarn_forbid_mask: int | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Return (galaxy_z, star_z) arrays from all redrock files under desi_dir."""
     rr_files = sorted(glob.glob(str(desi_dir / "**/redrock-*.fits"), recursive=True))
@@ -583,16 +589,96 @@ def collect_redrock_redshifts(
         rr = read_redrock(Path(rr_path))
         z = np.asarray(rr["Z"], dtype=float)
         st = np.char.strip(np.asarray(rr["SPECTYPE"]).astype(str))
-        zw = np.asarray(rr["ZWARN"])
+        zw = np.asarray(rr["ZWARN"], dtype=int)
         gal = (st == "GALAXY") & np.isfinite(z)
         star = (st == "STAR") & np.isfinite(z)
         if zwarn_zero:
             gal &= zw == 0
             star &= zw == 0
+        elif zwarn_forbid_mask is not None:
+            zwarn_ok = (zw & zwarn_forbid_mask) == 0
+            gal &= zwarn_ok
+            star &= zwarn_ok
         all_gal_z.extend(z[gal].tolist())
         all_star_z.extend(z[star].tolist())
 
     return np.asarray(all_gal_z, dtype=float), np.asarray(all_star_z, dtype=float)
+
+
+def redrock_zwarn_filter_label(
+    *,
+    zwarn_zero: bool,
+    zwarn_forbid_mask: int | None = None,
+) -> str:
+    """Human-readable label for the redrock ZWARN selection."""
+    if zwarn_zero:
+        return "ZWARN=0"
+    if zwarn_forbid_mask == ZWARN_UNSTABLE_BIT:
+        return "no UNSTABLE (ZWARN & 2048 = 0)"
+    if zwarn_forbid_mask is not None:
+        return f"ZWARN forbid mask {zwarn_forbid_mask}"
+    return "no ZWARN filter"
+
+
+def add_redrock_zwarn_arguments(parser: argparse.ArgumentParser) -> None:
+    """CLI flags for redrock ZWARN selection in redshift-histograms."""
+    parser.add_argument(
+        "--allow-zwarn",
+        action="store_true",
+        help=(
+            "Loosen redrock panel to match non-strict fits: drop UNSTABLE only "
+            f"(same as --zwarn-forbid-mask {ZWARN_UNSTABLE_BIT}). Default: ZWARN=0."
+        ),
+    )
+    parser.add_argument(
+        "--zwarn-forbid-mask",
+        type=int,
+        default=None,
+        metavar="BITS",
+        help=(
+            "Redrock panel keeps rows with (ZWARN & BITS) == 0. "
+            "Overrides default ZWARN=0 when set."
+        ),
+    )
+    parser.add_argument(
+        "--drop-unstable-zwarn",
+        action="store_true",
+        help=f"Shorthand for --zwarn-forbid-mask {ZWARN_UNSTABLE_BIT}.",
+    )
+
+
+def resolve_redrock_zwarn_selection(
+    args: argparse.Namespace,
+) -> tuple[bool, int | None, str]:
+    """Map CLI flags to (zwarn_zero, zwarn_forbid_mask, label)."""
+    mask = getattr(args, "zwarn_forbid_mask", None)
+    if getattr(args, "drop_unstable_zwarn", False):
+        if mask is not None and mask != ZWARN_UNSTABLE_BIT:
+            raise SystemExit(
+                "Use only one of --drop-unstable-zwarn and --zwarn-forbid-mask, "
+                f"or pass --zwarn-forbid-mask {ZWARN_UNSTABLE_BIT} explicitly."
+            )
+        mask = ZWARN_UNSTABLE_BIT
+    elif getattr(args, "allow_zwarn", False) and mask is None:
+        mask = ZWARN_UNSTABLE_BIT
+
+    if mask is not None:
+        label = redrock_zwarn_filter_label(zwarn_zero=False, zwarn_forbid_mask=mask)
+        return False, mask, label
+    label = redrock_zwarn_filter_label(zwarn_zero=True)
+    return True, None, label
+
+
+def weights_histogram_title(df: pd.DataFrame, weights_z: np.ndarray) -> str:
+    """Title for the empirical-weights panel, including ZWARN breakdown when available."""
+    n = len(weights_z)
+    if "zwarn" not in df.columns:
+        return f"Empirical weights CSV (n={n})"
+    zw = df["zwarn"].to_numpy(dtype=int)
+    n_zero = int((zw == 0).sum())
+    if n_zero == n:
+        return f"Empirical weights (n={n}, ZWARN=0)"
+    return f"Empirical weights (n={n}, ZWARN=0: {n_zero}, non-zero: {n - n_zero})"
 
 
 def save_redshift_histograms(
@@ -604,6 +690,8 @@ def save_redshift_histograms(
     z_cutoff: float | None = 0.05,
     low_z_max: float = 0.15,
     filename: str = "redshift_histograms.png",
+    redrock_zwarn_label: str = "ZWARN=0",
+    weights_title: str = "Empirical weights CSV (all rows)",
 ) -> None:
     """Two-panel low-z diagnostic: redrock spectypes vs empirical weights CSV."""
     fig, axes = plt.subplots(1, 2, figsize=(12, 4))
@@ -615,7 +703,7 @@ def save_redshift_histograms(
     axes[0].hist(star_low, bins=bins, alpha=0.5, label="STAR", color="C1")
     axes[0].set_xlabel("z")
     axes[0].set_ylabel("count")
-    axes[0].set_title(f"Redrock zwarn=0, z<{low_z_max:g}")
+    axes[0].set_title(f"Redrock ({redrock_zwarn_label}), z<{low_z_max:g}")
     axes[0].legend()
 
     axes[1].hist(weights_z, bins=50, color="C2", alpha=0.8)
@@ -623,7 +711,7 @@ def save_redshift_histograms(
         axes[1].axvline(float(z_cutoff), color="r", ls="--", label=f"z={float(z_cutoff):g}")
     axes[1].set_xlabel("z")
     axes[1].set_ylabel("count")
-    axes[1].set_title("Empirical weights CSV (all rows)")
+    axes[1].set_title(weights_title)
     axes[1].legend()
 
     fig.tight_layout()
@@ -633,13 +721,18 @@ def save_redshift_histograms(
     plt.close(fig)
 
 
-def _print_redshift_summary(galaxy_z: np.ndarray, star_z: np.ndarray) -> None:
-    print(f"Full catalog GALAXY zwarn=0: n={len(galaxy_z)}")
+def _print_redshift_summary(
+    galaxy_z: np.ndarray,
+    star_z: np.ndarray,
+    *,
+    redrock_zwarn_label: str,
+) -> None:
+    print(f"Full catalog GALAXY ({redrock_zwarn_label}): n={len(galaxy_z)}")
     for cut in (0.001, 0.01, 0.05):
         n = int((galaxy_z < cut).sum())
         print(f"  z<{cut:g}: {n} ({100 * n / max(len(galaxy_z), 1):.2f}%)")
     print(f"  z<0: {(galaxy_z < 0).sum()}")
-    print(f"\nFull catalog STAR zwarn=0: n={len(star_z)}")
+    print(f"\nFull catalog STAR ({redrock_zwarn_label}): n={len(star_z)}")
     n_near0 = int((np.abs(star_z) < 0.001).sum())
     print(
         f"  |z|<0.001: {n_near0} ({100 * n_near0 / max(len(star_z), 1):.2f}%)"
@@ -741,8 +834,15 @@ def run_redshift_histograms(args: argparse.Namespace) -> None:
         raise KeyError(f"Missing z column in {weights_csv}")
     weights_z = df["z"].to_numpy(dtype=float)
 
-    galaxy_z, star_z = collect_redrock_redshifts(desi_dir, zwarn_zero=not args.allow_zwarn)
-    _print_redshift_summary(galaxy_z, star_z)
+    zwarn_zero, zwarn_forbid_mask, redrock_zwarn_label = resolve_redrock_zwarn_selection(
+        args
+    )
+    galaxy_z, star_z = collect_redrock_redshifts(
+        desi_dir,
+        zwarn_zero=zwarn_zero,
+        zwarn_forbid_mask=zwarn_forbid_mask,
+    )
+    _print_redshift_summary(galaxy_z, star_z, redrock_zwarn_label=redrock_zwarn_label)
 
     if args.no_z_cutoff_line:
         z_cutoff = None
@@ -758,6 +858,8 @@ def run_redshift_histograms(args: argparse.Namespace) -> None:
         z_cutoff=z_cutoff,
         low_z_max=args.low_z_max,
         filename=args.filename,
+        redrock_zwarn_label=redrock_zwarn_label,
+        weights_title=weights_histogram_title(df, weights_z),
     )
     print(f"Saved {outdir / args.filename}")
 
@@ -998,7 +1100,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_all.add_argument("--no-z-cutoff-line", action="store_true")
     p_all.add_argument("--z-cutoff", type=float, default=None)
     p_all.add_argument("--low-z-max", type=float, default=0.15, dest="low_z_max")
-    p_all.add_argument("--allow-zwarn", action="store_true")
+    add_redrock_zwarn_arguments(p_all)
     p_all.add_argument("--prior-pool-size", type=int, default=4096)
     p_all.add_argument("--prior-pool-seed", type=int, default=7)
     p_all.add_argument("--device", default="cpu")
@@ -1068,11 +1170,7 @@ def build_parser() -> argparse.ArgumentParser:
         dest="low_z_max",
         help="Upper z limit for the redrock spectype panel (default 0.15).",
     )
-    p_z.add_argument(
-        "--allow-zwarn",
-        action="store_true",
-        help="Include all ZWARN values in redrock panel (default: zwarn=0 only).",
-    )
+    add_redrock_zwarn_arguments(p_z)
     p_z.add_argument(
         "--filename",
         default="redshift_histograms.png",

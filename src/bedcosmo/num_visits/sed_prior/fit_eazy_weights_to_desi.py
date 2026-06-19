@@ -1154,11 +1154,20 @@ def main() -> None:
     parser.add_argument("--z-max", type=float, default=None)
     parser.add_argument("--target-spectype", default="GALAXY")
 
-    parser.add_argument("--require-zwarn-zero", action="store_true", default=True)
     parser.add_argument(
-        "--no-require-zwarn-zero",
-        dest="require_zwarn_zero",
-        action="store_false",
+        "--allow-nonzero-zwarn",
+        action="store_true",
+        help="Include all redrock ZWARN values (default: require ZWARN == 0).",
+    )
+    parser.add_argument(
+        "--zwarn-forbid-mask",
+        type=int,
+        default=None,
+        metavar="BITS",
+        help=(
+            "Drop rows with any forbidden ZWARN bit set (keep if (ZWARN & BITS) == 0). "
+            "Overrides --allow-nonzero-zwarn. Example: 2048 forbids UNSTABLE fits."
+        ),
     )
 
     parser.add_argument("--norm-min", type=float, default=4000.0)
@@ -1320,6 +1329,12 @@ def main() -> None:
     print(f"Using redrock: {redrock_path}")
     print(f"Fit method:    {args.fit_method}")
     print(f"Coeff norm:    {args.coeff_norm}")
+    if args.zwarn_forbid_mask is not None:
+        print(f"ZWARN filter:  drop rows with mask {args.zwarn_forbid_mask} set")
+    elif not args.allow_nonzero_zwarn:
+        print("ZWARN filter:  require ZWARN == 0")
+    else:
+        print("ZWARN filter:  none")
 
     print(f"\nLoading EAZY templates from {EAZY_TEMPLATES_DIR}...")
     template_waves, template_fluxes, template_files = load_eazy_templates(
@@ -1346,8 +1361,11 @@ def main() -> None:
         spectype = np.char.strip(np.asarray(rr["SPECTYPE"]).astype(str))
         select &= spectype == args.target_spectype
 
-    if args.require_zwarn_zero:
-        select &= np.asarray(rr["ZWARN"]) == 0
+    zwarn = np.asarray(rr["ZWARN"], dtype=int)
+    if args.zwarn_forbid_mask is not None:
+        select &= (zwarn & args.zwarn_forbid_mask) == 0
+    elif not args.allow_nonzero_zwarn:
+        select &= zwarn == 0
 
     if args.z_min is not None:
         select &= np.asarray(rr["Z"]) >= args.z_min

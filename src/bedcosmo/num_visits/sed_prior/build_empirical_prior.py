@@ -37,6 +37,7 @@ from .desi_data import ensure_desi_healpix
 from .paths import (
     DEFAULT_EMPIRICAL_PRIOR_DIR,
     DEFAULT_HEALPIX,
+    ZWARN_UNSTABLE_BIT,
     add_desi_dir_argument,
     get_healpix_fit_dir,
     get_prior_build_dir,
@@ -108,6 +109,8 @@ def build_empirical_prior(
     kde_sample: int = 20_000,
     max_chi2_dof: float = DEFAULT_MAX_CHI2_DOF,
     kde_python: str | None = None,
+    allow_nonzero_zwarn: bool = False,
+    zwarn_forbid_mask: int | None = None,
 ) -> dict[str, Path]:
     """
     Run the full empirical prior pipeline for ``build_name``.
@@ -170,6 +173,10 @@ def build_empirical_prior(
             ]
             if n_max is not None:
                 cmd.extend(["--n-max", str(n_max)])
+            if zwarn_forbid_mask is not None:
+                cmd.extend(["--zwarn-forbid-mask", str(zwarn_forbid_mask)])
+            elif allow_nonzero_zwarn:
+                cmd.append("--allow-nonzero-zwarn")
             _run(cmd, step=f"Fitting HEALPIX {hp}")
     else:
         print("\nStep 2/4: skipped (--skip-fit)")
@@ -269,11 +276,39 @@ def main() -> None:
         default=None,
         help="Python executable for KDE step (needs torch; default: bedcosmo env or $BEDCOSMO_PYTHON).",
     )
+    parser.add_argument(
+        "--allow-nonzero-zwarn",
+        action="store_true",
+        help="Include all redrock ZWARN values (default: require ZWARN == 0).",
+    )
+    parser.add_argument(
+        "--zwarn-forbid-mask",
+        type=int,
+        default=None,
+        metavar="BITS",
+        help=(
+            "Drop rows with forbidden ZWARN bits set, e.g. 2048=UNSTABLE. "
+            "Overrides --allow-nonzero-zwarn."
+        ),
+    )
+    parser.add_argument(
+        "--drop-unstable-zwarn",
+        action="store_true",
+        help=f"Shorthand for --zwarn-forbid-mask {ZWARN_UNSTABLE_BIT} (drop UNSTABLE only).",
+    )
     parser.add_argument("--skip-desi", action="store_true")
     parser.add_argument("--skip-fit", action="store_true")
     parser.add_argument("--skip-combine", action="store_true")
     parser.add_argument("--skip-kde", action="store_true")
     args = parser.parse_args()
+    zwarn_forbid_mask = args.zwarn_forbid_mask
+    if args.drop_unstable_zwarn:
+        if zwarn_forbid_mask is not None and zwarn_forbid_mask != ZWARN_UNSTABLE_BIT:
+            parser.error(
+                "Use only one of --drop-unstable-zwarn and --zwarn-forbid-mask, "
+                "or pass --zwarn-forbid-mask 2048 explicitly."
+            )
+        zwarn_forbid_mask = ZWARN_UNSTABLE_BIT
 
     build_empirical_prior(
         build_name=args.build_name,
@@ -292,6 +327,8 @@ def main() -> None:
         kde_sample=args.kde_sample,
         max_chi2_dof=args.max_chi2_dof,
         kde_python=args.kde_python,
+        allow_nonzero_zwarn=args.allow_nonzero_zwarn,
+        zwarn_forbid_mask=zwarn_forbid_mask,
     )
 
 

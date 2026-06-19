@@ -88,6 +88,22 @@ def sample_prior_batch(
     return prior_pool.pool[idx]
 
 
+def sample_prior_pool_unique(
+    prior_pool: EmpiricalPriorPool,
+    n: int,
+    *,
+    generator: torch.Generator | None = None,
+) -> torch.Tensor:
+    """Draw up to ``n`` unique pool rows without replacement."""
+    if n <= 0:
+        raise ValueError("n must be positive")
+    n_pool = int(prior_pool.pool.shape[0])
+    if n > n_pool:
+        raise ValueError(f"Cannot draw {n} unique rows from pool of size {n_pool}")
+    perm = torch.randperm(n_pool, device=prior_pool.pool.device, generator=generator)
+    return prior_pool.pool[perm[:n]]
+
+
 def unpack_prior_rows(
     x: torch.Tensor,
     feature_names: list[str],

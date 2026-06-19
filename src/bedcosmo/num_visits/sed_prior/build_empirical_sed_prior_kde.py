@@ -396,25 +396,16 @@ def get_training_weights(artifact: dict[str, Any]) -> np.ndarray:
 
 
 def _marginal_central_value_1d(values: np.ndarray) -> float:
-    """Central value for one feature column from KDE prior draws.
-
-    Uses the 1D Gaussian-KDE mode when it agrees with the sample median (same sign).
-    For bimodal marginals where the global KDE mode sits on a secondary peak, falls
-    back to the median so central params match triangle-plot bulk (e.g. positive f1).
-    """
+    """1D Gaussian-KDE mode of a feature column from KDE prior draws."""
     col = np.asarray(values, dtype=np.float64)
     col = col[np.isfinite(col)]
     if col.size == 0:
         raise ValueError("cannot compute marginal central value from empty column")
-    median = float(np.median(col))
     if col.size < 2:
-        return median
+        return float(col[0])
     kde1d = stats.gaussian_kde(col)
     grid = np.linspace(float(col.min()), float(col.max()), 4000)
-    mode = float(grid[int(np.argmax(kde1d(grid)))])
-    if np.sign(mode) == np.sign(median) or median == 0.0:
-        return mode
-    return median
+    return float(grid[int(np.argmax(kde1d(grid)))])
 
 
 def mode_central_params_from_artifact(
@@ -427,8 +418,7 @@ def mode_central_params_from_artifact(
     Per-feature central values from marginals of the fitted KDE prior.
 
     Draws ``n_samples`` from the artifact KDE (same distribution as diagnostic
-    triangle plots), then estimates each marginal mode with a median fallback for
-    bimodal columns where the global 1D mode lies on a low-mass secondary peak.
+    triangle plots), then estimates each marginal with a 1D Gaussian-KDE mode.
     """
     draws = sample_sed_prior(artifact, n_samples, seed=seed)
     names = list(artifact["feature_names"])
