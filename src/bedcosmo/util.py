@@ -730,6 +730,7 @@ def init_experiment(
             Artifacts (prior_args.yaml) from the run_obj
         **kwargs: Additional arguments (e.g., device, profile) that will be added to run_args.
     """
+    emulator_artifacts_dir = None
     if run_obj is not None and run_args is not None:
 
         cosmo_exp = run_args.get("cosmo_exp")
@@ -739,6 +740,10 @@ def init_experiment(
             artifact_path = artifact_uri[7:]  # Remove "file://" prefix
         else:
             artifact_path = artifact_uri
+        # Emulator checkpoints snapshotted into the run's artifacts at submission time
+        emu_dir = os.path.join(artifact_path, "emulators")
+        if os.path.isdir(emu_dir):
+            emulator_artifacts_dir = emu_dir
         # If design_args is not provided (None), try to load from artifacts first
         if design_args is None:
             design_args_artifact_path = artifact_path + "/design_args.yaml"
@@ -806,6 +811,8 @@ def init_experiment(
         exp_args['global_rank'] = global_rank
         if checkpoint is not None and 'bijector_state' in checkpoint.keys():
             exp_args['bijector_state'] = checkpoint['bijector_state']
+        if emulator_artifacts_dir is not None:
+            exp_args['emulator_artifacts_dir'] = emulator_artifacts_dir
         experiment = NumTracers(**exp_args)
     
     elif cosmo_exp == 'variable_redshift':
