@@ -43,7 +43,8 @@ class Evaluator:
             self, run_id, guide_samples=1000, design_chunk_size=None, seed=1, cosmo_exp='num_tracers',
             levels=[0.68, 0.95], global_rank=0, n_evals=10, n_particles=1000,
             param_space='physical', display_run=False, verbose=False, device="cuda:0", profile=False,
-            sort=True, include_nominal=False, batch_size=1, particle_batch_size=None, design_args_path=None,
+            sort=True, include_nominal=False, plot_prior=False, batch_size=1, particle_batch_size=None,
+            design_args_path=None,
             experiment_args=None, nf_eig_data=None, grid_eig_data=None,
             marginal_eig_subsets=None, marginal_outer_y=8, marginal_inner_samples=200,
             marginal_knn_k=3,
@@ -97,6 +98,7 @@ class Evaluator:
         self.design_chunk_size = design_chunk_size  # Number of designs per chunk (None = use all)
         self.sort = sort
         self.include_nominal = include_nominal
+        self.plot_prior = plot_prior
         self.batch_size = batch_size  # Batch size for sample_posterior to reduce memory usage
         self.other_eig_data = grid_eig_data
 
@@ -171,6 +173,11 @@ class Evaluator:
         # Plotting must reuse this experiment so param_bijector comes from the checkpoint,
         # not a second init_experiment() that refits the joint Gaussianizer.
         self.plotter._experiment = self.experiment
+        # Plot from this run's own (live) eig_data rather than rediscovering the
+        # "newest complete file" on disk, which is wrong when multiple evals share
+        # the run's artifacts dir. Mutated in place by get_eig/get_marginal_eig, so
+        # the reference stays current as results accumulate.
+        self.plotter._eig_data_override = self.eig_data
         
         # Cache for EIG calculations to avoid redundant computations
         self._eig_cache = {}
@@ -759,6 +766,10 @@ class Evaluator:
         joint EIG and should be compared to joint nf_loss. Results are stored under
         ``eig_data[step_{N}]["marginal"][subset_id]`` and the JSON is re-saved.
 
+        Subsets that already have a complete marginal block for this step (e.g.
+        loaded via --nf-eig-data) are reused; only missing subsets are computed,
+        so a re-run that just needs the plots skips the posterior-entropy loop.
+
         Args:
             step: Training step (int or "last") whose guide is evaluated.
             subsets: List-of-lists of parameter names. Defaults to
@@ -784,84 +795,107 @@ class Evaluator:
         flow_model.eval()
 
         cosmo_params = self.experiment.cosmo_params
-        subset_ids = [self._subset_id(s) for s in subsets]
-        subset_idx = [[cosmo_params.index(p) for p in s] for s in subsets]
+        all_subset_ids = [self._subset_id(s) for s in subsets]
         n_designs = len(self.input_designs)
-        n_prior = self._marginal_prior_sample_count(
-            self.marginal_inner_samples, self.marginal_outer_y
-        )
         nominal_idx = self._find_nominal_design_index()
 
-        # Marginal prior entropy (design-independent), k-NN coordinate space, bits.
-        prior_samples = self._marginal_prior_physical_samples(n_prior)
-        prior_coords = self._marginal_knn_coords_from_physical(prior_samples)
-        if self.verbose:
-            print(f"  Marginal k-NN entropy space: {self._marginal_knn_space()}")
-        prior_H = {
-            sid: knn_entropy(prior_coords[:, idx], k=self.marginal_knn_k)
-            for sid, idx in zip(subset_ids, subset_idx)
-        }
-
-        prior_H_acc = {sid: [] for sid in subset_ids}
-        var_eig_acc = {sid: [] for sid in subset_ids}
-        nom_eig_acc = {sid: [] for sid in subset_ids}
-
-        for eval_idx in range(int(n_evals)):
-            if self.verbose:
-                print(f"  Marginal EIG evaluation {eval_idx + 1}/{int(n_evals)}")
-
-            var_post_H = self._marginal_posterior_entropy(
-                flow_model, self.input_designs, subset_ids, subset_idx
-            )
-            if nominal_idx is not None:
-                nom_post_H = {
-                    sid: np.array([var_post_H[sid][nominal_idx]]) for sid in subset_ids
-                }
-            else:
-                nom_post_H = self._marginal_posterior_entropy(
-                    flow_model,
-                    self.experiment.nominal_design.unsqueeze(0),
-                    subset_ids,
-                    subset_idx,
-                )
-            for sid in subset_ids:
-                prior_H_acc[sid].append(prior_H[sid])
-                var_eig_acc[sid].append(prior_H[sid] - var_post_H[sid])
-                nom_eig_acc[sid].append(prior_H[sid] - nom_post_H[sid][0])
-
-        marginal = {}
-        for sid, subset in zip(subset_ids, subsets):
-            var = np.array(var_eig_acc[sid])  # (n_evals, n_designs)
-            eigs_avg = var.mean(axis=0)
-            eigs_std = var.std(axis=0)
-            nom = np.array(nom_eig_acc[sid])  # (n_evals,)
-            optimal_idx = int(np.argmax(eigs_avg)) if n_designs > 0 else 0
-            optimal_design = self.input_designs[optimal_idx].detach().cpu().numpy().tolist()
-            marginal[sid] = {
-                "params": list(subset),
-                "prior_entropy": float(np.mean(prior_H_acc[sid])),
-                "eigs_avg": eigs_avg.tolist(),
-                "eigs_std": eigs_std.tolist(),
-                "nominal": {"eigs_avg": float(nom.mean()), "eigs_std": float(nom.std())},
-                "optimal_eig": float(eigs_avg[optimal_idx]),
-                "optimal_eig_std": float(eigs_std[optimal_idx]),
-                "optimal_design": optimal_design,
-            }
-            print(
-                f"  Marginal EIG [{sid}]: nominal {marginal[sid]['nominal']['eigs_avg']:.3f} bits, "
-                f"optimal {marginal[sid]['optimal_eig']:.3f} bits"
-            )
-
-        # Persist into the same eig_data JSON under the resolved step.
+        # Reuse any complete per-subset marginal results already present for this
+        # step (e.g. loaded via --nf-eig-data), recomputing only the missing
+        # subsets. Mirrors get_eig's pre-calculated-value reuse so a re-run that
+        # just needs the plots does not redo the (expensive) posterior-entropy loop.
         step_key = f"step_{selected_step}"
+        existing_marginal = self.eig_data.get(step_key, {}).get("marginal", {})
+        marginal = {}
+        subsets_to_compute = []
+        for subset, sid in zip(subsets, all_subset_ids):
+            prev = existing_marginal.get(sid)
+            if prev is not None and prev.get("eigs_avg"):
+                print(f"  Using pre-calculated marginal EIG for [{sid}] at {step_key}")
+                marginal[sid] = prev
+            else:
+                subsets_to_compute.append(subset)
+
+        if subsets_to_compute:
+            subset_ids = [self._subset_id(s) for s in subsets_to_compute]
+            subset_idx = [[cosmo_params.index(p) for p in s] for s in subsets_to_compute]
+            n_prior = self._marginal_prior_sample_count(
+                self.marginal_inner_samples, self.marginal_outer_y
+            )
+
+            # Marginal prior entropy (design-independent), k-NN coordinate space, bits.
+            prior_samples = self._marginal_prior_physical_samples(n_prior)
+            prior_coords = self._marginal_knn_coords_from_physical(prior_samples)
+            if self.verbose:
+                print(f"  Marginal k-NN entropy space: {self._marginal_knn_space()}")
+            prior_H = {
+                sid: knn_entropy(prior_coords[:, idx], k=self.marginal_knn_k)
+                for sid, idx in zip(subset_ids, subset_idx)
+            }
+
+            prior_H_acc = {sid: [] for sid in subset_ids}
+            var_eig_acc = {sid: [] for sid in subset_ids}
+            nom_eig_acc = {sid: [] for sid in subset_ids}
+
+            for eval_idx in range(int(n_evals)):
+                if self.verbose:
+                    print(f"  Marginal EIG evaluation {eval_idx + 1}/{int(n_evals)}")
+
+                var_post_H = self._marginal_posterior_entropy(
+                    flow_model, self.input_designs, subset_ids, subset_idx
+                )
+                if nominal_idx is not None:
+                    nom_post_H = {
+                        sid: np.array([var_post_H[sid][nominal_idx]]) for sid in subset_ids
+                    }
+                else:
+                    nom_post_H = self._marginal_posterior_entropy(
+                        flow_model,
+                        self.experiment.nominal_design.unsqueeze(0),
+                        subset_ids,
+                        subset_idx,
+                    )
+                for sid in subset_ids:
+                    prior_H_acc[sid].append(prior_H[sid])
+                    var_eig_acc[sid].append(prior_H[sid] - var_post_H[sid])
+                    nom_eig_acc[sid].append(prior_H[sid] - nom_post_H[sid][0])
+
+            for sid, subset in zip(subset_ids, subsets_to_compute):
+                var = np.array(var_eig_acc[sid])  # (n_evals, n_designs)
+                eigs_avg = var.mean(axis=0)
+                eigs_std = var.std(axis=0)
+                nom = np.array(nom_eig_acc[sid])  # (n_evals,)
+                optimal_idx = int(np.argmax(eigs_avg)) if n_designs > 0 else 0
+                optimal_design = self.input_designs[optimal_idx].detach().cpu().numpy().tolist()
+                marginal[sid] = {
+                    "params": list(subset),
+                    "prior_entropy": float(np.mean(prior_H_acc[sid])),
+                    "eigs_avg": eigs_avg.tolist(),
+                    "eigs_std": eigs_std.tolist(),
+                    "nominal": {"eigs_avg": float(nom.mean()), "eigs_std": float(nom.std())},
+                    "optimal_eig": float(eigs_avg[optimal_idx]),
+                    "optimal_eig_std": float(eigs_std[optimal_idx]),
+                    "optimal_design": optimal_design,
+                }
+                print(
+                    f"  Marginal EIG [{sid}]: nominal {marginal[sid]['nominal']['eigs_avg']:.3f} bits, "
+                    f"optimal {marginal[sid]['optimal_eig']:.3f} bits"
+                )
+        else:
+            print("  All requested marginal subsets already computed; skipping recompute.")
+
+        # Persist into the same eig_data JSON under the resolved step, merging so
+        # any previously-cached subsets for this step are preserved.
         step_dict = self.eig_data.setdefault(step_key, {})
-        step_dict["marginal"] = marginal
+        step_dict.setdefault("marginal", {}).update(marginal)
         self.eig_data["marginal_subsets"] = [list(s) for s in subsets]
         timestamp = getattr(self, 'timestamp', None) or datetime.now().strftime('%Y%m%d_%H%M')
         eig_data_save_path = self._eig_data_save_path(timestamp)
         with open(eig_data_save_path, "w") as f:
             json.dump(self.eig_data, f, indent=2)
         print(f"Saved marginal EIG data to {eig_data_save_path}")
+
+        # Return only the requested subsets (cached + newly computed).
+        marginal = {sid: step_dict["marginal"][sid] for sid in all_subset_ids if sid in step_dict["marginal"]}
 
         return marginal, selected_step
 
@@ -1438,7 +1472,7 @@ class Evaluator:
                 display=['nominal', 'optimal'],
                 guide_samples=self.guide_samples,
                 levels=self.levels,
-                plot_prior=True,
+                plot_prior=self.plot_prior,
                 transform_output=self.nf_transform_output,
             )
             self._update_runtime()
@@ -1455,7 +1489,7 @@ class Evaluator:
                     display=['nominal', 'optimal'],
                     guide_samples=self.guide_samples,
                     levels=self.levels,
-                    plot_prior=True,
+                    plot_prior=self.plot_prior,
                     transform_output=self.nf_transform_output,
                     params=subset,
                     filename=f"posterior_marginal_{subset_id}",
@@ -1540,12 +1574,81 @@ class Evaluator:
                 transform_output=self.nf_transform_output,
                 include_nominal=self.include_nominal,
                 sort=self.sort,
+                plot_prior=self.plot_prior,
             )
         except Exception as e:
             print(f"Warning: overlay rendering failed: {e}")
             traceback.print_exc()
 
         print(f"Evaluation completed successfully!")
+
+    def run_marginal(self, eval_step=None):
+        """Run only the marginal EIG evaluation loop (and its per-subset plots).
+
+        Standalone counterpart to :meth:`run` that skips the full joint EIG
+        pipeline (nominal/variable EIG, posterior triangles, EIG-vs-design,
+        overlays, etc.) and computes only the marginal EIG over
+        ``self.marginal_eig_subsets``, persisting it into the same eig_data JSON.
+        Triggered by ``./submit.sh eval <exp> <run_id> --marginal``.
+        """
+        # Determine eval_step
+        if eval_step is None or eval_step == 'last':
+            eval_step = self.total_steps
+        else:
+            eval_step = int(eval_step)
+
+        if not self.marginal_eig_subsets:
+            raise ValueError(
+                "--marginal requires at least one parameter subset; pass "
+                "--marginal-eig-subsets (e.g. '[[\"log_c_scale\",\"z\"]]') or set "
+                "marginal_eig_subsets in eval_args.yaml."
+            )
+
+        self.timestamp = datetime.now().strftime('%Y%m%d_%H%M')
+        self._update_runtime()
+
+        # Marginal EIG over requested parameter subsets (stored in the same JSON).
+        self.get_marginal_eig(step=eval_step, subsets=self.marginal_eig_subsets)
+        self._update_runtime()
+
+        self.eig_data["eval_step"] = int(eval_step)
+        self.eig_data['status'] = 'complete'
+        eig_data_save_path = self._eig_data_save_path(self.timestamp)
+        with open(eig_data_save_path, "w") as f:
+            json.dump(self.eig_data, f, indent=2)
+        print(f"Saved marginal EIG data to {eig_data_save_path}")
+
+        # Marginal posterior triangles + marginal EIG-vs-design plots per subset.
+        for subset in self.marginal_eig_subsets:
+            subset_id = self._subset_id(subset)
+            try:
+                self.plotter.generate_posterior(
+                    eval_step=eval_step,
+                    display=['nominal', 'optimal'],
+                    guide_samples=self.guide_samples,
+                    levels=self.levels,
+                    plot_prior=self.plot_prior,
+                    transform_output=self.nf_transform_output,
+                    params=subset,
+                    filename=f"posterior_marginal_{subset_id}",
+                )
+                self._update_runtime()
+            except Exception as e:
+                print(f"Warning: posterior_marginal ({subset_id}) failed: {e}")
+                traceback.print_exc()
+            try:
+                self.plotter.eig_designs_marginal(
+                    eval_step=eval_step,
+                    subset=subset,
+                    sort=self.sort,
+                    include_nominal=self.include_nominal,
+                )
+                self._update_runtime()
+            except Exception as e:
+                print(f"Warning: eig_designs_marginal ({subset_id}) failed: {e}")
+                traceback.print_exc()
+
+        print(f"Marginal EIG evaluation completed successfully!")
 
 if __name__ == "__main__":
 
@@ -1566,6 +1669,7 @@ if __name__ == "__main__":
     parser.add_argument('--verbose', action='store_true', help='Enable verbose output')
     parser.add_argument('--no-sort', dest='sort', action='store_false', help='Disable sorting of designs by EIG (default: sorting enabled)')
     parser.add_argument('--include-nominal', action='store_true', default=False, help='Include nominal EIG in eig_designs plot (default: False)')
+    parser.add_argument('--plot-prior', action='store_true', default=False, help='Include prior contours on posterior triangle plots (default: False)')
     parser.add_argument('--batch-size', type=int, default=1, help='Batch size for sample_posterior to reduce memory usage (default: 1)')
     parser.add_argument('--particle-batch-size', type=int, default=None, help='Batch size for processing particles in LikelihoodDataset to reduce memory usage (default: None to use all particles)')
     parser.add_argument('--design-args-path', type=str, default=None, help='Path to design_args.yaml file. If None, defaults to the run\'s artifacts/design_args.yaml')
@@ -1575,6 +1679,7 @@ if __name__ == "__main__":
     parser.add_argument('--marginal-outer-y', type=int, default=8, help='Outer y ~ p(y|d) samples per design for marginal posterior entropy (default: 8)')
     parser.add_argument('--marginal-inner-samples', type=int, default=200, help='Guide samples per outer y for marginal posterior entropy (default: 200)')
     parser.add_argument('--marginal-knn-k', type=int, default=3, help='Neighbor rank k for the k-NN entropy estimator (default: 3)')
+    parser.add_argument('--marginal', action='store_true', help='Run only the marginal EIG evaluation loop (and its per-subset plots), skipping the full joint EIG pipeline. Requires --marginal-eig-subsets (or marginal_eig_subsets in eval_args.yaml).')
 
     args, extra_args = parser.parse_known_args()
 
@@ -1590,4 +1695,7 @@ if __name__ == "__main__":
     print(f"Evaluating with parameters:")
     print(json.dumps(eval_args, indent=2))
     evaluator = Evaluator(**eval_args)
-    evaluator.run(eval_step=args.eval_step)
+    if args.marginal:
+        evaluator.run_marginal(eval_step=args.eval_step)
+    else:
+        evaluator.run(eval_step=args.eval_step)

@@ -973,7 +973,7 @@ class BasePlotter:
         nearest = max(available)
         return nearest, f"step_{nearest}"
 
-    def _parse_eig_for_posterior(self, eig_data, eval_step=None):
+    def _parse_eig_for_posterior(self, eig_data, eval_step=None, params=None):
         """Extract input_designs, eig_values, and nominal_eig from eig_data for posterior plots."""
         _, step_str = self._resolve_step(eig_data, eval_step)
         if step_str is None:
@@ -987,13 +987,24 @@ class BasePlotter:
             raise ValueError("No input designs found in EIG data")
 
         eig_values = np.array(variable_data.get('eigs_avg', []))
-        if eig_values.size == 0:
-            raise ValueError("No EIG values found in EIG data")
-
         nominal_eig = nominal_data.get('eigs_avg')
         if isinstance(nominal_eig, list):
             nominal_eig = nominal_eig[0] if len(nominal_eig) > 0 else None
         nominal_eig = float(nominal_eig) if nominal_eig is not None else None
+
+        # Fall back to the marginal block for the requested subset when the joint
+        # (variable) EIG was not computed -- e.g. a standalone --marginal run.
+        # The marginal branch in _extract_run_posterior_data re-applies these,
+        # but locating the optimal design here lets the plot proceed.
+        if eig_values.size == 0 and params is not None:
+            subset_id = "+".join(list(params))
+            marginal = step_data.get("marginal", {}).get(subset_id)
+            if marginal is not None:
+                eig_values = np.array(marginal.get("eigs_avg", []), dtype=float)
+                nominal_eig = float(marginal["nominal"]["eigs_avg"])
+
+        if eig_values.size == 0:
+            raise ValueError("No EIG values found in EIG data")
 
         return input_designs, eig_values, nominal_eig
     
@@ -1578,7 +1589,7 @@ class RunPlotter(BasePlotter):
         """Extract posterior plotting data from run's MLflow artifacts into a kwargs dict for generate_posterior()."""
         if eig_data is None:
             eig_data = self._get_eig_data(eval_step=eval_step)
-        input_designs, eig_values, nominal_eig = self._parse_eig_for_posterior(eig_data, eval_step)
+        input_designs, eig_values, nominal_eig = self._parse_eig_for_posterior(eig_data, eval_step, params=params)
         _, step_str = self._resolve_step(eig_data, eval_step)
         step_data = eig_data[step_str]
         marginal_eig = False
@@ -1946,6 +1957,13 @@ class RunPlotter(BasePlotter):
         """
         if eig_data is not None:
             return eig_data
+        # Prefer an explicitly-provided in-memory eig_data (set by the Evaluator to
+        # its own live dict) over rediscovering the "newest complete file" on disk.
+        # The disk scan is fragile when multiple evals share a run's artifacts dir
+        # (it can pick another run's complete-but-incompatible file).
+        override = getattr(self, "_eig_data_override", None)
+        if override is not None:
+            return override
         if self._experiment_id is not None:
             artifacts_dir = f"{self.storage_path}/mlruns/{self._experiment_id}/{self.run_id}/artifacts"
         else:

@@ -58,6 +58,9 @@ if [ $# -eq 0 ]; then
     echo "  --no-eval           - Disable auto-eval (on by default, off for --debug)"
     echo "  --eval-<arg> <val>  - Pass args to auto-eval (e.g. --eval-grid --eval-param-pts 2000)"
     echo "  --eval-time <HH:MM> - SLURM time limit for auto-eval job (default: 00:30)"
+    echo "  --marginal          - (eval only) Run ONLY the marginal EIG loop (+ per-subset plots),"
+    echo "                        skipping the full joint EIG pipeline. Needs --marginal-eig-subsets"
+    echo "                        (or marginal_eig_subsets in eval_args.yaml). Other --marginal-* args apply."
     echo "  --grid              - (eval only) Dispatch a sibling CPU grid job in parallel with NF eval"
     echo "                        Unprefixed --<arg> are forwarded to BOTH eval and grid jobs."
     echo "  --grid-eig-data <p> - (eval only, without --grid) Overlay an existing grid eig_data JSON"
@@ -79,6 +82,7 @@ if [ $# -eq 0 ]; then
     echo "  ./submit.sh grid num_visits --param-pts 500 --nf-eig-data /path/to/eig_data_nf.json --nf-checkpoint /path/to/checkpoint_rank_0_50000.pt"
     echo "    (new checkpoints embed nf_init_config; old .pt files also need --nf-overlay-run-id)"
     echo "  ./submit.sh eval num_visits <run_id> --grid --grid-param-pts 2000 --grid-feature-pts 800"
+    echo "  ./submit.sh eval num_visits <run_id> --marginal --marginal-eig-subsets '[[\"log_c_scale\",\"z\"]]'"
     echo "  ./submit.sh train num_tracers base_w_wa --initial-lr 0.0001 --log-usage"
     exit 1
 fi

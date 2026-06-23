@@ -2127,6 +2127,7 @@ def render_overlay(
     transform_output=True,
     include_nominal=False,
     sort=True,
+    plot_prior=False,
     overlay_save_dir=None,
     device=None,
     nf_checkpoint_path=None,
@@ -2150,6 +2151,7 @@ def render_overlay(
         transform_output: Whether to transform samples to physical space.
         include_nominal: Passed to eig_designs.
         sort: Passed to eig_designs.
+        plot_prior: Passed to generate_posterior overlay figures.
         overlay_save_dir: If set, figures are written here instead of the default
             MLflow artifacts path (used by standalone ``grid_calc`` overlays).
         device: Torch device string for loading the NF checkpoint (default: cuda if
@@ -2236,7 +2238,7 @@ def render_overlay(
                 display=['nominal', 'optimal'],
                 guide_samples=50000,
                 levels=list(levels),
-                plot_prior=True,
+                plot_prior=plot_prior,
                 transform_output=transform_output,
                 grid_samples=grid_samples,
                 filename='posterior_samples_overlay',
@@ -2249,7 +2251,7 @@ def render_overlay(
                 display=['nominal', 'optimal'],
                 guide_samples=50000,
                 levels=list(levels),
-                plot_prior=True,
+                plot_prior=plot_prior,
                 transform_output=transform_output,
                 grid_samples=grid_samples,
                 eig_data=combined,
@@ -2266,7 +2268,7 @@ def render_overlay(
                     display=(),
                     guide_samples=50000,
                     levels=list(levels),
-                    plot_prior=True,
+                    plot_prior=plot_prior,
                     transform_output=transform_output,
                     grid_samples=grid_samples,
                     device=device,
