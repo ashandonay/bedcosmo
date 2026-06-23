@@ -202,7 +202,7 @@ class NumTracers(BaseExperiment, CosmologyMixin):
                     checkpoints[tracer_bin] = ckpt_path if os.path.exists(ckpt_path) else None
             else:
                 checkpoints = self.resolve_emulator_checkpoints(self.analysis, self.cosmo_model, self.dataset)
-            self._emulator_config = {'checkpoints': checkpoints}
+            self._emulator_checkpoints = checkpoints
             self._load_emulators()
 
         # Initialize full shape data if provided
@@ -950,7 +950,7 @@ class NumTracers(BaseExperiment, CosmologyMixin):
 
         self._emulators = {}
         self._emulator_fallback_bins = []
-        for tracer_bin, ckpt_path in self._emulator_config['checkpoints'].items():
+        for tracer_bin, ckpt_path in self._emulator_checkpoints.items():
             if ckpt_path is None:
                 self._emulator_fallback_bins.append(tracer_bin)
                 continue
@@ -1165,7 +1165,7 @@ class NumTracers(BaseExperiment, CosmologyMixin):
 
         # Iterate over every tracer bin declared in the emulator config and fill
         # its covariance block, driven by the actual desi_data row layout.
-        for tracer_bin in self._emulator_config['checkpoints']:
+        for tracer_bin in self._emulator_checkpoints:
             desi_name = self._EMULATOR_TRACER_TO_DESI.get(tracer_bin)
             if desi_name is None:
                 raise ValueError(
