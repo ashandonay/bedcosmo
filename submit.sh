@@ -480,13 +480,21 @@ if [ -n "${CONDA_PREFIX:-}" ] && [ -d "$CONDA_PREFIX/lib" ]; then
 fi
 
 # ──────────────────────────────────────────────────────────────────────
-# For eval jobs, infer cosmo_model from MLflow run
+# Infer cosmo_model from MLflow when not provided (eval / resume / restart)
 # ──────────────────────────────────────────────────────────────────────
-if [ "$JOB_TYPE" = "eval" ] && [ -z "$COSMO_MODEL" ]; then
-    echo "Inferring cosmo_model from MLflow run ${RUN_ID}..."
-    TEMP_STDERR=$(mktemp)
-    set +e
-    COSMO_MODEL=$(timeout 30 python3 -c "
+if [ -z "$COSMO_MODEL" ]; then
+    INFER_RUN_ID=""
+    case "$JOB_TYPE" in
+        eval)    INFER_RUN_ID="$RUN_ID" ;;
+        resume)  INFER_RUN_ID="$RESUME_ID" ;;
+        restart) INFER_RUN_ID="$RESTART_ID" ;;
+    esac
+
+    if [ -n "$INFER_RUN_ID" ]; then
+        echo "Inferring cosmo_model from MLflow run ${INFER_RUN_ID}..."
+        TEMP_STDERR=$(mktemp)
+        set +e
+        COSMO_MODEL=$(timeout 30 python3 -c "
 import mlflow
 import os
 import sys
@@ -498,44 +506,54 @@ warnings.filterwarnings('ignore', category=FutureWarning)
 mlflow.set_tracking_uri('file:' + os.environ['SCRATCH'] + '/bedcosmo/${COSMO_EXP}/mlruns')
 client = MlflowClient()
 try:
-    run = client.get_run('${RUN_ID}')
+    run = client.get_run('${INFER_RUN_ID}')
     cosmo_model = run.data.params.get('cosmo_model', 'base')
     print(cosmo_model, flush=True)
 except Exception as e:
     print(f'ERROR: {e}', file=sys.stderr)
     sys.exit(1)
 " 2>"$TEMP_STDERR")
-    PYTHON_EXIT_CODE=$?
-    STDERR_CONTENT=$(cat "$TEMP_STDERR" 2>/dev/null)
-    rm -f "$TEMP_STDERR"
-    set -e
+        PYTHON_EXIT_CODE=$?
+        STDERR_CONTENT=$(cat "$TEMP_STDERR" 2>/dev/null)
+        rm -f "$TEMP_STDERR"
+        set -e
 
-    if [ -n "$STDERR_CONTENT" ]; then
-        echo "Warning from MLflow (non-fatal):" >&2
-        echo "$STDERR_CONTENT" >&2
-    fi
+        if [ -n "$STDERR_CONTENT" ]; then
+            echo "Warning from MLflow (non-fatal):" >&2
+            echo "$STDERR_CONTENT" >&2
+        fi
 
-    if [ $PYTHON_EXIT_CODE -ne 0 ]; then
-        if [ $PYTHON_EXIT_CODE -eq 124 ]; then
-            echo "Error: Timeout while getting cosmo_model from run ${RUN_ID} (command took >30 seconds)"
+        if [ $PYTHON_EXIT_CODE -ne 0 ]; then
+            if [ $PYTHON_EXIT_CODE -eq 124 ]; then
+                echo "Error: Timeout while getting cosmo_model from run ${INFER_RUN_ID} (command took >30 seconds)"
+            else
+                echo "Error: Failed to get cosmo_model from run ${INFER_RUN_ID} (exit code: $PYTHON_EXIT_CODE)"
+            fi
+            if [ -n "$COSMO_MODEL" ]; then
+                echo "Partial output: $COSMO_MODEL"
+            fi
+            if [ "$JOB_TYPE" = "eval" ]; then
+                exit 1
+            else
+                echo "Warning: auto-eval may not load eval_args.yaml without cosmo_model"
+                COSMO_MODEL=""
+            fi
         else
-            echo "Error: Failed to get cosmo_model from run ${RUN_ID} (exit code: $PYTHON_EXIT_CODE)"
+            COSMO_MODEL=$(echo "$COSMO_MODEL" | tail -n 1 | xargs)
+
+            if [ -z "$COSMO_MODEL" ]; then
+                if [ "$JOB_TYPE" = "eval" ]; then
+                    echo "Error: Could not extract cosmo_model from MLflow run ${INFER_RUN_ID}"
+                    exit 1
+                else
+                    echo "Warning: Could not extract cosmo_model from MLflow run ${INFER_RUN_ID}; auto-eval may not load eval_args.yaml"
+                fi
+            else
+                echo "Inferred cosmo_model: $COSMO_MODEL"
+                echo ""
+            fi
         fi
-        if [ -n "$COSMO_MODEL" ]; then
-            echo "Partial output: $COSMO_MODEL"
-        fi
-        exit 1
     fi
-
-    COSMO_MODEL=$(echo "$COSMO_MODEL" | tail -n 1 | xargs)
-
-    if [ -z "$COSMO_MODEL" ]; then
-        echo "Error: Could not extract cosmo_model from MLflow run ${RUN_ID}"
-        exit 1
-    fi
-
-    echo "Inferred cosmo_model: $COSMO_MODEL"
-    echo ""
 fi
 
 # ──────────────────────────────────────────────────────────────────────
@@ -1188,6 +1206,11 @@ if [ "$EXECUTION_MODE" = "slurm" ]; then
             echo "Submitting dependent eval job (auto_eval)"
             echo "==========================================="
             echo "  Dependency: afterok:$TRAIN_JOB_ID"
+            if [ -n "$COSMO_MODEL" ]; then
+                echo "  Eval config model: $COSMO_MODEL (from eval_args.yaml)"
+            else
+                echo "  Warning: cosmo_model unknown; eval_args.yaml will not be loaded"
+            fi
             if [ ${#EVAL_EXTRA_ARGS[@]} -gt 0 ]; then
                 echo "  Eval args: ${EVAL_EXTRA_ARGS[*]}"
             fi
