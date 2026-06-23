@@ -67,7 +67,7 @@ class NumTracers(BaseExperiment, CosmologyMixin):
         fullshape_z_eff=None,
         fullshape_ells=(0, 2, 4),
         likelihood_mode='scaling',
-        emulator_args_path=None,
+        emulator_artifacts_dir=None,
         input_transform_type="marginal",
         joint_transform_shrinkage=1e-3,
         joint_transform_fit_path=None,
@@ -191,18 +191,18 @@ class NumTracers(BaseExperiment, CosmologyMixin):
         # Initialize emulator-based likelihood mode
         self.likelihood_mode = likelihood_mode
         if self.likelihood_mode == 'emulator':
-            if emulator_args_path is None:
-                raise ValueError("emulator_args_path must be provided when likelihood_mode='emulator'")
-            if not os.path.isabs(emulator_args_path):
-                emulator_args_path = str(get_experiment_config_path('num_tracers', emulator_args_path))
-            with open(emulator_args_path, 'r') as f:
-                all_emulator_config = yaml.safe_load(f)
-            if self.cosmo_model not in all_emulator_config:
-                raise ValueError(
-                    f"Cosmo model '{self.cosmo_model}' not found in emulator_args. "
-                    f"Available: {list(all_emulator_config.keys())}"
-                )
-            self._emulator_config = all_emulator_config[self.cosmo_model]
+            # Prefer checkpoints snapshotted into the run's artifacts at submission time
+            # (artifacts/emulators/<tracer_bin>.pt). Bins without a .pt there are treated as
+            # fallback (null) bins. When no artifacts dir is provided (direct/local init), fall
+            # back to resolving from emulators.yaml against $SCRATCH.
+            if emulator_artifacts_dir is not None and os.path.isdir(emulator_artifacts_dir):
+                checkpoints = {}
+                for tracer_bin in self._EMULATOR_TRACER_TO_DESI:
+                    ckpt_path = os.path.join(emulator_artifacts_dir, f"{tracer_bin}.pt")
+                    checkpoints[tracer_bin] = ckpt_path if os.path.exists(ckpt_path) else None
+            else:
+                checkpoints = self.resolve_emulator_checkpoints(self.analysis, self.cosmo_model, self.dataset)
+            self._emulator_checkpoints = checkpoints
             self._load_emulators()
 
         # Initialize full shape data if provided
@@ -907,6 +907,36 @@ class NumTracers(BaseExperiment, CosmologyMixin):
 
         return parameters
 
+    @staticmethod
+    def resolve_emulator_checkpoints(analysis, cosmo_model, dataset):
+        """Resolve emulator checkpoint paths for a (analysis, cosmo_model, dataset) from emulators.yaml.
+
+        Emulator checkpoints live in emulators.yaml under <analysis>.<cosmo_model>.<dataset>. Relative
+        paths resolve against $SCRATCH/bedcosmo/num_tracers/emulator/models/{dataset}/{cosmo_model}/;
+        absolute paths are used verbatim; null -> fall back to fixed DESI nominal covariance.
+
+        Returns:
+            dict mapping tracer-bin -> absolute checkpoint path (or None for fallback bins).
+        """
+        emulators_yaml_path = get_experiment_config_path('num_tracers', 'emulators.yaml')
+        with open(emulators_yaml_path, 'r') as f:
+            all_emulators = yaml.safe_load(f)
+        if cosmo_model not in all_emulators.get(analysis, {}):
+            raise ValueError(
+                f"Cosmo model '{cosmo_model}' has no emulator entry under '{analysis}' in emulators.yaml"
+            )
+        emu_by_dataset = all_emulators[analysis][cosmo_model]
+        if dataset not in emu_by_dataset:
+            raise ValueError(
+                f"No emulator checkpoints for dataset '{dataset}' under "
+                f"{analysis}.{cosmo_model} in emulators.yaml (have: {list(emu_by_dataset)})"
+            )
+        base_dir = os.path.join(storage_path, "emulator", "models", dataset, cosmo_model)
+        return {
+            tb: (None if p is None else (p if os.path.isabs(p) else os.path.join(base_dir, p)))
+            for tb, p in emu_by_dataset[dataset].items()
+        }
+
     def _load_emulators(self):
         """Load trained NN emulators for each tracer bin from checkpoint files.
 
@@ -920,7 +950,7 @@ class NumTracers(BaseExperiment, CosmologyMixin):
 
         self._emulators = {}
         self._emulator_fallback_bins = []
-        for tracer_bin, ckpt_path in self._emulator_config['checkpoints'].items():
+        for tracer_bin, ckpt_path in self._emulator_checkpoints.items():
             if ckpt_path is None:
                 self._emulator_fallback_bins.append(tracer_bin)
                 continue
@@ -948,7 +978,6 @@ class NumTracers(BaseExperiment, CosmologyMixin):
                 'y_mu': ckpt["y_mu"].to(self.device),
                 'y_sigma': ckpt["y_sigma"].to(self.device),
                 'log_normalize': ckpt.get("log_normalize", False),
-                'log_sigma': ckpt.get("log_sigma", False),
                 'y_linthresh': ckpt["y_linthresh"].to(self.device) if ckpt.get("y_linthresh") is not None else None,
             }
 
@@ -991,7 +1020,6 @@ class NumTracers(BaseExperiment, CosmologyMixin):
             emu['target_names'],
             log_normalize=emu['log_normalize'],
             y_linthresh=emu['y_linthresh'],
-            log_sigma=emu.get('log_sigma', False),
             sigma_floor=self._sigma_floor,
         )
 
@@ -1039,7 +1067,7 @@ class NumTracers(BaseExperiment, CosmologyMixin):
 
         return n_tracers
 
-    # Maps emulator tracer-bin keys (emulator_args.yaml / checkpoints) to the
+    # Maps emulator tracer-bin keys (models.yaml likelihood_emulator) to the
     # tracer names used in desi_data.csv.
     _EMULATOR_TRACER_TO_DESI = {
         'BGS': 'BGS',
@@ -1137,7 +1165,7 @@ class NumTracers(BaseExperiment, CosmologyMixin):
 
         # Iterate over every tracer bin declared in the emulator config and fill
         # its covariance block, driven by the actual desi_data row layout.
-        for tracer_bin in self._emulator_config['checkpoints']:
+        for tracer_bin in self._emulator_checkpoints:
             desi_name = self._EMULATOR_TRACER_TO_DESI.get(tracer_bin)
             if desi_name is None:
                 raise ValueError(

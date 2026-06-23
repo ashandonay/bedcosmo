@@ -1,0 +1,53 @@
+# Emulator checkpoint paths, organized like models.yaml: <analysis>: <cosmo_model>: <dataset>: <tracer_bin>: <path>
+# Relative paths resolve against $SCRATCH/bedcosmo/num_tracers/emulator/models/{dataset}/{cosmo_model}/ ;
+# absolute paths are used verbatim; null means "no checkpoint -> fall back to the fixed DESI nominal covariance".
+bao:
+  base:
+    dr1:
+      BGS: config/v4/BGS.pt
+      LRG1: config/v4/LRG1.pt
+      LRG2: config/v4/LRG2.pt
+      LRG3_ELG1: config/v4/LRG3_ELG1.pt
+      ELG2: config/v4/ELG2.pt
+      QSO: config/v4/QSO.pt
+      Lya_QSO: null
+
+  base_omegak:
+    dr1:
+      BGS: /path/to/base_omegak/BGS/model.pt
+      LRG1: /path/to/base_omegak/LRG1/model.pt
+      LRG2: /path/to/base_omegak/LRG2/model.pt
+      LRG3_ELG1: /path/to/base_omegak/LRG3_ELG1/model.pt
+      ELG2: /path/to/base_omegak/ELG2/model.pt
+      QSO: /path/to/base_omegak/QSO/model.pt
+      Lya_QSO: /path/to/base_omegak/Lya_QSO/model.pt
+
+  base_w:
+    dr1:
+      BGS: /path/to/base_w/BGS/model.pt
+      LRG1: /path/to/base_w/LRG1/model.pt
+      LRG2: /path/to/base_w/LRG2/model.pt
+      LRG3_ELG1: /path/to/base_w/LRG3_ELG1/model.pt
+      ELG2: /path/to/base_w/ELG2/model.pt
+      QSO: /path/to/base_w/QSO/model.pt
+      Lya_QSO: /path/to/base_w/Lya_QSO/model.pt
+
+  base_w_wa:
+    dr1:
+      BGS: /path/to/base_w_wa/BGS/model.pt
+      LRG1: /path/to/base_w_wa/LRG1/model.pt
+      LRG2: /path/to/base_w_wa/LRG2/model.pt
+      LRG3_ELG1: /path/to/base_w_wa/LRG3_ELG1/model.pt
+      ELG2: /path/to/base_w_wa/ELG2/model.pt
+      QSO: /path/to/base_w_wa/QSO/model.pt
+      Lya_QSO: /path/to/base_w_wa/Lya_QSO/model.pt
+
+  base_omegak_w_wa:
+    dr1:
+      BGS: /path/to/base_omegak_w_wa/BGS/model.pt
+      LRG1: /path/to/base_omegak_w_wa/LRG1/model.pt
+      LRG2: /path/to/base_omegak_w_wa/LRG2/model.pt
+      LRG3_ELG1: /path/to/base_omegak_w_wa/LRG3_ELG1/model.pt
+      ELG2: /path/to/base_omegak_w_wa/ELG2/model.pt
+      QSO: /path/to/base_omegak_w_wa/QSO/model.pt
+      Lya_QSO: /path/to/base_omegak_w_wa/Lya_QSO/model.pt

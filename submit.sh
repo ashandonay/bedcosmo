@@ -1006,6 +1006,32 @@ fi
 CLI_OVERRIDES_STR="${CLI_OVERRIDES_STR% }"
 export BED_CLI_OVERRIDES="$CLI_OVERRIDES_STR"
 
+# ──────────────────────────────────────────────────────────────────────
+# Pre-create the MLflow run at submission time (train only) and snapshot the
+# referenced config (prior_args/design_args/emulator .pt files) into its artifacts,
+# so editing those files while the job is queued cannot change what the job uses.
+# The training job attaches to this run via --attach-run-id (see bedcosmo.train).
+# ──────────────────────────────────────────────────────────────────────
+if [ "$JOB_TYPE" = "train" ]; then
+    echo "=========================================="
+    echo "Pre-creating MLflow run and snapshotting config..."
+    echo "=========================================="
+    set +e
+    CREATE_RUN_OUTPUT=$(python3 "$PROJECT_ROOT/scripts/create_run.py" "${FINAL_ARGS[@]}")
+    CREATE_RUN_EXIT=$?
+    set -e
+    ATTACH_RUN_ID=$(printf '%s\n' "$CREATE_RUN_OUTPUT" | tail -n 1)
+    RUN_PATH=$(printf '%s\n' "$CREATE_RUN_OUTPUT" | sed -n 's/^RUN_PATH=//p' | head -n 1)
+    if [ $CREATE_RUN_EXIT -ne 0 ] || [ -z "$ATTACH_RUN_ID" ]; then
+        echo "Error: Failed to pre-create MLflow run (exit code: $CREATE_RUN_EXIT). Aborting submission."
+        exit 1
+    fi
+    echo "Pre-created run: $ATTACH_RUN_ID"
+    echo "MLflow run path: $RUN_PATH"
+    echo ""
+    FINAL_ARGS+=("--attach-run-id" "$ATTACH_RUN_ID")
+fi
+
 # ======================================================================
 # EXECUTION
 # ======================================================================

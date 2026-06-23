@@ -792,15 +792,28 @@ class Trainer:
     def _init_run(self):
         """Initialize MLflow run settings and broadcast to all ranks."""
         if not self.run_args.get("resume_id", None):
+            attach_run_id = self.run_args.get("attach_run_id", None)
             if self.global_rank == 0:
                 mlflow.set_experiment(self.mlflow_exp)
-                mlflow.start_run()
+                # Attach to a run pre-created at submission time, else start a fresh run.
+                if attach_run_id:
+                    mlflow.start_run(run_id=attach_run_id)
+                else:
+                    mlflow.start_run()
                 self.run_obj = mlflow.active_run()
                 # Set n_devices and n_particles using the world size and n_particles_per_device
                 self.run_args["n_devices"] = tdist.get_world_size() if "LOCAL_RANK" in os.environ else 1
                 self.run_args["n_particles"] = self.run_args["n_devices"] * self.run_args["n_particles_per_device"]
 
-            if not self.run_args.get("restart_id", None):
+            if not self.run_args.get("restart_id", None) and attach_run_id:
+                # Attach mode: run was pre-created at submission and its config
+                # (prior_args/design_args/emulators) was already snapshotted to artifacts.
+                if self.global_rank == 0:
+                    print(f"=== ATTACH MODE ===")
+                    print(f"Attaching to pre-created run {attach_run_id}")
+                    mlflow.set_tag("submit_status", "running")
+                self.checkpoint = None
+            elif not self.run_args.get("restart_id", None):
                 # Start new run
                 if self.global_rank == 0:
                     print(f"=== NEW RUN MODE ===")
@@ -1052,10 +1065,20 @@ class Trainer:
 
     def _save_input_args(self, restart_run=False):
         """
-        Save prior_args.yaml and design_args.yaml to artifacts.
-        
+        Snapshot the run's config (prior_args.yaml, design_args.yaml, and emulator
+        checkpoints) into its MLflow artifacts at job start.
+
+        This is the job-start snapshot path used by the modes that do NOT go through
+        submission-time pre-creation:
+          - new-run mode: running `python -m bedcosmo.train` directly without --attach-run-id
+            (copies prior_args/design_args from the configured file paths).
+          - restart mode (restart_run=True): copies prior_args.yaml, design_args.yaml and the
+            emulators/ directory from the source run's (immutable) artifacts.
+        Attach mode skips this entirely — create_run.py already snapshotted at submission.
+
         Args:
-            restart_run: If True, copy files from restart run's artifacts instead of from file paths.
+            restart_run: If True, copy files from the restart source run's artifacts instead of
+                from the configured file paths.
         """
         artifacts_dir = f"{self.storage_path}/mlruns/{mlflow.active_run().info.experiment_id}/{mlflow.active_run().info.run_id}/artifacts"
         os.makedirs(artifacts_dir, exist_ok=True)
@@ -1085,6 +1108,16 @@ class Trainer:
                     print(f"Copied design_args.yaml from restart run to new run artifacts")
             else:
                 raise FileNotFoundError(f"Design args file not found in restart run artifacts: {restart_design_args_path}")
+
+            # Copy emulator checkpoints (artifacts/emulators/*.pt), if the restart run has them,
+            # so the restart uses the same frozen emulators rather than re-resolving from emulators.yaml.
+            restart_emulators_dir = f"{restart_artifacts_dir}/emulators"
+            if os.path.isdir(restart_emulators_dir):
+                new_emulators_dir = f"{artifacts_dir}/emulators"
+                shutil.copytree(restart_emulators_dir, new_emulators_dir, dirs_exist_ok=True)
+                mlflow.log_artifacts(new_emulators_dir, artifact_path="emulators")
+                if self.verbose:
+                    print(f"Copied emulator checkpoints from restart run to new run artifacts")
         else:
             # Save prior_args.yaml - either from prior_flow or from file path
             prior_artifact_path = f"{artifacts_dir}/prior_args.yaml"
@@ -1379,6 +1412,7 @@ if __name__ == '__main__':
     parser.add_argument('--device', type=str, default=None, help='Device to use for training')
     
     # Add resume/restart arguments early so we can check them
+    parser.add_argument('--attach-run-id', type=str, default=None, help='Pre-created MLflow run ID to attach to (created at submission time; config already snapshotted to its artifacts)')
     parser.add_argument('--resume-id', type=str, default=None, help='MLflow run ID to resume training from')
     parser.add_argument('--resume-step', type=int, default=None, help='Step to resume training from')
     parser.add_argument('--add-steps', type=int, default=0, help='Number of steps to add to the training (only used with --resume-id)')
