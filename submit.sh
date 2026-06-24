@@ -76,8 +76,9 @@ if [ $# -eq 0 ]; then
     echo "  ./submit.sh eval num_tracers abc123"
     echo "  ./submit.sh resume num_tracers abc123 5000 --time 01:00 --queue regular"
     echo "  ./submit.sh restart num_tracers abc123 10000"
-    echo "  ./submit.sh grid num_visits --param-pts 1000 --feature-pts 500"
-    echo "  ./submit.sh grid num_visits --node-type gpu --param-pts 1000 --feature-pts 500"
+    echo "  ./submit.sh grid num_visits bb --param-pts 1000 --feature-pts 500"
+    echo "  ./submit.sh grid num_visits --cosmo-model bb --param-pts 1000 --feature-pts 500"
+    echo "  ./submit.sh grid num_visits --node-type gpu --cosmo-model bb --param-pts 1000 --feature-pts 500"
     echo "  ./submit.sh grid num_visits --param-pts 500 --nf-eig-data /path/to/eig_data_nf.json"
     echo "  ./submit.sh grid num_visits --param-pts 500 --nf-eig-data /path/to/eig_data_nf.json --nf-checkpoint /path/to/checkpoint_rank_0_50000.pt"
     echo "    (new checkpoints embed nf_init_config; old .pt files also need --nf-overlay-run-id)"
@@ -410,8 +411,8 @@ case $JOB_TYPE in
         ;;
 esac
 
-# Allow positional cosmo_model for job types that require it
-if [ -z "$COSMO_MODEL" ] && [ "$JOB_TYPE" != "eval" ] && [ "$JOB_TYPE" != "resume" ] && [ "$JOB_TYPE" != "restart" ] && [ "$JOB_TYPE" != "grid" ] && [ ${#POSITIONAL_ARGS[@]} -gt 0 ]; then
+# Allow positional cosmo_model for job types that require it (including grid)
+if [ -z "$COSMO_MODEL" ] && [ "$JOB_TYPE" != "eval" ] && [ "$JOB_TYPE" != "resume" ] && [ "$JOB_TYPE" != "restart" ] && [ ${#POSITIONAL_ARGS[@]} -gt 0 ]; then
     COSMO_MODEL="${POSITIONAL_ARGS[0]}"
     POSITIONAL_ARGS=("${POSITIONAL_ARGS[@]:1}")
 fi
@@ -435,7 +436,7 @@ if [ -z "$COSMO_EXP" ]; then
     exit 1
 fi
 
-# cosmo_model is NOT required for eval/resume/restart/grid
+# cosmo_model is NOT required for eval/resume/restart; grid needs it only for num_visits
 if [ -z "$COSMO_MODEL" ] && [ "$JOB_TYPE" != "eval" ] && [ "$JOB_TYPE" != "resume" ] && [ "$JOB_TYPE" != "restart" ] && [ "$JOB_TYPE" != "grid" ]; then
     echo "Error: --cosmo-model is required for $JOB_TYPE jobs"
     echo "Usage: ./submit.sh $JOB_TYPE [cosmo_exp] [cosmo_model] [additional args...]"
@@ -443,6 +444,15 @@ if [ -z "$COSMO_MODEL" ] && [ "$JOB_TYPE" != "eval" ] && [ "$JOB_TYPE" != "resum
     echo ""
     echo "Note: cosmo_model can be provided positionally after cosmo_exp."
     echo "Note: --cosmo-model is not needed for 'eval', 'resume', or 'restart' jobs (inferred from MLflow run)"
+    exit 1
+fi
+
+if [ "$JOB_TYPE" = "grid" ] && [ "$COSMO_EXP" = "num_visits" ] && [ -z "$COSMO_MODEL" ]; then
+    echo "Error: --cosmo-model is required for num_visits grid jobs"
+    echo "Usage: ./submit.sh grid num_visits [cosmo_model] [additional args...]"
+    echo "Available models: bb, bb_temp, empirical"
+    echo ""
+    echo "Note: cosmo_model can be provided positionally after cosmo_exp or via --cosmo-model."
     exit 1
 fi
 
@@ -900,6 +910,11 @@ case $JOB_TYPE in
             fi
         fi
 
+        # --cosmo-model is parsed by submit.sh (not CLI_ARGS_LIST); forward it to grid_calc.
+        if [ -n "$COSMO_MODEL" ]; then
+            YAML_ARGS+=("--cosmo-model" "$COSMO_MODEL")
+        fi
+
         # For SLURM: pass --cosmo-exp so grid.sh can parse it (same pattern as other scripts)
         # For local: FINAL_ARGS are passed directly to python -m, which expects positional cosmo_exp
         if [ "$EXECUTION_MODE" = "slurm" ]; then
@@ -1006,6 +1021,9 @@ echo ""
 # Build CLI overrides string for logging in SLURM job scripts
 # ──────────────────────────────────────────────────────────────────────
 CLI_OVERRIDES_STR=""
+if [ "$JOB_TYPE" = "grid" ] && [ -n "$COSMO_MODEL" ]; then
+    CLI_OVERRIDES_STR+="--cosmo-model $COSMO_MODEL "
+fi
 for arg in "${CLI_ARGS_LIST[@]}"; do
     CLI_OVERRIDES_STR+="$arg "
 done
@@ -1163,12 +1181,19 @@ if [ "$EXECUTION_MODE" = "slurm" ]; then
         # GRID_EXTRA_ARGS comes last so --grid-* overrides any same-named unprefixed arg.
         # --device cpu is appended after CLI_ARGS_LIST so the sibling stays CPU even if
         # the user passed --device cuda for the eval job.
+        GRID_COSMO_MODEL_ARGS=()
+        if [ -n "$COSMO_MODEL" ]; then
+            GRID_COSMO_MODEL_ARGS=("--cosmo-model" "$COSMO_MODEL")
+        fi
         GRID_FINAL_ARGS=("--cosmo-exp" "$COSMO_EXP" "--node-type" "cpu" "--run-id" "$RUN_ID" \
             "--nf-eig-data" "$GRID_NF_PATH" "--grid-eig-data" "$GRID_GRID_PATH" \
-            "${CLI_ARGS_LIST[@]}" "--device" "cpu" \
+            "${GRID_COSMO_MODEL_ARGS[@]}" "${CLI_ARGS_LIST[@]}" "--device" "cpu" \
             "${GRID_EXTRA_ARGS[@]}")
 
         GRID_CLI_OVERRIDES_STR=""
+        if [ -n "$COSMO_MODEL" ]; then
+            GRID_CLI_OVERRIDES_STR+="--cosmo-model $COSMO_MODEL "
+        fi
         for arg in "${CLI_ARGS_LIST[@]}" "${GRID_EXTRA_ARGS[@]}"; do
             GRID_CLI_OVERRIDES_STR+="$arg "
         done
@@ -1391,9 +1416,13 @@ else
             GRID_LOG_FILE="${LOG_BASE_DIR}/${TIMESTAMP}_grid.log"
             # Forward unprefixed --* args (CLI_ARGS_LIST) so they reach grid_calc too;
             # GRID_EXTRA_ARGS comes last so --grid-* overrides any same-named unprefixed arg.
+            GRID_COSMO_MODEL_ARGS=()
+            if [ -n "$COSMO_MODEL" ]; then
+                GRID_COSMO_MODEL_ARGS=("--cosmo-model" "$COSMO_MODEL")
+            fi
             GRID_FINAL_ARGS=("$COSMO_EXP" "--run-id" "$RUN_ID" \
                 "--nf-eig-data" "$GRID_NF_PATH" "--grid-eig-data" "$GRID_GRID_PATH" \
-                "${CLI_ARGS_LIST[@]}" "--device" "cpu" "${GRID_EXTRA_ARGS[@]}")
+                "${GRID_COSMO_MODEL_ARGS[@]}" "${CLI_ARGS_LIST[@]}" "--device" "cpu" "${GRID_EXTRA_ARGS[@]}")
             echo "Executing sibling grid job: python -m bedcosmo.grid_calc [${#GRID_FINAL_ARGS[@]} arguments]"
             echo "Grid log: $GRID_LOG_FILE"
             python -m bedcosmo.grid_calc "${GRID_FINAL_ARGS[@]}" > "$GRID_LOG_FILE" 2>&1 &
