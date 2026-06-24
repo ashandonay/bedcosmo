@@ -67,6 +67,7 @@ class NumTracers(BaseExperiment, CosmologyMixin):
         fullshape_z_eff=None,
         fullshape_ells=(0, 2, 4),
         likelihood_mode='scaling',
+        apply_desi_syst=False,
         emulator_artifacts_dir=None,
         input_transform_type="marginal",
         joint_transform_shrinkage=1e-3,
@@ -190,6 +191,10 @@ class NumTracers(BaseExperiment, CosmologyMixin):
 
         # Initialize emulator-based likelihood mode
         self.likelihood_mode = likelihood_mode
+        # Optionally inflate the emulator's statistical covariance by DESI's measured
+        # per-tracer systematic budget (desilike_emulator desi_reference.apply_desi_syst).
+        self.apply_desi_syst = apply_desi_syst
+        self._desi_syst_factors_cache = None
         if self.likelihood_mode == 'emulator':
             # Prefer checkpoints snapshotted into the run's artifacts at submission time
             # (artifacts/emulators/<tracer_bin>.pt). Bins without a .pt there are treated as
@@ -1224,7 +1229,41 @@ class NumTracers(BaseExperiment, CosmologyMixin):
                     f"{{'DM_over_rs', 'DH_over_rs'}}."
                 )
 
+        # Optionally inflate σ_stat -> σ_tot with DESI's systematic budget. The
+        # inflation is a diagonal per-quantity σ scaling R, so on the covariance it
+        # acts as cov[i,j] -> R_i·R_j·cov[i,j] (ρ unchanged; cross-tracer zeros stay
+        # zero). Fallback bins / unknown tracers scale by 1.0 (no-op).
+        if self.apply_desi_syst:
+            f = self._desi_syst_factors()
+            covariance = covariance * f.unsqueeze(-1) * f.unsqueeze(-2)
+
         return covariance
+
+    def _desi_syst_factors(self):
+        """Per-data-row σ inflation factors R from DESI's systematic budget.
+
+        Uses desilike_emulator's apply_desi_syst to map each
+        emulator tracer bin's frozen DESI_SYST_INFLATION factors onto the
+        desi_data row layout. Cached after first build. Rows not covered by an
+        emulator bin (or absent from the table) get 1.0.
+        """
+        if self._desi_syst_factors_cache is not None:
+            return self._desi_syst_factors_cache
+
+        from desilike_emulator.bao.desi_syst import apply_desi_syst
+
+        factors = torch.ones(len(self.desi_data), device=self.device, dtype=torch.float64)
+        unit = {'DH_over_rs': 1.0, 'DM_over_rs': 1.0, 'DV_over_rs': 1.0}
+        for tracer_bin, desi_name in self._EMULATOR_TRACER_TO_DESI.items():
+            rows = self.desi_data.index[self.desi_data['tracer'] == desi_name].tolist()
+            if not rows:
+                continue
+            R = apply_desi_syst(unit, tracer_bin)  # {quantity: factor}, no-op if unknown
+            for i in rows:
+                q = self.desi_data.loc[i, 'quantity']
+                factors[i] = float(R.get(q, 1.0))
+        self._desi_syst_factors_cache = factors
+        return factors
 
     def _stabilize_covariance(self, covariance_matrix):
         """Make covariance numerically SPD for MultivariateNormal sampling."""
