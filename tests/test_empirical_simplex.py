@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 import torch
 
-from bedcosmo.num_visits.sed_prior.simplex import (
+from bedcosmo.num_visits.empirical.simplex import (
     PARAMETERIZATION_CLR,
     PARAMETERIZATION_LOGITS,
     clr_to_weights,

@@ -13,17 +13,17 @@ import yaml
 from bedcosmo.custom_dist import EmpiricalPrior
 from bedcosmo.transform import Bijector
 from bedcosmo.util import get_experiment_config_path
-from bedcosmo.num_visits.sed_prior.prior_sampler import (
+from bedcosmo.num_visits.empirical.sed_prior import (
     build_gpu_prior_pool,
     load_empirical_prior,
     sample_prior_batch,
 )
-from bedcosmo.num_visits.sed_prior.simplex import (
+from bedcosmo.num_visits.empirical.simplex import (
     PARAMETERIZATION_CLR,
     prior_clr_feature_names,
     split_feature_matrix,
 )
-from bedcosmo.num_visits.sed_prior.templates import build_common_rest_grid, load_eazy_template_bank
+from bedcosmo.num_visits.empirical.templates import build_common_rest_grid, load_eazy_template_bank
 
 N_TEMPLATES = 12
 N_FEATURES = N_TEMPLATES + 2  # f1..f12, log_c_scale, z
@@ -114,7 +114,7 @@ def test_numvisits_eazy_init_and_magnitudes():
     design_args["input_type"] = "nominal"
 
     prior_args = {
-        "prior_kde_path": str(KDE_PATH.resolve()),
+        "prior_kde_source": str(KDE_PATH.resolve()),
         "prior_pool_size": 512,
         "prior_pool_seed": 0,
         "parameters": {},

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Per-HEALPix fit diagnostic plots (--plot-only; see build_empirical_prior.py for full pipeline).
+# Per-HEALPix fit diagnostic plots (--plot-only; see build_prior.py for full pipeline).
 set -euo pipefail
 
 BUILD_NAME="${BUILD_NAME:-empirical_prior}"
@@ -10,7 +10,7 @@ HEALPIX_DIR="${PRIOR_DIR}/healpix"
 SEED="${SEED:-7}"
 PLOT_N_EXAMPLES="${PLOT_N_EXAMPLES:-8}"
 PLOT_TOP_OUTLIERS="${PLOT_TOP_OUTLIERS:-5}"
-PY="conda run -n bedcosmo python -m bedcosmo.num_visits.sed_prior"
+PY="conda run -n bedcosmo python -m bedcosmo.num_visits.empirical"
 
 # Optional override; omit to use Python default ($SCRATCH/bedcosmo/desi/tiny_dr1).
 DESI_DIR_ARGS=()

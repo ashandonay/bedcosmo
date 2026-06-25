@@ -27,7 +27,9 @@ import torch
 from pyro import distributions as dist
 
 from bedcosmo.base import BaseExperiment
-from bedcosmo.pyro_oed_src import LikelihoodDataset
+from bedcosmo.pyro_oed_src import LikelihoodDataset, standard_normal_log_prob_nf_coords
+from bedcosmo.num_visits.empirical.sed_prior import EmpiricalPriorPool
+from bedcosmo.num_visits.empirical.sed_prior import EmpiricalSedPrior
 from bedcosmo.transform import Bijector
 
 # Smaller-than-default bijector resolution so each fixture builds in <1s.
@@ -397,3 +399,228 @@ class TestWithPriorFlow:
                      prior_flow=flow, prior_flow_metadata=meta)
         with pytest.raises(RuntimeError, match="bijector_state"):
             stub._init_param_bijector()
+
+
+# ============================================================================
+# Empirical KDE prior
+# ============================================================================
+
+
+def _tiny_kde_artifact(rng: np.random.Generator) -> dict:
+    from sklearn.preprocessing import StandardScaler
+    from sklearn.neighbors import KernelDensity
+
+    names = ["f1", "f2", "log_c_scale", "z"]
+    x = rng.normal(size=(300, len(names)))
+    scaler = StandardScaler()
+    x_scaled = scaler.fit_transform(x)
+    kde = KernelDensity(bandwidth=0.4, kernel="gaussian")
+    kde.fit(x_scaled)
+    return {
+        "feature_names": names,
+        "n_templates": 2,
+        "kde": kde,
+        "scaler": scaler,
+    }
+
+
+def _make_empirical_sed_prior(artifact: dict, pool_size: int = 200) -> EmpiricalSedPrior:
+    rng = np.random.default_rng(0)
+    names = list(artifact["feature_names"])
+    x = rng.normal(size=(pool_size, len(names)))
+    pool = EmpiricalPriorPool(
+        pool=torch.tensor(x, dtype=torch.float64),
+        feature_names=names,
+        n_templates=int(artifact["n_templates"]),
+        bounds_min=torch.tensor(x.min(axis=0), dtype=torch.float64),
+        bounds_max=torch.tensor(x.max(axis=0), dtype=torch.float64),
+    )
+    return EmpiricalSedPrior(artifact, pool)
+
+
+class _EmpiricalKDEStub:
+    """Minimal experiment with EmpiricalSedPrior."""
+
+    def __init__(self, artifact: dict):
+        self.name = "num_visits"
+        self.device = "cpu"
+        self.transform_input = False
+        self.cosmo_params = list(artifact["feature_names"])
+        self.sed_prior = _make_empirical_sed_prior(artifact)
+        self.designs = torch.zeros(1, 1, dtype=torch.float64)
+
+
+def test_score_kde_artifact_matches_sklearn():
+    from bedcosmo.num_visits.empirical.sed_prior import score_kde_artifact
+
+    rng = np.random.default_rng(0)
+    artifact = _tiny_kde_artifact(rng)
+    x = rng.normal(size=(50, len(artifact["feature_names"])))
+    lp = score_kde_artifact(artifact, x)
+    x_scaled = artifact["scaler"].transform(x)
+    expected = artifact["kde"].score_samples(x_scaled)
+    np.testing.assert_allclose(lp, expected, rtol=1e-12)
+    assert np.all(np.isfinite(lp))
+    assert np.mean(np.abs(lp)) > 0.1
+
+
+def test_compute_prior_log_probs_empirical_kde_not_delta_zeros():
+    rng = np.random.default_rng(1)
+    artifact = _tiny_kde_artifact(rng)
+    stub = _EmpiricalKDEStub(artifact)
+    samples = torch.tensor(
+        rng.normal(size=(32, len(stub.cosmo_params))),
+        dtype=torch.float64,
+    )
+    ds = LikelihoodDataset(
+        experiment=stub,
+        n_particles_per_device=32,
+        device="cpu",
+        evaluation=True,
+    )
+    trace = SimpleNamespace()
+    out = ds._compute_prior_log_probs(samples, trace)
+    assert "joint" in out
+    assert out["joint"].shape == (32,)
+    assert torch.all(torch.isfinite(out["joint"]))
+    assert torch.mean(torch.abs(out["joint"])) > 0.1
+
+
+class _EmpiricalKDETransformStub(_Stub):
+    """Empirical prior with transform_input=True and a fitted joint gaussianizer."""
+
+    def __init__(self, artifact: dict, rng: np.random.Generator):
+        prior = {
+            name: dist.Gamma(torch.tensor(3.0), torch.tensor(10.0 / 3.0))
+            for name in artifact["feature_names"]
+        }
+        super().__init__(prior, transform_input=True)
+        self.init_designs()
+        self.param_bijector = Bijector(
+            self,
+            cdf_bins=_CDF_BINS,
+            cdf_samples=_CDF_SAMPLES,
+            use_prior_flow=False,
+        )
+        self.name = "num_visits"
+        self.cosmo_params = list(artifact["feature_names"])
+        self.sed_prior = _make_empirical_sed_prior(artifact)
+        x = torch.tensor(
+            rng.normal(size=(500, len(self.cosmo_params))),
+            dtype=torch.float64,
+        )
+        self.param_bijector.fit_joint_gaussianizer(
+            x,
+            param_names=self.cosmo_params,
+            param_indices=list(range(len(self.cosmo_params))),
+        )
+
+    def _uses_joint_transform(self):
+        return True
+
+    def _joint_transform_param_names(self):
+        return list(self.cosmo_params)
+
+    def _joint_transform_param_indices(self):
+        return list(range(len(self.cosmo_params)))
+
+    def _bijector_param_names(self):
+        return set()
+
+    def _joint_transform_param_name_set(self):
+        return set(self.cosmo_params)
+
+    def _flow_squash_param_names(self):
+        return set()
+
+
+def test_empirical_transform_input_prior_uses_standard_normal_nf_coords():
+    """Empirical EIG with transform_input uses log N(0,I)(y), y = T(theta)."""
+    rng = np.random.default_rng(3)
+    artifact = _tiny_kde_artifact(rng)
+    stub = _EmpiricalKDETransformStub(artifact, rng)
+    samples = torch.tensor(
+        rng.normal(size=(32, len(stub.cosmo_params))),
+        dtype=torch.float64,
+    )
+    ds = LikelihoodDataset(
+        experiment=stub,
+        n_particles_per_device=32,
+        device="cpu",
+        evaluation=True,
+    )
+    trace = SimpleNamespace()
+    out = ds._compute_prior_log_probs(samples, trace)
+
+    expected = standard_normal_log_prob_nf_coords(stub, samples)
+    physical = stub.sed_prior.log_prob(
+        samples, param_names=stub.cosmo_params
+    )
+    assert torch.allclose(out["joint"], expected, atol=1e-6)
+    assert not torch.allclose(out["joint"], physical, atol=0.1)
+
+
+class _ConstLogProbGuide(torch.nn.Module):
+    def forward(self, context):
+        return self
+
+    def log_prob(self, y):
+        return torch.full((y.shape[0],), -2.0, device=y.device, dtype=y.dtype)
+
+
+def test_nf_loss_empirical_transform_input_eval_pairs_nf_prior_with_y_flow():
+    """Eval EIG = -E[log N(0,I)(y)] - E[-log q_y] in NF coordinates."""
+    from bedcosmo.pyro_oed_src import nf_loss
+
+    rng = np.random.default_rng(4)
+    artifact = _tiny_kde_artifact(rng)
+    stub = _EmpiricalKDETransformStub(artifact, rng)
+
+    samples = torch.tensor(
+        rng.normal(size=(16, 1, len(stub.cosmo_params))),
+        dtype=torch.float64,
+    )
+    context = torch.zeros(16, 1, 3, dtype=torch.float64)
+    prior_nf = standard_normal_log_prob_nf_coords(stub, samples)
+
+    _, eig, entropy_terms = nf_loss(
+        samples,
+        context,
+        _ConstLogProbGuide(),
+        stub,
+        log_probs={"joint": prior_nf},
+        evaluation=True,
+    )
+    expected = -prior_nf.mean() - 2.0
+    assert torch.allclose(eig.reshape(-1), expected.reshape(-1), atol=1e-5)
+    assert entropy_terms is not None
+    assert torch.allclose(
+        entropy_terms["posterior_entropy"].reshape(-1),
+        torch.tensor(2.0).reshape(-1),
+        atol=1e-5,
+    )
+
+
+def test_sed_prior_log_prob_nf_space_subtracts_log_det():
+    rng = np.random.default_rng(2)
+    artifact = _tiny_kde_artifact(rng)
+    sed_prior = _make_empirical_sed_prior(artifact)
+    samples = torch.tensor(
+        rng.normal(size=(16, len(artifact["feature_names"]))),
+        dtype=torch.float64,
+    )
+    log_det = torch.linspace(0.5, 2.0, 16, dtype=torch.float64)
+
+    def _fake_log_det(flat_samples):
+        return log_det
+
+    param_names = list(artifact["feature_names"])
+    physical = sed_prior.log_prob(samples, param_names=param_names)
+    nf = sed_prior.log_prob(
+        samples,
+        param_names=param_names,
+        nf_space=True,
+        log_abs_det_fn=_fake_log_det,
+    )
+    assert torch.allclose(nf.reshape(-1), physical.reshape(-1) - log_det)
+    assert not torch.allclose(nf, physical)

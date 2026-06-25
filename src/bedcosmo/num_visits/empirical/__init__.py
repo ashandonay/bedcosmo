@@ -1,18 +1,40 @@
 """Empirical galaxy SED prior from DESI spectra and EAZY template fits."""
 
-from .build_empirical_prior import build_empirical_prior
+from .build_prior import build_prior
 from .fit_sed_prior_kde import (
+    Y_PRIOR_KDE_VERSION,
     coeffs_from_sample_row,
+    fit_and_save_y_prior_kde_for_run,
+    fit_y_prior_kde,
     load_prior_training_table,
     load_sed_prior_kde,
+    load_y_prior_kde,
     mode_central_params_from_artifact,
     sample_sed_prior,
     sample_sed_prior_kde,
     samples_to_coeffs,
     save_sed_prior_kde,
+    save_y_prior_kde,
 )
 from .combine_healpix_weights import combine_healpix_weights
 from .desi_data import ensure_desi_healpix, get_local_desi_paths
+from .sed_prior import (
+    EMPIRICAL_ARTIFACT_DIR,
+    SED_PRIOR_KDE_FILENAME,
+    EmpiricalPriorPool,
+    EmpiricalSedPrior,
+    build_gpu_prior_pool,
+    copy_sed_prior_artifacts,
+    load_empirical_prior,
+    resolve_prior_kde_source,
+    resolve_runtime_prior_kde_path,
+    resolve_runtime_y_prior_kde_path,
+    sample_prior_batch,
+    score_kde_artifact,
+    sed_prior_kde_artifact_path,
+    snapshot_sed_prior_kde,
+    unpack_prior_rows,
+)
 from .paths import (
     DEFAULT_HEALPIX,
     DEFAULT_EMPIRICAL_PRIOR_DIR,
@@ -26,13 +48,6 @@ from .paths import (
     get_prior_kde_path,
     get_prior_weights_csv,
     get_scratch_root,
-)
-from .prior_sampler import (
-    EmpiricalPriorPool,
-    build_gpu_prior_pool,
-    load_empirical_prior,
-    sample_prior_batch,
-    unpack_prior_rows,
 )
 from .simplex import (
     PARAMETERIZATION_CLR,
@@ -65,10 +80,21 @@ __all__ = [
     "NUM_VISITS_EXPERIMENT",
     "PARAMETERIZATION_CLR",
     "PARAMETERIZATION_LOGITS",
-    "PARAMETERIZATION_WEIGHTS",
+    "Y_PRIOR_KDE_VERSION",
+    "fit_and_save_y_prior_kde_for_run",
+    "fit_y_prior_kde",
+    "EMPIRICAL_ARTIFACT_DIR",
+    "SED_PRIOR_KDE_FILENAME",
     "clr_to_weights",
+    "copy_sed_prior_artifacts",
+    "resolve_prior_kde_source",
+    "resolve_runtime_prior_kde_path",
+    "resolve_runtime_y_prior_kde_path",
+    "sed_prior_kde_artifact_path",
+    "snapshot_sed_prior_kde",
     "EmpiricalPriorPool",
-    "build_empirical_prior",
+    "EmpiricalSedPrior",
+    "build_prior",
     "build_gpu_prior_pool",
     "combine_healpix_weights",
     "coeffs_from_sample_row",
@@ -88,6 +114,7 @@ __all__ = [
     "load_eazy_templates",
     "load_prior_training_table",
     "load_sed_prior_kde",
+    "load_y_prior_kde",
     "mode_central_params_from_artifact",
     "logits_to_weights",
     "logits_to_weights_torch",
@@ -104,5 +131,7 @@ __all__ = [
     "sample_sed_prior_kde",
     "samples_to_coeffs",
     "save_sed_prior_kde",
+    "save_y_prior_kde",
+    "score_kde_artifact",
     "unpack_prior_rows",
 ]

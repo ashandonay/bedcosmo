@@ -627,7 +627,7 @@ def main():
     
     # Set base directory if not explicitly provided
     if args.base_dir is None:
-        from bedcosmo.num_visits.sed_prior.paths import get_desi_data_dir
+        from bedcosmo.num_visits.empirical.paths import get_desi_data_dir
 
         local_base_path = str(get_desi_data_dir(dr=args.dr))
     else:

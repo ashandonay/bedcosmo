@@ -28,20 +28,28 @@ Legacy sparse/masked behavior is still available with --support-mode masked or
 
 Example:
 
-  python -m bedcosmo.num_visits.sed_prior.fit_sed_prior_kde \
+  python -m bedcosmo.num_visits.empirical.fit_sed_prior_kde \
     --weights-csv ~/scratch/bedcosmo/desi_eazy_empirical_prior_nnls/desi_eazy_empirical_weights.csv
+
+For ``transform_input=True`` runs, fit a KDE in NF coordinates and freeze it
+beside the physical KDE::
+
+  python -m bedcosmo.num_visits.empirical.fit_sed_prior_kde y-prior <run_id>
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
+import sys
 from pathlib import Path
 from typing import Any, Literal
 
 import joblib
 import numpy as np
 import pandas as pd
+import torch
 from scipy import stats
 from sklearn.neighbors import KernelDensity
 from sklearn.preprocessing import StandardScaler
@@ -75,6 +83,7 @@ PRIOR_KDE_VERSION = 3
 PRIOR_KDE_VERSION_SMOOTH_LOGIT = 3
 PRIOR_KDE_VERSION_PREVIOUS = 2
 PRIOR_KDE_VERSION_LEGACY = 1
+Y_PRIOR_KDE_VERSION = "y_kde_v1"
 
 DEFAULT_KDE_BANDWIDTH = 0.3
 DEFAULT_KDE_DIAGNOSTIC_SAMPLES = 20_000
@@ -579,6 +588,136 @@ def load_sed_prior_kde(path: Path) -> dict[str, Any]:
     return artifact
 
 
+def load_y_prior_kde(path: str | Path) -> dict[str, Any]:
+    """Load a y-space KDE artifact (``version == y_kde_v1``)."""
+    artifact = joblib.load(path)
+    version = artifact.get("version")
+    if version != Y_PRIOR_KDE_VERSION:
+        raise ValueError(
+            f"Unsupported y-prior KDE version {version!r}; expected {Y_PRIOR_KDE_VERSION!r}"
+        )
+    return artifact
+
+
+def save_y_prior_kde(path: str | Path, artifact: dict[str, Any]) -> None:
+    save_sed_prior_kde(Path(path), artifact)
+
+
+def fit_y_prior_kde(
+    experiment,
+    *,
+    n_samples: int = 100_000,
+    seed: int = 0,
+    bandwidth: float | str | None = None,
+    kernel: str = "gaussian",
+    batch_size: int = 10_000,
+) -> dict[str, Any]:
+    """Fit a KDE on ``y = params_to_unconstrained(theta)`` using the runtime bijector."""
+    sed_prior = getattr(experiment, "sed_prior", None)
+    if sed_prior is None:
+        raise RuntimeError("fit_y_prior_kde requires experiment.sed_prior")
+    if not getattr(experiment, "transform_input", False):
+        raise RuntimeError("fit_y_prior_kde requires experiment.transform_input=True")
+    if getattr(experiment, "param_bijector", None) is None:
+        raise RuntimeError("fit_y_prior_kde requires experiment.param_bijector")
+
+    physical = sed_prior.artifact
+    if bandwidth is None:
+        bandwidth = physical.get("metadata", {}).get("bandwidth", DEFAULT_KDE_BANDWIDTH)
+
+    names = list(experiment.cosmo_params)
+    y_parts: list[np.ndarray] = []
+    remaining = int(n_samples)
+    gen = torch.Generator(device=experiment.device)
+    gen.manual_seed(int(seed))
+
+    while remaining > 0:
+        n = min(int(batch_size), remaining)
+        rows = sed_prior.sample_batch(n, generator=gen)
+        with torch.no_grad():
+            y = experiment.params_to_unconstrained(rows)
+        y_parts.append(y.detach().cpu().numpy().astype(np.float64, copy=False))
+        remaining -= n
+
+    y_all = np.concatenate(y_parts, axis=0)
+    kde, scaler = fit_sed_prior_kde(y_all, bandwidth=bandwidth, kernel=kernel)
+
+    return {
+        "version": Y_PRIOR_KDE_VERSION,
+        "kde": kde,
+        "scaler": scaler,
+        "feature_names": names,
+        "metadata": {
+            "n_fit_samples": int(n_samples),
+            "fit_seed": int(seed),
+            "bandwidth": float(getattr(kde, "bandwidth", bandwidth)),
+            "kernel": kernel,
+            "source_physical_kde": sed_prior.path,
+            "transform_input": True,
+            "input_transform_type": getattr(experiment, "input_transform_type", None),
+        },
+    }
+
+
+def fit_and_save_y_prior_kde_for_run(
+    run_id: str,
+    *,
+    cosmo_exp: str = "num_visits",
+    n_samples: int = 100_000,
+    seed: int = 0,
+    bandwidth: float | str | None = None,
+    storage_path: str | Path | None = None,
+) -> Path:
+    """Load a trained run, fit y-KDE with its checkpoint bijector, and freeze to artifacts."""
+    import mlflow
+
+    from bedcosmo.util import get_checkpoint, init_experiment, parse_mlflow_params
+
+    if storage_path is None:
+        storage_path = os.environ["SCRATCH"] + f"/bedcosmo/{cosmo_exp}"
+    storage_path = Path(storage_path)
+    mlflow.set_tracking_uri(f"file:{storage_path}/mlruns")
+    run = mlflow.get_run(run_id)
+    run_args = parse_mlflow_params(run.data.params)
+    run_args["cosmo_exp"] = cosmo_exp
+
+    checkpoint_dir = (
+        storage_path / "mlruns" / run.info.experiment_id / run_id / "artifacts/checkpoints"
+    )
+    checkpoint, _ = get_checkpoint(
+        "last",
+        str(checkpoint_dir),
+        "cpu",
+        0,
+        int(run_args.get("total_steps", 0) or 0),
+    )
+    if "bijector_state" not in checkpoint:
+        raise RuntimeError(f"Run {run_id} checkpoint has no bijector_state")
+
+    experiment = init_experiment(
+        run,
+        run_args,
+        checkpoint=checkpoint,
+        device="cpu",
+        global_rank=0,
+    )
+    artifact = fit_y_prior_kde(
+        experiment,
+        n_samples=n_samples,
+        seed=seed,
+        bandwidth=bandwidth,
+    )
+
+    artifacts_dir = (
+        storage_path / "mlruns" / run.info.experiment_id / run_id / "artifacts"
+    )
+    from .sed_prior import sed_prior_y_kde_artifact_path
+
+    dest = sed_prior_y_kde_artifact_path(artifacts_dir)
+    save_y_prior_kde(dest, artifact)
+    return dest
+
+
 def sample_sed_prior_kde(
     artifact: dict[str, Any],
     n_samples: int,
@@ -611,7 +750,7 @@ def sample_sed_prior(
     renormalize_a: bool = True,
     clip_to_training_bounds: bool = True,
 ) -> np.ndarray:
-    """Alias used by prior_sampler.py and downstream code."""
+    """Alias used by sed_prior.py and downstream code."""
     return sample_sed_prior_kde(
         artifact,
         n_samples,
@@ -620,9 +759,6 @@ def sample_sed_prior(
         apply_support_mask=apply_support_mask,
         clip_to_training_bounds=clip_to_training_bounds,
     )
-
-
-
 
 def sample_sed_prior_gaussianized(
     artifact: dict[str, Any],
@@ -1185,5 +1321,26 @@ def main() -> None:
                 )
 
 
+def main_y_prior_kde(argv: list[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(
+        description="Fit and freeze y-prior KDE for a transform_input=True run.",
+    )
+    parser.add_argument("run_id", help="MLflow run id")
+    parser.add_argument("--n-samples", type=int, default=100_000)
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--bandwidth", type=float, default=None)
+    args = parser.parse_args(argv)
+    out = fit_and_save_y_prior_kde_for_run(
+        args.run_id,
+        n_samples=args.n_samples,
+        seed=args.seed,
+        bandwidth=args.bandwidth,
+    )
+    print(f"Saved y-prior KDE to {out}")
+
+
 if __name__ == "__main__":
-    main()
+    if len(sys.argv) > 1 and sys.argv[1] == "y-prior":
+        main_y_prior_kde(sys.argv[2:])
+    else:
+        main()

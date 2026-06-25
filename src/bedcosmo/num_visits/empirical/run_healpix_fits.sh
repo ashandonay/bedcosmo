@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Fit EAZY NNLS weights per HEALPix (see build_empirical_prior.py for full pipeline).
+# Fit EAZY NNLS weights per HEALPix (see build_prior.py for full pipeline).
 set -euo pipefail
 
 BUILD_NAME="${BUILD_NAME:-empirical_prior}"
@@ -11,7 +11,7 @@ N_MAX="${N_MAX:-}"
 SEED="${SEED:-7}"
 Z_MIN="${Z_MIN:-0.01}"
 FORCE="${FORCE:-0}"
-PY="conda run -n bedcosmo python -m bedcosmo.num_visits.sed_prior"
+PY="conda run -n bedcosmo python -m bedcosmo.num_visits.empirical"
 
 HEALPIX=(23040 27257 27245 27259 27247 27256 27258 27344 26282)
 

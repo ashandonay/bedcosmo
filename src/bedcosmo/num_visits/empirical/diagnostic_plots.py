@@ -23,13 +23,13 @@ Subcommands:
 
 Examples:
 
-  python -m bedcosmo.num_visits.sed_prior.diagnostic_plots all \\
+  python -m bedcosmo.num_visits.empirical.diagnostic_plots all \\
     --prior-dir ~/scratch/bedcosmo/num_visits/empirical_prior
 
-  python -m bedcosmo.num_visits.sed_prior.diagnostic_plots redshift-histograms \\
+  python -m bedcosmo.num_visits.empirical.diagnostic_plots redshift-histograms \\
     --prior-dir ~/scratch/bedcosmo/num_visits/empirical_prior
 
-  python -m bedcosmo.num_visits.sed_prior.diagnostic_plots clr-triangle \\
+  python -m bedcosmo.num_visits.empirical.diagnostic_plots clr-triangle \\
     --prior-dir ~/scratch/bedcosmo/num_visits/empirical_prior \\
     --also-training
 """
@@ -69,7 +69,7 @@ from .paths import (
     get_prior_build_dir,
     resolve_desi_dir,
 )
-from .prior_sampler import sample_prior_batch
+from .sed_prior import sample_prior_batch
 
 DEFAULT_INACTIVE_WEIGHT_THRESHOLD = 1e-4
 DEFAULT_PRIOR_DIR = get_prior_build_dir()
@@ -173,7 +173,7 @@ def load_experiment_configs(
     with open(design_path) as f:
         design_args = yaml.safe_load(f)
     design_args["input_type"] = "nominal"
-    prior_args["prior_kde_path"] = str(kde_path.resolve())
+    prior_args["prior_kde_source"] = str(kde_path.resolve())
     prior_args["prior_pool_size"] = pool_size
     prior_args["prior_pool_seed"] = pool_seed
     return prior_args, design_args

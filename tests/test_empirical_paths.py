@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from bedcosmo.num_visits.sed_prior.paths import (
+from bedcosmo.num_visits.empirical.paths import (
     get_bedcosmo_scratch,
     get_desi_data_dir,
     get_eazy_templates_dir,

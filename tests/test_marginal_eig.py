@@ -4,7 +4,7 @@ import numpy as np
 import torch
 
 from bedcosmo.evaluate import Evaluator
-from bedcosmo.num_visits.sed_prior.prior_sampler import (
+from bedcosmo.num_visits.empirical.sed_prior import (
     EmpiricalPriorPool,
     sample_prior_batch,
     sample_prior_pool_unique,
@@ -83,7 +83,7 @@ def test_joint_eig_path_matches_nf_loss():
     guide = _Guide()
     exp = _Exp()
 
-    _, nf_nats = nf_loss(
+    _, nf_nats, _ = nf_loss(
         samples, context, guide, exp, log_probs=log_probs, evaluation=True
     )
     path_nats = joint_eig_path_nats(exp, guide, samples, context, log_probs)
