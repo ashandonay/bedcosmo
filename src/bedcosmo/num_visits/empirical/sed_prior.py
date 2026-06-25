@@ -37,6 +37,17 @@ def sed_prior_y_kde_artifact_path(artifacts_dir: str | Path) -> Path:
     return Path(artifacts_dir) / EMPIRICAL_ARTIFACT_DIR / SED_PRIOR_Y_KDE_FILENAME
 
 
+def _runtime_empirical_artifact_path(
+    empirical_artifacts_dir: str | Path,
+    filename: str,
+) -> Path | None:
+    """Resolve a frozen artifact under the runtime ``artifacts/empirical`` dir."""
+    path = Path(empirical_artifacts_dir) / filename
+    if path.is_file():
+        return path.resolve()
+    return None
+
+
 def _prior_kde_source_from_args(prior_args: dict[str, Any] | None) -> Any:
     if not prior_args:
         return None
@@ -66,13 +77,15 @@ def resolve_runtime_prior_kde_path(
 ) -> Path:
     """Resolve the physical KDE joblib for training/eval at runtime.
 
-    Prefers ``artifacts/empirical/sed_prior_kde.joblib`` when present, then an
-    explicit source override, then the default scratch build.
+    Prefers ``<empirical_artifacts_dir>/sed_prior_kde.joblib`` when present,
+    then an explicit source override, then the default scratch build.
     """
     if empirical_artifacts_dir is not None:
-        frozen = sed_prior_kde_artifact_path(empirical_artifacts_dir)
-        if frozen.is_file():
-            return frozen.resolve()
+        frozen = _runtime_empirical_artifact_path(
+            empirical_artifacts_dir, SED_PRIOR_KDE_FILENAME
+        )
+        if frozen is not None:
+            return frozen
     if not _is_null_path(prior_kde_source):
         path = Path(
             os.path.expandvars(os.path.expanduser(str(prior_kde_source)))
@@ -90,10 +103,9 @@ def resolve_runtime_y_prior_kde_path(
     """Resolve the frozen y-KDE joblib from run artifacts, if present."""
     if empirical_artifacts_dir is None:
         return None
-    path = sed_prior_y_kde_artifact_path(empirical_artifacts_dir)
-    if path.is_file():
-        return path.resolve()
-    return None
+    return _runtime_empirical_artifact_path(
+        empirical_artifacts_dir, SED_PRIOR_Y_KDE_FILENAME
+    )
 
 
 def snapshot_sed_prior_kde(

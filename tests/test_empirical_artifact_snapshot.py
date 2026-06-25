@@ -63,8 +63,8 @@ def test_snapshot_sed_prior_kde_copies_without_pinning_path(tmp_path: Path) -> N
 
 
 def test_resolve_runtime_prior_kde_path_prefers_artifacts(tmp_path: Path) -> None:
-    artifacts = tmp_path / "artifacts"
-    frozen = sed_prior_kde_artifact_path(artifacts)
+    empirical = tmp_path / "artifacts" / "empirical"
+    frozen = empirical / "sed_prior_kde.joblib"
     frozen.parent.mkdir(parents=True)
     frozen.write_bytes(b"frozen")
 
@@ -72,20 +72,30 @@ def test_resolve_runtime_prior_kde_path_prefers_artifacts(tmp_path: Path) -> Non
     scratch.write_bytes(b"scratch")
 
     path = resolve_runtime_prior_kde_path(
-        empirical_artifacts_dir=artifacts,
+        empirical_artifacts_dir=empirical,
         prior_kde_source=str(scratch),
     )
     assert path == frozen.resolve()
 
 
 def test_resolve_runtime_y_prior_kde_path_from_artifacts(tmp_path: Path) -> None:
-    artifacts = tmp_path / "artifacts"
-    y_path = sed_prior_y_kde_artifact_path(artifacts)
+    artifacts = tmp_path / "artifacts" / "empirical"
+    y_path = artifacts / "sed_prior_y_kde.joblib"
     y_path.parent.mkdir(parents=True)
     y_path.write_bytes(b"y-kde")
 
     resolved = resolve_runtime_y_prior_kde_path(empirical_artifacts_dir=artifacts)
     assert resolved == y_path.resolve()
+
+
+def test_resolve_runtime_prior_kde_path_from_empirical_subdir(tmp_path: Path) -> None:
+    empirical = tmp_path / "artifacts" / "empirical"
+    kde_path = empirical / "sed_prior_kde.joblib"
+    kde_path.parent.mkdir(parents=True)
+    kde_path.write_bytes(b"frozen")
+
+    resolved = resolve_runtime_prior_kde_path(empirical_artifacts_dir=empirical)
+    assert resolved == kde_path.resolve()
 
 
 def test_copy_sed_prior_artifacts(tmp_path: Path) -> None:

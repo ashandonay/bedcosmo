@@ -731,6 +731,7 @@ def init_experiment(
         **kwargs: Additional arguments (e.g., device, profile) that will be added to run_args.
     """
     emulator_artifacts_dir = None
+    empirical_artifacts_dir = None
     if run_obj is not None and run_args is not None:
 
         cosmo_exp = run_args.get("cosmo_exp")
@@ -744,6 +745,9 @@ def init_experiment(
         emu_dir = os.path.join(artifact_path, "emulators")
         if os.path.isdir(emu_dir):
             emulator_artifacts_dir = emu_dir
+        empirical_dir = os.path.join(artifact_path, "empirical")
+        if os.path.isdir(empirical_dir):
+            empirical_artifacts_dir = empirical_dir
         # If design_args is not provided (None), try to load from artifacts first
         if design_args is None:
             design_args_artifact_path = artifact_path + "/design_args.yaml"
@@ -837,6 +841,8 @@ def init_experiment(
         exp_args['global_rank'] = global_rank
         if checkpoint is not None and 'bijector_state' in checkpoint.keys():
             exp_args['bijector_state'] = checkpoint['bijector_state']
+        if empirical_artifacts_dir is not None:
+            exp_args['empirical_artifacts_dir'] = empirical_artifacts_dir
         experiment = NumVisits(**exp_args)
     
     else:
