@@ -18,9 +18,9 @@ Shared inputs (downloaded once, reused across builds)::
 
 Example::
 
-  python -m bedcosmo.num_visits.sed_prior.build_empirical_prior
-  python -m bedcosmo.num_visits.sed_prior.build_empirical_prior --build-name empirical_prior_test --n-max 600
-  python -m bedcosmo.num_visits.sed_prior.build_empirical_prior --healpix 23040 --skip-kde
+  python -m bedcosmo.num_visits.empirical.build_prior
+  python -m bedcosmo.num_visits.empirical.build_prior --build-name empirical_prior_test --n-max 600
+  python -m bedcosmo.num_visits.empirical.build_prior --healpix 23040 --skip-kde
 """
 
 from __future__ import annotations
@@ -49,8 +49,8 @@ from .paths import (
 DEFAULT_MAX_CHI2_DOF = 1.2
 DEFAULT_Z_MIN = 0.01
 
-FIT_MODULE = "bedcosmo.num_visits.sed_prior.fit_eazy_weights_to_desi"
-KDE_MODULE = "bedcosmo.num_visits.sed_prior.fit_sed_prior_kde"
+FIT_MODULE = "bedcosmo.num_visits.empirical.fit_eazy_weights_to_desi"
+KDE_MODULE = "bedcosmo.num_visits.empirical.fit_sed_prior_kde"
 
 
 def resolve_kde_python(explicit: str | None = None) -> str:
@@ -91,7 +91,7 @@ def _run(cmd: list[str], *, step: str) -> None:
     subprocess.run(cmd, check=True)
 
 
-def build_empirical_prior(
+def build_prior(
     *,
     build_name: str = DEFAULT_EMPIRICAL_PRIOR_DIR,
     healpix: list[int] | tuple[int, ...] = DEFAULT_HEALPIX,
@@ -310,7 +310,7 @@ def main() -> None:
             )
         zwarn_forbid_mask = ZWARN_UNSTABLE_BIT
 
-    build_empirical_prior(
+    build_prior(
         build_name=args.build_name,
         healpix=args.healpix,
         desi_dir=args.desi_dir,
