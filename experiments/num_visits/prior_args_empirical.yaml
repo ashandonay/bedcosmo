@@ -1,10 +1,11 @@
-# Empirical SED prior from DESI+EAZY KDE (CLR parameterization, v3).
+# Empirical SED prior from DESI+EAZY KDE (ILR parameterization, v3).
+# 11 isometric log-ratio coords f1..f11 (K-1 for K=12 templates) + log_c_scale + z.
 # Rebuild: fit_sed_prior_kde.py on desi_eazy_empirical_weights.csv
 #
-# Default KDE location: $SCRATCH/bedcosmo/num_visits/empirical_prior/sed_prior_kde.joblib
-# Omit or set null to use that default at runtime.
+# Optional override when snapshotting KDE at run creation (null = default scratch build).
+# At runtime, trained runs load artifacts/empirical/sed_prior_kde.joblib instead.
 
-prior_kde_path: null
+prior_kde_source: null
 eazy_templates_dir: null
 eazy_param: "templates/fsps_full/fsps_QSF_12_v3.param"
 prior_pool_size: 65536
@@ -72,12 +73,6 @@ parameters:
       lower: -8.0
       upper: 8.0
   f11:
-    distribution:
-      type: empirical
-    plot:
-      lower: -8.0
-      upper: 8.0
-  f12:
     distribution:
       type: empirical
     plot:
