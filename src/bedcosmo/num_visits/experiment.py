@@ -26,19 +26,15 @@ from bedcosmo.util import (
 )
 from bedcosmo.base import BaseExperiment
 from bedcosmo.custom_dist import EmpiricalPrior
-from bedcosmo.num_visits.sed_prior.fit_sed_prior_kde import (
+from bedcosmo.num_visits.empirical.fit_sed_prior_kde import (
     mode_central_params_from_artifact,
 )
-from bedcosmo.num_visits.sed_prior.prior_sampler import (
-    build_gpu_prior_pool,
-    load_empirical_prior,
-    sample_prior_batch,
+from bedcosmo.num_visits.empirical.sed_prior import EmpiricalSedPrior
+from bedcosmo.num_visits.empirical.simplex import (
+    PARAMETERIZATION_ILR,
+    ilr_to_weights_torch,
 )
-from bedcosmo.num_visits.sed_prior.simplex import (
-    PARAMETERIZATION_LOGITS,
-    logits_to_weights_torch,
-)
-from bedcosmo.num_visits.sed_prior.templates import load_eazy_template_bank
+from bedcosmo.num_visits.empirical.templates import load_eazy_template_bank
 from bedcosmo.cosmology import CosmologyMixin, _cumsimpson
 
 # LSST photometric zeropoints (AB magnitudes that produce 1 count per second)
@@ -120,6 +116,7 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         profile=False,
         verbose=False,
         global_rank=0,
+        empirical_artifacts_dir=None,
     ):
         self.name = "num_visits"
         self.device = device
@@ -129,6 +126,8 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         self.logit_flow_scale = float(logit_flow_scale)
         self.global_rank = global_rank
         self.prior_kde_path = None
+        self.empirical_artifacts_dir = empirical_artifacts_dir
+        self.sed_prior: EmpiricalSedPrior | None = None
         self._init_input_transform_options(
             input_transform_type=input_transform_type,
             joint_transform_shrinkage=joint_transform_shrinkage,
@@ -151,12 +150,20 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         
         self.prior_args = prior_args or {}
         self.cosmo_model = cosmo_model
-        self.prior_pool = None
-        self.prior_feature_names = None
+
+        prior_init_kwargs = dict(self.prior_args)
+        prior_kde_source = prior_init_kwargs.pop("prior_kde_source", None)
+        if prior_kde_source is None:
+            prior_kde_source = prior_init_kwargs.pop("prior_kde_path", None)
+        else:
+            prior_init_kwargs.pop("prior_kde_path", None)
+        prior_init_kwargs.pop("prior_y_kde_path", None)
 
         self.prior, self.latex_labels, self.cosmo_params = self.init_prior(
             cosmo_model=cosmo_model,
-            **self.prior_args,
+            empirical_artifacts_dir=self.empirical_artifacts_dir,
+            prior_kde_source=prior_kde_source,
+            **prior_init_kwargs,
         )
 
         self._init_param_bijector(
@@ -164,6 +171,7 @@ class NumVisits(BaseExperiment, CosmologyMixin):
             cdf_bins=cdf_bins,
             cdf_samples=cdf_samples,
         )
+        self._load_y_prior_if_present()
 
         if nominal_design is None:
             self.nominal_design = torch.tensor(
@@ -297,6 +305,87 @@ class NumVisits(BaseExperiment, CosmologyMixin):
             print(f"  Nominal design: {self.nominal_design}")
             print(f"  Central params: {self.central_params}")
 
+    @property
+    def sed_prior_artifact(self):
+        return self.sed_prior.artifact if self.sed_prior is not None else None
+
+    @property
+    def prior_pool(self):
+        return self.sed_prior.pool if self.sed_prior is not None else None
+
+    @property
+    def prior_feature_names(self):
+        return self.sed_prior.feature_names if self.sed_prior is not None else None
+
+    def _init_param_bijector(
+        self,
+        bijector_state=None,
+        cdf_bins=5000,
+        cdf_samples=int(1e7),
+        always_build=False,
+    ):
+        """Load the NF bijector from the KDE artifact for empirical runs."""
+        if (
+            getattr(self, "cosmo_model", None) == "empirical"
+            and getattr(self, "transform_input", False)
+        ):
+            self._init_empirical_param_bijector(
+                bijector_state=bijector_state,
+                cdf_bins=cdf_bins,
+            )
+            return
+        super()._init_param_bijector(
+            bijector_state=bijector_state,
+            cdf_bins=cdf_bins,
+            cdf_samples=cdf_samples,
+            always_build=always_build,
+        )
+
+    def _init_empirical_param_bijector(
+        self,
+        *,
+        bijector_state=None,
+        cdf_bins=5000,
+    ) -> None:
+        from bedcosmo.transform import Bijector
+        from bedcosmo.num_visits.empirical.fit_sed_prior_kde import (
+            get_empirical_gaussianizer,
+        )
+
+        if bijector_state is not None:
+            self.param_bijector = Bijector(
+                self,
+                cdf_bins=cdf_bins,
+                cdf_samples=0,
+                skip_sampling=True,
+                matrix_columns=list(self.cosmo_params),
+            )
+            self.param_bijector.set_state(bijector_state, device=self.device)
+            if self.global_rank == 0 and self.verbose:
+                print("Restoring bijector state from checkpoint.")
+            return
+
+        artifact = self.sed_prior_artifact
+        if artifact is None or artifact.get("gaussianizer_state") is None:
+            raise RuntimeError(
+                "empirical NumVisits with transform_input=True requires "
+                "gaussianizer_state in the KDE artifact. Rebuild with "
+                "`python -m bedcosmo.num_visits.empirical.build_prior` "
+                "(do not pass --no-gaussianizer)."
+            )
+
+        self.param_bijector = get_empirical_gaussianizer(artifact)
+        self.param_bijector.experiment = self
+        self.param_bijector.set_state(
+            self.param_bijector.get_state(),
+            device=self.device,
+        )
+        if self.global_rank == 0 and self.verbose:
+            print(
+                "Loaded param_bijector from empirical KDE artifact "
+                "(build_prior gaussianizer)."
+            )
+
     @profile_method
     def _expand_to_filters(self, value, label):
         if isinstance(value, (int, float)):
@@ -322,7 +411,7 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         artifact = getattr(self, "sed_prior_artifact", None)
         if artifact is None:
             return None
-        from bedcosmo.num_visits.sed_prior.fit_sed_prior_kde import (
+        from bedcosmo.num_visits.empirical.fit_sed_prior_kde import (
             get_training_matrix,
         )
 
@@ -341,7 +430,9 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         self,
         parameters,
         prior_flow_path=None,
+        prior_kde_source=None,
         prior_kde_path=None,
+        empirical_artifacts_dir=None,
         cosmo_model=None,
         prior_pool_size=65536,
         prior_pool_seed=7,
@@ -352,7 +443,8 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         """
         Load prior from prior_args and models.yaml.
 
-        For ``empirical``, uses ``prior_kde_path`` (absolute) and a GPU prior pool.
+        For ``empirical``, loads a GPU prior pool from run artifacts when available,
+        otherwise from ``prior_kde_source`` or the default scratch KDE build.
         Otherwise uses analytic Pyro distributions and optional ``prior_flow_path``.
         """
         if cosmo_model is None:
@@ -376,16 +468,22 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         if len(model_parameters) != len(latex_labels):
             raise ValueError("models.yaml parameters and latex_labels length mismatch")
 
-        if cosmo_model == "empirical" or prior_kde_path:
-            if not prior_kde_path:
-                from bedcosmo.num_visits.sed_prior.paths import get_prior_kde_path
+        if cosmo_model == "empirical" or prior_kde_source or prior_kde_path or empirical_artifacts_dir:
+            if prior_kde_source is None:
+                prior_kde_source = prior_kde_path
+            from bedcosmo.num_visits.empirical.sed_prior import (
+                resolve_runtime_prior_kde_path,
+            )
 
-                prior_kde_path = str(get_prior_kde_path())
+            kde_path = resolve_runtime_prior_kde_path(
+                empirical_artifacts_dir=empirical_artifacts_dir,
+                prior_kde_source=prior_kde_source,
+            )
             return self._init_prior_empirical(
                 parameters,
                 model_parameters,
                 latex_labels,
-                prior_kde_path=prior_kde_path,
+                prior_kde_path=str(kde_path),
                 prior_pool_size=int(prior_pool_size),
                 prior_pool_seed=int(prior_pool_seed),
                 eazy_templates_dir=eazy_templates_dir,
@@ -487,36 +585,29 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         eazy_param: str,
     ) -> tuple[dict, list[str], list[str]]:
         if not eazy_templates_dir:
-            from bedcosmo.num_visits.sed_prior.paths import get_eazy_templates_dir
+            from bedcosmo.num_visits.empirical.paths import get_eazy_templates_dir
 
             eazy_templates_dir = str(get_eazy_templates_dir())
 
-        kde_path = Path(os.path.expandvars(os.path.expanduser(prior_kde_path))).resolve()
-        if not kde_path.is_file():
-            raise FileNotFoundError(f"prior_kde_path not found: {kde_path}")
-
-        artifact = load_empirical_prior(kde_path)
-        self.prior_kde_path = str(kde_path)
-        self.sed_prior_artifact = artifact
-        self.prior_feature_names = list(artifact["feature_names"])
-        self._prior_parameterization = artifact.get("parameterization", "weights")
-        self._n_eazy_templates = int(artifact["n_templates"])
-        if list(model_parameters) != self.prior_feature_names:
-            raise ValueError(
-                f"models.yaml parameters {model_parameters} must match KDE "
-                f"feature_names {self.prior_feature_names}. "
-                "models.yaml must match artifact['feature_names']; for the current CLR empirical prior this should be f1..fK, log_c_scale, z."
-            )
-
         if self.global_rank == 0 and self.verbose:
-            print(f"Loading empirical SED KDE prior from {kde_path}")
+            print(f"Loading empirical SED KDE prior from {prior_kde_path}")
             print(f"  Building GPU prior pool (n={prior_pool_size})...")
-        self.prior_pool = build_gpu_prior_pool(
-            artifact,
-            prior_pool_size,
-            seed=prior_pool_seed,
+        self.sed_prior = EmpiricalSedPrior.from_kde_path(
+            prior_kde_path,
+            pool_size=int(prior_pool_size),
+            pool_seed=int(prior_pool_seed),
             device=self.device,
         )
+        self.prior_kde_path = self.sed_prior.path
+        self._prior_parameterization = self.sed_prior.parameterization
+        self._n_eazy_templates = self.sed_prior.n_templates
+        if list(model_parameters) != self.sed_prior.feature_names:
+            raise ValueError(
+                f"models.yaml parameters {model_parameters} must match KDE "
+                f"feature_names {self.sed_prior.feature_names}. "
+                f"models.yaml must match artifact['feature_names']; for the {self._prior_parameterization!r} "
+                "empirical prior this is f1..f_{K-1}, log_c_scale, z (ILR) or f1..fK, log_c_scale, z (CLR)."
+            )
 
         wave_rest, template_stack, _ = load_eazy_template_bank(
             eazy_param,
@@ -552,6 +643,36 @@ class NumVisits(BaseExperiment, CosmologyMixin):
             )
 
         return prior, latex_labels, model_parameters
+
+    def _load_y_prior_if_present(self) -> None:
+        if self.sed_prior is None or not self.transform_input:
+            return
+        # Empirical runs with the build-prior gaussianizer as param_bijector:
+        # y = params_to_unconstrained(theta) is already ~N(0,I), so EIG uses
+        # standard_normal_log_prob_nf_coords (see pyro_oed_src) rather than a
+        # fitted y-prior. The optional y-KDE below is only wired in explicitly.
+        if getattr(self, "cosmo_model", None) == "empirical":
+            if self.global_rank == 0 and self.verbose:
+                print(
+                    "Empirical NF prior: log N(0,I)(params_to_unconstrained(theta)) "
+                    "(build_prior gaussianizer; y-prior KDE not loaded)"
+                )
+            return
+
+        from bedcosmo.num_visits.empirical.fit_sed_prior_kde import (
+            load_y_prior_kde,
+        )
+        from bedcosmo.num_visits.empirical.sed_prior import (
+            resolve_runtime_y_prior_kde_path,
+        )
+
+        kde_path = resolve_runtime_y_prior_kde_path(
+            empirical_artifacts_dir=self.empirical_artifacts_dir,
+        )
+        if kde_path is not None:
+            self.sed_prior.attach_y_artifact(load_y_prior_kde(kde_path))
+            if self.global_rank == 0 and self.verbose:
+                print(f"Loaded y-prior KDE from {kde_path}")
 
     @profile_method
     def _calculate_base_profile(self):
@@ -657,17 +778,25 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         else:
             raise ValueError(f"Unknown input_type '{input_type}'. Expected 'nominal' or 'variable'.")
 
-        self.designs_grid = self._build_design_grid(
-            design_axes=design_axes,
-            design_pts=design_pts,
-            labels=grid_labels,
-            constraint=constraint,
-        )
-        if design_pts is None:
+        if design_pts is not None:
+            # Explicit designs (nominal or input_designs_path): use the points
+            # directly. A bed.grid.Grid is a Cartesian product, so building one
+            # from scattered points materializes prod(unique values per axis)
+            # cells (e.g. ~6e8 for a wide 6-band set -> GPU OOM), and nothing in
+            # training/eval consumes designs_grid for explicit points. Leave it
+            # None; the grid-EIG subcommand guards against this case explicitly.
+            self.designs_grid = None
+            self.designs = design_pts.to(self.device)
+        else:
+            self.designs_grid = self._build_design_grid(
+                design_axes=design_axes,
+                labels=grid_labels,
+                constraint=constraint,
+            )
             design_pts = self._designs_from_grid(
                 self.designs_grid, device=self.device, dtype=torch.float64
             )
-        self.designs = design_pts.to(self.device)
+            self.designs = design_pts.to(self.device)
 
     @staticmethod
     def _interp1d_linear(x_src: torch.Tensor, y_src: torch.Tensor, x_q: torch.Tensor) -> torch.Tensor:
@@ -889,6 +1018,15 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         flux_flat = flux[inverse_indices]
         return flux_flat.reshape(*z_tensor.shape, n_wlen)
 
+    def _require_parameterization(self) -> str:
+        param = getattr(self, "_prior_parameterization", None)
+        if param is None:
+            raise ValueError(
+                "Empirical prior has no parameterization; the KDE artifact must set "
+                "'parameterization' ('ilr' or legacy 'clr')."
+            )
+        return param
+
     def _empirical_rows_to_physical(
         self,
         rows: torch.Tensor,
@@ -898,15 +1036,20 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         Decode empirical-prior feature rows into physical SED quantities.
 
         Rows are in the artifact feature space:
-            weights: a1..aK, log_c_scale, z
-            logits:  f1..fK-1, log_c_scale, z
-            clr:     f1..fK, log_c_scale, z
+            ilr: f1..f_{K-1}, log_c_scale, z
+            clr: f1..fK, log_c_scale, z (legacy)
         """
-        parameterization = getattr(self, "_prior_parameterization", "weights")
+        parameterization = self._require_parameterization()
         K = int(self._n_eazy_templates)
         flat = sample_shape if sample_shape else (rows.shape[0],)
 
-        if parameterization == "clr":
+        if parameterization == PARAMETERIZATION_ILR:
+            ilr = rows[:, : K - 1]
+            a = ilr_to_weights_torch(ilr)
+            log_s = rows[:, K - 1]
+            z = rows[:, K]
+
+        elif parameterization == "clr":
             clr = rows[:, :K]
             shifted = clr - torch.amax(clr, dim=-1, keepdim=True)
             exp = torch.exp(shifted)
@@ -914,17 +1057,8 @@ class NumVisits(BaseExperiment, CosmologyMixin):
             log_s = rows[:, K]
             z = rows[:, K + 1]
 
-        elif parameterization == PARAMETERIZATION_LOGITS:
-            eta = rows[:, : K - 1]
-            a = logits_to_weights_torch(eta)
-            log_s = rows[:, K - 1]
-            z = rows[:, K]
-
         else:
-            a = rows[:, :K]
-            a = a / a.sum(dim=-1, keepdim=True).clamp_min(1e-300)
-            log_s = rows[:, K]
-            z = rows[:, K + 1]
+            raise ValueError(f"Unknown prior parameterization {parameterization!r}")
 
         return (
             a.reshape(*flat, K),
@@ -933,10 +1067,18 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         )
 
     def _central_magnitudes_from_dict(self, central: dict) -> torch.Tensor:
-        parameterization = getattr(self, "_prior_parameterization", "weights")
+        parameterization = self._require_parameterization()
         K = int(self._n_eazy_templates)
 
-        if parameterization == "clr":
+        if parameterization == PARAMETERIZATION_ILR:
+            ilr = torch.tensor(
+                [[float(central.get(f"f{k}", 0.0)) for k in range(1, K)]],
+                device=self.device,
+                dtype=torch.float64,
+            )
+            a = ilr_to_weights_torch(ilr)
+
+        elif parameterization == "clr":
             clr = torch.tensor(
                 [[float(central.get(f"f{k}", 0.0)) for k in range(1, K + 1)]],
                 device=self.device,
@@ -946,21 +1088,8 @@ class NumVisits(BaseExperiment, CosmologyMixin):
             exp = torch.exp(shifted)
             a = exp / exp.sum(dim=-1, keepdim=True).clamp_min(1e-300)
 
-        elif parameterization == PARAMETERIZATION_LOGITS:
-            eta = torch.tensor(
-                [[float(central.get(f"f{k}", 0.0)) for k in range(1, K)]],
-                device=self.device,
-                dtype=torch.float64,
-            )
-            a = logits_to_weights_torch(eta)
-
         else:
-            a = torch.tensor(
-                [[float(central.get(f"a{k}", 0.0)) for k in range(1, K + 1)]],
-                device=self.device,
-                dtype=torch.float64,
-            )
-            a = a / a.sum(dim=-1, keepdim=True).clamp_min(1e-300)
+            raise ValueError(f"Unknown prior parameterization {parameterization!r}")
 
         log_s = torch.tensor(
             [float(central["log_c_scale"])],
@@ -981,26 +1110,20 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         sample_shape: tuple[int, ...],
     ) -> dict[str, torch.Tensor]:
         """Map empirical-prior feature rows to parameter tensors with trailing dim 1."""
-        col = {n: i for i, n in enumerate(self.prior_feature_names)}
-        out: dict[str, torch.Tensor] = {}
-        flat = sample_shape if sample_shape else (rows.shape[0],)
-        for name in self.cosmo_params:
-            if name not in col:
-                raise KeyError(
-                    f"Unknown empirical prior parameter '{name}'. "
-                    f"Available: {self.prior_feature_names}"
-                )
-            out[name] = rows[:, col[name]].reshape(*flat, 1)
-        return out
+        if self.sed_prior is None:
+            raise RuntimeError("sed_prior is not initialized")
+        return self.sed_prior.rows_to_param_dict(
+            rows, self.cosmo_params, sample_shape
+        )
 
     @profile_method
     def sample_parameters(self, sample_shape, prior=None, use_prior_flow=True, **kwargs):
         """
         Sample parameters from analytic prior, prior flow, or empirical KDE pool.
         """
-        if self.cosmo_model == "empirical" and self.prior_pool is not None:
+        if self.cosmo_model == "empirical" and self.sed_prior is not None:
             n = int(np.prod(sample_shape)) if sample_shape else 1
-            rows = sample_prior_batch(self.prior_pool, n)
+            rows = self.sed_prior.sample_batch(n)
             return self._prior_rows_to_param_dict(rows, sample_shape)
 
         if prior is None:
@@ -1204,9 +1327,9 @@ class NumVisits(BaseExperiment, CosmologyMixin):
 
         batch_shape = nvisits.shape[:-1]
 
-        if self.cosmo_model == "empirical" and self.prior_pool is not None:
+        if self.cosmo_model == "empirical" and self.sed_prior is not None:
             n = int(np.prod(batch_shape))
-            rows = sample_prior_batch(self.prior_pool, n)
+            rows = self.sed_prior.sample_batch(n)
             params = self._prior_rows_to_param_dict(rows, batch_shape)
             for name, val in params.items():
                 pyro.sample(name, dist.Delta(val.squeeze(-1)).to_event(0))

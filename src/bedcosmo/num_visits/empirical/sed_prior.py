@@ -125,6 +125,11 @@ def snapshot_sed_prior_kde(
     dest.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(src, dest)
 
+    # NOTE: the y-space prior KDE (sed_prior_y_kde.joblib) is intentionally NOT
+    # snapshotted. Empirical runs short-circuit y-prior loading in
+    # NumVisits._load_y_prior_if_present (the gaussianized y is already ~N(0,I),
+    # so EIG uses the N(0,I) shortcut), so it would be dead weight in artifacts.
+
     out = dict(prior_args)
     for key in ("prior_kde_path", "prior_y_kde_path"):
         out.pop(key, None)
@@ -249,8 +254,7 @@ def unpack_prior_rows(
     """Split pool rows into simplex weights a, log_s, and z."""
     from .simplex import (
         PARAMETERIZATION_CLR,
-        PARAMETERIZATION_LOGITS,
-        PARAMETERIZATION_WEIGHTS,
+        PARAMETERIZATION_ILR,
         split_feature_matrix,
     )
 
@@ -263,9 +267,12 @@ def unpack_prior_rows(
         if n_f == n_templates:
             parameterization = PARAMETERIZATION_CLR
         elif n_f == n_templates - 1:
-            parameterization = PARAMETERIZATION_LOGITS
+            parameterization = PARAMETERIZATION_ILR
         else:
-            parameterization = PARAMETERIZATION_WEIGHTS
+            raise ValueError(
+                f"Cannot infer parameterization: {n_f} f-columns for {n_templates} "
+                "templates (expected K for CLR or K-1 for ILR)."
+            )
     arr = x.detach().cpu().numpy()
     a, log_s, z = split_feature_matrix(arr, n_templates, parameterization=parameterization)
     dev, dtype = x.device, x.dtype
@@ -343,6 +350,9 @@ class EmpiricalSedPrior:
     def has_y_prior_kde(self) -> bool:
         return self.y_artifact is not None
 
+    def has_y_prior(self) -> bool:
+        return self.has_y_prior_kde()
+
     def log_prob_y(
         self,
         y_samples: torch.Tensor,
@@ -378,14 +388,12 @@ class EmpiricalSedPrior:
         param_names: Sequence[str] | None = None,
         chunk_size: int | None = None,
     ) -> torch.Tensor:
-        """Score the y-KDE at ``transform_fn(physical_samples)``."""
+        """Score the y-prior at ``transform_fn(physical_samples)``."""
         flat = self._align_samples(physical_samples, param_names)
         with torch.no_grad():
             y = transform_fn(flat)
-        return self.log_prob_y(
-            y.reshape(*physical_samples.shape[:-1], y.shape[-1]),
-            chunk_size=chunk_size,
-        )
+        y = y.reshape(*physical_samples.shape[:-1], y.shape[-1])
+        return self.log_prob_y(y, chunk_size=chunk_size)
 
     def _align_samples(
         self,

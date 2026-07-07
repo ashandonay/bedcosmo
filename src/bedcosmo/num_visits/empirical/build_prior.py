@@ -9,6 +9,7 @@ Default output tree (``--build-name empirical_prior``)::
       healpix/hp27257/...
       desi_eazy_empirical_weights.csv   # combined
       sed_prior_kde.joblib
+      sed_prior_y_kde.joblib
       sed_prior_kde.json
 
 Shared inputs (downloaded once, reused across builds)::
@@ -220,6 +221,9 @@ def build_prior(
         print(f"  Combined weights: {weights_csv}")
     if kde_path.exists():
         print(f"  KDE artifact:     {kde_path}")
+        y_kde_path = kde_path.parent / "sed_prior_y_kde.joblib"
+        if y_kde_path.exists():
+            print(f"  y-prior KDE:      {y_kde_path}")
 
     return {
         "prior_dir": prior_dir,

@@ -28,7 +28,7 @@ import yaml
 
 from .fit_sed_prior_kde import load_sed_prior_kde
 from .fit_eazy_weights_to_desi import save_triangle_plot
-from .simplex import PARAMETERIZATION_LOGITS, split_feature_matrix
+from .simplex import PARAMETERIZATION_ILR, split_feature_matrix
 
 
 def _get_experiment_config_path(cosmo_exp: str, config_name: str) -> Path:
@@ -255,7 +255,7 @@ def main() -> None:
     x_gauss = gaussian.cpu().numpy()
 
     n_tpl = int(artifact["n_templates"])
-    if param == PARAMETERIZATION_LOGITS:
+    if param == PARAMETERIZATION_ILR:
         a, log_s, z = split_feature_matrix(x_phys, n_tpl, parameterization=param)
         joint_weights = np.column_stack([a, log_s, z])
     else:
@@ -330,17 +330,17 @@ def main() -> None:
             "multimodality in x still appears in y and z."
         )
 
-    if args.also_logits_triangle and param == PARAMETERIZATION_LOGITS:
+    if args.also_logits_triangle and param == PARAMETERIZATION_ILR:
         labels_phys = _labels_physical(experiment)
         save_triangle_plot(
             outdir,
             x_phys,
             labels_phys,
-            filename="triangle_logits_before_transform.png",
-            title=rf"Logit coords f_k ($N={n}$; expect boundary spikes / multimodal 1D)",
+            filename="triangle_ilr_before_transform.png",
+            title=rf"ILR coords f_k ($N={n}$; expect smooth unimodal 1D)",
             panel_size=args.panel_size,
         )
-        print(f"Saved {outdir / 'triangle_logits_before_transform.png'}")
+        print(f"Saved {outdir / 'triangle_ilr_before_transform.png'}")
         print(
             "  Note: f_k = log(a_k/a_12) piles up at KDE clip bounds and at "
             "'inactive template' values; use the a_k triangle for physical shape."

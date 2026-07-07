@@ -85,7 +85,7 @@ empirical:
   nf_seed: 1
   prior_args_path: prior_args_empirical.yaml
   flow_type: NAF
-  transform_input: true
+  transform_input: false
   input_transform_type: joint
   logit_flow_scale: 8.0
   activation: elu
@@ -109,25 +109,10 @@ empirical:
   gamma: 0.1
   step_freq: 1
   checkpoint_step_freq: 1000
-  n_particles_per_device: 100
+  n_particles_per_device: 50
   mag_err_cap: 10
   cdf_bins: 5000
   cdf_samples: 1000000
-  central_params:
-    f1: 7.485695
-    f2: -2.556071
-    f3: -2.458513
-    f4: -2.475593
-    f5: -2.587700
-    f6: -2.455915
-    f7: -3.078100
-    f8: -2.464153
-    f9: -2.771274
-    f10: -2.704496
-    f11: -2.582472
-    f12: -2.691376
-    log_c_scale: 6.588856
-    z: 0.926622
   condition_design: true
   log_nominal_area: false
   verbose: true

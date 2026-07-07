@@ -7,6 +7,26 @@ import math
 from torch.utils.data import Dataset
 from bedcosmo.profiling import profile_method
 
+
+def transform_input_standard_normal_log_prob(
+    experiment, samples: torch.Tensor
+) -> torch.Tensor:
+    """``log N(0, I)(y)`` with ``y = params_to_unconstrained(theta)``.
+
+    Used when ``transform_input=True`` and the bijector Gaussianizes the prior
+    (joint Gaussianizer or empirical build-prior gaussianizer), so evaluation
+    pairs ``log N(0, I)(y)`` with the flow density ``log q(y)`` at the same ``y``.
+    """
+    batch_shape = samples.shape[:-1]
+    flat = samples.reshape(-1, samples.shape[-1])
+    with torch.no_grad():
+        y = experiment.params_to_unconstrained(flat)
+        log_prob = -0.5 * (
+            y.pow(2).sum(dim=-1) + y.shape[-1] * math.log(2.0 * math.pi)
+        )
+    return log_prob.reshape(batch_shape)
+
+
 def nmc_eig(
     model,
     design,
@@ -199,7 +219,7 @@ def nf_loss(
     experiment,
     rank=0,
     verbose_shapes=False,
-    log_probs=None,
+    prior_log_probs=None,
     evaluation=False,
     chunk_size=None,
 ):
@@ -213,14 +233,23 @@ def nf_loss(
     - experiment: Object with transform_input, params_to_unconstrained, cosmo_params, etc.
     - rank: The rank of the current process.
     - verbose_shapes: Whether to print tensor shapes for debugging (default: False).
-    - log_probs: Dict of prior log-probs for evaluation mode.
+    - prior_log_probs: Dict of prior log-probs for evaluation mode.
     - evaluation: If True, return EIG-style loss (prior_entropy - posterior_entropy).
     - chunk_size: If not None, evaluate log_prob in chunks of this size along the
                   flattened batch dimension to reduce peak memory usage.
 
+    With ``transform_input=True``, evaluation pairs ``log N(0,I)(y)`` (prior in
+    NF coordinates) with flow ``log q_y(y)`` at ``y = T(theta)``. With
+    ``transform_input=False``, empirical NumVisits priors use physical
+    ``log p_KDE(theta)`` against ``log q_theta(theta)``.
+
     Returns:
     - agg_loss: Aggregated loss over all samples.
     - loss: Per-sample loss, reshaped to match the original design batch.
+    - entropy_terms: When ``evaluation=True``, dict with ``prior_entropy`` and
+      ``posterior_entropy`` (nats, per design). Otherwise ``None``.
+      ``prior_entropy`` is :math:`-\\mathbb{E}[\\log p]`; ``posterior_entropy``
+      is :math:`\\mathbb{E}[-\\log q]`; EIG = prior_entropy - posterior_entropy.
     """
     # Store original batch shape
     batch_shape = samples.shape[:-1]  # e.g. [num_particles, num_designs]
@@ -260,23 +289,22 @@ def nf_loss(
     neg_log_prob = neg_log_prob.reshape(batch_shape)
 
     # Compute the aggregate loss
-    agg_loss, loss = _safe_mean_terms(neg_log_prob)
+    agg_loss, posterior_entropy = _safe_mean_terms(neg_log_prob)
+    if not evaluation:
+        return agg_loss, posterior_entropy, None
 
-    if evaluation:
-        if log_probs is None:
-            raise ValueError("Log probabilities are not provided")
-        
-        if log_probs is not None and "joint" in log_probs:
-            prior_entropy = -1 * log_probs["joint"].mean(dim=0)
-        else:
-            prior_entropy = -1 * sum(
-                log_probs[l].mean(dim=0)
-                for l in experiment.cosmo_params
-            )
-        
-        loss = prior_entropy - loss
+    if prior_log_probs is None:
+        raise ValueError("Log probabilities are not provided")
 
-    return agg_loss, loss
+    prior_entropy = _prior_entropy_from_log_probs(prior_log_probs, experiment)
+
+    # H_prior = -E[log p], H_post = E[-log q]; EIG = H_prior - H_post (nats).
+    entropy_terms = {
+        "prior_entropy": prior_entropy.detach(),
+        "posterior_entropy": posterior_entropy.detach(),
+    }
+    eig = prior_entropy - posterior_entropy
+    return agg_loss, eig, entropy_terms
 
 def posterior_loss(experiment, guide, num_particles, 
                    nflow=False, verbose_shapes=False, evaluation=False, 
@@ -533,6 +561,16 @@ def monte_carlo_entropy(model, design, target_labels, num_prior_samples=1000):
     lp = sum(trace.nodes[l]["log_prob"] for l in target_labels)
     return -lp.sum(0) / num_prior_samples
 
+def _prior_entropy_from_log_probs(prior_log_probs, experiment):
+    """Per-design prior entropy H = -E[log p] from joint or factorized prior_log_probs."""
+    if "joint" in prior_log_probs:
+        return -prior_log_probs["joint"].mean(dim=0)
+    return -sum(
+        prior_log_probs[l].mean(dim=0)
+        for l in experiment.cosmo_params
+    )
+
+
 def _safe_mean_terms(terms):
     mask = torch.isnan(terms) | (terms == float("-inf")) | (terms == float("inf"))
     if terms.dtype is torch.float32:
@@ -614,15 +652,17 @@ class LikelihoodDataset(Dataset):
             if torch.cuda.is_available() and batch_idx < n_batches - 1:
                 torch.cuda.empty_cache()
 
-        samples_list, condition_input_list, log_probs_list = zip(*batch_results)
+        samples_list, condition_input_list, prior_log_probs_list = zip(*batch_results)
         samples = torch.cat(samples_list, dim=0)
         condition_input = torch.cat(condition_input_list, dim=0)
 
         if self.evaluation:
-            log_probs = {}
-            for key in log_probs_list[0].keys():
-                log_probs[key] = torch.cat([lp[key] for lp in log_probs_list], dim=0)
-            return samples, condition_input, log_probs
+            prior_log_probs = {}
+            for key in prior_log_probs_list[0].keys():
+                prior_log_probs[key] = torch.cat(
+                    [lp[key] for lp in prior_log_probs_list], dim=0
+                )
+            return samples, condition_input, prior_log_probs
 
         return samples, condition_input
 
@@ -735,38 +775,44 @@ class LikelihoodDataset(Dataset):
             log_prob_all = log_prob_all.reshape(batch_shape)
             return {"joint": log_prob_all}
 
-        trace.compute_log_prob()
+        sed_prior = getattr(self.experiment, "sed_prior", None)
+        if sed_prior is not None:
+            if getattr(self.experiment, "transform_input", False):
+                if sed_prior.has_y_prior():
+                    log_joint = sed_prior.log_prob_nf_from_physical(
+                        samples,
+                        self.experiment.params_to_unconstrained,
+                        param_names=self.experiment.cosmo_params,
+                        chunk_size=getattr(self, "particle_batch_size", None),
+                    )
+                    return {"joint": log_joint}
+                return {
+                    "joint": transform_input_standard_normal_log_prob(
+                        self.experiment, samples
+                    )
+                }
+            log_joint = sed_prior.log_prob(
+                samples,
+                param_names=self.experiment.cosmo_params,
+                chunk_size=getattr(self, "particle_batch_size", None),
+            )
+            return {"joint": log_joint}
 
         if getattr(self.experiment, "transform_input", False):
             bijector = self.experiment.param_bijector
 
-            # If we are using a joint empirical Gaussianizer, the transformed samples
-            # are already the natural prior space for the NF. For empirical-CDF +
-            # whitening, this space is approximately N(0, I), so evaluate the prior
-            # directly there instead of relying on Delta log_probs from the Pyro trace.
-            if bijector.uses_joint_gaussianizer():
-                batch_shape = samples.shape[:-1]
-                flat_samples = samples.reshape(-1, samples.shape[-1])
-
-                with torch.no_grad():
-                    y_flat = self.experiment.params_to_unconstrained(
-                        flat_samples,
-                        bijector_class=bijector,
-                    )
-
-                    # Standard-normal prior in transformed NF space.
-                    # Shape: [n_flat]
-                    joint_log_prob_flat = -0.5 * (
-                        y_flat.pow(2).sum(dim=-1)
-                        + y_flat.shape[-1] * math.log(2.0 * math.pi)
-                    )
-                
+            # Joint Gaussianizer (non-empirical): NF-space prior is N(0, I).
+            if bijector is not None and bijector.uses_joint_gaussianizer():
                 return {
-                    "joint": joint_log_prob_flat.reshape(batch_shape)
+                    "joint": transform_input_standard_normal_log_prob(
+                        self.experiment, samples
+                    )
                 }
 
+        trace.compute_log_prob()
+
         # Otherwise fall back to Pyro trace log-probs.
-        log_probs = {
+        prior_log_probs = {
             l: trace.nodes[l]["log_prob"]
             for l in self.experiment.cosmo_params
         }
@@ -785,12 +831,12 @@ class LikelihoodDataset(Dataset):
 
             for name in self.experiment.cosmo_params:
                 if name in transformed_names and not applied_transform_correction:
-                    log_probs[name] = log_probs[name] - total_log_det.reshape(
-                        log_probs[name].shape
+                    prior_log_probs[name] = prior_log_probs[name] - total_log_det.reshape(
+                        prior_log_probs[name].shape
                     )
                     applied_transform_correction = True
 
-        return log_probs
+        return prior_log_probs
 
     @profile_method
     def _process_particles(self, n_particles):
@@ -815,9 +861,9 @@ class LikelihoodDataset(Dataset):
         )
 
         if self.evaluation:
-            log_probs = self._compute_prior_log_probs(samples, trace)
+            prior_log_probs = self._compute_prior_log_probs(samples, trace)
             del trace, expanded_design, y_dict, theta_dict
-            return samples, condition_input, log_probs
+            return samples, condition_input, prior_log_probs
 
         del trace, expanded_design, y_dict, theta_dict
         return samples, condition_input

@@ -19,7 +19,6 @@ empirical:
     - f9
     - f10
     - f11
-    - f12
     - log_c_scale
     - z
   latex_labels:
@@ -34,6 +33,5 @@ empirical:
     - "f_9"
     - "f_{10}"
     - "f_{11}"
-    - "f_{12}"
     - "\\log s"
     - "z"

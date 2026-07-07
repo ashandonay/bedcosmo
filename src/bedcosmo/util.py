@@ -732,6 +732,7 @@ def init_experiment(
     """
     emulator_artifacts_dir = None
     empirical_artifacts_dir = None
+    ref_cov_artifact_path = None
     if run_obj is not None and run_args is not None:
 
         cosmo_exp = run_args.get("cosmo_exp")
@@ -748,6 +749,11 @@ def init_experiment(
         empirical_dir = os.path.join(artifact_path, "empirical")
         if os.path.isdir(empirical_dir):
             empirical_artifacts_dir = empirical_dir
+        # Reference covariance frozen into the run's artifacts at submission time
+        # (num_tracers scaling mode). Takes precedence over run_args.
+        ref_cov_artifact = os.path.join(artifact_path, "ref_cov.npy")
+        if os.path.exists(ref_cov_artifact):
+            ref_cov_artifact_path = ref_cov_artifact
         # If design_args is not provided (None), try to load from artifacts first
         if design_args is None:
             design_args_artifact_path = artifact_path + "/design_args.yaml"
@@ -817,6 +823,8 @@ def init_experiment(
             exp_args['bijector_state'] = checkpoint['bijector_state']
         if emulator_artifacts_dir is not None:
             exp_args['emulator_artifacts_dir'] = emulator_artifacts_dir
+        if ref_cov_artifact_path is not None:
+            exp_args['ref_cov'] = ref_cov_artifact_path
         experiment = NumTracers(**exp_args)
     
     elif cosmo_exp == 'variable_redshift':

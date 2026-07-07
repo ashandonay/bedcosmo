@@ -71,6 +71,7 @@ class NumTracers(BaseExperiment, CosmologyMixin):
         likelihood_mode="scaling",
         apply_desi_syst=False,
         vary_lya_qso=False,
+        ref_cov=None,
         emulator_sqrtn_ref=None,
         emulator_artifacts_dir=None,
         input_transform_type="marginal",
@@ -89,15 +90,30 @@ class NumTracers(BaseExperiment, CosmologyMixin):
         self.desi_tracers = pd.read_csv(
             os.path.join(home_dir, f"data/desi/bao_{self.dataset}", "desi_tracers.csv")
         )
-        self.nominal_cov = np.load(
-            os.path.join(home_dir, f"data/desi/bao_{self.dataset}", "desi_cov.npy")
-        )
+        # Reference covariance (scaling mode scales this; also sets corr_matrix/sigmas).
+        # Defaults to the dataset's desi_cov.npy, but can be overridden via ref_cov
+        # (train_arg). An absolute/user path is used as-is; a relative path resolves
+        # against the dataset data dir (where desi_cov.npy lives), so e.g.
+        # ref_cov="ref_cov_alt.npy" drops in a sibling file.
+        default_cov_dir = os.path.join(home_dir, f"data/desi/bao_{self.dataset}")
+        if ref_cov is None:
+            resolved_ref_cov = os.path.join(default_cov_dir, "desi_cov.npy")
+        else:
+            ref_cov = os.path.expanduser(ref_cov)
+            resolved_ref_cov = (
+                ref_cov if os.path.isabs(ref_cov)
+                else os.path.join(default_cov_dir, ref_cov)
+            )
+        if not os.path.exists(resolved_ref_cov):
+            raise FileNotFoundError(f"Reference covariance file not found: {resolved_ref_cov}")
+        self.ref_cov_path = resolved_ref_cov
+        self.ref_cov = np.load(resolved_ref_cov)
         self.DH_idx = np.where(self.desi_data["quantity"] == "DH_over_rs")[0]
         self.DM_idx = np.where(self.desi_data["quantity"] == "DM_over_rs")[0]
         self.DV_idx = np.where(self.desi_data["quantity"] == "DV_over_rs")[0]
         # By default the Lya QSO error is held fixed at its nominal value in scaling
         # mode (design-independent), mirroring how the emulator mode leaves Lya_QSO
-        # at nominal_cov instead of scaling it. Set vary_lya_qso=True to instead let it
+        # at ref_cov instead of scaling it. Set vary_lya_qso=True to instead let it
         # scale with the design like the other tracers.
         self.vary_lya_qso = vary_lya_qso
         self._lya_qso_rows = np.where(self.desi_data["tracer"] == "Lya QSO")[0]
@@ -117,8 +133,8 @@ class NumTracers(BaseExperiment, CosmologyMixin):
         self.rdrag = 149.77
         self.c = constants.c.to("km/s").value
         self.corr_matrix = torch.tensor(
-            self.nominal_cov
-            / np.sqrt(np.outer(np.diag(self.nominal_cov), np.diag(self.nominal_cov))),
+            self.ref_cov
+            / np.sqrt(np.outer(np.diag(self.ref_cov), np.diag(self.ref_cov))),
             device=self.device,
         )
         self.include_D_M = include_D_M
@@ -127,11 +143,8 @@ class NumTracers(BaseExperiment, CosmologyMixin):
             self.desi_data.drop_duplicates(subset=["tracer"])["efficiency"].tolist(),
             device=self.device,
         )
-        # desi_cov.npy is the single source of truth for the nominal (unscaled)
-        # uncertainties: variances are its diagonal, correlations are corr_matrix.
-        # (desi_data["std"] is redundant with sqrt(diag(nominal_cov)) and no longer used.)
         self.sigmas = torch.sqrt(
-            torch.tensor(np.diag(self.nominal_cov), device=self.device, dtype=torch.float32)
+            torch.tensor(np.diag(self.ref_cov), device=self.device, dtype=torch.float32)
         )
         self.central_val = torch.tensor(self.desi_data["value_at_z"].tolist(), device=self.device)
         self.tracer_bins = self.desi_data.drop_duplicates(subset=["tracer"])["tracer"].tolist()
@@ -1505,10 +1518,14 @@ class NumTracers(BaseExperiment, CosmologyMixin):
             cov_ref = self._fill_emulator_blocks(n_ref, Om, Ok, w0, wa, hrdrag_phys, batch_shape)
 
         # Per-data-row factor g[row] = sqrt(N_ref[bin] / N[bin]) for the owning tracer bin,
-        # so cov_ref * g g^T scales each block (incl. fallback bins) by N_ref/N (rho intact).
+        # so cov_ref * g g^T scales each block by N_ref/N (rho intact). Only bins with a
+        # real emulator are scaled; null-checkpoint fallback bins (e.g. Lya_QSO in base)
+        # keep g=1 so their block stays at the fixed reference value, matching both the
+        # normal emulator path (_fill_emulator_blocks copies ref_cov unscaled) and scaling
+        # mode's default (Lya QSO held fixed) -- they are not meant to be design dependent.
         cov_size = len(self.desi_data)
         g = torch.ones(batch_shape + (cov_size,), device=self.device, dtype=torch.float64)
-        for tracer_bin in self._emulator_checkpoints:
+        for tracer_bin in self._emulators:
             desi_name = self._EMULATOR_TRACER_TO_DESI.get(tracer_bin)
             rows = self.desi_data.index[self.desi_data["tracer"] == desi_name].tolist()
             if not rows:
@@ -1530,9 +1547,9 @@ class NumTracers(BaseExperiment, CosmologyMixin):
             batch_shape + (cov_size, cov_size), device=self.device, dtype=torch.float64
         )
 
-        # Fixed DESI nominal covariance, used as fallback for tracer bins whose
+        # Fixed reference covariance, used as fallback for tracer bins whose
         # emulator checkpoint was null (e.g. Lya_QSO in the base config).
-        nominal_cov = torch.as_tensor(self.nominal_cov, device=self.device, dtype=torch.float64)
+        ref_cov = torch.as_tensor(self.ref_cov, device=self.device, dtype=torch.float64)
 
         def _to_broadcastable(value):
             if not isinstance(value, torch.Tensor):
@@ -1587,11 +1604,11 @@ class NumTracers(BaseExperiment, CosmologyMixin):
                 continue
             quantities = self.desi_data.loc[rows, "quantity"].tolist()
 
-            # Null checkpoint -> fixed DESI nominal covariance within-tracer block.
+            # Null checkpoint -> fixed reference covariance within-tracer block.
             if tracer_bin in self._emulator_fallback_bins:
                 for i in rows:
                     for j in rows:
-                        covariance[..., i, j] = nominal_cov[i, j]
+                        covariance[..., i, j] = ref_cov[i, j]
                 continue
 
             sig = _predict_sigmas(tracer_bin)

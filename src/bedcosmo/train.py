@@ -136,7 +136,7 @@ class Trainer:
     
     @profile_method
     def loss(self, samples, context):
-        agg_loss, loss = nf_loss(
+        agg_loss, loss, _ = nf_loss(
             samples, context, self.posterior_flow, self.experiment, 
             rank=self.global_rank, verbose_shapes=self.verbose, evaluation=False
             )
@@ -1065,16 +1065,17 @@ class Trainer:
 
     def _save_input_args(self, restart_run=False):
         """
-        Snapshot the run's config (prior_args.yaml, design_args.yaml, and emulator
-        checkpoints) into its MLflow artifacts at job start.
+        Snapshot the run's config (prior_args.yaml, design_args.yaml, emulator
+        checkpoints, etc.) into its MLflow artifacts at job start.
 
         This is the job-start snapshot path used by the modes that do NOT go through
         submission-time pre-creation:
           - new-run mode: running `python -m bedcosmo.train` directly without --attach-run-id
             (copies prior_args/design_args from the configured file paths).
-          - restart mode (restart_run=True): copies prior_args.yaml, design_args.yaml and the
-            emulators/ directory from the source run's (immutable) artifacts.
-        Attach mode skips this entirely — create_run.py already snapshotted at submission.
+          - restart mode (restart_run=True): copies prior_args.yaml, design_args.yaml,
+            emulators/, and empirical/ from the source run's artifacts.
+        Attach mode skips this entirely — create_run.py already snapshotted at submission
+        (including empirical KDE for num_visits empirical runs).
 
         Args:
             restart_run: If True, copy files from the restart source run's artifacts instead of
@@ -1118,6 +1119,14 @@ class Trainer:
                 mlflow.log_artifacts(new_emulators_dir, artifact_path="emulators")
                 if self.verbose:
                     print(f"Copied emulator checkpoints from restart run to new run artifacts")
+
+            restart_empirical_dir = f"{restart_artifacts_dir}/empirical"
+            if os.path.isdir(restart_empirical_dir):
+                new_empirical_dir = f"{artifacts_dir}/empirical"
+                shutil.copytree(restart_empirical_dir, new_empirical_dir, dirs_exist_ok=True)
+                mlflow.log_artifacts(new_empirical_dir, artifact_path="empirical")
+                if self.verbose:
+                    print("Copied empirical KDE artifacts from restart run")
         else:
             # Save prior_args.yaml - either from prior_flow or from file path
             prior_artifact_path = f"{artifacts_dir}/prior_args.yaml"
@@ -1151,7 +1160,7 @@ class Trainer:
                 mlflow.log_artifact(design_args_artifact_path)
                 if self.verbose:
                     print(f"Saved design_args.yaml to artifacts: {design_args_artifact_path}")
-    
+
     def _save_design_array(self):
         """Save designs.npy to artifacts and update design_args.yaml with input_designs_path."""
         artifacts_dir = f"{self.storage_path}/mlruns/{mlflow.active_run().info.experiment_id}/{mlflow.active_run().info.run_id}/artifacts"

@@ -133,7 +133,7 @@ Defines which parameters belong to each named training variant. `train_args.yaml
 |-------|------------|-------------------|-------|
 | `bb` | `z` | Blackbody (fixed T) | Analytic gamma on `z` |
 | `bb_temp` | `z`, `T` | Blackbody | Analytic gamma + uniform `T` |
-| `empirical` | `f1`…`f11`, `log_c_scale`, `z` (13D; simplex logits) | EAZY template mixture | Masked KDE v2 (`prior_kde_path`; rebuild with `--parameterization logits`) |
+| `empirical` | `f1`…`f11`, `log_c_scale`, `z` (13D; simplex logits) | EAZY template mixture | Masked KDE v2 (`artifacts/empirical/sed_prior_kde.joblib`; rebuild with `--parameterization logits`) |
 
 Example:
 
@@ -143,7 +143,7 @@ empirical:
   latex_labels: ["$a_1$", ..., "$z$"]
 ```
 
-For `empirical`, set an **absolute** path to `sed_prior_kde.joblib` in [`prior_args_empirical.yaml`](prior_args_empirical.yaml) (built with `src/bedcosmo/num_visits/sed_prior/`). Training draws from a GPU-resident pool of KDE samples and integrates template SEDs on the GPU. See [`sed_prior/README.md`](../../src/bedcosmo/num_visits/sed_prior/README.md).
+For `empirical`, set an **absolute** path to `sed_prior_kde.joblib` in [`prior_args_empirical.yaml`](prior_args_empirical.yaml) (built with `src/bedcosmo/num_visits/empirical/`). Training draws from a GPU-resident pool of KDE samples and integrates template SEDs on the GPU. See [`empirical/README.md`](../../src/bedcosmo/num_visits/empirical/README.md).
 
 ## Marginal EIG over parameter subsets (`eval_args.yaml`)
 

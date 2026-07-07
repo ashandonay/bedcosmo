@@ -47,7 +47,7 @@ class Evaluator:
             design_args_path=None,
             experiment_args=None, nf_eig_data=None, grid_eig_data=None,
             marginal_eig_subsets=None, marginal_outer_y=8, marginal_inner_samples=200,
-            marginal_knn_k=3,
+            marginal_knn_k=3, step_diagnostics=False,
             ):
         self.cosmo_exp = cosmo_exp
         
@@ -108,6 +108,7 @@ class Evaluator:
         self.marginal_outer_y = int(marginal_outer_y)
         self.marginal_inner_samples = int(marginal_inner_samples)
         self.marginal_knn_k = int(marginal_knn_k)
+        self.step_diagnostics = bool(step_diagnostics)
 
         # Parse experiment_args override
         if isinstance(experiment_args, str):
@@ -496,7 +497,8 @@ class Evaluator:
             nominal_design (bool): Whether to evaluate the nominal design.
             designs: Tensor of designs to evaluate. If None, determines from nominal_design or self.input_designs.
         Returns:
-            eigs (torch.Tensor): The EIGs for each design.
+            tuple (eigs, entropy_terms) where eigs is per-design EIG in nats and
+            entropy_terms maps prior_entropy / posterior_entropy (also nats).
         """
         device_obj = torch.device(self.device)
         
@@ -533,7 +535,7 @@ class Evaluator:
                 particle_batch_size=self.particle_batch_size
             )[0]
 
-        samples, context, log_probs = dataset_result
+        samples, context, prior_log_probs = dataset_result
 
         # Clear GPU cache after dataset creation to free memory from trace operations
         if torch.cuda.is_available():
@@ -542,8 +544,8 @@ class Evaluator:
         # Ensure all tensors are on the correct device
         samples = samples.to(device_obj)
         context = context.to(device_obj)
-        if log_probs is not None:
-            log_probs = {k: v.to(device_obj) for k, v in log_probs.items()}
+        if prior_log_probs is not None:
+            prior_log_probs = {k: v.to(device_obj) for k, v in prior_log_probs.items()}
         flow_model = flow_model.to(device_obj)
 
         nfloss_cm = (
@@ -551,25 +553,29 @@ class Evaluator:
         )
         with torch.no_grad():
             with nfloss_cm:
-                _, eigs = nf_loss(
+                _, eigs, entropy_terms = nf_loss(
                     samples=samples,
                     context=context,
                     guide=flow_model,
                     experiment=self.experiment,
                     rank=0,
                     verbose_shapes=False,
-                    log_probs=log_probs,
+                    prior_log_probs=prior_log_probs,
                     evaluation=True,
                     chunk_size=(self.n_particles // 10)
                 )
         eigs = eigs.detach().cpu()  # Move to CPU immediately to free GPU memory
+        if entropy_terms is not None:
+            entropy_terms = {
+                k: v.detach().cpu() for k, v in entropy_terms.items()
+            }
         # release temporary tensors to avoid graph retention and free GPU caches after each chunk
-        del dataset_result, samples, context, log_probs
+        del dataset_result, samples, context, prior_log_probs
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
             torch.cuda.synchronize()  # Ensure all operations complete before clearing cache
 
-        return eigs
+        return eigs, entropy_terms
 
     # =========================================================================
     # Marginal EIG over parameter subsets
@@ -654,9 +660,23 @@ class Evaluator:
         """
         exp = self.experiment
         pool = getattr(exp, "prior_pool", None)
+        sed_prior = getattr(exp, "sed_prior", None)
         n_want = int(num_samples)
+        if sed_prior is not None:
+            gen = torch.Generator(device=sed_prior.pool.pool.device)
+            gen.manual_seed(int(self.seed))
+            n_pool = int(sed_prior.pool.pool.shape[0])
+            n_draw = min(n_want, n_pool)
+            rows = sed_prior.sample_unique(n_draw, generator=gen)
+            params = exp._prior_rows_to_param_dict(rows, (n_draw,))
+            param_samples = torch.stack(
+                [params[k].squeeze(-1) for k in exp.cosmo_params], dim=-1
+            )
+            exp.apply_multipliers(param_samples)
+            param_samples = exp._sanitize_physical_samples(param_samples)
+            return param_samples.detach().cpu().numpy()
         if pool is not None:
-            from bedcosmo.num_visits.sed_prior.prior_sampler import sample_prior_pool_unique
+            from bedcosmo.num_visits.empirical.sed_prior import sample_prior_pool_unique
 
             n_pool = int(pool.pool.shape[0])
             n_draw = min(n_want, n_pool)
@@ -687,6 +707,58 @@ class Evaluator:
             if np.allclose(row, nominal, rtol=0.0, atol=atol):
                 return i
         return None
+
+    @staticmethod
+    def _nats_to_bits(values):
+        """Convert natural-log entropy/EIG quantities to bits."""
+        if isinstance(values, torch.Tensor):
+            values = values.detach().cpu().numpy()
+        return np.atleast_1d(np.asarray(values)).flatten() / np.log(2)
+
+    def _store_entropy_eval_results(
+        self, step_data, all_prior_eval, all_post_eval, nominal_design
+    ):
+        """Persist per-eval and mean/std entropy arrays into step_data (bits)."""
+        step_data["prior_entropies"] = [
+            r.tolist() if isinstance(r, np.ndarray) else r for r in all_prior_eval
+        ]
+        step_data["posterior_entropies"] = [
+            r.tolist() if isinstance(r, np.ndarray) else r for r in all_post_eval
+        ]
+        prior_mean = np.mean(np.array(all_prior_eval), axis=0)
+        prior_std = np.std(np.array(all_prior_eval), axis=0)
+        post_mean = np.mean(np.array(all_post_eval), axis=0)
+        post_std = np.std(np.array(all_post_eval), axis=0)
+        if nominal_design:
+            step_data["prior_entropy_avg"] = float(prior_mean.reshape(-1)[0])
+            step_data["prior_entropy_std"] = float(prior_std.reshape(-1)[0])
+            step_data["posterior_entropy_avg"] = float(post_mean.reshape(-1)[0])
+            step_data["posterior_entropy_std"] = float(post_std.reshape(-1)[0])
+        else:
+            step_data["prior_entropy_avg"] = np.atleast_1d(prior_mean).tolist()
+            step_data["prior_entropy_std"] = np.atleast_1d(prior_std).tolist()
+            step_data["posterior_entropy_avg"] = np.atleast_1d(post_mean).tolist()
+            step_data["posterior_entropy_std"] = np.atleast_1d(post_std).tolist()
+
+    def _log_entropy_summary(
+        self, eig_bits, eig_std_bits, prior_bits, prior_std, post_bits, post_std, nominal_design
+    ):
+        if nominal_design:
+            print(
+                f"  Entropy (bits): H_prior={float(prior_bits):.3f}"
+                f"±{float(prior_std):.3f}, "
+                f"H_post={float(post_bits):.3f}±{float(post_std):.3f}, "
+                f"EIG={float(eig_bits):.3f}±{float(eig_std_bits):.3f}"
+            )
+        else:
+            print(
+                f"  Mean entropy (bits): H_prior={float(np.mean(prior_bits)):.3f}"
+                f"±{float(np.mean(prior_std)):.3f}, "
+                f"H_post={float(np.mean(post_bits)):.3f}"
+                f"±{float(np.mean(post_std)):.3f}, "
+                f"mean EIG={float(np.mean(eig_bits)):.3f}"
+                f"±{float(np.mean(eig_std_bits)):.3f}"
+            )
 
     @profile_loop("per-design flow sample", total_from="n_designs")
     def _marginal_design_indices(self, n_designs):
@@ -1021,6 +1093,8 @@ class Evaluator:
         
         # Check if we have existing partial results to resume from
         all_eval_results = []
+        all_prior_entropy_eval = []
+        all_posterior_entropy_eval = []
         
         if 'eigs' in step_data and step_data['eigs'] is not None:
             existing_results = step_data['eigs']
@@ -1048,6 +1122,17 @@ class Evaluator:
                     
                     all_eval_results.append(arr)
                 
+                if "prior_entropies" in step_data and step_data["prior_entropies"]:
+                    for r in step_data["prior_entropies"][: len(all_eval_results)]:
+                        all_prior_entropy_eval.append(
+                            np.array(r) if not isinstance(r, np.ndarray) else r
+                        )
+                if "posterior_entropies" in step_data and step_data["posterior_entropies"]:
+                    for r in step_data["posterior_entropies"][: len(all_eval_results)]:
+                        all_posterior_entropy_eval.append(
+                            np.array(r) if not isinstance(r, np.ndarray) else r
+                        )
+
                 num_existing = len(all_eval_results)
                 if num_existing < target_n_evals:
                     print(f"  Found {num_existing} existing evaluations, continuing from evaluation {num_existing + 1} to {target_n_evals}")
@@ -1080,6 +1165,21 @@ class Evaluator:
                         step_data['optimal_eig'] = float(result_array[optimal_idx])
                         step_data['optimal_eig_std'] = float(result_std_array[optimal_idx]) if len(result_std_array) > optimal_idx else 0.0
                         step_data['optimal_design'] = optimal_design
+                    if all_prior_entropy_eval and all_posterior_entropy_eval:
+                        self._store_entropy_eval_results(
+                            step_data,
+                            all_prior_entropy_eval,
+                            all_posterior_entropy_eval,
+                            nominal_design,
+                        )
+                        prior_mean = np.mean(np.array(all_prior_entropy_eval), axis=0)
+                        prior_std = np.std(np.array(all_prior_entropy_eval), axis=0)
+                        post_mean = np.mean(np.array(all_posterior_entropy_eval), axis=0)
+                        post_std = np.std(np.array(all_posterior_entropy_eval), axis=0)
+                        if nominal_design:
+                            self._log_entropy_summary(
+                                result, result_std, prior_mean, prior_std, post_mean, post_std, True
+                            )
                     timestamp = getattr(self, 'timestamp', None) or datetime.now().strftime('%Y%m%d_%H%M')
                     self.eig_data['status'] = 'incomplete'  # Mark as incomplete during evaluation
                     eig_data_save_path = self._eig_data_save_path(timestamp)
@@ -1116,6 +1216,8 @@ class Evaluator:
             
             # Evaluate each chunk and combine results for this evaluation
             full_eigs = np.zeros(num_designs)
+            full_prior_entropy = np.zeros(num_designs)
+            full_posterior_entropy = np.zeros(num_designs)
             eig_timers = ProfileTimerGroup(self)
 
             for design_indices in self._eig_design_chunk_indices(
@@ -1125,7 +1227,7 @@ class Evaluator:
                 chunk_designs = all_designs[design_indices].to(self.device)
 
                 # Evaluate this chunk
-                eig_result = self._compute_eig(
+                eig_result, entropy_terms = self._compute_eig(
                     flow_model,
                     nominal_design=nominal_design,
                     designs=chunk_designs,
@@ -1133,7 +1235,7 @@ class Evaluator:
                 )
                 
                 # Store results for this chunk (eig_result is already on CPU)
-                eig_array = eig_result.numpy() / np.log(2)
+                eig_array = self._nats_to_bits(eig_result)
                 if len(design_indices) == 1:
                     # Single design case
                     if nominal_design or num_designs == 1:
@@ -1144,12 +1246,56 @@ class Evaluator:
                     # Multiple designs in chunk
                     for idx, eig_val in zip(design_indices, eig_array.flatten()):
                         full_eigs[idx] = eig_val
+                if entropy_terms is not None:
+                    prior_bits = self._nats_to_bits(entropy_terms["prior_entropy"])
+                    post_bits = self._nats_to_bits(entropy_terms["posterior_entropy"])
+                    if len(design_indices) == 1:
+                        full_prior_entropy[design_indices[0]] = float(prior_bits.reshape(-1)[0])
+                        full_posterior_entropy[design_indices[0]] = float(post_bits.reshape(-1)[0])
+                    else:
+                        for idx, p_val, q_val in zip(design_indices, prior_bits, post_bits):
+                            full_prior_entropy[idx] = float(p_val)
+                            full_posterior_entropy[idx] = float(q_val)
 
             eig_timers.report_all()
 
             all_eval_results.append(full_eigs)
+            all_prior_entropy_eval.append(full_prior_entropy.copy())
+            all_posterior_entropy_eval.append(full_posterior_entropy.copy())
             # Save to step_data, converting numpy arrays to lists for JSON serialization
             step_data['eigs'] = [r.tolist() if isinstance(r, np.ndarray) else r for r in all_eval_results]
+            self._store_entropy_eval_results(
+                step_data,
+                all_prior_entropy_eval,
+                all_posterior_entropy_eval,
+                nominal_design,
+            )
+            eval_prior_mean = np.mean(full_prior_entropy)
+            eval_prior_std = np.std(full_prior_entropy) if num_designs > 1 else 0.0
+            eval_post_mean = np.mean(full_posterior_entropy)
+            eval_post_std = np.std(full_posterior_entropy) if num_designs > 1 else 0.0
+            eval_eig_mean = float(np.mean(full_eigs))
+            eval_eig_std = float(np.std(full_eigs)) if num_designs > 1 else 0.0
+            if nominal_design:
+                self._log_entropy_summary(
+                    full_eigs[0],
+                    eval_eig_std,
+                    full_prior_entropy[0],
+                    eval_prior_std,
+                    full_posterior_entropy[0],
+                    eval_post_std,
+                    True,
+                )
+            else:
+                self._log_entropy_summary(
+                    eval_eig_mean,
+                    eval_eig_std,
+                    eval_prior_mean,
+                    eval_prior_std,
+                    eval_post_mean,
+                    eval_post_std,
+                    False,
+                )
 
             # Save EIG data to file
             timestamp = getattr(self, 'timestamp', None) or datetime.now().strftime('%Y%m%d_%H%M')
@@ -1200,6 +1346,23 @@ class Evaluator:
             step_data['optimal_eig'] = float(result_array[optimal_idx])
             step_data['optimal_eig_std'] = float(result_std_array[optimal_idx]) if len(result_std_array) > optimal_idx else 0.0
             step_data['optimal_design'] = optimal_design
+
+        if all_prior_entropy_eval and all_posterior_entropy_eval:
+            self._store_entropy_eval_results(
+                step_data,
+                all_prior_entropy_eval,
+                all_posterior_entropy_eval,
+                nominal_design,
+            )
+            prior_mean = np.mean(np.array(all_prior_entropy_eval), axis=0)
+            prior_std = np.std(np.array(all_prior_entropy_eval), axis=0)
+            post_mean = np.mean(np.array(all_posterior_entropy_eval), axis=0)
+            post_std = np.std(np.array(all_posterior_entropy_eval), axis=0)
+            eig_bits = result if nominal_design else np.atleast_1d(result)
+            eig_std_bits = result_std if nominal_design else np.atleast_1d(result_std)
+            self._log_entropy_summary(
+                eig_bits, eig_std_bits, prior_mean, prior_std, post_mean, post_std, nominal_design
+            )
 
         timestamp = getattr(self, 'timestamp', None) or datetime.now().strftime('%Y%m%d_%H%M')
         self.eig_data['status'] = 'incomplete'  # Mark as incomplete during evaluation
@@ -1523,7 +1686,9 @@ class Evaluator:
         
         try:
             if self.cosmo_exp == 'num_tracers':
-                self.plotter.design_comparison(eval_step=eval_step, log_scale=True, use_fractional=False)
+                self.plotter.design_comparison(
+                    eval_step=eval_step, log_scale=True, 
+                    use_fractional=False, filename="design_comparison")
                 self._update_runtime()
         except Exception as e:
             print(f"Warning: design_comparison failed: {e}")
@@ -1536,32 +1701,33 @@ class Evaluator:
             print(f"Warning: eig_designs failed: {e}")
             traceback.print_exc()
         
-        try:
-            # Plot posterior at different training steps
-            steps_to_plot = [self.total_steps//4, self.total_steps//2, self.total_steps*3//4, 'last']
-            self.plotter.posterior_steps(
-                steps=steps_to_plot,
-                levels=self.levels,
-                guide_samples=self.guide_samples,
-                filename='posterior_steps',
-                transform_output=self.nf_transform_output
-            )
-            self._update_runtime()
-        except Exception as e:
-            print(f"Warning: posterior_steps failed: {e}")
-            traceback.print_exc()
+        if self.step_diagnostics:
+            try:
+                # Plot posterior at different training steps
+                steps_to_plot = [self.total_steps//4, self.total_steps//2, self.total_steps*3//4, 'last']
+                self.plotter.posterior_steps(
+                    steps=steps_to_plot,
+                    levels=self.levels,
+                    guide_samples=self.guide_samples,
+                    filename='posterior_steps',
+                    transform_output=self.nf_transform_output
+                )
+                self._update_runtime()
+            except Exception as e:
+                print(f"Warning: posterior_steps failed: {e}")
+                traceback.print_exc()
 
-        try:
-            # Compute variable EIG at intermediate training steps (cheap: n_evals=1)
-            eig_steps_to_compute = [self.total_steps//4, self.total_steps//2, self.total_steps*3//4]
-            self.compute_eig_steps(steps=eig_steps_to_compute, n_evals=1)
-            # Plot EIG across training steps (intermediate + final eval_step)
-            all_eig_steps = eig_steps_to_compute + [eval_step]
-            self.plotter.eig_designs(eval_step=all_eig_steps, sort=self.sort, include_nominal=self.include_nominal, filename="eig_designs_steps")
-            self._update_runtime()
-        except Exception as e:
-            print(f"Warning: eig_designs (multi-step) failed: {e}")
-            traceback.print_exc()
+            try:
+                # Compute variable EIG at intermediate training steps (cheap: n_evals=1)
+                eig_steps_to_compute = [self.total_steps//4, self.total_steps//2, self.total_steps*3//4]
+                self.compute_eig_steps(steps=eig_steps_to_compute, n_evals=1)
+                # Plot EIG across training steps (intermediate + final eval_step)
+                all_eig_steps = eig_steps_to_compute + [eval_step]
+                self.plotter.eig_designs(eval_step=all_eig_steps, sort=self.sort, include_nominal=self.include_nominal, filename="eig_designs_steps")
+                self._update_runtime()
+            except Exception as e:
+                print(f"Warning: eig_designs (multi-step) failed: {e}")
+                traceback.print_exc()
 
         try:
             render_overlay(
@@ -1680,6 +1846,7 @@ if __name__ == "__main__":
     parser.add_argument('--marginal-inner-samples', type=int, default=200, help='Guide samples per outer y for marginal posterior entropy (default: 200)')
     parser.add_argument('--marginal-knn-k', type=int, default=3, help='Neighbor rank k for the k-NN entropy estimator (default: 3)')
     parser.add_argument('--marginal', action='store_true', help='Run only the marginal EIG evaluation loop (and its per-subset plots), skipping the full joint EIG pipeline. Requires --marginal-eig-subsets (or marginal_eig_subsets in eval_args.yaml).')
+    parser.add_argument('--step-diagnostics', action='store_true', help='Run intermediate-step diagnostics (posterior_steps and eig_designs_steps). Disabled by default.')
 
     args, extra_args = parser.parse_known_args()
 

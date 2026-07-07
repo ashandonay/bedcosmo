@@ -542,6 +542,14 @@ class BasePlotter:
             display = (display,)
         return tuple(display)
 
+    def _entropy_legend_suffix(self, prior_entropy=None, posterior_entropy=None):
+        if prior_entropy is None or posterior_entropy is None:
+            return ""
+        return (
+            f", H_prior: {float(prior_entropy):.2f} bits"
+            f", H_post: {float(posterior_entropy):.2f} bits"
+        )
+
     def _nf_display_samples(
         self,
         display,
@@ -553,6 +561,10 @@ class BasePlotter:
         input_designs=None,
         eig_values=None,
         nominal_eig=None,
+        nominal_prior_entropy=None,
+        nominal_posterior_entropy=None,
+        prior_entropy_by_design=None,
+        posterior_entropy_by_design=None,
         device=None,
         run_obj=None,
         run_args=None,
@@ -594,9 +606,13 @@ class BasePlotter:
                 run_id = run_obj.info.run_id
                 artifacts_dir = f"{self.storage_path}/mlruns/{exp_id}/{run_id}/artifacts"
                 _, eig_data = self.load_eig_data_file(artifacts_dir, eval_step=eval_step)
-                input_designs, eig_values, nominal_eig = self._parse_eig_for_posterior(
+                input_designs, eig_values, nominal_eig, entropy_info = self._parse_eig_for_posterior(
                     eig_data, eval_step
                 )
+                nominal_prior_entropy = entropy_info.get("nominal_prior_entropy")
+                nominal_posterior_entropy = entropy_info.get("nominal_posterior_entropy")
+                prior_entropy_by_design = entropy_info.get("prior_entropy_by_design")
+                posterior_entropy_by_design = entropy_info.get("posterior_entropy_by_design")
         elif experiment is None:
             raise ValueError("Either experiment or run_obj must be provided")
 
@@ -620,6 +636,9 @@ class BasePlotter:
             eig_str = (
                 f", {eig_label}: {nominal_eig:.3f} bits" if nominal_eig is not None else ""
             )
+            eig_str += self._entropy_legend_suffix(
+                nominal_prior_entropy, nominal_posterior_entropy
+            )
             entries.append({
                 'samples': nominal_samples_gd,
                 'label': f'Nominal Design (NF){eig_str}',
@@ -640,6 +659,13 @@ class BasePlotter:
                 optimal_design = input_designs[optimal_idx]
                 optimal_eig = float(eig_values[optimal_idx])
                 eig_str = f", {eig_label}: {optimal_eig:.3f} bits"
+                opt_prior_h = None
+                opt_post_h = None
+                if prior_entropy_by_design is not None and len(prior_entropy_by_design) > optimal_idx:
+                    opt_prior_h = float(prior_entropy_by_design[optimal_idx])
+                if posterior_entropy_by_design is not None and len(posterior_entropy_by_design) > optimal_idx:
+                    opt_post_h = float(posterior_entropy_by_design[optimal_idx])
+                eig_str += self._entropy_legend_suffix(opt_prior_h, opt_post_h)
                 label = f'Optimal Design (NF){eig_str}'
             elif len(input_designs) >= 1:
                 optimal_design = input_designs[0]
@@ -679,6 +705,10 @@ class BasePlotter:
         input_designs=None,
         eig_values=None,
         nominal_eig=None,
+        nominal_prior_entropy=None,
+        nominal_posterior_entropy=None,
+        prior_entropy_by_design=None,
+        posterior_entropy_by_design=None,
         display=('nominal', 'optimal'),
         levels=(0.68,),
         guide_samples=1000,
@@ -745,6 +775,10 @@ class BasePlotter:
             input_designs=input_designs,
             eig_values=eig_values,
             nominal_eig=nominal_eig,
+            nominal_prior_entropy=nominal_prior_entropy,
+            nominal_posterior_entropy=nominal_posterior_entropy,
+            prior_entropy_by_design=prior_entropy_by_design,
+            posterior_entropy_by_design=posterior_entropy_by_design,
             device=device,
             params=params,
             marginal_eig=marginal_eig,
@@ -974,7 +1008,7 @@ class BasePlotter:
         return nearest, f"step_{nearest}"
 
     def _parse_eig_for_posterior(self, eig_data, eval_step=None, params=None):
-        """Extract input_designs, eig_values, and nominal_eig from eig_data for posterior plots."""
+        """Extract EIG and entropy summaries from eig_data for posterior plots."""
         _, step_str = self._resolve_step(eig_data, eval_step)
         if step_str is None:
             raise ValueError("Could not resolve eval step in EIG data")
@@ -992,6 +1026,23 @@ class BasePlotter:
             nominal_eig = nominal_eig[0] if len(nominal_eig) > 0 else None
         nominal_eig = float(nominal_eig) if nominal_eig is not None else None
 
+        def _scalar_entropy(block, key):
+            val = block.get(key)
+            if val is None:
+                return None
+            if isinstance(val, list):
+                val = val[0] if len(val) > 0 else None
+            return float(val) if val is not None else None
+
+        nominal_prior_entropy = _scalar_entropy(nominal_data, "prior_entropy_avg")
+        nominal_posterior_entropy = _scalar_entropy(nominal_data, "posterior_entropy_avg")
+        prior_entropy_by_design = variable_data.get("prior_entropy_avg")
+        posterior_entropy_by_design = variable_data.get("posterior_entropy_avg")
+        if prior_entropy_by_design is not None:
+            prior_entropy_by_design = np.asarray(prior_entropy_by_design, dtype=float)
+        if posterior_entropy_by_design is not None:
+            posterior_entropy_by_design = np.asarray(posterior_entropy_by_design, dtype=float)
+
         # Fall back to the marginal block for the requested subset when the joint
         # (variable) EIG was not computed -- e.g. a standalone --marginal run.
         # The marginal branch in _extract_run_posterior_data re-applies these,
@@ -1002,11 +1053,21 @@ class BasePlotter:
             if marginal is not None:
                 eig_values = np.array(marginal.get("eigs_avg", []), dtype=float)
                 nominal_eig = float(marginal["nominal"]["eigs_avg"])
+                nominal_prior_entropy = None
+                nominal_posterior_entropy = None
+                prior_entropy_by_design = None
+                posterior_entropy_by_design = None
 
         if eig_values.size == 0:
             raise ValueError("No EIG values found in EIG data")
 
-        return input_designs, eig_values, nominal_eig
+        entropy_info = {
+            "nominal_prior_entropy": nominal_prior_entropy,
+            "nominal_posterior_entropy": nominal_posterior_entropy,
+            "prior_entropy_by_design": prior_entropy_by_design,
+            "posterior_entropy_by_design": posterior_entropy_by_design,
+        }
+        return input_designs, eig_values, nominal_eig, entropy_info
     
     def plot_posterior(
         self,
@@ -1589,7 +1650,7 @@ class RunPlotter(BasePlotter):
         """Extract posterior plotting data from run's MLflow artifacts into a kwargs dict for generate_posterior()."""
         if eig_data is None:
             eig_data = self._get_eig_data(eval_step=eval_step)
-        input_designs, eig_values, nominal_eig = self._parse_eig_for_posterior(eig_data, eval_step, params=params)
+        input_designs, eig_values, nominal_eig, entropy_info = self._parse_eig_for_posterior(eig_data, eval_step, params=params)
         _, step_str = self._resolve_step(eig_data, eval_step)
         step_data = eig_data[step_str]
         marginal_eig = False
@@ -1637,6 +1698,10 @@ class RunPlotter(BasePlotter):
             input_designs=input_designs,
             eig_values=eig_values,
             nominal_eig=nominal_eig,
+            nominal_prior_entropy=entropy_info.get("nominal_prior_entropy"),
+            nominal_posterior_entropy=entropy_info.get("nominal_posterior_entropy"),
+            prior_entropy_by_design=entropy_info.get("prior_entropy_by_design"),
+            posterior_entropy_by_design=entropy_info.get("posterior_entropy_by_design"),
             nominal_grid_eig=nominal_grid_eig,
             title=title,
             marginal_eig=marginal_eig,

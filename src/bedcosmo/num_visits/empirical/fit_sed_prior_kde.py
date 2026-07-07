@@ -31,8 +31,12 @@ Example:
   python -m bedcosmo.num_visits.empirical.fit_sed_prior_kde \
     --weights-csv ~/scratch/bedcosmo/desi_eazy_empirical_prior_nnls/desi_eazy_empirical_weights.csv
 
-For ``transform_input=True`` runs, fit a KDE in NF coordinates and freeze it
-beside the physical KDE::
+For ``transform_input=True`` runs, the build-prior gaussianizer inside
+``sed_prior_kde.joblib`` is the canonical NF input transform. A y-space prior
+KDE (``sed_prior_y_kde.joblib``) is fit automatically beside the KDE during
+``build_prior`` / ``fit_sed_prior_kde`` (used only if wired in explicitly).
+
+Legacy run-id helper remains for old checkpoints::
 
   python -m bedcosmo.num_visits.empirical.fit_sed_prior_kde y-prior <run_id>
 """
@@ -68,22 +72,18 @@ from .fit_eazy_weights_to_desi import (
 from .paths import DEFAULT_EMPIRICAL_PRIOR_DIR, get_prior_kde_path, get_prior_weights_csv
 from .simplex import (
     PARAMETERIZATION_CLR,
-    PARAMETERIZATION_LOGITS,
-    PARAMETERIZATION_WEIGHTS,
-    clr_to_weights,
-    prior_clr_feature_names,
+    PARAMETERIZATION_ILR,
     prior_feature_names,
-    prior_weights_feature_names,
     split_feature_matrix,
     weights_to_clr,
-    weights_to_logits,
+    weights_to_ilr,
 )
 
 PRIOR_KDE_VERSION = 3
-PRIOR_KDE_VERSION_SMOOTH_LOGIT = 3
 PRIOR_KDE_VERSION_PREVIOUS = 2
 PRIOR_KDE_VERSION_LEGACY = 1
 Y_PRIOR_KDE_VERSION = "y_kde_v1"
+DEFAULT_Y_PRIOR_KDE_SAMPLES = 50_000
 
 DEFAULT_KDE_BANDWIDTH = 0.3
 DEFAULT_KDE_DIAGNOSTIC_SAMPLES = 20_000
@@ -261,7 +261,7 @@ def smooth_simplex_weights(a: np.ndarray, eps: float = DEFAULT_SIMPLEX_SMOOTHING
     """
     Make fitted template weights strictly positive and renormalized.
 
-    This is the key smooth-logit step. Exact NNLS zeros become tiny positive
+    This is the key smoothing step. Exact NNLS zeros become tiny positive
     weights, so log-ratios remain finite and the KDE sees a continuous target.
     """
     if eps < 0:
@@ -283,7 +283,7 @@ def smooth_simplex_weights(a: np.ndarray, eps: float = DEFAULT_SIMPLEX_SMOOTHING
 def build_feature_matrix(
     df: pd.DataFrame,
     *,
-    parameterization: str = PARAMETERIZATION_LOGITS,
+    parameterization: str = PARAMETERIZATION_ILR,
     simplex_smoothing_eps: float = DEFAULT_SIMPLEX_SMOOTHING_EPS,
 ) -> tuple[np.ndarray, list[str], np.ndarray]:
     """
@@ -296,12 +296,11 @@ def build_feature_matrix(
     names
         Feature names matching x.
     a_model
-        The simplex weights represented by x. For logit mode these are the
-        smoothed weights; for legacy weights mode these are projected weights.
+        The smoothed simplex weights represented by x.
     """
     n_templates = n_template_coeff_columns(df)
     a_cols = prior_a_column_names(df)
-    expected = prior_weights_feature_names(n_templates)[:n_templates]
+    expected = [f"a{k + 1}" for k in range(n_templates)]
     if a_cols != expected:
         raise ValueError(f"Expected columns {expected}, got {a_cols}")
 
@@ -313,17 +312,13 @@ def build_feature_matrix(
     log_s = df["log_c_scale"].to_numpy(dtype=float)
     z = df["z"].to_numpy(dtype=float)
 
-    if parameterization == PARAMETERIZATION_LOGITS:
-        a_model = smooth_simplex_weights(a_raw, eps=simplex_smoothing_eps)
-        eta = weights_to_logits(a_model, eps=max(simplex_smoothing_eps, A_ZERO_EPS))
-        x = np.column_stack([eta, log_s, z])
+    a_model = smooth_simplex_weights(a_raw, eps=simplex_smoothing_eps)
+    if parameterization == PARAMETERIZATION_ILR:
+        ilr = weights_to_ilr(a_model, eps=max(simplex_smoothing_eps, A_ZERO_EPS))
+        x = np.column_stack([ilr, log_s, z])
     elif parameterization == PARAMETERIZATION_CLR:
-        a_model = smooth_simplex_weights(a_raw, eps=simplex_smoothing_eps)
         clr = weights_to_clr(a_model, eps=max(simplex_smoothing_eps, A_ZERO_EPS))
         x = np.column_stack([clr, log_s, z])
-    elif parameterization == PARAMETERIZATION_WEIGHTS:
-        a_model = smooth_simplex_weights(a_raw, eps=0.0)
-        x = np.column_stack([a_model, log_s, z])
     else:
         raise ValueError(f"Unknown parameterization {parameterization!r}")
 
@@ -360,7 +355,13 @@ def apply_training_support_mask(
 
 
 def get_parameterization(artifact: dict[str, Any]) -> str:
-    return artifact.get("parameterization", PARAMETERIZATION_WEIGHTS)
+    param = artifact.get("parameterization")
+    if param is None:
+        raise KeyError(
+            "KDE artifact has no 'parameterization' key; rebuild with fit_sed_prior_kde.py "
+            "(expected 'ilr' or legacy 'clr')."
+        )
+    return param
 
 
 def get_support_mode(artifact: dict[str, Any]) -> SupportMode:
@@ -370,7 +371,7 @@ def get_support_mode(artifact: dict[str, Any]) -> SupportMode:
     # Backward compatibility with old artifacts.
     if artifact.get("metadata", {}).get("apply_support_mask_default", False):
         return "masked"
-    return "smooth" if get_parameterization(artifact) == PARAMETERIZATION_LOGITS else "none"
+    return "smooth" if get_parameterization(artifact) in (PARAMETERIZATION_CLR, PARAMETERIZATION_ILR) else "none"
 
 
 def get_training_matrix(artifact: dict[str, Any]) -> np.ndarray:
@@ -461,18 +462,18 @@ def pack_kde_artifact(
     training_x: np.ndarray,
     *,
     metadata: dict[str, Any],
-    parameterization: str = PARAMETERIZATION_LOGITS,
+    parameterization: str = PARAMETERIZATION_ILR,
     support_mode: SupportMode = "smooth",
     gaussianizer: Bijector | None = None,
 ) -> dict[str, Any]:
     if "n_templates" in metadata:
         n_templates = int(metadata["n_templates"])
-    elif parameterization == PARAMETERIZATION_LOGITS:
-        n_templates = len(feature_names) - 1
+    elif parameterization == PARAMETERIZATION_ILR:
+        n_templates = len(feature_names) - 1  # f1..f_{K-1}, log_c_scale, z
     elif parameterization == PARAMETERIZATION_CLR:
-        n_templates = len(feature_names) - 2
+        n_templates = len(feature_names) - 2  # f1..fK, log_c_scale, z
     else:
-        n_templates = len(feature_names) - 2
+        raise ValueError(f"Unknown parameterization {parameterization!r}")
 
     return {
         "version": PRIOR_KDE_VERSION,
@@ -486,7 +487,7 @@ def pack_kde_artifact(
         "feature_bounds_min": np.asarray(training_x.min(axis=0), dtype=float),
         "feature_bounds_max": np.asarray(training_x.max(axis=0), dtype=float),
         # Retained for old downstream code that checks this key.
-        "enforce_nonnegative_a": parameterization in (PARAMETERIZATION_LOGITS, PARAMETERIZATION_CLR) or support_mode in ("smooth", "masked"),
+        "enforce_nonnegative_a": parameterization in (PARAMETERIZATION_CLR, PARAMETERIZATION_ILR) or support_mode in ("smooth", "masked"),
         "metadata": metadata,
         "gaussianizer_state": None if gaussianizer is None else gaussianizer.get_state(),
     }
@@ -504,9 +505,9 @@ def postprocess_kde_samples(
     """
     Convert raw KDE draws into valid prior feature rows.
 
-    In recommended smooth-logit mode, this does not mask or project the KDE
-    samples. It only clips features to training bounds, because logits already
-    decode to valid positive simplex weights via softmax.
+    In recommended smooth mode, this does not mask or project the KDE samples.
+    It only clips features to training bounds, because ILR/CLR coordinates
+    already decode to valid positive simplex weights via softmax.
     """
     n_templates = int(artifact["n_templates"])
     parameterization = get_parameterization(artifact)
@@ -523,7 +524,7 @@ def postprocess_kde_samples(
         return np.asarray(out, dtype=float)
 
     # Recommended path: KDE is already in smooth simplex coordinates.
-    if parameterization in (PARAMETERIZATION_LOGITS, PARAMETERIZATION_CLR) and support_mode == "smooth":
+    if parameterization in (PARAMETERIZATION_CLR, PARAMETERIZATION_ILR) and support_mode == "smooth":
         if parameterization == PARAMETERIZATION_CLR:
             # Numerical guard: keep CLR rows centered after KDE/clipping.
             out = np.asarray(out, dtype=float).copy()
@@ -540,24 +541,17 @@ def postprocess_kde_samples(
         training_a = get_training_weights(artifact)
         a = apply_training_support_mask(a, training_a, rng)
 
-    if support_mode in ("smooth", "masked") or parameterization in (PARAMETERIZATION_LOGITS, PARAMETERIZATION_CLR):
-        a = project_a_simplex(a)
-    else:
-        a = renormalize_signed_l1(a)
+    a = project_a_simplex(a)
 
-    if parameterization == PARAMETERIZATION_LOGITS:
-        eps = float(artifact.get("metadata", {}).get("simplex_smoothing_eps", DEFAULT_SIMPLEX_SMOOTHING_EPS))
-        a = smooth_simplex_weights(a, eps=eps if support_mode == "smooth" else 0.0)
-        eta = weights_to_logits(a, eps=max(eps, A_ZERO_EPS))
-        return np.column_stack([eta, log_s, z])
-
+    eps = float(artifact.get("metadata", {}).get("simplex_smoothing_eps", DEFAULT_SIMPLEX_SMOOTHING_EPS))
+    a = smooth_simplex_weights(a, eps=eps if support_mode == "smooth" else 0.0)
+    if parameterization == PARAMETERIZATION_ILR:
+        ilr = weights_to_ilr(a, eps=max(eps, A_ZERO_EPS))
+        return np.column_stack([ilr, log_s, z])
     if parameterization == PARAMETERIZATION_CLR:
-        eps = float(artifact.get("metadata", {}).get("simplex_smoothing_eps", DEFAULT_SIMPLEX_SMOOTHING_EPS))
-        a = smooth_simplex_weights(a, eps=eps if support_mode == "smooth" else 0.0)
         clr = weights_to_clr(a, eps=max(eps, A_ZERO_EPS))
         return np.column_stack([clr, log_s, z])
-
-    return np.column_stack([a, log_s, z])
+    raise ValueError(f"Unknown parameterization {parameterization!r}")
 
 
 def save_sed_prior_kde(path: Path, artifact: dict[str, Any]) -> None:
@@ -579,9 +573,6 @@ def load_sed_prior_kde(path: Path) -> dict[str, Any]:
             f"expected one of {PRIOR_KDE_VERSION}, {PRIOR_KDE_VERSION_PREVIOUS}, "
             f"or {PRIOR_KDE_VERSION_LEGACY}"
         )
-    if version == PRIOR_KDE_VERSION_LEGACY and "parameterization" not in artifact:
-        artifact = dict(artifact)
-        artifact["parameterization"] = PARAMETERIZATION_WEIGHTS
     if "support_mode" not in artifact:
         artifact = dict(artifact)
         artifact["support_mode"] = get_support_mode(artifact)
@@ -659,16 +650,13 @@ def fit_y_prior_kde(
     }
 
 
-def fit_and_save_y_prior_kde_for_run(
+def _load_experiment_for_y_prior_fit(
     run_id: str,
     *,
     cosmo_exp: str = "num_visits",
-    n_samples: int = 100_000,
-    seed: int = 0,
-    bandwidth: float | str | None = None,
     storage_path: str | Path | None = None,
-) -> Path:
-    """Load a trained run, fit y-KDE with its checkpoint bijector, and freeze to artifacts."""
+):
+    """Load a trained run and experiment for y-space prior fitting."""
     import mlflow
 
     from bedcosmo.util import get_checkpoint, init_experiment, parse_mlflow_params
@@ -700,6 +688,101 @@ def fit_and_save_y_prior_kde_for_run(
         checkpoint=checkpoint,
         device="cpu",
         global_rank=0,
+    )
+    return storage_path, run, experiment
+
+
+def fit_y_prior_kde_from_artifact(
+    artifact: dict[str, Any],
+    *,
+    n_samples: int = DEFAULT_Y_PRIOR_KDE_SAMPLES,
+    seed: int = 0,
+    bandwidth: float | str | None = None,
+    kernel: str = "gaussian",
+    kde_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """Fit a y-space KDE using the build-prior NF gaussianizer (no run needed).
+
+    Draws physical samples from the KDE, pushes them through the artifact's own
+    gaussianizer (the same map the runtime uses as ``params_to_unconstrained``
+    for empirical runs), then fits a KDE on the resulting ``y``. A nonparametric
+    KDE in ``y`` can represent higher-order dependence; see the module README for
+    how it is (not) wired at runtime.
+    """
+    if artifact.get("gaussianizer_state") is None:
+        raise RuntimeError(
+            "KDE artifact has no gaussianizer_state; rebuild without --no-gaussianizer"
+        )
+
+    names = list(artifact["feature_names"])
+    whitening = get_gaussianizer_whitening(artifact)
+    if bandwidth is None:
+        bandwidth = artifact.get("metadata", {}).get("bandwidth", DEFAULT_KDE_BANDWIDTH)
+    x = sample_sed_prior(artifact, int(n_samples), seed=int(seed))
+    y_all = gaussianize_with(
+        get_empirical_gaussianizer(artifact),
+        x,
+        whitening=whitening,
+    )
+    kde, scaler = fit_sed_prior_kde(y_all, bandwidth=bandwidth, kernel=kernel)
+
+    return {
+        "version": Y_PRIOR_KDE_VERSION,
+        "kde": kde,
+        "scaler": scaler,
+        "feature_names": names,
+        "metadata": {
+            "n_fit_samples": int(n_samples),
+            "fit_seed": int(seed),
+            "bandwidth": float(getattr(kde, "bandwidth", bandwidth)),
+            "kernel": kernel,
+            "source_physical_kde": str(kde_path) if kde_path is not None else None,
+            "nf_transform": "build_prior_gaussianizer",
+            "nf_gaussianizer_whitening": whitening,
+            "transform_input": True,
+            "input_transform_type": "joint",
+        },
+    }
+
+
+def fit_and_save_y_prior_kde_for_kde(
+    kde_path: str | Path,
+    *,
+    n_samples: int = DEFAULT_Y_PRIOR_KDE_SAMPLES,
+    seed: int = 0,
+    bandwidth: float | str | None = None,
+    kernel: str = "gaussian",
+) -> Path:
+    """Fit y-KDE beside a scratch/build ``sed_prior_kde.joblib``."""
+    kde_path = Path(kde_path).expanduser().resolve()
+    artifact = load_sed_prior_kde(kde_path)
+    y_artifact = fit_y_prior_kde_from_artifact(
+        artifact,
+        n_samples=n_samples,
+        seed=seed,
+        bandwidth=bandwidth,
+        kernel=kernel,
+        kde_path=kde_path,
+    )
+    dest = kde_path.parent / "sed_prior_y_kde.joblib"
+    save_y_prior_kde(dest, y_artifact)
+    return dest
+
+
+def fit_and_save_y_prior_kde_for_run(
+    run_id: str,
+    *,
+    cosmo_exp: str = "num_visits",
+    n_samples: int = 100_000,
+    seed: int = 0,
+    bandwidth: float | str | None = None,
+    storage_path: str | Path | None = None,
+) -> Path:
+    """Load a trained run, fit y-KDE with its checkpoint bijector, and freeze to artifacts."""
+    storage_path, run, experiment = _load_experiment_for_y_prior_fit(
+        run_id,
+        cosmo_exp=cosmo_exp,
+        storage_path=storage_path,
     )
     artifact = fit_y_prior_kde(
         experiment,
@@ -792,7 +875,7 @@ def samples_to_coeffs(
     x: np.ndarray,
     n_templates: int,
     *,
-    parameterization: str = PARAMETERIZATION_LOGITS,
+    parameterization: str = PARAMETERIZATION_ILR,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     return _split_feature_matrix_any(x, n_templates, parameterization=parameterization)
 
@@ -865,12 +948,12 @@ def main() -> None:
     )
     parser.add_argument(
         "--parameterization",
-        choices=(PARAMETERIZATION_CLR, PARAMETERIZATION_LOGITS, PARAMETERIZATION_WEIGHTS),
-        default=PARAMETERIZATION_CLR,
+        choices=(PARAMETERIZATION_ILR, PARAMETERIZATION_CLR),
+        default=PARAMETERIZATION_ILR,
         help=(
-            "clr: recommended centered log-ratio features f1..fK; "
-            "logits: K-1 log-ratios against the last template; "
-            "weights: legacy a1..aK."
+            "ilr: recommended isometric log-ratio features f1..f_{K-1} "
+            "(full-rank, well-posed entropy); "
+            "clr: legacy centered log-ratio features f1..fK (rank K-1, sum-zero)."
         ),
     )
     parser.add_argument(
@@ -878,7 +961,7 @@ def main() -> None:
         type=float,
         default=DEFAULT_SIMPLEX_SMOOTHING_EPS,
         help=(
-            "Positive floor added to every a_k before logit training. "
+            "Positive floor added to every a_k before log-ratio (CLR/ILR) training. "
             "Use 1e-5 (default) or 1e-4 for smooth NF-friendly priors."
         ),
     )
@@ -902,7 +985,7 @@ def main() -> None:
     parser.add_argument(
         "--no-support-mask",
         action="store_true",
-        help="Backward-compatible alias for --support-mode smooth in logit mode / none in weights mode.",
+        help="Backward-compatible alias for --support-mode smooth.",
     )
     parser.add_argument(
         "--no-clip-to-training-bounds",
@@ -913,6 +996,29 @@ def main() -> None:
         "--no-gaussianizer",
         action="store_true",
         help="Do not fit/store the empirical CDF + Gaussian-copula gaussianizer.",
+    )
+    parser.add_argument(
+        "--no-y-kde",
+        action="store_true",
+        help="Skip fitting the y-space prior KDE (normally written beside --out).",
+    )
+    parser.add_argument(
+        "--y-kde-samples",
+        type=int,
+        default=DEFAULT_Y_PRIOR_KDE_SAMPLES,
+        help="Reference draws for the build-time y-prior KDE.",
+    )
+    parser.add_argument(
+        "--y-kde-seed",
+        type=int,
+        default=None,
+        help="Random seed for y-KDE fit draws (default: --seed + 300003).",
+    )
+    parser.add_argument(
+        "--y-kde-bandwidth",
+        type=float,
+        default=None,
+        help="Bandwidth for the y-prior KDE in scaled space (default: physical KDE bandwidth).",
     )
     parser.add_argument(
         "--gaussianizer-shrinkage",
@@ -996,7 +1102,7 @@ def main() -> None:
 
     if args.simplex_smoothing_eps < 0:
         raise ValueError("--simplex-smoothing-eps must be >= 0")
-    if args.parameterization in (PARAMETERIZATION_LOGITS, PARAMETERIZATION_CLR) and args.simplex_smoothing_eps <= 0:
+    if args.parameterization in (PARAMETERIZATION_CLR, PARAMETERIZATION_ILR) and args.simplex_smoothing_eps <= 0:
         raise ValueError(
             "--simplex-smoothing-eps must be > 0 for smooth simplex-coordinate priors. "
             "Use a small value like 1e-5 or 1e-4."
@@ -1004,8 +1110,8 @@ def main() -> None:
 
     support_mode: SupportMode = args.support_mode
     if args.no_support_mask:
-        support_mode = "smooth" if args.parameterization in (PARAMETERIZATION_LOGITS, PARAMETERIZATION_CLR) else "none"
-    if args.parameterization in (PARAMETERIZATION_LOGITS, PARAMETERIZATION_CLR) and support_mode == "none":
+        support_mode = "smooth" if args.parameterization in (PARAMETERIZATION_CLR, PARAMETERIZATION_ILR) else "none"
+    if args.parameterization in (PARAMETERIZATION_CLR, PARAMETERIZATION_ILR) and support_mode == "none":
         # Smooth simplex coordinates always imply valid simplex weights through softmax.
         support_mode = "smooth"
 
@@ -1100,7 +1206,6 @@ def main() -> None:
             max_rows=max_rows,
             seed=args.seed,
         )
-        y_train = gaussianize_with(gaussianizer, x, args.gaussianizer_whitening)
         y_train_marginal = gaussianize_with(gaussianizer, x, "none")
         y_train_whitened = gaussianize_with(gaussianizer, x, "cholesky")
         print("  gaussianizer:    enabled")
@@ -1154,7 +1259,7 @@ def main() -> None:
         "gaussianizer_fit_seed": None if gaussianizer is None else int(gaussianizer_fit_seed),
         "gaussianizer_fit_n_rows": None if gaussianizer_fit_x is None else int(gaussianizer_fit_x.shape[0]),
         # Backward-compatible metadata keys.
-        "enforce_nonnegative_a": args.parameterization in (PARAMETERIZATION_LOGITS, PARAMETERIZATION_CLR) or support_mode in ("smooth", "masked"),
+        "enforce_nonnegative_a": args.parameterization in (PARAMETERIZATION_CLR, PARAMETERIZATION_ILR) or support_mode in ("smooth", "masked"),
         "apply_support_mask_default": support_mode == "masked",
         "notes": (
             "Recommended artifact is smooth CLR KDE: epsilon-smoothed simplex "
@@ -1176,6 +1281,21 @@ def main() -> None:
     save_sed_prior_kde(out_path, artifact)
     out_path.with_suffix(".json").write_text(json.dumps(metadata, indent=2) + "\n")
     print(f"Saved KDE prior: {out_path}")
+
+    if gaussianizer is not None and not args.no_y_kde:
+        y_kde_seed = (
+            int(args.y_kde_seed)
+            if args.y_kde_seed is not None
+            else int(args.seed) + 300_003
+        )
+        y_kde_path = fit_and_save_y_prior_kde_for_kde(
+            out_path,
+            n_samples=int(args.y_kde_samples),
+            seed=y_kde_seed,
+            bandwidth=args.y_kde_bandwidth,
+            kernel=args.kernel,
+        )
+        print(f"Saved y-prior KDE: {y_kde_path}")
 
     if args.sample > 0:
         mask_arg = True if support_mode == "masked" else False
@@ -1235,8 +1355,8 @@ def main() -> None:
 
         # Plot 1: decoded physical simplex weights a_k plus log scale and z.
         # This is the plot you should use to inspect the actual SED mixture
-        # coefficients that will be passed downstream. Even when the KDE is
-        # trained in logit space, this plot is in decoded weight space.
+        # coefficients that will be passed downstream. Even though the KDE is
+        # trained in log-ratio (ILR/CLR) space, this plot is in decoded weight space.
         joint, labels = build_prior_parameter_samples(a, log_s, z)
         decoded_name = "kde_samples_triangle.png"
         save_triangle_plot(
@@ -1252,12 +1372,12 @@ def main() -> None:
         )
         print(f"Saved decoded-weight triangle: {out_path.parent / decoded_name}")
 
-        # Plot 2: actual KDE feature coordinates. For the recommended CLR
-        # parameterization this shows f_i = log(a_i) - mean_j log(a_j),
+        # Plot 2: actual KDE feature coordinates. For the recommended ILR
+        # parameterization this shows the 11 isometric log-ratio coords f1..f11,
         # log_c_scale, z. This is the space where smoothness/Gaussianization
         # should be judged.
-        if args.parameterization in (PARAMETERIZATION_LOGITS, PARAMETERIZATION_CLR):
-            suffix = "clr" if args.parameterization == PARAMETERIZATION_CLR else "logit"
+        if args.parameterization in (PARAMETERIZATION_CLR, PARAMETERIZATION_ILR):
+            suffix = args.parameterization
             feature_name = f"kde_samples_{suffix}_triangle.png"
             save_triangle_plot(
                 out_path.parent,

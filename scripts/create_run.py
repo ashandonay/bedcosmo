@@ -13,7 +13,9 @@ the job, which attaches to this run (see bedcosmo.train._init_run) instead of cr
 Snapshotted artifacts:
   - prior_args.yaml   (from --prior-args-path, or from --prior-flow-path's run when set)
   - design_args.yaml  (from --design-args-path)
+  - ref_cov.npy       (scaling mode only; the reference covariance, from --ref-cov or the dataset default)
   - emulators/<tracer_bin>.pt  (when --likelihood-mode == emulator)
+  - empirical/sed_prior_kde.joblib  (num_visits empirical; loaded from artifacts/empirical/)
 
 Only the train flow uses this. resume/restart/eval/grid attach to runs derived from MLflow state.
 
@@ -30,6 +32,7 @@ import shutil
 import sys
 
 import mlflow
+import yaml
 from mlflow.tracking import MlflowClient
 
 from bedcosmo.util import get_experiment_config_path, extract_run_info_from_checkpoint_path
@@ -46,6 +49,7 @@ def _parse_args():
     parser.add_argument("--prior-args-path", type=str, default=None)
     parser.add_argument("--design-args-path", type=str, default=None)
     parser.add_argument("--prior-flow-path", type=str, default=None)
+    parser.add_argument("--ref-cov", type=str, default=None)
     args, _ = parser.parse_known_args()
     return args
 
@@ -85,8 +89,32 @@ def _snapshot_design_args(args, artifacts_dir):
     shutil.copy2(src, os.path.join(artifacts_dir, "design_args.yaml"))
 
 
+def _snapshot_ref_cov(args, artifacts_dir):
+    # Scaling mode scales a reference covariance, so freeze it into the run: a queued job
+    # (and all later eval/resume) then uses exactly the cov present at submission -- the
+    # default desi_cov.npy is as editable as a custom one. Only meaningful for scaling
+    # mode; emulator mode predicts the covariance from its (separately snapshotted)
+    # checkpoints. Source is --ref-cov when given (absolute/user path as-is, else relative
+    # to the dataset data dir, mirroring NumTracers' resolution), otherwise the dataset's
+    # default desi_cov.npy. Snapshot as ref_cov.npy.
+    if args.cosmo_exp != "num_tracers" or args.likelihood_mode != "scaling":
+        return
+    default_cov_dir = os.path.join(os.environ["HOME"], f"data/desi/bao_{args.dataset}")
+    if args.ref_cov:
+        ref_cov = os.path.expanduser(args.ref_cov)
+        src = ref_cov if os.path.isabs(ref_cov) else os.path.join(default_cov_dir, ref_cov)
+    else:
+        src = os.path.join(default_cov_dir, "desi_cov.npy")
+    if not os.path.exists(src):
+        raise FileNotFoundError(f"Reference covariance file not found: {src}")
+    shutil.copy2(src, os.path.join(artifacts_dir, "ref_cov.npy"))
+    print(f"Snapshotted reference covariance {src} -> artifacts/ref_cov.npy", file=sys.stderr)
+
+
 def _snapshot_emulators(args, artifacts_dir):
-    # Only num_tracers has emulator checkpoints; resolve and copy each non-null .pt.
+    # Only num_tracers emulator mode has checkpoints; resolve and copy each non-null .pt.
+    if args.cosmo_exp != "num_tracers" or args.likelihood_mode != "emulator":
+        return
     from bedcosmo.num_tracers.experiment import NumTracers
 
     checkpoints = NumTracers.resolve_emulator_checkpoints(args.analysis, args.cosmo_model, args.dataset)
@@ -103,6 +131,33 @@ def _snapshot_emulators(args, artifacts_dir):
         shutil.copy2(ckpt_path, os.path.join(emu_dir, f"{tracer_bin}.pt"))
         copied.append(tracer_bin)
     print(f"Snapshotted emulator checkpoints: {copied}", file=sys.stderr)
+
+
+def _snapshot_sed_prior_kde(args, artifacts_dir):
+    if args.cosmo_exp != "num_visits" or args.cosmo_model != "empirical":
+        return
+    prior_path = os.path.join(artifacts_dir, "prior_args.yaml")
+    if not os.path.exists(prior_path):
+        print("Warning: prior_args.yaml missing; skipping empirical KDE snapshot", file=sys.stderr)
+        return
+    from bedcosmo.num_visits.empirical.sed_prior import (
+        sed_prior_kde_artifact_path,
+        snapshot_sed_prior_kde,
+    )
+
+    with open(prior_path, "r") as f:
+        prior_args = yaml.safe_load(f) or {}
+    prior_args = snapshot_sed_prior_kde(
+        prior_args,
+        artifacts_dir,
+        cosmo_exp=args.cosmo_exp,
+    )
+    with open(prior_path, "w") as f:
+        yaml.dump(prior_args, f, default_flow_style=False, sort_keys=False)
+    print(
+        f"Snapshotted empirical KDE -> {sed_prior_kde_artifact_path(artifacts_dir)}",
+        file=sys.stderr,
+    )
 
 
 def main():
@@ -123,8 +178,9 @@ def main():
 
     _snapshot_prior_args(args, storage_path, artifacts_dir)
     _snapshot_design_args(args, artifacts_dir)
-    if args.likelihood_mode == "emulator":
-        _snapshot_emulators(args, artifacts_dir)
+    _snapshot_ref_cov(args, artifacts_dir)
+    _snapshot_emulators(args, artifacts_dir)
+    _snapshot_sed_prior_kde(args, artifacts_dir)
 
     client.set_tag(run_id, "submit_status", "queued")
     client.set_tag(run_id, "submit_time", datetime.datetime.now().isoformat(timespec="seconds"))
