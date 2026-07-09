@@ -42,6 +42,7 @@ SED_PRIOR_FLOW_FILENAMES = {
     SPACE_NATIVE: "sed_prior_flow_native.pt",
     SPACE_GAUSSIANIZED: "sed_prior_flow_gaussianized.pt",
 }
+PRIOR_FLOW_TRAINING_PLOT = "prior_flow_training.png"
 
 
 def _build_nsf(dim: int, config: dict[str, Any]):
@@ -321,6 +322,58 @@ def _draw_space_samples(artifact, space: str, n: int, seed: int, whitening: str 
     raise ValueError(f"unknown space {space!r}")
 
 
+def plot_training_convergence(flow_paths: dict[str, Path], out_path: str | Path) -> Path:
+    """Plot held-out eval NLL vs epoch for each trained flow, one subplot per space.
+
+    A convergence sanity check saved beside the ``.pt`` files. Loads only the flow
+    metadata (``meta["train"]["eval_nll_history"]``); no retraining, no mlflow run.
+    """
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    out_path = Path(out_path)
+    fig, axes = plt.subplots(
+        1, len(flow_paths), figsize=(6.0 * len(flow_paths), 4.4), squeeze=False
+    )
+    for ax, (space, path) in zip(axes.ravel(), flow_paths.items()):
+        tr = PriorFlow.load(path).meta["train"]
+        hist = np.asarray(tr["eval_nll_history"], dtype=float)
+        epochs = np.arange(len(hist))
+        best_epoch = int(hist.argmin())
+        best = float(hist[best_epoch])
+
+        ax.plot(epochs, hist, color="C0", lw=1.3, label="held-out eval NLL")
+        ax.axhline(best, color="C3", ls="--", lw=1.0, alpha=0.7)
+        ax.plot([best_epoch], [best], "o", color="C3", ms=7, label=f"best (ep {best_epoch})")
+        ax.annotate(
+            f"best NLL={best:.3f}",
+            xy=(best_epoch, best),
+            xytext=(0.5, 0.85),
+            textcoords="axes fraction",
+            fontsize=9,
+            ha="center",
+        )
+        # settle-in ylim: ignore the first few noisy epochs so the plateau is visible
+        tail = hist[min(5, len(hist) - 1) :]
+        ax.set_ylim(best - 0.05 * (tail.max() - best + 1e-9), tail.max() + 0.1)
+        ax.set_title(
+            f"{space} flow\nn_train={tr['n_train']}  lr={tr['lr']}  epochs={tr['epochs']}",
+            fontsize=10,
+        )
+        ax.set_xlabel("epoch")
+        ax.set_ylabel("eval NLL (standardized coords, nats)")
+        ax.legend(fontsize=8)
+        ax.grid(alpha=0.25)
+
+    fig.suptitle("Empirical SED prior-flow training convergence", fontsize=12)
+    fig.tight_layout(rect=(0, 0, 1, 0.96))
+    fig.savefig(out_path, dpi=130)
+    plt.close(fig)
+    return out_path
+
+
 def train_and_save_prior_flows_for_kde(
     kde_path: str | Path,
     *,
@@ -364,6 +417,8 @@ def train_and_save_prior_flows_for_kde(
             f"[save]  {space}: {dest}  (best_eval_nll={pf.meta['train']['best_eval_nll']:.4f})",
             flush=True,
         )
+    plot_path = plot_training_convergence(written, out_dir / PRIOR_FLOW_TRAINING_PLOT)
+    print(f"[plot]  training convergence: {plot_path}", flush=True)
     return written
 
 
