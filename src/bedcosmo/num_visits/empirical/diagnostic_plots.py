@@ -38,7 +38,6 @@ from __future__ import annotations
 
 import argparse
 import glob
-import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -51,18 +50,16 @@ import yaml
 from bedcosmo.num_visits import NumVisits
 from bedcosmo.util import get_experiment_config_path
 
+from .fit_eazy_weights_to_desi import prior_a_column_names, read_redrock
 from .fit_sed_prior_kde import (
     DEFAULT_KDE_DIAGNOSTIC_SAMPLES,
     apply_training_support_mask,
-    clr_to_weights,
     gaussianize_with,
     get_empirical_gaussianizer,
     load_prior_training_table,
     load_sed_prior_kde,
-    prior_clr_feature_names,
     sample_sed_prior,
 )
-from .fit_eazy_weights_to_desi import prior_a_column_names, read_redrock
 from .paths import (
     ZWARN_UNSTABLE_BIT,
     add_desi_dir_argument,
@@ -70,10 +67,11 @@ from .paths import (
     resolve_desi_dir,
 )
 from .sed_prior import sample_prior_batch
+from .simplex import clr_to_weights, prior_clr_feature_names
 
 DEFAULT_INACTIVE_WEIGHT_THRESHOLD = 1e-4
 DEFAULT_PRIOR_DIR = get_prior_build_dir()
-PRIOR_KDE_FILENAME = "sed_prior_kde.joblib"
+PRIOR_KDE_FILENAME = "sed_prior_kde_native.joblib"
 PRIOR_WEIGHTS_FILENAME = "desi_eazy_empirical_weights.csv"
 DIAGNOSTICS_DIRNAME = "diagnostics"
 
@@ -173,7 +171,7 @@ def load_experiment_configs(
     with open(design_path) as f:
         design_args = yaml.safe_load(f)
     design_args["input_type"] = "nominal"
-    prior_args["prior_kde_source"] = str(kde_path.resolve())
+    prior_args["prior_dir"] = str(kde_path.parent.resolve())
     prior_args["prior_pool_size"] = pool_size
     prior_args["prior_pool_seed"] = pool_seed
     return prior_args, design_args
@@ -1175,7 +1173,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--kde-path",
         type=Path,
         default=None,
-        help="Override KDE path (default: <prior-dir>/sed_prior_kde.joblib).",
+        help="Override KDE path (default: <prior-dir>/sed_prior_kde_native.joblib).",
     )
     p_clr.add_argument(
         "--sample",
@@ -1247,7 +1245,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--kde-path",
         type=Path,
         default=None,
-        help="Override KDE path (default: <prior-dir>/sed_prior_kde.joblib).",
+        help="Override KDE path (default: <prior-dir>/sed_prior_kde_native.joblib).",
     )
     p_sed.add_argument("--n-samples", type=int, default=12)
     p_sed.add_argument("--seed", type=int, default=7)
@@ -1275,7 +1273,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--kde-path",
         type=Path,
         default=None,
-        help="Override KDE path (default: <prior-dir>/sed_prior_kde.joblib).",
+        help="Override KDE path (default: <prior-dir>/sed_prior_kde_native.joblib).",
     )
     p_mag.add_argument("--n-samples", type=int, default=5000)
     p_mag.add_argument("--seed", type=int, default=7)

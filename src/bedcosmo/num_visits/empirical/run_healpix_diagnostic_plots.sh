@@ -10,12 +10,19 @@ HEALPIX_DIR="${PRIOR_DIR}/healpix"
 SEED="${SEED:-7}"
 PLOT_N_EXAMPLES="${PLOT_N_EXAMPLES:-8}"
 PLOT_TOP_OUTLIERS="${PLOT_TOP_OUTLIERS:-5}"
+# Template-bank .param; set for non-default banks, e.g.
+# TEMPLATE_PARAM=templates/eazy_v1.0.spectra.param
+TEMPLATE_PARAM="${TEMPLATE_PARAM:-}"
 PY="conda run -n bedcosmo python -m bedcosmo.num_visits.empirical"
 
 # Optional override; omit to use Python default ($SCRATCH/bedcosmo/desi/tiny_dr1).
 DESI_DIR_ARGS=()
 if [[ -n "${DESI_DIR:-}" ]]; then
   DESI_DIR_ARGS=(--desi-dir "${DESI_DIR}")
+fi
+TEMPLATE_PARAM_ARGS=()
+if [[ -n "${TEMPLATE_PARAM}" ]]; then
+  TEMPLATE_PARAM_ARGS=(--template-param "${TEMPLATE_PARAM}")
 fi
 
 HEALPIX=(23040 27257 27245 27259 27247 27256 27258 27344 26282)
@@ -34,6 +41,7 @@ for hp in "${HEALPIX[@]}"; do
     --healpix "${hp}" \
     --outdir "${out}" \
     "${DESI_DIR_ARGS[@]}" \
+    "${TEMPLATE_PARAM_ARGS[@]}" \
     --plot-n-examples "${PLOT_N_EXAMPLES}" \
     --plot-top-outliers "${PLOT_TOP_OUTLIERS}" \
     --seed "${SEED}"

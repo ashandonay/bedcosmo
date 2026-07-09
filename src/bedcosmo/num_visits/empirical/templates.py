@@ -8,11 +8,12 @@ from urllib.request import urlretrieve
 
 import numpy as np
 
-from .paths import get_eazy_templates_dir
+from .paths import get_template_dir
 
 EAZY_RAW_BASE = "https://raw.githubusercontent.com/gbrammer/eazy-photoz/master/"
-DEFAULT_TEMPLATES_DIR = get_eazy_templates_dir()
-DEFAULT_PARAM_12D = "templates/fsps_full/fsps_QSF_12_v3.param"
+DEFAULT_TEMPLATE_DIR = get_template_dir()
+DEFAULT_TEMPLATE_PARAM_12D = "templates/fsps_full/fsps_QSF_12_v3.param"
+DEFAULT_TEMPLATE_PARAM_6D = "templates/eazy_v1.0.spectra.param"
 # Rest-frame tabulation range for NumVisits / template bank (Angstrom).
 # Native EAZY files span ~91–1e8 Å; LSST needs dense sampling in the optical/NIR only.
 DEFAULT_BANK_WAVE_MIN_AA = 500.0
@@ -74,22 +75,26 @@ def normalize_shape(
 
 
 def load_eazy_templates(
-    param: str = DEFAULT_PARAM_12D,
+    template_param: str = DEFAULT_TEMPLATE_PARAM_12D,
     *,
     overwrite: bool = False,
     norm_min: float = 4000.0,
     norm_max: float = 8000.0,
-    templates_dir: Path | str = DEFAULT_TEMPLATES_DIR,
+    template_dir: Path | str = DEFAULT_TEMPLATE_DIR,
 ) -> tuple[list[np.ndarray], list[np.ndarray], list[str]]:
-    """Download/load per-template wavelength and normalized flux arrays."""
-    templates_dir = Path(os.path.expanduser(templates_dir))
-    local_param = templates_dir / param
-    download(EAZY_RAW_BASE + param, local_param, overwrite=overwrite)
+    """Download/load per-template wavelength and normalized flux arrays.
+
+    ``template_param`` is a template-bank listing file (``.param``) relative to
+    ``template_dir``.
+    """
+    template_dir = Path(os.path.expanduser(template_dir))
+    local_param = template_dir / template_param
+    download(EAZY_RAW_BASE + template_param, local_param, overwrite=overwrite)
     rel_paths = read_template_param(local_param)
     waves: list[np.ndarray] = []
     fluxes: list[np.ndarray] = []
     for rel in rel_paths:
-        local_path = templates_dir / rel
+        local_path = template_dir / rel
         download(EAZY_RAW_BASE + rel, local_path, overwrite=overwrite)
         wave, flux = load_two_column_template(local_path)
         flux = normalize_shape(wave, flux, norm_min=norm_min, norm_max=norm_max)
@@ -140,9 +145,9 @@ def stack_templates_on_grid(
 
 
 def load_eazy_template_bank(
-    param: str = DEFAULT_PARAM_12D,
+    template_param: str = DEFAULT_TEMPLATE_PARAM_12D,
     *,
-    templates_dir: Path | str = DEFAULT_TEMPLATES_DIR,
+    template_dir: Path | str = DEFAULT_TEMPLATE_DIR,
     n_grid: int = 4000,
     wave_min: float | None = None,
     wave_max: float | None = None,
@@ -157,7 +162,7 @@ def load_eazy_template_bank(
     rel_paths : template filenames
     """
     waves, fluxes, rel_paths = load_eazy_templates(
-        param, templates_dir=templates_dir, overwrite=overwrite
+        template_param, template_dir=template_dir, overwrite=overwrite
     )
     wave_common = build_common_rest_grid(
         waves,

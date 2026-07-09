@@ -15,7 +15,8 @@ Snapshotted artifacts:
   - design_args.yaml  (from --design-args-path)
   - ref_cov.npy       (scaling mode only; the reference covariance, from --ref-cov or the dataset default)
   - emulators/<tracer_bin>.pt  (when --likelihood-mode == emulator)
-  - empirical/sed_prior_kde.joblib  (num_visits empirical; loaded from artifacts/empirical/)
+  - empirical/sed_prior_kde_native.joblib  (num_visits empirical; loaded from artifacts/empirical/)
+  - empirical/sed_prior_flow_*.pt   (num_visits empirical, prior_source=flow; beside the KDE)
 
 Only the train flow uses this. resume/restart/eval/grid attach to runs derived from MLflow state.
 
@@ -35,7 +36,7 @@ import mlflow
 import yaml
 from mlflow.tracking import MlflowClient
 
-from bedcosmo.util import get_experiment_config_path, extract_run_info_from_checkpoint_path
+from bedcosmo.util import extract_run_info_from_checkpoint_path, get_experiment_config_path
 
 
 def _parse_args():
@@ -133,29 +134,30 @@ def _snapshot_emulators(args, artifacts_dir):
     print(f"Snapshotted emulator checkpoints: {copied}", file=sys.stderr)
 
 
-def _snapshot_sed_prior_kde(args, artifacts_dir):
+def _snapshot_sed_prior(args, artifacts_dir):
     if args.cosmo_exp != "num_visits" or args.cosmo_model != "empirical":
         return
     prior_path = os.path.join(artifacts_dir, "prior_args.yaml")
     if not os.path.exists(prior_path):
-        print("Warning: prior_args.yaml missing; skipping empirical KDE snapshot", file=sys.stderr)
+        print("Warning: prior_args.yaml missing; skipping empirical prior snapshot", file=sys.stderr)
         return
     from bedcosmo.num_visits.empirical.sed_prior import (
+        PRIOR_SOURCE_FLOW,
+        normalize_prior_source,
         sed_prior_kde_artifact_path,
-        snapshot_sed_prior_kde,
+        snapshot_sed_prior,
     )
 
-    with open(prior_path, "r") as f:
+    with open(prior_path) as f:
         prior_args = yaml.safe_load(f) or {}
-    prior_args = snapshot_sed_prior_kde(
-        prior_args,
-        artifacts_dir,
-        cosmo_exp=args.cosmo_exp,
-    )
+    prior_args = snapshot_sed_prior(prior_args, artifacts_dir, cosmo_exp=args.cosmo_exp)
     with open(prior_path, "w") as f:
         yaml.dump(prior_args, f, default_flow_style=False, sort_keys=False)
+    with_flow = normalize_prior_source(prior_args.get("prior_source")) == PRIOR_SOURCE_FLOW
+    kind = "KDE + prior flow(s)" if with_flow else "KDE"
     print(
-        f"Snapshotted empirical KDE -> {sed_prior_kde_artifact_path(artifacts_dir)}",
+        f"Snapshotted empirical prior ({kind}) -> "
+        f"{sed_prior_kde_artifact_path(artifacts_dir).parent}",
         file=sys.stderr,
     )
 
@@ -180,7 +182,7 @@ def main():
     _snapshot_design_args(args, artifacts_dir)
     _snapshot_ref_cov(args, artifacts_dir)
     _snapshot_emulators(args, artifacts_dir)
-    _snapshot_sed_prior_kde(args, artifacts_dir)
+    _snapshot_sed_prior(args, artifacts_dir)
 
     client.set_tag(run_id, "submit_status", "queued")
     client.set_tag(run_id, "submit_time", datetime.datetime.now().isoformat(timespec="seconds"))

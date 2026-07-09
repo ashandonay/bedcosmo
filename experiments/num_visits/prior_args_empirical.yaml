@@ -2,12 +2,26 @@
 # 11 isometric log-ratio coords f1..f11 (K-1 for K=12 templates) + log_c_scale + z.
 # Rebuild: fit_sed_prior_kde.py on desi_eazy_empirical_weights.csv
 #
-# Optional override when snapshotting KDE at run creation (null = default scratch build).
-# At runtime, trained runs load artifacts/empirical/sed_prior_kde.joblib instead.
+# prior_dir: build directory containing sed_prior_kde_native.joblib and (for prior_source=flow)
+# the sed_prior_flow_*.pt files. null = default $SCRATCH/bedcosmo/num_visits/empirical_prior.
+# At runtime, trained runs load from artifacts/empirical/ instead.
+prior_dir: null
 
-prior_kde_source: null
-eazy_templates_dir: null
-eazy_param: "templates/fsps_full/fsps_QSF_12_v3.param"
+# Prior source:
+#   "flow" (default) -- draw the prior pool from the trained native normalizing flow and
+#           use it as the prior density for entropy (native for transform_input=False;
+#           gaussianized flow for transform_input=True).
+#           Validated against the KDE: flow-vs-KDE A/B PASS, and H_prior=35.0 bits (24.3 nats)
+#           confirmed to match in the eval pipeline.
+#   "kde"  -- draw the pool from the frozen KDE plug-in instead (the pre-flow baseline; set
+#           this for a KDE A/B comparison).
+# The flow(s) (sed_prior_flow_native.pt / _gaussianized.pt) must exist in prior_dir.
+# Train them with:
+#   python -m bedcosmo.num_visits.empirical.prior_flow --space both
+prior_source: flow
+
+template_dir: null
+template_param: "templates/fsps_full/fsps_QSF_12_v3.param"
 prior_pool_size: 65536
 prior_pool_seed: 7
 

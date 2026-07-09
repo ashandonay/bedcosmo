@@ -11,6 +11,8 @@ DEFAULT_SURVEY = "main"
 DEFAULT_PROGRAM = "dark"
 NUM_VISITS_EXPERIMENT = "num_visits"
 DEFAULT_EMPIRICAL_PRIOR_DIR = "empirical_prior"
+SED_PRIOR_KDE_NATIVE_FILENAME = "sed_prior_kde_native.joblib"
+SED_PRIOR_KDE_GAUSSIANIZED_FILENAME = "sed_prior_kde_gaussianized.joblib"
 ZWARN_UNSTABLE_BIT = 2048
 HEALPIX_FITS_SUBDIR = "healpix"
 HEALPIX_DIR_PREFIX = "hp"
@@ -74,7 +76,7 @@ def add_desi_dir_argument(parser) -> None:
     )
 
 
-def get_eazy_templates_dir() -> Path:
+def get_template_dir() -> Path:
     """Cached EAZY template bank (auto-downloaded from GitHub)."""
     return get_bedcosmo_scratch() / "eazy"
 
@@ -134,4 +136,8 @@ def get_prior_weights_csv(name: str = DEFAULT_EMPIRICAL_PRIOR_DIR) -> Path:
 
 
 def get_prior_kde_path(name: str = DEFAULT_EMPIRICAL_PRIOR_DIR) -> Path:
-    return get_prior_build_dir(name) / "sed_prior_kde.joblib"
+    return get_prior_build_dir(name) / SED_PRIOR_KDE_NATIVE_FILENAME
+
+
+def get_prior_kde_gaussianized_path(name: str = DEFAULT_EMPIRICAL_PRIOR_DIR) -> Path:
+    return get_prior_build_dir(name) / SED_PRIOR_KDE_GAUSSIANIZED_FILENAME

@@ -28,9 +28,7 @@ Example:
 from __future__ import annotations
 
 import argparse
-import os
 from pathlib import Path
-from urllib.request import urlretrieve
 
 import numpy as np
 import pandas as pd
@@ -48,13 +46,13 @@ from .paths import (
     resolve_desi_dir,
 )
 from .templates import (
-    DEFAULT_PARAM_12D,
-    DEFAULT_TEMPLATES_DIR,
+    DEFAULT_TEMPLATE_PARAM_12D,
+    DEFAULT_TEMPLATE_PARAM_6D,
+    DEFAULT_TEMPLATE_DIR,
     load_eazy_templates,
 )
 
-DEFAULT_PARAM_6D = "templates/eazy_v1.0.spectra.param"
-EAZY_TEMPLATES_DIR = DEFAULT_TEMPLATES_DIR
+EAZY_TEMPLATES_DIR = DEFAULT_TEMPLATE_DIR
 
 
 def read_redrock(redrock_path: Path):
@@ -1126,7 +1124,15 @@ def main() -> None:
         default=None,
         help="Fit output directory (default: .../num_visits/<build-name>/healpix/hp<HEALPIX>).",
     )
-    parser.add_argument("--param", default=DEFAULT_PARAM_12D)
+    parser.add_argument(
+        "--template-param",
+        default=DEFAULT_TEMPLATE_PARAM_12D,
+        help=(
+            "Template-bank listing file (.param) relative to the templates dir. "
+            "Default is the 12-template FSPS bank; use "
+            f"{DEFAULT_TEMPLATE_PARAM_6D} for the classic 6-template set."
+        ),
+    )
     parser.add_argument("--overwrite-templates", action="store_true")
 
     parser.add_argument(
@@ -1338,7 +1344,7 @@ def main() -> None:
 
     print(f"\nLoading EAZY templates from {EAZY_TEMPLATES_DIR}...")
     template_waves, template_fluxes, template_files = load_eazy_templates(
-        param=args.param,
+        template_param=args.template_param,
         overwrite=args.overwrite_templates,
         norm_min=args.norm_min,
         norm_max=args.norm_max,

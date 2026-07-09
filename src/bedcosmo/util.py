@@ -730,8 +730,7 @@ def init_experiment(
             Artifacts (prior_args.yaml) from the run_obj
         **kwargs: Additional arguments (e.g., device, profile) that will be added to run_args.
     """
-    emulator_artifacts_dir = None
-    empirical_artifacts_dir = None
+    artifacts_dir = None
     ref_cov_artifact_path = None
     if run_obj is not None and run_args is not None:
 
@@ -739,24 +738,17 @@ def init_experiment(
 
         artifact_uri = run_obj.info.artifact_uri
         if artifact_uri.startswith("file://"):
-            artifact_path = artifact_uri[7:]  # Remove "file://" prefix
+            artifacts_dir = artifact_uri[7:]  # Remove "file://" prefix
         else:
-            artifact_path = artifact_uri
-        # Emulator checkpoints snapshotted into the run's artifacts at submission time
-        emu_dir = os.path.join(artifact_path, "emulators")
-        if os.path.isdir(emu_dir):
-            emulator_artifacts_dir = emu_dir
-        empirical_dir = os.path.join(artifact_path, "empirical")
-        if os.path.isdir(empirical_dir):
-            empirical_artifacts_dir = empirical_dir
+            artifacts_dir = artifact_uri
         # Reference covariance frozen into the run's artifacts at submission time
         # (num_tracers scaling mode). Takes precedence over run_args.
-        ref_cov_artifact = os.path.join(artifact_path, "ref_cov.npy")
+        ref_cov_artifact = os.path.join(artifacts_dir, "ref_cov.npy")
         if os.path.exists(ref_cov_artifact):
             ref_cov_artifact_path = ref_cov_artifact
         # If design_args is not provided (None), try to load from artifacts first
         if design_args is None:
-            design_args_artifact_path = artifact_path + "/design_args.yaml"
+            design_args_artifact_path = artifacts_dir + "/design_args.yaml"
             if os.path.exists(design_args_artifact_path):
                 with open(design_args_artifact_path, 'r') as f:
                     design_args = yaml.safe_load(f)
@@ -771,7 +763,7 @@ def init_experiment(
         
         # If prior_args is not provided (None), try to load from artifacts
         if prior_args is None:
-            prior_artifact_path = artifact_path + "/prior_args.yaml"
+            prior_artifact_path = artifacts_dir + "/prior_args.yaml"
             if os.path.exists(prior_artifact_path):
                 with open(prior_artifact_path, 'r') as f:
                     prior_args = yaml.safe_load(f)
@@ -821,8 +813,8 @@ def init_experiment(
         exp_args['global_rank'] = global_rank
         if checkpoint is not None and 'bijector_state' in checkpoint.keys():
             exp_args['bijector_state'] = checkpoint['bijector_state']
-        if emulator_artifacts_dir is not None:
-            exp_args['emulator_artifacts_dir'] = emulator_artifacts_dir
+        if artifacts_dir is not None:
+            exp_args['artifacts_dir'] = artifacts_dir
         if ref_cov_artifact_path is not None:
             exp_args['ref_cov'] = ref_cov_artifact_path
         experiment = NumTracers(**exp_args)
@@ -849,8 +841,8 @@ def init_experiment(
         exp_args['global_rank'] = global_rank
         if checkpoint is not None and 'bijector_state' in checkpoint.keys():
             exp_args['bijector_state'] = checkpoint['bijector_state']
-        if empirical_artifacts_dir is not None:
-            exp_args['empirical_artifacts_dir'] = empirical_artifacts_dir
+        if artifacts_dir is not None:
+            exp_args['artifacts_dir'] = artifacts_dir
         experiment = NumVisits(**exp_args)
     
     else:

@@ -32,13 +32,15 @@ Example:
     --weights-csv ~/scratch/bedcosmo/desi_eazy_empirical_prior_nnls/desi_eazy_empirical_weights.csv
 
 For ``transform_input=True`` runs, the build-prior gaussianizer inside
-``sed_prior_kde.joblib`` is the canonical NF input transform. A y-space prior
-KDE (``sed_prior_y_kde.joblib``) is fit automatically beside the KDE during
-``build_prior`` / ``fit_sed_prior_kde`` (used only if wired in explicitly).
+``sed_prior_kde_native.joblib`` is the canonical NF input transform. Runtime prior
+entropy uses the trained PriorFlows (``prior_source: flow``) or the N(0,I)
+shortcut (``prior_source: kde``). An offline gaussianized-space KDE
+(``sed_prior_kde_gaussianized.joblib``) may still be written beside the native KDE
+for diagnostics; it is not loaded by NumVisits.
 
-Legacy run-id helper remains for old checkpoints::
+Legacy run-id helper (fit gaussianized KDE with a checkpoint bijector)::
 
-  python -m bedcosmo.num_visits.empirical.fit_sed_prior_kde y-prior <run_id>
+  python -m bedcosmo.num_visits.empirical.fit_sed_prior_kde gaussianized-kde <run_id>
 """
 
 from __future__ import annotations
@@ -82,8 +84,8 @@ from .simplex import (
 PRIOR_KDE_VERSION = 3
 PRIOR_KDE_VERSION_PREVIOUS = 2
 PRIOR_KDE_VERSION_LEGACY = 1
-Y_PRIOR_KDE_VERSION = "y_kde_v1"
-DEFAULT_Y_PRIOR_KDE_SAMPLES = 50_000
+GAUSSIANIZED_KDE_VERSION = "gaussianized_kde_v1"
+DEFAULT_GAUSSIANIZED_KDE_SAMPLES = 50_000
 
 DEFAULT_KDE_BANDWIDTH = 0.3
 DEFAULT_KDE_DIAGNOSTIC_SAMPLES = 20_000
@@ -579,22 +581,22 @@ def load_sed_prior_kde(path: Path) -> dict[str, Any]:
     return artifact
 
 
-def load_y_prior_kde(path: str | Path) -> dict[str, Any]:
-    """Load a y-space KDE artifact (``version == y_kde_v1``)."""
+def load_gaussianized_kde(path: str | Path) -> dict[str, Any]:
+    """Load a gaussianized-space KDE artifact (``version == gaussianized_kde_v1``)."""
     artifact = joblib.load(path)
     version = artifact.get("version")
-    if version != Y_PRIOR_KDE_VERSION:
+    if version != GAUSSIANIZED_KDE_VERSION:
         raise ValueError(
-            f"Unsupported y-prior KDE version {version!r}; expected {Y_PRIOR_KDE_VERSION!r}"
+            f"Unsupported gaussianized KDE version {version!r}; expected {GAUSSIANIZED_KDE_VERSION!r}"
         )
     return artifact
 
 
-def save_y_prior_kde(path: str | Path, artifact: dict[str, Any]) -> None:
+def save_gaussianized_kde(path: str | Path, artifact: dict[str, Any]) -> None:
     save_sed_prior_kde(Path(path), artifact)
 
 
-def fit_y_prior_kde(
+def fit_gaussianized_kde(
     experiment,
     *,
     n_samples: int = 100_000,
@@ -606,11 +608,11 @@ def fit_y_prior_kde(
     """Fit a KDE on ``y = params_to_unconstrained(theta)`` using the runtime bijector."""
     sed_prior = getattr(experiment, "sed_prior", None)
     if sed_prior is None:
-        raise RuntimeError("fit_y_prior_kde requires experiment.sed_prior")
+        raise RuntimeError("fit_gaussianized_kde requires experiment.sed_prior")
     if not getattr(experiment, "transform_input", False):
-        raise RuntimeError("fit_y_prior_kde requires experiment.transform_input=True")
+        raise RuntimeError("fit_gaussianized_kde requires experiment.transform_input=True")
     if getattr(experiment, "param_bijector", None) is None:
-        raise RuntimeError("fit_y_prior_kde requires experiment.param_bijector")
+        raise RuntimeError("fit_gaussianized_kde requires experiment.param_bijector")
 
     physical = sed_prior.artifact
     if bandwidth is None:
@@ -634,7 +636,7 @@ def fit_y_prior_kde(
     kde, scaler = fit_sed_prior_kde(y_all, bandwidth=bandwidth, kernel=kernel)
 
     return {
-        "version": Y_PRIOR_KDE_VERSION,
+        "version": GAUSSIANIZED_KDE_VERSION,
         "kde": kde,
         "scaler": scaler,
         "feature_names": names,
@@ -650,13 +652,13 @@ def fit_y_prior_kde(
     }
 
 
-def _load_experiment_for_y_prior_fit(
+def _load_experiment_for_gaussianized_kde_fit(
     run_id: str,
     *,
     cosmo_exp: str = "num_visits",
     storage_path: str | Path | None = None,
 ):
-    """Load a trained run and experiment for y-space prior fitting."""
+    """Load a trained run and experiment for gaussianized-space KDE fitting."""
     import mlflow
 
     from bedcosmo.util import get_checkpoint, init_experiment, parse_mlflow_params
@@ -692,16 +694,16 @@ def _load_experiment_for_y_prior_fit(
     return storage_path, run, experiment
 
 
-def fit_y_prior_kde_from_artifact(
+def fit_gaussianized_kde_from_artifact(
     artifact: dict[str, Any],
     *,
-    n_samples: int = DEFAULT_Y_PRIOR_KDE_SAMPLES,
+    n_samples: int = DEFAULT_GAUSSIANIZED_KDE_SAMPLES,
     seed: int = 0,
     bandwidth: float | str | None = None,
     kernel: str = "gaussian",
     kde_path: str | Path | None = None,
 ) -> dict[str, Any]:
-    """Fit a y-space KDE using the build-prior NF gaussianizer (no run needed).
+    """Fit a gaussianized-space KDE using the build-prior NF gaussianizer (no run needed).
 
     Draws physical samples from the KDE, pushes them through the artifact's own
     gaussianizer (the same map the runtime uses as ``params_to_unconstrained``
@@ -727,7 +729,7 @@ def fit_y_prior_kde_from_artifact(
     kde, scaler = fit_sed_prior_kde(y_all, bandwidth=bandwidth, kernel=kernel)
 
     return {
-        "version": Y_PRIOR_KDE_VERSION,
+        "version": GAUSSIANIZED_KDE_VERSION,
         "kde": kde,
         "scaler": scaler,
         "feature_names": names,
@@ -745,18 +747,18 @@ def fit_y_prior_kde_from_artifact(
     }
 
 
-def fit_and_save_y_prior_kde_for_kde(
+def fit_and_save_gaussianized_kde(
     kde_path: str | Path,
     *,
-    n_samples: int = DEFAULT_Y_PRIOR_KDE_SAMPLES,
+    n_samples: int = DEFAULT_GAUSSIANIZED_KDE_SAMPLES,
     seed: int = 0,
     bandwidth: float | str | None = None,
     kernel: str = "gaussian",
 ) -> Path:
-    """Fit y-KDE beside a scratch/build ``sed_prior_kde.joblib``."""
+    """Fit gaussianized-space KDE beside a scratch/build ``sed_prior_kde_native.joblib``."""
     kde_path = Path(kde_path).expanduser().resolve()
     artifact = load_sed_prior_kde(kde_path)
-    y_artifact = fit_y_prior_kde_from_artifact(
+    gaussianized_artifact = fit_gaussianized_kde_from_artifact(
         artifact,
         n_samples=n_samples,
         seed=seed,
@@ -764,12 +766,14 @@ def fit_and_save_y_prior_kde_for_kde(
         kernel=kernel,
         kde_path=kde_path,
     )
-    dest = kde_path.parent / "sed_prior_y_kde.joblib"
-    save_y_prior_kde(dest, y_artifact)
+    from .paths import SED_PRIOR_KDE_GAUSSIANIZED_FILENAME
+
+    dest = kde_path.parent / SED_PRIOR_KDE_GAUSSIANIZED_FILENAME
+    save_gaussianized_kde(dest, gaussianized_artifact)
     return dest
 
 
-def fit_and_save_y_prior_kde_for_run(
+def fit_and_save_gaussianized_kde_for_run(
     run_id: str,
     *,
     cosmo_exp: str = "num_visits",
@@ -778,13 +782,13 @@ def fit_and_save_y_prior_kde_for_run(
     bandwidth: float | str | None = None,
     storage_path: str | Path | None = None,
 ) -> Path:
-    """Load a trained run, fit y-KDE with its checkpoint bijector, and freeze to artifacts."""
-    storage_path, run, experiment = _load_experiment_for_y_prior_fit(
+    """Load a trained run, fit gaussianized KDE with its checkpoint bijector, and freeze to artifacts."""
+    storage_path, run, experiment = _load_experiment_for_gaussianized_kde_fit(
         run_id,
         cosmo_exp=cosmo_exp,
         storage_path=storage_path,
     )
-    artifact = fit_y_prior_kde(
+    artifact = fit_gaussianized_kde(
         experiment,
         n_samples=n_samples,
         seed=seed,
@@ -794,10 +798,10 @@ def fit_and_save_y_prior_kde_for_run(
     artifacts_dir = (
         storage_path / "mlruns" / run.info.experiment_id / run_id / "artifacts"
     )
-    from .sed_prior import sed_prior_y_kde_artifact_path
+    from .sed_prior import sed_prior_kde_artifact_path
 
-    dest = sed_prior_y_kde_artifact_path(artifacts_dir)
-    save_y_prior_kde(dest, artifact)
+    dest = sed_prior_kde_artifact_path(artifacts_dir, space="gaussianized")
+    save_gaussianized_kde(dest, artifact)
     return dest
 
 
@@ -915,7 +919,7 @@ def main() -> None:
         "--out",
         type=Path,
         default=None,
-        help="Output .joblib path (default: <weights-dir>/sed_prior_kde.joblib).",
+        help="Output .joblib path (default: <weights-dir>/sed_prior_kde_native.joblib).",
     )
     parser.add_argument("--max-chi2-dof", type=float, default=DEFAULT_MAX_CHI2_DOF)
     parser.add_argument("--no-quality-cuts", action="store_true")
@@ -998,27 +1002,27 @@ def main() -> None:
         help="Do not fit/store the empirical CDF + Gaussian-copula gaussianizer.",
     )
     parser.add_argument(
-        "--no-y-kde",
+        "--no-gaussianized-kde",
         action="store_true",
-        help="Skip fitting the y-space prior KDE (normally written beside --out).",
+        help="Skip fitting the gaussianized-space KDE (normally written beside --out).",
     )
     parser.add_argument(
-        "--y-kde-samples",
+        "--gaussianized-kde-samples",
         type=int,
-        default=DEFAULT_Y_PRIOR_KDE_SAMPLES,
-        help="Reference draws for the build-time y-prior KDE.",
+        default=DEFAULT_GAUSSIANIZED_KDE_SAMPLES,
+        help="Reference draws for the build-time gaussianized KDE.",
     )
     parser.add_argument(
-        "--y-kde-seed",
+        "--gaussianized-kde-seed",
         type=int,
         default=None,
-        help="Random seed for y-KDE fit draws (default: --seed + 300003).",
+        help="Random seed for gaussianized KDE fit draws (default: --seed + 300003).",
     )
     parser.add_argument(
-        "--y-kde-bandwidth",
+        "--gaussianized-kde-bandwidth",
         type=float,
         default=None,
-        help="Bandwidth for the y-prior KDE in scaled space (default: physical KDE bandwidth).",
+        help="Bandwidth for the gaussianized KDE in scaled space (default: physical KDE bandwidth).",
     )
     parser.add_argument(
         "--gaussianizer-shrinkage",
@@ -1282,20 +1286,20 @@ def main() -> None:
     out_path.with_suffix(".json").write_text(json.dumps(metadata, indent=2) + "\n")
     print(f"Saved KDE prior: {out_path}")
 
-    if gaussianizer is not None and not args.no_y_kde:
-        y_kde_seed = (
-            int(args.y_kde_seed)
-            if args.y_kde_seed is not None
+    if gaussianizer is not None and not args.no_gaussianized_kde:
+        gaussianized_kde_seed = (
+            int(args.gaussianized_kde_seed)
+            if args.gaussianized_kde_seed is not None
             else int(args.seed) + 300_003
         )
-        y_kde_path = fit_and_save_y_prior_kde_for_kde(
+        gaussianized_kde_path = fit_and_save_gaussianized_kde(
             out_path,
-            n_samples=int(args.y_kde_samples),
-            seed=y_kde_seed,
-            bandwidth=args.y_kde_bandwidth,
+            n_samples=int(args.gaussianized_kde_samples),
+            seed=gaussianized_kde_seed,
+            bandwidth=args.gaussianized_kde_bandwidth,
             kernel=args.kernel,
         )
-        print(f"Saved y-prior KDE: {y_kde_path}")
+        print(f"Saved gaussianized KDE: {gaussianized_kde_path}")
 
     if args.sample > 0:
         mask_arg = True if support_mode == "masked" else False
@@ -1441,26 +1445,26 @@ def main() -> None:
                 )
 
 
-def main_y_prior_kde(argv: list[str] | None = None) -> None:
+def main_gaussianized_kde(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(
-        description="Fit and freeze y-prior KDE for a transform_input=True run.",
+        description="Fit and freeze gaussianized KDE for a transform_input=True run.",
     )
     parser.add_argument("run_id", help="MLflow run id")
     parser.add_argument("--n-samples", type=int, default=100_000)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--bandwidth", type=float, default=None)
     args = parser.parse_args(argv)
-    out = fit_and_save_y_prior_kde_for_run(
+    out = fit_and_save_gaussianized_kde_for_run(
         args.run_id,
         n_samples=args.n_samples,
         seed=args.seed,
         bandwidth=args.bandwidth,
     )
-    print(f"Saved y-prior KDE to {out}")
+    print(f"Saved gaussianized KDE to {out}")
 
 
 if __name__ == "__main__":
-    if len(sys.argv) > 1 and sys.argv[1] == "y-prior":
-        main_y_prior_kde(sys.argv[2:])
+    if len(sys.argv) > 1 and sys.argv[1] == "gaussianized-kde":
+        main_gaussianized_kde(sys.argv[2:])
     else:
         main()

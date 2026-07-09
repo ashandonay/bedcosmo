@@ -8,9 +8,10 @@ Default output tree (``--build-name empirical_prior``)::
       healpix/hp23040/desi_eazy_empirical_weights.csv
       healpix/hp27257/...
       desi_eazy_empirical_weights.csv   # combined
-      sed_prior_kde.joblib
-      sed_prior_y_kde.joblib
-      sed_prior_kde.json
+      sed_prior_kde_native.joblib
+      sed_prior_kde_gaussianized.joblib
+      sed_prior_kde_native.json
+      build.log
 
 Shared inputs (downloaded once, reused across builds)::
 
@@ -22,6 +23,8 @@ Example::
   python -m bedcosmo.num_visits.empirical.build_prior
   python -m bedcosmo.num_visits.empirical.build_prior --build-name empirical_prior_test --n-max 600
   python -m bedcosmo.num_visits.empirical.build_prior --healpix 23040 --skip-kde
+  python -m bedcosmo.num_visits.empirical.build_prior \\
+    --build-name empirical_prior_eazy6 --template-param templates/eazy_v1.0.spectra.param
 """
 
 from __future__ import annotations
@@ -46,6 +49,7 @@ from .paths import (
     get_prior_weights_csv,
     resolve_desi_dir,
 )
+from .templates import DEFAULT_TEMPLATE_PARAM_12D
 
 DEFAULT_MAX_CHI2_DOF = 1.2
 DEFAULT_Z_MIN = 0.01
@@ -88,8 +92,38 @@ def resolve_kde_python(explicit: str | None = None) -> str:
 
 def _run(cmd: list[str], *, step: str) -> None:
     print(f"\n{'=' * 72}\n{step}\n{'=' * 72}")
-    print(" ".join(cmd))
-    subprocess.run(cmd, check=True)
+    print(" ".join(cmd), flush=True)
+    # Capture child stdout/stderr so it goes through the build.log tee.
+    result = subprocess.run(cmd, check=False, text=True, capture_output=True)
+    if result.stdout:
+        print(result.stdout, end="" if result.stdout.endswith("\n") else "\n", flush=True)
+    if result.stderr:
+        print(result.stderr, end="" if result.stderr.endswith("\n") else "\n", flush=True)
+    if result.returncode != 0:
+        raise subprocess.CalledProcessError(result.returncode, cmd, result.stdout, result.stderr)
+
+
+class _TeeStream:
+    """Write to the original stream and a log file (line-buffered)."""
+
+    def __init__(self, primary, log_file) -> None:
+        self._primary = primary
+        self._log = log_file
+
+    def write(self, data: str) -> int:
+        self._primary.write(data)
+        self._log.write(data)
+        return len(data)
+
+    def flush(self) -> None:
+        self._primary.flush()
+        self._log.flush()
+
+    def fileno(self):
+        return self._primary.fileno()
+
+    def isatty(self) -> bool:
+        return False
 
 
 def build_prior(
@@ -103,6 +137,7 @@ def build_prior(
     seed: int = 7,
     z_min: float = DEFAULT_Z_MIN,
     fit_method: str = "nnls",
+    template_param: str = DEFAULT_TEMPLATE_PARAM_12D,
     skip_desi: bool = False,
     skip_fit: bool = False,
     skip_combine: bool = False,
@@ -117,16 +152,87 @@ def build_prior(
     Run the full empirical prior pipeline for ``build_name``.
 
     Returns paths to the prior build directory, combined CSV, and KDE artifact.
+    Console output is also written to ``<prior_dir>/build.log``.
     """
     desi_dir = resolve_desi_dir(desi_dir)
     prior_dir = get_prior_build_dir(build_name)
     prior_dir.mkdir(parents=True, exist_ok=True)
     weights_csv = get_prior_weights_csv(build_name)
     kde_path = get_prior_kde_path(build_name)
+    log_path = prior_dir / "build.log"
 
     fit_python = sys.executable
     kde_py = resolve_kde_python(kde_python)
 
+    orig_out, orig_err = sys.stdout, sys.stderr
+    with open(log_path, "w", encoding="utf-8") as log_file:
+        sys.stdout = _TeeStream(orig_out, log_file)
+        sys.stderr = _TeeStream(orig_err, log_file)
+        try:
+            print(f"Logging to {log_path}")
+            _build_prior_body(
+                prior_dir=prior_dir,
+                weights_csv=weights_csv,
+                kde_path=kde_path,
+                desi_dir=desi_dir,
+                build_name=build_name,
+                healpix=healpix,
+                force_desi=force_desi,
+                force_fit=force_fit,
+                n_max=n_max,
+                seed=seed,
+                z_min=z_min,
+                fit_method=fit_method,
+                template_param=template_param,
+                skip_desi=skip_desi,
+                skip_fit=skip_fit,
+                skip_combine=skip_combine,
+                skip_kde=skip_kde,
+                kde_sample=kde_sample,
+                max_chi2_dof=max_chi2_dof,
+                fit_python=fit_python,
+                kde_py=kde_py,
+                allow_nonzero_zwarn=allow_nonzero_zwarn,
+                zwarn_forbid_mask=zwarn_forbid_mask,
+            )
+        finally:
+            sys.stdout = orig_out
+            sys.stderr = orig_err
+
+    return {
+        "prior_dir": prior_dir,
+        "weights_csv": weights_csv,
+        "kde_path": kde_path,
+        "build_log": log_path,
+    }
+
+
+def _build_prior_body(
+    *,
+    prior_dir: Path,
+    weights_csv: Path,
+    kde_path: Path,
+    desi_dir: Path,
+    build_name: str,
+    healpix: list[int] | tuple[int, ...],
+    force_desi: bool,
+    force_fit: bool,
+    n_max: int | None,
+    seed: int,
+    z_min: float,
+    fit_method: str,
+    template_param: str,
+    skip_desi: bool,
+    skip_fit: bool,
+    skip_combine: bool,
+    skip_kde: bool,
+    kde_sample: int,
+    max_chi2_dof: float,
+    fit_python: str,
+    kde_py: str,
+    allow_nonzero_zwarn: bool,
+    zwarn_forbid_mask: int | None,
+) -> None:
     if not skip_desi:
         print(f"\nStep 1/4: ensure DESI coadd + redrock under {desi_dir}")
         for hp in healpix:
@@ -141,6 +247,7 @@ def build_prior(
 
     if not skip_fit:
         print(f"\nStep 2/4: fit EAZY template weights → {prior_dir}/healpix/hp*/")
+        print(f"  template_param={template_param}")
         for hp in healpix:
             outdir = get_healpix_fit_dir(hp, build_name=build_name)
             csv_path = outdir / "desi_eazy_empirical_weights.csv"
@@ -158,6 +265,8 @@ def build_prior(
                 str(desi_dir),
                 "--outdir",
                 str(outdir),
+                "--template-param",
+                str(template_param),
                 "--fit-method",
                 fit_method,
                 "--z-min",
@@ -220,16 +329,13 @@ def build_prior(
     if weights_csv.exists():
         print(f"  Combined weights: {weights_csv}")
     if kde_path.exists():
-        print(f"  KDE artifact:     {kde_path}")
-        y_kde_path = kde_path.parent / "sed_prior_y_kde.joblib"
-        if y_kde_path.exists():
-            print(f"  y-prior KDE:      {y_kde_path}")
+        print(f"  KDE (native):     {kde_path}")
+        from .paths import SED_PRIOR_KDE_GAUSSIANIZED_FILENAME
 
-    return {
-        "prior_dir": prior_dir,
-        "weights_csv": weights_csv,
-        "kde_path": kde_path,
-    }
+        gauss_kde_path = kde_path.parent / SED_PRIOR_KDE_GAUSSIANIZED_FILENAME
+        if gauss_kde_path.exists():
+            print(f"  KDE (gaussianized): {gauss_kde_path}")
+    print(f"  Build log:        {prior_dir / 'build.log'}")
 
 
 def main() -> None:
@@ -263,6 +369,14 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--z-min", type=float, default=DEFAULT_Z_MIN)
     parser.add_argument("--fit-method", choices=("nnls", "wls"), default="nnls")
+    parser.add_argument(
+        "--template-param",
+        default=DEFAULT_TEMPLATE_PARAM_12D,
+        help=(
+            "Template-bank listing file (.param) relative to the templates dir. "
+            "Use templates/eazy_v1.0.spectra.param for the classic 6-template bank."
+        ),
+    )
     parser.add_argument(
         "--max-chi2-dof",
         type=float,
@@ -324,6 +438,7 @@ def main() -> None:
         seed=args.seed,
         z_min=args.z_min,
         fit_method=args.fit_method,
+        template_param=args.template_param,
         skip_desi=args.skip_desi,
         skip_fit=args.skip_fit,
         skip_combine=args.skip_combine,

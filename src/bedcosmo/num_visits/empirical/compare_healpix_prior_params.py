@@ -74,13 +74,27 @@ def a_columns(df: pd.DataFrame) -> list[str]:
     return prior_a_column_names(df)
 
 
+def _probe_a_indices(n_a: int) -> tuple[int, int]:
+    """Pick two representative template indices for summary/plots (0-based).
+
+    Prefer a4/a10 when the bank is large enough (12-template default); otherwise
+    use ~1/4 and ~3/4 of the bank so 6-template builds still work.
+    """
+    if n_a >= 10:
+        return 3, 9
+    if n_a >= 2:
+        return max(0, n_a // 4), min(n_a - 1, (3 * n_a) // 4)
+    return 0, 0
+
+
 def summary_row(df: pd.DataFrame, healpix: int) -> dict:
     cols = a_columns(df)
     a = df[cols].to_numpy(dtype=float) if len(df) else np.empty((0, len(cols)))
     z = df["z"].to_numpy(dtype=float) if len(df) else np.array([])
     log_s = df["log_c_scale"].to_numpy(dtype=float) if len(df) else np.array([])
     active = (a > 1e-8).sum(axis=1) if a.size else np.array([])
-    return {
+    i0, i1 = _probe_a_indices(a.shape[1] if a.ndim == 2 else 0)
+    row = {
         "healpix": healpix,
         "n_quality_pass": len(df),
         "z_median": float(np.median(z)) if z.size else np.nan,
@@ -88,9 +102,12 @@ def summary_row(df: pd.DataFrame, healpix: int) -> dict:
         "z_p84": float(np.percentile(z, 84)) if z.size else np.nan,
         "log_s_median": float(np.median(log_s)) if log_s.size else np.nan,
         "n_active_templates_median": float(np.median(active)) if active.size else np.nan,
-        "frac_a4_zero": float((a[:, 3] <= 1e-8).mean()) if a.shape[0] else np.nan,
-        "frac_a10_zero": float((a[:, 9] <= 1e-8).mean()) if a.shape[0] else np.nan,
     }
+    if a.shape[0] and a.shape[1] > i0:
+        row[f"frac_a{i0 + 1}_zero"] = float((a[:, i0] <= 1e-8).mean())
+    if a.shape[0] and a.shape[1] > i1 and i1 != i0:
+        row[f"frac_a{i1 + 1}_zero"] = float((a[:, i1] <= 1e-8).mean())
+    return row
 
 
 def plot_marginal_overlays(
@@ -139,15 +156,19 @@ def plot_compact_triangle(
     samples: dict[int, pd.DataFrame],
     outdir: Path,
     *,
-    param_indices: tuple[int, ...] = (3, 9, 12, 13),
+    param_indices: tuple[int, ...] | None = None,
 ) -> None:
-    """Small corner plot: a4, a10, log s, z with per-healpix colors."""
+    """Small corner plot: two probe a_i, log s, z with per-healpix colors."""
     healpix_ids = sorted(samples.keys())
+    first = next(iter(samples.values()))
+    n_a = len(a_columns(first))
+    i0, i1 = _probe_a_indices(n_a)
+    if param_indices is None:
+        # joint = [a_1..a_n, log_s, z] → log_s at n_a, z at n_a+1
+        param_indices = (i0, i1, n_a, n_a + 1) if i0 != i1 else (i0, n_a, n_a + 1)
     labels_all = [
-        r"$a_4$",
-        r"$a_{10}$",
-        r"$\log s$",
-        r"$z$",
+        rf"$a_{{{idx + 1}}}$" if idx < n_a else (r"$\log s$" if idx == n_a else r"$z$")
+        for idx in param_indices
     ]
     n = len(param_indices)
     cmap = {hp: plt.cm.tab10(i % 10) for i, hp in enumerate(healpix_ids)}
@@ -201,7 +222,7 @@ def plot_compact_triangle(
         plt.Line2D([0], [0], color=cmap[hp], lw=2, label=str(hp)) for hp in healpix_ids
     ]
     fig.legend(handles=handles, loc="upper right", bbox_to_anchor=(1.0, 1.0), fontsize=7)
-    fig.suptitle(r"Overlay: $a_4$, $a_{10}$, $\log s$, $z$", fontsize=10)
+    fig.suptitle("Overlay: probe $a_i$, $\\log s$, $z$", fontsize=10)
     fig.tight_layout()
     fig.savefig(outdir / "compact_triangle_by_healpix.png", dpi=150, bbox_inches="tight")
     plt.close(fig)
@@ -211,16 +232,21 @@ def plot_per_healpix_triangles(
     samples: dict[int, pd.DataFrame],
     outdir: Path,
 ) -> None:
-    """One small triangle per healpix (same 4 params as compact overlay)."""
+    """One small triangle per healpix (same probe params as compact overlay)."""
     sub = outdir / "per_healpix"
     sub.mkdir(parents=True, exist_ok=True)
-    idx = (3, 9, 12, 13)
-    labels = [r"$a_4$", r"$a_{10}$", r"$\log s$", r"$z$"]
 
     for hp, df in sorted(samples.items()):
         if len(df) < 3:
             continue
         cols = a_columns(df)
+        n_a = len(cols)
+        i0, i1 = _probe_a_indices(n_a)
+        idx = (i0, i1, n_a, n_a + 1) if i0 != i1 else (i0, n_a, n_a + 1)
+        labels = [
+            rf"$a_{{{j + 1}}}$" if j < n_a else (r"$\log s$" if j == n_a else r"$z$")
+            for j in idx
+        ]
         a_arr = df[cols].to_numpy(dtype=float)
         joint_full, _ = build_prior_parameter_samples(
             a_arr,
@@ -325,14 +351,19 @@ def main() -> None:
     print(f"\nWrote {summary_path}")
     print(summary_df.to_string(index=False))
 
+    first = next(iter(samples.values()))
+    n_a = len(a_columns(first))
+    i0, i1 = _probe_a_indices(n_a)
+    a_params = [(f"a{i0 + 1}", rf"$a_{{{i0 + 1}}}$")]
+    if i1 != i0:
+        a_params.append((f"a{i1 + 1}", rf"$a_{{{i1 + 1}}}$"))
     plot_marginal_overlays(
         samples,
         outdir,
         params=[
             ("z", r"$z$"),
             ("log_c_scale", r"$\log s$"),
-            ("a4", r"$a_4$"),
-            ("a10", r"$a_{10}$"),
+            *a_params,
         ],
     )
     plot_compact_triangle(samples, outdir)

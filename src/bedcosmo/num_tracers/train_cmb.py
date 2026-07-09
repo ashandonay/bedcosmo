@@ -302,7 +302,7 @@ def single_run(
         for context, samples in dataloader:
             optimizer.zero_grad()
             
-            agg_loss, loss = nf_loss(context, posterior_flow.module, samples, rank=global_rank, verbose_shapes=(step==0))
+            agg_loss, loss, _ = nf_loss(context, posterior_flow.module, samples, rank=global_rank, verbose_shapes=(step==0))
 
             global_loss_tensor = loss.mean().detach()
             tdist.all_reduce(global_loss_tensor, op=torch.distributed.ReduceOp.SUM)

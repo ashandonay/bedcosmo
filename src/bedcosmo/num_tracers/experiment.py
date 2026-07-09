@@ -73,7 +73,7 @@ class NumTracers(BaseExperiment, CosmologyMixin):
         vary_lya_qso=False,
         ref_cov=None,
         emulator_sqrtn_ref=None,
-        emulator_artifacts_dir=None,
+        artifacts_dir=None,
         input_transform_type="marginal",
         joint_transform_shrinkage=1e-3,
         joint_transform_fit_path=None,
@@ -277,10 +277,11 @@ class NumTracers(BaseExperiment, CosmologyMixin):
             # (artifacts/emulators/<tracer_bin>.pt). Bins without a .pt there are treated as
             # fallback (null) bins. When no artifacts dir is provided (direct/local init), fall
             # back to resolving from emulators.yaml against $SCRATCH.
-            if emulator_artifacts_dir is not None and os.path.isdir(emulator_artifacts_dir):
+            emu_dir = os.path.join(artifacts_dir, "emulators") if artifacts_dir else None
+            if emu_dir is not None and os.path.isdir(emu_dir):
                 checkpoints = {}
                 for tracer_bin in self._EMULATOR_TRACER_TO_DESI:
-                    ckpt_path = os.path.join(emulator_artifacts_dir, f"{tracer_bin}.pt")
+                    ckpt_path = os.path.join(emu_dir, f"{tracer_bin}.pt")
                     checkpoints[tracer_bin] = ckpt_path if os.path.exists(ckpt_path) else None
             else:
                 checkpoints = self.resolve_emulator_checkpoints(

@@ -22,14 +22,19 @@ from bedcosmo.profiling import profile_method
 from bedcosmo.util import (
     _central_params_as_dict,
     get_experiment_config_path,
-    load_prior_flow_from_file
+    load_prior_flow_from_file,
 )
 from bedcosmo.base import BaseExperiment
 from bedcosmo.custom_dist import EmpiricalPrior
 from bedcosmo.num_visits.empirical.fit_sed_prior_kde import (
     mode_central_params_from_artifact,
 )
-from bedcosmo.num_visits.empirical.sed_prior import EmpiricalSedPrior
+from bedcosmo.num_visits.empirical.sed_prior import (
+    PRIOR_SOURCE_FLOW,
+    EmpiricalSedPrior,
+    normalize_prior_source,
+    resolve_runtime_prior_root,
+)
 from bedcosmo.num_visits.empirical.simplex import (
     PARAMETERIZATION_ILR,
     ilr_to_weights_torch,
@@ -41,34 +46,19 @@ from bedcosmo.cosmology import CosmologyMixin, _cumsimpson
 # From SMTN-002 (v1.9 throughputs): https://smtn-002.lsst.io
 # Based on syseng_throughputs v1.9 with triple silver mirror coatings
 # and as-measured filter/lens/detector throughputs
-s0 = {'u': 26.52,
-      'g': 28.51,
-      'r': 28.36,
-      'i': 28.17,
-      'z': 27.78,
-      'y': 26.82}
+s0 = {"u": 26.52, "g": 28.51, "r": 28.36, "i": 28.17, "z": 27.78, "y": 26.82}
 
 # Sky brightnesses in AB mag / arcsec^2 (zenith, dark sky)
 # From SMTN-002: https://smtn-002.lsst.io
 # Based on dark sky spectrum from UVES/Gemini/ESO, normalized to match SDSS observations
-B = {'u': 23.05,
-     'g': 22.25,
-     'r': 21.2,
-     'i': 20.46,
-     'z': 19.61,
-     'y': 18.6}
+B = {"u": 23.05, "g": 22.25, "r": 21.2, "i": 20.46, "z": 19.61, "y": 18.6}
 
-fiducial_nvisits = {'u': 70,
-                    'g': 100,
-                    'r': 230,
-                    'i': 230,
-                    'z': 200,
-                    'y': 200}
+fiducial_nvisits = {"u": 70, "g": 100, "r": 230, "i": 230, "z": 200, "y": 200}
 # Sky brightness per arcsec^2 per second
 # At sky magnitude B[k]: flux = 10^(-0.4*(B[k] - s0[k])) photons/sec/arcsec^2
 sbar = {}
 for k in B:
-    sbar[k] = 10**(-0.4*(B[k] - s0[k]))
+    sbar[k] = 10 ** (-0.4 * (B[k] - s0[k]))
 
 # Pre-compute physical constants for blackbody computation
 _h_cgs = h.cgs.value
@@ -116,7 +106,7 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         profile=False,
         verbose=False,
         global_rank=0,
-        empirical_artifacts_dir=None,
+        artifacts_dir=None,
     ):
         self.name = "num_visits"
         self.device = device
@@ -126,7 +116,7 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         self.logit_flow_scale = float(logit_flow_scale)
         self.global_rank = global_rank
         self.prior_kde_path = None
-        self.empirical_artifacts_dir = empirical_artifacts_dir
+        self.artifacts_dir = artifacts_dir
         self.sed_prior: EmpiricalSedPrior | None = None
         self._init_input_transform_options(
             input_transform_type=input_transform_type,
@@ -136,34 +126,25 @@ class NumVisits(BaseExperiment, CosmologyMixin):
             flow_squash_params=flow_squash_params,
         )
 
-        self.filters_list = design_args.get('labels', ["u", "g", "r", "i", "z", "y"])
+        self.filters_list = design_args.get("labels", ["u", "g", "r", "i", "z", "y"])
         self.design_labels = self.filters_list
         self.num_filters = len(self.filters_list)
         self.observation_labels = ["magnitudes"]
         # Context = design (nvisits per filter) + observations (magnitudes per filter)
-        self.context_dim = 2*len(self.filters_list)
+        self.context_dim = 2 * len(self.filters_list)
 
         if isinstance(temperature, (int, float)):
             self.temperature = float(temperature) * u.K
         else:
             self.temperature = temperature
-        
+
         self.prior_args = prior_args or {}
         self.cosmo_model = cosmo_model
 
-        prior_init_kwargs = dict(self.prior_args)
-        prior_kde_source = prior_init_kwargs.pop("prior_kde_source", None)
-        if prior_kde_source is None:
-            prior_kde_source = prior_init_kwargs.pop("prior_kde_path", None)
-        else:
-            prior_init_kwargs.pop("prior_kde_path", None)
-        prior_init_kwargs.pop("prior_y_kde_path", None)
-
         self.prior, self.latex_labels, self.cosmo_params = self.init_prior(
             cosmo_model=cosmo_model,
-            empirical_artifacts_dir=self.empirical_artifacts_dir,
-            prior_kde_source=prior_kde_source,
-            **prior_init_kwargs,
+            artifacts_dir=self.artifacts_dir,
+            **self.prior_args,
         )
 
         self._init_param_bijector(
@@ -171,11 +152,12 @@ class NumVisits(BaseExperiment, CosmologyMixin):
             cdf_bins=cdf_bins,
             cdf_samples=cdf_samples,
         )
-        self._load_y_prior_if_present()
 
         if nominal_design is None:
             self.nominal_design = torch.tensor(
-                [fiducial_nvisits[band] for band in self.filters_list], device=self.device, dtype=torch.float64
+                [fiducial_nvisits[band] for band in self.filters_list],
+                device=self.device,
+                dtype=torch.float64,
             )
         else:
             nominal_array = np.asarray(nominal_design, dtype=np.float64)
@@ -183,8 +165,10 @@ class NumVisits(BaseExperiment, CosmologyMixin):
                 raise ValueError(
                     f"nominal_design must have shape ({self.num_filters},), got {nominal_array.shape}"
                 )
-            self.nominal_design = torch.tensor(nominal_array, device=self.device, dtype=torch.float64)
-        
+            self.nominal_design = torch.tensor(
+                nominal_array, device=self.device, dtype=torch.float64
+            )
+
         self.pixel_scale = pixel_scale
         self.stamp_size = stamp_size
         self.threshold = threshold
@@ -202,18 +186,22 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         # Create a common wavelength grid and store all filters as tensors for parallel processing
         hc_erg_angstrom = (h * c).to(u.erg * u.Angstrom).value
         downsample_factor = 5
-        
+
         # First pass: collect all wavelength ranges to create common grid
         all_wlen_min = []
         all_wlen_max = []
         filter_data_list = []
-        
+
         for band in self.filters_list:
-            loaded_filter = speclite_filters.load_filter("lsst2023-"+band)
+            loaded_filter = speclite_filters.load_filter("lsst2023-" + band)
             wlen = loaded_filter.wavelength * u.AA
             transmission_result = loaded_filter(wlen)
-            transmission = transmission_result if isinstance(transmission_result, np.ndarray) else transmission_result.value
-            
+            transmission = (
+                transmission_result
+                if isinstance(transmission_result, np.ndarray)
+                else transmission_result.value
+            )
+
             # Downsample to reduce computation
             if downsample_factor > 1:
                 wlen_aa_downsampled = wlen.value[::downsample_factor]
@@ -221,44 +209,55 @@ class NumVisits(BaseExperiment, CosmologyMixin):
             else:
                 wlen_aa_downsampled = wlen.value
                 transmission_downsampled = transmission
-            
+
             all_wlen_min.append(wlen_aa_downsampled.min())
             all_wlen_max.append(wlen_aa_downsampled.max())
-            filter_data_list.append({
-                'band': band,
-                'wlen_aa': wlen_aa_downsampled,
-                'transmission': transmission_downsampled,
-            })
-        
+            filter_data_list.append(
+                {
+                    "band": band,
+                    "wlen_aa": wlen_aa_downsampled,
+                    "transmission": transmission_downsampled,
+                }
+            )
+
         # Create common wavelength grid covering all filters
         wlen_min = min(all_wlen_min)
         wlen_max = max(all_wlen_max)
         # Use the maximum number of points from any filter, or a reasonable default
-        max_points = max(len(fd['wlen_aa']) for fd in filter_data_list)
+        max_points = max(len(fd["wlen_aa"]) for fd in filter_data_list)
         wlen_common_aa = np.linspace(wlen_min, wlen_max, max_points)
         wlen_common_cm = wlen_common_aa * 1e-8  # Convert Angstrom to cm
-        wlen_over_hc_common = (wlen_common_aa / hc_erg_angstrom)
-        
+        wlen_over_hc_common = wlen_common_aa / hc_erg_angstrom
+
         # Interpolate all filters to common grid
         from scipy.interpolate import interp1d
+
         transmission_array = np.zeros((self.num_filters, len(wlen_common_aa)), dtype=np.float64)
-        
+
         for i, filter_data in enumerate(filter_data_list):
             # Interpolate transmission to common grid
             interp_func = interp1d(
-                filter_data['wlen_aa'],
-                filter_data['transmission'],
-                kind='linear',
+                filter_data["wlen_aa"],
+                filter_data["transmission"],
+                kind="linear",
                 bounds_error=False,
-                fill_value=0.0  # Outside filter range, transmission is 0
+                fill_value=0.0,  # Outside filter range, transmission is 0
             )
             transmission_array[i, :] = interp_func(wlen_common_aa)
-        
+
         # Store as tensors on device
-        self._wlen_aa_tensor = torch.tensor(wlen_common_aa, device=self.device, dtype=torch.float64)  # (n_wlen,)
-        self._wlen_cm_tensor = torch.tensor(wlen_common_cm, device=self.device, dtype=torch.float64)  # (n_wlen,)
-        self._transmission_tensor = torch.tensor(transmission_array, device=self.device, dtype=torch.float64)  # (n_filters, n_wlen)
-        self._wlen_over_hc_tensor = torch.tensor(wlen_over_hc_common, device=self.device, dtype=torch.float64)  # (n_wlen,)
+        self._wlen_aa_tensor = torch.tensor(
+            wlen_common_aa, device=self.device, dtype=torch.float64
+        )  # (n_wlen,)
+        self._wlen_cm_tensor = torch.tensor(
+            wlen_common_cm, device=self.device, dtype=torch.float64
+        )  # (n_wlen,)
+        self._transmission_tensor = torch.tensor(
+            transmission_array, device=self.device, dtype=torch.float64
+        )  # (n_filters, n_wlen)
+        self._wlen_over_hc_tensor = torch.tensor(
+            wlen_over_hc_common, device=self.device, dtype=torch.float64
+        )  # (n_wlen,)
         defaults = {"z": 1.0}
         if self.cosmo_model == "empirical":
             defaults = mode_central_params_from_artifact(self.sed_prior_artifact)
@@ -325,9 +324,8 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         always_build=False,
     ):
         """Load the NF bijector from the KDE artifact for empirical runs."""
-        if (
-            getattr(self, "cosmo_model", None) == "empirical"
-            and getattr(self, "transform_input", False)
+        if getattr(self, "cosmo_model", None) == "empirical" and getattr(
+            self, "transform_input", False
         ):
             self._init_empirical_param_bijector(
                 bijector_state=bijector_state,
@@ -382,8 +380,7 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         )
         if self.global_rank == 0 and self.verbose:
             print(
-                "Loaded param_bijector from empirical KDE artifact "
-                "(build_prior gaussianizer)."
+                "Loaded param_bijector from empirical KDE artifact " "(build_prior gaussianizer)."
             )
 
     @profile_method
@@ -430,21 +427,22 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         self,
         parameters,
         prior_flow_path=None,
-        prior_kde_source=None,
-        prior_kde_path=None,
-        empirical_artifacts_dir=None,
+        prior_dir=None,
+        artifacts_dir=None,
         cosmo_model=None,
         prior_pool_size=65536,
         prior_pool_seed=7,
-        eazy_templates_dir=None,
-        eazy_param="templates/fsps_full/fsps_QSF_12_v3.param",
+        template_dir=None,
+        template_param="templates/fsps_full/fsps_QSF_12_v3.param",
+        prior_source="kde",
         **kwargs,
     ):
         """
         Load prior from prior_args and models.yaml.
 
-        For ``empirical``, loads a GPU prior pool from run artifacts when available,
-        otherwise from ``prior_kde_source`` or the default scratch KDE build.
+        For ``empirical``, resolves a prior root directory (frozen run artifacts,
+        else ``prior_dir``, else the default scratch build) and loads the KDE /
+        PriorFlows from there according to ``prior_source``.
         Otherwise uses analytic Pyro distributions and optional ``prior_flow_path``.
         """
         if cosmo_model is None:
@@ -461,34 +459,30 @@ class NumVisits(BaseExperiment, CosmologyMixin):
                 f"Available: {list(cosmo_models.keys())}"
             )
         model_cfg = cosmo_models[cosmo_model]
-        model_parameters = list(model_cfg["parameters"])
-        latex_labels = [
-            self._strip_math_delimiters(lbl) for lbl in model_cfg["latex_labels"]
-        ]
-        if len(model_parameters) != len(latex_labels):
-            raise ValueError("models.yaml parameters and latex_labels length mismatch")
 
-        if cosmo_model == "empirical" or prior_kde_source or prior_kde_path or empirical_artifacts_dir:
-            if prior_kde_source is None:
-                prior_kde_source = prior_kde_path
-            from bedcosmo.num_visits.empirical.sed_prior import (
-                resolve_runtime_prior_kde_path,
-            )
-
-            kde_path = resolve_runtime_prior_kde_path(
-                empirical_artifacts_dir=empirical_artifacts_dir,
-                prior_kde_source=prior_kde_source,
+        if cosmo_model == "empirical":
+            # Parameter names / latex come from the KDE artifact (+ optional
+            # latex_labels in prior_args), so alternate template banks only need
+            # a different prior_args file — not a new models.yaml entry.
+            prior_root = resolve_runtime_prior_root(
+                artifacts_dir=artifacts_dir,
+                prior_dir=prior_dir,
             )
             return self._init_prior_empirical(
                 parameters,
-                model_parameters,
-                latex_labels,
-                prior_kde_path=str(kde_path),
+                prior_root=prior_root,
                 prior_pool_size=int(prior_pool_size),
                 prior_pool_seed=int(prior_pool_seed),
-                eazy_templates_dir=eazy_templates_dir,
-                eazy_param=eazy_param,
+                template_dir=template_dir,
+                template_param=template_param,
+                prior_source=str(prior_source),
+                latex_labels=kwargs.get("latex_labels"),
             )
+
+        model_parameters = list(model_cfg["parameters"])
+        latex_labels = [self._strip_math_delimiters(lbl) for lbl in model_cfg["latex_labels"]]
+        if len(model_parameters) != len(latex_labels):
+            raise ValueError("models.yaml parameters and latex_labels length mismatch")
 
         prior = {}
 
@@ -501,12 +495,14 @@ class NumVisits(BaseExperiment, CosmologyMixin):
             cfg = parameters[name]
             dist_cfg = cfg.get("distribution", {})
             dist_type = dist_cfg.get("type", "uniform")
-            
+
             if dist_type == "uniform":
                 lower = float(dist_cfg.get("lower", 0.0))
                 upper = float(dist_cfg.get("upper", 1.0))
                 if lower >= upper:
-                    raise ValueError(f"Invalid bounds for '{name}': lower ({lower}) must be < upper ({upper})")
+                    raise ValueError(
+                        f"Invalid bounds for '{name}': lower ({lower}) must be < upper ({upper})"
+                    )
                 prior[name] = dist.Uniform(
                     torch.tensor(lower, device=self.device, dtype=torch.float64),
                     torch.tensor(upper, device=self.device, dtype=torch.float64),
@@ -548,7 +544,7 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         for name in model_parameters:
             if name not in prior:
                 raise KeyError(f"Model parameter '{name}' was not added to prior dict")
-        
+
         # Load prior flow if specified
         # Note: prior_flow_path must be an absolute path
         if prior_flow_path:
@@ -559,14 +555,14 @@ class NumVisits(BaseExperiment, CosmologyMixin):
                 )
 
             self.prior_flow, self.prior_flow_metadata = load_prior_flow_from_file(
-                prior_flow_path,
-                self.device,
-                self.global_rank
+                prior_flow_path, self.device, self.global_rank
             )
             # Store metadata in experiment class, not on the flow model
             # If not provided, will be set in __init__ after nominal_design is available
             if self.global_rank == 0:
-                print("Using trained posterior model as prior for parameter sampling (loaded from prior_args.yaml)")
+                print(
+                    "Using trained posterior model as prior for parameter sampling (loaded from prior_args.yaml)"
+                )
         else:
             self.prior_flow = None
 
@@ -575,25 +571,29 @@ class NumVisits(BaseExperiment, CosmologyMixin):
     def _init_prior_empirical(
         self,
         parameters: dict,
-        model_parameters: list[str],
-        latex_labels: list[str],
         *,
-        prior_kde_path: str,
+        prior_root: Path,
         prior_pool_size: int,
         prior_pool_seed: int,
-        eazy_templates_dir: str | None,
-        eazy_param: str,
+        template_dir: str | None,
+        template_param: str,
+        prior_source: str = "kde",
+        latex_labels: list[str] | None = None,
     ) -> tuple[dict, list[str], list[str]]:
-        if not eazy_templates_dir:
-            from bedcosmo.num_visits.empirical.paths import get_eazy_templates_dir
+        from bedcosmo.num_visits.empirical.paths import SED_PRIOR_KDE_NATIVE_FILENAME
 
-            eazy_templates_dir = str(get_eazy_templates_dir())
+        if not template_dir:
+            from bedcosmo.num_visits.empirical.paths import get_template_dir
 
+            template_dir = str(get_template_dir())
+
+        prior_root = Path(prior_root)
+        kde_path = prior_root / SED_PRIOR_KDE_NATIVE_FILENAME
         if self.global_rank == 0 and self.verbose:
-            print(f"Loading empirical SED KDE prior from {prior_kde_path}")
-            print(f"  Building GPU prior pool (n={prior_pool_size})...")
+            print(f"Loading empirical prior from {prior_root}")
+            print(f"  prior_source={prior_source}; pool n={prior_pool_size}")
         self.sed_prior = EmpiricalSedPrior.from_kde_path(
-            prior_kde_path,
+            kde_path,
             pool_size=int(prior_pool_size),
             pool_seed=int(prior_pool_seed),
             device=self.device,
@@ -601,30 +601,66 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         self.prior_kde_path = self.sed_prior.path
         self._prior_parameterization = self.sed_prior.parameterization
         self._n_eazy_templates = self.sed_prior.n_templates
-        if list(model_parameters) != self.sed_prior.feature_names:
+        model_parameters = list(self.sed_prior.feature_names)
+
+        # Optional latex overrides in prior_args; otherwise f_i / log s / z.
+        if latex_labels is not None:
+            if len(latex_labels) != len(model_parameters):
+                raise ValueError(
+                    f"prior_args latex_labels length {len(latex_labels)} != "
+                    f"{len(model_parameters)} KDE features {model_parameters}"
+                )
+            latex_labels = [self._strip_math_delimiters(lbl) for lbl in latex_labels]
+        else:
+            latex_labels = []
+            for name in model_parameters:
+                if name == "log_c_scale":
+                    latex_labels.append(r"\log s")
+                elif name.startswith("f") and name[1:].isdigit():
+                    latex_labels.append(
+                        f"f_{{{name[1:]}}}" if len(name) > 2 else f"f_{name[1:]}"
+                    )
+                else:
+                    latex_labels.append(name)
+
+        # ``parameters`` is the inner prior_args ``parameters:`` mapping.
+        missing = [n for n in model_parameters if n not in parameters]
+        if missing:
             raise ValueError(
-                f"models.yaml parameters {model_parameters} must match KDE "
-                f"feature_names {self.sed_prior.feature_names}. "
-                f"models.yaml must match artifact['feature_names']; for the {self._prior_parameterization!r} "
-                "empirical prior this is f1..f_{K-1}, log_c_scale, z (ILR) or f1..fK, log_c_scale, z (CLR)."
+                f"prior_args parameters missing entries for KDE features {missing}. "
+                f"Expected keys matching artifact feature_names {model_parameters}."
             )
 
+        if normalize_prior_source(prior_source) == PRIOR_SOURCE_FLOW:
+            loaded = self.sed_prior.enable_flow_prior(
+                prior_pool_size,
+                seed=prior_pool_seed,
+                device=self.device,
+                flow_dir=prior_root,
+            )
+            if self.global_rank == 0 and self.verbose:
+                names = ", ".join(p.name for p in loaded.values())
+                print(
+                    f"  loaded flows: {names}; "
+                    f"rebuilt pool (n={prior_pool_size}) from native flow"
+                )
+
         wave_rest, template_stack, _ = load_eazy_template_bank(
-            eazy_param,
-            templates_dir=eazy_templates_dir,
+            template_param,
+            template_dir=template_dir,
         )
-        self._template_wave_rest = torch.tensor(
-            wave_rest, device=self.device, dtype=torch.float64
-        )
-        self._template_flux = torch.tensor(
-            template_stack, device=self.device, dtype=torch.float64
-        )
+        self._template_wave_rest = torch.tensor(wave_rest, device=self.device, dtype=torch.float64)
+        self._template_flux = torch.tensor(template_stack, device=self.device, dtype=torch.float64)
+        if int(template_stack.shape[0]) != int(self._n_eazy_templates):
+            raise ValueError(
+                f"template_param bank has {template_stack.shape[0]} templates but KDE "
+                f"n_templates={self._n_eazy_templates}. Set template_param in prior_args to "
+                "match the build used for this prior_dir."
+            )
 
         name_to_idx = {n: i for i, n in enumerate(self.prior_feature_names)}
         prior = {}
         for name in model_parameters:
-            if name not in parameters:
-                raise ValueError(f"Missing prior_args entry for '{name}'")
             if name not in name_to_idx:
                 raise ValueError(
                     f"Parameter '{name}' not in KDE feature_names {self.prior_feature_names}"
@@ -644,36 +680,6 @@ class NumVisits(BaseExperiment, CosmologyMixin):
 
         return prior, latex_labels, model_parameters
 
-    def _load_y_prior_if_present(self) -> None:
-        if self.sed_prior is None or not self.transform_input:
-            return
-        # Empirical runs with the build-prior gaussianizer as param_bijector:
-        # y = params_to_unconstrained(theta) is already ~N(0,I), so EIG uses
-        # standard_normal_log_prob_nf_coords (see pyro_oed_src) rather than a
-        # fitted y-prior. The optional y-KDE below is only wired in explicitly.
-        if getattr(self, "cosmo_model", None) == "empirical":
-            if self.global_rank == 0 and self.verbose:
-                print(
-                    "Empirical NF prior: log N(0,I)(params_to_unconstrained(theta)) "
-                    "(build_prior gaussianizer; y-prior KDE not loaded)"
-                )
-            return
-
-        from bedcosmo.num_visits.empirical.fit_sed_prior_kde import (
-            load_y_prior_kde,
-        )
-        from bedcosmo.num_visits.empirical.sed_prior import (
-            resolve_runtime_y_prior_kde_path,
-        )
-
-        kde_path = resolve_runtime_y_prior_kde_path(
-            empirical_artifacts_dir=self.empirical_artifacts_dir,
-        )
-        if kde_path is not None:
-            self.sed_prior.attach_y_artifact(load_y_prior_kde(kde_path))
-            if self.global_rank == 0 and self.verbose:
-                print(f"Loaded y-prior KDE from {kde_path}")
-
     @profile_method
     def _calculate_base_profile(self):
         gal = galsim.Gaussian(flux=1.0, sigma=2.0)
@@ -685,12 +691,19 @@ class NumVisits(BaseExperiment, CosmologyMixin):
 
     @profile_method
     def init_designs(
-        self, input_designs_path=None, input_type="variable", step=20.0, 
-        lower=10.0, upper=250.0, sum_lower=None, sum_upper=None, labels=None
-        ):
+        self,
+        input_designs_path=None,
+        input_type="variable",
+        step=20.0,
+        lower=10.0,
+        upper=250.0,
+        sum_lower=None,
+        sum_upper=None,
+        labels=None,
+    ):
         """
         Initialize design space.
-        
+
         Args:
             input_designs_path: Path to numpy file containing designs (assumed to be absolute)
             input_type: Type of input designs ("nominal" or "variable")
@@ -721,27 +734,37 @@ class NumVisits(BaseExperiment, CosmologyMixin):
             # If input_designs_path is provided, load from path (assumed to be absolute)
             if input_designs_path is not None:
                 if not os.path.isabs(input_designs_path):
-                    raise ValueError(f"input_designs_path must be an absolute path, got: {input_designs_path}")
+                    raise ValueError(
+                        f"input_designs_path must be an absolute path, got: {input_designs_path}"
+                    )
                 if not os.path.exists(input_designs_path):
                     raise FileNotFoundError(f"input_designs_path not found: {input_designs_path}")
-                
+
                 input_designs_array = np.load(input_designs_path)
                 # Convert to tensor
                 if isinstance(input_designs_array, torch.Tensor):
                     design_pts = input_designs_array.to(self.device, dtype=torch.float64)
                 elif isinstance(input_designs_array, (list, tuple, np.ndarray)):
-                    design_pts = torch.as_tensor(input_designs_array, device=self.device, dtype=torch.float64)
+                    design_pts = torch.as_tensor(
+                        input_designs_array, device=self.device, dtype=torch.float64
+                    )
                 else:
-                    raise ValueError(f"input_designs must be a list, array, or tensor, got {type(input_designs_array)}")
-                
+                    raise ValueError(
+                        f"input_designs must be a list, array, or tensor, got {type(input_designs_array)}"
+                    )
+
                 # Handle 1D input (single design)
                 if design_pts.ndim == 1:
                     if len(design_pts) != self.num_filters:
-                        raise ValueError(f"Input design must have {self.num_filters} values, got {len(design_pts)}")
+                        raise ValueError(
+                            f"Input design must have {self.num_filters} values, got {len(design_pts)}"
+                        )
                     design_pts = design_pts.reshape(1, -1)
                 elif design_pts.ndim == 2:
                     if design_pts.shape[1] != self.num_filters:
-                        raise ValueError(f"Input design must have {self.num_filters} columns, got {design_pts.shape[1]}")
+                        raise ValueError(
+                            f"Input design must have {self.num_filters} columns, got {design_pts.shape[1]}"
+                        )
                 else:
                     raise ValueError(f"Input design must be 1D or 2D, got shape {design_pts.shape}")
 
@@ -750,13 +773,21 @@ class NumVisits(BaseExperiment, CosmologyMixin):
                 design_step = self._expand_to_filters(step, "step")
                 design_lower = self._expand_to_filters(lower, "lower")
                 design_upper = self._expand_to_filters(upper, "upper")
-                
+
                 # Set sum_lower and sum_upper defaults if not provided
                 if sum_lower is None:
-                    sum_lower = float(self.nominal_design.sum()) if hasattr(self, 'nominal_design') else None
+                    sum_lower = (
+                        float(self.nominal_design.sum())
+                        if hasattr(self, "nominal_design")
+                        else None
+                    )
                 if sum_upper is None:
-                    sum_upper = float(self.nominal_design.sum()) if hasattr(self, 'nominal_design') else None
-                
+                    sum_upper = (
+                        float(self.nominal_design.sum())
+                        if hasattr(self, "nominal_design")
+                        else None
+                    )
+
                 design_axes = {}
                 for idx, grid_label in enumerate(grid_labels):
                     design_axes[grid_label] = np.arange(
@@ -771,12 +802,16 @@ class NumVisits(BaseExperiment, CosmologyMixin):
 
                     def _constraint(**kwargs):
                         total = sum(kwargs.values())
-                        within = np.logical_and(total >= lower_bound - 1e-9, total <= upper_bound + 1e-9)
+                        within = np.logical_and(
+                            total >= lower_bound - 1e-9, total <= upper_bound + 1e-9
+                        )
                         return within.astype(int)
 
                     constraint = _constraint
         else:
-            raise ValueError(f"Unknown input_type '{input_type}'. Expected 'nominal' or 'variable'.")
+            raise ValueError(
+                f"Unknown input_type '{input_type}'. Expected 'nominal' or 'variable'."
+            )
 
         if design_pts is not None:
             # Explicit designs (nominal or input_designs_path): use the points
@@ -799,7 +834,9 @@ class NumVisits(BaseExperiment, CosmologyMixin):
             self.designs = design_pts.to(self.device)
 
     @staticmethod
-    def _interp1d_linear(x_src: torch.Tensor, y_src: torch.Tensor, x_q: torch.Tensor) -> torch.Tensor:
+    def _interp1d_linear(
+        x_src: torch.Tensor, y_src: torch.Tensor, x_q: torch.Tensor
+    ) -> torch.Tensor:
         """Linear interpolation; x_src (N,), y_src (N,), x_q (...) -> same shape as x_q."""
         x_q_flat = x_q.reshape(-1)
         x_q_clamped = torch.clamp(x_q_flat, float(x_src[0]), float(x_src[-1]))
@@ -954,8 +991,7 @@ class NumVisits(BaseExperiment, CosmologyMixin):
                     / T_K_4
                 )
                 self._four_pi_R2_tensor = (
-                    torch.tensor(4 * np.pi, device=self.device, dtype=torch.float64)
-                    * R_eff_val**2
+                    torch.tensor(4 * np.pi, device=self.device, dtype=torch.float64) * R_eff_val**2
                 )
             four_pi_R2 = self._four_pi_R2_tensor
             T_K_for_bb = T_K
@@ -979,9 +1015,7 @@ class NumVisits(BaseExperiment, CosmologyMixin):
                 dtype=torch.float64,
             )
             R_eff = torch.sqrt(L_bol_const / (T_K**4))
-            four_pi_R2 = (
-                torch.tensor(4 * np.pi, device=self.device, dtype=torch.float64) * R_eff**2
-            )
+            four_pi_R2 = torch.tensor(4 * np.pi, device=self.device, dtype=torch.float64) * R_eff**2
             T_K_for_bb = T_K.unsqueeze(-1)
             four_pi_R2_for_L = four_pi_R2.unsqueeze(-1)
 
@@ -1009,8 +1043,12 @@ class NumVisits(BaseExperiment, CosmologyMixin):
                 print(f"WARNING: {problematic_count} problematic flux values found!")
                 print(f"  flux range: [{flux.min().item():.2e}, {flux.max().item():.2e}]")
                 print(f"  L range: [{L.min().item():.2e}, {L.max().item():.2e}]")
-                print(f"  lum_dist range: [{lum_dist.min().item():.2e}, {lum_dist.max().item():.2e}]")
-                print(f"  z_unique range: [{z_unique.min().item():.4f}, {z_unique.max().item():.4f}]")
+                print(
+                    f"  lum_dist range: [{lum_dist.min().item():.2e}, {lum_dist.max().item():.2e}]"
+                )
+                print(
+                    f"  z_unique range: [{z_unique.min().item():.4f}, {z_unique.max().item():.4f}]"
+                )
 
         n_wlen = self._wlen_aa_tensor.shape[0]
         if T_tensor is not None:
@@ -1112,9 +1150,7 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         """Map empirical-prior feature rows to parameter tensors with trailing dim 1."""
         if self.sed_prior is None:
             raise RuntimeError("sed_prior is not initialized")
-        return self.sed_prior.rows_to_param_dict(
-            rows, self.cosmo_params, sample_shape
-        )
+        return self.sed_prior.rows_to_param_dict(rows, self.cosmo_params, sample_shape)
 
     @profile_method
     def sample_parameters(self, sample_shape, prior=None, use_prior_flow=True, **kwargs):
@@ -1143,20 +1179,20 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         """
         Compute luminosity distance using tensor operations (GPU-compatible).
         Uses Planck18 cosmology: H0=67.4 km/s/Mpc, Om=0.315, flat universe.
-        
+
         For a flat universe: D_L(z) = (1+z) * c/H0 * ∫[0 to z] dz'/E(z')
         Where E(z) = sqrt(Om*(1+z)^3 + (1-Om))
-        
+
         Args:
             z: torch.Tensor, redshift values
             n_int: int, number of integration points
-            
+
         Returns:
             torch.Tensor: Luminosity distance in cm (same shape as z)
         """
         DTYPE = torch.float64
         dev = self.device
-        
+
         # Planck18 parameters
         H0_km_s_Mpc = 67.4  # km/s/Mpc
         # 1 Mpc = 3.086e22 m = 3.086e24 cm
@@ -1165,22 +1201,22 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         H0_s_inv = H0_cm_s / Mpc_to_cm  # s^-1
         c_cm_s = 2.998e10  # cm/s
         Om = 0.315
-        
+
         # Convert z to tensor and flatten
         z_t = torch.as_tensor(z, device=dev, dtype=DTYPE)
         original_shape = z_t.shape
         z_flat = z_t.flatten()
-        
+
         if z_flat.numel() == 0:
             return torch.zeros_like(z_t)
-        
+
         z_max = float(z_flat.max())
         if z_max <= 0:
             return torch.zeros_like(z_t)
-        
+
         # Create integration grid from 0 to z_max
         z_grid = torch.linspace(0.0, z_max, n_int, device=dev, dtype=DTYPE)
-        
+
         # Merge evaluation points into grid
         z_all = torch.unique(torch.cat([z_grid, z_flat])).sort().values
         # Ensure we have 0 in the grid
@@ -1190,17 +1226,17 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         if z_all.numel() % 2 == 0:
             mid = 0.5 * (z_all[-2] + z_all[-1])
             z_all = torch.unique(torch.cat([z_all, mid.unsqueeze(0)])).sort().values
-        
+
         # Compute E(z) = sqrt(Om*(1+z)^3 + (1-Om)) for flat universe
         zp1 = 1.0 + z_all
         E_z = torch.sqrt(Om * zp1**3 + (1.0 - Om))
-        
+
         # Integrand: 1/E(z)
         integrand = 1.0 / E_z
-        
+
         # Cumulative integral using Simpson's rule
         cum_int = _cumsimpson(z_all, integrand, dim=-1)
-        
+
         # Interpolate to get values at z_flat
         # Find indices where z_flat should be inserted
         idx = torch.searchsorted(z_all, z_flat)
@@ -1214,19 +1250,21 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         z_upper = z_all[idx]
         cum_lower = cum_int[idx_lower]
         cum_upper = cum_int[idx]
-        
+
         # Linear interpolation
-        alpha = torch.where(exact_match, torch.zeros_like(z_flat),
-                           (z_flat - z_lower) / (z_upper - z_lower + 1e-10))
-        dc_over_dh0 = torch.where(exact_match, cum_upper,
-                                  cum_lower + alpha * (cum_upper - cum_lower))
-        
+        alpha = torch.where(
+            exact_match, torch.zeros_like(z_flat), (z_flat - z_lower) / (z_upper - z_lower + 1e-10)
+        )
+        dc_over_dh0 = torch.where(
+            exact_match, cum_upper, cum_lower + alpha * (cum_upper - cum_lower)
+        )
+
         # Comoving distance: D_C = (c/H0) * ∫ dz'/E(z')
         dc_cm = (c_cm_s / H0_s_inv) * dc_over_dh0
-        
+
         # Luminosity distance for flat universe: D_L = (1+z) * D_C
         dl_cm = (1.0 + z_flat) * dc_cm
-        
+
         # Reshape to original shape
         return dl_cm.reshape(original_shape)
 
@@ -1234,20 +1272,22 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         """Compute blackbody flux using PyTorch tensors (GPU-accelerated)."""
         # Use float32 for faster computation (sufficient precision)
         # Physical constants (pre-computed, create tensors once)
-        if not hasattr(self, '_hc_tensor_f32'):
+        if not hasattr(self, "_hc_tensor_f32"):
             self._hc_tensor_f32 = torch.tensor(_hc, device=self.device, dtype=torch.float32)
             self._k_B_tensor_f32 = torch.tensor(_k_B_cgs, device=self.device, dtype=torch.float32)
-            self._two_hc2_tensor_f32 = torch.tensor(_two_hc2, device=self.device, dtype=torch.float32)
+            self._two_hc2_tensor_f32 = torch.tensor(
+                _two_hc2, device=self.device, dtype=torch.float32
+            )
             self._pi_tensor_f32 = torch.tensor(np.pi, device=self.device, dtype=torch.float32)
             self._1e8_tensor_f32 = torch.tensor(1e-8, device=self.device, dtype=torch.float32)
-        
+
         # Convert inputs to float32 for speed
         wlen_cm_f32 = wlen_cm.to(torch.float32)
         T_K_f32 = T_K.to(torch.float32)
-        
+
         hc_over_kT = self._hc_tensor_f32 / (self._k_B_tensor_f32 * T_K_f32)
         exponent = hc_over_kT / wlen_cm_f32
-        
+
         # Use expm1 directly - it's optimized in PyTorch
         # For very large negative exponents, exp(x) - 1 ≈ -1, so we can approximate
         # For moderate values, use expm1
@@ -1255,19 +1295,19 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         # Use a threshold to avoid exp() for very negative values
         very_large_neg = exponent < -20.0
         moderate = ~very_large_neg
-        
+
         exp_term = torch.zeros_like(exponent)
         # For very large negative: exp(x) - 1 ≈ -1 (since exp(x) ≈ 0)
         exp_term[very_large_neg] = -1.0
         # For moderate: use expm1 (optimized in PyTorch)
         exp_term[moderate] = torch.expm1(exponent[moderate])
         exp_term = torch.clamp(exp_term, min=torch.finfo(torch.float32).tiny)
-        
+
         wlen_cm_5 = wlen_cm_f32**5
         B = self._two_hc2_tensor_f32 / (wlen_cm_5 * exp_term)
         F = self._pi_tensor_f32 * B
         F_per_AA = F * self._1e8_tensor_f32
-        
+
         # Convert back to float64 for consistency
         return F_per_AA.to(torch.float64)
 
@@ -1302,15 +1342,11 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         noise = np.sqrt((masked_pixels**2 * total_var).sum(axis=(-2, -1)))
         snr = np.where(noise == 0, 0.0, signal / noise)
         coeff = 2.5 / np.log(10.0)
-        
+
         # Calculate magnitude errors: coeff / snr, with optional cap
         if self.mag_err_cap is not None:
             min_snr_for_detection = coeff / self.mag_err_cap
-            mag_err = np.where(
-                snr < min_snr_for_detection,
-                self.mag_err_cap,
-                coeff / snr
-            )
+            mag_err = np.where(snr < min_snr_for_detection, self.mag_err_cap, coeff / snr)
         else:
             mag_err = np.where(snr > 0, coeff / snr, coeff / 1e-10)
 
@@ -1404,12 +1440,11 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         """
         Unnormalized likelihood compatible with bed.bayesdesign brute-force routines.
         """
+
         def _grid_array(grid, name):
             """Get axis values without GridStack trailing singleton pad dimensions."""
             if name not in grid.names:
-                raise ValueError(
-                    f"Axis '{name}' not found in grid names {list(grid.names)}."
-                )
+                raise ValueError(f"Axis '{name}' not found in grid names {list(grid.names)}.")
             values = jnp.asarray(getattr(grid, name), dtype=jnp.float64)
             grid_ndim = len(grid.shape)
             if values.ndim > grid_ndim:
@@ -1426,12 +1461,12 @@ class NumVisits(BaseExperiment, CosmologyMixin):
             z_tensor = torch.as_tensor(np.asarray(z_b), device=self.device, dtype=torch.float64)
             T_tensor = torch.as_tensor(np.asarray(T_b), device=self.device, dtype=torch.float64)
             flux_aa = self._observed_spectral_flux(z_tensor, T=T_tensor)
-            mags_model = jnp.asarray(
-                self._calculate_magnitudes(flux_aa).detach().cpu().numpy()
-            )
+            mags_model = jnp.asarray(self._calculate_magnitudes(flux_aa).detach().cpu().numpy())
         else:
             z_shape = z_values.shape
-            z_tensor = torch.as_tensor(np.asarray(z_values), device=self.device, dtype=torch.float64)
+            z_tensor = torch.as_tensor(
+                np.asarray(z_values), device=self.device, dtype=torch.float64
+            )
             flux_aa = self._observed_spectral_flux(z_tensor)
             mags_model = jnp.asarray(self._calculate_magnitudes(flux_aa).detach().cpu().numpy())
         # mags_model shape: P + (num_filters,)
@@ -1452,32 +1487,36 @@ class NumVisits(BaseExperiment, CosmologyMixin):
 
         # Magnitude errors depend on model magnitudes and design only (not on observed features).
         # Arrange as D + P + (num_filters,) so final output ordering is X + D + P.
-        mags_for_sigma = mags_model.reshape((1,) * len(design_shape) + z_shape + (self.num_filters,))
-        nvisits_for_sigma = nvisits.reshape(design_shape + (1,) * len(z_shape) + (self.num_filters,))
-        sigmas = jnp.asarray(self._magnitude_errors(
-            torch.as_tensor(np.asarray(mags_for_sigma), device=self.device, dtype=torch.float64),
-            torch.as_tensor(np.asarray(nvisits_for_sigma), device=self.device, dtype=torch.float64),
-        ).detach().cpu().numpy())
+        mags_for_sigma = mags_model.reshape(
+            (1,) * len(design_shape) + z_shape + (self.num_filters,)
+        )
+        nvisits_for_sigma = nvisits.reshape(
+            design_shape + (1,) * len(z_shape) + (self.num_filters,)
+        )
+        sigmas = jnp.asarray(
+            self._magnitude_errors(
+                torch.as_tensor(
+                    np.asarray(mags_for_sigma), device=self.device, dtype=torch.float64
+                ),
+                torch.as_tensor(
+                    np.asarray(nvisits_for_sigma), device=self.device, dtype=torch.float64
+                ),
+            )
+            .detach()
+            .cpu()
+            .numpy()
+        )
         # sigmas shape: D + P + (num_filters,)
 
         # Build full broadcasted shapes for likelihood: X + D + P + (num_filters,)
         feature_obs_full = feature_obs.reshape(
-            feature_shape
-            + (1,) * len(design_shape)
-            + (1,) * len(z_shape)
-            + (self.num_filters,)
+            feature_shape + (1,) * len(design_shape) + (1,) * len(z_shape) + (self.num_filters,)
         )
         mags_full = mags_model.reshape(
-            (1,) * len(feature_shape)
-            + (1,) * len(design_shape)
-            + z_shape
-            + (self.num_filters,)
+            (1,) * len(feature_shape) + (1,) * len(design_shape) + z_shape + (self.num_filters,)
         )
         sigma_full = sigmas.reshape(
-            (1,) * len(feature_shape)
-            + design_shape
-            + z_shape
-            + (self.num_filters,)
+            (1,) * len(feature_shape) + design_shape + z_shape + (self.num_filters,)
         )
 
         diff = (feature_obs_full - mags_full) / sigma_full

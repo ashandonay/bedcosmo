@@ -11,7 +11,7 @@ Draws KDE prior samples, applies ``params_to_unconstrained``, and writes:
 Example:
 
   python -m bedcosmo.num_visits.empirical.diagnose_transform_input \\
-    --kde-path ~/scratch/bedcosmo/desi_eazy_empirical_prior_nnls/sed_prior_kde.joblib \\
+    --kde-path ~/scratch/bedcosmo/desi_eazy_empirical_prior_nnls/sed_prior_kde_native.joblib \\
     --outdir ~/scratch/bedcosmo/desi_eazy_empirical_prior_nnls/transform_diagnostic \\
     --n-samples 8000 --cdf-samples 200000
 """
@@ -133,7 +133,7 @@ def main() -> None:
         "--kde-path",
         type=Path,
         default=Path.home()
-        / "scratch/bedcosmo/num_visits/empirical_prior/sed_prior_kde.joblib",
+        / "scratch/bedcosmo/num_visits/empirical_prior/sed_prior_kde_native.joblib",
     )
     parser.add_argument(
         "--prior-args",
@@ -192,7 +192,7 @@ def main() -> None:
         _load_prior_args_from_yaml(prior_args_path),
         args.cosmo_model,
     )
-    prior_args["prior_kde_source"] = str(kde_path)
+    prior_args["prior_dir"] = str(kde_path.parent)
 
     design_path = _get_experiment_config_path("num_visits", "design_args.yaml")
     with open(design_path) as f:

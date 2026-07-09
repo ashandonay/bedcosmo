@@ -14,6 +14,7 @@ base:
   design_chunk_size: 1
   profile: true
   verbose: true
+  plot_prior: false
 
 base_omegak:
   cosmo_model: base_omegak
@@ -28,6 +29,7 @@ base_omegak:
   design_chunk_size: 1
   profile: true
   verbose: true
+  plot_prior: false
 
 base_w:
   cosmo_model: base_w
@@ -42,6 +44,7 @@ base_w:
   design_chunk_size: 1
   profile: true
   verbose: true
+  plot_prior: false
 
 base_w_wa:
   cosmo_model: base_w_wa
@@ -56,6 +59,7 @@ base_w_wa:
   design_chunk_size: 1
   profile: true
   verbose: true
+  plot_prior: false
 
 base_omegak_w_wa:
   cosmo_model: base_omegak_w_wa
@@ -71,4 +75,5 @@ base_omegak_w_wa:
   design_chunk_size: 1
   profile: true
   verbose: true
+  plot_prior: false
 
