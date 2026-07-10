@@ -23,7 +23,7 @@ transform, modifies nothing but the output files. NSF training is CPU-heavy --
 run on a compute node or cap threads. Example::
 
     OMP_NUM_THREADS=8 python -m bedcosmo.num_visits.empirical.prior_flow \\
-        --space both --n 100000 --epochs 400
+        --space both --n 400000 --epochs 250 --transforms 6 --bins 16
 """
 
 from __future__ import annotations
@@ -438,14 +438,15 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument(
         "--out-dir", default=None, help="Output directory (default: beside the KDE artifact)."
     )
-    ap.add_argument("--n", type=int, default=100_000, help="Prior rows to draw for training.")
+    ap.add_argument("--n", type=int, default=400_000, help="Prior rows to draw for training.")
     ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--epochs", type=int, default=400)
+    ap.add_argument("--epochs", type=int, default=250)
     ap.add_argument("--hidden", type=int, nargs="+", default=[128, 128])
-    ap.add_argument("--transforms", type=int, default=3)
-    ap.add_argument("--bins", type=int, default=8)
+    ap.add_argument("--transforms", type=int, default=6)
+    ap.add_argument("--bins", type=int, default=16)
     ap.add_argument("--batch-size", type=int, default=4096)
     ap.add_argument("--lr", type=float, default=1e-3)
+    ap.add_argument("--weight-decay", type=float, default=0.0)
     ap.add_argument("--threads", type=int, default=8)
     ap.add_argument(
         "--whitening",
@@ -471,6 +472,7 @@ def main(argv: list[str] | None = None) -> None:
         "bins": args.bins,
         "batch_size": args.batch_size,
         "lr": args.lr,
+        "weight_decay": args.weight_decay,
     }
 
     print(f"[load] KDE artifact: {kde_path}", flush=True)
