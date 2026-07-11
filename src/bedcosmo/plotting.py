@@ -2487,7 +2487,7 @@ class ComparisonPlotter(BasePlotter):
     """
     
     def __init__(self, cosmo_exp='num_tracers', mlflow_exp=None, run_ids=None, 
-                 excluded_runs=None, filter_string=None, run_labels=None):
+                 excluded_runs=None, filter_string=None, run_labels=None, var=None):
         """
         Initialize the comparison plotter.
         
@@ -2498,6 +2498,8 @@ class ComparisonPlotter(BasePlotter):
             excluded_runs (list, optional): List of run IDs to exclude. Especially useful when mlflow_exp is passed to skip specific runs across all comparison methods.
             filter_string (str, optional): MLflow filter string.
             run_labels (list, optional): Labels for each run (same order as run_ids / run_data_list). Used by compare_optimal_designs and compare_eigs.
+            var (str or list, optional): Default MLflow param(s) used to differentiate runs in labels/grouping.
+                Individual compare_* methods can override this by passing their own ``var``.
         """
         super().__init__(cosmo_exp=cosmo_exp)
         
@@ -2511,9 +2513,59 @@ class ComparisonPlotter(BasePlotter):
         self.excluded_runs = excluded_runs or []
         self.filter_string = filter_string
         self.run_labels = run_labels
+        self.var = var
         
         # Cache for run data (will be populated on first use)
         self._run_data_cache = {}
+
+    def _resolve_var(self, var):
+        """Return method-level ``var`` if provided, otherwise the class default."""
+        return self.var if var is None else var
+
+    def _var_group_sort_key(self, group_key):
+        """
+        Sort key for var groups: numeric values descending, strings alphabetical.
+        Matches the ordering used by compare_training / compare_posterior.
+        """
+        base_sort_key = sort_key_for_group_tuple(group_key)
+        if isinstance(base_sort_key, tuple):
+            return tuple(-val if isinstance(val, (int, float)) else val for val in base_sort_key)
+        if isinstance(base_sort_key, (int, float)):
+            return -base_sort_key
+        return base_sort_key
+
+    def _sort_run_ids_by_var(self, run_data_list, run_ids, var):
+        """
+        Reorder run_ids by ``var`` values (same order as compare_training).
+
+        Runs missing the requested var(s) are appended at the end in their
+        original relative order. If ``var`` is None, returns run_ids unchanged.
+        """
+        if var is None:
+            return list(run_ids)
+
+        vars_list = var if isinstance(var, list) else [var]
+        rid_to_params = {r['run_id']: r.get('params', {}) for r in run_data_list}
+
+        keyed = []
+        missing = []
+        for run_id in run_ids:
+            params = rid_to_params.get(run_id, {})
+            group_vals = []
+            ok = True
+            for v_key in vars_list:
+                if v_key in params:
+                    group_vals.append(params[v_key])
+                else:
+                    ok = False
+                    break
+            if ok:
+                keyed.append((self._var_group_sort_key(tuple(group_vals)), run_id))
+            else:
+                missing.append(run_id)
+
+        keyed.sort(key=lambda item: item[0])
+        return [run_id for _, run_id in keyed] + missing
     
     def _get_run_data_list(self, parse_params=True, filter_string=None):
         """
@@ -2659,6 +2711,7 @@ class ComparisonPlotter(BasePlotter):
 
         Args:
             var (str or list, optional): Parameter(s) to group runs by.
+                Defaults to ``self.var`` from ``__init__`` when omitted.
             guide_samples (int): Number of samples to draw from the posterior.
             show_scatter (bool): Whether to show scatter points.
             step (str or int): Checkpoint to evaluate for the posterior flow.
@@ -2676,6 +2729,7 @@ class ComparisonPlotter(BasePlotter):
         Returns:
             GetDist plotter object.
         """
+        var = self._resolve_var(var)
         global_ranks = global_rank if isinstance(global_rank, list) else [global_rank]
 
         display = self._normalize_display(display)
@@ -2733,23 +2787,7 @@ class ComparisonPlotter(BasePlotter):
         
         # Sort groups
         if var:
-            def custom_sort_key(group_key):
-                base_sort_key = sort_key_for_group_tuple(group_key)
-                if isinstance(base_sort_key, tuple):
-                    modified_values = []
-                    for val in base_sort_key:
-                        if isinstance(val, (int, float)):
-                            modified_values.append(-val)
-                        else:
-                            modified_values.append(val)
-                    return tuple(modified_values)
-                else:
-                    if isinstance(base_sort_key, (int, float)):
-                        return -base_sort_key
-                    else:
-                        return base_sort_key
-            
-            sorted_group_keys = sorted(grouped_runs.keys(), key=custom_sort_key)
+            sorted_group_keys = sorted(grouped_runs.keys(), key=self._var_group_sort_key)
         else:
             sorted_group_keys = sorted(grouped_runs.keys())
         
@@ -2936,6 +2974,7 @@ class ComparisonPlotter(BasePlotter):
 
         Args:
             var (str or list, optional): Parameter(s) from MLflow run params to include in the label.
+                                        Defaults to ``self.var`` from ``__init__`` when omitted.
                                         If provided and self.run_labels is None, labels will be generated from these parameters. Otherwise run ID (first 8 chars).
             eval_step (str or int, optional): Step identifier (if omitted the most recent step is used).
             figsize (tuple): Matplotlib figure size.
@@ -2960,10 +2999,11 @@ class ComparisonPlotter(BasePlotter):
         Returns:
             tuple: (fig, (ax_line, ax_heat)) matplotlib figure and axes objects.
         """
+        var = self._resolve_var(var)
         storage_path = self.storage_path
 
-        # Parse params if we need them for var labels or plot_input_design
-        need_params = plot_input_design or (var is not None and self.run_labels is None)
+        # Parse params if we need them for var labels/sorting or plot_input_design
+        need_params = plot_input_design or var is not None
         run_data_list, experiment_id_for_save_path, actual_mlflow_exp_for_title = self._get_run_data_list(
             parse_params=need_params
         )
@@ -2998,6 +3038,14 @@ class ComparisonPlotter(BasePlotter):
 
         if not all_data:
             raise ValueError("No valid EIG data files found to compare")
+
+        # Keep color/label order consistent with compare_training when var is set
+        if var is not None:
+            sorted_ids = self._sort_run_ids_by_var(run_data_list, found_run_ids, var)
+            id_to_idx = {rid: i for i, rid in enumerate(found_run_ids)}
+            order = [id_to_idx[rid] for rid in sorted_ids]
+            found_run_ids = [found_run_ids[i] for i in order]
+            all_data = [all_data[i] for i in order]
 
         # Resolve run_labels using centralized method
         run_labels = self._resolve_run_labels(run_data_list, found_run_ids, var=var)
@@ -3479,6 +3527,7 @@ class ComparisonPlotter(BasePlotter):
         include_nominal=False,
         cmap='viridis',
         nominal_design=None,
+        var=None,
         filename=None,
         save_dir=None,
         dpi=400
@@ -3501,10 +3550,13 @@ class ComparisonPlotter(BasePlotter):
             include_nominal (bool): Whether to include nominal design bars on the left (default: False, only used for top_n=1)
             cmap (str): Colormap to use for the heatmap when top_n>1 (default: 'viridis'). If nominal_design is provided, a diverging colormap will be used.
             nominal_design (list, optional): Nominal design as a list of floats for top_n>1. If provided, colors will be plotted as ratios relative to this nominal design.
+            var (str or list, optional): Parameter(s) from MLflow run params to include in the label.
+                Defaults to ``self.var`` from ``__init__`` when omitted.
         
         Returns:
             fig, ax: Matplotlib figure and axes objects
         """
+        var = self._resolve_var(var)
         storage_path = self.storage_path
 
         # Get run data
@@ -3602,9 +3654,18 @@ class ComparisonPlotter(BasePlotter):
             
             if len(optimal_designs) == 0:
                 raise ValueError("No valid optimal design data found to compare")
+
+            # Keep color/label order consistent with compare_training when var is set
+            if var is not None:
+                sorted_ids = self._sort_run_ids_by_var(run_data_list, found_run_ids, var)
+                id_to_idx = {rid: i for i, rid in enumerate(found_run_ids)}
+                order = [id_to_idx[rid] for rid in sorted_ids]
+                found_run_ids = [found_run_ids[i] for i in order]
+                optimal_designs = [optimal_designs[i] for i in order]
+                optimal_eigs = [optimal_eigs[i] for i in order]
             
             # Resolve run labels using centralized method
-            labels = self._resolve_run_labels(run_data_list, found_run_ids, var=None)
+            labels = self._resolve_run_labels(run_data_list, found_run_ids, var=var)
             if len(labels) != len(optimal_designs):
                 labels = labels[:len(optimal_designs)]
             
@@ -3904,6 +3965,14 @@ class ComparisonPlotter(BasePlotter):
             
             if len(all_run_top_designs) == 0:
                 raise ValueError("No valid design data found to compare")
+
+            # Keep color/label order consistent with compare_training when var is set
+            if var is not None:
+                sorted_ids = self._sort_run_ids_by_var(run_data_list, found_run_ids, var)
+                id_to_idx = {rid: i for i, rid in enumerate(found_run_ids)}
+                order = [id_to_idx[rid] for rid in sorted_ids]
+                found_run_ids = [found_run_ids[i] for i in order]
+                all_run_top_designs = [all_run_top_designs[i] for i in order]
             
             # Combine all designs into a single array
             combined_designs = np.concatenate(all_run_top_designs, axis=0)
@@ -3915,7 +3984,7 @@ class ComparisonPlotter(BasePlotter):
                 current_idx += len(run_designs)
             
             # Resolve run labels using centralized method
-            labels = self._resolve_run_labels(run_data_list, found_run_ids, var=None)
+            labels = self._resolve_run_labels(run_data_list, found_run_ids, var=var)
             if len(labels) != len(all_run_top_designs):
                 labels = labels[:len(all_run_top_designs)]
             
@@ -4005,7 +4074,7 @@ class ComparisonPlotter(BasePlotter):
                 x_tick_labels.append(labels[i] if i < len(labels) else found_run_ids[i][:8])
             
             ax.set_xticks(x_tick_positions)
-            ax.set_xticklabels(x_tick_labels, rotation=45, ha='right')
+            ax.set_xticklabels(x_tick_labels)
             ax.set_xlim(-0.5, len(combined_designs) - 0.5)
             
             # Add colorbar
@@ -4072,6 +4141,7 @@ class ComparisonPlotter(BasePlotter):
 
         Args:
             var (str or list): Parameter(s) from MLflow run params to include in the label.
+                Defaults to ``self.var`` from ``__init__`` when omitted.
             log_scale (bool): If True, use log scale for the y-axes (Loss, LR, Area). Loss values <= 0 will be omitted in log scale.
             loss_step_freq (int): Sampling frequency for plotting loss points.
             start_step (int or list): Starting step offset for x-axis. If list, must be same length as run_id.
@@ -4084,6 +4154,7 @@ class ComparisonPlotter(BasePlotter):
             colors (list, optional): List of colors to use for each group. If None, uses default matplotlib colors.
             step_range (tuple, optional): Tuple of (min_step, max_step) to limit the x-axis range. If None, plots all available steps.
         """
+        var = self._resolve_var(var)
         # Set MLflow tracking URI before creating client
         storage_path = self.storage_path
         mlflow.set_tracking_uri(storage_path + "/mlruns")
@@ -4138,29 +4209,7 @@ class ComparisonPlotter(BasePlotter):
                     grouped_runs[group_key_tuple].append(run_data_item)
 
         # Sort groups for consistent ordering - descending for numerical, alphabetical for text
-        def custom_sort_key(group_key):
-            # First get the sort key using your existing function
-            base_sort_key = sort_key_for_group_tuple(group_key)
-            
-            # Then modify numerical values to be negative for descending order
-            if isinstance(base_sort_key, tuple):
-                modified_values = []
-                for val in base_sort_key:
-                    if isinstance(val, (int, float)):
-                        # Use negative value for descending order
-                        modified_values.append(-val)
-                    else:
-                        # Keep string values as-is for alphabetical ordering
-                        modified_values.append(val)
-                return tuple(modified_values)
-            else:
-                # Single value case
-                if isinstance(base_sort_key, (int, float)):
-                    return -base_sort_key
-                else:
-                    return base_sort_key
-        
-        sorted_group_keys = sorted(grouped_runs.keys(), key=custom_sort_key)
+        sorted_group_keys = sorted(grouped_runs.keys(), key=self._var_group_sort_key)
         
         # Create a mapping of run_id to its group key for color assignment
         run_to_group = {}

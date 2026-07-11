@@ -392,15 +392,16 @@ Reads the KDE from `get_prior_kde_path()` (override `--kde-path`) and writes bes
 $SCRATCH/bedcosmo/num_visits/empirical_prior/
   sed_prior_flow_native.pt              sed_prior_flow_native_train.log
   sed_prior_flow_gaussianized.pt        sed_prior_flow_gaussianized_train.log
-  prior_flow_training.png
+  prior_flow_training_native.png        prior_flow_training_gaussianized.png
 ```
 
 Each `*_train.log` holds that flow's full per-epoch eval-NLL history + hyperparameters
 (one file per space, so the concurrent processes don't interleave). The best-eval history
-is also stored inside the `.pt` (`meta["train"]`), and a convergence plot
-(`prior_flow_training.png`) is written automatically beside the flows at the end of
-training by `plot_training_convergence` (regenerate it standalone by loading the `.pt`
-files and calling that function).
+is also stored inside the `.pt` (`meta["train"]`), and a convergence plot is written
+automatically per space (`prior_flow_training_<space>.png`) beside each flow right after
+it is saved by `plot_training_convergence` — so training a single space in its own job
+never clobbers the other's plot. Regenerate one standalone by loading the `.pt` and
+calling that function with its path.
 
 ### Validate (`validate_prior_flow.py`)
 
