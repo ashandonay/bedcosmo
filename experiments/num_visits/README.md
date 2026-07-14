@@ -86,12 +86,13 @@ Each parameter entry contains:
 
 - **`prior_args_uniform.yaml`** -- `z ~ Uniform(0.1, 3.0)`.
 - **`prior_args_gamma.yaml`** -- `z ~ Gamma(shape=3.0, z_0=0.3)`, a more realistic galaxy redshift distribution.
+- **`prior_args_empirical.yaml`** -- the empirical SED prior over the 13D ILR features (`f1..f11`, `log_c_scale`, `z`); `prior_source` selects `{kde, flow}` and **defaults to `flow`**. See the [Cosmology Models](#cosmology-models-modelsyaml) section (`empirical`) for details.
 
 ## Likelihood Model
 
-The forward model is implemented in `src/bedcosmo/num_visits/experiment.py` and consists of three stages.
+The forward model is implemented in `src/bedcosmo/num_visits/experiment.py` and consists of three stages. The **signal SED** (§1) has two variants selected by `--cosmo-model`: a blackbody (`bb`, `bb_temp`) or a data-driven EAZY template mixture (`empirical`, §1b). The **noise model** (§2) and the diagonal-Gaussian sampling (§3) are shared by both.
 
-### 1. Magnitude calculation (`_calculate_magnitudes`)
+### 1. Magnitude calculation — blackbody (`_calculate_magnitudes`)
 
 A blackbody spectral energy distribution (SED) at a fixed temperature (default 5000 K) is assumed for all galaxies. The source luminosity is set by normalizing the blackbody to a fixed bolometric luminosity of 10^9 L_sun via an effective radius `R_eff`. Given a redshift `z`:
 
@@ -100,6 +101,24 @@ A blackbody spectral energy distribution (SED) at a fixed temperature (default 5
 3. The observed flux is `f = L / [(1 + z) * 4 * pi * D_L(z)^2]`, where `D_L` is the luminosity distance (Planck18 flat LCDM: H0 = 67.4 km/s/Mpc, Omega_m = 0.315).
 4. The photon flux in each LSST filter is obtained by integrating `f * T_b(lambda) * lambda / (hc)` over the filter transmission curve `T_b` (loaded via `speclite`).
 5. Fluxes are converted to AB magnitudes using the LSST photometric zeropoints from SMTN-002.
+
+### 1b. Magnitude calculation — empirical EAZY template mixture (`_observed_spectral_flux`, `_calculate_magnitudes`)
+
+The `empirical` cosmo-model replaces the blackbody with a **data-driven mixture of 12 EAZY templates** fit to DESI galaxies (see [`empirical/README.md`](../../src/bedcosmo/num_visits/empirical/README.md)). The rest-frame SED is a non-negative weighted sum of the template spectra; the parameters are the mixture weights (on the simplex), an overall amplitude, and the redshift.
+
+Parameters (13D, **ILR** parameterization; `K = 12` templates):
+
+- `f1`…`f11` — isometric-log-ratio (ILR) coordinates of the 12 simplex weights. `a = ilr_to_weights_torch(f1..f11)` maps the 11 ILR coordinates to 12 non-negative weights that sum to 1 (`bedcosmo.num_visits.empirical.simplex`).
+- `log_c_scale` — log overall amplitude. Raw per-template coefficients are `c_k = exp(log_c_scale) * a_k` (`_coeffs_from_a_log_s`).
+- `z` — redshift.
+
+Given these, the observed-frame flux density is computed by `_observed_spectral_flux`:
+
+1. Shift the common wavelength grid to the rest frame: `lambda_rest = lambda_obs / (1 + z)`.
+2. Interpolate each of the 12 templates onto `lambda_rest` and take the weighted sum, with the `(1 + z)` bandpass factor: `flux(lambda_obs) = (1 / (1 + z)) * sum_k c_k * T_k(lambda_rest)` (a single batched `einsum` over templates).
+3. Convert to AB magnitudes with the same filter integration + zeropoints as steps 4–5 of §1 (`_calculate_magnitudes`).
+
+Unlike the blackbody model, absolute brightness is a **free amplitude** (`log_c_scale`) rather than a luminosity-distance normalization: redshift enters only through the wavelength shift and the `1/(1 + z)` factor — i.e. through **colors**, not a distance modulus. Photometric redshift is therefore constrained by how spectral features move across the six filters, marginalizing over template shape (`f1..f11`) and amplitude (`log_c_scale`).
 
 ### 2. Magnitude errors (`_magnitude_errors`)
 
@@ -117,12 +136,22 @@ Photometric uncertainties are derived from a matched-filter signal-to-noise calc
 
 ### 3. Generative model (`pyro_model`)
 
-The Pyro probabilistic model ties the components together:
+The Pyro probabilistic model ties the components together. The mean magnitudes are built differently per cosmo-model, then a shared noise model is applied.
 
-1. Sample `z` from the prior (analytic distribution or prior flow).
-2. Compute mean magnitudes `mu = _calculate_magnitudes(z)` for each filter.
-3. Compute per-filter magnitude errors `sigma = _magnitude_errors(mu, N_visits)`.
-4. Build a diagonal covariance matrix `C = diag(sigma^2)`.
+For the blackbody models (`bb`, `bb_temp`):
+
+1. Sample `z` (and `T` for `bb_temp`) from the prior (analytic distribution or prior flow).
+2. Compute mean magnitudes `mu = _calculate_magnitudes(z)` for each filter (§1).
+
+For the `empirical` model:
+
+1. Draw a feature row `(f1..f11, log_c_scale, z)` from the empirical SED prior (`sed_prior.sample_batch`; KDE or flow per [`prior_args_empirical.yaml`](prior_args_empirical.yaml)) and record each parameter as a `Delta` sample site.
+2. Decode to physical SED quantities `(a, log_c_scale, z)` and compute mean magnitudes `mu` via the template mixture (§1b).
+
+Both variants then share the same noise model:
+
+3. Compute per-filter magnitude errors `sigma = _magnitude_errors(mu, N_visits)` (§2).
+4. Build a **diagonal** covariance matrix `C = diag(sigma^2)` — the six band magnitudes are independent given the SED.
 5. Sample observed magnitudes `y ~ MultivariateNormal(mu, C)`.
 
 ## Cosmology Models (`models.yaml`)
@@ -133,17 +162,22 @@ Defines which parameters belong to each named training variant. `train_args.yaml
 |-------|------------|-------------------|-------|
 | `bb` | `z` | Blackbody (fixed T) | Analytic gamma on `z` |
 | `bb_temp` | `z`, `T` | Blackbody | Analytic gamma + uniform `T` |
-| `empirical` | `f1`…`f11`, `log_c_scale`, `z` (13D; simplex logits) | EAZY template mixture | Masked KDE v2 (`artifacts/empirical/sed_prior_kde_native.joblib`; rebuild with `--parameterization logits`) |
+| `empirical` | `f1`…`f11`, `log_c_scale`, `z` (13D; ILR simplex coords, see §1b) | EAZY template mixture | Empirical SED prior — KDE or normalizing flow (`artifacts/empirical/`; rebuild with `--parameterization ilr`) |
 
 Example:
 
 ```yaml
 empirical:
-  parameters: [f1, ..., f11, log_c_scale, z]  # softmax → a1..a12
+  parameters: [f1, ..., f11, log_c_scale, z]  # ILR coords → a1..a12 weights
   latex_labels: ["$a_1$", ..., "$z$"]
 ```
 
-For `empirical`, set an **absolute** path to `sed_prior_kde_native.joblib` in [`prior_args_empirical.yaml`](prior_args_empirical.yaml) (built with `src/bedcosmo/num_visits/empirical/`). Training draws from a GPU-resident pool of KDE samples and integrates template SEDs on the GPU. See [`empirical/README.md`](../../src/bedcosmo/num_visits/empirical/README.md).
+For `empirical`, the prior is selected by `prior_source` in [`prior_args_empirical.yaml`](prior_args_empirical.yaml) — a strict enum `{kde, flow}` that **defaults to `flow`**. Both are fit to the DESI/EAZY template weights by `src/bedcosmo/num_visits/empirical/`:
+
+- **`flow` (default)** — a trained normalizing flow over the ILR features. Empirical runs **require** the trained flow checkpoints (`sed_prior_flow_native.pt`, plus `sed_prior_flow_gaussianized.pt` when `transform_input=True`) in `$SCRATCH/bedcosmo/num_visits/empirical_prior/`; they are snapshotted into each run's `artifacts/empirical/`. Train them (~10 min, CPU, both at once) with `./scripts/train_prior_flow.sh --space both`.
+- **`kde`** — a masked KDE (`sed_prior_kde_native.joblib`); the legacy/fallback path.
+
+Either way, training draws from a GPU-resident pool of prior samples (drawn from the flow, or KDE samples) and integrates the template SEDs on the GPU. See [`empirical/README.md`](../../src/bedcosmo/num_visits/empirical/README.md).
 
 ## Marginal EIG over parameter subsets (`eval_args.yaml`)
 
@@ -160,16 +194,17 @@ EIG_S(d) = H[p(θ_S)] − E_y[ H[ q(θ_S | y, d) ] ]
 ```
 
 Because the trained guide `q(θ|y,d)` is a joint normalizing flow and the
-empirical prior is a joint KDE, neither marginal is available in closed form.
+empirical prior is a joint density (normalizing flow by default, or KDE),
+neither marginal is available in closed form.
 Both entropies are estimated from samples in **physical** parameter space with a
 k-nearest-neighbor (Kozachenko–Leonenko) estimator (`src/bedcosmo/entropy.py`).
 The marginal posterior entropy is a nested Monte Carlo estimate: outer samples
 `y ~ p(y|d)` and, for each, `K` guide samples whose subset marginal entropy is
 estimated and averaged.
 
-For the empirical KDE prior, prior rows are drawn **without replacement** from
-the GPU pool (up to pool size) so k-NN entropy is not biased by duplicate pool
-rows. The prior sample count tracks `marginal_inner_samples * marginal_outer_y`
+For the empirical prior (flow or KDE), prior rows are drawn **without replacement**
+from the GPU sample pool (up to pool size) so k-NN entropy is not biased by
+duplicate pool rows. The prior sample count tracks `marginal_inner_samples * marginal_outer_y`
 (with a floor of 4096), matching the posterior MC depth rather than a fixed 20k.
 Per design, inner posterior samples are drawn for each outer ``y ~ p(y|d)``;
 k-NN entropy is computed per outer ``y`` (on ``K`` samples) and averaged over
