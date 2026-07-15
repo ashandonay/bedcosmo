@@ -39,6 +39,9 @@ base:
   include_D_M: true
   condition_design: true
   likelihood_mode: emulator
+  vary_lya_qso: false
+  emulator_sqrtn_ref: null
+  ref_cov: null
 
 base_omegak:
   cosmo_model: base_omegak
@@ -77,6 +80,9 @@ base_omegak:
   include_D_M: true
   condition_design: true
   likelihood_mode: scaling
+  vary_lya_qso: false
+  emulator_sqrtn_ref: null
+  ref_cov: null
 
 base_w:
   cosmo_model: base_w
@@ -115,6 +121,9 @@ base_w:
   include_D_M: true
   condition_design: true
   likelihood_mode: scaling
+  vary_lya_qso: false
+  emulator_sqrtn_ref: null
+  ref_cov: null
 
 base_w_wa:
   cosmo_model: base_w_wa
@@ -153,6 +162,9 @@ base_w_wa:
   include_D_M: true
   condition_design: true
   likelihood_mode: scaling
+  vary_lya_qso: false
+  emulator_sqrtn_ref: null
+  ref_cov: null
 
 base_omegak_w_wa:
   cosmo_model: base_omegak_w_wa
@@ -190,5 +202,8 @@ base_omegak_w_wa:
   log_nominal_area: true
   include_D_M: true
   condition_design: true
-  likelihood_mode: scaling
+  likelihood_mode: emulator
+  vary_lya_qso: false
+  emulator_sqrtn_ref: null
+  ref_cov: null
 
