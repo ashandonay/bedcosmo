@@ -27,7 +27,7 @@ import torch
 from pyro import distributions as dist
 
 from bedcosmo.base import BaseExperiment
-from bedcosmo.pyro_oed_src import LikelihoodDataset, standard_normal_log_prob_nf_coords
+from bedcosmo.pyro_oed_src import LikelihoodDataset, transform_input_standard_normal_log_prob
 from bedcosmo.num_visits.empirical.sed_prior import EmpiricalPriorPool
 from bedcosmo.num_visits.empirical.sed_prior import EmpiricalSedPrior
 from bedcosmo.transform import Bijector
@@ -534,7 +534,7 @@ class _EmpiricalKDETransformStub(_Stub):
         return set()
 
 
-def test_empirical_transform_input_prior_uses_standard_normal_nf_coords():
+def test_empirical_transform_input_standard_normal_prior():
     """Empirical EIG with transform_input uses log N(0,I)(y), y = T(theta)."""
     rng = np.random.default_rng(3)
     artifact = _tiny_kde_artifact(rng)
@@ -552,7 +552,7 @@ def test_empirical_transform_input_prior_uses_standard_normal_nf_coords():
     trace = SimpleNamespace()
     out = ds._compute_prior_log_probs(samples, trace)
 
-    expected = standard_normal_log_prob_nf_coords(stub, samples)
+    expected = transform_input_standard_normal_log_prob(stub, samples)
     physical = stub.sed_prior.log_prob(
         samples, param_names=stub.cosmo_params
     )
@@ -581,14 +581,14 @@ def test_nf_loss_empirical_transform_input_eval_pairs_nf_prior_with_y_flow():
         dtype=torch.float64,
     )
     context = torch.zeros(16, 1, 3, dtype=torch.float64)
-    prior_nf = standard_normal_log_prob_nf_coords(stub, samples)
+    prior_nf = transform_input_standard_normal_log_prob(stub, samples)
 
     _, eig, entropy_terms = nf_loss(
         samples,
         context,
         _ConstLogProbGuide(),
         stub,
-        log_probs={"joint": prior_nf},
+        prior_log_probs={"joint": prior_nf},
         evaluation=True,
     )
     expected = -prior_nf.mean() - 2.0
@@ -601,26 +601,89 @@ def test_nf_loss_empirical_transform_input_eval_pairs_nf_prior_with_y_flow():
     )
 
 
-def test_sed_prior_log_prob_nf_space_subtracts_log_det():
-    rng = np.random.default_rng(2)
+class _EmpiricalFlowTransformStub(_Stub):
+    """Empirical prior_source=flow + transform_input with a gaussianized flow."""
+
+    def __init__(self, artifact: dict, rng: np.random.Generator):
+        from bedcosmo.num_visits.empirical.prior_flow import (
+            SPACE_GAUSSIANIZED,
+            SPACE_NATIVE,
+            train_prior_flow,
+        )
+
+        prior = {
+            name: dist.Normal(0.0, 1.0) for name in artifact["feature_names"]
+        }
+        super().__init__(prior, transform_input=True)
+        self.init_designs()
+        self.name = "num_visits"
+        self.cosmo_params = list(artifact["feature_names"])
+        self.sed_prior = _make_empirical_sed_prior(artifact)
+        x = rng.normal(size=(400, len(self.cosmo_params)))
+        native = train_prior_flow(
+            x,
+            space=SPACE_NATIVE,
+            feature_names=self.cosmo_params,
+            epochs=4,
+            hidden_features=(16, 16),
+            transforms=2,
+            bins=6,
+            verbose=False,
+        )
+        # Train gaussianized flow on a simple affine image of native samples.
+        y = 0.5 * x + 0.1
+        gauss = train_prior_flow(
+            y,
+            space=SPACE_GAUSSIANIZED,
+            feature_names=self.cosmo_params,
+            epochs=4,
+            hidden_features=(16, 16),
+            transforms=2,
+            bins=6,
+            verbose=False,
+        )
+        self.sed_prior.attach_flow(native)
+        self.sed_prior.attach_flow(gauss)
+        self.sed_prior.prior_source = "flow"
+        # Identity bijector stub: params_to_unconstrained = affine used above.
+        self.param_bijector = Bijector(
+            self,
+            cdf_bins=_CDF_BINS,
+            cdf_samples=_CDF_SAMPLES,
+            use_prior_flow=False,
+        )
+
+    def params_to_unconstrained(self, samples, bijector_class=None):
+        flat = samples.reshape(-1, samples.shape[-1])
+        return (0.5 * flat + 0.1).reshape(samples.shape)
+
+
+def test_compute_prior_log_probs_flow_transform_uses_gaussianized_flow():
+    """prior_source=flow + transform_input scores gaussianized_flow at y=T(theta)."""
+    rng = np.random.default_rng(5)
     artifact = _tiny_kde_artifact(rng)
-    sed_prior = _make_empirical_sed_prior(artifact)
+    stub = _EmpiricalFlowTransformStub(artifact, rng)
     samples = torch.tensor(
-        rng.normal(size=(16, len(artifact["feature_names"]))),
+        rng.normal(size=(24, len(stub.cosmo_params))),
         dtype=torch.float64,
     )
-    log_det = torch.linspace(0.5, 2.0, 16, dtype=torch.float64)
-
-    def _fake_log_det(flat_samples):
-        return log_det
-
-    param_names = list(artifact["feature_names"])
-    physical = sed_prior.log_prob(samples, param_names=param_names)
-    nf = sed_prior.log_prob(
-        samples,
-        param_names=param_names,
-        nf_space=True,
-        log_abs_det_fn=_fake_log_det,
+    ds = LikelihoodDataset(
+        experiment=stub,
+        n_particles_per_device=24,
+        device="cpu",
+        evaluation=True,
     )
-    assert torch.allclose(nf.reshape(-1), physical.reshape(-1) - log_det)
-    assert not torch.allclose(nf, physical)
+    out = ds._compute_prior_log_probs(samples, SimpleNamespace())
+    expected = stub.sed_prior.log_prob_gaussianized_from_native(
+        samples,
+        stub.params_to_unconstrained,
+        param_names=stub.cosmo_params,
+    )
+    assert torch.allclose(out["joint"], expected, atol=1e-9)
+    # Must not fall back to N(0,I) or native physical density.
+    std_normal = transform_input_standard_normal_log_prob(stub, samples)
+    native = stub.sed_prior.log_prob(
+        samples, param_names=stub.cosmo_params, use_flow=True
+    )
+    assert not torch.allclose(out["joint"], std_normal, atol=0.1)
+    assert not torch.allclose(out["joint"], native, atol=0.1)

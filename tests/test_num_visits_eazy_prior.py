@@ -15,24 +15,31 @@ from bedcosmo.transform import Bijector
 from bedcosmo.util import get_experiment_config_path
 from bedcosmo.num_visits.empirical.sed_prior import (
     build_gpu_prior_pool,
-    load_empirical_prior,
     sample_prior_batch,
 )
 from bedcosmo.num_visits.empirical.simplex import (
     PARAMETERIZATION_CLR,
+    PARAMETERIZATION_ILR,
     prior_clr_feature_names,
+    prior_ilr_feature_names,
     split_feature_matrix,
 )
+from bedcosmo.num_visits.empirical.fit_sed_prior_kde import get_parameterization, load_sed_prior_kde
 from bedcosmo.num_visits.empirical.templates import build_common_rest_grid, load_eazy_template_bank
 
 N_TEMPLATES = 12
-N_FEATURES = N_TEMPLATES + 2  # f1..f12, log_c_scale, z
+
+
+def _expected_feature_names(parameterization: str) -> list[str]:
+    if parameterization == PARAMETERIZATION_ILR:
+        return prior_ilr_feature_names(N_TEMPLATES)  # f1..f11, log_c_scale, z
+    return prior_clr_feature_names(N_TEMPLATES)  # f1..f12, log_c_scale, z (legacy)
 
 KDE_PATH = Path(
     os.environ.get(
         "BEDCOSMO_TEST_KDE_PATH",
         Path.home()
-        / "scratch/bedcosmo/num_visits/empirical_prior/sed_prior_kde.joblib",
+        / "scratch/bedcosmo/num_visits/empirical_prior/sed_prior_kde_native.joblib",
     )
 ).expanduser()
 
@@ -54,33 +61,35 @@ def test_build_common_rest_grid_optical_coverage():
 
 @pytest.fixture(scope="module")
 def kde_artifact():
-    artifact = load_empirical_prior(KDE_PATH)
-    if artifact.get("parameterization", "weights") != PARAMETERIZATION_CLR:
+    artifact = load_sed_prior_kde(KDE_PATH)
+    if get_parameterization(artifact) not in (PARAMETERIZATION_ILR, PARAMETERIZATION_CLR):
         pytest.skip(
-            "KDE artifact is not CLR parameterization; rebuild with "
-            "fit_sed_prior_kde.py (default --parameterization clr)"
+            "KDE artifact is not ILR/CLR parameterization; rebuild with fit_sed_prior_kde.py"
         )
     return artifact
 
 
 def test_build_gpu_prior_pool_shape_and_simplex(kde_artifact):
+    param = get_parameterization(kde_artifact)
+    feature_names = _expected_feature_names(param)
     pool = build_gpu_prior_pool(kde_artifact, 2000, seed=0, device="cpu")
-    assert pool.pool.shape == (2000, N_FEATURES)
+    assert pool.pool.shape == (2000, len(feature_names))
     assert pool.n_templates == N_TEMPLATES
-    assert pool.feature_names == prior_clr_feature_names(N_TEMPLATES)
+    assert pool.feature_names == feature_names
     a, _, _ = split_feature_matrix(
         pool.pool.cpu().numpy(),
         N_TEMPLATES,
-        parameterization=PARAMETERIZATION_CLR,
+        parameterization=param,
     )
     assert np.all(a >= -1e-9)
     assert np.allclose(a.sum(axis=1), 1.0, atol=1e-5)
 
 
 def test_sample_prior_batch_on_device(kde_artifact):
+    n_features = len(_expected_feature_names(get_parameterization(kde_artifact)))
     pool = build_gpu_prior_pool(kde_artifact, 500, seed=1, device="cpu")
     rows = sample_prior_batch(pool, 128)
-    assert rows.shape == (128, N_FEATURES)
+    assert rows.shape == (128, n_features)
     assert rows.device == pool.pool.device
 
 
@@ -104,6 +113,51 @@ def test_load_eazy_template_bank():
     assert not np.all(np.diff(t0) >= -1e-20)
 
 
+def test_empirical_transform_input_loads_build_prior_bijector(kde_artifact):
+    """Empirical NumVisits should load NF bijector from KDE artifact, not resample CDFs."""
+    if kde_artifact.get("gaussianizer_state") is None:
+        pytest.skip("KDE artifact has no gaussianizer_state")
+
+    from bedcosmo.num_visits import NumVisits
+    from bedcosmo.util import get_experiment_config_path
+
+    design_path = get_experiment_config_path("num_visits", "design_args.yaml")
+    with open(design_path) as f:
+        design_args = yaml.safe_load(f)
+    design_args["input_type"] = "nominal"
+
+    prior_args = {
+        "prior_dir": str(KDE_PATH.parent.resolve()),
+        "prior_pool_size": 512,
+        "prior_pool_seed": 0,
+        "parameters": {},
+    }
+    models_path = get_experiment_config_path("num_visits", "models.yaml")
+    with open(models_path) as f:
+        models = yaml.safe_load(f)
+    for name in models["empirical"]["parameters"]:
+        prior_args["parameters"][name] = {
+            "distribution": {"type": "empirical"},
+            "plot": {"lower": -8.0, "upper": 8.0},
+        }
+
+    exp = NumVisits(
+        prior_args=prior_args,
+        design_args=design_args,
+        cosmo_model="empirical",
+        device="cpu",
+        transform_input=True,
+        input_transform_type="joint",
+        verbose=False,
+    )
+    assert exp.param_bijector is not None
+    assert exp.param_bijector.uses_joint_gaussianizer()
+    rows = exp.sed_prior.sample_batch(32)
+    y = exp.params_to_unconstrained(rows)
+    assert y.shape == (32, len(exp.cosmo_params))
+    assert torch.isfinite(y).all()
+
+
 @pytest.mark.slow
 def test_numvisits_eazy_init_and_magnitudes():
     from bedcosmo.num_visits import NumVisits
@@ -114,7 +168,7 @@ def test_numvisits_eazy_init_and_magnitudes():
     design_args["input_type"] = "nominal"
 
     prior_args = {
-        "prior_kde_source": str(KDE_PATH.resolve()),
+        "prior_dir": str(KDE_PATH.parent.resolve()),
         "prior_pool_size": 512,
         "prior_pool_seed": 0,
         "parameters": {},
@@ -139,9 +193,11 @@ def test_numvisits_eazy_init_and_magnitudes():
         transform_input=False,
         verbose=False,
     )
-    assert exp.use_eazy_sed
-    assert len(exp.cosmo_params) == N_FEATURES
-    assert exp._prior_parameterization == PARAMETERIZATION_CLR
+    expected_param = get_parameterization(load_sed_prior_kde(KDE_PATH))
+    assert exp.cosmo_model == "empirical"
+    assert exp._n_eazy_templates == N_TEMPLATES
+    assert len(exp.cosmo_params) == len(_expected_feature_names(expected_param))
+    assert exp._prior_parameterization == expected_param
     z = torch.tensor([0.5, 0.9], dtype=torch.float64)
     a = torch.ones(2, N_TEMPLATES, dtype=torch.float64) / N_TEMPLATES
     log_s = torch.tensor([7.0, 7.5], dtype=torch.float64)

@@ -9,7 +9,7 @@ import pytest
 from bedcosmo.num_visits.empirical.paths import (
     get_bedcosmo_scratch,
     get_desi_data_dir,
-    get_eazy_templates_dir,
+    get_template_dir,
     get_healpix_fit_dir,
     get_num_visits_scratch,
     get_prior_build_dir,
@@ -28,7 +28,7 @@ def test_scratch_paths_use_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) 
     assert get_bedcosmo_scratch() == scratch / "bedcosmo"
     assert get_num_visits_scratch() == scratch / "bedcosmo" / "num_visits"
     assert get_desi_data_dir() == scratch / "bedcosmo" / "desi" / "tiny_dr1"
-    assert get_eazy_templates_dir() == scratch / "bedcosmo" / "eazy"
+    assert get_template_dir() == scratch / "bedcosmo" / "eazy"
     assert get_healpix_fit_dir(23040) == (
         scratch / "bedcosmo" / "num_visits" / "empirical_prior" / "healpix" / "hp23040"
     )
@@ -37,7 +37,7 @@ def test_scratch_paths_use_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) 
         scratch / "bedcosmo" / "num_visits" / "empirical_prior" / "desi_eazy_empirical_weights.csv"
     )
     assert get_prior_kde_path() == (
-        scratch / "bedcosmo" / "num_visits" / "empirical_prior" / "sed_prior_kde.joblib"
+        scratch / "bedcosmo" / "num_visits" / "empirical_prior" / "sed_prior_kde_native.joblib"
     )
 
 
