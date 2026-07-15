@@ -1319,10 +1319,17 @@ class NumTracers(BaseExperiment, CosmologyMixin):
         """
         from desilike_emulator.util import build_model, DEFAULT_SIGMA_FLOOR
 
+        # Sigma clamps passed to decode_emulator_outputs. The floor is the
+        # emulator's own convention (single-sourced from util, so it can't drift
+        # from what the model was decoded with); the ceiling is a bedcosmo choice
+        # (util has no default -- it defaults OFF) that caps non-detection-tail
+        # extrapolation so the covariance stays finite and PD. See _SIGMA_CEILING.
         self._sigma_floor = DEFAULT_SIGMA_FLOOR
+        self._sigma_ceiling = self._SIGMA_CEILING
 
         self._emulators = {}
         self._emulator_fallback_bins = []
+        self._n_extrap_warned = set()  # tracer bins already warned (warn once)
         for tracer_bin, ckpt_path in self._emulator_checkpoints.items():
             if ckpt_path is None:
                 self._emulator_fallback_bins.append(tracer_bin)
@@ -1342,8 +1349,24 @@ class NumTracers(BaseExperiment, CosmologyMixin):
             model.eval()
             model.requires_grad_(False)
 
+            # Recover the trained N_tracers box from the input standardization
+            # stats: N was drawn uniform[a, b], so mu = (a+b)/2 and
+            # sigma = (b-a)/sqrt(12)  =>  [a, b] = mu -+ sqrt(3)*sigma. Used only
+            # to warn (not clamp) on gross N-extrapolation, which signals a
+            # wiring bug rather than a valid design excursion.
+            pnames = list(ckpt["param_names"])
+            n_train_lo = n_train_hi = None
+            if "N_tracers" in pnames:
+                i_n = pnames.index("N_tracers")
+                xmu = ckpt["x_mu"].reshape(-1)[i_n].item()
+                xsg = ckpt["x_sigma"].reshape(-1)[i_n].item()
+                half = (3.0 ** 0.5) * xsg
+                n_train_lo, n_train_hi = xmu - half, xmu + half
+
             self._emulators[tracer_bin] = {
                 "model": model,
+                "n_train_lo": n_train_lo,
+                "n_train_hi": n_train_hi,
                 "param_names": list(ckpt["param_names"]),
                 "target_names": list(ckpt["target_names"]),
                 "x_mu": ckpt["x_mu"].to(self.device),
@@ -1390,6 +1413,13 @@ class NumTracers(BaseExperiment, CosmologyMixin):
         y_sigma = emu["y_sigma"].to(model_dtype)
         x_norm = (x - x_mu) / x_sigma
         y_norm = emu["model"](x_norm)
+        # Numerical guard on non-detection / out-of-domain extrapolation: cap
+        # sigma to a finite ceiling (inf/nan -> ceiling; encodes "no info") and
+        # pull rho strictly inside (-1, 1) so the assembled covariance is always
+        # finite and every 2x2 block is strictly positive-definite. Both are
+        # applied inside the decode (rho clip is always-on there; the ceiling is
+        # opt-in via sigma_ceiling and off for training/eval). In-domain values
+        # are untouched (see _SIGMA_CEILING).
         return decode_emulator_outputs(
             y_norm,
             y_mu,
@@ -1398,7 +1428,41 @@ class NumTracers(BaseExperiment, CosmologyMixin):
             log_normalize=emu["log_normalize"],
             y_linthresh=emu["y_linthresh"],
             sigma_floor=self._sigma_floor,
+            sigma_ceiling=self._sigma_ceiling,
         )
+
+    # How far outside the trained N_tracers box counts as "gross" extrapolation
+    # worth warning about. A valid design only reaches ~0.70-1.05x the trained
+    # box (verified for dr1), where the emulator stays accurate (~0.6%); values
+    # far beyond this (e.g. raw counts, a bad hrdrag_multiplier) indicate a
+    # wiring bug, so we warn -- but never clamp, to avoid silently biasing the
+    # small, benign excursions the design legitimately makes.
+    _N_EXTRAP_LO = 0.5   # warn below 0.5 x trained low
+    _N_EXTRAP_HI = 2.0   # warn above 2.0 x trained high
+
+    def _warn_n_extrapolation(self, tracer_bin, n_values):
+        """Warn once per tracer bin if fed N_tracers grossly outside training."""
+        if tracer_bin in self._n_extrap_warned:
+            return
+        emu = self._emulators.get(tracer_bin, {})
+        lo, hi = emu.get("n_train_lo"), emu.get("n_train_hi")
+        if lo is None or hi is None:
+            return
+        with torch.no_grad():
+            nmin = float(torch.as_tensor(n_values).min())
+            nmax = float(torch.as_tensor(n_values).max())
+        if nmin < self._N_EXTRAP_LO * lo or nmax > self._N_EXTRAP_HI * hi:
+            self._n_extrap_warned.add(tracer_bin)
+            import warnings
+            warnings.warn(
+                f"[{tracer_bin}] N_tracers fed to emulator "
+                f"[{nmin:.3e}, {nmax:.3e}] is grossly outside the trained box "
+                f"[{lo:.3e}, {hi:.3e}] (tolerance x{self._N_EXTRAP_LO}/"
+                f"x{self._N_EXTRAP_HI}); predictions there are extrapolated and "
+                f"may be unreliable. This usually signals an N_tracers wiring "
+                f"bug, not a valid design.",
+                RuntimeWarning,
+            )
 
     def _passed_ratio_to_n_tracers(self, passed_ratio):
         """Convert a passed *ratio* (``calc_passed`` output) to absolute passed ``N_tracers``.
@@ -1429,6 +1493,20 @@ class NumTracers(BaseExperiment, CosmologyMixin):
             # All rows of a given tracer carry the same passed value; take the first.
             n_tracers[tracer_bin] = passed_ratio[..., rows[0]] * self.nominal_total_obs
         return n_tracers
+
+    # Sigma ceiling for emulator extrapolation into the non-detection tail. At
+    # degenerate cosmologies (e.g. very low Om) the true BAO forecast is itself
+    # non-finite -- the training generator discards those rows -- so the emulator
+    # has no signal there and its decode's expm1 overflows sigma to +inf, which
+    # poisons the assembled covariance and crashes the MultivariateNormal
+    # Cholesky. Passing this as ``sigma_ceiling`` to decode_emulator_outputs
+    # caps sigma to a finite value that reproduces the true "no information"
+    # verdict (precision -> 0) instead of crashing. Chosen to never touch
+    # in-domain values: it sits far above any real forecast (in-domain
+    # sigma <~ 1e2, training-tail finite max ~1.5e7). The companion rho clip to
+    # strictly inside (-1, 1) -- which keeps every 2x2 block PD -- lives in the
+    # decode itself (util._RHO_CLIP), always-on, mirroring the forward transform.
+    _SIGMA_CEILING = 1.0e8          # cap on decoded sigma (encodes zero precision)
 
     # Maps emulator tracer-bin keys (models.yaml likelihood_emulator) to the
     # tracer names used in desi_data.csv.
@@ -1563,6 +1641,7 @@ class NumTracers(BaseExperiment, CosmologyMixin):
             # Build emulator inputs in the exact feature order expected by the
             # checkpoint (e.g. current BAO models use ['N_tracers', 'Om', 'hrdrag']).
             emu = self._emulators[tracer_bin]
+            self._warn_n_extrapolation(tracer_bin, n_tracers[tracer_bin])
             feature_values = {
                 "N_tracers": n_tracers[tracer_bin],
                 "Om": Om,
@@ -1737,7 +1816,14 @@ class NumTracers(BaseExperiment, CosmologyMixin):
         """Make covariance numerically SPD for MultivariateNormal sampling."""
         cov = 0.5 * (covariance_matrix + covariance_matrix.transpose(-1, -2))
         if not torch.isfinite(cov).all():
-            cov = torch.nan_to_num(cov, nan=0.0, posinf=0.0, neginf=0.0)
+            # Map a non-finite variance to a LARGE finite one, not zero: +inf
+            # variance means "no information", so zeroing it (the old behavior)
+            # inverts the physics into "infinite precision". With the upstream
+            # sigma cap in _emulator_predict this branch should never trigger
+            # for the emulator path; kept as defense in depth. Ceiling^2 matches
+            # the sigma cap's variance scale.
+            big = self._sigma_ceiling ** 2
+            cov = torch.nan_to_num(cov, nan=0.0, posinf=big, neginf=-big)
             cov = 0.5 * (cov + cov.transpose(-1, -2))
         n_dim = cov.shape[-1]
         eye = torch.eye(n_dim, device=cov.device, dtype=cov.dtype)
