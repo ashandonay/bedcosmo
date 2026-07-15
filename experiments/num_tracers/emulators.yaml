@@ -44,10 +44,10 @@ bao:
 
   base_omegak_w_wa:
     dr1:
-      BGS: /path/to/base_omegak_w_wa/BGS/model.pt
-      LRG1: /path/to/base_omegak_w_wa/LRG1/model.pt
-      LRG2: /path/to/base_omegak_w_wa/LRG2/model.pt
-      LRG3_ELG1: /path/to/base_omegak_w_wa/LRG3_ELG1/model.pt
-      ELG2: /path/to/base_omegak_w_wa/ELG2/model.pt
-      QSO: /path/to/base_omegak_w_wa/QSO/model.pt
-      Lya_QSO: /path/to/base_omegak_w_wa/Lya_QSO/model.pt
+      BGS: config/v2/BGS.pt
+      LRG1: config/v2/LRG1.pt
+      LRG2: config/v2/LRG2.pt
+      LRG3_ELG1: config/v2/LRG3_ELG1.pt
+      ELG2: config/v2/ELG2.pt
+      QSO: config/v2/QSO.pt
+      Lya_QSO: null
