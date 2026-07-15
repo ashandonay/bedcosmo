@@ -107,6 +107,7 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         verbose=False,
         global_rank=0,
         artifacts_dir=None,
+        target_params=None,
     ):
         self.name = "num_visits"
         self.device = device
@@ -146,6 +147,12 @@ class NumVisits(BaseExperiment, CosmologyMixin):
             artifacts_dir=self.artifacts_dir,
             **self.prior_args,
         )
+
+        # Which cosmo_params the guide actually infers (default: all). A strict
+        # subset trains a focused guide (e.g. redshift only) while the generative
+        # model still samples the full parameter vector (nuisances marginalized
+        # by simulation).
+        self._init_target_params(target_params)
 
         self._init_param_bijector(
             bijector_state=bijector_state,

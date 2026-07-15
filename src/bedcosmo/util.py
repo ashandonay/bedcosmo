@@ -965,7 +965,6 @@ def load_model(experiment, step, run_obj, run_args, device, global_rank=0):
 
     current_run_id = run_obj.info.run_id
     exp_id = run_obj.info.experiment_id
-    input_dim = len(experiment.cosmo_params)
 
     effective_step = step
     if step == 'last':
@@ -980,6 +979,16 @@ def load_model(experiment, step, run_obj, run_args, device, global_rank=0):
     if selected_step != effective_step:
         print(f"Warning: Step {effective_step} not found in checkpoints. Loading checkpoint for step {selected_step} instead.")
         effective_step = selected_step
+
+    # Rebuild the flow at the guide's saved output dim. For a focused-target
+    # run this is len(target_params); keep the experiment's target columns in
+    # sync so eval slices the same columns the guide was trained on. Legacy
+    # checkpoints (no input_dim/target_params) fall back to all cosmo_params.
+    ckpt_targets = checkpoint.get("target_params")
+    if ckpt_targets is not None and hasattr(experiment, "_init_target_params"):
+        if list(ckpt_targets) != list(getattr(experiment, "target_params", [])):
+            experiment._init_target_params(ckpt_targets)
+    input_dim = int(checkpoint.get("input_dim", len(experiment.cosmo_params)))
 
     nf_cfg = checkpoint.get(NF_INIT_CONFIG_KEY)
     init_args = nf_cfg if nf_cfg is not None else run_args

@@ -301,6 +301,16 @@ def nf_loss(
     else:
         y_flat = flattened_samples
 
+    # Focused-target guide: keep only the inferred (target) columns before the
+    # flow log_prob. The generative model still sampled the full parameter
+    # vector, so the omitted params are marginalized by simulation. The guard
+    # fires only for a strict subset; the default (all params) path is
+    # unchanged. Subsets require transform_input=False (enforced in the
+    # experiment), so y_flat is the physical sample and column-slicing is exact.
+    target_indices = getattr(experiment, "target_indices", None)
+    if target_indices is not None and len(target_indices) != y_flat.shape[-1]:
+        y_flat = y_flat[:, target_indices]
+
     # Compute the negative log-probability
     if chunk_size is None:
         neg_log_prob = -guide(flattened_context).log_prob(y_flat)
@@ -325,7 +335,17 @@ def nf_loss(
     if prior_log_probs is None:
         raise ValueError("Log probabilities are not provided")
 
-    prior_entropy = _prior_entropy_from_log_probs(prior_log_probs, experiment)
+    # Focused-target guide: the plug-in prior scorer is over the full joint, but
+    # EIG_target = H_prior(target) - H_post(target). Use the design-independent
+    # target-marginal prior entropy the evaluator injects (nats). Falls back to
+    # the full-joint prior for default (all-params) runs.
+    target_prior_entropy = getattr(experiment, "target_prior_entropy", None)
+    n_targets = getattr(experiment, "n_targets", None)
+    is_subset = n_targets is not None and n_targets != len(experiment.cosmo_params)
+    if target_prior_entropy is not None and is_subset:
+        prior_entropy = torch.full_like(posterior_entropy, float(target_prior_entropy))
+    else:
+        prior_entropy = _prior_entropy_from_log_probs(prior_log_probs, experiment)
 
     # H_prior = -E[log p], H_post = E[-log q]; EIG = H_prior - H_post (nats).
     entropy_terms = {

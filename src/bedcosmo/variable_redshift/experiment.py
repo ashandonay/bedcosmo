@@ -73,6 +73,7 @@ class VariableRedshift(BaseExperiment, CosmologyMixin):
         joint_transform_fit_path=None,
         joint_transform_fit_samples=None,
         flow_squash_params=None,
+        target_params=None,
     ):
 
         self.name = 'variable_redshift'
@@ -143,6 +144,7 @@ class VariableRedshift(BaseExperiment, CosmologyMixin):
             joint_transform_fit_samples=joint_transform_fit_samples,
             flow_squash_params=flow_squash_params,
         )
+        self._init_target_params(target_params)
         self._init_param_bijector(bijector_state=bijector_state)
 
         # Observation labels

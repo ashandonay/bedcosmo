@@ -89,9 +89,14 @@ class Trainer:
             if hasattr(self.experiment, 'nominal_design'):
                 print(f"Nominal design: {self.experiment.nominal_design}\n")
 
+        # Guide output dim = number of inferred (target) params; defaults to all
+        # cosmo_params for experiments without a focused-target subset.
+        n_targets = getattr(
+            self.experiment, "n_targets", len(self.experiment.cosmo_params)
+        )
         self.posterior_flow = init_nf(
             self.run_args,
-            len(self.experiment.cosmo_params),
+            n_targets,
             self.experiment.context_dim,
             device=self.device,
             seed=self.run_args["nf_seed"]
@@ -102,9 +107,9 @@ class Trainer:
 
             print("MLFlow Run Info:", self.run_obj.info.experiment_id + "/" + self.run_obj.info.run_id)
             print(f"Using {self.run_args['n_devices']} devices with {self.run_args['n_particles']} total particles.")
-            print(f'Input dim: {len(self.experiment.cosmo_params)}, Context dim: {self.experiment.context_dim}')
+            print(f'Input dim: {n_targets}, Context dim: {self.experiment.context_dim}')
             print(f"Cosmology: {self.run_args['cosmo_model']}")
-            print(f"Target labels: {self.experiment.cosmo_params}")
+            print(f"Target labels: {getattr(self.experiment, 'target_params', self.experiment.cosmo_params)}")
             print(f"Designs shape: {self.experiment.designs.shape}")
             print("Flow model initialized: \n", self.posterior_flow)
             
@@ -412,7 +417,10 @@ class Trainer:
                     
                     # Perform all RNG operations (plotting, etc.) BEFORE saving checkpoint
                     # This ensures the saved RNG state is ready for the next training step
-                    if self.run_args.get("log_nominal_area", False):
+                    # Contour-area diagnostics need >=2 inferred params; skip for
+                    # focused-target (e.g. 1D redshift) guides.
+                    _n_targets = getattr(self.experiment, "n_targets", len(self.experiment.cosmo_params))
+                    if self.run_args.get("log_nominal_area", False) and _n_targets >= 2:
                         plot_samples, plot_colors, plot_labels, plot_scatter = [], [], [], []
                         nf_samples = self.experiment.get_guide_samples(self.posterior_flow, self.experiment.nominal_context, num_samples=10000)
                         plot_samples.append(nf_samples)
@@ -639,10 +647,18 @@ class Trainer:
                 if self.global_rank == 0:
                     print(f'Warning: Failed to serialize bijector state: {exc}')
 
-        # Save input_dim and context_dim
+        # Save input_dim and context_dim. input_dim is the guide's output
+        # dimension (= number of target params, defaults to all cosmo_params).
+        # target_params lets eval rebuild the flow at the right dim and keep its
+        # column-slicing in sync.
         if hasattr(self, 'experiment') and self.experiment is not None:
-            checkpoint['input_dim'] = len(self.experiment.cosmo_params)
+            checkpoint['input_dim'] = getattr(
+                self.experiment, "n_targets", len(self.experiment.cosmo_params)
+            )
             checkpoint['context_dim'] = self.experiment.context_dim
+            target_params = getattr(self.experiment, "target_params", None)
+            if target_params is not None:
+                checkpoint['target_params'] = list(target_params)
 
         if getattr(self, "run_args", None) is not None:
             checkpoint[NF_INIT_CONFIG_KEY] = build_nf_init_config_from_run_args(self.run_args)

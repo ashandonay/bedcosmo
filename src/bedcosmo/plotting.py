@@ -497,8 +497,17 @@ class BasePlotter:
             return False
         raise ValueError(f"Invalid parameter space: {param_space}")
 
-    def _mark_central_parameter_values(self, g, experiment, transform_output=True):
-        """Mark ``experiment.central_params`` on GetDist triangle-plot axes."""
+    def _mark_central_parameter_values(
+        self, g, experiment, transform_output=True, plotted_params=None
+    ):
+        """Mark ``experiment.central_params`` on GetDist triangle-plot axes.
+
+        ``plotted_params`` is the ordered list of parameter names that actually
+        occupy the panels (``samples[0].paramNames``). It must be used instead of
+        ``experiment.cosmo_params`` because focused-target or marginal-subset
+        plots have fewer panels than the full parameter set, and panel index i no
+        longer corresponds to ``cosmo_params[i]``.
+        """
         central_params = getattr(experiment, "central_params", None)
         if not central_params:
             return
@@ -523,7 +532,7 @@ class BasePlotter:
             }
 
         line_kw = dict(color='black', linestyle='--', linewidth=1.0)
-        params = experiment.cosmo_params
+        params = list(plotted_params) if plotted_params is not None else list(experiment.cosmo_params)
         n = g.subplots.shape[0]
 
         for i, pi in enumerate(params):
@@ -876,7 +885,10 @@ class BasePlotter:
         )
 
         if getattr(experiment, "central_params", None):
-            self._mark_central_parameter_values(g, experiment, transform_output=transform_output)
+            plotted_params = all_samples[0].paramNames.list()
+            self._mark_central_parameter_values(
+                g, experiment, transform_output=transform_output, plotted_params=plotted_params
+            )
 
         # Calculate dynamic font sizes
         n_params = len(all_samples[0].paramNames.names)
@@ -2273,7 +2285,10 @@ class RunPlotter(BasePlotter):
         g = self.plot_posterior(all_samples, all_colors, levels=levels, width_inch=plot_width)
         
         if getattr(experiment, "central_params", None):
-            self._mark_central_parameter_values(g, experiment, transform_output=transform_output)
+            plotted_params = all_samples[0].paramNames.list()
+            self._mark_central_parameter_values(
+                g, experiment, transform_output=transform_output, plotted_params=plotted_params
+            )
 
         # Calculate dynamic font sizes
         n_params = len(all_samples[0].paramNames.names)

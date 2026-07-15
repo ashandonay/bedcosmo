@@ -257,6 +257,47 @@ class BaseExperiment(ABC):
         """Optional override: return (N, D_c) physical samples for joint transform correlation fit."""
         return None
 
+    def _init_target_params(self, target_params):
+        """Resolve which cosmo_params the guide infers (default: all).
+
+        ``target_params`` may be None, an empty list, or a list of param names
+        (any order). None / [] / a list covering every cosmo_param -> the full
+        set (current behavior). A strict subset trains a focused guide whose
+        flow output dimension is ``len(target_params)``; the generative model
+        still samples the full parameter vector, so the omitted params are
+        marginalized by simulation.
+
+        Sets ``self.target_params`` (always concrete), ``self.target_indices``
+        (columns into the full cosmo_params-ordered sample tensor), and
+        ``self.n_targets``. Subclasses call this once, after ``self.cosmo_params``
+        and ``self.transform_input`` are set.
+        """
+        all_params = list(self.cosmo_params)
+        if not target_params or set(target_params) == set(all_params):
+            resolved = all_params
+        else:
+            unknown = [p for p in target_params if p not in all_params]
+            if unknown:
+                raise ValueError(
+                    f"target_params {unknown} not in cosmo_params {all_params}"
+                )
+            resolved = list(target_params)
+
+        self.target_params = resolved
+        self.target_indices = [all_params.index(p) for p in resolved]
+        self.n_targets = len(self.target_indices)
+
+        # A strict subset needs transform_input=False: the joint whitening
+        # transform mixes all params, so a post-transform column is not a
+        # function of its param alone and a subset guide would be incoherent.
+        if self.n_targets < len(all_params) and getattr(self, "transform_input", False):
+            raise ValueError(
+                "target_params subset requires transform_input=False "
+                "(the joint whitening transform entangles all parameters, so a "
+                f"subset guide over {resolved} is not well defined). "
+                "Set transform_input: false for focused-target runs."
+            )
+
     def _uses_joint_transform(self) -> bool:
         return (
             getattr(self, "transform_input", False)
@@ -637,22 +678,38 @@ class BaseExperiment(ABC):
         with torch.no_grad():
             param_samples = guide(context.squeeze()).sample((num_samples,))
 
-        # Transform if needed
+        # The guide outputs one column per inferred (target) param, in
+        # target_params order. For a default run this is all cosmo_params; for a
+        # focused-target guide it is the subset. Map columns accordingly so
+        # multipliers/names/labels align with the actual guide output.
+        n_targets = getattr(self, "n_targets", len(self.cosmo_params))
+        if n_targets < len(self.cosmo_params):
+            guide_params = list(self.target_params)
+            guide_indices = list(self.target_indices)  # positions in cosmo_params
+        else:
+            guide_params = list(self.cosmo_params)
+            guide_indices = list(range(len(self.cosmo_params)))
+
+        # Transform if needed (skipped for focused runs, which use transform_input=False)
         if getattr(self, "transform_input", False) and transform_output:
             param_samples = self.params_from_unconstrained(param_samples)
             param_samples = self._sanitize_physical_samples(param_samples)
 
-        self.apply_multipliers(param_samples)
+        # Apply multipliers per guide column (keyed by the column's param name).
+        for j, pname in enumerate(guide_params):
+            multiplier = getattr(self, f"{pname}_multiplier", None)
+            if multiplier is not None:
+                param_samples[..., j] *= multiplier
 
         # Filter parameters if requested
         if params is None:
-            names = self.cosmo_params
-            labels = self.latex_labels
+            names = guide_params
+            labels = [self.latex_labels[i] for i in guide_indices]
         else:
-            param_indices = [self.cosmo_params.index(param) for param in params if param in self.cosmo_params]
-            param_samples = param_samples[:, param_indices]
-            names = [self.cosmo_params[i] for i in param_indices]
-            labels = [self.latex_labels[i] for i in param_indices]
+            sel = [j for j, pname in enumerate(guide_params) if pname in params]
+            param_samples = param_samples[:, sel]
+            names = [guide_params[j] for j in sel]
+            labels = [self.latex_labels[guide_indices[j]] for j in sel]
 
         # Add tiny noise to constant columns to prevent getdist from excluding them
         for i in range(param_samples.shape[1]):

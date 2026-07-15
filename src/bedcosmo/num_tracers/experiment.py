@@ -79,6 +79,7 @@ class NumTracers(BaseExperiment, CosmologyMixin):
         joint_transform_fit_path=None,
         joint_transform_fit_samples=None,
         flow_squash_params=None,
+        target_params=None,
     ):
 
         self.name = "num_tracers"
@@ -222,6 +223,7 @@ class NumTracers(BaseExperiment, CosmologyMixin):
             joint_transform_fit_samples=joint_transform_fit_samples,
             flow_squash_params=flow_squash_params,
         )
+        self._init_target_params(target_params)
 
         # param_bijector is built unconditionally (DESI sampling consumes it
         # even when transform_input is False). State resolution (explicit
