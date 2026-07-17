@@ -18,7 +18,12 @@ import argparse
 from bedcosmo.plotting import RunPlotter
 import traceback
 from bedcosmo.pyro_oed_src import nf_loss, LikelihoodDataset
-from bedcosmo.entropy import knn_entropy
+from bedcosmo.entropy import (
+    bits_to_nats,
+    knn_entropy,
+    nats_to_bits,
+    plugin_entropy_from_log_probs,
+)
 from matplotlib.patches import Rectangle
 from bedcosmo.profiling import (
     profile_method,
@@ -36,6 +41,9 @@ from bedcosmo.util import (
 import mlflow
 import inspect
 import yaml
+
+# Sentinel for "not computed yet", so a legitimately-None result is still cached.
+_UNSET = object()
 
 
 class Evaluator:
@@ -108,6 +116,8 @@ class Evaluator:
         self.marginal_outer_y = int(marginal_outer_y)
         self.marginal_inner_samples = int(marginal_inner_samples)
         self.marginal_knn_k = int(marginal_knn_k)
+        # Design-independent H(target); computed on first use, see _target_prior_entropy.
+        self._target_prior_entropy_cache = _UNSET
         self.step_diagnostics = bool(step_diagnostics)
 
         # Parse experiment_args override
@@ -497,8 +507,10 @@ class Evaluator:
             nominal_design (bool): Whether to evaluate the nominal design.
             designs: Tensor of designs to evaluate. If None, determines from nominal_design or self.input_designs.
         Returns:
-            tuple (eigs, entropy_terms) where eigs is per-design EIG in nats and
-            entropy_terms maps prior_entropy / posterior_entropy (also nats).
+            tuple (eigs, entropy_terms) where eigs is per-design EIG in BITS and
+            entropy_terms maps prior_entropy / posterior_entropy (also bits), as
+            numpy arrays. This method is the nats -> bits boundary: nf_loss and
+            the prior plug-in work in nats, and nothing downstream of here does.
         """
         device_obj = torch.device(self.device)
         
@@ -553,22 +565,27 @@ class Evaluator:
         )
         with torch.no_grad():
             with nfloss_cm:
-                _, eigs, entropy_terms = nf_loss(
+                _, posterior_entropy = nf_loss(
                     samples=samples,
                     context=context,
                     guide=flow_model,
                     experiment=self.experiment,
                     rank=0,
                     verbose_shapes=False,
-                    prior_log_probs=prior_log_probs,
-                    evaluation=True,
                     chunk_size=(self.n_particles // 10)
                 )
-        eigs = eigs.detach().cpu()  # Move to CPU immediately to free GPU memory
-        if entropy_terms is not None:
-            entropy_terms = {
-                k: v.detach().cpu() for k, v in entropy_terms.items()
-            }
+        # EIG = H_prior - H_post (nats). nf_loss owns only the posterior term;
+        # picking the right prior is this method's job.
+        prior_entropy = self._prior_entropy(prior_log_probs, posterior_entropy)
+        # This is the nats -> bits seam: nf_loss must stay in nats (its agg_loss
+        # is the training objective that gets backprop'd, and rescaling it would
+        # silently change the effective LR and break comparability of every
+        # logged loss curve). Everything the Evaluator hands out downstream is bits.
+        eigs = nats_to_bits((prior_entropy - posterior_entropy).detach().cpu())
+        entropy_terms = {
+            "prior_entropy": nats_to_bits(prior_entropy.detach().cpu()),
+            "posterior_entropy": nats_to_bits(posterior_entropy.detach().cpu()),
+        }
         # release temporary tensors to avoid graph retention and free GPU caches after each chunk
         del dataset_result, samples, context, prior_log_probs
         if torch.cuda.is_available():
@@ -633,20 +650,45 @@ class Evaluator:
         return u.detach().cpu().numpy()
 
     def _marginal_flow_samples_to_knn_coords(self, samples: torch.Tensor) -> torch.Tensor:
+        """Guide samples -> k-NN coordinate space, clamped to the prior bounds.
+
+        For plotting/diagnostic callers, where clamping is harmless. Estimator
+        paths must use :meth:`_marginal_knn_coords_and_mask` instead -- see the
+        note on :meth:`BaseExperiment._sanitize_physical_samples`.
+        """
         if self._marginal_knn_space() == "unconstrained":
             return samples
         return self._marginal_inner_to_physical(samples)
 
-    def _marginal_inner_to_physical(self, samples):
+    def _marginal_knn_coords_and_mask(self, samples: torch.Tensor):
+        """Guide samples -> ``(coords, valid)`` for k-NN, *without* clamping.
+
+        ``valid`` is an element-wise mask shaped like ``coords``; rows failing it
+        (non-finite, or outside an ``EmpiricalPrior``'s support) must be dropped
+        before neighbor-based estimation rather than clamped, which would stack
+        them all onto one identical value and collapse the k-NN estimate.
+        """
+        if self._marginal_knn_space() == "unconstrained":
+            return samples, torch.isfinite(samples)
+        physical = self._marginal_inner_to_physical(samples, sanitize=False)
+        return physical, self.experiment._physical_samples_valid_mask(physical)
+
+    def _marginal_inner_to_physical(self, samples, *, sanitize: bool = True):
         """Transform guide samples to the same (physical) space as the prior samples.
 
         Mirrors BaseExperiment.get_guide_samples so the marginal posterior and
         marginal prior entropies are estimated in a common coordinate system.
         Operates on tensors of shape (..., n_params).
+
+        Args:
+            sanitize: Clamp empirical-prior params to their support. Leave True
+                for presentation; pass False in estimator paths and drop invalid
+                rows via :meth:`_marginal_knn_coords_and_mask`.
         """
         if getattr(self.experiment, "transform_input", False) and self.nf_transform_output:
             samples = self.experiment.params_from_unconstrained(samples)
-            samples = self.experiment._sanitize_physical_samples(samples)
+            if sanitize:
+                samples = self.experiment._sanitize_physical_samples(samples)
         self.experiment.apply_multipliers(samples)
         return samples
 
@@ -657,46 +699,181 @@ class Evaluator:
         entropy is not biased by duplicate rows (with-replacement pool draws
         collapse neighbor distances at large ``num_samples``). Other experiments
         use :meth:`BaseExperiment.get_prior_samples`.
+
+        Clamped to the prior bounds; estimator paths want
+        :meth:`_marginal_prior_physical_and_mask` instead.
+        """
+        return self._marginal_prior_physical_and_mask(num_samples, sanitize=True)[0]
+
+    def _marginal_prior_physical_and_mask(
+        self, num_samples: int, *, sanitize: bool = False
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Prior samples plus an element-wise validity mask, *without* clamping.
+
+        The prior counterpart to :meth:`_marginal_knn_coords_and_mask`. KDE
+        smoothing kernels do not respect the catalog bounds, so a small fraction
+        of pool draws land outside an ``EmpiricalPrior``'s support. Clamping
+        them stacks every offender onto the identical bound value, which is
+        exactly the tie pattern that collapses k-NN (see
+        ``BaseExperiment._sanitize_physical_samples``). Callers reduce the mask
+        over their own columns and drop the failing rows.
         """
         exp = self.experiment
         pool = getattr(exp, "prior_pool", None)
         sed_prior = getattr(exp, "sed_prior", None)
         n_want = int(num_samples)
-        if sed_prior is not None:
-            gen = torch.Generator(device=sed_prior.pool.pool.device)
-            gen.manual_seed(int(self.seed))
-            n_pool = int(sed_prior.pool.pool.shape[0])
+
+        param_samples = None
+        if sed_prior is not None or pool is not None:
+            src = sed_prior.pool if sed_prior is not None else pool
+            n_pool = int(src.pool.shape[0])
             n_draw = min(n_want, n_pool)
-            rows = sed_prior.sample_unique(n_draw, generator=gen)
+            gen = torch.Generator(device=src.pool.device)
+            gen.manual_seed(int(self.seed))
+            if sed_prior is not None:
+                rows = sed_prior.sample_unique(n_draw, generator=gen)
+            else:
+                from bedcosmo.num_visits.empirical.sed_prior import sample_prior_pool_unique
+
+                rows = sample_prior_pool_unique(pool, n_draw, generator=gen)
             params = exp._prior_rows_to_param_dict(rows, (n_draw,))
             param_samples = torch.stack(
                 [params[k].squeeze(-1) for k in exp.cosmo_params], dim=-1
             )
             exp.apply_multipliers(param_samples)
-            param_samples = exp._sanitize_physical_samples(param_samples)
-            return param_samples.detach().cpu().numpy()
-        if pool is not None:
-            from bedcosmo.num_visits.empirical.sed_prior import sample_prior_pool_unique
 
-            n_pool = int(pool.pool.shape[0])
-            n_draw = min(n_want, n_pool)
-            gen = torch.Generator(device=pool.pool.device)
-            gen.manual_seed(int(self.seed))
-            rows = sample_prior_pool_unique(pool, n_draw, generator=gen)
-            params = exp._prior_rows_to_param_dict(rows, (n_draw,))
-            param_samples = torch.stack(
-                [params[k].squeeze(-1) for k in exp.cosmo_params], dim=-1
-            )
-            exp.apply_multipliers(param_samples)
-            param_samples = exp._sanitize_physical_samples(param_samples)
-            return param_samples.detach().cpu().numpy()
+        if param_samples is None:
+            phys = exp.get_prior_samples(num_samples=n_want).samples
+            param_samples = torch.as_tensor(phys, dtype=torch.float64)
 
-        return exp.get_prior_samples(num_samples=n_want).samples
+        valid = exp._physical_samples_valid_mask(param_samples)
+        if sanitize:
+            param_samples = exp._sanitize_physical_samples(param_samples)
+        return (
+            param_samples.detach().cpu().numpy(),
+            valid.detach().cpu().numpy(),
+        )
 
     @staticmethod
     def _marginal_prior_sample_count(marginal_inner_samples: int, marginal_outer_y: int) -> int:
         """Prior rows for k-NN entropy: match posterior MC depth, modest floor."""
         return max(int(marginal_inner_samples) * int(marginal_outer_y), 4096)
+
+    def _is_focused_target(self) -> bool:
+        """True when the guide models a strict subset of ``cosmo_params``."""
+        n_targets = getattr(self.experiment, "n_targets", None)
+        return n_targets is not None and n_targets != len(self.experiment.cosmo_params)
+
+    def _prior_entropy(self, prior_log_probs, posterior_entropy):
+        """Per-design prior entropy H_prior for the EIG, in NATS.
+
+        Two cases, chosen explicitly rather than by a silent fallback:
+
+        * **Focused-target guide** -- the plug-in prior scorer is over the full
+          joint, but ``EIG_target = H_prior(target) - H_post(target)``, so the
+          joint prior would pair a 13-D prior entropy with a 1-D posterior
+          entropy and report a large, plausible, meaningless number. Use the
+          design-independent target-marginal prior entropy instead, broadcast
+          across designs.
+        * **Default (all-params) guide** -- the plug-in prior entropy from the
+          sampled log-probs.
+
+        Raises:
+            ValueError: if the inputs for the selected case are missing. This is
+                deliberately loud: every silent fallback here produces a wrong
+                EIG that still looks reasonable.
+        """
+        if self._is_focused_target():
+            h_bits = self._target_prior_entropy()
+            if h_bits is None:
+                raise ValueError(
+                    "Focused-target run needs a target-marginal prior entropy, but "
+                    "_target_prior_entropy() returned None. Pairing the full-joint "
+                    "prior with a target-marginal posterior yields a meaningless EIG."
+                )
+            return torch.full_like(posterior_entropy, float(bits_to_nats(h_bits)))
+        if prior_log_probs is None:
+            raise ValueError(
+                "Prior log-probs are required to compute the EIG prior entropy "
+                "(LikelihoodDataset must be built with evaluation=True)."
+            )
+        return plugin_entropy_from_log_probs(prior_log_probs, self.experiment.cosmo_params)
+
+    def _target_prior_entropy(self) -> float | None:
+        """Design-independent marginal prior entropy H(target), in BITS (memoized).
+
+        Memoized because it is design-independent by construction but costs a
+        50k-sample prior draw plus a k-NN build, and ``_prior_entropy`` asks for
+        it on every EIG evaluation.
+
+        For a focused-target guide, EIG_target = H_prior(target) - H_post(target).
+        The prior scorer is over the full joint, so we estimate the
+        target-marginal prior entropy once from a large prior draw, sliced to the
+        target columns in the same knn-coord space the posterior entropy uses
+        (so H_prior and H_post are commensurable).
+
+        Estimator: k-NN. On the num_visits prior z-marginal this reads 0.484 bits
+        against a KDE plug-in's 0.501 -- agreement to ~0.02 bits, which cannot
+        move a design ranking because H(target) is a design-independent constant
+        that cancels from every comparison. A parametric flow is deliberately not
+        used: it underfits a skewed, bounded 1-D marginal and *overestimates* H
+        (0.58-0.97) unless trained to convergence; the "exact density" win only
+        pays off for the hard-trained posterior guide.
+
+        Returns ``None`` for default (all-params) runs, which have no target
+        marginal to estimate.
+        """
+        if self._target_prior_entropy_cache is not _UNSET:
+            return self._target_prior_entropy_cache
+
+        target_indices = getattr(self.experiment, "target_indices", None)
+        if not self._is_focused_target() or target_indices is None:
+            self._target_prior_entropy_cache = None
+            return None
+        n = max(
+            self._marginal_prior_sample_count(
+                self.marginal_inner_samples, self.marginal_outer_y
+            ),
+            int(getattr(self, "target_prior_samples", 50000)),
+        )
+        coords, n_drop, n_total = self._prior_marginal_coords(n, target_indices)
+        if n_drop and self.verbose:
+            print(
+                f"  H(target) prior: dropped {n_drop}/{n_total} "
+                f"({100.0 * n_drop / n_total:.2f}%) out-of-support prior draws",
+                flush=True,
+            )
+        h_bits = knn_entropy(coords, k=self.marginal_knn_k)
+        if self.verbose:
+            names = [self.experiment.cosmo_params[i] for i in target_indices]
+            print(
+                f"  H(target={names}) prior via k-NN = {h_bits:.3f} bits "
+                f"(dim={coords.shape[1]}, N={coords.shape[0]})",
+                flush=True,
+            )
+        self._target_prior_entropy_cache = h_bits
+        return h_bits
+
+    def _prior_marginal_coords(self, n_samples, indices):
+        """Prior draws in k-NN coord space, sliced to ``indices``, invalid rows dropped.
+
+        Shared by the focused-target prior entropy and the marginal-EIG prior
+        entropy. Rows are dropped on the subset's *own* columns: a draw that is
+        invalid in some nuisance column is still a good draw for the z marginal.
+
+        Returns:
+            ``(coords, n_dropped, n_total)`` with ``coords`` shaped ``(n_ok, |indices|)``.
+        """
+        prior_phys, prior_valid = self._marginal_prior_physical_and_mask(n_samples)
+        coords = np.asarray(
+            self._marginal_knn_coords_from_physical(prior_phys)[:, indices],
+            dtype=np.float64,
+        )
+        if coords.ndim == 1:
+            coords = coords[:, None]
+        row_ok = prior_valid[:, indices].all(axis=-1)
+        n_total = int(coords.shape[0])
+        return coords[row_ok], int(n_total - row_ok.sum()), n_total
 
     def _find_nominal_design_index(self, designs=None, atol=1e-5):
         """Index of nominal design in ``designs``, or None if not present."""
@@ -707,13 +884,6 @@ class Evaluator:
             if np.allclose(row, nominal, rtol=0.0, atol=atol):
                 return i
         return None
-
-    @staticmethod
-    def _nats_to_bits(values):
-        """Convert natural-log entropy/EIG quantities to bits."""
-        if isinstance(values, torch.Tensor):
-            values = values.detach().cpu().numpy()
-        return np.atleast_1d(np.asarray(values)).flatten() / np.log(2)
 
     def _store_entropy_eval_results(
         self, step_data, all_prior_eval, all_post_eval, nominal_design
@@ -740,15 +910,28 @@ class Evaluator:
             step_data["posterior_entropy_avg"] = np.atleast_1d(post_mean).tolist()
             step_data["posterior_entropy_std"] = np.atleast_1d(post_std).tolist()
 
+    @staticmethod
+    def _first_scalar(x):
+        """First element of ``x`` as a float, whether it is a scalar or an array.
+
+        The nominal-design callers are inconsistent: one passes 0-d values
+        (``full_eigs[0]``), another passes shape-``(1,)`` means over evals
+        (``np.mean(..., axis=0)`` with a single design). Bare ``float()`` on the
+        latter is a NumPy DeprecationWarning today and an error in a future
+        release, so normalize instead of relying on the caller.
+        """
+        return float(np.ravel(x)[0])
+
     def _log_entropy_summary(
         self, eig_bits, eig_std_bits, prior_bits, prior_std, post_bits, post_std, nominal_design
     ):
         if nominal_design:
+            s = self._first_scalar
             print(
-                f"  Entropy (bits): H_prior={float(prior_bits):.3f}"
-                f"±{float(prior_std):.3f}, "
-                f"H_post={float(post_bits):.3f}±{float(post_std):.3f}, "
-                f"EIG={float(eig_bits):.3f}±{float(eig_std_bits):.3f}"
+                f"  Entropy (bits): H_prior={s(prior_bits):.3f}"
+                f"±{s(prior_std):.3f}, "
+                f"H_post={s(post_bits):.3f}±{s(post_std):.3f}, "
+                f"EIG={s(eig_bits):.3f}±{s(eig_std_bits):.3f}"
             )
         else:
             print(
@@ -806,25 +989,59 @@ class Evaluator:
         context = context.to(device_obj)
 
         out = {sid: np.zeros(n_designs) for sid in subset_ids}
+        n_dropped = 0
+        n_total = 0
+        n_degenerate = 0
+        n_ties = 0
         with torch.inference_mode():
             for j in self._marginal_design_indices(n_designs):
                 ctx_j = context[:, j, :]  # (M, ctx_dim)
-                inner_np = (
-                    self._marginal_flow_samples_to_knn_coords(
-                        flow_model(ctx_j).sample((K,))
-                    )
-                    .detach()
-                    .cpu()
-                    .numpy()
-                )  # (K, M, n_params)
+                coords, valid = self._marginal_knn_coords_and_mask(flow_model(ctx_j).sample((K,)))
+                inner_np = coords.detach().cpu().numpy()  # (K, M, n_params)
+                valid_np = valid.detach().cpu().numpy()  # (K, M, n_params)
                 if self.verbose and (
                     j == 0 or (j + 1) % 20 == 0 or j == n_designs - 1
                 ):
                     print(f"    Marginal posterior entropy: design {j + 1}/{n_designs}")
                 for sid, idx in zip(subset_ids, subset_idx):
                     cols = inner_np[..., idx]  # (K, M, |S|)
-                    H_per_y = [knn_entropy(cols[:, m, :], k=k) for m in range(M)]
-                    out[sid][j] = float(np.mean(H_per_y))
+                    # Drop draws that fall outside the subset's own support; a
+                    # clamp here would stack them on one value and collapse k-NN.
+                    row_ok = valid_np[..., idx].all(axis=-1)  # (K, M)
+                    H_per_y = []
+                    for m in range(M):
+                        rows = cols[row_ok[:, m], m, :]
+                        n_total += K
+                        n_dropped += K - rows.shape[0]
+                        if rows.shape[0] <= k + 1:
+                            n_degenerate += 1
+                            H_per_y.append(np.nan)
+                            continue
+                        # Count ties here and warn once in aggregate below: this
+                        # runs n_designs * M times, so a per-call warning spams.
+                        n_ties += rows.shape[0] - len(np.unique(rows, axis=0))
+                        H_per_y.append(knn_entropy(rows, k=k, warn_duplicates=False))
+                    out[sid][j] = (
+                        float(np.nanmean(H_per_y)) if not np.all(np.isnan(H_per_y)) else np.nan
+                    )
+        if n_dropped:
+            msg = (
+                f"  Marginal posterior entropy: dropped {n_dropped}/{n_total} "
+                f"({100.0 * n_dropped / n_total:.2f}%) out-of-support guide draws"
+            )
+            if n_degenerate:
+                msg += f"; {n_degenerate} (y, subset) estimates had too few valid draws -> NaN"
+            print(msg)
+        if n_ties:
+            # Expected at ~0.05%: Bijector._icdf_lookup clamps u to
+            # [cdf_eps, 1-cdf_eps], so draws past ~3.09 sigma (cdf_eps=1e-3) all
+            # map onto the CDF grid endpoint. That value is inside the prior
+            # support, so the valid-mask above cannot catch it. A rate much above
+            # ~0.1% means something else is stacking samples onto one value.
+            print(
+                f"  Marginal posterior entropy: dropped {n_ties}/{n_total} "
+                f"({100.0 * n_ties / n_total:.3f}%) duplicate rows (icdf-clamp ties)"
+            )
         del context
         return out
 
@@ -858,6 +1075,19 @@ class Evaluator:
             return {}, None
         if n_evals is None:
             n_evals = self.n_evals
+
+        # The kNN marginal path samples and column-slices the FULL joint guide.
+        # A focused-target guide already yields exact per-target EIG through the
+        # main eval path, and its guide output is not the full param vector, so
+        # this path does not apply.
+        n_targets = getattr(self.experiment, "n_targets", len(self.experiment.cosmo_params))
+        if n_targets < len(self.experiment.cosmo_params):
+            print(
+                "Skipping marginal EIG: this is a focused-target guide "
+                f"(target_params={getattr(self.experiment, 'target_params', None)}); "
+                "the main eval already reports exact per-target EIG."
+            )
+            return {}, None
 
         flow_model, selected_step = load_model(
             self.experiment, step, self.run_obj,
@@ -895,14 +1125,17 @@ class Evaluator:
             )
 
             # Marginal prior entropy (design-independent), k-NN coordinate space, bits.
-            prior_samples = self._marginal_prior_physical_samples(n_prior)
-            prior_coords = self._marginal_knn_coords_from_physical(prior_samples)
             if self.verbose:
                 print(f"  Marginal k-NN entropy space: {self._marginal_knn_space()}")
-            prior_H = {
-                sid: knn_entropy(prior_coords[:, idx], k=self.marginal_knn_k)
-                for sid, idx in zip(subset_ids, subset_idx)
-            }
+            prior_H = {}
+            for sid, idx in zip(subset_ids, subset_idx):
+                coords, n_drop, n_total = self._prior_marginal_coords(n_prior, idx)
+                if n_drop and self.verbose:
+                    print(
+                        f"  Marginal prior entropy [{sid}]: dropped {n_drop}/{n_total} "
+                        "out-of-support prior draws"
+                    )
+                prior_H[sid] = knn_entropy(coords, k=self.marginal_knn_k)
 
             prior_H_acc = {sid: [] for sid in subset_ids}
             var_eig_acc = {sid: [] for sid in subset_ids}
@@ -1234,8 +1467,8 @@ class Evaluator:
                     timers=eig_timers,
                 )
                 
-                # Store results for this chunk (eig_result is already on CPU)
-                eig_array = self._nats_to_bits(eig_result)
+                # Store results for this chunk (_compute_eig already returns bits on CPU)
+                eig_array = eig_result
                 if len(design_indices) == 1:
                     # Single design case
                     if nominal_design or num_designs == 1:
@@ -1247,8 +1480,8 @@ class Evaluator:
                     for idx, eig_val in zip(design_indices, eig_array.flatten()):
                         full_eigs[idx] = eig_val
                 if entropy_terms is not None:
-                    prior_bits = self._nats_to_bits(entropy_terms["prior_entropy"])
-                    post_bits = self._nats_to_bits(entropy_terms["posterior_entropy"])
+                    prior_bits = entropy_terms["prior_entropy"]
+                    post_bits = entropy_terms["posterior_entropy"]
                     if len(design_indices) == 1:
                         full_prior_entropy[design_indices[0]] = float(prior_bits.reshape(-1)[0])
                         full_posterior_entropy[design_indices[0]] = float(post_bits.reshape(-1)[0])
@@ -1557,6 +1790,16 @@ class Evaluator:
         self.timestamp = datetime.now().strftime('%Y%m%d_%H%M')
         # Initialize timing at start of run
         self._update_runtime()
+
+        # Focused-target guide: report the design-independent target-marginal prior
+        # entropy up front. _prior_entropy computes it on demand (and memoizes);
+        # this is purely so it appears early in the log. No-op for all-param runs.
+        target_prior_bits = self._target_prior_entropy()
+        if target_prior_bits is not None:
+            print(
+                f"Focused target {self.experiment.target_params}: "
+                f"H_prior = {target_prior_bits:.3f} bits"
+            )
 
         step_key = f"step_{eval_step}"
         step_dict = self.eig_data.get(step_key, {})

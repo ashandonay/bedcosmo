@@ -248,12 +248,16 @@ def nf_loss(
     experiment,
     rank=0,
     verbose_shapes=False,
-    prior_log_probs=None,
-    evaluation=False,
     chunk_size=None,
 ):
     """
     Computes the negative log-probability loss for a normalizing flow model given pre-sampled data.
+
+    Scope: this is the *posterior* half of the EIG only -- it scores the guide
+    and returns ``H[q(theta | y, d)]`` per design. The prior half is the
+    caller's job, because it needs no guide and no flow: see
+    ``entropy.plugin_entropy_from_log_probs`` and ``Evaluator._prior_entropy``.
+    ``EIG = H_prior - H_post`` is then a subtraction at the call site.
 
     Parameters:
     - samples: Pre-sampled parameter values (theta).
@@ -262,23 +266,13 @@ def nf_loss(
     - experiment: Object with transform_input, params_to_unconstrained, cosmo_params, etc.
     - rank: The rank of the current process.
     - verbose_shapes: Whether to print tensor shapes for debugging (default: False).
-    - prior_log_probs: Dict of prior log-probs for evaluation mode.
-    - evaluation: If True, return EIG-style loss (prior_entropy - posterior_entropy).
     - chunk_size: If not None, evaluate log_prob in chunks of this size along the
                   flattened batch dimension to reduce peak memory usage.
 
-    With ``transform_input=True``, evaluation pairs ``log N(0,I)(y)`` (prior in
-    NF coordinates) with flow ``log q_y(y)`` at ``y = T(theta)``. With
-    ``transform_input=False``, empirical NumVisits priors use physical
-    ``log p_KDE(theta)`` against ``log q_theta(theta)``.
-
     Returns:
-    - agg_loss: Aggregated loss over all samples.
-    - loss: Per-sample loss, reshaped to match the original design batch.
-    - entropy_terms: When ``evaluation=True``, dict with ``prior_entropy`` and
-      ``posterior_entropy`` (nats, per design). Otherwise ``None``.
-      ``prior_entropy`` is :math:`-\\mathbb{E}[\\log p]`; ``posterior_entropy``
-      is :math:`\\mathbb{E}[-\\log q]`; EIG = prior_entropy - posterior_entropy.
+    - agg_loss: Aggregated loss over all samples (the training objective).
+    - posterior_entropy: Per-design ``E[-log q]`` in NATS, shaped to the design
+      batch. This is the training loss and the EIG's posterior term.
     """
     # Store original batch shape
     batch_shape = samples.shape[:-1]  # e.g. [num_particles, num_designs]
@@ -329,31 +323,7 @@ def nf_loss(
 
     # Compute the aggregate loss
     agg_loss, posterior_entropy = _safe_mean_terms(neg_log_prob)
-    if not evaluation:
-        return agg_loss, posterior_entropy, None
-
-    if prior_log_probs is None:
-        raise ValueError("Log probabilities are not provided")
-
-    # Focused-target guide: the plug-in prior scorer is over the full joint, but
-    # EIG_target = H_prior(target) - H_post(target). Use the design-independent
-    # target-marginal prior entropy the evaluator injects (nats). Falls back to
-    # the full-joint prior for default (all-params) runs.
-    target_prior_entropy = getattr(experiment, "target_prior_entropy", None)
-    n_targets = getattr(experiment, "n_targets", None)
-    is_subset = n_targets is not None and n_targets != len(experiment.cosmo_params)
-    if target_prior_entropy is not None and is_subset:
-        prior_entropy = torch.full_like(posterior_entropy, float(target_prior_entropy))
-    else:
-        prior_entropy = _prior_entropy_from_log_probs(prior_log_probs, experiment)
-
-    # H_prior = -E[log p], H_post = E[-log q]; EIG = H_prior - H_post (nats).
-    entropy_terms = {
-        "prior_entropy": prior_entropy.detach(),
-        "posterior_entropy": posterior_entropy.detach(),
-    }
-    eig = prior_entropy - posterior_entropy
-    return agg_loss, eig, entropy_terms
+    return agg_loss, posterior_entropy
 
 
 def posterior_loss(
@@ -740,13 +710,6 @@ def monte_carlo_entropy(model, design, target_labels, num_prior_samples=1000):
     trace.compute_log_prob()
     lp = sum(trace.nodes[l]["log_prob"] for l in target_labels)
     return -lp.sum(0) / num_prior_samples
-
-
-def _prior_entropy_from_log_probs(prior_log_probs, experiment):
-    """Per-design prior entropy H = -E[log p] from joint or factorized prior_log_probs."""
-    if "joint" in prior_log_probs:
-        return -prior_log_probs["joint"].mean(dim=0)
-    return -sum(prior_log_probs[l].mean(dim=0) for l in experiment.cosmo_params)
 
 
 def _safe_mean_terms(terms):
