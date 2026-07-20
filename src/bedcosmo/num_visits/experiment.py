@@ -66,6 +66,7 @@ _c_cgs = c.cgs.value
 _k_B_cgs = k_B.cgs.value
 _hc = _h_cgs * _c_cgs
 _two_hc2 = 2 * _h_cgs * _c_cgs**2
+_L_sun_cgs = 3.826e33  # erg/s
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -82,6 +83,7 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         design_args=None,
         cosmo_model=None,
         temperature=10000,
+        l_bol=1e9,
         central_params=None,
         nominal_design=None,
         pixel_scale=0.2,
@@ -138,6 +140,16 @@ class NumVisits(BaseExperiment, CosmologyMixin):
             self.temperature = float(temperature) * u.K
         else:
             self.temperature = temperature
+
+        # Bolometric luminosity in L_sun, applied to the bb/bb_temp SED. The
+        # emitting radius is back-solved from Stefan-Boltzmann to hold this fixed
+        # at every T, making the source a zero-scatter standard candle -- so this
+        # value sets the whole SNR scale of the experiment, not just a brightness
+        # offset. 1e9 (the historical default) is a dwarf galaxy (M_bol=-17.8);
+        # LSST photo-z targets are L* ~ 2-3e10.
+        self.l_bol = float(l_bol)
+        if self.l_bol <= 0:
+            raise ValueError(f"l_bol must be positive (L_sun), got {l_bol}")
 
         self.prior_args = prior_args or {}
         self.cosmo_model = cosmo_model
@@ -985,8 +997,7 @@ class NumVisits(BaseExperiment, CosmologyMixin):
             T_K = self._T_K_tensor
 
             if not hasattr(self, "_four_pi_R2_tensor"):
-                L_sun = 3.826e33
-                L_bol = 1e9 * L_sun
+                L_bol = self.l_bol * _L_sun_cgs
                 sigma_sb_cgs = sigma_sb.to(u.erg / (u.s * u.cm**2 * u.K**4)).value
                 T_K_4 = T_K**4
                 R_eff_val = torch.sqrt(
@@ -1013,8 +1024,7 @@ class NumVisits(BaseExperiment, CosmologyMixin):
             inverse_indices = None
             lum_dist = self._luminosity_distance(z_unique)
 
-            L_sun = 3.826e33
-            L_bol = 1e9 * L_sun
+            L_bol = self.l_bol * _L_sun_cgs
             sigma_sb_cgs = sigma_sb.to(u.erg / (u.s * u.cm**2 * u.K**4)).value
             L_bol_const = torch.tensor(
                 L_bol / (4 * np.pi * sigma_sb_cgs),
