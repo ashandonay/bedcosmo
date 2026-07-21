@@ -1,0 +1,20 @@
+# Design arguments for num_visits experiment (extreme reallocation, exact 1030).
+#
+# Every design sums to EXACTLY 1030 visits (the nominal budget) while each band
+# is free to range from 0 up to ~2x its nominal count. A Cartesian grid cannot
+# do this for 6 bands: with lower=0 each design is a multiple of gcd(step), so
+# gcd(step) must divide 1030 = 2*5*103 (forcing step gcd = 10), and a uniform
+# step-10 grid over 0->2x nominal is ~1.3e9 points before pruning. Instead we
+# use explicit design points, each constructed to total 1030.
+#
+# Regenerate with ratio limits 0–2x nominal (extreme reallocation):
+#   python -m bedcosmo.num_visits.design --ratio-min 0 --ratio-max 2.0 --output ...
+labels: ["u", "g", "r", "i", "z", "y"]
+input_type: variable # variable or nominal
+input_designs_path: /pscratch/sd/a/ashandon/bedcosmo/num_visits/designs/designs_100_20260625_162938.npy
+# Grid fields below are ignored when input_designs_path is set.
+step: null
+lower: null
+upper: null
+sum_lower: 1030
+sum_upper: 1030

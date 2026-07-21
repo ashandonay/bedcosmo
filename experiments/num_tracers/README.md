@@ -195,5 +195,3 @@ The `fullshape` analysis defines its own parameter set (bias, counterterm, and s
 ```
 
 Any `train_args.yaml` key is overridable on the command line (`--likelihood-mode`, `--design-args-path`, `--n-particles-per-device`, …).
-
-> `gen_increasing_nominal.py` is superseded by `python -m bedcosmo.num_tracers.design scaled`, which reproduces its output byte-for-byte.
