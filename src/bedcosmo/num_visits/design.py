@@ -13,7 +13,7 @@ counts, so all six filters appear on comparable footing in ratio-to-nominal plot
 
 Example::
 
-    python -m bedcosmo.num_visits.build_designs
+    python -m bedcosmo.num_visits.design
 
 Writes ``$SCRATCH/bedcosmo/num_visits/designs/designs_<n>_<YYYYMMDD_HHMMSS>.npy``
 and prints the absolute path for ``input_designs_path``.
