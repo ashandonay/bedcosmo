@@ -124,7 +124,6 @@ def main():
 
     wlen_aa = experiment._wlen_aa_tensor.detach().cpu().numpy()
     a_np = a.detach().cpu().numpy()
-    c = (torch.exp(log_s) * a).detach().cpu().numpy()
     z_val = float(z.detach().cpu())
     s_val = float(torch.exp(log_s).detach().cpu())
 
@@ -137,7 +136,7 @@ def main():
 
     fig, axes = plt.subplots(2, 2, figsize=(12, 9), constrained_layout=True)
 
-    ax = axes[0, 0]
+    ax = axes[0]
     k_idx = np.arange(1, len(a_np) + 1)
     ax.bar(k_idx, a_np, color="steelblue", edgecolor="k", linewidth=0.4)
     ax.set_xlabel("EAZY template index $k$")
@@ -146,17 +145,11 @@ def main():
     ax.set_title(rf"Template weights $a_k$ (decoded from {param})")
     ax.set_xticks(k_idx)
 
-    ax = axes[0, 1]
-    ax.bar(["$\\log s$", "$s=\\exp(\\log s)$"], [float(log_s.cpu()), s_val], color=["#c44e52", "#55a868"])
-    ax.set_ylabel("value")
-    ax.set_title(f"Scale at $z={z_val:.2f}$")
-
-    ax = axes[1, 0]
-    ax.plot(wlen_aa, flux_aa, color="k", lw=1.5, label="observed $F_\\lambda$")
+    ax = axes[1]
+    ax.plot(wlen_aa, flux_aa, color="k", lw=1.5)
     ax.set_xlabel(r"Observed $\lambda$ [$\mathrm{\AA}$]")
     ax.set_ylabel(r"$F_\lambda$ [erg s$^{-1}$ cm$^{-2}$ $\AA^{-1}$]")
-    ax.set_title("Central SED (NumVisits._observed_spectral_flux)")
-    ax.legend(loc="upper right", fontsize=8)
+    ax.set_title(f"Central observed SED ($z={z_val:.2f}$)")
     ax.set_xlim(wlen_aa.min(), wlen_aa.max())
 
     ax = axes[1, 1]
