@@ -437,24 +437,24 @@ class GridCalculation:
             if self.experiment.name == "num_visits":
                 if not hasattr(self.parameter_grid, "z"):
                     raise ValueError("Auto feature grid requires parameter grid to include 'z'.")
-                z = np.asarray(getattr(self.parameter_grid, "z"), dtype=np.float64)
                 exp_device = self._experiment_torch_device()
-                z_tensor = torch.as_tensor(z, device=exp_device, dtype=torch.float64)
+                axis_names = ["z"] + [
+                    name for name in ("T", "L_bol") if hasattr(self.parameter_grid, name)
+                ]
+                axes = np.broadcast_arrays(
+                    *[
+                        np.asarray(getattr(self.parameter_grid, name), dtype=np.float64)
+                        for name in axis_names
+                    ]
+                )
+                z_tensor = torch.as_tensor(axes[0], device=exp_device, dtype=torch.float64)
+                sed_kwargs = {
+                    name: torch.as_tensor(axis, device=exp_device, dtype=torch.float64)
+                    for name, axis in zip(axis_names[1:], axes[1:])
+                }
                 with torch.no_grad():
-                    if hasattr(self.parameter_grid, "T"):
-                        T = np.asarray(getattr(self.parameter_grid, "T"), dtype=np.float64)
-                        z_b, T_b = np.broadcast_arrays(z, T)
-                        T_tensor = torch.as_tensor(T_b, device=exp_device, dtype=torch.float64)
-                        z_tensor = torch.as_tensor(z_b, device=exp_device, dtype=torch.float64)
-                        flux_aa = self.experiment._observed_spectral_flux(
-                            z_tensor, T=T_tensor
-                        )
-                        features = self.experiment._calculate_magnitudes(
-                            flux_aa
-                        ).detach().cpu().numpy()
-                    else:
-                        flux_aa = self.experiment._observed_spectral_flux(z_tensor)
-                        features = self.experiment._calculate_magnitudes(flux_aa).detach().cpu().numpy()
+                    flux_aa = self.experiment._observed_spectral_flux(z_tensor, **sed_kwargs)
+                    features = self.experiment._calculate_magnitudes(flux_aa).detach().cpu().numpy()
             else:
                 raise NotImplementedError(f"Feature grid inference not implemented for {self.experiment.name}.")
 
