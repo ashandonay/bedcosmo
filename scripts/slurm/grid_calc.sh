@@ -20,6 +20,15 @@ mkdir -p logs
 module load conda
 conda activate bedcosmo
 
+# Prefer torch's bundled cuBLAS over system libraries to avoid CUBLAS_STATUS_INVALID_VALUE
+# errors from CUDA version mismatches after NERSC system updates. Without this the
+# cudatoolkit module's cuBLAS shadows torch's and every batched GEMM fails (torch.bmm
+# with batch >= 2, any shape or dtype). Same block as train.sh/eval.sh/grid.sh.
+CUBLAS_LIB="$CONDA_PREFIX/lib/python3.10/site-packages/nvidia/cublas/lib"
+if [ -d "$CUBLAS_LIB" ]; then
+    export LD_LIBRARY_PATH="$CUBLAS_LIB${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+fi
+
 cd /global/homes/a/ashandon/bedcosmo
 
 echo "SLURM mem per node: ${SLURM_MEM_PER_NODE:-unknown} MB"
