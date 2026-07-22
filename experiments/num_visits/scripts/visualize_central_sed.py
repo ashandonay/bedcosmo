@@ -135,57 +135,27 @@ def main():
 
     wlen_aa = experiment._wlen_aa_tensor.detach().cpu().numpy()
     a_np = a.detach().cpu().numpy()
-    c = (torch.exp(log_s) * a).detach().cpu().numpy()
     z_val = float(z.detach().cpu())
-    s_val = float(torch.exp(log_s).detach().cpu())
 
-    # Rest-frame weighted template sum (before 1/(1+z) factor in _observed_spectral_flux)
-    wlen_rest = experiment._template_wave_rest.detach().cpu().numpy()
-    templates = experiment._template_flux.detach().cpu().numpy()
-    one_plus_z = 1.0 + z_val
-    wlen_obs_from_rest = wlen_rest * one_plus_z
-    flux_rest_mix = np.zeros_like(wlen_rest, dtype=np.float64)
-    for k in range(len(a_np)):
-        flux_rest_mix += c[k] * templates[k]
+    fig, axes = plt.subplots(2, 1, figsize=(8, 7), constrained_layout=True)
 
-    fig, axes = plt.subplots(2, 2, figsize=(12, 9), constrained_layout=True)
-
-    ax = axes[0, 0]
+    ax = axes[0]
     k_idx = np.arange(1, len(a_np) + 1)
     ax.bar(k_idx, a_np, color="steelblue", edgecolor="k", linewidth=0.4)
     ax.set_xlabel("EAZY template index $k$")
     ax.set_ylabel(r"Weight $a_k$")
     param = getattr(experiment, "_prior_parameterization", "?")
-    ax.set_title(rf"Template weights $a_k$ ({param}; all $f_k=0$ $\Rightarrow$ uniform)")
+    ax.set_title(rf"Template weights $a_k$ ({param})")
     ax.set_xticks(k_idx)
 
-    ax = axes[0, 1]
-    ax.bar(["$\\log s$", "$s=\\exp(\\log s)$"], [float(log_s.cpu()), s_val], color=["#c44e52", "#55a868"])
-    ax.set_ylabel("value")
-    ax.set_title(f"Scale at $z={z_val:.2f}$")
-
-    ax = axes[1, 0]
-    ax.plot(wlen_aa, flux_aa, color="k", lw=1.5, label="observed $F_\\lambda$")
+    ax = axes[1]
+    ax.plot(wlen_aa, flux_aa, color="k", lw=1.5)
     ax.set_xlabel(r"Observed $\lambda$ [$\mathrm{\AA}$]")
     ax.set_ylabel(r"$F_\lambda$ [erg s$^{-1}$ cm$^{-2}$ $\AA^{-1}$]")
-    ax.set_title("Central SED (NumVisits._observed_spectral_flux)")
-    ax.legend(loc="upper right", fontsize=8)
+    ax.set_title(f"Central observed SED ($z={z_val:.2f}$)")
     ax.set_xlim(wlen_aa.min(), wlen_aa.max())
 
-    ax = axes[1, 1]
-    ax.plot(wlen_rest, flux_rest_mix, color="#4c72b0", lw=1.2, label=r"$\sum_k c_k T_k(\lambda/(1+z))$")
-    ax.set_xlabel(r"Rest-frame $\lambda$ [$\mathrm{\AA}$]")
-    ax.set_ylabel(r"linear flux (arb. units)")
-    ax.set_title(rf"Rest-frame mixture ($c_k = e^{{\log s}} a_k$)")
-    ax.legend(loc="upper right", fontsize=8)
-
-    fig.suptitle(
-        "num_visits empirical central_params SED\n"
-        f"z={z_val}, log_c_scale={float(log_s.cpu()):.1f}, "
-        f"central $f_k=0$ (uniform $a_k$)",
-        fontsize=12,
-        y=1.02,
-    )
+    fig.suptitle("num_visits empirical central_params SED", fontsize=12, y=1.02)
 
     # LSST mags annotation
     mag_text = ", ".join(f"{b}={m:.2f}" for b, m in zip(experiment.filters_list, mags))
