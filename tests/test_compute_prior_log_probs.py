@@ -583,21 +583,30 @@ def test_nf_loss_empirical_transform_input_eval_pairs_nf_prior_with_y_flow():
     context = torch.zeros(16, 1, 3, dtype=torch.float64)
     prior_nf = transform_input_standard_normal_log_prob(stub, samples)
 
-    _, eig, entropy_terms = nf_loss(
+    from bedcosmo.entropy import plugin_entropy_from_log_probs
+
+    # nf_loss owns only the posterior term; EIG = H_prior - H_post is assembled
+    # by the caller (Evaluator._prior_entropy) from the two halves.
+    _, posterior_entropy = nf_loss(
         samples,
         context,
         _ConstLogProbGuide(),
         stub,
-        prior_log_probs={"joint": prior_nf},
-        evaluation=True,
     )
+    prior_entropy = plugin_entropy_from_log_probs(
+        {"joint": prior_nf}, stub.cosmo_params
+    )
+    eig = prior_entropy - posterior_entropy
+
     expected = -prior_nf.mean() - 2.0
     assert torch.allclose(eig.reshape(-1), expected.reshape(-1), atol=1e-5)
-    assert entropy_terms is not None
     assert torch.allclose(
-        entropy_terms["posterior_entropy"].reshape(-1),
+        posterior_entropy.reshape(-1),
         torch.tensor(2.0).reshape(-1),
         atol=1e-5,
+    )
+    assert torch.allclose(
+        prior_entropy.reshape(-1), (-prior_nf.mean()).reshape(-1), atol=1e-5
     )
 
 

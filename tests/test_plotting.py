@@ -1257,12 +1257,12 @@ class TestPlot2dEig:
                     cosmo_exp='test_exp'
                 )
     
-    @pytest.mark.skip(reason="plot_2d_eig has a bug: calls load_eig_data_file as standalone but it's a BasePlotter method")
+    @pytest.mark.skip(reason="plot_2d_eig integration test not yet implemented")
     def test_plot_2d_eig_with_data(self, mock_scratch_env, tmp_path):
         """Test plot_2d_eig with valid data."""
         pass
 
-    @pytest.mark.skip(reason="plot_2d_eig has a bug: calls load_eig_data_file as standalone but it's a BasePlotter method")
+    @pytest.mark.skip(reason="plot_2d_eig integration test not yet implemented")
     def test_plot_2d_eig_with_options(self, mock_scratch_env, tmp_path):
         """Test plot_2d_eig with show_optimal, show_nominal, save_path, and dpi."""
         pass
