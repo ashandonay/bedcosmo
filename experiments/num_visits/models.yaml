@@ -6,6 +6,10 @@ bb_temp:
   parameters: ["z", "T"]
   latex_labels: ["z", "T\\,[\\mathrm{K}]"]
 
+bb_temp_lbol:
+  parameters: ["z", "T", "L_bol"]
+  latex_labels: ["z", "T\\,[\\mathrm{K}]", "L_\\mathrm{bol}\\,[L_\\odot]"]
+
 empirical:
   parameters:
     - f1

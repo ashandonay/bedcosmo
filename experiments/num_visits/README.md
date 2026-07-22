@@ -86,6 +86,8 @@ Each parameter entry contains:
 
 - **`prior_args_uniform.yaml`** -- `z ~ Uniform(0.1, 3.0)`.
 - **`prior_args_gamma.yaml`** -- `z ~ Gamma(shape=3.0, z_0=0.3)`, a more realistic galaxy redshift distribution.
+- **`prior_args_gamma_temp.yaml`** -- the gamma `z` prior plus `T ~ Uniform(9500, 10500)` K (for `bb_temp`).
+- **`prior_args_gamma_temp_lbol.yaml`** -- the gamma `z` prior plus `T ~ Uniform(9500, 10500)` K and `L_bol ~ Uniform(1e9, 3e10)` L_sun (for `bb_temp_lbol`). The range straddles a dwarf galaxy (1e9, where the `T` signal is ~0.5 sigma) and L* (~2-3e10, where it is ~15 sigma), so luminosity is a genuine nuisance rather than a fixed choice.
 - **`prior_args_empirical.yaml`** -- the empirical SED prior over the 13D ILR features (`f1..f11`, `log_c_scale`, `z`); `prior_source` selects `{kde, flow}` and **defaults to `flow`**. See the [Cosmology Models](#cosmology-models-modelsyaml) section (`empirical`) for details.
 
 ## Likelihood Model
@@ -94,7 +96,7 @@ The forward model is implemented in `src/bedcosmo/num_visits/experiment.py` and 
 
 ### 1. Magnitude calculation — blackbody (`_calculate_magnitudes`)
 
-A blackbody spectral energy distribution (SED) at a fixed temperature (default 5000 K) is assumed for all galaxies. The source luminosity is set by normalizing the blackbody to a fixed bolometric luminosity of 10^9 L_sun via an effective radius `R_eff`. Given a redshift `z`:
+A blackbody spectral energy distribution (SED) at a fixed temperature (default 5000 K) is assumed for all galaxies. The source luminosity is set by normalizing the blackbody to a bolometric luminosity `L_bol` (default 10^9 L_sun, the `l_bol` constructor arg) via an effective radius `R_eff = sqrt(L_bol / (4 pi sigma T^4))` — so the source is a zero-scatter standard candle and `L_bol` sets the SNR scale of the whole experiment. `T` and `L_bol` are experiment-level scalars for `bb`; either or both can instead be sampled per-galaxy (`bb_temp`, `bb_temp_lbol`), in which case `_observed_spectral_flux` broadcasts them against `z`. Given a redshift `z`:
 
 1. Each wavelength in a common grid is shifted to the rest frame: `lambda_rest = lambda_obs / (1 + z)`.
 2. The rest-frame blackbody surface flux `F(lambda_rest, T)` is computed and scaled to a luminosity `L = 4 * pi * R_eff^2 * F`.
@@ -138,9 +140,9 @@ Photometric uncertainties are derived from a matched-filter signal-to-noise calc
 
 The Pyro probabilistic model ties the components together. The mean magnitudes are built differently per cosmo-model, then a shared noise model is applied.
 
-For the blackbody models (`bb`, `bb_temp`):
+For the blackbody models (`bb`, `bb_temp`, `bb_temp_lbol`):
 
-1. Sample `z` (and `T` for `bb_temp`) from the prior (analytic distribution or prior flow).
+1. Sample `z` (plus `T` for `bb_temp`, plus `T` and `L_bol` for `bb_temp_lbol`) from the prior (analytic distribution or prior flow).
 2. Compute mean magnitudes `mu = _calculate_magnitudes(z)` for each filter (§1).
 
 For the `empirical` model:
@@ -162,6 +164,7 @@ Defines which parameters belong to each named training variant. `train_args.yaml
 |-------|------------|-------------------|-------|
 | `bb` | `z` | Blackbody (fixed T) | Analytic gamma on `z` |
 | `bb_temp` | `z`, `T` | Blackbody | Analytic gamma + uniform `T` |
+| `bb_temp_lbol` | `z`, `T`, `L_bol` | Blackbody | Analytic gamma + uniform `T` + uniform `L_bol` |
 | `empirical` | `f1`…`f11`, `log_c_scale`, `z` (13D; ILR simplex coords, see §1b) | EAZY template mixture | Empirical SED prior — KDE or normalizing flow (`artifacts/empirical/`; rebuild with `--parameterization ilr`) |
 
 Example:

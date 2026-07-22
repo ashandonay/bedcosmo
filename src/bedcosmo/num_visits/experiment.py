@@ -286,8 +286,11 @@ class NumVisits(BaseExperiment, CosmologyMixin):
                     f"  central_params defaults: KDE-prior marginal modes "
                     f"(training N={n_train}); override via train_args central_params"
                 )
-        elif "T" in self.cosmo_params:
-            defaults["T"] = 10000.0
+        else:
+            if "T" in self.cosmo_params:
+                defaults["T"] = 10000.0
+            if "L_bol" in self.cosmo_params:
+                defaults["L_bol"] = self.l_bol
         self.central_params = dict(defaults)
         self.central_params.update(_central_params_as_dict(central_params))
 
@@ -297,13 +300,14 @@ class NumVisits(BaseExperiment, CosmologyMixin):
             z_central = torch.tensor(
                 [self.central_params["z"]], device=self.device, dtype=torch.float64
             )
-            if "T" in self.central_params:
-                T_central = torch.tensor(
-                    [self.central_params["T"]], device=self.device, dtype=torch.float64
+            sed_kwargs = {
+                key: torch.tensor(
+                    [self.central_params[key]], device=self.device, dtype=torch.float64
                 )
-                flux_aa = self._observed_spectral_flux(z_central, T=T_central)
-            else:
-                flux_aa = self._observed_spectral_flux(z_central)
+                for key in ("T", "L_bol")
+                if key in self.central_params
+            }
+            flux_aa = self._observed_spectral_flux(z_central, **sed_kwargs)
             self.central_val = self._calculate_magnitudes(flux_aa).squeeze(0)
 
         self.nominal_context = torch.cat([self.nominal_design, self.central_val], dim=-1)
@@ -918,12 +922,24 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         mags_flat = 24.0 - 2.5 * torch.log10(flux_ratio)
         return mags_flat.reshape(*batch_shape, self.num_filters)
 
+    def _scalar_temperature_k(self) -> torch.Tensor:
+        """The experiment-level blackbody temperature in K, as a cached scalar tensor."""
+        if not hasattr(self, "_T_K_tensor"):
+            value = (
+                self.temperature.to(u.K).value
+                if hasattr(self.temperature, "value")
+                else float(self.temperature)
+            )
+            self._T_K_tensor = torch.tensor(value, device=self.device, dtype=torch.float64)
+        return self._T_K_tensor
+
     @profile_method
     def _observed_spectral_flux(
         self,
         z: torch.Tensor,
         *,
         T: torch.Tensor | None = None,
+        L_bol: torch.Tensor | None = None,
         a: torch.Tensor | None = None,
         log_s: torch.Tensor | None = None,
     ) -> torch.Tensor:
@@ -931,10 +947,12 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         Observed-frame spectral flux per Angstrom on ``self._wlen_aa_tensor``.
 
         Pass ``a`` and ``log_s`` for the EAZY template mixture (empirical prior).
-        Omit them for a blackbody, using ``self.temperature`` or optional ``T``.
+        Omit them for a blackbody, using ``self.temperature`` or optional ``T``,
+        and ``self.l_bol`` or optional ``L_bol`` (in L_sun) for the normalization.
 
         Returns:
-            Flux with shape ``z.shape + (n_wlen,)``.
+            Flux with shape broadcast over ``z``, ``T``, ``L_bol`` plus a
+            trailing wavelength dim.
         """
         if a is not None or log_s is not None:
             if a is None or log_s is None:
@@ -976,33 +994,25 @@ class NumVisits(BaseExperiment, CosmologyMixin):
 
         z_tensor = z
         T_tensor = T
-        if T_tensor is None:
+        L_bol_tensor = L_bol
+        # Fast path: both T and L_bol are experiment-level scalars, so the
+        # Stefan-Boltzmann radius is a constant that can be cached and only the
+        # unique redshifts need integrating.
+        broadcast_sed = T_tensor is not None or L_bol_tensor is not None
+        if not broadcast_sed:
             z_flat = z_tensor.flatten()
             z_unique, inverse_indices = torch.unique(z_flat, return_inverse=True)
             lum_dist = self._luminosity_distance(z_unique)
 
-            if not hasattr(self, "_T_K_tensor"):
-                if hasattr(self.temperature, "value"):
-                    self._T_K_tensor = torch.tensor(
-                        self.temperature.to(u.K).value,
-                        device=self.device,
-                        dtype=torch.float64,
-                    )
-                else:
-                    self._T_K_tensor = torch.tensor(
-                        float(self.temperature),
-                        device=self.device,
-                        dtype=torch.float64,
-                    )
-            T_K = self._T_K_tensor
+            T_K = self._scalar_temperature_k()
 
             if not hasattr(self, "_four_pi_R2_tensor"):
-                L_bol = self.l_bol * _L_sun_cgs
+                L_bol_cgs = self.l_bol * _L_sun_cgs
                 sigma_sb_cgs = sigma_sb.to(u.erg / (u.s * u.cm**2 * u.K**4)).value
                 T_K_4 = T_K**4
                 R_eff_val = torch.sqrt(
                     torch.tensor(
-                        L_bol / (4 * np.pi * sigma_sb_cgs),
+                        L_bol_cgs / (4 * np.pi * sigma_sb_cgs),
                         device=self.device,
                         dtype=torch.float64,
                     )
@@ -1016,21 +1026,22 @@ class NumVisits(BaseExperiment, CosmologyMixin):
             four_pi_R2_for_L = four_pi_R2
         else:
             z_t = torch.as_tensor(z_tensor, device=self.device, dtype=torch.float64)
+            if T_tensor is None:
+                T_tensor = self._scalar_temperature_k()
             T_t = torch.as_tensor(T_tensor, device=self.device, dtype=torch.float64)
-            z_b, T_b = torch.broadcast_tensors(z_t, T_t)
+            if L_bol_tensor is None:
+                L_bol_tensor = self.l_bol
+            L_t = torch.as_tensor(L_bol_tensor, device=self.device, dtype=torch.float64)
+            z_b, T_b, L_b = torch.broadcast_tensors(z_t, T_t, L_t)
             joint_shape = z_b.shape
             z_unique = z_b.flatten()
             T_K = T_b.flatten()
+            L_bol_sun = L_b.flatten()
             inverse_indices = None
             lum_dist = self._luminosity_distance(z_unique)
 
-            L_bol = self.l_bol * _L_sun_cgs
             sigma_sb_cgs = sigma_sb.to(u.erg / (u.s * u.cm**2 * u.K**4)).value
-            L_bol_const = torch.tensor(
-                L_bol / (4 * np.pi * sigma_sb_cgs),
-                device=self.device,
-                dtype=torch.float64,
-            )
+            L_bol_const = L_bol_sun * (_L_sun_cgs / (4 * np.pi * sigma_sb_cgs))
             R_eff = torch.sqrt(L_bol_const / (T_K**4))
             four_pi_R2 = torch.tensor(4 * np.pi, device=self.device, dtype=torch.float64) * R_eff**2
             T_K_for_bb = T_K.unsqueeze(-1)
@@ -1068,7 +1079,7 @@ class NumVisits(BaseExperiment, CosmologyMixin):
                 )
 
         n_wlen = self._wlen_aa_tensor.shape[0]
-        if T_tensor is not None:
+        if broadcast_sed:
             return flux.reshape(*joint_shape, n_wlen)
         flux_flat = flux[inverse_indices]
         return flux_flat.reshape(*z_tensor.shape, n_wlen)
@@ -1398,12 +1409,14 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         else:
             z_dist = self.prior["z"].expand(batch_shape).to_event(0)
             z = pyro.sample("z", z_dist)
+            sed_kwargs = {}
             if "T" in self.prior:
                 T_dist = self.prior["T"].expand(batch_shape).to_event(0)
-                T = pyro.sample("T", T_dist)
-                flux_aa = self._observed_spectral_flux(z, T=T)
-            else:
-                flux_aa = self._observed_spectral_flux(z)
+                sed_kwargs["T"] = pyro.sample("T", T_dist)
+            if "L_bol" in self.prior:
+                L_dist = self.prior["L_bol"].expand(batch_shape).to_event(0)
+                sed_kwargs["L_bol"] = pyro.sample("L_bol", L_dist)
+            flux_aa = self._observed_spectral_flux(z, **sed_kwargs)
             means = self._calculate_magnitudes(flux_aa)
         sigmas = self._magnitude_errors(means, nvisits)
         covariance = torch.diag_embed(sigmas**2)
@@ -1468,24 +1481,19 @@ class NumVisits(BaseExperiment, CosmologyMixin):
                 values = values.reshape(values.shape[:grid_ndim])
             return values
 
-        # Parameter grid: z (always present), optionally T. Final P shape is
-        # the joint broadcast of all parameter axes.
-        z_values = _grid_array(params, "z")
-        if "T" in getattr(params, "names", []):
-            T_values = _grid_array(params, "T")
-            z_b, T_b = jnp.broadcast_arrays(z_values, T_values)
-            z_shape = z_b.shape
-            z_tensor = torch.as_tensor(np.asarray(z_b), device=self.device, dtype=torch.float64)
-            T_tensor = torch.as_tensor(np.asarray(T_b), device=self.device, dtype=torch.float64)
-            flux_aa = self._observed_spectral_flux(z_tensor, T=T_tensor)
-            mags_model = jnp.asarray(self._calculate_magnitudes(flux_aa).detach().cpu().numpy())
-        else:
-            z_shape = z_values.shape
-            z_tensor = torch.as_tensor(
-                np.asarray(z_values), device=self.device, dtype=torch.float64
-            )
-            flux_aa = self._observed_spectral_flux(z_tensor)
-            mags_model = jnp.asarray(self._calculate_magnitudes(flux_aa).detach().cpu().numpy())
+        # Parameter grid: z (always present), optionally T and L_bol. Final P
+        # shape is the joint broadcast of all parameter axes.
+        grid_names = list(getattr(params, "names", []))
+        axis_names = ["z"] + [name for name in ("T", "L_bol") if name in grid_names]
+        axes = jnp.broadcast_arrays(*[_grid_array(params, name) for name in axis_names])
+        z_shape = axes[0].shape
+        sed_kwargs = {
+            name: torch.as_tensor(np.asarray(axis), device=self.device, dtype=torch.float64)
+            for name, axis in zip(axis_names[1:], axes[1:])
+        }
+        z_tensor = torch.as_tensor(np.asarray(axes[0]), device=self.device, dtype=torch.float64)
+        flux_aa = self._observed_spectral_flux(z_tensor, **sed_kwargs)
+        mags_model = jnp.asarray(self._calculate_magnitudes(flux_aa).detach().cpu().numpy())
         # mags_model shape: P + (num_filters,)
 
         # Feature grid (magnitudes): broadcast per-filter axes to a common feature shape X
