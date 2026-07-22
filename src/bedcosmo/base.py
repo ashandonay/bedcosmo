@@ -162,6 +162,18 @@ class BaseExperiment(ABC):
             if constraint is None:
                 return Grid(**axis_values)
 
+            # A single-cell grid makes the constraint vacuous, and bed.Grid cannot
+            # represent it: it squeezes the (1, ..., 1) mask to a 0-d array, which
+            # jnp.nonzero rejects. Check the lone point here and drop the constraint.
+            if all(len(v) == 1 for v in axis_values.values()):
+                keep = np.asarray(constraint(**{n: np.asarray(v) for n, v in axis_values.items()}))
+                if not np.all(keep > 0):
+                    raise ValueError(
+                        "The only design in the grid violates the design constraint: "
+                        + ", ".join(f"{n}={v[0]:g}" for n, v in axis_values.items())
+                    )
+                return Grid(**axis_values)
+
             if full_shape is None:
                 full_shape = tuple(len(v) for v in axis_values.values())
             return Grid(**axis_values, constraint=constraint, full_shape=tuple(full_shape))
