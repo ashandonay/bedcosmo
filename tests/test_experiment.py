@@ -430,6 +430,37 @@ class TestDesignGridHelpers:
         assert points.shape[0] < 9
         assert torch.all(points.sum(dim=1) <= 2.0 + 1e-12)
 
+    def test_single_cell_grid_with_constraint(self):
+        """A pinned (1x1) design grid builds; its constraint is vacuous.
+
+        bed.Grid squeezes the (1, ..., 1) constraint mask to a 0-d array, which
+        jnp.nonzero rejects, so _build_design_grid resolves the lone point itself
+        instead of handing the mask over.
+        """
+        exp = self._make_exp()
+        grid = exp._build_design_grid(
+            design_axes={"x": np.array([70.0]), "y": np.array([100.0])},
+            constraint=lambda **kwargs: (
+                np.abs(kwargs["x"] + kwargs["y"] - 170.0) < 1e-9
+            ).astype(int),
+        )
+        points = exp._designs_from_grid(grid, device="cpu")
+
+        assert points.shape == (1, 2)
+        assert torch.allclose(points[0], torch.tensor([70.0, 100.0], dtype=points.dtype))
+
+    def test_single_cell_grid_violating_constraint_raises(self):
+        """A pinned design that fails the constraint is an error, not a silent grid."""
+        exp = self._make_exp()
+
+        with pytest.raises(ValueError, match="violates the design constraint"):
+            exp._build_design_grid(
+                design_axes={"x": np.array([70.0]), "y": np.array([99.0])},
+                constraint=lambda **kwargs: (
+                    np.abs(kwargs["x"] + kwargs["y"] - 170.0) < 1e-9
+                ).astype(int),
+            )
+
     def test_build_from_irregular_design_points_round_trip(self):
         exp = self._make_exp()
         design_pts = torch.tensor(

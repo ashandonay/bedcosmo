@@ -23,8 +23,8 @@ import torch
 import yaml
 
 from bedcosmo.num_visits import NumVisits
-from bedcosmo.num_visits.sed_prior import PARAMETERIZATION_LOGITS, logits_to_weights_torch
-from bedcosmo.num_visits.sed_prior.paths import get_prior_build_dir
+from bedcosmo.num_visits.empirical import PARAMETERIZATION_ILR
+from bedcosmo.num_visits.empirical.paths import get_prior_build_dir
 from bedcosmo.util import get_experiment_config_path
 
 DIAGNOSTICS_SUBDIR = "central_sed"
@@ -44,36 +44,25 @@ def _load_yaml(name: str) -> dict:
 
 
 def _central_tensors(experiment: NumVisits, central: dict):
-    """Mirror _central_magnitudes_from_dict decoding."""
+    """Decode central_params into (a, log_s, z) via the experiment's own decoder.
+
+    Assembles one artifact-space feature row and hands it to
+    ``NumVisits._empirical_rows_to_physical`` so the simplex math lives in exactly
+    one place. This function used to duplicate that decode and silently went
+    stale: it carried a branch for the since-removed 'logits' parameterization and
+    had none for 'ilr', so ILR rows fell through to a raw-weights path that would
+    have produced a wrong SED rather than an error.
+
+    Row layout (matches the artifact feature space):
+        ilr: f1..f_{K-1}, log_c_scale, z
+        clr: f1..fK,      log_c_scale, z   (legacy)
+    """
     K = int(experiment._n_eazy_templates)
-    parameterization = getattr(experiment, "_prior_parameterization", "weights")
-
-    if parameterization == "clr":
-        clr = torch.tensor(
-            [[float(central.get(f"f{k}", 0.0)) for k in range(1, K + 1)]],
-            device=experiment.device,
-            dtype=torch.float64,
-        )
-        shifted = clr - torch.amax(clr, dim=-1, keepdim=True)
-        exp = torch.exp(shifted)
-        a = exp / exp.sum(dim=-1, keepdim=True).clamp_min(1e-300)
-    elif parameterization == PARAMETERIZATION_LOGITS:
-        eta = torch.tensor(
-            [[float(central.get(f"f{k}", 0.0)) for k in range(1, K)]],
-            device=experiment.device,
-            dtype=torch.float64,
-        )
-        a = logits_to_weights_torch(eta)
-    else:
-        a = torch.tensor(
-            [[float(central.get(f"a{k}", 0.0)) for k in range(1, K + 1)]],
-            device=experiment.device,
-            dtype=torch.float64,
-        )
-        a = a / a.sum(dim=-1, keepdim=True).clamp_min(1e-300)
-
-    log_s = torch.tensor([float(central["log_c_scale"])], device=experiment.device, dtype=torch.float64)
-    z = torch.tensor([float(central["z"])], device=experiment.device, dtype=torch.float64)
+    n_f = K - 1 if experiment._require_parameterization() == PARAMETERIZATION_ILR else K
+    row = [float(central.get(f"f{k}", 0.0)) for k in range(1, n_f + 1)]
+    row += [float(central["log_c_scale"]), float(central["z"])]
+    rows = torch.tensor([row], device=experiment.device, dtype=torch.float64)
+    a, log_s, z = experiment._empirical_rows_to_physical(rows, (1,))
     return a.squeeze(0), log_s.squeeze(0), z.squeeze(0)
 
 
@@ -142,8 +131,6 @@ def main():
     # Rest-frame weighted template sum (before 1/(1+z) factor in _observed_spectral_flux)
     wlen_rest = experiment._template_wave_rest.detach().cpu().numpy()
     templates = experiment._template_flux.detach().cpu().numpy()
-    one_plus_z = 1.0 + z_val
-    wlen_obs_from_rest = wlen_rest * one_plus_z
     flux_rest_mix = np.zeros_like(wlen_rest, dtype=np.float64)
     for k in range(len(a_np)):
         flux_rest_mix += c[k] * templates[k]
@@ -156,7 +143,7 @@ def main():
     ax.set_xlabel("EAZY template index $k$")
     ax.set_ylabel(r"Weight $a_k$")
     param = getattr(experiment, "_prior_parameterization", "?")
-    ax.set_title(rf"Template weights $a_k$ ({param}; all $f_k=0$ $\Rightarrow$ uniform)")
+    ax.set_title(rf"Template weights $a_k$ (decoded from {param})")
     ax.set_xticks(k_idx)
 
     ax = axes[0, 1]
@@ -176,15 +163,14 @@ def main():
     ax.plot(wlen_rest, flux_rest_mix, color="#4c72b0", lw=1.2, label=r"$\sum_k c_k T_k(\lambda/(1+z))$")
     ax.set_xlabel(r"Rest-frame $\lambda$ [$\mathrm{\AA}$]")
     ax.set_ylabel(r"linear flux (arb. units)")
-    ax.set_title(rf"Rest-frame mixture ($c_k = e^{{\log s}} a_k$)")
+    ax.set_title(r"Rest-frame mixture ($c_k = e^{\log s} a_k$)")
     ax.legend(loc="upper right", fontsize=8)
 
     fig.suptitle(
         "num_visits empirical central_params SED\n"
-        f"z={z_val}, log_c_scale={float(log_s.cpu()):.1f}, "
-        f"central $f_k=0$ (uniform $a_k$)",
+        f"z={z_val:.3f}, log_c_scale={float(log_s.cpu()):.2f}, "
+        f"max $a_k$={a_np.max():.2f} (k={int(a_np.argmax()) + 1})",
         fontsize=12,
-        y=1.02,
     )
 
     # LSST mags annotation

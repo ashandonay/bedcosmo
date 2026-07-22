@@ -2,8 +2,16 @@
 
 import os
 import sys
+from pathlib import Path
 
 import pytest
+
+# The reusable entropy estimators live in scripts/entropy_models (co-located with
+# the toy-model plots that also use them). Put that dir on sys.path so tests can
+# import them directly, e.g. ``from estimators import flow_plugin_entropy``.
+_ENTROPY_MODELS = Path(__file__).resolve().parent.parent / "scripts" / "entropy_models"
+if str(_ENTROPY_MODELS) not in sys.path:
+    sys.path.insert(0, str(_ENTROPY_MODELS))
 
 # Only set environment variables if they're not already set
 # This ensures tests can run without requiring actual environment setup
