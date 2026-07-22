@@ -32,6 +32,7 @@ bb:
   checkpoint_step_freq: 1000
   n_particles_per_device: 10
   temperature: 10000
+  l_bol: 1.0e10  # bolometric luminosity [L_sun]; ~0.4 L*. 1e9 = dwarf, invisible past z~1.8
   mag_err_cap: 10
   central_params:
     z: 1.0
@@ -70,6 +71,7 @@ bb_temp:
   step_freq: 1
   checkpoint_step_freq: 1000
   n_particles_per_device: 10
+  l_bol: 1.0e10  # bolometric luminosity [L_sun]; ~0.4 L*. 1e9 = dwarf, T signal only 0.5 sigma
   mag_err_cap: 10
   central_params:
     z: 1.0
@@ -87,6 +89,10 @@ empirical:
   flow_type: NAF
   transform_input: false
   input_transform_type: joint
+  # Which cosmo_params the guide infers. [] = all (joint). A strict subset (e.g.
+  # ["z"]) trains a focused guide; requires transform_input: false. Override via
+  # --target-params '["z"]'.
+  target_params: []
   logit_flow_scale: 8.0
   activation: elu
   n_transforms: 4

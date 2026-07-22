@@ -35,7 +35,7 @@ empirical:
   eval_step: last
   levels: [0.68, 0.95]
   guide_samples: 100000
-  n_particles: 5000
+  n_particles: 50000
   particle_batch_size: 10000
   n_evals: 5
   param_space: physical
