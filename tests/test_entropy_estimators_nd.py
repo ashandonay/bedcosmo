@@ -21,7 +21,7 @@ import math
 import numpy as np
 import pytest
 
-from tests.helpers.entropy_estimators import (
+from estimators import (
     cumulant_negentropy_entropy,
     flow_plugin_entropy,
     gaussian_entropy,

@@ -162,6 +162,18 @@ class BaseExperiment(ABC):
             if constraint is None:
                 return Grid(**axis_values)
 
+            # A single-cell grid makes the constraint vacuous, and bed.Grid cannot
+            # represent it: it squeezes the (1, ..., 1) mask to a 0-d array, which
+            # jnp.nonzero rejects. Check the lone point here and drop the constraint.
+            if all(len(v) == 1 for v in axis_values.values()):
+                keep = np.asarray(constraint(**{n: np.asarray(v) for n, v in axis_values.items()}))
+                if not np.all(keep > 0):
+                    raise ValueError(
+                        "The only design in the grid violates the design constraint: "
+                        + ", ".join(f"{n}={v[0]:g}" for n, v in axis_values.items())
+                    )
+                return Grid(**axis_values)
+
             if full_shape is None:
                 full_shape = tuple(len(v) for v in axis_values.values())
             return Grid(**axis_values, constraint=constraint, full_shape=tuple(full_shape))
@@ -631,7 +643,14 @@ class BaseExperiment(ABC):
         return x
 
     def _sanitize_physical_samples(self, param_samples: torch.Tensor) -> torch.Tensor:
-        """Clamp empirical-prior parameters and replace non-finite values for plotting."""
+        """Clamp empirical-prior parameters and replace non-finite values for plotting.
+
+        Presentation only. Every out-of-bounds row is mapped onto the *same*
+        bound value, which is fatal for neighbor-based estimators: ``k + 1``
+        identical rows make the k-NN distance exactly zero. Estimator paths must
+        use :meth:`_physical_samples_valid_mask` and drop the offending rows
+        instead of clamping them.
+        """
         if not getattr(self, "prior", None):
             return param_samples
         x = param_samples.clone()
@@ -645,6 +664,26 @@ class BaseExperiment(ABC):
             col = torch.where(torch.isfinite(col), col, mid)
             x[..., sl] = col
         return x
+
+    def _physical_samples_valid_mask(self, param_samples: torch.Tensor) -> torch.Tensor:
+        """Element-wise mask of usable physical samples; shape matches the input.
+
+        The estimator-safe counterpart to :meth:`_sanitize_physical_samples`: an
+        entry is ``True`` when it is finite and, for ``EmpiricalPrior``
+        parameters, inside the prior's support. Callers reduce over the columns
+        they care about (``mask[..., idx].all(-1)``) and drop the failing rows,
+        so a draw is never silently relocated onto a bound.
+        """
+        valid = torch.isfinite(param_samples)
+        if not getattr(self, "prior", None):
+            return valid
+        for i, param_name in enumerate(self.cosmo_params):
+            prior_dist = self.prior.get(param_name)
+            if not isinstance(prior_dist, EmpiricalPrior):
+                continue
+            col = param_samples[..., i]
+            valid[..., i] &= (col >= prior_dist.low) & (col <= prior_dist.high)
+        return valid
 
     # =========================================================================
     # Sampling Methods

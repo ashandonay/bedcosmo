@@ -1,0 +1,68 @@
+# Classic 6-template EAZY empirical prior (ILR parameterization).
+# Same cosmo_model as production (`empirical`); only this prior_args file differs.
+# 5 isometric log-ratio coords f1..f5 (K-1 for K=6 templates) + log_c_scale + z.
+#
+# Build:
+#   python -m bedcosmo.num_visits.empirical.build_prior \
+#     --build-name empirical_prior_eazy6 \
+#     --template-param templates/eazy_v1.0.spectra.param
+#
+# Train / eval (override the default prior_args_empirical.yaml):
+#   ./submit.sh train num_visits empirical --prior-args-path prior_args_empirical_eazy6.yaml
+#
+# prior_dir points at the alternate scratch build (not the production 12-template tree).
+prior_dir: /pscratch/sd/a/ashandon/bedcosmo/num_visits/empirical_prior_eazy6
+
+# Start with KDE until a prior flow is trained for this build.
+prior_source: kde
+
+template_dir: null
+template_param: "templates/eazy_v1.0.spectra.param"
+prior_pool_size: 65536
+prior_pool_seed: 7
+
+parameters:
+  f1:
+    distribution:
+      type: empirical
+    plot:
+      lower: -8.0
+      upper: 8.0
+  f2:
+    distribution:
+      type: empirical
+    plot:
+      lower: -8.0
+      upper: 8.0
+  f3:
+    distribution:
+      type: empirical
+    plot:
+      lower: -8.0
+      upper: 8.0
+  f4:
+    distribution:
+      type: empirical
+    plot:
+      lower: -8.0
+      upper: 8.0
+  f5:
+    distribution:
+      type: empirical
+    plot:
+      lower: -8.0
+      upper: 8.0
+  log_c_scale:
+    distribution:
+      type: empirical
+    plot:
+      lower: 4.0
+      upper: 10.5
+  z:
+    distribution:
+      type: empirical
+    plot:
+      lower: 0.0
+      upper: 1.75
+
+constraints: {}

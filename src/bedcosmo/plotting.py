@@ -47,6 +47,67 @@ plt.rcParams['font.family'] = 'DejaVu Sans'
 plt.rcParams['font.serif'] = ['DejaVu Serif', 'Times New Roman', 'Times', 'serif']
 
 
+def load_eig_data_file(artifacts_dir, eval_step=None):
+    """
+    Load the most recent completed eig_data JSON file from the artifacts directory.
+
+    Args:
+        artifacts_dir (str): Path to the artifacts directory containing eig_data files
+        eval_step (str or int, optional): If provided, verify that the loaded file contains this step
+
+    Returns:
+        tuple: (json_path, data) where json_path is the path to the file and data is the loaded JSON.
+               Returns (None, None) if no valid file is found.
+
+    Raises:
+        ValueError: If no completed eig_data files are found, if file cannot be loaded, or if eval_step is not found in the data.
+    """
+    if not os.path.exists(artifacts_dir):
+        raise ValueError(f"Artifacts directory not found: {artifacts_dir}")
+
+    # Find all eig_data JSON files
+    eig_files = glob_module.glob(f"{artifacts_dir}/eig_data_*.json")
+
+    if len(eig_files) == 0:
+        raise ValueError(f"No eig_data JSON files found in {artifacts_dir}")
+
+    # Sort by filename (most recent first)
+    eig_files.sort(key=lambda x: os.path.basename(x), reverse=True)
+
+    # Check each file for completion status (most recent first)
+    for json_path in eig_files:
+        try:
+            with open(json_path, 'r') as f:
+                data = json.load(f)
+
+            # Check if evaluation is completed using status field
+            status = data.get('status')
+            if status != 'complete':
+                # Skip incomplete files
+                continue
+
+            # If eval_step is provided, verify it exists in the data
+            if eval_step is not None:
+                step_str = f"step_{eval_step}" if not str(eval_step).startswith('step_') else str(eval_step)
+                if step_str not in data:
+                    # This file doesn't have the requested step, try next file
+                    continue
+
+            # Found a complete file (and it has the requested step if eval_step was provided)
+            return json_path, data
+
+        except Exception as e:
+            # Skip files that can't be loaded and continue to next
+            print(f"Warning: Error loading {json_path}: {e}, skipping...")
+            continue
+
+    # No completed files found (or no file with the requested eval_step)
+    if eval_step is not None:
+        raise ValueError(f"No completed eig_data files with step {eval_step} found in {artifacts_dir}")
+    else:
+        raise ValueError(f"No completed eig_data files found in {artifacts_dir}")
+
+
 # ============================================================================
 # Base Plotter Class
 # ============================================================================
@@ -932,64 +993,8 @@ class BasePlotter:
         return g
 
     def load_eig_data_file(self, artifacts_dir, eval_step=None):
-        """
-        Load the most recent completed eig_data JSON file from the artifacts directory.
-        
-        Args:
-            artifacts_dir (str): Path to the artifacts directory containing eig_data files
-            eval_step (str or int, optional): If provided, verify that the loaded file contains this step
-        
-        Returns:
-            tuple: (json_path, data) where json_path is the path to the file and data is the loaded JSON.
-                   Returns (None, None) if no valid file is found.
-        
-        Raises:
-            ValueError: If no completed eig_data files are found, if file cannot be loaded, or if eval_step is not found in the data.
-        """
-        if not os.path.exists(artifacts_dir):
-            raise ValueError(f"Artifacts directory not found: {artifacts_dir}")
-        
-        # Find all eig_data JSON files
-        eig_files = glob_module.glob(f"{artifacts_dir}/eig_data_*.json")
-        
-        if len(eig_files) == 0:
-            raise ValueError(f"No eig_data JSON files found in {artifacts_dir}")
-        
-        # Sort by filename (most recent first)
-        eig_files.sort(key=lambda x: os.path.basename(x), reverse=True)
-        
-        # Check each file for completion status (most recent first)
-        for json_path in eig_files:
-            try:
-                with open(json_path, 'r') as f:
-                    data = json.load(f)
-                
-                # Check if evaluation is completed using status field
-                status = data.get('status')
-                if status != 'complete':
-                    # Skip incomplete files
-                    continue
-                
-                # If eval_step is provided, verify it exists in the data
-                if eval_step is not None:
-                    step_str = f"step_{eval_step}" if not str(eval_step).startswith('step_') else str(eval_step)
-                    if step_str not in data:
-                        # This file doesn't have the requested step, try next file
-                        continue
-                
-                # Found a complete file (and it has the requested step if eval_step was provided)
-                return json_path, data
-                    
-            except Exception as e:
-                # Skip files that can't be loaded and continue to next
-                print(f"Warning: Error loading {json_path}: {e}, skipping...")
-                continue
-        
-        # No completed files found (or no file with the requested eval_step)
-        if eval_step is not None:
-            raise ValueError(f"No completed eig_data files with step {eval_step} found in {artifacts_dir}")
-        else:
-            raise ValueError(f"No completed eig_data files found in {artifacts_dir}")
+        """Load the most recent completed eig_data JSON file (see module-level ``load_eig_data_file``)."""
+        return load_eig_data_file(artifacts_dir, eval_step=eval_step)
 
     def _resolve_step(self, eig_data, eval_step):
         """Resolve eval_step to a step string key in eig_data (see RunPlotter usage)."""
@@ -5033,7 +5038,10 @@ def compare_increasing_design(
                         ref_data = None
                 else:
                     print(f"Warning: Artifacts directory not found for reference run {ref_id}")
-        except Exception as e:
+        except (ValueError, OSError, KeyError) as e:
+            # Expected "reference data is missing/malformed" cases -> skip the
+            # reference overlay. Programming errors (NameError, TypeError, ...)
+            # deliberately propagate instead of being masked as a warning.
             print(f"Warning: Error loading reference run {ref_id}: {e}")
     
     # Get run data - can use either mlflow_exp or run_ids

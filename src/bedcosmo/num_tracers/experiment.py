@@ -613,27 +613,40 @@ class NumTracers(BaseExperiment, CosmologyMixin):
         return prior, param_constraints, latex_labels, prior_flow, prior_flow_metadata
 
     @profile_method
-    def sigma_scaling_factor(self, passed_ratio, class_ratio, index):
+    def sigma_scaling_factor(self, passed_ratio, index):
         """
-        Calculate the scaling factor for likelihood uncertainties based on the distribution of observations
-        across tracers (passed_ratio) and the total number of observations (encoded in the sum of class_ratio).
+        Calculate the scaling factor for likelihood uncertainties from the passed-tracer counts
+        implied by the design.
 
-        The total_obs_multiplier is inferred from the sum of class_ratio. If class_ratio (design var) sums to 1.4,
-        then the total_obs_multiplier is 1.4.
+        ``passed_ratio`` (``calc_passed`` output) is linear in the design ``class_ratio``, so it
+        already encodes *both* the split across tracers *and* the total observation budget (the
+        design sum): a design scaled uniformly by ``s`` gives ``passed_ratio = s *
+        nominal_passed_ratio``. The per-bin count is ``N_i = passed_ratio_i * nominal_total_obs``
+        (see ``_passed_ratio_to_n_tracers``), so the shot-noise scaling ``sigma ~ 1/sqrt(N)`` is
+
+            factor = sqrt(nominal_passed_ratio / passed_ratio)
+
+        which reduces to ``1/sqrt(s)`` under uniform scaling.
+
+        Do NOT also divide by the design sum ("total_obs_multiplier"): ``passed_ratio`` already
+        carries the budget, so that double-counts it and yields ``sigma ~ 1/s``. It is a no-op at
+        the historical ``sum == 1`` designs, which is why it went unnoticed; it only biases
+        designs whose sum is free. See tests/test_num_tracers_sigma_scaling.py.
+
+        Note this is scaling mode's shot-noise *idealization*. Emulator mode learns the true BAO
+        forecast (including sample-variance saturation, where dense bins improve far more slowly
+        than 1/sqrt(N)) and does not use this method.
 
         Args:
-            passed_ratio: Fraction of passed objects in each tracer bin relative to total obs
-            class_ratio: Design variables (fraction allocated to each class)
+            passed_ratio: Fraction of passed objects in each tracer bin (``calc_passed`` output);
+                carries both the split and the budget.
             index: Index for the specific measurement
 
         Returns:
             Scaling factor for sigma: sigma_new = sigma_nominal * scaling_factor
 
         """
-        total_obs_multiplier = class_ratio.sum(dim=-1, keepdim=True)  # sum across classes
-        factor = torch.sqrt(
-            self.nominal_passed_ratio[index] / (total_obs_multiplier * passed_ratio[..., index])
-        )
+        factor = torch.sqrt(self.nominal_passed_ratio[index] / passed_ratio[..., index])
         if not self.vary_lya_qso and self._lya_qso_rows.size:
             # By default the Lya QSO error is held fixed. `index` is a positional array
             # into desi_data rows; entries that are Lya QSO rows keep the nominal sigma
@@ -961,17 +974,17 @@ class NumTracers(BaseExperiment, CosmologyMixin):
             )
             rescaled_sigmas[:, :, self.DH_idx] = self.sigmas[
                 self.DH_idx
-            ] * self.sigma_scaling_factor(passed_ratio, expanded_tracer_ratio, self.DH_idx)
+            ] * self.sigma_scaling_factor(passed_ratio, self.DH_idx)
             if self.include_D_M:
                 means[:, :, self.DM_idx] = self.central_val[self.DM_idx]
                 rescaled_sigmas[:, :, self.DM_idx] = self.sigmas[
                     self.DM_idx
-                ] * self.sigma_scaling_factor(passed_ratio, expanded_tracer_ratio, self.DM_idx)
+                ] * self.sigma_scaling_factor(passed_ratio, self.DM_idx)
             if self.include_D_V:
                 means[:, :, self.DV_idx] = self.central_val[self.DV_idx]
                 rescaled_sigmas[:, :, self.DV_idx] = self.sigmas[
                     self.DV_idx
-                ] * self.sigma_scaling_factor(passed_ratio, expanded_tracer_ratio, self.DV_idx)
+                ] * self.sigma_scaling_factor(passed_ratio, self.DV_idx)
 
             if self.include_D_V and self.include_D_M:
                 covariance_matrix = self.corr_matrix * (
@@ -1910,7 +1923,7 @@ class NumTracers(BaseExperiment, CosmologyMixin):
                 means[:, :, self.DH_idx] = self.D_H_func(z_eff, **parameters)
                 rescaled_sigmas[:, :, self.DH_idx] = self.sigmas[
                     self.DH_idx
-                ] * self.sigma_scaling_factor(passed_ratio, tracer_ratio, self.DH_idx)
+                ] * self.sigma_scaling_factor(passed_ratio, self.DH_idx)
                 if self.include_D_M:
                     z_eff = torch.tensor(
                         self.desi_data[self.desi_data["quantity"] == "DM_over_rs"]["z"].to_list(),
@@ -1919,7 +1932,7 @@ class NumTracers(BaseExperiment, CosmologyMixin):
                     means[:, :, self.DM_idx] = self.D_M_func(z_eff, **parameters)
                     rescaled_sigmas[:, :, self.DM_idx] = self.sigmas[
                         self.DM_idx
-                    ] * self.sigma_scaling_factor(passed_ratio, tracer_ratio, self.DM_idx)
+                    ] * self.sigma_scaling_factor(passed_ratio, self.DM_idx)
 
                 if self.include_D_V:
                     z_eff = torch.tensor(
@@ -1929,7 +1942,7 @@ class NumTracers(BaseExperiment, CosmologyMixin):
                     means[:, :, self.DV_idx] = self.D_V_func(z_eff, **parameters)
                     rescaled_sigmas[:, :, self.DV_idx] = self.sigmas[
                         self.DV_idx
-                    ] * self.sigma_scaling_factor(passed_ratio, tracer_ratio, self.DV_idx)
+                    ] * self.sigma_scaling_factor(passed_ratio, self.DV_idx)
 
                 # extract correlation matrix from DESI covariance matrix
                 if self.include_D_V and self.include_D_M:
