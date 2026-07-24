@@ -5,7 +5,7 @@ bb:
   eval_step: last
   levels: [0.68, 0.95]
   guide_samples: 100000
-  n_particles: 100001
+  n_particles: 20001
   particle_batch_size: 10000
   n_evals: 10
   param_space: physical
@@ -15,12 +15,12 @@ bb:
   verbose: true
   plot_prior: true
 
-bb_temp:
-  cosmo_model: bb_temp
+bbt:
+  cosmo_model: bbt
   eval_step: last
   levels: [0.68, 0.95]
   guide_samples: 100000
-  n_particles: 100001
+  n_particles: 20001
   particle_batch_size: 10000
   n_evals: 10
   param_space: physical
@@ -30,12 +30,12 @@ bb_temp:
   verbose: true
   plot_prior: true
 
-bb_temp_lbol:
-  cosmo_model: bb_temp_lbol
+bbtm:
+  cosmo_model: bbtm
   eval_step: last
   levels: [0.68, 0.95]
   guide_samples: 100000
-  n_particles: 100001
+  n_particles: 20001
   particle_batch_size: 10000
   n_evals: 10
   param_space: physical

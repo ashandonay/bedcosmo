@@ -2,13 +2,13 @@ bb:
   parameters: ["z"]
   latex_labels: ["z"]
 
-bb_temp:
+bbt:
   parameters: ["z", "T"]
   latex_labels: ["z", "T\\,[\\mathrm{K}]"]
 
-bb_temp_lbol:
-  parameters: ["z", "T", "L_bol"]
-  latex_labels: ["z", "T\\,[\\mathrm{K}]", "L_\\mathrm{bol}\\,[L_\\odot]"]
+bbtm:
+  parameters: ["z", "T", "M_ref"]
+  latex_labels: ["z", "T\\,[\\mathrm{K}]", "M_\\mathrm{ref}"]
 
 empirical:
   parameters:

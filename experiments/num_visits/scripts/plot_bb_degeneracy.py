@@ -1,7 +1,7 @@
 """Two candidate explanations for the flat T posterior -- BOTH RULED OUT.
 
 SUPERSEDED. This figure records a negative result. It was built to argue that the
-flat bb_temp T posterior is structural, forced by the two mechanisms below. Both
+flat bbt T posterior is structural, forced by the two mechanisms below. Both
 were subsequently tested and are NOT the cause. The actual driver is the *value*
 of ``l_bol``: the T signal is a fixed ~0.213 mag, while only the photometric sigma
 scales with luminosity, so at ``l_bol=1e9`` (a dwarf galaxy) the signal is ~0.5
@@ -87,19 +87,20 @@ R_SUN = 6.957e10
 
 
 def build_experiment(device: str = "cpu") -> NumVisits:
-    """Instantiate NumVisits exactly as the bb_temp config does."""
+    """Instantiate NumVisits exactly as the bbt config does."""
     design_args = yaml.safe_load(open(get_experiment_config_path("num_visits", "design_args.yaml")))
     prior_args = yaml.safe_load(
-        open(get_experiment_config_path("num_visits", "prior_args_gamma_temp.yaml"))
+        open(get_experiment_config_path("num_visits", "prior_args_bbt.yaml"))
     )
     exp = NumVisits(
         prior_args=prior_args,
         design_args=design_args,
-        cosmo_model="bb_temp",
+        cosmo_model="bbt",
+        norm_mode="bolometric",
         device=device,
         verbose=False,
     )
-    exp.init_prior(parameters=prior_args["parameters"], cosmo_model="bb_temp")
+    exp.init_prior(parameters=prior_args["parameters"], cosmo_model="bbt")
     design_keys = ("input_type", "step", "lower", "upper", "sum_lower", "sum_upper", "labels")
     exp.init_designs(**{k: v for k, v in design_args.items() if k in design_keys})
     return exp
@@ -126,7 +127,7 @@ def log_like(exp, z, T, data, nv, chunk=2000) -> np.ndarray:
 
 
 def log_prior_z(z: np.ndarray) -> np.ndarray:
-    """Gamma(shape=3, z_0=0.3) from prior_args_gamma_temp.yaml, up to a constant."""
+    """Gamma(shape=3, z_0=0.3) from prior_args_bbt.yaml, up to a constant."""
     return 2 * np.log(z) - z / 0.3
 
 

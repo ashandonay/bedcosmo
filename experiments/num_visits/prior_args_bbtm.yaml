@@ -1,0 +1,39 @@
+# Blackbody prior with an in-band absolute magnitude (cosmo_model: bbtm).
+# Same z / T priors as prior_args_bbt.yaml, plus a uniform M_ref.
+#
+# M_ref is the rest-frame AB absolute magnitude at the reference wavelength
+# (ref_wavelength, set in train_args; default 5000 A). Under norm_mode="band" the
+# SED amplitude is chosen so L_lambda(ref_wavelength) matches M_ref, so brightness
+# (M_ref) and color (T) are decoupled -- unlike bolometric normalization, cooling
+# the source does not dim it in-band. The range below straddles a bright, super-L*
+# galaxy (-22) and a fainter one (-20); M* ~ -21 for the local luminosity function.
+parameters:
+  z:
+    distribution:
+      type: "gamma"
+      shape: 3.0
+      z_0: 0.3
+    plot:
+      lower: 0.1
+      upper: 3.0
+    latex: "z"
+  T:
+    distribution:
+      type: "uniform"
+      lower: 4000.0
+      upper: 10000.0
+    plot:
+      lower: 4000.0
+      upper: 10000.0
+    latex: "T\\,[\\mathrm{K}]"
+  M_ref:
+    distribution:
+      type: "uniform"
+      lower: -22.0
+      upper: -20.0
+    plot:
+      lower: -22.0
+      upper: -20.0
+    latex: "M_\\mathrm{ref}"
+
+constraints: {}

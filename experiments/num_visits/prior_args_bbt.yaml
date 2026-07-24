@@ -11,11 +11,11 @@ parameters:
   T:
     distribution:
       type: "uniform"
-      lower: 9500.0
-      upper: 10500.0
+      lower: 4000.0
+      upper: 10000.0
     plot:
-      lower: 9500.0
-      upper: 10500.0
+      lower: 4000.0
+      upper: 10000.0
     latex: "T\\,[\\mathrm{K}]"
 
 constraints: {}

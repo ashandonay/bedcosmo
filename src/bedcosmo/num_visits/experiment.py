@@ -67,6 +67,9 @@ _k_B_cgs = k_B.cgs.value
 _hc = _h_cgs * _c_cgs
 _two_hc2 = 2 * _h_cgs * _c_cgs**2
 _L_sun_cgs = 3.826e33  # erg/s
+_TEN_PC_CM = 10 * 3.0856775814913673e18  # 10 parsec in cm (absolute-magnitude distance)
+_AB_ZEROPOINT = 48.6  # AB magnitude zeropoint: m_AB = -2.5 log10(f_nu) - 48.6
+_C_ANGSTROM_S = 2.99792458e18  # speed of light in Angstrom / s (for L_nu -> L_lambda)
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -84,6 +87,9 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         cosmo_model=None,
         temperature=10000,
         l_bol=1e9,
+        norm_mode="band",
+        ref_wavelength=5000.0,
+        M_ref=-21.0,
         central_params=None,
         nominal_design=None,
         pixel_scale=0.2,
@@ -141,15 +147,32 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         else:
             self.temperature = temperature
 
-        # Bolometric luminosity in L_sun, applied to the bb/bb_temp SED. The
-        # emitting radius is back-solved from Stefan-Boltzmann to hold this fixed
-        # at every T, making the source a zero-scatter standard candle -- so this
-        # value sets the whole SNR scale of the experiment, not just a brightness
-        # offset. 1e9 (the historical default) is a dwarf galaxy (M_bol=-17.8);
-        # LSST photo-z targets are L* ~ 2-3e10.
+        # SED normalization convention:
+        #   "band" (default) -- pin the rest-frame luminosity at ref_wavelength to
+        #     the AB absolute magnitude M_ref. M_ref is one variable: a fixed
+        #     experiment scalar when a model does not list it in models.yaml (bbt),
+        #     or a sampled per-galaxy parameter when it does (bbtm). This decouples
+        #     brightness (M_ref) from color (T): cooling no longer dims the source
+        #     in-band. See experiments/num_visits/README.md.
+        #   "bolometric" -- pin the total luminosity l_bol (L_sun) and back-solve
+        #     the emitting radius from Stefan-Boltzmann, so the source is a
+        #     zero-scatter standard candle whose SNR scale is set by l_bol. The
+        #     legacy convention, used by bb. 1e9 is a dwarf (M_bol=-17.8); L* ~ 2-3e10.
+        self.norm_mode = str(norm_mode)
+        if self.norm_mode not in ("bolometric", "band"):
+            raise ValueError(f"norm_mode must be 'bolometric' or 'band', got {norm_mode!r}")
+
         self.l_bol = float(l_bol)
         if self.l_bol <= 0:
             raise ValueError(f"l_bol must be positive (L_sun), got {l_bol}")
+
+        # Rest-frame reference wavelength (Angstrom) and the AB absolute magnitude
+        # there, for norm_mode="band". M_ref is the fixed default used when a model
+        # does not sample it (bbt); bbtm overrides it with a sampled parameter.
+        self.ref_wavelength = float(ref_wavelength)
+        if self.ref_wavelength <= 0:
+            raise ValueError(f"ref_wavelength must be positive (Angstrom), got {ref_wavelength}")
+        self.M_ref = float(M_ref)
 
         self.prior_args = prior_args or {}
         self.cosmo_model = cosmo_model
@@ -289,8 +312,8 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         else:
             if "T" in self.cosmo_params:
                 defaults["T"] = 10000.0
-            if "L_bol" in self.cosmo_params:
-                defaults["L_bol"] = self.l_bol
+            if "M_ref" in self.cosmo_params:
+                defaults["M_ref"] = self.M_ref
         self.central_params = dict(defaults)
         self.central_params.update(_central_params_as_dict(central_params))
 
@@ -304,7 +327,7 @@ class NumVisits(BaseExperiment, CosmologyMixin):
                 key: torch.tensor(
                     [self.central_params[key]], device=self.device, dtype=torch.float64
                 )
-                for key in ("T", "L_bol")
+                for key in ("T", "M_ref")
                 if key in self.central_params
             }
             flux_aa = self._observed_spectral_flux(z_central, **sed_kwargs)
@@ -471,7 +494,7 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         if cosmo_model is None:
             cosmo_model = self.cosmo_model
         if cosmo_model is None:
-            raise ValueError("cosmo_model must be set for NumVisits (e.g. bb, bb_temp, empirical)")
+            raise ValueError("cosmo_model must be set for NumVisits (e.g. bb, bbt, empirical)")
 
         models_yaml_path = get_experiment_config_path("num_visits", "models.yaml")
         with open(models_yaml_path, "r") as f:
@@ -640,9 +663,7 @@ class NumVisits(BaseExperiment, CosmologyMixin):
                 if name == "log_c_scale":
                     latex_labels.append(r"\log s")
                 elif name.startswith("f") and name[1:].isdigit():
-                    latex_labels.append(
-                        f"f_{{{name[1:]}}}" if len(name) > 2 else f"f_{name[1:]}"
-                    )
+                    latex_labels.append(f"f_{{{name[1:]}}}" if len(name) > 2 else f"f_{name[1:]}")
                 else:
                     latex_labels.append(name)
 
@@ -933,13 +954,41 @@ class NumVisits(BaseExperiment, CosmologyMixin):
             self._T_K_tensor = torch.tensor(value, device=self.device, dtype=torch.float64)
         return self._T_K_tensor
 
+    def _bolometric_four_pi_R2(self, T_K: torch.Tensor) -> torch.Tensor:
+        """Emitting area 4 pi R^2 (cm^2) from a fixed bolometric luminosity l_bol.
+
+        The radius is back-solved from Stefan-Boltzmann so the total luminosity is
+        held at ``self.l_bol`` for every T (the standard-candle / bolometric mode).
+        """
+        sigma_sb_cgs = sigma_sb.to(u.erg / (u.s * u.cm**2 * u.K**4)).value
+        L_bol_const = self.l_bol * (_L_sun_cgs / (4 * np.pi * sigma_sb_cgs))
+        R_eff_sq = L_bol_const / (T_K**4)
+        return 4 * np.pi * R_eff_sq
+
+    def _band_four_pi_R2(self, M_ref: torch.Tensor, T_K: torch.Tensor) -> torch.Tensor:
+        """Emitting area 4 pi R^2 (cm^2) that pins L_lambda(ref_wavelength).
+
+        ``M_ref`` is a rest-frame AB absolute magnitude at ``self.ref_wavelength``;
+        the amplitude is chosen so the blackbody's rest-frame L_lambda there matches
+        it (the in-band / ``norm_mode="band"`` mode), decoupling brightness from T.
+        """
+        # AB absolute magnitude -> monochromatic L_nu (erg/s/Hz) -> L_lambda (erg/s/AA).
+        L_nu = 4 * np.pi * _TEN_PC_CM**2 * 10.0 ** (-0.4 * (M_ref + _AB_ZEROPOINT))
+        L_lambda_ref = L_nu * _C_ANGSTROM_S / (self.ref_wavelength**2)
+        lam_ref_cm = torch.tensor(
+            self.ref_wavelength * 1e-8, device=self.device, dtype=torch.float64
+        )
+        # Blackbody surface flux per AA at the (rest-frame) reference wavelength.
+        F_ref = self._blackbody_flux(lam_ref_cm, T_K)
+        return L_lambda_ref / F_ref
+
     @profile_method
     def _observed_spectral_flux(
         self,
         z: torch.Tensor,
         *,
         T: torch.Tensor | None = None,
-        L_bol: torch.Tensor | None = None,
+        M_ref: torch.Tensor | None = None,
         a: torch.Tensor | None = None,
         log_s: torch.Tensor | None = None,
     ) -> torch.Tensor:
@@ -947,12 +996,18 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         Observed-frame spectral flux per Angstrom on ``self._wlen_aa_tensor``.
 
         Pass ``a`` and ``log_s`` for the EAZY template mixture (empirical prior).
-        Omit them for a blackbody, using ``self.temperature`` or optional ``T``,
-        and ``self.l_bol`` or optional ``L_bol`` (in L_sun) for the normalization.
+        Omit them for a blackbody, using ``self.temperature`` or optional ``T``.
+
+        The normalization follows ``self.norm_mode``:
+          - ``"bolometric"``: pin the total luminosity ``self.l_bol`` and back-solve
+            the radius from Stefan-Boltzmann (standard candle; used by bb/bbt).
+          - ``"band"``: pin the rest-frame L_lambda at ``self.ref_wavelength`` to a
+            fixed AB absolute magnitude -- ``M_ref`` if sampled, else ``self.M_ref``
+            (used by bbtm). Decouples brightness from T.
 
         Returns:
-            Flux with shape broadcast over ``z``, ``T``, ``L_bol`` plus a
-            trailing wavelength dim.
+            Flux with shape broadcast over ``z``, ``T``, and (band mode) ``M_ref``
+            plus a trailing wavelength dim.
         """
         if a is not None or log_s is not None:
             if a is None or log_s is None:
@@ -994,11 +1049,10 @@ class NumVisits(BaseExperiment, CosmologyMixin):
 
         z_tensor = z
         T_tensor = T
-        L_bol_tensor = L_bol
-        # Fast path: both T and L_bol are experiment-level scalars, so the
-        # Stefan-Boltzmann radius is a constant that can be cached and only the
-        # unique redshifts need integrating.
-        broadcast_sed = T_tensor is not None or L_bol_tensor is not None
+        M_ref_tensor = M_ref
+        # Fast path: everything is an experiment-level scalar, so the emitting-area
+        # constant can be cached and only the unique redshifts need integrating.
+        broadcast_sed = T_tensor is not None or M_ref_tensor is not None
         if not broadcast_sed:
             z_flat = z_tensor.flatten()
             z_unique, inverse_indices = torch.unique(z_flat, return_inverse=True)
@@ -1007,20 +1061,11 @@ class NumVisits(BaseExperiment, CosmologyMixin):
             T_K = self._scalar_temperature_k()
 
             if not hasattr(self, "_four_pi_R2_tensor"):
-                L_bol_cgs = self.l_bol * _L_sun_cgs
-                sigma_sb_cgs = sigma_sb.to(u.erg / (u.s * u.cm**2 * u.K**4)).value
-                T_K_4 = T_K**4
-                R_eff_val = torch.sqrt(
-                    torch.tensor(
-                        L_bol_cgs / (4 * np.pi * sigma_sb_cgs),
-                        device=self.device,
-                        dtype=torch.float64,
-                    )
-                    / T_K_4
-                )
-                self._four_pi_R2_tensor = (
-                    torch.tensor(4 * np.pi, device=self.device, dtype=torch.float64) * R_eff_val**2
-                )
+                if self.norm_mode == "band":
+                    M_ref_scalar = torch.tensor(self.M_ref, device=self.device, dtype=torch.float64)
+                    self._four_pi_R2_tensor = self._band_four_pi_R2(M_ref_scalar, T_K)
+                else:
+                    self._four_pi_R2_tensor = self._bolometric_four_pi_R2(T_K)
             four_pi_R2 = self._four_pi_R2_tensor
             T_K_for_bb = T_K
             four_pi_R2_for_L = four_pi_R2
@@ -1029,21 +1074,24 @@ class NumVisits(BaseExperiment, CosmologyMixin):
             if T_tensor is None:
                 T_tensor = self._scalar_temperature_k()
             T_t = torch.as_tensor(T_tensor, device=self.device, dtype=torch.float64)
-            if L_bol_tensor is None:
-                L_bol_tensor = self.l_bol
-            L_t = torch.as_tensor(L_bol_tensor, device=self.device, dtype=torch.float64)
-            z_b, T_b, L_b = torch.broadcast_tensors(z_t, T_t, L_t)
-            joint_shape = z_b.shape
-            z_unique = z_b.flatten()
-            T_K = T_b.flatten()
-            L_bol_sun = L_b.flatten()
+            if self.norm_mode == "band":
+                # In-band magnitude anchor (bbtm): brightness = M_ref, color = T.
+                M_val = M_ref_tensor if M_ref_tensor is not None else self.M_ref
+                M_t = torch.as_tensor(M_val, device=self.device, dtype=torch.float64)
+                z_b, T_b, M_b = torch.broadcast_tensors(z_t, T_t, M_t)
+                joint_shape = z_b.shape
+                z_unique = z_b.flatten()
+                T_K = T_b.flatten()
+                four_pi_R2 = self._band_four_pi_R2(M_b.flatten(), T_K)
+            else:
+                # Bolometric standard candle (bbt): fixed l_bol, T floats.
+                z_b, T_b = torch.broadcast_tensors(z_t, T_t)
+                joint_shape = z_b.shape
+                z_unique = z_b.flatten()
+                T_K = T_b.flatten()
+                four_pi_R2 = self._bolometric_four_pi_R2(T_K)
             inverse_indices = None
             lum_dist = self._luminosity_distance(z_unique)
-
-            sigma_sb_cgs = sigma_sb.to(u.erg / (u.s * u.cm**2 * u.K**4)).value
-            L_bol_const = L_bol_sun * (_L_sun_cgs / (4 * np.pi * sigma_sb_cgs))
-            R_eff = torch.sqrt(L_bol_const / (T_K**4))
-            four_pi_R2 = torch.tensor(4 * np.pi, device=self.device, dtype=torch.float64) * R_eff**2
             T_K_for_bb = T_K.unsqueeze(-1)
             four_pi_R2_for_L = four_pi_R2.unsqueeze(-1)
 
@@ -1413,9 +1461,9 @@ class NumVisits(BaseExperiment, CosmologyMixin):
             if "T" in self.prior:
                 T_dist = self.prior["T"].expand(batch_shape).to_event(0)
                 sed_kwargs["T"] = pyro.sample("T", T_dist)
-            if "L_bol" in self.prior:
-                L_dist = self.prior["L_bol"].expand(batch_shape).to_event(0)
-                sed_kwargs["L_bol"] = pyro.sample("L_bol", L_dist)
+            if "M_ref" in self.prior:
+                M_dist = self.prior["M_ref"].expand(batch_shape).to_event(0)
+                sed_kwargs["M_ref"] = pyro.sample("M_ref", M_dist)
             flux_aa = self._observed_spectral_flux(z, **sed_kwargs)
             means = self._calculate_magnitudes(flux_aa)
         sigmas = self._magnitude_errors(means, nvisits)
@@ -1481,10 +1529,10 @@ class NumVisits(BaseExperiment, CosmologyMixin):
                 values = values.reshape(values.shape[:grid_ndim])
             return values
 
-        # Parameter grid: z (always present), optionally T and L_bol. Final P
-        # shape is the joint broadcast of all parameter axes.
+        # Parameter grid: z (always present), optionally T and M_ref. Final
+        # P shape is the joint broadcast of all parameter axes.
         grid_names = list(getattr(params, "names", []))
-        axis_names = ["z"] + [name for name in ("T", "L_bol") if name in grid_names]
+        axis_names = ["z"] + [name for name in ("T", "M_ref") if name in grid_names]
         axes = jnp.broadcast_arrays(*[_grid_array(params, name) for name in axis_names])
         z_shape = axes[0].shape
         sed_kwargs = {

@@ -633,7 +633,7 @@ class Evaluator:
     def _marginal_knn_space(self) -> str:
         """Coordinate system for k-NN marginal entropy.
 
-        Per-parameter (marginal) bijectors (bb, bb_temp): unconstrained flow space,
+        Per-parameter (marginal) bijectors (bb, bbt): unconstrained flow space,
         matching joint nf_loss. Joint empirical Gaussianizer (empirical): physical
         space so subset marginals are in interpretable units.
         """

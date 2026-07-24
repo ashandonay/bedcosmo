@@ -60,7 +60,7 @@ def make_experiment(
         },
         "constraints": {},
     }
-    if cosmo_model == "bb_temp":
+    if cosmo_model == "bbt":
         prior_args["parameters"]["T"] = {
             "distribution": {"type": "uniform", "lower": 2000.0, "upper": 30000.0},
             "plot": {"lower": 2000.0, "upper": 30000.0},
@@ -71,6 +71,7 @@ def make_experiment(
         prior_args=prior_args,
         design_args=design_args,
         cosmo_model=cosmo_model,
+        norm_mode="bolometric",
         temperature=temperature,
         device=device,
         verbose=False,
