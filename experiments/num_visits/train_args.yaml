@@ -7,6 +7,8 @@ bb:
   nf_seed: 1
   prior_args_path: prior_args_gamma.yaml
   norm_mode: bolometric
+  ref_wavelength: 5000.0
+  M_ref: -21.0
   flow_type: NAF
   transform_input: true
   input_transform_type: marginal
