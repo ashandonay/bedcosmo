@@ -2,7 +2,7 @@
 # Same z / T priors as prior_args_bbt.yaml, plus a uniform M_ref.
 #
 # M_ref is the rest-frame AB absolute magnitude at the reference wavelength
-# (ref_wavelength, set in train_args; default 5000 A). Under norm_mode="band" the
+# (ref_wavelength, set in train_args; default 5000 A). Under norm_mode="monochromatic" the
 # SED amplitude is chosen so L_lambda(ref_wavelength) matches M_ref, so brightness
 # (M_ref) and color (T) are decoupled -- unlike bolometric normalization, cooling
 # the source does not dim it in-band. The range below straddles a bright, super-L*

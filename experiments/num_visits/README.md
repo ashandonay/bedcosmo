@@ -87,7 +87,7 @@ Each parameter entry contains:
 - **`prior_args_uniform.yaml`** -- `z ~ Uniform(0.1, 3.0)`.
 - **`prior_args_gamma.yaml`** -- `z ~ Gamma(shape=3.0, z_0=0.3)`, a more realistic galaxy redshift distribution.
 - **`prior_args_bbt.yaml`** -- the gamma `z` prior plus a broad `T ~ Uniform(4000, 10000)` K (for `bbt`). Band normalization lets `T` span a wide color range without cool sources dropping out of the LSST bands.
-- **`prior_args_bbtm.yaml`** -- the gamma `z` prior plus `T ~ Uniform(4000, 10000)` K and `M_ref ~ Uniform(-22, -20)` (for `bbtm`). `M_ref` is the rest-frame AB absolute magnitude at `ref_wavelength`; under `norm_mode: band` the SED amplitude is pinned to it, so brightness (`M_ref`) and color (`T`) are decoupled and cooling does not dim the source in-band. The range straddles a bright super-L* galaxy (-22) and a fainter one (-20); `M* ~ -21` for the local luminosity function.
+- **`prior_args_bbtm.yaml`** -- the gamma `z` prior plus `T ~ Uniform(4000, 10000)` K and `M_ref ~ Uniform(-22, -20)` (for `bbtm`). `M_ref` is the rest-frame AB absolute magnitude at `ref_wavelength`; under `norm_mode: monochromatic` the SED amplitude is pinned to it, so brightness (`M_ref`) and color (`T`) are decoupled and cooling does not dim the source in-band. The range straddles a bright super-L* galaxy (-22) and a fainter one (-20); `M* ~ -21` for the local luminosity function.
 - **`prior_args_empirical.yaml`** -- the empirical SED prior over the 13D ILR features (`f1..f11`, `log_c_scale`, `z`); `prior_source` selects `{kde, flow}` and **defaults to `flow`**. See the [Cosmology Models](#cosmology-models-modelsyaml) section (`empirical`) for details.
 
 ## Likelihood Model
@@ -110,7 +110,7 @@ This is what `_blackbody_flux` returns (the `pi` is already folded in), so the c
 
 #### SED normalization (`norm_mode`)
 
-**`band` (default) — anchor an in-band absolute magnitude.** Used by `bbt` and `bbtm`. The rest-frame spectral luminosity at a reference wavelength `ref_wavelength` (default 5000 Å, rest-frame optical) is pinned to a fixed rest-frame **AB absolute magnitude** `M_ref`:
+**`monochromatic` (default) — anchor an in-band absolute magnitude.** Used by `bbt` and `bbtm`. The rest-frame spectral luminosity at a single reference wavelength `ref_wavelength` (default 5000 Å, rest-frame optical) is pinned to a fixed rest-frame **AB absolute magnitude** `M_ref`. ("Monochromatic" because the anchor is `L_lambda` at one wavelength, not integrated over a filter bandpass; `band` is accepted as a deprecated alias.)
 
 1. `M_ref → L_lambda(lambda_ref)` via the AB definition (`m_AB = -2.5 log10(f_nu) - 48.6`, "absolute" referenced to 10 pc).
 2. Scale the blackbody to hit that anchor: `4*pi*R^2 = L_lambda(lambda_ref) / B(lambda_ref, T)`. **`T` enters the normalization here** — it sets how much to scale the curve so its value at `lambda_ref` equals the fixed in-band luminosity.

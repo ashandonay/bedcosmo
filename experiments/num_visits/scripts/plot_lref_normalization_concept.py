@@ -1,6 +1,6 @@
 """Concept figures: what in-band (L_ref @ lambda_ref) normalization means.
 
-Explains the proposed ``norm_mode: band`` for the num_visits blackbody, where the
+Explains the ``norm_mode: monochromatic`` mode for the num_visits blackbody, where the
 SED amplitude is pinned to a reference luminosity ``L_ref`` at a rest-frame
 reference wavelength ``lambda_ref`` instead of to the bolometric integral.
 

@@ -87,7 +87,7 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         cosmo_model=None,
         temperature=10000,
         l_bol=1e9,
-        norm_mode="band",
+        norm_mode="monochromatic",
         ref_wavelength=5000.0,
         M_ref=-21.0,
         central_params=None,
@@ -148,26 +148,29 @@ class NumVisits(BaseExperiment, CosmologyMixin):
             self.temperature = temperature
 
         # SED normalization convention:
-        #   "band" (default) -- pin the rest-frame luminosity at ref_wavelength to
-        #     the AB absolute magnitude M_ref. M_ref is one variable: a fixed
-        #     experiment scalar when a model does not list it in models.yaml (bbt),
-        #     or a sampled per-galaxy parameter when it does (bbtm). This decouples
-        #     brightness (M_ref) from color (T): cooling no longer dims the source
-        #     in-band. See experiments/num_visits/README.md.
+        #   "monochromatic" (default) -- pin the rest-frame luminosity at the single
+        #     reference wavelength ref_wavelength to the AB absolute magnitude M_ref.
+        #     M_ref is one variable: a fixed experiment scalar when a model does not
+        #     list it in models.yaml (bbt), or a sampled per-galaxy parameter when it
+        #     does (bbtm). This decouples brightness (M_ref) from color (T): cooling
+        #     no longer dims the source in-band. See experiments/num_visits/README.md.
         #   "bolometric" -- pin the total luminosity l_bol (L_sun) and back-solve
         #     the emitting radius from Stefan-Boltzmann, so the source is a
         #     zero-scatter standard candle whose SNR scale is set by l_bol. The
         #     legacy convention, used by bb. 1e9 is a dwarf (M_bol=-17.8); L* ~ 2-3e10.
-        self.norm_mode = str(norm_mode)
-        if self.norm_mode not in ("bolometric", "band"):
-            raise ValueError(f"norm_mode must be 'bolometric' or 'band', got {norm_mode!r}")
+        # "band" is accepted as a deprecated alias for "monochromatic".
+        self.norm_mode = "monochromatic" if str(norm_mode) == "band" else str(norm_mode)
+        if self.norm_mode not in ("bolometric", "monochromatic"):
+            raise ValueError(
+                f"norm_mode must be 'bolometric' or 'monochromatic', got {norm_mode!r}"
+            )
 
         self.l_bol = float(l_bol)
         if self.l_bol <= 0:
             raise ValueError(f"l_bol must be positive (L_sun), got {l_bol}")
 
         # Rest-frame reference wavelength (Angstrom) and the AB absolute magnitude
-        # there, for norm_mode="band". M_ref is the fixed default used when a model
+        # there, for norm_mode="monochromatic". M_ref is the fixed default used when a model
         # does not sample it (bbt); bbtm overrides it with a sampled parameter.
         self.ref_wavelength = float(ref_wavelength)
         if self.ref_wavelength <= 0:
@@ -965,12 +968,13 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         R_eff_sq = L_bol_const / (T_K**4)
         return 4 * np.pi * R_eff_sq
 
-    def _band_four_pi_R2(self, M_ref: torch.Tensor, T_K: torch.Tensor) -> torch.Tensor:
+    def _monochromatic_four_pi_R2(self, M_ref: torch.Tensor, T_K: torch.Tensor) -> torch.Tensor:
         """Emitting area 4 pi R^2 (cm^2) that pins L_lambda(ref_wavelength).
 
         ``M_ref`` is a rest-frame AB absolute magnitude at ``self.ref_wavelength``;
         the amplitude is chosen so the blackbody's rest-frame L_lambda there matches
-        it (the in-band / ``norm_mode="band"`` mode), decoupling brightness from T.
+        it (the ``norm_mode="monochromatic"`` mode, anchoring a single in-band
+        wavelength), decoupling brightness from T.
         """
         # AB absolute magnitude -> monochromatic L_nu (erg/s/Hz) -> L_lambda (erg/s/AA).
         L_nu = 4 * np.pi * _TEN_PC_CM**2 * 10.0 ** (-0.4 * (M_ref + _AB_ZEROPOINT))
@@ -1001,12 +1005,12 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         The normalization follows ``self.norm_mode``:
           - ``"bolometric"``: pin the total luminosity ``self.l_bol`` and back-solve
             the radius from Stefan-Boltzmann (standard candle; used by bb/bbt).
-          - ``"band"``: pin the rest-frame L_lambda at ``self.ref_wavelength`` to a
-            fixed AB absolute magnitude -- ``M_ref`` if sampled, else ``self.M_ref``
-            (used by bbtm). Decouples brightness from T.
+          - ``"monochromatic"``: pin the rest-frame L_lambda at ``self.ref_wavelength``
+            to a fixed AB absolute magnitude -- ``M_ref`` if sampled, else
+            ``self.M_ref`` (used by bbt/bbtm). Decouples brightness from T.
 
         Returns:
-            Flux with shape broadcast over ``z``, ``T``, and (band mode) ``M_ref``
+            Flux with shape broadcast over ``z``, ``T``, and (monochromatic mode) ``M_ref``
             plus a trailing wavelength dim.
         """
         if a is not None or log_s is not None:
@@ -1061,9 +1065,9 @@ class NumVisits(BaseExperiment, CosmologyMixin):
             T_K = self._scalar_temperature_k()
 
             if not hasattr(self, "_four_pi_R2_tensor"):
-                if self.norm_mode == "band":
+                if self.norm_mode == "monochromatic":
                     M_ref_scalar = torch.tensor(self.M_ref, device=self.device, dtype=torch.float64)
-                    self._four_pi_R2_tensor = self._band_four_pi_R2(M_ref_scalar, T_K)
+                    self._four_pi_R2_tensor = self._monochromatic_four_pi_R2(M_ref_scalar, T_K)
                 else:
                     self._four_pi_R2_tensor = self._bolometric_four_pi_R2(T_K)
             four_pi_R2 = self._four_pi_R2_tensor
@@ -1074,7 +1078,7 @@ class NumVisits(BaseExperiment, CosmologyMixin):
             if T_tensor is None:
                 T_tensor = self._scalar_temperature_k()
             T_t = torch.as_tensor(T_tensor, device=self.device, dtype=torch.float64)
-            if self.norm_mode == "band":
+            if self.norm_mode == "monochromatic":
                 # In-band magnitude anchor (bbtm): brightness = M_ref, color = T.
                 M_val = M_ref_tensor if M_ref_tensor is not None else self.M_ref
                 M_t = torch.as_tensor(M_val, device=self.device, dtype=torch.float64)
@@ -1082,9 +1086,9 @@ class NumVisits(BaseExperiment, CosmologyMixin):
                 joint_shape = z_b.shape
                 z_unique = z_b.flatten()
                 T_K = T_b.flatten()
-                four_pi_R2 = self._band_four_pi_R2(M_b.flatten(), T_K)
+                four_pi_R2 = self._monochromatic_four_pi_R2(M_b.flatten(), T_K)
             else:
-                # Bolometric standard candle (bbt): fixed l_bol, T floats.
+                # Bolometric standard candle: fixed l_bol, T floats.
                 z_b, T_b = torch.broadcast_tensors(z_t, T_t)
                 joint_shape = z_b.shape
                 z_unique = z_b.flatten()
