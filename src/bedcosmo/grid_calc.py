@@ -20,8 +20,12 @@ import torch
 import yaml
 from bedcosmo.plotting import BasePlotter, RunPlotter
 from bedcosmo.util import (
-    init_experiment, get_experiment_config_path, parse_extra_args,
-    get_runs_data, render_overlay, NF_INIT_CONFIG_KEY,
+    init_experiment,
+    get_experiment_config_path,
+    parse_extra_args,
+    get_runs_data,
+    render_overlay,
+    NF_INIT_CONFIG_KEY,
 )
 from bed.design import ExperimentDesigner
 from bed.grid import Grid
@@ -122,13 +126,11 @@ class GridCalculation:
         self.eig: Optional[np.ndarray] = None
         self.best_design: Optional[Any] = None
 
-
     def _make_grid(self, **kwargs):
         # Convert axis arrays to jnp at the bed boundary; pass through
         # non-array kwargs (e.g. constraint, full_shape) untouched.
         converted = {
-            k: (jnp.asarray(v) if isinstance(v, np.ndarray) else v)
-            for k, v in kwargs.items()
+            k: (jnp.asarray(v) if isinstance(v, np.ndarray) else v) for k, v in kwargs.items()
         }
         return Grid(device=self.bed_device, **converted)
 
@@ -228,15 +230,13 @@ class GridCalculation:
             lower = float(dist_config.get("lower", 0.0))
             upper = float(dist_config.get("upper", 1.0))
             return dist.Uniform(
-                torch.tensor(lower, dtype=torch.float64),
-                torch.tensor(upper, dtype=torch.float64)
+                torch.tensor(lower, dtype=torch.float64), torch.tensor(upper, dtype=torch.float64)
             )
         elif dist_type == "normal" or dist_type == "gaussian":
             mean = float(dist_config.get("mean", 0.0))
             std = float(dist_config.get("std", 1.0))
             return dist.Normal(
-                torch.tensor(mean, dtype=torch.float64),
-                torch.tensor(std, dtype=torch.float64)
+                torch.tensor(mean, dtype=torch.float64), torch.tensor(std, dtype=torch.float64)
             )
         elif dist_type == "truncatednormal":
             mean = float(dist_config.get("mean", 0.0))
@@ -245,13 +245,12 @@ class GridCalculation:
             upper = float(dist_config.get("upper", mean + 4 * std))
             # Use TruncatedNormal from pyro
             base = dist.Normal(
-                torch.tensor(mean, dtype=torch.float64),
-                torch.tensor(std, dtype=torch.float64)
+                torch.tensor(mean, dtype=torch.float64), torch.tensor(std, dtype=torch.float64)
             )
             return dist.TruncatedDistribution(
                 base,
                 low=torch.tensor(lower, dtype=torch.float64),
-                high=torch.tensor(upper, dtype=torch.float64)
+                high=torch.tensor(upper, dtype=torch.float64),
             )
         elif dist_type == "gamma":
             shape = float(dist_config.get("shape", 1.0))
@@ -280,7 +279,9 @@ class GridCalculation:
             lo, hi = self._dist_bounds(prior[name])
             if name in self.param_dense_ranges:
                 d_lo, d_hi = self.param_dense_ranges[name]
-                axes[name] = self._dense_axis(lo, hi, d_lo, d_hi, int(self.param_pts), self.param_dense_fraction)
+                axes[name] = self._dense_axis(
+                    lo, hi, d_lo, d_hi, int(self.param_pts), self.param_dense_fraction
+                )
                 print(f"  Param grid {name}: [{lo:.4f}, {hi:.4f}] (dense [{d_lo:.4f}, {d_hi:.4f}])")
             else:
                 axes[name] = np.linspace(lo, hi, int(self.param_pts), dtype=np.float64)
@@ -422,11 +423,19 @@ class GridCalculation:
                     key = d if d in self.feature_ranges else f"y_{d}"
                     lo, hi = self.feature_ranges[key]
                     name = f"y_{d}"
-                    dense_key = d if d in self.feature_dense_ranges else f"y_{d}" if f"y_{d}" in self.feature_dense_ranges else None
+                    dense_key = (
+                        d
+                        if d in self.feature_dense_ranges
+                        else f"y_{d}" if f"y_{d}" in self.feature_dense_ranges else None
+                    )
                     if dense_key is not None:
                         d_lo, d_hi = self.feature_dense_ranges[dense_key]
-                        axes[name] = self._dense_axis(lo, hi, d_lo, d_hi, int(self.feature_pts), self.feature_dense_fraction)
-                        print(f"  Feature grid {d}: [{lo:.1f}, {hi:.1f}] (explicit, dense [{d_lo:.1f}, {d_hi:.1f}])")
+                        axes[name] = self._dense_axis(
+                            lo, hi, d_lo, d_hi, int(self.feature_pts), self.feature_dense_fraction
+                        )
+                        print(
+                            f"  Feature grid {d}: [{lo:.1f}, {hi:.1f}] (explicit, dense [{d_lo:.1f}, {d_hi:.1f}])"
+                        )
                     else:
                         axes[name] = np.linspace(lo, hi, int(self.feature_pts), dtype=np.float64)
                         print(f"  Feature grid {d}: [{lo:.1f}, {hi:.1f}] (explicit)")
@@ -439,7 +448,7 @@ class GridCalculation:
                     raise ValueError("Auto feature grid requires parameter grid to include 'z'.")
                 exp_device = self._experiment_torch_device()
                 axis_names = ["z"] + [
-                    name for name in ("T", "L_bol") if hasattr(self.parameter_grid, name)
+                    name for name in ("T", "M_ref") if hasattr(self.parameter_grid, name)
                 ]
                 axes = np.broadcast_arrays(
                     *[
@@ -456,7 +465,9 @@ class GridCalculation:
                     flux_aa = self.experiment._observed_spectral_flux(z_tensor, **sed_kwargs)
                     features = self.experiment._calculate_magnitudes(flux_aa).detach().cpu().numpy()
             else:
-                raise NotImplementedError(f"Feature grid inference not implemented for {self.experiment.name}.")
+                raise NotImplementedError(
+                    f"Feature grid inference not implemented for {self.experiment.name}."
+                )
 
             exp_device = self._experiment_torch_device()
             features_tensor = torch.as_tensor(features, device=exp_device, dtype=torch.float64)
@@ -474,18 +485,27 @@ class GridCalculation:
                 min_visits, device=exp_device, dtype=torch.float64
             ).expand(features_tensor.shape)
             if self.experiment.name == "num_visits":
-                feature_errors = self.experiment._magnitude_errors(
-                    features_tensor, min_visits_tensor
-                ).detach().cpu().numpy()
+                feature_errors = (
+                    self.experiment._magnitude_errors(features_tensor, min_visits_tensor)
+                    .detach()
+                    .cpu()
+                    .numpy()
+                )
             else:
-                raise NotImplementedError(f"Feature grid inference not implemented for {self.experiment.name}.")
+                raise NotImplementedError(
+                    f"Feature grid inference not implemented for {self.experiment.name}."
+                )
 
             axes = {}
             for i, d in enumerate(self.experiment.design_labels):
                 err_i = feature_errors[..., i]
                 feature_i = features[..., i]
 
-                range_key = d if d in self.feature_ranges else f"y_{d}" if f"y_{d}" in self.feature_ranges else None
+                range_key = (
+                    d
+                    if d in self.feature_ranges
+                    else f"y_{d}" if f"y_{d}" in self.feature_ranges else None
+                )
                 if range_key is not None:
                     lo, hi = self.feature_ranges[range_key]
                 else:
@@ -500,11 +520,19 @@ class GridCalculation:
                     lo -= padding
                     hi += padding
 
-                dense_key = d if d in self.feature_dense_ranges else f"y_{d}" if f"y_{d}" in self.feature_dense_ranges else None
+                dense_key = (
+                    d
+                    if d in self.feature_dense_ranges
+                    else f"y_{d}" if f"y_{d}" in self.feature_dense_ranges else None
+                )
                 if dense_key is not None:
                     d_lo, d_hi = self.feature_dense_ranges[dense_key]
-                    print(f"  Feature grid {d}: [{lo:.1f}, {hi:.1f}] (dense [{d_lo:.1f}, {d_hi:.1f}])")
-                    axes[f"y_{d}"] = self._dense_axis(lo, hi, d_lo, d_hi, int(self.feature_pts), self.feature_dense_fraction)
+                    print(
+                        f"  Feature grid {d}: [{lo:.1f}, {hi:.1f}] (dense [{d_lo:.1f}, {d_hi:.1f}])"
+                    )
+                    axes[f"y_{d}"] = self._dense_axis(
+                        lo, hi, d_lo, d_hi, int(self.feature_pts), self.feature_dense_fraction
+                    )
                 elif self.adaptive_features:
                     print(f"  Feature grid {d}: [{lo:.1f}, {hi:.1f}] (adaptive)")
                     axes[f"y_{d}"] = self._adaptive_axis(
@@ -586,7 +614,11 @@ class GridCalculation:
             if not resolved_path.is_absolute():
                 # Try to resolve relative to experiments directory
                 from bedcosmo.util import get_experiment_config_path
-                cosmo_exp = getattr(self.experiment, "_name", None) or self.experiment.__class__.__name__.lower()
+
+                cosmo_exp = (
+                    getattr(self.experiment, "_name", None)
+                    or self.experiment.__class__.__name__.lower()
+                )
                 try:
                     resolved_path = get_experiment_config_path(cosmo_exp, prior_args_path)
                 except FileNotFoundError:
@@ -629,7 +661,10 @@ class GridCalculation:
 
             # Build flattened grid points and sample from the PMF for plotting.
             # Resampling keeps plotting memory bounded for large grids.
-            axes = [np.asarray(self.parameter_grid.axes_in[name], dtype=np.float64).ravel() for name in param_names]
+            axes = [
+                np.asarray(self.parameter_grid.axes_in[name], dtype=np.float64).ravel()
+                for name in param_names
+            ]
             mesh = np.meshgrid(*axes, indexing="ij")
             points = np.column_stack([m.ravel() for m in mesh])
 
@@ -682,6 +717,7 @@ class GridCalculation:
             print(f"Saved prior PDF plot to {prior_plot_path}")
         except Exception as e:
             import traceback
+
             traceback.print_exc()
             print(f"Warning: failed to plot/save prior PDF: {e}")
 
@@ -750,9 +786,7 @@ class GridCalculation:
             with torch.no_grad():
                 marginal_log_prob = distribution.log_prob(values_tensor).detach().cpu().numpy()
 
-            marginal_log_prob = np.where(
-                np.isfinite(marginal_log_prob), marginal_log_prob, -np.inf
-            )
+            marginal_log_prob = np.where(np.isfinite(marginal_log_prob), marginal_log_prob, -np.inf)
 
             shape_for_broadcast = [1] * len(grid_shape)
             shape_for_broadcast[i] = len(axis_values)
@@ -760,7 +794,9 @@ class GridCalculation:
 
             log_prob = log_prob + marginal_log_prob
 
-        log_prob_max = np.max(log_prob[np.isfinite(log_prob)]) if np.any(np.isfinite(log_prob)) else 0.0
+        log_prob_max = (
+            np.max(log_prob[np.isfinite(log_prob)]) if np.any(np.isfinite(log_prob)) else 0.0
+        )
         pdf = np.exp(log_prob - log_prob_max)
         pdf = np.where(np.isfinite(pdf), pdf, 0.0)
 
@@ -859,21 +895,27 @@ class GridCalculation:
             raise RuntimeError("Must call run() before getting posterior.")
 
         if not nominal:
-            raise NotImplementedError(
-                "Non-nominal posterior conditioning is not implemented yet."
-            )
+            raise NotImplementedError("Non-nominal posterior conditioning is not implemented yet.")
 
         if not hasattr(self.experiment, "nominal_design"):
             raise ValueError("Experiment must expose nominal_design.")
         if not hasattr(self.experiment, "central_val"):
             raise ValueError("Experiment must expose central_val.")
 
-        nominal_design = torch.as_tensor(
-            self.experiment.nominal_design, dtype=torch.float64
-        ).detach().cpu().numpy().reshape(-1)
-        central_features = torch.as_tensor(
-            self.experiment.central_val, dtype=torch.float64
-        ).detach().cpu().numpy().reshape(-1)
+        nominal_design = (
+            torch.as_tensor(self.experiment.nominal_design, dtype=torch.float64)
+            .detach()
+            .cpu()
+            .numpy()
+            .reshape(-1)
+        )
+        central_features = (
+            torch.as_tensor(self.experiment.central_val, dtype=torch.float64)
+            .detach()
+            .cpu()
+            .numpy()
+            .reshape(-1)
+        )
 
         design_names = list(self.design_grid.names)
         feature_names = list(self.feature_grid.names)
@@ -887,9 +929,7 @@ class GridCalculation:
                 f"Central feature size mismatch: {central_features.size} vs {len(feature_names)}."
             )
 
-        conditioning = {
-            name: float(nominal_design[i]) for i, name in enumerate(design_names)
-        }
+        conditioning = {name: float(nominal_design[i]) for i, name in enumerate(design_names)}
         conditioning.update(
             {name: float(central_features[i]) for i, name in enumerate(feature_names)}
         )
@@ -897,8 +937,7 @@ class GridCalculation:
         posterior = self.designer.get_posterior(**conditioning)
         if posterior is None:
             raise RuntimeError(
-                "ExperimentDesigner.get_posterior returned None. "
-                "Ensure calculateEIG was called."
+                "ExperimentDesigner.get_posterior returned None. " "Ensure calculateEIG was called."
             )
         return np.asarray(posterior, dtype=np.float64)
 
@@ -946,9 +985,9 @@ class GridCalculation:
 
         rng = np.random.default_rng(seed)
         draw_idx = rng.choice(weights.size, size=int(num_samples), replace=True, p=weights)
-        samples = np.column_stack(
-            [axis.reshape(-1)[draw_idx] for axis in broadcast_axes]
-        ).astype(np.float64, copy=False)
+        samples = np.column_stack([axis.reshape(-1)[draw_idx] for axis in broadcast_axes]).astype(
+            np.float64, copy=False
+        )
         return samples
 
     def plot_feature_grid(
@@ -970,8 +1009,7 @@ class GridCalculation:
         n_features = len(feature_names)
 
         axes_vals = [
-            np.asarray(self.feature_grid.axes_in[name], dtype=np.float64)
-            for name in feature_names
+            np.asarray(self.feature_grid.axes_in[name], dtype=np.float64) for name in feature_names
         ]
 
         if figsize is None:
@@ -1004,11 +1042,27 @@ class GridCalculation:
                         if redshift_range is not None:
                             z_min, z_max = redshift_range
                         else:
-                            z_min = float(self._icdf(z_prior, torch.tensor(1e-6, device=exp_device, dtype=torch.float64)))
-                            z_max = float(self._icdf(z_prior, torch.tensor(1 - 1e-6, device=exp_device, dtype=torch.float64)))
-                        p_low = float(z_prior.cdf(torch.tensor(z_min, device=exp_device, dtype=torch.float64)))
-                        p_high = float(z_prior.cdf(torch.tensor(z_max, device=exp_device, dtype=torch.float64)))
-                        quantiles = torch.linspace(p_low, p_high, n_redshift_pts, device=exp_device, dtype=torch.float64).clamp(1e-6, 1 - 1e-6)
+                            z_min = float(
+                                self._icdf(
+                                    z_prior,
+                                    torch.tensor(1e-6, device=exp_device, dtype=torch.float64),
+                                )
+                            )
+                            z_max = float(
+                                self._icdf(
+                                    z_prior,
+                                    torch.tensor(1 - 1e-6, device=exp_device, dtype=torch.float64),
+                                )
+                            )
+                        p_low = float(
+                            z_prior.cdf(torch.tensor(z_min, device=exp_device, dtype=torch.float64))
+                        )
+                        p_high = float(
+                            z_prior.cdf(torch.tensor(z_max, device=exp_device, dtype=torch.float64))
+                        )
+                        quantiles = torch.linspace(
+                            p_low, p_high, n_redshift_pts, device=exp_device, dtype=torch.float64
+                        ).clamp(1e-6, 1 - 1e-6)
                         z_arr = self._icdf(z_prior, quantiles).clamp(z_min, z_max)
                     else:
                         z_min, z_max = redshift_range or (0.1, 3.0)
@@ -1021,33 +1075,64 @@ class GridCalculation:
                         )
                         p_low, p_high = 0.0, 1.0
                     with torch.no_grad():
-                        track_features = self.experiment._calculate_magnitudes(
-                            self.experiment._observed_spectral_flux(z_arr)
-                        ).detach().cpu().numpy()
+                        track_features = (
+                            self.experiment._calculate_magnitudes(
+                                self.experiment._observed_spectral_flux(z_arr)
+                            )
+                            .detach()
+                            .cpu()
+                            .numpy()
+                        )
                 else:
-                    raise NotImplementedError(f"Feature grid inference not implemented for {self.experiment.name}.")
+                    raise NotImplementedError(
+                        f"Feature grid inference not implemented for {self.experiment.name}."
+                    )
                 filter_to_idx = {f"y_{d}": i for i, d in enumerate(self.experiment.design_labels)}
                 ix = filter_to_idx.get(feature_names[0])
                 iy = filter_to_idx.get(feature_names[1])
                 if ix is not None and iy is not None:
-                    ax.plot(track_features[:, ix], track_features[:, iy], color="red",
-                            linewidth=1.5, zorder=5, label="z track")
+                    ax.plot(
+                        track_features[:, ix],
+                        track_features[:, iy],
+                        color="red",
+                        linewidth=1.5,
+                        zorder=5,
+                        label="z track",
+                    )
                     z_np = z_arr.detach().cpu().numpy()
                     if hasattr(self.experiment, "prior") and "z" in self.experiment.prior:
                         mark_qs = torch.linspace(
-                            p_low, p_high, 6, device=self._experiment_torch_device(), dtype=torch.float64
+                            p_low,
+                            p_high,
+                            6,
+                            device=self._experiment_torch_device(),
+                            dtype=torch.float64,
                         ).clamp(1e-6, 1 - 1e-6)
-                        z_marks = self._icdf(z_prior, mark_qs).clamp(z_min, z_max).detach().cpu().numpy()
+                        z_marks = (
+                            self._icdf(z_prior, mark_qs).clamp(z_min, z_max).detach().cpu().numpy()
+                        )
                     else:
                         z_marks = np.linspace(z_min, z_max, 6)
                     for z_mark in z_marks:
                         closest = int(np.argmin(np.abs(z_np - z_mark)))
-                        ax.plot(track_features[closest, ix], track_features[closest, iy], "o",
-                                color="red", markersize=4, zorder=6)
-                        ax.annotate(f"z={z_mark:.2f}",
-                                    (track_features[closest, ix], track_features[closest, iy]),
-                                    textcoords="offset points", xytext=(5, 5),
-                                    fontsize=7, color="red", fontweight="bold", zorder=6)
+                        ax.plot(
+                            track_features[closest, ix],
+                            track_features[closest, iy],
+                            "o",
+                            color="red",
+                            markersize=4,
+                            zorder=6,
+                        )
+                        ax.annotate(
+                            f"z={z_mark:.2f}",
+                            (track_features[closest, ix], track_features[closest, iy]),
+                            textcoords="offset points",
+                            xytext=(5, 5),
+                            fontsize=7,
+                            color="red",
+                            fontweight="bold",
+                            zorder=6,
+                        )
                     ax.legend(fontsize=8)
 
         ax.set_title("Feature grid points")
@@ -1113,7 +1198,11 @@ class GridCalculation:
         fig, ax = plt.subplots(1, 1, figsize=figsize)
 
         x_vals = np.asarray(self.feature_grid.axes_in[feature_names[0]]).ravel()
-        y_vals = np.asarray(self.feature_grid.axes_in[feature_names[1]]).ravel() if n_features > 1 else None
+        y_vals = (
+            np.asarray(self.feature_grid.axes_in[feature_names[1]]).ravel()
+            if n_features > 1
+            else None
+        )
 
         marg = marginal_flat[..., design_index]
 
@@ -1143,11 +1232,7 @@ class GridCalculation:
 
         # Overlay redshift track if experiment is provided and requested
         if self.experiment.name == "num_visits":
-            if (
-                param_overlay
-                and n_features == 2
-                and y_vals is not None
-            ):
+            if param_overlay and n_features == 2 and y_vals is not None:
                 if hasattr(self.experiment, "design_labels"):
                     if hasattr(self.experiment, "prior") and "z" in self.experiment.prior:
                         z_prior = self.experiment.prior["z"]
@@ -1155,11 +1240,27 @@ class GridCalculation:
                         if redshift_range is not None:
                             z_min, z_max = redshift_range
                         else:
-                            z_min = float(self._icdf(z_prior, torch.tensor(1e-6, device=exp_device, dtype=torch.float64)))
-                            z_max = float(self._icdf(z_prior, torch.tensor(1 - 1e-6, device=exp_device, dtype=torch.float64)))
-                        p_low = float(z_prior.cdf(torch.tensor(z_min, device=exp_device, dtype=torch.float64)))
-                        p_high = float(z_prior.cdf(torch.tensor(z_max, device=exp_device, dtype=torch.float64)))
-                        quantiles = torch.linspace(p_low, p_high, n_redshift_pts, device=exp_device, dtype=torch.float64).clamp(1e-6, 1 - 1e-6)
+                            z_min = float(
+                                self._icdf(
+                                    z_prior,
+                                    torch.tensor(1e-6, device=exp_device, dtype=torch.float64),
+                                )
+                            )
+                            z_max = float(
+                                self._icdf(
+                                    z_prior,
+                                    torch.tensor(1 - 1e-6, device=exp_device, dtype=torch.float64),
+                                )
+                            )
+                        p_low = float(
+                            z_prior.cdf(torch.tensor(z_min, device=exp_device, dtype=torch.float64))
+                        )
+                        p_high = float(
+                            z_prior.cdf(torch.tensor(z_max, device=exp_device, dtype=torch.float64))
+                        )
+                        quantiles = torch.linspace(
+                            p_low, p_high, n_redshift_pts, device=exp_device, dtype=torch.float64
+                        ).clamp(1e-6, 1 - 1e-6)
                         z_arr = self._icdf(z_prior, quantiles).clamp(z_min, z_max)
                     else:
                         z_min, z_max = redshift_range or (0.1, 3.0)
@@ -1172,10 +1273,17 @@ class GridCalculation:
                         )
                         p_low, p_high = 0.0, 1.0
                     with torch.no_grad():
-                        track_features = self.experiment._calculate_magnitudes(
-                            self.experiment._observed_spectral_flux(z_arr)
-                        ).detach().cpu().numpy()
-                    filter_to_idx = {f"y_{d}": i for i, d in enumerate(self.experiment.design_labels)}
+                        track_features = (
+                            self.experiment._calculate_magnitudes(
+                                self.experiment._observed_spectral_flux(z_arr)
+                            )
+                            .detach()
+                            .cpu()
+                            .numpy()
+                        )
+                    filter_to_idx = {
+                        f"y_{d}": i for i, d in enumerate(self.experiment.design_labels)
+                    }
                     ix = filter_to_idx.get(feature_names[0])
                     iy = filter_to_idx.get(feature_names[1])
                     if ix is not None and iy is not None:
@@ -1185,19 +1293,41 @@ class GridCalculation:
                         z_np = z_arr.detach().cpu().numpy()
                         if hasattr(self.experiment, "prior") and "z" in self.experiment.prior:
                             mark_qs = torch.linspace(
-                                p_low, p_high, 6, device=self._experiment_torch_device(), dtype=torch.float64
+                                p_low,
+                                p_high,
+                                6,
+                                device=self._experiment_torch_device(),
+                                dtype=torch.float64,
                             ).clamp(1e-6, 1 - 1e-6)
-                            z_marks = self._icdf(z_prior, mark_qs).clamp(z_min, z_max).detach().cpu().numpy()
+                            z_marks = (
+                                self._icdf(z_prior, mark_qs)
+                                .clamp(z_min, z_max)
+                                .detach()
+                                .cpu()
+                                .numpy()
+                            )
                         else:
                             z_marks = np.linspace(z_min, z_max, 6)
                         for z_mark in z_marks:
                             closest = int(np.argmin(np.abs(z_np - z_mark)))
-                            ax.plot(track_x[closest], track_y[closest], "o",
-                                    color="black", markersize=4, zorder=6)
-                            ax.annotate(f"z={z_mark:.2f}",
-                                        (track_x[closest], track_y[closest]),
-                                        textcoords="offset points", xytext=(5, 5),
-                                        fontsize=7, color="black", fontweight="bold", zorder=6)
+                            ax.plot(
+                                track_x[closest],
+                                track_y[closest],
+                                "o",
+                                color="black",
+                                markersize=4,
+                                zorder=6,
+                            )
+                            ax.annotate(
+                                f"z={z_mark:.2f}",
+                                (track_x[closest], track_y[closest]),
+                                textcoords="offset points",
+                                xytext=(5, 5),
+                                fontsize=7,
+                                color="black",
+                                fontweight="bold",
+                                zorder=6,
+                            )
 
         if title is None:
             title = "Marginal P(y|ξ), "
@@ -1214,10 +1344,9 @@ class GridCalculation:
         """Return the flat design index closest to the experiment's nominal design."""
         nominal_np = self.experiment.nominal_design.detach().cpu().numpy().reshape(1, -1)
         designs_np = self.experiment.designs.detach().cpu().numpy().astype(np.float64)
-        return int(np.argmin(np.linalg.norm(
-            designs_np - nominal_np[:, :designs_np.shape[1]], axis=1
-        )))
-
+        return int(
+            np.argmin(np.linalg.norm(designs_np - nominal_np[:, : designs_np.shape[1]], axis=1))
+        )
 
 
 def _run_merge_into_run(
@@ -1239,20 +1368,20 @@ def _run_merge_into_run(
     if not run_data_list:
         raise ValueError(f"Run {run_id} not found in experiment {cosmo_exp}")
     run_data = run_data_list[0]
-    run_obj = run_data['run_obj']
-    run_args = run_data['params']
+    run_obj = run_data["run_obj"]
+    run_args = run_data["params"]
     save_path = os.environ["SCRATCH"] + f"/bedcosmo/{cosmo_exp}/mlruns/{exp_id}/{run_id}/artifacts"
     os.makedirs(save_path, exist_ok=True)
 
     eval_step = args.eval_step
     if eval_step is None:
-        eval_step = run_args.get('total_steps')
+        eval_step = run_args.get("total_steps")
         if eval_step is None:
             raise ValueError("Could not determine eval_step; pass --eval-step.")
     eval_step = int(eval_step)
     step_key = f"step_{eval_step}"
 
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M')
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M")
     output_path = args.grid_eig_data or f"{save_path}/eig_data_grid_{timestamp}.json"
     print(f"Merge-into-run mode: writing grid eig_data to {output_path}")
 
@@ -1264,7 +1393,7 @@ def _run_merge_into_run(
             design_args_file = str(resolved)
         if not os.path.exists(design_args_file):
             raise FileNotFoundError(f"Design args file not found: {design_args_file}")
-        with open(design_args_file, 'r') as f:
+        with open(design_args_file, "r") as f:
             design_args = yaml.safe_load(f)
 
     print(f"Initializing {cosmo_exp} experiment from run {run_id} on device={args.device}...")
@@ -1306,9 +1435,13 @@ def _run_merge_into_run(
     max_idx = int(np.argmax(eig_flat))
     optimal_eig = float(eig_flat[max_idx])
 
-    nominal_np = np.asarray(experiment.nominal_design.detach().cpu().numpy(), dtype=float).reshape(1, -1)
+    nominal_np = np.asarray(experiment.nominal_design.detach().cpu().numpy(), dtype=float).reshape(
+        1, -1
+    )
     designs_np = np.asarray(experiment.designs.detach().cpu().numpy(), dtype=float)
-    nominal_idx = int(np.argmin(np.linalg.norm(designs_np - nominal_np[:, :designs_np.shape[1]], axis=1)))
+    nominal_idx = int(
+        np.argmin(np.linalg.norm(designs_np - nominal_np[:, : designs_np.shape[1]], axis=1))
+    )
 
     step_dict = {"variable": {}, "nominal": {}}
     step_dict["variable"]["grid"] = {
@@ -1338,6 +1471,7 @@ def _run_merge_into_run(
         print(f"Saved grid posterior samples to {samples_path}")
     except Exception as e:
         import traceback as _tb
+
         _tb.print_exc()
         print(f"Warning: grid posterior sampling failed: {e}")
 
@@ -1345,11 +1479,15 @@ def _run_merge_into_run(
     try:
         fig_marginal, _ = gc_obj.plot_marginal(design_type="nominal", param_overlay=True)
         plotter.save_figure(
-            fig_marginal, filename="grid_marginal", dpi=400,
-            run_id=run_id, experiment_id=exp_id,
+            fig_marginal,
+            filename="grid_marginal",
+            dpi=400,
+            run_id=run_id,
+            experiment_id=exp_id,
         )
     except Exception as e:
         import traceback as _tb
+
         _tb.print_exc()
         print(f"Warning: grid_marginal plot failed: {e}")
 
@@ -1357,18 +1495,21 @@ def _run_merge_into_run(
     with open(output_path, "w") as f:
         json.dump(eig_data, f, indent=2)
     print(f"Saved grid eig_data to {output_path}")
-    print(f"Grid EIG: nominal={step_dict['nominal']['grid']['eigs_avg']:.4f}, optimal={optimal_eig:.4f}")
+    print(
+        f"Grid EIG: nominal={step_dict['nominal']['grid']['eigs_avg']:.4f}, optimal={optimal_eig:.4f}"
+    )
 
     try:
         render_overlay(
             own_eig_data=eig_data,
-            own_role='grid',
+            own_role="grid",
             other_eig_data_path=args.nf_eig_data,
             plotter=plotter,
             eval_step=eval_step,
         )
     except Exception as e:
         import traceback as _tb
+
         _tb.print_exc()
         print(f"Warning: overlay rendering failed: {e}")
 
@@ -1412,12 +1553,8 @@ def _resolve_nf_eval_step_key(nf_data: dict, eval_step_arg: Optional[str]) -> Tu
             step_num = int(eval_step_arg)
             sk = f"step_{step_num}"
         if sk not in nf_data:
-            available = sorted(
-                k for k in nf_data if isinstance(k, str) and k.startswith("step_")
-            )
-            raise ValueError(
-                f"NF eig_data has no {sk}; available step keys: {available}"
-            )
+            available = sorted(k for k in nf_data if isinstance(k, str) and k.startswith("step_"))
+            raise ValueError(f"NF eig_data has no {sk}; available step keys: {available}")
         return step_num, sk
     es = nf_data.get("eval_step")
     if es is not None:
@@ -1476,7 +1613,9 @@ def main():
     session_start_time = time.time()
 
     parser = argparse.ArgumentParser(description="Standalone grid-based EIG runner")
-    parser.add_argument("cosmo_exp", type=str, help="Experiment type (e.g. num_visits, num_tracers)")
+    parser.add_argument(
+        "cosmo_exp", type=str, help="Experiment type (e.g. num_visits, num_tracers)"
+    )
     parser.add_argument(
         "--design-args-path",
         type=str,
@@ -1489,24 +1628,65 @@ def main():
         default=None,
         help="Prior args config name under experiments/<cosmo_exp>/ (e.g. prior_args_uniform.yaml)",
     )
-    parser.add_argument("--use-experiment-prior", action="store_true", help="Use experiment's prior distributions for PDF")
-    parser.add_argument("--device", type=str, default="cpu", help="Torch device for experiment calculations")
+    parser.add_argument(
+        "--use-experiment-prior",
+        action="store_true",
+        help="Use experiment's prior distributions for PDF",
+    )
+    parser.add_argument(
+        "--device", type=str, default="cpu", help="Torch device for experiment calculations"
+    )
     parser.add_argument("--verbose", action="store_true", help="Verbose output")
     parser.add_argument("--param-pts", type=int, default=500, help="Points per parameter axis")
     parser.add_argument("--feature-pts", type=int, default=200, help="Points per feature axis")
     parser.add_argument("--no-plots", action="store_true", help="Skip generating plots")
-    parser.add_argument("--adaptive-features", action="store_true", help="Concentrate feature grid points in high-density regions")
-    parser.add_argument("--adaptive-floor", type=float, default=0.05, help="Uniform floor fraction for adaptive feature grid (0=fully adaptive, 1=nearly uniform)")
-    parser.add_argument("--feature-range", type=str, action="append", default=[], metavar="NAME:LO,HI",
-                        help="Per-feature axis range, e.g. --feature-range u:-10,60 --feature-range g:15,55")
-    parser.add_argument("--feature-dense-range", type=str, action="append", default=[], metavar="NAME:LO,HI",
-                        help="Per-feature dense sub-region, e.g. --feature-dense-range u:20,30 --feature-dense-range g:22,32")
-    parser.add_argument("--param-dense-range", type=str, action="append", default=[], metavar="NAME:LO,HI",
-                        help="Per-parameter dense sub-region, e.g. --param-dense-range z:0.5,1.5")
-    parser.add_argument("--feature-dense-fraction", type=float, default=0.6,
-                        help="Fraction of feature grid points allocated to each dense region (default 0.6)")
-    parser.add_argument("--param-dense-fraction", type=float, default=0.6,
-                        help="Fraction of parameter grid points allocated to each dense region (default 0.6)")
+    parser.add_argument(
+        "--adaptive-features",
+        action="store_true",
+        help="Concentrate feature grid points in high-density regions",
+    )
+    parser.add_argument(
+        "--adaptive-floor",
+        type=float,
+        default=0.05,
+        help="Uniform floor fraction for adaptive feature grid (0=fully adaptive, 1=nearly uniform)",
+    )
+    parser.add_argument(
+        "--feature-range",
+        type=str,
+        action="append",
+        default=[],
+        metavar="NAME:LO,HI",
+        help="Per-feature axis range, e.g. --feature-range u:-10,60 --feature-range g:15,55",
+    )
+    parser.add_argument(
+        "--feature-dense-range",
+        type=str,
+        action="append",
+        default=[],
+        metavar="NAME:LO,HI",
+        help="Per-feature dense sub-region, e.g. --feature-dense-range u:20,30 --feature-dense-range g:22,32",
+    )
+    parser.add_argument(
+        "--param-dense-range",
+        type=str,
+        action="append",
+        default=[],
+        metavar="NAME:LO,HI",
+        help="Per-parameter dense sub-region, e.g. --param-dense-range z:0.5,1.5",
+    )
+    parser.add_argument(
+        "--feature-dense-fraction",
+        type=float,
+        default=0.6,
+        help="Fraction of feature grid points allocated to each dense region (default 0.6)",
+    )
+    parser.add_argument(
+        "--param-dense-fraction",
+        type=float,
+        default=0.6,
+        help="Fraction of parameter grid points allocated to each dense region (default 0.6)",
+    )
     parser.add_argument(
         "--design-chunk-size",
         type=int,
@@ -1517,16 +1697,28 @@ def main():
     )
     # Merge-into-run mode: when --run-id is given, grid results are written into the
     # run's MLflow artifacts dir so they live alongside (but separate from) NF eval.
-    parser.add_argument("--run-id", type=str, default=None,
-                        help="MLflow run ID. If set, grid output is written into the run's artifacts dir.")
-    parser.add_argument("--eval-step", type=str, default=None,
-                        help="Step to tag grid results with (default: run_args['total_steps']).")
-    parser.add_argument("--nf-eig-data", type=str, default=None,
-                        help="Path to NF eig_data JSON. In merge-into-run mode (--run-id), overlay plots "
-                        "after the grid job completes. In standalone mode, merges with this NF JSON and "
-                        "writes overlays under grid_calc/.../plots/. Use --nf-checkpoint for NF posterior "
-                        "contours (needs MLflow run id for run_args); without it, the posterior overlay is "
-                        "grid (+ prior) only while the EIG plot still compares NF vs grid from the JSON.")
+    parser.add_argument(
+        "--run-id",
+        type=str,
+        default=None,
+        help="MLflow run ID. If set, grid output is written into the run's artifacts dir.",
+    )
+    parser.add_argument(
+        "--eval-step",
+        type=str,
+        default=None,
+        help="Step to tag grid results with (default: run_args['total_steps']).",
+    )
+    parser.add_argument(
+        "--nf-eig-data",
+        type=str,
+        default=None,
+        help="Path to NF eig_data JSON. In merge-into-run mode (--run-id), overlay plots "
+        "after the grid job completes. In standalone mode, merges with this NF JSON and "
+        "writes overlays under grid_calc/.../plots/. Use --nf-checkpoint for NF posterior "
+        "contours (needs MLflow run id for run_args); without it, the posterior overlay is "
+        "grid (+ prior) only while the EIG plot still compares NF vs grid from the JSON.",
+    )
     parser.add_argument(
         "--nf-checkpoint",
         type=str,
@@ -1550,9 +1742,18 @@ def main():
         help="Which step_* block in the NF eig_data to use (e.g. 50000 or step_50000). "
         "Default: JSON's eval_step if present, otherwise the largest step_* key.",
     )
-    parser.add_argument("--grid-eig-data", type=str, default=None,
-                        help="Path for this grid job to write its eig_data JSON (overrides auto-named eig_data_grid_<timestamp>.json).")
-    parser.add_argument("--seed", type=int, default=1, help="Seed for posterior sample drawing (merge-into-run mode).")
+    parser.add_argument(
+        "--grid-eig-data",
+        type=str,
+        default=None,
+        help="Path for this grid job to write its eig_data JSON (overrides auto-named eig_data_grid_<timestamp>.json).",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=1,
+        help="Seed for posterior sample drawing (merge-into-run mode).",
+    )
     args, extra_args = parser.parse_known_args()
 
     exp_kwargs = parse_extra_args(extra_args)
@@ -1634,8 +1835,13 @@ def main():
             suffix += 1
 
     # Save all args (grid_calc + experiment) to args.yaml
-    all_args = {**vars(args), "feature_ranges": feature_ranges, "feature_dense_ranges": feature_dense_ranges,
-                "param_dense_ranges": param_dense_ranges, **exp_kwargs}
+    all_args = {
+        **vars(args),
+        "feature_ranges": feature_ranges,
+        "feature_dense_ranges": feature_dense_ranges,
+        "param_dense_ranges": param_dense_ranges,
+        **exp_kwargs,
+    }
     # Remove non-serializable or redundant fields
     all_args.pop("feature_range", None)
     all_args.pop("feature_dense_range", None)
@@ -1753,7 +1959,9 @@ def main():
 
     if args.nf_eig_data:
         if gc_samples is None:
-            print("Warning: skipping NF overlay (--nf-eig-data) because grid posterior samples were not computed.")
+            print(
+                "Warning: skipping NF overlay (--nf-eig-data) because grid posterior samples were not computed."
+            )
         else:
             samples_path = str(out_dir / "grid_samples_nominal_overlay.npy")
             np.save(samples_path, np.asarray(gc_samples))
@@ -1771,13 +1979,9 @@ def main():
                 )
                 overlay_device = args.device if args.device else "cpu"
                 if args.nf_checkpoint:
-                    ck = torch.load(
-                        args.nf_checkpoint, map_location="cpu", weights_only=False
-                    )
+                    ck = torch.load(args.nf_checkpoint, map_location="cpu", weights_only=False)
                     if NF_INIT_CONFIG_KEY not in ck:
-                        run_id_nf = args.nf_overlay_run_id or _infer_run_id_from_nf_eig_json(
-                            nf_eig
-                        )
+                        run_id_nf = args.nf_overlay_run_id or _infer_run_id_from_nf_eig_json(nf_eig)
                         if not run_id_nf:
                             raise ValueError(
                                 f"Checkpoint has no {NF_INIT_CONFIG_KEY}; pass "

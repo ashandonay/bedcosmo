@@ -6,6 +6,7 @@ bb:
   pyro_seed: 1
   nf_seed: 1
   prior_args_path: prior_args_gamma.yaml
+  norm_mode: bolometric
   flow_type: NAF
   transform_input: true
   input_transform_type: marginal
@@ -40,12 +41,15 @@ bb:
   log_nominal_area: false
   verbose: true
 
-bb_temp:
-  cosmo_model: bb_temp
-  mlflow_exp: bb_temp
+bbt:
+  cosmo_model: bbt
+  mlflow_exp: bbt
   pyro_seed: 1
   nf_seed: 1
-  prior_args_path: prior_args_gamma_temp.yaml
+  prior_args_path: prior_args_bbt.yaml
+  norm_mode: band
+  ref_wavelength: 5000.0
+  M_ref: -21.0
   flow_type: NAF
   transform_input: true
   input_transform_type: marginal
@@ -61,7 +65,7 @@ bb_temp:
   design_args_path: design_args.yaml
   total_steps: 10000
   optimizer: Adam
-  initial_lr: 0.0001
+  initial_lr: 0.001
   final_lr: 0.00001
   grad_clip: 0.0
   warmup_fraction: 0.05
@@ -71,21 +75,22 @@ bb_temp:
   step_freq: 1
   checkpoint_step_freq: 1000
   n_particles_per_device: 10
-  l_bol: 1.0e10  # bolometric luminosity [L_sun]; ~0.4 L*. 1e9 = dwarf, T signal only 0.5 sigma
   mag_err_cap: 10
   central_params:
     z: 1.0
-    T: 10000
+    T: 7000
   condition_design: true
   log_nominal_area: false
   verbose: true
 
-bb_temp_lbol:
-  cosmo_model: bb_temp_lbol
-  mlflow_exp: bb_temp_lbol
+bbtm:
+  cosmo_model: bbtm
+  mlflow_exp: bbtm
   pyro_seed: 1
   nf_seed: 1
-  prior_args_path: prior_args_gamma_temp_lbol.yaml
+  prior_args_path: prior_args_bbtm.yaml
+  norm_mode: band
+  ref_wavelength: 5000.0
   flow_type: NAF
   transform_input: true
   input_transform_type: marginal
@@ -101,7 +106,7 @@ bb_temp_lbol:
   design_args_path: design_args.yaml
   total_steps: 10000
   optimizer: Adam
-  initial_lr: 0.0001
+  initial_lr: 0.001
   final_lr: 0.00001
   grad_clip: 0.0
   warmup_fraction: 0.05
@@ -114,8 +119,8 @@ bb_temp_lbol:
   mag_err_cap: 10
   central_params:
     z: 1.0
-    T: 10000
-    L_bol: 1.0e10
+    T: 7000
+    M_ref: -21.0
   condition_design: true
   log_nominal_area: false
   verbose: true

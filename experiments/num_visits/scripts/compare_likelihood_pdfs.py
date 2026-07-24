@@ -92,6 +92,7 @@ def main():
         prior_args=prior_args,
         design_args=design_args,
         cosmo_model="bb",
+        norm_mode="bolometric",
         temperature=10000,
         device=device,
         verbose=True,

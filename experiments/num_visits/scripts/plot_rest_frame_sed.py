@@ -1,6 +1,6 @@
 """What L_lambda(lambda_rest) actually looks like, and how z enters.
 
-The rest-frame spectral luminosity the bb / bb_temp model builds is
+The rest-frame spectral luminosity the bb / bbt model builds is
 
     L_lambda(lambda_rest) = 4 pi R_eff^2 * pi * B_lambda(lambda_rest, T)
                           = 4 pi R_eff^2 * pi * (2hc^2/lambda_rest^5)
@@ -57,16 +57,17 @@ TEMPS = [(4000.0, C_COOL), (5000.0, C_MID), (10000.0, C_WARM)]
 def build_experiment(device: str = "cpu") -> NumVisits:
     design_args = yaml.safe_load(open(get_experiment_config_path("num_visits", "design_args.yaml")))
     prior_args = yaml.safe_load(
-        open(get_experiment_config_path("num_visits", "prior_args_gamma_temp.yaml"))
+        open(get_experiment_config_path("num_visits", "prior_args_bbt.yaml"))
     )
     exp = NumVisits(
         prior_args=prior_args,
         design_args=design_args,
-        cosmo_model="bb_temp",
+        cosmo_model="bbt",
+        norm_mode="bolometric",
         device=device,
         verbose=False,
     )
-    exp.init_prior(parameters=prior_args["parameters"], cosmo_model="bb_temp")
+    exp.init_prior(parameters=prior_args["parameters"], cosmo_model="bbt")
     keys = ("input_type", "step", "lower", "upper", "sum_lower", "sum_upper", "labels")
     exp.init_designs(**{k: v for k, v in design_args.items() if k in keys})
     return exp

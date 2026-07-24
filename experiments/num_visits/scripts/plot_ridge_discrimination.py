@@ -3,7 +3,7 @@
 SUPERSEDED as an explanation, still valid as mechanism. The figure below is a
 correct account of what swapping the luminosity normalization (fix R instead of
 L_bol) does to the *redshift* constraint. It was produced while testing whether
-that choice explains the flat bb_temp T posterior. It does not.
+that choice explains the flat bbt T posterior. It does not.
 
 The actual driver is the *value* of ``l_bol``, not R-vs-L_bol: the T signal is a
 fixed ~0.213 mag while only the photometric sigma scales with luminosity, so the
@@ -82,16 +82,17 @@ MODELS = [(False, "$L_{\\rm bol}$ fixed (candle)", C_CANDLE), (True, "$R$ fixed 
 def build_experiment(device: str = "cpu") -> NumVisits:
     design_args = yaml.safe_load(open(get_experiment_config_path("num_visits", "design_args.yaml")))
     prior_args = yaml.safe_load(
-        open(get_experiment_config_path("num_visits", "prior_args_gamma_temp.yaml"))
+        open(get_experiment_config_path("num_visits", "prior_args_bbt.yaml"))
     )
     exp = NumVisits(
         prior_args=prior_args,
         design_args=design_args,
-        cosmo_model="bb_temp",
+        cosmo_model="bbt",
+        norm_mode="bolometric",
         device=device,
         verbose=False,
     )
-    exp.init_prior(parameters=prior_args["parameters"], cosmo_model="bb_temp")
+    exp.init_prior(parameters=prior_args["parameters"], cosmo_model="bbt")
     keys = ("input_type", "step", "lower", "upper", "sum_lower", "sum_upper", "labels")
     exp.init_designs(**{k: v for k, v in design_args.items() if k in keys})
     return exp
