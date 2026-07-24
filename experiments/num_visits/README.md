@@ -100,6 +100,14 @@ Every galaxy is modeled as a single blackbody at temperature `T`. This is a deli
 
 A blackbody's **shape** is fixed by `T`; its **amplitude** (how luminous the source is) needs a separate convention, selected by `norm_mode`.
 
+Throughout this section, `B(lambda, T)` denotes the blackbody **surface flux** — the emergent power per unit area per unit wavelength, `pi` times the Planck specific intensity `B_lambda`:
+
+```
+B(lambda, T) = pi * B_lambda(lambda, T),   with   integral_0^inf B(lambda, T) dlambda = sigma * T^4
+```
+
+This is what `_blackbody_flux` returns (the `pi` is already folded in), so the code writes `4*pi*R^2 * B` with a single explicit `pi`. Note this is *not* the bare Planck intensity `B_lambda` (per steradian); the hemisphere solid-angle integral `integral B_lambda cos(theta) dOmega = pi * B_lambda` supplies the extra `pi`.
+
 #### SED normalization (`norm_mode`)
 
 **`band` (default) — anchor an in-band absolute magnitude.** Used by `bbt` and `bbtm`. The rest-frame spectral luminosity at a reference wavelength `ref_wavelength` (default 5000 Å, rest-frame optical) is pinned to a fixed rest-frame **AB absolute magnitude** `M_ref`:
