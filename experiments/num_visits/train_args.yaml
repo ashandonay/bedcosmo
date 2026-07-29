@@ -8,7 +8,9 @@ bb:
   prior_args_path: prior_args_gamma.yaml
   norm_mode: bolometric
   ref_wavelength: 5000.0
-  M_ref: -21.0
+  M_ref: -17.42
+  temperature: 10000
+  l_bol: 1.0e9
   flow_type: NAF
   transform_input: true
   input_transform_type: marginal
@@ -34,8 +36,6 @@ bb:
   step_freq: 1
   checkpoint_step_freq: 1000
   n_particles_per_device: 10
-  temperature: 10000
-  l_bol: 1.0e10  # bolometric luminosity [L_sun]; ~0.4 L*. 1e9 = dwarf, invisible past z~1.8
   mag_err_cap: 10
   central_params:
     z: 1.0
