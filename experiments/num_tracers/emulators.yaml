@@ -1,5 +1,6 @@
 # Emulator checkpoint paths, organized like models.yaml: <analysis>: <cosmo_model>: <dataset>: <tracer_bin>: <path>
-# Relative paths resolve against $SCRATCH/bedcosmo/num_tracers/emulator/models/{dataset}/{cosmo_model}/ ;
+# Relative paths resolve against
+#   $SCRATCH/bedcosmo/num_tracers/emulator/{analysis}/models/{dataset}/{cosmo_model}/ ;
 # absolute paths are used verbatim; null means "no checkpoint -> fall back to the fixed DESI nominal covariance".
 bao:
   base:

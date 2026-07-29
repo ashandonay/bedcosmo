@@ -1298,8 +1298,15 @@ class NumTracers(BaseExperiment, CosmologyMixin):
         """Resolve emulator checkpoint paths for a (analysis, cosmo_model, dataset) from emulators.yaml.
 
         Emulator checkpoints live in emulators.yaml under <analysis>.<cosmo_model>.<dataset>. Relative
-        paths resolve against $SCRATCH/bedcosmo/num_tracers/emulator/models/{dataset}/{cosmo_model}/;
+        paths resolve against
+        $SCRATCH/bedcosmo/num_tracers/emulator/{analysis}/models/{dataset}/{cosmo_model}/;
         absolute paths are used verbatim; null -> fall back to fixed DESI nominal covariance.
+
+        The {analysis} segment is required: the emulator repo stores each analysis in its own
+        subtree, and 'covar' is a valid quantity for both bao and shapefit, so an analysis-less
+        path is ambiguous. Omitting it resolves to a non-existent directory, which this method
+        reports as null -> every bin silently falls back to the fixed DESI covariance instead of
+        using the emulator at all.
 
         Returns:
             dict mapping tracer-bin -> absolute checkpoint path (or None for fallback bins).
@@ -1317,7 +1324,8 @@ class NumTracers(BaseExperiment, CosmologyMixin):
                 f"No emulator checkpoints for dataset '{dataset}' under "
                 f"{analysis}.{cosmo_model} in emulators.yaml (have: {list(emu_by_dataset)})"
             )
-        base_dir = os.path.join(storage_path, "emulator", "models", dataset, cosmo_model)
+        base_dir = os.path.join(
+            storage_path, "emulator", analysis, "models", dataset, cosmo_model)
         return {
             tb: (None if p is None else (p if os.path.isabs(p) else os.path.join(base_dir, p)))
             for tb, p in emu_by_dataset[dataset].items()
