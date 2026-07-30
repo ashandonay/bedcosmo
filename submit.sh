@@ -1480,6 +1480,17 @@ except Exception as e:
                     # Convert underscores to hyphens for CLI flags (POSIX convention)
                     key="${key//_/-}"
 
+                    # Skip keys that were explicitly provided via --eval-* args
+                    skip_key=false
+                    for ((ei=0; ei<${#EVAL_EXTRA_ARGS[@]}; ei++)); do
+                        if [[ "${EVAL_EXTRA_ARGS[$ei]}" == "--$key" ]]; then
+                            skip_key=true
+                            break
+                        fi
+                    done
+                    if [ "$skip_key" = true ]; then
+                        continue
+                    fi
                     if [ "$value" = "null" ] || [ "$value" = "None" ] || [ -z "$value" ]; then
                         continue
                     fi
