@@ -3006,11 +3006,14 @@ class ComparisonPlotter(BasePlotter):
             title (str, optional): Custom figure title.
             sort (bool): Whether to reorder designs by descending EIG using the reference run.
             sort_reference (str, optional): Run ID or label that defines the sorting EIG. Required when `sort=True`.
-            normalize (bool): If True, subtract each run's nominal EIG so curves are relative to nominal.
+            normalize (bool): If True, plot percent difference vs each run's nominal EIG:
+                                    ``100 * (EIG - EIG_nominal) / EIG_nominal``.
             show_errorbars (bool): If True, draw the filled std bands for each run.
             plot_input_design (bool): If True, plot scatter points for input_designs from MLflow params on the heatmap.
                                     Only plots if they match the evaluation designs. Default False.
             design_labels (list, optional): Custom labels for each design dimension. Must be the same length as the number of design dimensions.
+                                    If omitted, tries eig_data metadata, then the sort-reference (or first) run's
+                                    ``design_args.yaml`` / ``experiment.design_labels``.
             show_ratio_to_nominal (bool): If True, display designs as ratio to nominal design (like eig_designs). Default True.
             filename (str, optional): Filename for the plot.
             save_dir (str, optional): Directory to save the plot.
@@ -3022,8 +3025,14 @@ class ComparisonPlotter(BasePlotter):
         var = self._resolve_var(var)
         storage_path = self.storage_path
 
-        # Parse params if we need them for var labels/sorting or plot_input_design
-        need_params = plot_input_design or var is not None
+        # Parse params if we need them for var labels/sorting, plot_input_design,
+        # or experiment init (design_labels / nominal_design fallback).
+        need_params = (
+            plot_input_design
+            or var is not None
+            or design_labels is None
+            or show_ratio_to_nominal
+        )
         run_data_list, experiment_id_for_save_path, actual_mlflow_exp_for_title = self._get_run_data_list(
             parse_params=need_params
         )
@@ -3131,13 +3140,13 @@ class ComparisonPlotter(BasePlotter):
                 raise ValueError("Design arrays must have identical shapes across runs to enable comparison.")
 
             if design_labels is None:
-                metadata = data.get('metadata', {})
-                design_labels = metadata.get('design_labels', None)
-                if design_labels is None or len(design_labels) != designs_arr.shape[1]:
-                    design_labels = [f'$d_{i}$' for i in range(designs_arr.shape[1])]
-            else:
-                if isinstance(design_labels, str):
-                    design_labels = [design_labels]
+                # Prefer labels written into eig_data metadata when present.
+                metadata = data.get('metadata', {}) or {}
+                meta_labels = metadata.get('design_labels')
+                if meta_labels is not None and len(meta_labels) == designs_arr.shape[1]:
+                    design_labels = list(meta_labels)
+            elif isinstance(design_labels, str):
+                design_labels = [design_labels]
 
             eig_values_raw = variable_data.get('eigs_avg')
             if eig_values_raw is None:
@@ -3232,18 +3241,60 @@ class ComparisonPlotter(BasePlotter):
             sorted_designs = run_records[0]['designs'][global_sort_idx]
             run_for_nominal = run_records[0]
         
-        # Get nominal design if needed for ratio display
+        # Resolve design_labels / nominal_design via experiment when needed
+        # (same pattern as compare_optimal_designs / eig_designs). Prefer the
+        # sort_reference run when available.
+        need_labels = design_labels is None
+        need_nominal = show_ratio_to_nominal and not is_1d_design
         nominal_design = None
-        if show_ratio_to_nominal and not is_1d_design:
-            # Initialize experiment from the reference run to get nominal_design
+        ref_run_id = run_for_nominal['run_id']
+        ref_exp_id = run_id_to_exp_id.get(ref_run_id)
+        ref_artifacts = (
+            f"{storage_path}/mlruns/{ref_exp_id}/{ref_run_id}/artifacts"
+            if ref_exp_id is not None else None
+        )
+
+        # Prefer nominal_design stored in eig_data when present (avoids init).
+        if need_nominal:
+            for data, rid in zip(all_data, found_run_ids):
+                if rid != ref_run_id:
+                    continue
+                stored_nominal = data.get('nominal_design')
+                if stored_nominal is not None:
+                    candidate = np.asarray(stored_nominal, dtype=float)
+                    if candidate.ndim == 1 and candidate.shape[0] == num_dims:
+                        nominal_design = candidate
+                    else:
+                        print(
+                            f"Warning: eig_data nominal_design shape {candidate.shape} "
+                            f"doesn't match design dimensions {num_dims}, ignoring."
+                        )
+                break
+
+        # Lightweight label fallback from design_args.yaml (source of experiment.design_labels).
+        if need_labels and ref_artifacts is not None:
+            design_args_path = os.path.join(ref_artifacts, "design_args.yaml")
+            if os.path.exists(design_args_path):
+                try:
+                    with open(design_args_path, "r") as f:
+                        design_args = yaml.safe_load(f) or {}
+                    labels = design_args.get("labels")
+                    if labels is not None and len(labels) == num_dims:
+                        design_labels = list(labels)
+                        need_labels = False
+                except Exception as e:
+                    print(f"Warning: Could not load design_labels from {design_args_path}: {e}")
+
+        if need_labels or (need_nominal and nominal_design is None):
             try:
                 device = "cuda:0"
-                run_data_item = next((r for r in run_data_list if r['run_id'] == run_for_nominal['run_id']), None)
+                run_data_item = next(
+                    (r for r in run_data_list if r['run_id'] == ref_run_id),
+                    None,
+                )
                 if run_data_item and run_data_item.get('run_obj') is not None:
                     run_params = run_data_item['params'].copy()
-                    
-                    # init_experiment is imported via 'from util import *' at the top
-                    # init_experiment will automatically load prior_args from artifacts
+                    # init_experiment loads prior_args / design_args from artifacts
                     experiment = init_experiment(
                         run_data_item['run_obj'],
                         run_params,
@@ -3252,19 +3303,37 @@ class ComparisonPlotter(BasePlotter):
                         global_rank=0,
                         verbose=False,
                     )
-                    if hasattr(experiment, 'nominal_design'):
-                        nominal_design = experiment.nominal_design.cpu().numpy()
-                        # Verify shape matches (nominal_design should be 1D with num_dims elements)
-                        if nominal_design.ndim == 1:
-                            if nominal_design.shape[0] != sorted_designs.shape[1]:
-                                print(f"Warning: nominal_design shape {nominal_design.shape} doesn't match design dimensions {sorted_designs.shape[1]}, disabling ratio display.")
-                                nominal_design = None
+                    if need_labels and hasattr(experiment, 'design_labels'):
+                        exp_labels = list(experiment.design_labels)
+                        if len(exp_labels) == num_dims:
+                            design_labels = exp_labels
                         else:
-                            print(f"Warning: nominal_design has unexpected shape {nominal_design.shape}, expected 1D array, disabling ratio display.")
-                            nominal_design = None
+                            print(
+                                f"Warning: experiment.design_labels length ({len(exp_labels)}) "
+                                f"doesn't match design dimensions ({num_dims})."
+                            )
+                    if need_nominal and nominal_design is None and hasattr(experiment, 'nominal_design'):
+                        candidate = experiment.nominal_design.cpu().numpy()
+                        if candidate.ndim == 1 and candidate.shape[0] == num_dims:
+                            nominal_design = candidate
+                        else:
+                            print(
+                                f"Warning: nominal_design shape {candidate.shape} doesn't match "
+                                f"design dimensions {num_dims}, disabling ratio display."
+                            )
             except Exception as e:
-                print(f"Warning: Could not initialize experiment to get nominal_design: {e}")
-                print("Will display designs as absolute values instead of ratios.")
+                what = []
+                if need_labels and design_labels is None:
+                    what.append('design_labels')
+                if need_nominal and nominal_design is None:
+                    what.append('nominal_design')
+                if what:
+                    print(f"Warning: Could not initialize experiment to get {'/'.join(what)}: {e}")
+                if need_nominal and nominal_design is None:
+                    print("Will display designs as absolute values instead of ratios.")
+
+        if design_labels is None:
+            design_labels = [f'$d_{i}$' for i in range(num_dims)]
 
         # Determine if we should show heatmap (only if not per-run sorting)
         show_heatmap = not per_run_sort and (not is_1d_design or sort)
@@ -3338,13 +3407,19 @@ class ComparisonPlotter(BasePlotter):
             eig_std_vals = record['eigs_std'][sort_idx]
             color = record['color']
 
-            baseline = 0.0
             if normalize:
-                if record['nominal_eig'] is None:
+                nominal_eig = record['nominal_eig']
+                if nominal_eig is None:
                     raise ValueError(f"normalize=True requires nominal_eig for run {record['run_id']}")
-                baseline = record['nominal_eig']
-
-            eig_vals_plot = eig_vals - baseline
+                if nominal_eig == 0:
+                    raise ValueError(
+                        f"normalize=True cannot divide by nominal_eig=0 for run {record['run_id']}"
+                    )
+                eig_vals_plot = 100.0 * (eig_vals - nominal_eig) / nominal_eig
+                eig_std_vals_plot = 100.0 * eig_std_vals / abs(nominal_eig)
+            else:
+                eig_vals_plot = eig_vals
+                eig_std_vals_plot = eig_std_vals
 
             # Determine if single point or line
             num_points = len(eig_vals_plot)
@@ -3354,14 +3429,14 @@ class ComparisonPlotter(BasePlotter):
                 line = ax_line.plot(x_vals, eig_vals_plot, color=color, linewidth=2, label=record['run_label'])[0]
                 
             handles_for_legend.append(line)
-            if show_errorbars and np.any(eig_std_vals > 0):
+            if show_errorbars and np.any(eig_std_vals_plot > 0):
                 if num_points == 1:
-                    ax_line.errorbar(x_vals, eig_vals_plot, yerr=eig_std_vals, color=color, zorder=5, fmt='o', capsize=5, label=record['run_label'])
+                    ax_line.errorbar(x_vals, eig_vals_plot, yerr=eig_std_vals_plot, color=color, zorder=5, fmt='o', capsize=5, label=record['run_label'])
                 else:
                     ax_line.fill_between(
                         x_vals,
-                        eig_vals_plot - eig_std_vals,
-                        eig_vals_plot + eig_std_vals,
+                        eig_vals_plot - eig_std_vals_plot,
+                        eig_vals_plot + eig_std_vals_plot,
                         color=color,
                         alpha=0.2
                     )
@@ -3443,7 +3518,7 @@ class ComparisonPlotter(BasePlotter):
 
         y_label = 'Expected Information Gain [bits]'
         if normalize:
-            y_label = 'EIG Relative to Nominal Design [bits]'
+            y_label = r'EIG Difference from Nominal [%]'
         ax_line.set_ylabel(y_label, fontsize=12, weight='bold')
         ax_line.grid(True, alpha=0.3)
         legend_handles = []
