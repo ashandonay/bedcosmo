@@ -32,7 +32,7 @@ from bedcosmo.profiling import (
     ProfileTimerGroup,
 )
 from bedcosmo.util import (
-    auto_seed, init_experiment, load_model, get_runs_data,
+    auto_seed, init_experiment, load_model, get_run,
     parse_float_or_list,
     parse_param_subsets,
     get_rng_state, parse_extra_args, render_overlay,
@@ -68,15 +68,8 @@ class Evaluator:
         self.run_id = run_id
         print(f"\nStarting evaluation for run {self.run_id}")
         print(f"Using MLflow tracking URI: {mlflow.get_tracking_uri()}")
-        run_data_list, _, _ = get_runs_data(run_ids=self.run_id, cosmo_exp=self.cosmo_exp)
-        if not run_data_list:  # Check for empty list instead of None
-            print(f"Run {self.run_id} not found.")
-            raise ValueError(f"Run {self.run_id} not found in experiment {self.cosmo_exp}. Please check that the run exists and cosmo_exp is correct.")
-        run_data = run_data_list[0]
-        self.run_obj = run_data['run_obj']
-        self.run_args = run_data['params']
+        self.run_obj, self.run_args, self.exp_id = get_run(self.run_id, self.cosmo_exp)
         self.total_steps = self.run_args["total_steps"]
-        self.exp_id = run_data['exp_id']
         self.storage_path = os.environ["SCRATCH"] + f"/bedcosmo/{self.cosmo_exp}"
         self.save_path = f"{self.storage_path}/mlruns/{self.exp_id}/{self.run_id}/artifacts"
         
