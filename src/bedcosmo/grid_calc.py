@@ -23,7 +23,7 @@ from bedcosmo.util import (
     init_experiment,
     get_experiment_config_path,
     parse_extra_args,
-    get_runs_data,
+    get_run,
     render_overlay,
     NF_INIT_CONFIG_KEY,
 )
@@ -1364,12 +1364,7 @@ def _run_merge_into_run(
     cosmo_exp = args.cosmo_exp
 
     mlflow.set_tracking_uri("file:" + os.environ["SCRATCH"] + f"/bedcosmo/{cosmo_exp}/mlruns")
-    run_data_list, exp_id, _ = get_runs_data(run_ids=run_id, cosmo_exp=cosmo_exp)
-    if not run_data_list:
-        raise ValueError(f"Run {run_id} not found in experiment {cosmo_exp}")
-    run_data = run_data_list[0]
-    run_obj = run_data["run_obj"]
-    run_args = run_data["params"]
+    run_obj, run_args, exp_id = get_run(run_id, cosmo_exp)
     save_path = os.environ["SCRATCH"] + f"/bedcosmo/{cosmo_exp}/mlruns/{exp_id}/{run_id}/artifacts"
     os.makedirs(save_path, exist_ok=True)
 

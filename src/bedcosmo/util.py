@@ -853,6 +853,77 @@ def init_experiment(
     
     return experiment
 
+
+def get_run(run_id, cosmo_exp='num_tracers'):
+    """Resolve one MLflow run id to ``(run_obj, run_args, exp_id)``.
+
+    The *lookup* half of loading a finished run, kept separate from
+    :func:`init_experiment` (the *construction* half) because every consumer
+    needs ``run_args`` before it can build the experiment: ``Evaluator`` reads
+    ``total_steps`` to resolve a checkpoint, ``grid_calc`` derives ``eval_step``
+    and the artifacts ``save_path``, and ``BasePlotter`` caches run data and the
+    experiment independently.
+
+    Use :func:`load_experiment` instead when you need nothing in between.
+
+    Args:
+        run_id (str): MLflow run id.
+        cosmo_exp (str): Cosmology experiment name.
+
+    Returns:
+        tuple: ``(run_obj, run_args, exp_id)``.
+
+    Raises:
+        ValueError: If the run is not found.
+    """
+    run_data_list, exp_id, _ = get_runs_data(run_ids=run_id, cosmo_exp=cosmo_exp)
+    if not run_data_list:
+        raise ValueError(
+            f"Run {run_id} not found in experiment {cosmo_exp}. Please check that "
+            "the run exists and cosmo_exp is correct."
+        )
+    run_data = run_data_list[0]
+    return run_data['run_obj'], run_data['params'], exp_id
+
+
+def load_experiment(run_id, cosmo_exp='num_tracers', device=None, checkpoint=None,
+                    design_args=None, global_rank=0, **kwargs):
+    """Load a finished run's experiment from its run id.
+
+    Composition of :func:`get_run` and :func:`init_experiment` for callers that
+    need nothing between the lookup and the construction (analysis and reference
+    scripts, typically).
+
+    ``design_args`` defaults to None so ``init_experiment`` resolves it from the
+    run's own ``artifacts/design_args.yaml``, which pins ``input_designs_path``
+    to the frozen ``artifacts/designs.npy``. A run's designs must always come
+    from its artifacts -- passing a repo YAML rebuilds the design grid from
+    whatever that file says *now*, silently evaluating a different design set
+    than the run used. Only pass ``design_args`` when you deliberately want a
+    different design set (``grid_calc`` does, because the artifact path leaves
+    ``designs_grid`` as None and the grid-EIG code requires it).
+
+    Args:
+        run_id (str): MLflow run id.
+        cosmo_exp (str): Cosmology experiment name.
+        device: Torch device forwarded to ``init_experiment``.
+        checkpoint (dict): Checkpoint dict, e.g. to restore bijector state.
+        design_args (dict): Override designs. None (default) = from artifacts.
+        global_rank (int): Global rank for distributed runs.
+        **kwargs: Extra run_args overrides forwarded to ``init_experiment``.
+
+    Returns:
+        The initialized experiment. Run parameters are already exposed on it
+        (``experiment.norm_mode``, ``.cosmo_model``, ``.l_bol``, ...); use
+        :func:`get_run` directly if you need the raw ``run_args`` or ``exp_id``.
+    """
+    run_obj, run_args, _ = get_run(run_id, cosmo_exp)
+    return init_experiment(
+        run_obj, run_args, device=device, checkpoint=checkpoint,
+        design_args=design_args, global_rank=global_rank, **kwargs
+    )
+
+
 def load_prior_flow_from_file(prior_flow_path, device, global_rank=0):
     """
     Load a prior flow model from a .pt checkpoint file.
