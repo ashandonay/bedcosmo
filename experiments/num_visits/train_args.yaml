@@ -52,6 +52,7 @@ bbt:
   norm_mode: monochromatic
   ref_wavelength: 5000.0
   M_ref: -21.0
+  l_bol: 1.0e9
   flow_type: NAF
   transform_input: true
   input_transform_type: marginal
