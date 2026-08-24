@@ -66,3 +66,10 @@ empirical:
   marginal_outer_y: 10             # outer y ~ p(y|d) samples per design
   marginal_inner_samples: 1000     # guide samples per outer y
   marginal_knn_k: 3             # k for the k-NN entropy estimator
+  # null = auto design chunk from marginal_max_guide_batch
+  marginal_design_chunk_size: null
+  marginal_knn_workers: 8          # thread pool for per-(design,y) k-NN
+  # null = Evaluator device only; set to 2 or "0,1" to shard designs across GPUs
+  marginal_gpus: null
+  # Cap K_block*M*n_design_chunk per guide.sample (prevents OOM at large K,M)
+  marginal_max_guide_batch: 100000

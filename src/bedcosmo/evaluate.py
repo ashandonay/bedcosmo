@@ -55,7 +55,8 @@ class Evaluator:
             design_args_path=None,
             experiment_args=None, nf_eig_data=None, grid_eig_data=None,
             marginal_eig_subsets=None, marginal_outer_y=8, marginal_inner_samples=200,
-            marginal_knn_k=3, step_diagnostics=False,
+            marginal_knn_k=3, marginal_design_chunk_size=None, marginal_knn_workers=8,
+            marginal_gpus=None, marginal_max_guide_batch=100_000, step_diagnostics=False,
             ):
         self.cosmo_exp = cosmo_exp
         
@@ -116,6 +117,18 @@ class Evaluator:
         self.marginal_outer_y = int(marginal_outer_y)
         self.marginal_inner_samples = int(marginal_inner_samples)
         self.marginal_knn_k = int(marginal_knn_k)
+        # None / <=0: sample all designs in one guide call (fast). Positive: GPU
+        # memory cap when K*M*n_designs is large.
+        self.marginal_design_chunk_size = (
+            None if marginal_design_chunk_size in (None, 0) else int(marginal_design_chunk_size)
+        )
+        # Thread pool size for per-(design, y) k-NN. 0/1 = serial.
+        self.marginal_knn_workers = max(0, int(marginal_knn_workers))
+        # Multi-GPU design sharding for marginal guide.sample. None => Evaluator.device
+        # only. Int N => cuda:0..N-1. Str "0,1" => those ids.
+        self.marginal_gpus = marginal_gpus
+        # Cap on K_block * M * n_design_chunk for one guide.sample (avoids OOM).
+        self.marginal_max_guide_batch = max(1_000, int(marginal_max_guide_batch))
         # Design-independent H(target); computed on first use, see _target_prior_entropy.
         self._target_prior_entropy_cache = _UNSET
         self.step_diagnostics = bool(step_diagnostics)
@@ -943,9 +956,10 @@ class Evaluator:
                 f"±{float(np.mean(eig_std_bits)):.3f}"
             )
 
-    @profile_loop("per-design flow sample", total_from="n_designs")
-    def _marginal_design_indices(self, n_designs):
-        yield from range(n_designs)
+    @profile_loop("per-design-chunk flow sample", total_from="n_chunks")
+    def _marginal_design_chunks(self, n_designs, chunk_size, n_chunks):
+        for start in range(0, n_designs, chunk_size):
+            yield start, min(start + chunk_size, n_designs)
 
     @profile_loop(
         "_compute_eig chunk",
@@ -954,6 +968,217 @@ class Evaluator:
     )
     def _eig_design_chunk_indices(self, design_chunks, num_designs, eig_timers):
         yield from design_chunks
+
+    @staticmethod
+    def _knn_entropy_rows(rows: np.ndarray, k: int):
+        """Return ``(H_bits or nan, n_ties)`` for one (design, y) cloud."""
+        n = int(rows.shape[0])
+        if n <= k + 1:
+            return np.nan, 0
+        n_ties = n - len(np.unique(rows, axis=0))
+        return knn_entropy(rows, k=k, warn_duplicates=False), n_ties
+
+    def _resolve_marginal_gpu_ids(self):
+        """CUDA device indices for sharded marginal guide sampling.
+
+        ``marginal_gpus`` interpretations:
+          * ``None`` / ``0`` / ``""``: use ``Evaluator.device`` only
+          * positive ``int`` ``N``: ``cuda:0 .. cuda:N-1``
+          * ``"0,1"``: explicit ids
+        """
+        raw = getattr(self, "marginal_gpus", None)
+
+        def _from_evaluator_device():
+            if isinstance(self.device, str) and self.device.startswith("cuda"):
+                parts = self.device.split(":")
+                return [int(parts[1]) if len(parts) > 1 else 0]
+            return [0] if torch.cuda.is_available() else []
+
+        if raw is None or raw == "" or raw == 0:
+            return _from_evaluator_device()
+        if isinstance(raw, int):
+            return list(range(int(raw))) if int(raw) > 0 else _from_evaluator_device()
+        if isinstance(raw, str):
+            raw = raw.strip()
+            if raw.isdigit():
+                n = int(raw)
+                return list(range(n)) if n > 0 else _from_evaluator_device()
+            return [int(x.strip()) for x in raw.split(",") if x.strip() != ""]
+        return [int(x) for x in raw]
+
+    def _marginal_posterior_entropy_on_device(
+        self,
+        flow_model,
+        designs,
+        context,
+        subset_ids,
+        subset_idx,
+        *,
+        device,
+        design_offset=0,
+    ):
+        """Batched guide.sample + k-NN for designs already placed on ``device``.
+
+        ``context`` has shape (M, n_designs, ctx_dim) on ``device``.
+        Returns (out_dict, n_dropped, n_total, n_degenerate, n_ties).
+        """
+        from concurrent.futures import ThreadPoolExecutor
+
+        n_designs = designs.shape[0]
+        M = self.marginal_outer_y
+        K = self.marginal_inner_samples
+        k = self.marginal_knn_k
+        budget = int(self.marginal_max_guide_batch)
+        # Auto design chunk: keep room for a healthy K_block (~min(K, 2000)).
+        if self.marginal_design_chunk_size in (None, 0):
+            k_pref = max(1, min(K, 2000))
+            chunk_size = max(1, min(n_designs, budget // max(M * k_pref, 1)))
+        else:
+            chunk_size = max(1, min(int(self.marginal_design_chunk_size), n_designs))
+        n_chunks = (n_designs + chunk_size - 1) // chunk_size
+        n_workers = self.marginal_knn_workers
+
+        out = {sid: np.zeros(n_designs) for sid in subset_ids}
+        n_dropped = n_total = n_degenerate = n_ties = 0
+
+        if self.verbose:
+            # Preview k_block for the (possibly full) chunk size.
+            n_ctx_prev = M * chunk_size
+            k_block_prev = max(1, min(K, budget // max(n_ctx_prev, 1)))
+            print(
+                f"    Marginal posterior entropy [{device}]: {n_designs} designs "
+                f"(offset {design_offset}), M={M}, K={K}, "
+                f"design_chunk={chunk_size} ({n_chunks} chunk(s)), "
+                f"K_block≤{k_block_prev} (budget={budget}), "
+                f"knn_workers={n_workers}"
+            )
+
+        with torch.inference_mode():
+            for start, end in self._marginal_design_chunks(
+                n_designs, chunk_size, n_chunks
+            ):
+                n_chunk = end - start
+                ctx_flat = context[:, start:end, :].reshape(M * n_chunk, -1)
+                n_ctx = int(ctx_flat.shape[0])
+                k_block = max(1, min(K, budget // max(n_ctx, 1)))
+
+                coords_parts = []
+                valid_parts = []
+                n_k_blocks = (K + k_block - 1) // k_block
+                t_design0 = time.time()
+                kb_time_sum = 0.0
+                with profile_section(self, "marginal guide.sample"):
+                    for i_kb, k0 in enumerate(range(0, K, k_block)):
+                        k_take = min(k_block, K - k0)
+                        if self.verbose:
+                            print(
+                                f"    Marginal posterior entropy [{device}]: "
+                                f"designs {design_offset + start + 1}-"
+                                f"{design_offset + end}/"
+                                f"{design_offset + n_designs} "
+                                f"K-block {i_kb + 1}/{n_k_blocks} "
+                                f"(K[{k0}:{k0 + k_take}], n_ctx={n_ctx}) ...",
+                                flush=True,
+                            )
+                        t_kb0 = time.time()
+                        samples = flow_model(ctx_flat).sample((k_take,))
+                        eval_device = torch.device(self.device)
+                        if samples.device != eval_device:
+                            samples = samples.to(eval_device)
+                        coords, valid = self._marginal_knn_coords_and_mask(samples)
+                        coords_parts.append(
+                            coords.reshape(k_take, M, n_chunk, -1).detach().cpu()
+                        )
+                        valid_parts.append(
+                            valid.reshape(k_take, M, n_chunk, -1).detach().cpu()
+                        )
+                        del samples, coords, valid
+                        if torch.cuda.is_available():
+                            torch.cuda.empty_cache()
+                        if self.verbose:
+                            dt_kb = time.time() - t_kb0
+                            kb_time_sum += dt_kb
+                            done = i_kb + 1
+                            mean_kb = kb_time_sum / done
+                            rem_kb = n_k_blocks - done
+                            n_chunks_left_after = (
+                                n_designs - end + chunk_size - 1
+                            ) // chunk_size
+                            eta_s = mean_kb * (
+                                rem_kb + n_chunks_left_after * n_k_blocks
+                            )
+                            n_draws = max(k_take * n_ctx, 1)
+                            print(
+                                f"    Marginal posterior entropy [{device}]: "
+                                f"K-block {done}/{n_k_blocks} took {dt_kb:.1f}s "
+                                f"(~{dt_kb / n_draws * 1000:.2f} ms/draw, "
+                                f"avg {mean_kb:.1f}s/block); "
+                                f"shard ETA ~{eta_s / 60:.1f} min",
+                                flush=True,
+                            )
+
+                with profile_section(self, "marginal coords+mask"):
+                    # Already transformed per K-block; just concatenate on CPU.
+                    inner_np = torch.cat(coords_parts, dim=0).numpy()
+                    valid_np = torch.cat(valid_parts, dim=0).numpy()
+                del coords_parts, valid_parts
+
+                if self.verbose:
+                    print(
+                        f"    Marginal posterior entropy [{device}]: "
+                        f"designs {design_offset + start + 1}-"
+                        f"{design_offset + end} done in "
+                        f"{time.time() - t_design0:.1f}s "
+                        f"(K_block={k_block}, n_ctx={n_ctx})",
+                        flush=True,
+                    )
+
+                with profile_section(self, "marginal knn"):
+                    for sid, idx in zip(subset_ids, subset_idx):
+                        # Keep a trailing |S| axis even when |S|==1 (np.take on a
+                        # scalar index would squeeze it away).
+                        idx_arr = np.atleast_1d(np.asarray(idx, dtype=int))
+                        cols = np.take(inner_np, idx_arr, axis=-1)
+                        row_ok = np.take(valid_np, idx_arr, axis=-1).all(axis=-1)
+                        jobs = []
+                        job_meta = []
+                        for j_local in range(n_chunk):
+                            for m in range(M):
+                                rows = cols[row_ok[:, m, j_local], m, j_local, :]
+                                n_total += K
+                                n_dropped += K - rows.shape[0]
+                                jobs.append(rows)
+                                job_meta.append(j_local)
+
+                        if n_workers > 1 and len(jobs) > 1:
+                            with ThreadPoolExecutor(max_workers=n_workers) as pool:
+                                results = list(
+                                    pool.map(
+                                        lambda rows, kk=k: self._knn_entropy_rows(
+                                            rows, kk
+                                        ),
+                                        jobs,
+                                    )
+                                )
+                        else:
+                            results = [
+                                self._knn_entropy_rows(rows, k) for rows in jobs
+                            ]
+
+                        H_acc = {j: [] for j in range(n_chunk)}
+                        for j_local, (h, ties) in zip(job_meta, results):
+                            n_ties += ties
+                            if np.isnan(h):
+                                n_degenerate += 1
+                            H_acc[j_local].append(h)
+                        for j_local, hs in H_acc.items():
+                            out[sid][start + j_local] = (
+                                float(np.nanmean(hs))
+                                if not np.all(np.isnan(hs))
+                                else np.nan
+                            )
+
+        return out, n_dropped, n_total, n_degenerate, n_ties
 
     @profile_method
     def _marginal_posterior_entropy(self, flow_model, designs, subset_ids, subset_idx):
@@ -964,18 +1189,22 @@ class Evaluator:
         for each context, and estimates E_y[H(q(theta_S | y, d))] by applying k-NN
         to each outer ``y`` (on ``K`` inner samples) and averaging over ``M``.
 
-        Same estimator for every subset S, including S = all cosmo_params (full
-        joint); full-joint marginal EIG should then be comparable to joint nf_loss.
+        Guide sampling is batched across designs within each GPU shard
+        (``marginal_design_chunk_size``). With ``marginal_gpus`` > 1, designs are
+        sharded across GPUs and sampled concurrently. Per-(design, y) k-NN uses
+        ``marginal_knn_workers`` threads.
 
         Returns:
             dict {subset_id: np.ndarray of shape (n_designs,)} in bits.
         """
-        device_obj = torch.device(self.device)
-        designs = designs.to(device_obj)
+        from concurrent.futures import ThreadPoolExecutor
+
+        designs = designs.to(torch.device(self.device))
         n_designs = designs.shape[0]
         M = self.marginal_outer_y
-        K = self.marginal_inner_samples
-        k = self.marginal_knn_k
+        gpu_ids = self._resolve_marginal_gpu_ids()
+        if not gpu_ids:
+            gpu_ids = [None]  # CPU fallback
 
         # Outer y ~ p(y|d): context rows are [y, design], shape (M, n_designs, ctx_dim).
         with profile_section(self, "LikelihoodDataset (outer y)"):
@@ -986,63 +1215,97 @@ class Evaluator:
                 evaluation=False,
                 designs=designs,
             )[0]
-        context = context.to(device_obj)
+        context = context.to(torch.device(self.device))
 
-        out = {sid: np.zeros(n_designs) for sid in subset_ids}
-        n_dropped = 0
-        n_total = 0
-        n_degenerate = 0
-        n_ties = 0
-        with torch.inference_mode():
-            for j in self._marginal_design_indices(n_designs):
-                ctx_j = context[:, j, :]  # (M, ctx_dim)
-                coords, valid = self._marginal_knn_coords_and_mask(flow_model(ctx_j).sample((K,)))
-                inner_np = coords.detach().cpu().numpy()  # (K, M, n_params)
-                valid_np = valid.detach().cpu().numpy()  # (K, M, n_params)
-                if self.verbose and (
-                    j == 0 or (j + 1) % 20 == 0 or j == n_designs - 1
+        # Shard designs across GPUs.
+        if len(gpu_ids) == 1 or n_designs == 1:
+            shards = [(gpu_ids[0], 0, n_designs)]
+        else:
+            edges = np.linspace(0, n_designs, len(gpu_ids) + 1, dtype=int)
+            shards = [
+                (gpu_ids[i], int(edges[i]), int(edges[i + 1]))
+                for i in range(len(gpu_ids))
+                if edges[i + 1] > edges[i]
+            ]
+
+        if self.verbose and len(shards) > 1:
+            print(
+                f"    Marginal posterior entropy: sharding {n_designs} designs "
+                f"across GPUs {gpu_ids}"
+            )
+
+        if len(shards) == 1:
+            gpu_id, start, end = shards[0]
+            device = (
+                torch.device("cpu")
+                if gpu_id is None
+                else torch.device(f"cuda:{gpu_id}")
+            )
+            flow_d = flow_model.to(device)
+            out, n_dropped, n_total, n_degenerate, n_ties = (
+                self._marginal_posterior_entropy_on_device(
+                    flow_d,
+                    designs.to(device),
+                    context.to(device),
+                    subset_ids,
+                    subset_idx,
+                    device=device,
+                    design_offset=0,
+                )
+            )
+        else:
+            import copy
+
+            out = {sid: np.full(n_designs, np.nan) for sid in subset_ids}
+            n_dropped = n_total = n_degenerate = n_ties = 0
+
+            def _run_shard(shard):
+                gpu_id, start, end = shard
+                device = torch.device(f"cuda:{gpu_id}")
+                flow_d = copy.deepcopy(flow_model).to(device)
+                flow_d.eval()
+                return self._marginal_posterior_entropy_on_device(
+                    flow_d,
+                    designs[start:end].to(device),
+                    context[:, start:end, :].to(device),
+                    subset_ids,
+                    subset_idx,
+                    device=device,
+                    design_offset=start,
+                ), start, end
+
+            # One thread per GPU; each thread owns its cloned module + device.
+            with ThreadPoolExecutor(max_workers=len(shards)) as pool:
+                for (out_part, d, t, deg, ties), start, end in pool.map(
+                    _run_shard, shards
                 ):
-                    print(f"    Marginal posterior entropy: design {j + 1}/{n_designs}")
-                for sid, idx in zip(subset_ids, subset_idx):
-                    cols = inner_np[..., idx]  # (K, M, |S|)
-                    # Drop draws that fall outside the subset's own support; a
-                    # clamp here would stack them on one value and collapse k-NN.
-                    row_ok = valid_np[..., idx].all(axis=-1)  # (K, M)
-                    H_per_y = []
-                    for m in range(M):
-                        rows = cols[row_ok[:, m], m, :]
-                        n_total += K
-                        n_dropped += K - rows.shape[0]
-                        if rows.shape[0] <= k + 1:
-                            n_degenerate += 1
-                            H_per_y.append(np.nan)
-                            continue
-                        # Count ties here and warn once in aggregate below: this
-                        # runs n_designs * M times, so a per-call warning spams.
-                        n_ties += rows.shape[0] - len(np.unique(rows, axis=0))
-                        H_per_y.append(knn_entropy(rows, k=k, warn_duplicates=False))
-                    out[sid][j] = (
-                        float(np.nanmean(H_per_y)) if not np.all(np.isnan(H_per_y)) else np.nan
-                    )
+                    for sid in subset_ids:
+                        out[sid][start:end] = out_part[sid]
+                    n_dropped += d
+                    n_total += t
+                    n_degenerate += deg
+                    n_ties += ties
+            flow_model.to(self.device)
+
         if n_dropped:
             msg = (
                 f"  Marginal posterior entropy: dropped {n_dropped}/{n_total} "
                 f"({100.0 * n_dropped / n_total:.2f}%) out-of-support guide draws"
             )
             if n_degenerate:
-                msg += f"; {n_degenerate} (y, subset) estimates had too few valid draws -> NaN"
+                msg += (
+                    f"; {n_degenerate} (y, subset) estimates had too few "
+                    f"valid draws -> NaN"
+                )
             print(msg)
         if n_ties:
-            # Expected at ~0.05%: Bijector._icdf_lookup clamps u to
-            # [cdf_eps, 1-cdf_eps], so draws past ~3.09 sigma (cdf_eps=1e-3) all
-            # map onto the CDF grid endpoint. That value is inside the prior
-            # support, so the valid-mask above cannot catch it. A rate much above
-            # ~0.1% means something else is stacking samples onto one value.
             print(
                 f"  Marginal posterior entropy: dropped {n_ties}/{n_total} "
                 f"({100.0 * n_ties / n_total:.3f}%) duplicate rows (icdf-clamp ties)"
             )
         del context
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
         return out
 
     @profile_method
@@ -2088,6 +2351,33 @@ if __name__ == "__main__":
     parser.add_argument('--marginal-outer-y', type=int, default=8, help='Outer y ~ p(y|d) samples per design for marginal posterior entropy (default: 8)')
     parser.add_argument('--marginal-inner-samples', type=int, default=200, help='Guide samples per outer y for marginal posterior entropy (default: 200)')
     parser.add_argument('--marginal-knn-k', type=int, default=3, help='Neighbor rank k for the k-NN entropy estimator (default: 3)')
+    parser.add_argument(
+        '--marginal-design-chunk-size',
+        type=int,
+        default=None,
+        help='Designs per batched guide.sample for marginal posterior entropy '
+        '(default: None = all designs in one call)',
+    )
+    parser.add_argument(
+        '--marginal-knn-workers',
+        type=int,
+        default=8,
+        help='Thread-pool workers for per-(design,y) k-NN entropy (0/1 = serial; default: 8)',
+    )
+    parser.add_argument(
+        '--marginal-gpus',
+        type=str,
+        default=None,
+        help='GPUs for sharded marginal guide.sample: int N (cuda:0..N-1) or "0,1". '
+        'Default: Evaluator --device only. Wall time scales ~1/N_gpus.',
+    )
+    parser.add_argument(
+        '--marginal-max-guide-batch',
+        type=int,
+        default=100_000,
+        help='Max K_block*M*n_design_chunk per guide.sample (default: 100000). '
+        'Lower if CUDA OOM; auto design/K chunking respects this budget.',
+    )
     parser.add_argument('--marginal', action='store_true', help='Run only the marginal EIG evaluation loop (and its per-subset plots), skipping the full joint EIG pipeline. Requires --marginal-eig-subsets (or marginal_eig_subsets in eval_args.yaml).')
     parser.add_argument('--step-diagnostics', action='store_true', help='Run intermediate-step diagnostics (posterior_steps and eig_designs_steps). Disabled by default.')
 
