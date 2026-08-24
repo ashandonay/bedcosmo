@@ -21,7 +21,7 @@ Example:
 
   python fit_eazy_weights_to_desi.py \\
     --healpix 23040 \\
-    --build-name empirical_prior \\
+    --build-name empirical_prior/eazy12 \\
     --plot-only
 """
 

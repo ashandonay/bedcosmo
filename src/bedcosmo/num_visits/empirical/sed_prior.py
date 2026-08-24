@@ -86,7 +86,7 @@ def resolve_prior_dir(
 
     Contains ``sed_prior_kde_native.joblib`` and, when ``prior_source=flow``, the
     ``sed_prior_flow_*.pt`` files. ``null`` / omitted → default scratch build
-    (``$SCRATCH/bedcosmo/num_visits/empirical_prior``).
+    (``$SCRATCH/bedcosmo/num_visits/empirical_prior/eazy12``).
     """
     raw = prior_dir
     if _is_null_path(raw) and prior_args:

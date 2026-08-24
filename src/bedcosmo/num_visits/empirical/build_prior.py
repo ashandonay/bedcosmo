@@ -2,9 +2,9 @@
 """
 End-to-end empirical SED prior build: DESI download → NNLS fits → combine → KDE.
 
-Default output tree (``--build-name empirical_prior``)::
+Default output tree (``--build-name empirical_prior/eazy12``)::
 
-    $SCRATCH/bedcosmo/num_visits/empirical_prior/
+    $SCRATCH/bedcosmo/num_visits/empirical_prior/eazy12/
       healpix/hp23040/desi_eazy_empirical_weights.csv
       healpix/hp27257/...
       desi_eazy_empirical_weights.csv   # combined
@@ -24,7 +24,7 @@ Example::
   python -m bedcosmo.num_visits.empirical.build_prior --build-name empirical_prior_test --n-max 600
   python -m bedcosmo.num_visits.empirical.build_prior --healpix 23040 --skip-kde
   python -m bedcosmo.num_visits.empirical.build_prior \\
-    --build-name empirical_prior_eazy6 --template-param templates/eazy_v1.0.spectra.param
+    --build-name empirical_prior/eazy6 --template-param templates/eazy_v1.0.spectra.param
 """
 
 from __future__ import annotations
