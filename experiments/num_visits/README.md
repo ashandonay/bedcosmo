@@ -210,7 +210,7 @@ empirical:
 
 For `empirical`, the prior is selected by `prior_source` in [`prior_args_empirical.yaml`](prior_args_empirical.yaml) — a strict enum `{kde, flow}` that **defaults to `flow`**. Both are fit to the DESI/EAZY template weights by `src/bedcosmo/num_visits/empirical/`:
 
-- **`flow` (default)** — a trained normalizing flow over the ILR features. Empirical runs **require** the trained flow checkpoints (`sed_prior_flow_native.pt`, plus `sed_prior_flow_gaussianized.pt` when `transform_input=True`) in `$SCRATCH/bedcosmo/num_visits/empirical_prior/`; they are snapshotted into each run's `artifacts/empirical/`. Train them (~10 min, CPU, both at once) with `./scripts/train_prior_flow.sh --space both`.
+- **`flow` (default)** — a trained normalizing flow over the ILR features. Empirical runs **require** the trained flow checkpoints (`sed_prior_flow_native.pt`, plus `sed_prior_flow_gaussianized.pt` when `transform_input=True`) in `$SCRATCH/bedcosmo/num_visits/empirical_prior/eazy12/`; they are snapshotted into each run's `artifacts/empirical/`. Train them (~10 min, CPU, both at once) with `./scripts/train_prior_flow.sh --space both`.
 - **`kde`** — a masked KDE (`sed_prior_kde_native.joblib`); the legacy/fallback path.
 
 Either way, training draws from a GPU-resident pool of prior samples (drawn from the flow, or KDE samples) and integrates the template SEDs on the GPU. See [`empirical/README.md`](../../src/bedcosmo/num_visits/empirical/README.md).

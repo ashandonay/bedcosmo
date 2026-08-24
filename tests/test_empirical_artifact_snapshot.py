@@ -23,7 +23,7 @@ def test_resolve_prior_dir_null_uses_default(
 ) -> None:
     scratch = tmp_path / "scratch"
     monkeypatch.setenv("SCRATCH", str(scratch))
-    default = scratch / "bedcosmo" / "num_visits" / "empirical_prior"
+    default = scratch / "bedcosmo" / "num_visits" / "empirical_prior" / "eazy12"
     default.mkdir(parents=True)
 
     assert resolve_prior_dir({"prior_dir": None}) == default

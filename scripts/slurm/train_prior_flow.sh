@@ -4,7 +4,8 @@
 # Wraps `python -m bedcosmo.num_visits.empirical.prior_flow`. NSF training
 # is CPU-heavy, so we grab a full node and let torch use all its cores rather
 # than thrash a thread-capped login node. Writes sed_prior_flow_native.pt and
-# sed_prior_flow_gaussianized.pt beside the KDE ($SCRATCH/.../empirical_prior/).
+# sed_prior_flow_gaussianized.pt beside the KDE
+# ($SCRATCH/.../empirical_prior/eazy12/).
 #
 # Usage (all args after the script name pass through to the Python module):
 #   sbatch scripts/slurm/train_prior_flow.sh --space both --n 100000 --epochs 400

@@ -41,13 +41,13 @@ from bedcosmo.num_visits.empirical.fit_sed_prior_kde import (  # noqa: E402
     load_sed_prior_kde,
     sample_sed_prior,
 )
+from bedcosmo.num_visits.empirical.paths import get_prior_build_dir  # noqa: E402
 from bedcosmo.num_visits.empirical.simplex import ilr_basis  # noqa: E402
 
 LOG2 = math.log(2.0)
 BITS = 1.0 / LOG2
 GAUSS_C = 0.5 * math.log(2.0 * math.pi * math.e)  # per-direction Gaussian H offset
-PRIOR_DIR = "/pscratch/sd/a/ashandon/bedcosmo/num_visits/empirical_prior"
-DEFAULT_ARTIFACT = f"{PRIOR_DIR}/sed_prior_kde_clr_backup.joblib"
+DEFAULT_ARTIFACT = get_prior_build_dir() / "sed_prior_kde_clr_backup.joblib"
 
 
 def spectrum_and_cumH(cov: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -59,7 +59,7 @@ def spectrum_and_cumH(cov: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--artifact", default=DEFAULT_ARTIFACT, help="CLR build artifact")
+    ap.add_argument("--artifact", type=Path, default=DEFAULT_ARTIFACT, help="CLR build artifact")
     ap.add_argument("--n", type=int, default=20000)
     ap.add_argument("--out", default=str(plot_path("ilr_fix.png")))
     args = ap.parse_args()
