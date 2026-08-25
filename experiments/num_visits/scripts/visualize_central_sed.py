@@ -6,7 +6,7 @@ Uses NumVisits._observed_spectral_flux (same path as _central_magnitudes_from_di
 
 Default output (same tree as ``diagnostic_plots``)::
 
-  $SCRATCH/bedcosmo/num_visits/empirical_prior/diagnostics/central_sed/central_params_sed.png
+  $SCRATCH/bedcosmo/num_visits/empirical_prior/eazy12/diagnostics/central_sed/central_params_sed.png
 
 Example:
   python experiments/num_visits/scripts/visualize_central_sed.py
@@ -73,7 +73,8 @@ def main():
         type=Path,
         default=None,
         help=(
-            "Prior build directory (default: $SCRATCH/bedcosmo/num_visits/empirical_prior). "
+            "Prior build directory (default: "
+            "$SCRATCH/bedcosmo/num_visits/empirical_prior/eazy12). "
             "Used with --out default."
         ),
     )

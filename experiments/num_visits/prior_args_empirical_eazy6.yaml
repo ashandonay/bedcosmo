@@ -4,14 +4,14 @@
 #
 # Build:
 #   python -m bedcosmo.num_visits.empirical.build_prior \
-#     --build-name empirical_prior_eazy6 \
+#     --build-name empirical_prior/eazy6 \
 #     --template-param templates/eazy_v1.0.spectra.param
 #
 # Train / eval (override the default prior_args_empirical.yaml):
 #   ./submit.sh train num_visits empirical --prior-args-path prior_args_empirical_eazy6.yaml
 #
 # prior_dir points at the alternate scratch build (not the production 12-template tree).
-prior_dir: /pscratch/sd/a/ashandon/bedcosmo/num_visits/empirical_prior_eazy6
+prior_dir: $SCRATCH/bedcosmo/num_visits/empirical_prior/eazy6
 
 # Start with KDE until a prior flow is trained for this build.
 prior_source: kde

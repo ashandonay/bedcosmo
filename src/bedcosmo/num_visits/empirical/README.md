@@ -19,10 +19,10 @@ To generate the empirical prior data for BED training:
 python -m bedcosmo.num_visits.empirical.build_prior
 ```
 
-Default `--build-name empirical_prior` writes:
+Default `--build-name empirical_prior/eazy12` writes:
 
 ```text
-$SCRATCH/bedcosmo/num_visits/empirical_prior/
+$SCRATCH/bedcosmo/num_visits/empirical_prior/eazy12/
   healpix/hp23040/desi_eazy_empirical_weights.csv
   healpix/hp27257/...
   desi_eazy_empirical_weights.csv
@@ -44,7 +44,7 @@ Existing outputs are skipped unless `--force-desi` or `--force-fit` is set.
 ```bash
 # KDE only (fits + combine already done)
 python -m bedcosmo.num_visits.empirical.build_prior \
-  --build-name empirical_prior \
+  --build-name empirical_prior/eazy12 \
   --skip-desi --skip-fit --skip-combine
 
 # Single patch, no KDE
@@ -56,7 +56,7 @@ python -m bedcosmo.num_visits.empirical.build_prior --force-fit
 
 # Classic 6-template EAZY bank (separate scratch tree; 7D ILR prior)
 python -m bedcosmo.num_visits.empirical.build_prior \
-  --build-name empirical_prior_eazy6 \
+  --build-name empirical_prior/eazy6 \
   --template-param templates/eazy_v1.0.spectra.param
 ```
 
@@ -73,7 +73,7 @@ Production default (`prior_args_empirical.yaml`, 12 templates) is unchanged.
 
 | Flag | Default | Notes |
 |------|---------|--------|
-| `--build-name` | `empirical_prior` | Subdir under `num_visits/` |
+| `--build-name` | `empirical_prior/eazy12` | Relative path under `num_visits/` |
 | `--template-param` | `templates/fsps_full/fsps_QSF_12_v3.param` | Template-bank listing (`.param`); use `templates/eazy_v1.0.spectra.param` for classic 6. |
 | `--healpix` | 9 patches above | Override patch list |
 | `--desi-dir` | `$SCRATCH/bedcosmo/desi/tiny_dr1` | Local DESI tree root |
@@ -114,11 +114,12 @@ Production default (`prior_args_empirical.yaml`, 12 templates) is unchanged.
 |------|------|
 | EAZY templates | `eazy/` (auto-downloaded on first fit) |
 | DESI tiny DR1 | `desi/tiny_dr1/` |
-| **Production prior build** | `num_visits/empirical_prior/` |
-| Per-patch fits | `num_visits/empirical_prior/healpix/hp{HEALPIX}/` |
-| Combined weights | `num_visits/empirical_prior/desi_eazy_empirical_weights.csv` |
-| KDE artifact | `num_visits/empirical_prior/sed_prior_kde_native.joblib` |
-| gaussianized KDE (diagnostic) | `num_visits/empirical_prior/sed_prior_kde_gaussianized.joblib` |
+| Empirical-prior variants | `num_visits/empirical_prior/{eazy12,eazy6,allow_zwarn,no_unstable}/` |
+| **Production prior build** | `num_visits/empirical_prior/eazy12/` |
+| Per-patch fits | `num_visits/empirical_prior/eazy12/healpix/hp{HEALPIX}/` |
+| Combined weights | `num_visits/empirical_prior/eazy12/desi_eazy_empirical_weights.csv` |
+| KDE artifact | `num_visits/empirical_prior/eazy12/sed_prior_kde_native.joblib` |
+| gaussianized KDE (diagnostic) | `num_visits/empirical_prior/eazy12/sed_prior_kde_gaussianized.joblib` |
 | Training config | [`prior_args_empirical.yaml`](../../../../experiments/num_visits/prior_args_empirical.yaml) (`prior_dir: null` → default scratch build at snapshot) |
 
 **Notebook:** `experiments/num_visits/notebooks/empircal_prior.ipynb`
@@ -216,12 +217,12 @@ with DESI \(z\). Minimize weighted \(\chi^2\) on unmasked pixels (NNLS: \(c_k \g
 ```bash
 python -m bedcosmo.num_visits.empirical.fit_eazy_weights_to_desi \
   --healpix 23040 \
-  --build-name empirical_prior \
+  --build-name empirical_prior/eazy12 \
   --fit-method nnls \
   --z-min 0.01
 ```
 
-Output defaults to `$SCRATCH/bedcosmo/num_visits/empirical_prior/healpix/hp23040/`. Omit `--n-max` to fit **all** passing candidates; use `--n-max 600` for quick tests.
+Output defaults to `$SCRATCH/bedcosmo/num_visits/empirical_prior/eazy12/healpix/hp23040/`. Omit `--n-max` to fit **all** passing candidates; use `--n-max 600` for quick tests.
 
 ### Multi-patch batch (fits only)
 
@@ -233,7 +234,7 @@ Prefer `build_prior` for the full pipeline. For fits alone:
 
 | Env var | Default | Notes |
 |---------|---------|--------|
-| `BUILD_NAME` | `empirical_prior` | Under `$SCRATCH/bedcosmo/num_visits/` |
+| `BUILD_NAME` | `empirical_prior/eazy12` | Relative path under `$SCRATCH/bedcosmo/num_visits/` |
 | `N_MAX` | *(unset)* | If set, subsample per patch (e.g. `600`) |
 | `FORCE` | `0` | `FORCE=1` refits even if CSV exists |
 | `Z_MIN` | `0.01` | Redshift floor |
@@ -245,17 +246,17 @@ DESI and EAZY paths use Python defaults (`$SCRATCH/bedcosmo/desi/tiny_dr1`, etc.
 
 ```bash
 python -m bedcosmo.num_visits.empirical.combine_healpix_weights \
-  --build-name empirical_prior
+  --build-name empirical_prior/eazy12
 ```
 
 ### Compare patches
 
 ```bash
 python -m bedcosmo.num_visits.empirical.compare_healpix_prior_params \
-  --build-name empirical_prior
+  --build-name empirical_prior/eazy12
 ```
 
-Default output: `num_visits/empirical_prior/healpix_prior_comparison/`.
+Default output: `num_visits/empirical_prior/eazy12/healpix_prior_comparison/`.
 
 ### Fit outputs
 
@@ -272,7 +273,7 @@ Default output: `num_visits/empirical_prior/healpix_prior_comparison/`.
 
 ```bash
 python -m bedcosmo.num_visits.empirical.fit_eazy_weights_to_desi \
-  --plot-only --healpix 23040 --build-name empirical_prior \
+  --plot-only --healpix 23040 --build-name empirical_prior/eazy12 \
   --plot-n-examples 8 --plot-top-outliers 5
 ```
 
@@ -315,7 +316,7 @@ Normally run via `build_prior` (step 4). Standalone:
 
 ```bash
 python -m bedcosmo.num_visits.empirical.fit_sed_prior_kde \
-  --build-name empirical_prior
+  --build-name empirical_prior/eazy12
 ```
 
 Paths default from `paths.py` (`desi_eazy_empirical_weights.csv` and `sed_prior_kde_native.joblib` under the build directory). Requires `torch` (use `bedcosmo` env).
@@ -389,7 +390,7 @@ Reads the KDE from `get_prior_kde_path()` (override `--kde-path`) and writes bes
 (override `--out-dir`):
 
 ```text
-$SCRATCH/bedcosmo/num_visits/empirical_prior/
+$SCRATCH/bedcosmo/num_visits/empirical_prior/eazy12/
   sed_prior_flow_native.pt              sed_prior_flow_native_train.log
   sed_prior_flow_gaussianized.pt        sed_prior_flow_gaussianized_train.log
   prior_flow_training_native.png        prior_flow_training_gaussianized.png
@@ -437,7 +438,7 @@ Not part of the build pipeline. All subcommands take a **prior build directory**
 
 ```bash
 python -m bedcosmo.num_visits.empirical.diagnostic_plots all \
-  --prior-dir $SCRATCH/bedcosmo/num_visits/empirical_prior
+  --prior-dir $SCRATCH/bedcosmo/num_visits/empirical_prior/eazy12
 ```
 
 | Subcommand | Output subdir | What it checks |
@@ -454,7 +455,7 @@ Individual runs:
 
 ```bash
 python -m bedcosmo.num_visits.empirical.diagnostic_plots clr-triangle \
-  --prior-dir $SCRATCH/bedcosmo/num_visits/empirical_prior --also-training
+  --prior-dir $SCRATCH/bedcosmo/num_visits/empirical_prior/eazy12 --also-training
 ```
 
 ---
@@ -464,16 +465,16 @@ python -m bedcosmo.num_visits.empirical.diagnostic_plots clr-triangle \
 ### Config
 
 - **Parameters:** taken at runtime from the KDE artifact’s `feature_names` (not hardcoded from `models.yaml`). Production 12-template builds use `f1`…`f11`, `log_c_scale`, `z`; a 6-template prior_args points at a K=6 artifact and gets `f1`…`f5`, `log_c_scale`, `z` automatically.
-- **Prior build dir:** [`prior_args_empirical.yaml`](../../../../experiments/num_visits/prior_args_empirical.yaml). Set `prior_dir: null` to use `$SCRATCH/bedcosmo/num_visits/empirical_prior`. That directory holds `sed_prior_kde_native.joblib` and (for `prior_source: flow`) the `sed_prior_flow_*.pt` files. Trained runs load the frozen copies from `artifacts/empirical/`.
+- **Prior build dir:** [`prior_args_empirical.yaml`](../../../../experiments/num_visits/prior_args_empirical.yaml). Set `prior_dir: null` to use `$SCRATCH/bedcosmo/num_visits/empirical_prior/eazy12`. That directory holds `sed_prior_kde_native.joblib` and (for `prior_source: flow`) the `sed_prior_flow_*.pt` files. Trained runs load the frozen copies from `artifacts/empirical/`.
 
 ```yaml
-prior_dir: null            # null = default scratch empirical_prior build
+prior_dir: null            # null = default scratch empirical_prior/eazy12 build
 template_dir: null         # defaults to $SCRATCH/bedcosmo/eazy/
 prior_source: flow         # {flow (default), kde}; flow needs sed_prior_flow_*.pt in prior_dir
 ```
 
 For the classic 6-template bank use [`prior_args_empirical_eazy6.yaml`](../../../../experiments/num_visits/prior_args_empirical_eazy6.yaml)
-(`prior_dir` → `empirical_prior_eazy6`, `template_param: templates/eazy_v1.0.spectra.param`,
+(`prior_dir` → `empirical_prior/eazy6`, `template_param: templates/eazy_v1.0.spectra.param`,
 `prior_source: kde` until a flow is trained) with:
 
 ```bash
@@ -502,7 +503,7 @@ For empirical runs, **`param_bijector` is loaded from the KDE artifact** (`build
 
 ```bash
 python -m bedcosmo.num_visits.empirical.diagnose_transform_input \
-  --kde-path $SCRATCH/bedcosmo/num_visits/empirical_prior/sed_prior_kde_native.joblib
+  --kde-path $SCRATCH/bedcosmo/num_visits/empirical_prior/eazy12/sed_prior_kde_native.joblib
 ```
 
 Writes physical \((a_k, \log s, z)\) and post-transform Gaussian triangles.
@@ -538,7 +539,7 @@ Legacy layouts (`desi_eazy_hp*` at scratch root, `desi_eazy_empirical_prior_full
 | Step | Command / setting |
 |------|-------------------|
 | **Full build** | `python -m bedcosmo.num_visits.empirical.build_prior` |
-| Build name | `empirical_prior` (under `num_visits/`) |
+| Build name | `empirical_prior/eazy12` (under `num_visits/`) |
 | Fit | **NNLS**, **L1** norm, **`z_min=0.01`**, all candidates (no `--n-max`) |
 | KDE | **ILR**, **smooth**, \(\varepsilon=10^{-5}\), bandwidth **0.3** |
 | NF bijector | **`gaussianizer_state` in KDE artifact** (not rebuilt at train/eval) |
@@ -547,7 +548,7 @@ Legacy layouts (`desi_eazy_hp*` at scratch root, `desi_eazy_empirical_prior_full
 | Validate flow | `python -m bedcosmo.num_visits.empirical.validate_prior_flow --threads 8` |
 | Training | `prior_dir: null` at snapshot; runtime uses `artifacts/empirical/` |
 | Fit diagnostics | `./run_healpix_diagnostic_plots.sh` |
-| KDE diagnostics | `diagnostic_plots all --prior-dir .../empirical_prior` |
+| KDE diagnostics | `diagnostic_plots all --prior-dir .../empirical_prior/eazy12` |
 
 ---
 

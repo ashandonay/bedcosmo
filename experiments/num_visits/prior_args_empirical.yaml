@@ -3,7 +3,8 @@
 # Rebuild: fit_sed_prior_kde.py on desi_eazy_empirical_weights.csv
 #
 # prior_dir: build directory containing sed_prior_kde_native.joblib and (for prior_source=flow)
-# the sed_prior_flow_*.pt files. null = default $SCRATCH/bedcosmo/num_visits/empirical_prior.
+# the sed_prior_flow_*.pt files. null = default
+# $SCRATCH/bedcosmo/num_visits/empirical_prior/eazy12.
 # At runtime, trained runs load from artifacts/empirical/ instead.
 prior_dir: null
 

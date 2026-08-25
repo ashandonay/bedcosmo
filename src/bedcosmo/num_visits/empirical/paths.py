@@ -10,7 +10,14 @@ DEFAULT_SPECPROD = "iron"
 DEFAULT_SURVEY = "main"
 DEFAULT_PROGRAM = "dark"
 NUM_VISITS_EXPERIMENT = "num_visits"
-DEFAULT_EMPIRICAL_PRIOR_DIR = "empirical_prior"
+EMPIRICAL_PRIOR_ROOT_DIR = "empirical_prior"
+DEFAULT_EMPIRICAL_PRIOR_VARIANT = "eazy12"
+# Build names are paths relative to the num_visits scratch root. Keeping the
+# variant in the build name lets existing --build-name callers work with the
+# grouped on-disk layout without special-casing path construction.
+DEFAULT_EMPIRICAL_PRIOR_DIR = (
+    f"{EMPIRICAL_PRIOR_ROOT_DIR}/{DEFAULT_EMPIRICAL_PRIOR_VARIANT}"
+)
 SED_PRIOR_KDE_NATIVE_FILENAME = "sed_prior_kde_native.joblib"
 SED_PRIOR_KDE_GAUSSIANIZED_FILENAME = "sed_prior_kde_gaussianized.joblib"
 ZWARN_UNSTABLE_BIT = 2048
@@ -82,7 +89,7 @@ def get_template_dir() -> Path:
 
 
 def get_prior_build_dir(name: str = DEFAULT_EMPIRICAL_PRIOR_DIR) -> Path:
-    """Prior build root: combined CSV, KDE, and per-HEALPix fit subdirs."""
+    """Prior build root, including its variant below ``empirical_prior/``."""
     return get_num_visits_scratch() / name
 
 
