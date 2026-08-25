@@ -97,7 +97,6 @@ if [ -d "$CUBLAS_LIB" ]; then
 fi
 
 # Load NERSC CUDA and NCCL modules AFTER conda activation
-module load nccl/2.21.5 # NERSC NCCL for Slingshot
 export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
 export NCCL_TIMEOUT=1800
 export NCCL_NET_GDR_LEVEL=PHB # tells NCCL to use GPUdirect when on the same PCI bus
