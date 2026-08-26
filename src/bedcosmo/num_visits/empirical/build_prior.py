@@ -8,6 +8,7 @@ Default output tree (``--build-name empirical_prior/eazy12``)::
       healpix/hp23040/desi_eazy_empirical_weights.csv
       healpix/hp27257/...
       desi_eazy_empirical_weights.csv   # combined
+      build_provenance.json             # fit/template/KDE build settings
       sed_prior_kde_native.joblib
       sed_prior_kde_gaussianized.joblib
       sed_prior_kde_native.json
@@ -39,6 +40,7 @@ from pathlib import Path
 from .combine_healpix_weights import combine_healpix_weights
 from .desi_data import ensure_desi_healpix
 from .paths import (
+    BUILD_PROVENANCE_FILENAME,
     DEFAULT_EMPIRICAL_PRIOR_DIR,
     DEFAULT_HEALPIX,
     ZWARN_UNSTABLE_BIT,
@@ -49,7 +51,12 @@ from .paths import (
     get_prior_weights_csv,
     resolve_desi_dir,
 )
-from .templates import DEFAULT_TEMPLATE_PARAM_12D
+from .provenance import write_provenance
+from .templates import (
+    DEFAULT_TEMPLATE_NORM_MAX_AA,
+    DEFAULT_TEMPLATE_NORM_MIN_AA,
+    DEFAULT_TEMPLATE_PARAM_12D,
+)
 
 DEFAULT_MAX_CHI2_DOF = 1.2
 DEFAULT_Z_MIN = 0.01
@@ -136,8 +143,16 @@ def build_prior(
     n_max: int | None = None,
     seed: int = 7,
     z_min: float = DEFAULT_Z_MIN,
+    z_max: float | None = None,
     fit_method: str = "nnls",
+    coeff_norm: str = "l1",
     template_param: str = DEFAULT_TEMPLATE_PARAM_12D,
+    norm_min: float = DEFAULT_TEMPLATE_NORM_MIN_AA,
+    norm_max: float = DEFAULT_TEMPLATE_NORM_MAX_AA,
+    wave_obs_min: float | None = None,
+    wave_obs_max: float | None = None,
+    min_good_pixels: int = 200,
+    target_spectype: str = "GALAXY",
     skip_desi: bool = False,
     skip_fit: bool = False,
     skip_combine: bool = False,
@@ -154,15 +169,60 @@ def build_prior(
     Returns paths to the prior build directory, combined CSV, and KDE artifact.
     Console output is also written to ``<prior_dir>/build.log``.
     """
+    if norm_min >= norm_max:
+        raise ValueError(f"norm_min must be < norm_max, got {norm_min:g} >= {norm_max:g}")
+    if min_good_pixels <= 0:
+        raise ValueError(f"min_good_pixels must be positive, got {min_good_pixels}")
     desi_dir = resolve_desi_dir(desi_dir)
     prior_dir = get_prior_build_dir(build_name)
     prior_dir.mkdir(parents=True, exist_ok=True)
     weights_csv = get_prior_weights_csv(build_name)
     kde_path = get_prior_kde_path(build_name)
     log_path = prior_dir / "build.log"
-
     fit_python = sys.executable
     kde_py = resolve_kde_python(kde_python)
+
+    provenance_path = prior_dir / BUILD_PROVENANCE_FILENAME
+    write_provenance(
+        provenance_path,
+        {
+            "kind": "empirical_sed_prior_build",
+            "build_name": build_name,
+            "template": {
+                "template_param": template_param,
+                "normalization": {
+                    "method": "integral",
+                    "wave_min_aa": float(norm_min),
+                    "wave_max_aa": float(norm_max),
+                },
+            },
+            "fit": {
+                "fit_method": fit_method,
+                "coeff_norm": coeff_norm,
+                "wave_obs_min_aa": wave_obs_min,
+                "wave_obs_max_aa": wave_obs_max,
+                "min_good_pixels": int(min_good_pixels),
+            },
+            "selection": {
+                "healpix": [int(hp) for hp in healpix],
+                "target_spectype": target_spectype,
+                "z_min": z_min,
+                "z_max": z_max,
+                "allow_nonzero_zwarn": bool(allow_nonzero_zwarn),
+                "zwarn_forbid_mask": zwarn_forbid_mask,
+                "n_max_per_healpix": n_max,
+                "seed": int(seed),
+            },
+            "quality": {"max_chi2_dof": max_chi2_dof},
+            "inputs": {"desi_dir": desi_dir},
+            "kde_request": {
+                "sample": int(kde_sample),
+                "requested_python": kde_python,
+                "resolved_python": kde_py,
+            },
+            "fit_python": fit_python,
+        },
+    )
 
     orig_out, orig_err = sys.stdout, sys.stderr
     with open(log_path, "w", encoding="utf-8") as log_file:
@@ -182,8 +242,16 @@ def build_prior(
                 n_max=n_max,
                 seed=seed,
                 z_min=z_min,
+                z_max=z_max,
                 fit_method=fit_method,
+                coeff_norm=coeff_norm,
                 template_param=template_param,
+                norm_min=norm_min,
+                norm_max=norm_max,
+                wave_obs_min=wave_obs_min,
+                wave_obs_max=wave_obs_max,
+                min_good_pixels=min_good_pixels,
+                target_spectype=target_spectype,
                 skip_desi=skip_desi,
                 skip_fit=skip_fit,
                 skip_combine=skip_combine,
@@ -204,6 +272,7 @@ def build_prior(
         "weights_csv": weights_csv,
         "kde_path": kde_path,
         "build_log": log_path,
+        "build_provenance": provenance_path,
     }
 
 
@@ -220,8 +289,16 @@ def _build_prior_body(
     n_max: int | None,
     seed: int,
     z_min: float,
+    z_max: float | None,
     fit_method: str,
+    coeff_norm: str,
     template_param: str,
+    norm_min: float,
+    norm_max: float,
+    wave_obs_min: float | None,
+    wave_obs_max: float | None,
+    min_good_pixels: int,
+    target_spectype: str,
     skip_desi: bool,
     skip_fit: bool,
     skip_combine: bool,
@@ -269,6 +346,16 @@ def _build_prior_body(
                 str(template_param),
                 "--fit-method",
                 fit_method,
+                "--coeff-norm",
+                coeff_norm,
+                "--norm-min",
+                str(norm_min),
+                "--norm-max",
+                str(norm_max),
+                "--min-good-pixels",
+                str(min_good_pixels),
+                "--target-spectype",
+                target_spectype,
                 "--z-min",
                 str(z_min),
                 "--seed",
@@ -283,6 +370,12 @@ def _build_prior_body(
             ]
             if n_max is not None:
                 cmd.extend(["--n-max", str(n_max)])
+            if z_max is not None:
+                cmd.extend(["--z-max", str(z_max)])
+            if wave_obs_min is not None:
+                cmd.extend(["--wave-obs-min", str(wave_obs_min)])
+            if wave_obs_max is not None:
+                cmd.extend(["--wave-obs-max", str(wave_obs_max)])
             if zwarn_forbid_mask is not None:
                 cmd.extend(["--zwarn-forbid-mask", str(zwarn_forbid_mask)])
             elif allow_nonzero_zwarn:
@@ -312,6 +405,8 @@ def _build_prior_body(
             str(weights_csv),
             "--out",
             str(kde_path),
+            "--build-provenance",
+            str(prior_dir / BUILD_PROVENANCE_FILENAME),
             "--sample",
             str(kde_sample),
             "--seed",
@@ -368,7 +463,10 @@ def main() -> None:
     )
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--z-min", type=float, default=DEFAULT_Z_MIN)
+    parser.add_argument("--z-max", type=float, default=None)
+    parser.add_argument("--target-spectype", default="GALAXY")
     parser.add_argument("--fit-method", choices=("nnls", "wls"), default="nnls")
+    parser.add_argument("--coeff-norm", choices=("l1", "max"), default="l1")
     parser.add_argument(
         "--template-param",
         default=DEFAULT_TEMPLATE_PARAM_12D,
@@ -383,6 +481,11 @@ def main() -> None:
         default=DEFAULT_MAX_CHI2_DOF,
         help="Quality cut used in fits and KDE training table.",
     )
+    parser.add_argument("--norm-min", type=float, default=DEFAULT_TEMPLATE_NORM_MIN_AA)
+    parser.add_argument("--norm-max", type=float, default=DEFAULT_TEMPLATE_NORM_MAX_AA)
+    parser.add_argument("--wave-obs-min", type=float, default=None)
+    parser.add_argument("--wave-obs-max", type=float, default=None)
+    parser.add_argument("--min-good-pixels", type=int, default=200)
     parser.add_argument(
         "--kde-sample",
         type=int,
@@ -437,8 +540,16 @@ def main() -> None:
         n_max=args.n_max,
         seed=args.seed,
         z_min=args.z_min,
+        z_max=args.z_max,
         fit_method=args.fit_method,
+        coeff_norm=args.coeff_norm,
         template_param=args.template_param,
+        norm_min=args.norm_min,
+        norm_max=args.norm_max,
+        wave_obs_min=args.wave_obs_min,
+        wave_obs_max=args.wave_obs_max,
+        min_good_pixels=args.min_good_pixels,
+        target_spectype=args.target_spectype,
         skip_desi=args.skip_desi,
         skip_fit=args.skip_fit,
         skip_combine=args.skip_combine,

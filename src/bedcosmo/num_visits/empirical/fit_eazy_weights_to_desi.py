@@ -30,9 +30,9 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
 from astropy.io import fits
 from scipy.ndimage import gaussian_filter1d
 from scipy.optimize import nnls
@@ -45,10 +45,13 @@ from .paths import (
     get_healpix_fit_dir,
     resolve_desi_dir,
 )
+from .provenance import fit_provenance_path, write_provenance
 from .templates import (
+    DEFAULT_TEMPLATE_DIR,
+    DEFAULT_TEMPLATE_NORM_MAX_AA,
+    DEFAULT_TEMPLATE_NORM_MIN_AA,
     DEFAULT_TEMPLATE_PARAM_12D,
     DEFAULT_TEMPLATE_PARAM_6D,
-    DEFAULT_TEMPLATE_DIR,
     load_eazy_templates,
 )
 
@@ -403,7 +406,10 @@ def _gaussian_smooth_segments(
         if not np.isfinite(dlam) or dlam <= 0:
             continue
         sigma_pix = max(sigma_aa / dlam, 0.8)
-        out[seg] = gaussian_filter1d(y[seg].astype(float), sigma=sigma_pix, mode="nearest")
+        # Reflect the measured segment at its boundary instead of repeating its
+        # final pixel. Repeating one noisy edge pixel can drive a broad
+        # continuum estimate through zero and create a false normalized spike.
+        out[seg] = gaussian_filter1d(y[seg].astype(float), sigma=sigma_pix, mode="reflect")
 
     return out
 
@@ -413,17 +419,67 @@ def _divide_by_continuum(
     flux: np.ndarray,
     good: np.ndarray,
     cont_sigma_aa: float,
-) -> tuple[np.ndarray, np.ndarray]:
+    ivar: np.ndarray | None = None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
     """
     Divide flux by a heavily smoothed continuum estimate (display only).
 
-    Returns normalized flux and the continuum array.
+    Returns normalized flux, the continuum array, and (when ``ivar`` is
+    supplied) the inverse variance of the smoothed continuum estimate.
     """
-    cont = _gaussian_smooth_segments(wave, flux, good, sigma_aa=cont_sigma_aa)
+    cont_ivar: np.ndarray | None = None
+    if ivar is None:
+        cont = _gaussian_smooth_segments(wave, flux, good, sigma_aa=cont_sigma_aa)
+    else:
+        cont = np.full_like(flux, np.nan, dtype=float)
+        cont_ivar = np.zeros_like(flux, dtype=float)
+        weights = np.asarray(ivar, dtype=float)
+        for seg in _iter_good_segments(wave, good):
+            if seg.size < 3:
+                continue
+            dlam = float(np.median(np.diff(wave[seg])))
+            if not np.isfinite(dlam) or dlam <= 0:
+                continue
+            sigma_pix = max(cont_sigma_aa / dlam, 0.8)
+            smooth_weight = gaussian_filter1d(weights[seg], sigma_pix, mode="constant", cval=0.0)
+            smooth_weighted_flux = gaussian_filter1d(
+                weights[seg] * flux[seg], sigma_pix, mode="constant", cval=0.0
+            )
+            segment_continuum = np.full(seg.size, np.nan, dtype=float)
+            np.divide(
+                smooth_weighted_flux,
+                smooth_weight,
+                out=segment_continuum,
+                where=smooth_weight > 0,
+            )
+            cont[seg] = segment_continuum
+
+            # For C = sum(K w f) / sum(K w), Var(C) is
+            # sum(K^2 w) / sum(K w)^2. A squared Gaussian kernel is a
+            # narrower Gaussian times its discrete L2 norm.
+            radius = int(4.0 * sigma_pix + 0.5)
+            offsets = np.arange(-radius, radius + 1, dtype=float)
+            kernel = np.exp(-0.5 * (offsets / sigma_pix) ** 2)
+            kernel /= kernel.sum()
+            kernel_l2 = float(np.sum(kernel**2))
+            smooth_squared_weight = kernel_l2 * gaussian_filter1d(
+                weights[seg],
+                sigma_pix / np.sqrt(2.0),
+                mode="constant",
+                cval=0.0,
+            )
+            segment_cont_ivar = np.zeros(seg.size, dtype=float)
+            np.divide(
+                smooth_weight**2,
+                smooth_squared_weight,
+                out=segment_cont_ivar,
+                where=smooth_squared_weight > 0,
+            )
+            cont_ivar[seg] = segment_cont_ivar
     normed = np.full_like(flux, np.nan, dtype=float)
     safe = good & np.isfinite(cont) & (cont > 0)
     normed[safe] = flux[safe] / cont[safe]
-    return normed, cont
+    return normed, cont, cont_ivar
 
 
 def _robust_ylim(
@@ -761,8 +817,12 @@ def save_example_spectrum_plots(
             )
 
             if normalize:
-                flux_plot, cont = _divide_by_continuum(
-                    wave, flux, good, cont_sigma_aa=cont_sigma_aa
+                flux_plot, cont, _ = _divide_by_continuum(
+                    wave,
+                    flux,
+                    good,
+                    cont_sigma_aa=cont_sigma_aa,
+                    ivar=ivar,
                 )
                 model_plot = np.full_like(model, np.nan, dtype=float)
                 safe = good & np.isfinite(cont) & (cont > 0) & np.isfinite(model)
@@ -819,11 +879,7 @@ def save_example_spectrum_plots(
             else:
                 ax_coeff.set_xlabel("Template index", fontsize=8)
 
-        smooth_note = (
-            f", smoothed ~{smooth_sigma_aa:.0f} A"
-            if smooth_sigma_aa > 0
-            else ""
-        )
+        smooth_note = f", smoothed ~{smooth_sigma_aa:.0f} A" if smooth_sigma_aa > 0 else ""
         top_margin = max(0.90, 0.97 - 0.012 * n)
         fig.tight_layout(rect=[0, 0, 1, top_margin], h_pad=0.6, w_pad=0.4)
         fig.suptitle(
@@ -1176,8 +1232,8 @@ def main() -> None:
         ),
     )
 
-    parser.add_argument("--norm-min", type=float, default=4000.0)
-    parser.add_argument("--norm-max", type=float, default=8000.0)
+    parser.add_argument("--norm-min", type=float, default=DEFAULT_TEMPLATE_NORM_MIN_AA)
+    parser.add_argument("--norm-max", type=float, default=DEFAULT_TEMPLATE_NORM_MAX_AA)
     parser.add_argument("--wave-obs-min", type=float, default=None)
     parser.add_argument("--wave-obs-max", type=float, default=None)
     parser.add_argument("--min-good-pixels", type=int, default=200)
@@ -1266,10 +1322,7 @@ def main() -> None:
         "--fit-method",
         choices=("nnls", "wls"),
         default="wls",
-        help=(
-            "wls: unconstrained WLS (default). "
-            "nnls: nonnegative coefficients."
-        ),
+        help=("wls: unconstrained WLS (default). nnls: nonnegative coefficients."),
     )
     parser.add_argument(
         "--coeff-norm",
@@ -1331,6 +1384,31 @@ def main() -> None:
                 "download data via desi_get_dr_subset.py."
             )
 
+    if args.norm_min >= args.norm_max:
+        raise ValueError(f"--norm-min must be < --norm-max, got {args.norm_min} >= {args.norm_max}")
+    if not args.plot_only:
+        write_provenance(
+            fit_provenance_path(outdir),
+            {
+                "kind": "desi_eazy_patch_fit",
+                "parameters": vars(args),
+                "template": {
+                    "template_param": args.template_param,
+                    "template_dir": EAZY_TEMPLATES_DIR,
+                    "normalization": {
+                        "method": "integral",
+                        "wave_min_aa": float(args.norm_min),
+                        "wave_max_aa": float(args.norm_max),
+                    },
+                },
+                "inputs": {
+                    "coadd_path": coadd_path,
+                    "redrock_path": redrock_path,
+                    "desi_dir": desi_dir,
+                },
+            },
+        )
+
     print(f"Using coadd:   {coadd_path}")
     print(f"Using redrock: {redrock_path}")
     print(f"Fit method:    {args.fit_method}")
@@ -1381,10 +1459,7 @@ def main() -> None:
 
     candidate_rows = np.where(select)[0]
 
-    candidate_rows = [
-        i for i in candidate_rows
-        if int(rr["TARGETID"][i]) in targetid_to_index
-    ]
+    candidate_rows = [i for i in candidate_rows if int(rr["TARGETID"][i]) in targetid_to_index]
 
     rng = np.random.default_rng(args.seed)
 
@@ -1484,28 +1559,20 @@ def main() -> None:
             }
 
             for k in range(n_templates):
-                row[f"a{k+1}"] = a[k]
-                row[f"c{k+1}"] = coeffs[k]
+                row[f"a{k + 1}"] = a[k]
+                row[f"c{k + 1}"] = coeffs[k]
 
             rows.append(row)
             all_a.append(a)
             all_coeffs.append(coeffs)
-            all_log_c_scale.append(
-                float(log_s) if np.isfinite(log_s) else np.nan
-            )
+            all_log_c_scale.append(float(log_s) if np.isfinite(log_s) else np.nan)
 
         df = pd.DataFrame(rows)
 
-        a_arr = (
-            np.vstack(all_a)
-            if all_a
-            else np.empty((0, n_templates), dtype=float)
-        )
+        a_arr = np.vstack(all_a) if all_a else np.empty((0, n_templates), dtype=float)
 
         coeffs_arr = (
-            np.vstack(all_coeffs)
-            if all_coeffs
-            else np.empty((0, n_templates), dtype=float)
+            np.vstack(all_coeffs) if all_coeffs else np.empty((0, n_templates), dtype=float)
         )
 
         log_c_scale_arr = (
@@ -1623,7 +1690,9 @@ def main() -> None:
             )
 
     n_success = int(df["success"].sum()) if len(df) else 0
-    n_prior = int(df["quality_pass"].sum()) if len(df) and "quality_pass" in df.columns else n_success
+    n_prior = (
+        int(df["quality_pass"].sum()) if len(df) and "quality_pass" in df.columns else n_success
+    )
 
     print("\nDone.")
     print(f"Attempted fits: {len(df)}")

@@ -33,7 +33,13 @@ $SCRATCH/bedcosmo/num_visits/empirical_prior/eazy12/
 
 Shared inputs (reused across builds): `$SCRATCH/bedcosmo/desi/tiny_dr1/`, `$SCRATCH/bedcosmo/eazy/`.
 
-`build_prior` also writes ``build.log`` into that directory (fit success counts, KDE messages, etc.).
+`build_prior` also writes ``build.log`` and ``build_provenance.json`` into that
+directory. The provenance records the template bank, template normalization
+interval, spectral fitting and selection cuts, input paths, and KDE request.
+Each HEALPix fit also has a ``fit_provenance.json`` beside its CSV. Combining
+patches rejects incompatible template/normalization settings, and the build
+provenance is embedded in the KDE artifact so NumVisits can validate and reuse
+the exact normalization at runtime.
 
 Default HEALPix patches: `23040 27257 27245 27259 27247 27256 27258 27344 26282`.
 
@@ -102,6 +108,8 @@ Production default (`prior_args_empirical.yaml`, 12 templates) is unchanged.
 | `run_healpix_fits.sh` | Batch fits only (no combine/KDE; see orchestrator instead) |
 | `run_healpix_diagnostic_plots.sh` | Per-patch `--plot-only` triangles + cross-patch comparison |
 | `compare_healpix_prior_params.py` | Cross-patch overlays of prior coordinates |
+| `discover_template_cohorts.py` | Exhaustive exact-N DESI refits and reduced-template cohort assignments |
+| `plot_template_subset_examples.py` | Observed/full/reduced DESI fit galleries with individual template contributions |
 | `diagnostic_plots.py` | Post-build KDE/NumVisits diagnostics |
 | `diagnose_transform_input.py` | NumVisits `transform_input` triangle diagnostics |
 | `sed_prior.py` | Empirical prior: GPU pool, sampling, log-density scoring, and flow attachment (`prior_source` {kde, flow}) |
@@ -527,6 +535,110 @@ Writes physical \((a_k, \log s, z)\) and post-transform Gaussian triangles.
 | Logits / raw weights / masked support | — | Removed |
 
 Use `diagnostic_plots sed-examples` for production-pipeline SED checks (KDE-sampled weights, not synthetic mixtures).
+
+To connect majority-T1 and majority-T7 subsets back to their actual DESI
+coadds, run:
+
+```bash
+python experiments/num_visits/scripts/plot_eazy_dominant_cohort_traits.py
+```
+
+This writes a physical-traits figure plus a TARGETID/HEALPix-level CSV. The
+measurements include narrow Dn4000 and local-continuum emission equivalent
+widths for [O II], Hβ, [O III], and Hα. `--min-anchor-weight` controls cohort
+purity (default: the dominant anchor must carry at least 50% of the fitted
+weight).
+
+### Discover fixed-size reduced-template cohorts
+
+To refit every quality-passing DESI spectrum with every size-N subset of the
+12-template bank:
+
+```bash
+python -m bedcosmo.num_visits.empirical.discover_template_cohorts \
+  --n-templates 3 \
+  --max-chi2-dof 1.2 \
+  --max-delta-chi2-dof 0.05 \
+  --max-color-rms 0.02 \
+  --min-component-weight 0.01 \
+  --min-cohort-size 100
+```
+
+The first run caches each spectrum's weighted 12-template sufficient
+statistics; searches with other values of N reuse that cache. Outputs under
+`<prior-dir>/reduced_template_cohorts/nN/` are:
+
+| File | Contents |
+|------|----------|
+| `subset_summary.csv` | Independent total coverage, strictly exclusive coverage, and fit-quality distribution summaries for every subset |
+| `subset_memberships.csv` | Every passing spectrum-subset pair, including that subset's reduced coefficients, scale, fit degradation, and LSST color RMS |
+| `spectrum_assignments.csv` | Optional disjoint view that selects the best passing subset per spectrum |
+| `subset_quality_matrices.npz` | Per-spectrum quality and pass mask for every candidate subset |
+| `subset_discovery.png` | Largest independent cohorts with distributions of DESI fit degradation, absolute reduced-fit quality, and disjoint-assignment redshift |
+| `discovery_parameters.json` | Exact thresholds and template settings |
+
+`--min-component-weight` prevents an N-template cohort from being padded with
+an unused template. Set it to zero to interpret N as "at most N"; leave it
+positive when discovering physically distinct exact-N cohorts.
+`exclusive_count` means spectra that pass exactly one candidate subset of the
+requested N; it is distinct from `assigned_count`, which selects the best
+passing subset even when several subsets pass.
+
+To inspect what the templates contribute for explicit subsets or the largest
+cohorts, generate example-fit galleries from a discovery directory:
+
+```bash
+python -m bedcosmo.num_visits.empirical.plot_template_subset_examples \
+  --cohort-dir experiments/num_visits/plots/reduced_template_cohorts/eazy12/n3 \
+  --templates T1+T7+T9 \
+  --top-sets 3
+```
+
+For comparisons at fixed redshift, pass `--z-min` and `--z-max`. Add
+`--distinct-across-subsets` when plotting several subsets to prevent the same
+DESI target from appearing in more than one gallery.
+
+Each gallery includes a representative member and one member rich in each
+selected template. It overlays the observed DESI coadd, full-basis fit,
+reduced fit, and each reduced template contribution; the side bars show the
+normalized reduced coefficients. For EAZY6, also pass
+`--build-name empirical_prior/eazy6 --template-param templates/eazy_v1.0.spectra.param`.
+By default, every trace is divided by the same continuum estimated from the
+DESI coadd with a 250-rest-Angstrom Gaussian and then smoothed by 8 observed
+Angstroms for display. Defining the broad continuum scale in the rest frame
+makes physical feature comparisons consistent across redshift while keeping
+the additive template decomposition intact. The continuum estimate is weighted
+by the DESI inverse variance so very noisy pixels cannot control the displayed
+normalization. The wavelength axis defaults to
+the observed frame. The continuum smoother reflects the
+measured spectrum at its endpoints rather than extending a potentially noisy
+last pixel. Values below 5% of the spectrum's 75th-percentile continuum or
+below continuum S/N 3 are masked to prevent unstable display division. Use
+`--no-continuum-normalize` for the
+original flux view; there, the DESI measurements default to independent
+inverse-variance-weighted 25-Angstrom bins with one-sigma error bars, and
+`--display-bin-aa 0` shows every original pixel. The fits and quoted chi-square
+values always use every original pixel, so none of these display transforms
+affect cohort membership or fit quality. `--wavelength-frame rest` switches
+the plotted coordinates, and `--shared-x` enables a shared union range.
+
+### Build a prior from one reduced-template cohort
+
+Turn the passing members of any discovered subset into a standalone empirical
+prior with:
+
+```bash
+python -m bedcosmo.num_visits.empirical.build_reduced_template_prior \
+  --cohort-dir experiments/num_visits/plots/reduced_template_cohorts/eazy12/n2 \
+  --templates T1+T7
+```
+
+This writes a reduced EAZY `.param` file, a compatible coefficient table,
+complete selection/template provenance, and the native and gaussianized KDEs.
+For T1+T7 the prior has three features: one ILR shape coordinate, `log_c_scale`,
+and `z`. Use `prior_args_empirical_eazy12_t1_t7.yaml` to load it in NumVisits.
+The prior is conditioned on passing the cohort discovery thresholds; it does
+not represent DESI galaxies that require other template directions.
 
 ### Older scratch trees
 

@@ -23,6 +23,8 @@ prior_source: flow
 
 template_dir: null
 template_param: "templates/fsps_full/fsps_QSF_12_v3.param"
+template_norm_min: 4000.0
+template_norm_max: 8000.0
 prior_pool_size: 65536
 prior_pool_seed: 7
 

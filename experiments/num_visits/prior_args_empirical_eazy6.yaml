@@ -18,6 +18,8 @@ prior_source: kde
 
 template_dir: null
 template_param: "templates/eazy_v1.0.spectra.param"
+template_norm_min: 4000.0
+template_norm_max: 8000.0
 prior_pool_size: 65536
 prior_pool_seed: 7
 

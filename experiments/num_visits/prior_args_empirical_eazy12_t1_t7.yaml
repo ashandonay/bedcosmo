@@ -1,0 +1,43 @@
+# Reduced EAZY12 T1+T7 empirical prior.
+# One ILR shape coordinate (T1:T7), plus log_c_scale and redshift.
+#
+# Build:
+#   python -m bedcosmo.num_visits.empirical.build_reduced_template_prior \
+#     --cohort-dir experiments/num_visits/plots/reduced_template_cohorts/eazy12/n2 \
+#     --templates T1+T7
+#
+# Train / eval:
+#   ./submit.sh train num_visits empirical \
+#     --prior-args-path prior_args_empirical_eazy12_t1_t7.yaml
+
+prior_dir: $SCRATCH/bedcosmo/num_visits/empirical_prior/eazy12-t1-t7
+prior_source: kde
+
+template_dir: null
+template_param: "templates/reduced/fsps_QSF_12_v3_t1-t7.param"
+template_norm_min: 4000.0
+template_norm_max: 8000.0
+prior_pool_size: 65536
+prior_pool_seed: 7
+
+parameters:
+  f1:
+    distribution:
+      type: empirical
+    plot:
+      lower: -4.0
+      upper: 4.0
+  log_c_scale:
+    distribution:
+      type: empirical
+    plot:
+      lower: 4.0
+      upper: 10.5
+  z:
+    distribution:
+      type: empirical
+    plot:
+      lower: 0.0
+      upper: 1.75
+
+constraints: {}

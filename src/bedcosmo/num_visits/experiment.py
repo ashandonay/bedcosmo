@@ -29,6 +29,7 @@ from bedcosmo.custom_dist import EmpiricalPrior
 from bedcosmo.num_visits.empirical.fit_sed_prior_kde import (
     mode_central_params_from_artifact,
 )
+from bedcosmo.num_visits.empirical.provenance import resolve_template_settings
 from bedcosmo.num_visits.empirical.sed_prior import (
     PRIOR_SOURCE_FLOW,
     EmpiricalSedPrior,
@@ -483,6 +484,8 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         prior_pool_seed=7,
         template_dir=None,
         template_param="templates/fsps_full/fsps_QSF_12_v3.param",
+        template_norm_min=None,
+        template_norm_max=None,
         prior_source="kde",
         **kwargs,
     ):
@@ -524,6 +527,8 @@ class NumVisits(BaseExperiment, CosmologyMixin):
                 prior_pool_seed=int(prior_pool_seed),
                 template_dir=template_dir,
                 template_param=template_param,
+                template_norm_min=template_norm_min,
+                template_norm_max=template_norm_max,
                 prior_source=str(prior_source),
                 latex_labels=kwargs.get("latex_labels"),
             )
@@ -626,6 +631,8 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         prior_pool_seed: int,
         template_dir: str | None,
         template_param: str,
+        template_norm_min: float | None,
+        template_norm_max: float | None,
         prior_source: str = "kde",
         latex_labels: list[str] | None = None,
     ) -> tuple[dict, list[str], list[str]]:
@@ -651,6 +658,15 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         self._prior_parameterization = self.sed_prior.parameterization
         self._n_eazy_templates = self.sed_prior.n_templates
         model_parameters = list(self.sed_prior.feature_names)
+
+        template_param, norm_min, norm_max = resolve_template_settings(
+            self.sed_prior.artifact,
+            configured_template_param=template_param,
+            configured_norm_min=template_norm_min,
+            configured_norm_max=template_norm_max,
+        )
+        self.template_norm_min = norm_min
+        self.template_norm_max = norm_max
 
         # Optional latex overrides in prior_args; otherwise f_i / log s / z.
         if latex_labels is not None:
@@ -695,6 +711,8 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         wave_rest, template_stack, _ = load_eazy_template_bank(
             template_param,
             template_dir=template_dir,
+            norm_min=norm_min,
+            norm_max=norm_max,
         )
         self._template_wave_rest = torch.tensor(wave_rest, device=self.device, dtype=torch.float64)
         self._template_flux = torch.tensor(template_stack, device=self.device, dtype=torch.float64)
@@ -722,7 +740,8 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         if self.global_rank == 0 and self.verbose:
             print(
                 f"  EAZY templates: {self._n_eazy_templates} on "
-                f"{self._template_wave_rest.shape[0]} rest-frame grid points"
+                f"{self._template_wave_rest.shape[0]} rest-frame grid points; "
+                f"normalization=[{norm_min:g}, {norm_max:g}] Angstrom"
             )
 
         return prior, latex_labels, model_parameters

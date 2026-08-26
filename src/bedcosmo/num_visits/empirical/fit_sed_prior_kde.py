@@ -71,7 +71,13 @@ from .fit_eazy_weights_to_desi import (
     prior_quality_mask,
     save_triangle_plot,
 )
-from .paths import DEFAULT_EMPIRICAL_PRIOR_DIR, get_prior_kde_path, get_prior_weights_csv
+from .paths import (
+    BUILD_PROVENANCE_FILENAME,
+    DEFAULT_EMPIRICAL_PRIOR_DIR,
+    get_prior_kde_path,
+    get_prior_weights_csv,
+)
+from .provenance import json_safe, read_provenance
 from .simplex import (
     PARAMETERIZATION_CLR,
     PARAMETERIZATION_ILR,
@@ -145,9 +151,7 @@ def gaussianize_with(
     whitening: str = "cholesky",
 ) -> np.ndarray:
     """Apply either marginal-only or joint-whitened gaussianization."""
-    y = gaussianizer.matrix_to_gaussian(
-        x, apply_joint=_whitening_to_apply_joint(whitening)
-    )
+    y = gaussianizer.matrix_to_gaussian(x, apply_joint=_whitening_to_apply_joint(whitening))
     return y.detach().cpu().numpy()
 
 
@@ -157,9 +161,7 @@ def degaussianize_with(
     whitening: str = "cholesky",
 ) -> np.ndarray:
     """Invert either marginal-only or joint-whitened gaussianization."""
-    x = gaussianizer.matrix_from_gaussian(
-        y, apply_joint=_whitening_to_apply_joint(whitening)
-    )
+    x = gaussianizer.matrix_from_gaussian(y, apply_joint=_whitening_to_apply_joint(whitening))
     return x.detach().cpu().numpy()
 
 
@@ -237,9 +239,7 @@ def load_prior_training_table(
         keep_z = np.isfinite(z) & (z >= float(z_min))
         n_removed = int((~keep_z).sum())
         if n_removed:
-            print(
-                f"Filtered {n_removed} / {n_raw} rows with non-finite z or z < {float(z_min):g}"
-            )
+            print(f"Filtered {n_removed} / {n_raw} rows with non-finite z or z < {float(z_min):g}")
         df = df.loc[keep_z].copy()
 
     if "quality_pass" not in df.columns:
@@ -373,7 +373,11 @@ def get_support_mode(artifact: dict[str, Any]) -> SupportMode:
     # Backward compatibility with old artifacts.
     if artifact.get("metadata", {}).get("apply_support_mask_default", False):
         return "masked"
-    return "smooth" if get_parameterization(artifact) in (PARAMETERIZATION_CLR, PARAMETERIZATION_ILR) else "none"
+    return (
+        "smooth"
+        if get_parameterization(artifact) in (PARAMETERIZATION_CLR, PARAMETERIZATION_ILR)
+        else "none"
+    )
 
 
 def get_training_matrix(artifact: dict[str, Any]) -> np.ndarray:
@@ -387,9 +391,7 @@ def get_training_matrix(artifact: dict[str, Any]) -> np.ndarray:
         df,
         parameterization=get_parameterization(artifact),
         simplex_smoothing_eps=float(
-            artifact.get("metadata", {}).get(
-                "simplex_smoothing_eps", DEFAULT_SIMPLEX_SMOOTHING_EPS
-            )
+            artifact.get("metadata", {}).get("simplex_smoothing_eps", DEFAULT_SIMPLEX_SMOOTHING_EPS)
         ),
     )
     return x
@@ -435,13 +437,8 @@ def mode_central_params_from_artifact(
     draws = sample_sed_prior(artifact, n_samples, seed=seed)
     names = list(artifact["feature_names"])
     if draws.shape[1] != len(names):
-        raise ValueError(
-            f"KDE sample columns {draws.shape[1]} != len(feature_names) {len(names)}"
-        )
-    return {
-        name: _marginal_central_value_1d(draws[:, i])
-        for i, name in enumerate(names)
-    }
+        raise ValueError(f"KDE sample columns {draws.shape[1]} != len(feature_names) {len(names)}")
+    return {name: _marginal_central_value_1d(draws[:, i]) for i, name in enumerate(names)}
 
 
 def fit_sed_prior_kde(
@@ -489,7 +486,8 @@ def pack_kde_artifact(
         "feature_bounds_min": np.asarray(training_x.min(axis=0), dtype=float),
         "feature_bounds_max": np.asarray(training_x.max(axis=0), dtype=float),
         # Retained for old downstream code that checks this key.
-        "enforce_nonnegative_a": parameterization in (PARAMETERIZATION_CLR, PARAMETERIZATION_ILR) or support_mode in ("smooth", "masked"),
+        "enforce_nonnegative_a": parameterization in (PARAMETERIZATION_CLR, PARAMETERIZATION_ILR)
+        or support_mode in ("smooth", "masked"),
         "metadata": metadata,
         "gaussianizer_state": None if gaussianizer is None else gaussianizer.get_state(),
     }
@@ -526,7 +524,10 @@ def postprocess_kde_samples(
         return np.asarray(out, dtype=float)
 
     # Recommended path: KDE is already in smooth simplex coordinates.
-    if parameterization in (PARAMETERIZATION_CLR, PARAMETERIZATION_ILR) and support_mode == "smooth":
+    if (
+        parameterization in (PARAMETERIZATION_CLR, PARAMETERIZATION_ILR)
+        and support_mode == "smooth"
+    ):
         if parameterization == PARAMETERIZATION_CLR:
             # Numerical guard: keep CLR rows centered after KDE/clipping.
             out = np.asarray(out, dtype=float).copy()
@@ -545,7 +546,9 @@ def postprocess_kde_samples(
 
     a = project_a_simplex(a)
 
-    eps = float(artifact.get("metadata", {}).get("simplex_smoothing_eps", DEFAULT_SIMPLEX_SMOOTHING_EPS))
+    eps = float(
+        artifact.get("metadata", {}).get("simplex_smoothing_eps", DEFAULT_SIMPLEX_SMOOTHING_EPS)
+    )
     a = smooth_simplex_weights(a, eps=eps if support_mode == "smooth" else 0.0)
     if parameterization == PARAMETERIZATION_ILR:
         ilr = weights_to_ilr(a, eps=max(eps, A_ZERO_EPS))
@@ -646,6 +649,8 @@ def fit_gaussianized_kde(
             "bandwidth": float(getattr(kde, "bandwidth", bandwidth)),
             "kernel": kernel,
             "source_physical_kde": sed_prior.path,
+            "build_provenance": physical.get("metadata", {}).get("build_provenance"),
+            "template_settings": physical.get("metadata", {}).get("template_settings"),
             "transform_input": True,
             "input_transform_type": getattr(experiment, "input_transform_type", None),
         },
@@ -739,6 +744,8 @@ def fit_gaussianized_kde_from_artifact(
             "bandwidth": float(getattr(kde, "bandwidth", bandwidth)),
             "kernel": kernel,
             "source_physical_kde": str(kde_path) if kde_path is not None else None,
+            "build_provenance": artifact.get("metadata", {}).get("build_provenance"),
+            "template_settings": artifact.get("metadata", {}).get("template_settings"),
             "nf_transform": "build_prior_gaussianizer",
             "nf_gaussianizer_whitening": whitening,
             "transform_input": True,
@@ -795,9 +802,7 @@ def fit_and_save_gaussianized_kde_for_run(
         bandwidth=bandwidth,
     )
 
-    artifacts_dir = (
-        storage_path / "mlruns" / run.info.experiment_id / run_id / "artifacts"
-    )
+    artifacts_dir = storage_path / "mlruns" / run.info.experiment_id / run_id / "artifacts"
     from .sed_prior import sed_prior_kde_artifact_path
 
     dest = sed_prior_kde_artifact_path(artifacts_dir, space="gaussianized")
@@ -847,6 +852,7 @@ def sample_sed_prior(
         clip_to_training_bounds=clip_to_training_bounds,
     )
 
+
 def sample_sed_prior_gaussianized(
     artifact: dict[str, Any],
     n_samples: int,
@@ -874,6 +880,7 @@ def sample_sed_prior_gaussianized(
         clip_to_training_bounds=clip_to_training_bounds,
     )
     return gaussianize_sed_prior_features(artifact, x, whitening=whitening)
+
 
 def samples_to_coeffs(
     x: np.ndarray,
@@ -920,6 +927,15 @@ def main() -> None:
         type=Path,
         default=None,
         help="Output .joblib path (default: <weights-dir>/sed_prior_kde_native.joblib).",
+    )
+    parser.add_argument(
+        "--build-provenance",
+        type=Path,
+        default=None,
+        help=(
+            "Build provenance JSON to embed (default: build_provenance.json beside "
+            "the weights CSV)."
+        ),
     )
     parser.add_argument("--max-chi2-dof", type=float, default=DEFAULT_MAX_CHI2_DOF)
     parser.add_argument("--no-quality-cuts", action="store_true")
@@ -1104,9 +1120,25 @@ def main() -> None:
     if not weights_csv.exists():
         raise FileNotFoundError(weights_csv)
 
+    provenance_path = (
+        Path(args.build_provenance).expanduser()
+        if args.build_provenance is not None
+        else weights_csv.parent / BUILD_PROVENANCE_FILENAME
+    )
+    build_provenance = read_provenance(provenance_path)
+    if build_provenance is None:
+        print(
+            f"WARNING: no build provenance at {provenance_path}; "
+            "the KDE artifact will not contain template normalization settings.",
+            file=sys.stderr,
+        )
+
     if args.simplex_smoothing_eps < 0:
         raise ValueError("--simplex-smoothing-eps must be >= 0")
-    if args.parameterization in (PARAMETERIZATION_CLR, PARAMETERIZATION_ILR) and args.simplex_smoothing_eps <= 0:
+    if (
+        args.parameterization in (PARAMETERIZATION_CLR, PARAMETERIZATION_ILR)
+        and args.simplex_smoothing_eps <= 0
+    ):
         raise ValueError(
             "--simplex-smoothing-eps must be > 0 for smooth simplex-coordinate priors. "
             "Use a small value like 1e-5 or 1e-4."
@@ -1114,15 +1146,20 @@ def main() -> None:
 
     support_mode: SupportMode = args.support_mode
     if args.no_support_mask:
-        support_mode = "smooth" if args.parameterization in (PARAMETERIZATION_CLR, PARAMETERIZATION_ILR) else "none"
-    if args.parameterization in (PARAMETERIZATION_CLR, PARAMETERIZATION_ILR) and support_mode == "none":
+        support_mode = (
+            "smooth"
+            if args.parameterization in (PARAMETERIZATION_CLR, PARAMETERIZATION_ILR)
+            else "none"
+        )
+    if (
+        args.parameterization in (PARAMETERIZATION_CLR, PARAMETERIZATION_ILR)
+        and support_mode == "none"
+    ):
         # Smooth simplex coordinates always imply valid simplex weights through softmax.
         support_mode = "smooth"
 
     out_path = (
-        Path(args.out).expanduser()
-        if args.out is not None
-        else get_prior_kde_path(args.build_name)
+        Path(args.out).expanduser() if args.out is not None else get_prior_kde_path(args.build_name)
     )
 
     max_chi2 = None if args.no_quality_cuts else args.max_chi2_dof
@@ -1167,7 +1204,9 @@ def main() -> None:
             gaussianizer_fit_x = x
         elif args.gaussianizer_fit_source == "kde":
             if args.gaussianizer_fit_samples <= 0:
-                raise ValueError("--gaussianizer-fit-samples must be > 0 when --gaussianizer-fit-source=kde")
+                raise ValueError(
+                    "--gaussianizer-fit-samples must be > 0 when --gaussianizer-fit-source=kde"
+                )
             # Build a temporary artifact without the gaussianizer so that the
             # reference distribution is exactly the same postprocessed KDE
             # distribution used by sample_sed_prior(...). This makes the
@@ -1246,12 +1285,19 @@ def main() -> None:
         "z_min": z_min,
         "z_filter_enabled": z_min is not None,
         "fit_method": args.fit_method,
+        "kde_parameters": json_safe(vars(args)),
+        "build_provenance": build_provenance,
+        "template_settings": (
+            None if build_provenance is None else build_provenance.get("template")
+        ),
         "bandwidth": kde.bandwidth,
         "bandwidth_rule": bandwidth if isinstance(bandwidth, str) else None,
         "kernel": args.kernel,
         "clip_to_training_bounds_default": not args.no_clip_to_training_bounds,
         "gaussianizer_enabled": gaussianizer is not None,
-        "gaussianizer_shrinkage": None if gaussianizer is None else float(args.gaussianizer_shrinkage),
+        "gaussianizer_shrinkage": (
+            None if gaussianizer is None else float(args.gaussianizer_shrinkage)
+        ),
         "gaussianizer_eps": None if gaussianizer is None else float(args.gaussianizer_eps),
         "gaussianizer_whitening": None if gaussianizer is None else args.gaussianizer_whitening,
         "gaussianizer_fit_source": None if gaussianizer is None else args.gaussianizer_fit_source,
@@ -1261,9 +1307,13 @@ def main() -> None:
             else int(args.gaussianizer_fit_samples)
         ),
         "gaussianizer_fit_seed": None if gaussianizer is None else int(gaussianizer_fit_seed),
-        "gaussianizer_fit_n_rows": None if gaussianizer_fit_x is None else int(gaussianizer_fit_x.shape[0]),
+        "gaussianizer_fit_n_rows": (
+            None if gaussianizer_fit_x is None else int(gaussianizer_fit_x.shape[0])
+        ),
         # Backward-compatible metadata keys.
-        "enforce_nonnegative_a": args.parameterization in (PARAMETERIZATION_CLR, PARAMETERIZATION_ILR) or support_mode in ("smooth", "masked"),
+        "enforce_nonnegative_a": args.parameterization
+        in (PARAMETERIZATION_CLR, PARAMETERIZATION_ILR)
+        or support_mode in ("smooth", "masked"),
         "apply_support_mask_default": support_mode == "masked",
         "notes": (
             "Recommended artifact is smooth CLR KDE: epsilon-smoothed simplex "
@@ -1389,8 +1439,7 @@ def main() -> None:
                 feature_names,
                 filename=feature_name,
                 title=(
-                    rf"KDE prior feature/{suffix} samples "
-                    rf"($N={args.sample}$, {support_mode})"
+                    rf"KDE prior feature/{suffix} samples " rf"($N={args.sample}$, {support_mode})"
                 ),
                 panel_size=1.35,
             )
