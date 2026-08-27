@@ -486,6 +486,7 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         template_param="templates/fsps_full/fsps_QSF_12_v3.param",
         template_norm_min=None,
         template_norm_max=None,
+        flux_unit_scale=None,
         prior_source="kde",
         **kwargs,
     ):
@@ -529,6 +530,7 @@ class NumVisits(BaseExperiment, CosmologyMixin):
                 template_param=template_param,
                 template_norm_min=template_norm_min,
                 template_norm_max=template_norm_max,
+                flux_unit_scale=flux_unit_scale,
                 prior_source=str(prior_source),
                 latex_labels=kwargs.get("latex_labels"),
             )
@@ -633,10 +635,23 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         template_param: str,
         template_norm_min: float | None,
         template_norm_max: float | None,
+        flux_unit_scale: float | None,
         prior_source: str = "kde",
         latex_labels: list[str] | None = None,
     ) -> tuple[dict, list[str], list[str]]:
         from bedcosmo.num_visits.empirical.paths import SED_PRIOR_KDE_NATIVE_FILENAME
+
+        if flux_unit_scale is None:
+            raise ValueError(
+                "Empirical prior_args must explicitly set flux_unit_scale "
+                "from the fitted spectrum flux unit"
+            )
+        self.flux_unit_scale = float(flux_unit_scale)
+        if not np.isfinite(self.flux_unit_scale) or self.flux_unit_scale <= 0:
+            raise ValueError(
+                "flux_unit_scale must be a positive finite cgs conversion factor, "
+                f"got {flux_unit_scale!r}"
+            )
 
         if not template_dir:
             from bedcosmo.num_visits.empirical.paths import get_template_dir
@@ -741,7 +756,8 @@ class NumVisits(BaseExperiment, CosmologyMixin):
             print(
                 f"  EAZY templates: {self._n_eazy_templates} on "
                 f"{self._template_wave_rest.shape[0]} rest-frame grid points; "
-                f"normalization=[{norm_min:g}, {norm_max:g}] Angstrom"
+                f"normalization=[{norm_min:g}, {norm_max:g}] Angstrom; "
+                f"flux unit scale={self.flux_unit_scale:g} cgs"
             )
 
         return prior, latex_labels, model_parameters
@@ -965,8 +981,9 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         min_flux = torch.finfo(photon_flux.dtype).tiny * 1e10
         A_cm2 = (319 / 9.6) * 1e4
         photon_flux_pixel = torch.clamp(photon_flux * A_cm2, min=min_flux)
-        flux_ratio = torch.clamp(photon_flux_pixel / s0_vals, min=min_flux)
-        mags_flat = 24.0 - 2.5 * torch.log10(flux_ratio)
+        # SMTN-002 defines s0 as the AB magnitude producing 1 count/s:
+        # https://smtn-002.lsst.io/#photometric-zeropoints
+        mags_flat = s0_vals - 2.5 * torch.log10(photon_flux_pixel)
         return mags_flat.reshape(*batch_shape, self.num_filters)
 
     def _scalar_temperature_k(self) -> torch.Tensor:
@@ -1071,7 +1088,10 @@ class NumVisits(BaseExperiment, CosmologyMixin):
 
             # Per-particle weighted sum over templates: replaces the loop's accumulation.
             flux_obs = torch.einsum("bk,kbw->bw", c, T_all)
-            flux_obs = flux_obs / one_plus_z
+            # Convert the fitted spectrum's tabulated flux unit to physical cgs.
+            # For the current DESI builds this is the coadd FLUX BUNIT of 1e-17
+            # erg / (s cm^2 Angstrom). This applies only to the empirical branch.
+            flux_obs = flux_obs * self.flux_unit_scale / one_plus_z
             return flux_obs.reshape(*z.shape, n_wlen)
 
         z_tensor = z

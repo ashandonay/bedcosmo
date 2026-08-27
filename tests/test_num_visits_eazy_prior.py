@@ -128,6 +128,7 @@ def test_empirical_transform_input_loads_build_prior_bijector(kde_artifact):
 
     prior_args = {
         "prior_dir": str(KDE_PATH.parent.resolve()),
+        "flux_unit_scale": 1e-17,
         "prior_pool_size": 512,
         "prior_pool_seed": 0,
         "parameters": {},
@@ -169,6 +170,7 @@ def test_numvisits_eazy_init_and_magnitudes():
 
     prior_args = {
         "prior_dir": str(KDE_PATH.parent.resolve()),
+        "flux_unit_scale": 1e-17,
         "prior_pool_size": 512,
         "prior_pool_seed": 0,
         "parameters": {},

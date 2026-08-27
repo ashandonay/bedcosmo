@@ -151,7 +151,10 @@ Given these, the observed-frame flux density is computed by `_observed_spectral_
 
 1. Shift the common wavelength grid to the rest frame: `lambda_rest = lambda_obs / (1 + z)`.
 2. Interpolate each of the 12 templates onto `lambda_rest` and take the weighted sum, with the `(1 + z)` bandpass factor: `flux(lambda_obs) = (1 / (1 + z)) * sum_k c_k * T_k(lambda_rest)` (a single batched `einsum` over templates).
-3. Convert to AB magnitudes with the same filter integration + zeropoints as steps 4–5 of §1 (`_calculate_magnitudes`).
+3. Convert the fitted DESI coadd flux numbers to physical flux density using their
+   `1e-17 erg / (s cm^2 Angstrom)` unit (`flux_unit_scale` in `prior_args`),
+   then convert to AB magnitudes with the same filter integration + zeropoints as
+   steps 4–5 of §1 (`_calculate_magnitudes`).
 
 Unlike the blackbody model, absolute brightness is a **free amplitude** (`log_c_scale`) rather than a luminosity-distance normalization: redshift enters only through the wavelength shift and the `1/(1 + z)` factor — i.e. through **colors**, not a distance modulus. Photometric redshift is therefore constrained by how spectral features move across the six filters, marginalizing over template shape (`f1..f11`) and amplitude (`log_c_scale`).
 

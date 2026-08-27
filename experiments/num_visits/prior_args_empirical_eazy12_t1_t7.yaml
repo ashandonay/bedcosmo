@@ -17,6 +17,9 @@ template_dir: null
 template_param: "templates/reduced/fsps_QSF_12_v3_t1-t7.param"
 template_norm_min: 4000.0
 template_norm_max: 8000.0
+# Input fitted-spectrum flux-unit conversion to erg / (s cm^2 Angstrom).
+# This DESI build inherits the coadd FLUX BUNIT of 1e-17.
+flux_unit_scale: 1.0e-17
 prior_pool_size: 65536
 prior_pool_seed: 7
 
