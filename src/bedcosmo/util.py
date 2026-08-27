@@ -21,6 +21,7 @@ import time
 import inspect
 import concurrent.futures
 import warnings
+import shutil
 from itertools import combinations
 
 # GetDist KDE settings used for all MCSamples constructions. 2D smoothing
@@ -89,6 +90,63 @@ def get_experiments_dir() -> Path:
 def get_experiment_config_path(cosmo_exp: str, config_name: str) -> Path:
     """Get full path to experiment config file."""
     return get_experiments_dir() / cosmo_exp / config_name
+
+
+def resolve_design_args_input_path(
+    design_args: dict | None,
+    config_path: str | Path | None = None,
+) -> dict | None:
+    """Resolve ``input_designs_path`` from a design-arguments document.
+
+    Environment variables and ``~`` are expanded. Relative paths are anchored
+    to the directory containing the YAML file, or to the current directory when
+    the arguments were supplied directly as a dictionary.
+    """
+    if design_args is None:
+        return None
+    resolved = dict(design_args)
+    raw = resolved.get("input_designs_path")
+    if raw in (None, ""):
+        return resolved
+    expanded = os.path.expandvars(os.path.expanduser(os.fspath(raw)))
+    if "$" in expanded:
+        raise ValueError(
+            f"input_designs_path contains an undefined environment variable: {raw}"
+        )
+    path = Path(expanded)
+    if not path.is_absolute():
+        base = Path(config_path).expanduser().resolve().parent if config_path else Path.cwd()
+        path = base / path
+    resolved["input_designs_path"] = str(path.resolve())
+    return resolved
+
+
+def snapshot_design_args_config(
+    source_path: str | Path,
+    destination_path: str | Path,
+) -> dict:
+    """Freeze a design YAML and its referenced array into an artifact directory."""
+    source_path = Path(source_path).expanduser().resolve()
+    destination_path = Path(destination_path).expanduser().resolve()
+    with source_path.open() as stream:
+        design_args = yaml.safe_load(stream) or {}
+    design_args = resolve_design_args_input_path(design_args, source_path)
+
+    input_path = design_args.get("input_designs_path")
+    if input_path is not None:
+        input_path = Path(input_path)
+        if not input_path.is_file():
+            raise FileNotFoundError(f"input_designs_path not found: {input_path}")
+        frozen_path = destination_path.parent / "designs.npy"
+        destination_path.parent.mkdir(parents=True, exist_ok=True)
+        if input_path.resolve() != frozen_path.resolve():
+            shutil.copy2(input_path, frozen_path)
+        design_args["input_designs_path"] = str(frozen_path.resolve())
+
+    destination_path.parent.mkdir(parents=True, exist_ok=True)
+    with destination_path.open("w") as stream:
+        yaml.safe_dump(design_args, stream, default_flow_style=False, sort_keys=False)
+    return design_args
 
 
 def extract_run_info_from_checkpoint_path(checkpoint_path: str) -> tuple[str, str, str]:
@@ -731,6 +789,7 @@ def init_experiment(
         **kwargs: Additional arguments (e.g., device, profile) that will be added to run_args.
     """
     artifacts_dir = None
+    design_config_path = None
     ref_cov_artifact_path = None
     if run_obj is not None and run_args is not None:
 
@@ -750,6 +809,7 @@ def init_experiment(
         if design_args is None:
             design_args_artifact_path = artifacts_dir + "/design_args.yaml"
             if os.path.exists(design_args_artifact_path):
+                design_config_path = design_args_artifact_path
                 with open(design_args_artifact_path, 'r') as f:
                     design_args = yaml.safe_load(f)
             else:
@@ -760,6 +820,7 @@ def init_experiment(
                         raise FileNotFoundError(f"Design args file not found: {design_args_path}")
                     with open(design_args_path, 'r') as f:
                         design_args = yaml.safe_load(f)
+                    design_config_path = design_args_path
         
         # If prior_args is not provided (None), try to load from artifacts
         if prior_args is None:
@@ -782,6 +843,7 @@ def init_experiment(
                     raise FileNotFoundError(f"Design args file not found: {resolved_path}")
                 with open(resolved_path, 'r') as f:
                     design_args = yaml.safe_load(f)
+                design_config_path = resolved_path
 
         if prior_args is None:
             if prior_args_path is not None:
@@ -791,6 +853,8 @@ def init_experiment(
                 with open(resolved_path, 'r') as f:
                     prior_args = yaml.safe_load(f)
     
+    design_args = resolve_design_args_input_path(design_args, design_config_path)
+
     # Initialize run_args if None
     if run_args is None:
         run_args = {}

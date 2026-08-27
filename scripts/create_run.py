@@ -36,7 +36,11 @@ import mlflow
 import yaml
 from mlflow.tracking import MlflowClient
 
-from bedcosmo.util import extract_run_info_from_checkpoint_path, get_experiment_config_path
+from bedcosmo.util import (
+    extract_run_info_from_checkpoint_path,
+    get_experiment_config_path,
+    snapshot_design_args_config,
+)
 
 
 def _parse_args():
@@ -87,7 +91,15 @@ def _snapshot_design_args(args, artifacts_dir):
     src = _resolve_config_path(args.cosmo_exp, args.design_args_path)
     if not os.path.exists(src):
         raise FileNotFoundError(f"design_args file not found: {src}")
-    shutil.copy2(src, os.path.join(artifacts_dir, "design_args.yaml"))
+    frozen = snapshot_design_args_config(
+        src,
+        os.path.join(artifacts_dir, "design_args.yaml"),
+    )
+    if frozen.get("input_designs_path") is not None:
+        print(
+            f"Snapshotted explicit designs -> {frozen['input_designs_path']}",
+            file=sys.stderr,
+        )
 
 
 def _snapshot_ref_cov(args, artifacts_dir):

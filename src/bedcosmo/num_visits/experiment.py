@@ -797,8 +797,12 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         if input_type == "nominal":
             design_pts = self.nominal_design.unsqueeze(0)  # Add batch dimension
         elif input_type == "variable":
-            # If input_designs_path is provided, load from path (assumed to be absolute)
+            # Config loading normally resolves this path relative to its YAML and
+            # snapshots the array. Expand variables here as well for direct callers.
             if input_designs_path is not None:
+                input_designs_path = os.path.expandvars(
+                    os.path.expanduser(os.fspath(input_designs_path))
+                )
                 if not os.path.isabs(input_designs_path):
                     raise ValueError(
                         f"input_designs_path must be an absolute path, got: {input_designs_path}"

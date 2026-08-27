@@ -1172,7 +1172,10 @@ class Trainer:
                     raise FileNotFoundError(f"Design args file not found at {self.design_args_path}")
                 
                 design_args_artifact_path = f"{artifacts_dir}/design_args.yaml"
-                shutil.copy2(self.design_args_path, design_args_artifact_path)
+                snapshot_design_args_config(
+                    self.design_args_path,
+                    design_args_artifact_path,
+                )
                 mlflow.log_artifact(design_args_artifact_path)
                 if self.verbose:
                     print(f"Saved design_args.yaml to artifacts: {design_args_artifact_path}")
