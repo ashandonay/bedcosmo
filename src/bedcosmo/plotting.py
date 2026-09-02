@@ -558,8 +558,67 @@ class BasePlotter:
             return False
         raise ValueError(f"Invalid parameter space: {param_space}")
 
+    @staticmethod
+    def _central_params_equal(central_params_a, central_params_b):
+        """Return True when two central-param dicts match on keys and values."""
+        if set(central_params_a) != set(central_params_b):
+            return False
+        return all(
+            np.isclose(central_params_a[key], central_params_b[key])
+            for key in central_params_a
+        )
+
+    @staticmethod
+    def _format_contour_level(level):
+        """Format a GetDist contour fraction as a percentage string."""
+        pct = 100.0 * float(level)
+        if np.isclose(pct, round(pct)):
+            return f"{int(round(pct))}%"
+        return f"{pct:.1f}%"
+
+    @classmethod
+    def _format_contour_levels_list(cls, levels):
+        """Format contour levels as a bracketed list for plot titles."""
+        if isinstance(levels, (int, float)):
+            levels = [levels]
+        parts = [cls._format_contour_level(level) for level in levels]
+        return f"[{', '.join(parts)}]"
+
+    @classmethod
+    def _prior_args_equal(cls, prior_args_a, prior_args_b):
+        """Return True when two prior_args configs match recursively."""
+        return cls._nested_config_equal(prior_args_a or {}, prior_args_b or {})
+
+    @staticmethod
+    def _nested_config_equal(value_a, value_b):
+        """Recursively compare nested config structures."""
+        if isinstance(value_a, dict) and isinstance(value_b, dict):
+            if set(value_a) != set(value_b):
+                return False
+            return all(
+                BasePlotter._nested_config_equal(value_a[key], value_b[key])
+                for key in value_a
+            )
+        if isinstance(value_a, (list, tuple)) and isinstance(value_b, (list, tuple)):
+            if len(value_a) != len(value_b):
+                return False
+            return all(
+                BasePlotter._nested_config_equal(item_a, item_b)
+                for item_a, item_b in zip(value_a, value_b)
+            )
+        if isinstance(value_a, (int, float, np.floating)) and isinstance(
+            value_b, (int, float, np.floating)
+        ):
+            return np.isclose(float(value_a), float(value_b))
+        return value_a == value_b
+
     def _mark_central_parameter_values(
-        self, g, experiment, transform_output=True, plotted_params=None
+        self, 
+        g, 
+        experiment, 
+        transform_output=True, 
+        plotted_params=None,
+        color='black',
     ):
         """Mark ``experiment.central_params`` on GetDist triangle-plot axes.
 
@@ -592,7 +651,7 @@ class BasePlotter:
                 if p in central_params
             }
 
-        line_kw = dict(color='black', linestyle='--', linewidth=1.0)
+        line_kw = dict(color=color, linestyle='--', linewidth=1.0)
         params = list(plotted_params) if plotted_params is not None else list(experiment.cosmo_params)
         n = g.subplots.shape[0]
 
@@ -1100,7 +1159,7 @@ class BasePlotter:
         ranges=None,
         scatter_alpha=0.6,
         contour_alpha_factor=0.8,
-        style=style
+        style=style,
     ):
         """
         Plots posterior distributions using GetDist triangle plots.
@@ -1118,7 +1177,7 @@ class BasePlotter:
                 If a single float is provided, it is converted to a list.
                 If None, the default GetDist settings are used.
             width_inch (float): Width of the plot in inches. Higher values increase resolution.
-            ranges (dict, optional): Dictionary specifying fixed ranges for parameters. 
+            ranges (dict, optional): Dictionary specifying fixed ranges for parameters.
                 Keys should be parameter names, values should be tuples of (min, max).
             scatter_alpha (float): Alpha value for scatter points. Default 0.6 for better distinguishability.
             contour_alpha_factor (float): Factor to adjust contour alpha for distinguishability. Default 0.8.
@@ -1206,6 +1265,9 @@ class BasePlotter:
 
         # Prepare contour_args with custom levels if provided
         # For GetDist, we don't pass line styles in contour_args when using multiple styles
+
+        for sample in samples:
+            sample.updateSettings(GETDIST_SETTINGS)
 
         # Set contour levels if provided
         if levels is not None:
@@ -2716,13 +2778,31 @@ class ComparisonPlotter(BasePlotter):
             return ax.legend(handles, labels, **legend_kwargs)
         else:
             return ax.legend(**legend_kwargs)
-    
+
+    def _comparison_group_label(self, group_key, group_runs, vars_list, var, run_id_to_label):
+        """Build the legend label for a comparison-plot group."""
+        label_parts = []
+        if run_id_to_label:
+            group_run_labels = [
+                run_id_to_label.get(run_data_item['run_id'])
+                for run_data_item in group_runs
+            ]
+            group_run_labels = [label for label in group_run_labels if label is not None]
+            if group_run_labels:
+                label_parts.append(group_run_labels[0])
+        if var:
+            var_label = ', '.join([f'{vars_list[j]}={val}' for j, val in enumerate(group_key)])
+            label_parts.append(var_label)
+        if label_parts:
+            return ', '.join(label_parts)
+        return group_key[:8] if isinstance(group_key, str) else str(group_key)[:8]
+
     def compare_posterior(self, var=None, guide_samples=10000, show_scatter=False,
                          step='loss_best', seed=1, device="cuda:0",
-                         global_rank=0, levels=[0.68, 0.95], width_inch=10,
+                         global_rank=0, levels=[0.68], width_inch=10,
                          colors=None, filter_string=None, filename=None, save_dir=None,
                          dpi=400, transform_output=True, display=('nominal', 'optimal'),
-                         eval_step=None, **kwargs):
+                         eval_step=None, plot_prior=True, **kwargs):
         """
         Compare posterior distributions across multiple runs in a triangle plot.
 
@@ -2745,6 +2825,8 @@ class ComparisonPlotter(BasePlotter):
             transform_output (bool): Transform NF samples to physical space (default True).
             display (tuple or str): 'nominal' and/or 'optimal' (default both).
             eval_step (str or int, optional): EIG eval step for optimal design; latest if None.
+            plot_prior (bool): If True, overlay each group's prior. Uses black when all
+                groups share the same prior_args, otherwise matches group colors.
 
         Returns:
             GetDist plotter object.
@@ -2815,6 +2897,8 @@ class ComparisonPlotter(BasePlotter):
         all_samples = []
         all_colors = []
         legend_handles = []
+        plotted_group_keys = []
+        group_labels = {}
         
         if colors is not None:
             if len(colors) < len(sorted_group_keys):
@@ -2865,36 +2949,12 @@ class ComparisonPlotter(BasePlotter):
             
             all_samples.extend(group_samples)
             all_colors.extend([group_color] * len(group_samples))
+            plotted_group_keys.append(group_key)
             
-            # Determine group label: combine run_labels and var if both are available
-            label_parts = []
-            
-            # Get run_label if available
-            if run_id_to_label:
-                # Get labels for all runs in this group
-                group_run_labels = [run_id_to_label.get(run_data_item['run_id'], None) 
-                                   for run_data_item in group_runs]
-                # Filter out None values
-                group_run_labels = [label for label in group_run_labels if label is not None]
-                
-                if group_run_labels:
-                    # If all runs in group have the same label, use it; otherwise use first label
-                    if len(set(group_run_labels)) == 1:
-                        label_parts.append(group_run_labels[0])
-                    else:
-                        # Multiple different labels in group - use first one
-                        label_parts.append(group_run_labels[0])
-            
-            # Add var information if specified
-            if var:
-                var_label = ', '.join([f'{vars_list[j]}={val}' for j, val in enumerate(group_key)])
-                label_parts.append(var_label)
-            
-            # Combine label parts, or fall back to run_id if nothing available
-            if label_parts:
-                group_label = ', '.join(label_parts)
-            else:
-                group_label = group_key[:8] if isinstance(group_key, str) else str(group_key)[:8]
+            group_label = self._comparison_group_label(
+                group_key, group_runs, vars_list, var, run_id_to_label
+            )
+            group_labels[group_key] = group_label
             
             legend_handles.append(
                 Line2D([0], [0], color=group_color, label=group_label)
@@ -2930,20 +2990,116 @@ class ComparisonPlotter(BasePlotter):
                 )
             except (NotImplementedError, FileNotFoundError, OSError) as e:
                 print(f"Warning: Could not load MCMC reference samples: {e}")
+
+        group_experiments = {}
+        for group_key in plotted_group_keys:
+            run_data_item = grouped_runs[group_key][0]
+            try:
+                group_experiments[group_key] = init_experiment(
+                    run_data_item['run_obj'],
+                    run_data_item['params'].copy(),
+                    device=device,
+                    global_rank=0,
+                    verbose=False,
+                )
+            except Exception as e:
+                print(
+                    f"Warning: Could not initialize experiment for group {group_key}: {e}"
+                )
+
+        prior_entries = []
+        if plot_prior and group_experiments:
+            auto_seed(seed)
+            for group_key, experiment in group_experiments.items():
+                if not hasattr(experiment, 'get_prior_samples'):
+                    continue
+                try:
+                    prior_samples_gd = experiment.get_prior_samples(num_samples=guide_samples)
+                except Exception as e:
+                    print(
+                        f"Warning: Could not get prior samples for group {group_key}: {e}"
+                    )
+                    continue
+                prior_args = getattr(experiment, 'prior_args', None) or {}
+                prior_entries.append(
+                    (prior_samples_gd, group_colors[group_key], prior_args, group_key)
+                )
+
+            if prior_entries:
+                reference_prior_args = prior_entries[0][2]
+                all_priors_identical = all(
+                    self._prior_args_equal(reference_prior_args, prior_args)
+                    for _, _, prior_args, _ in prior_entries[1:]
+                )
+                if all_priors_identical:
+                    all_samples.append(prior_entries[0][0])
+                    all_colors.append('black')
+                    legend_handles.append(
+                        Line2D([0], [0], color='black', label='Prior')
+                    )
+                else:
+                    for prior_samples_gd, color, _, group_key in prior_entries:
+                        all_samples.append(prior_samples_gd)
+                        all_colors.append(color)
+                        legend_handles.append(
+                            Line2D(
+                                [0],
+                                [0],
+                                color=color,
+                                label=f"Prior ({group_labels[group_key]})",
+                            )
+                        )
         
         g = self.plot_posterior(all_samples, all_colors, show_scatter=show_scatter, levels=levels, width_inch=width_inch)
+
+        plotted_params = all_samples[0].paramNames.list()
+        marker_entries = []
+        for group_key, experiment in group_experiments.items():
+            if getattr(experiment, "central_params", None):
+                marker_entries.append((experiment, group_colors[group_key]))
+
+        if marker_entries:
+            reference_central_params = dict(marker_entries[0][0].central_params)
+            all_identical = all(
+                self._central_params_equal(reference_central_params, dict(experiment.central_params))
+                for experiment, _ in marker_entries[1:]
+            )
+            if all_identical:
+                self._mark_central_parameter_values(
+                    g,
+                    marker_entries[0][0],
+                    transform_output=transform_output,
+                    plotted_params=plotted_params,
+                    color='black',
+                )
+            else:
+                for experiment, color in marker_entries:
+                    self._mark_central_parameter_values(
+                        g,
+                        experiment,
+                        transform_output=transform_output,
+                        plotted_params=plotted_params,
+                        color=color,
+                    )
 
         if g.fig.legends:
             for legend in g.fig.legends:
                 legend.remove()
         
-        title = f'Posterior Comparison ({", ".join(display)}), Step: {step}'
+        title = (
+            f'Posterior Comparison ({", ".join(display)}), Step: {step}, '
+            f'Levels: {self._format_contour_levels_list(levels)}'
+        )
         filter_str = filter_string if filter_string is not None else self.filter_string
         if filter_str:
             title += f' (filter: {filter_str})'
         
         g.fig.set_constrained_layout(True)
-        leg = g.fig.legend(handles=legend_handles, loc='upper right', bbox_to_anchor=(0.99, 0.96))
+        leg = g.fig.legend(
+            handles=legend_handles,
+            loc='upper right',
+            bbox_to_anchor=(0.99, 0.96),
+        )
         leg.set_in_layout(False)
         g.fig.suptitle(title)
         

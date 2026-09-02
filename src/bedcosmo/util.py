@@ -24,10 +24,12 @@ import warnings
 import shutil
 from itertools import combinations
 
-# GetDist KDE settings used for all MCSamples constructions. 2D smoothing
-# reduces contour pixel noise while preserving broad structure.
+# GetDist KDE settings used for all MCSamples constructions and triangle plots.
+# Single smoothing scale for every trace in a comparison (prior + posteriors).
+# smooth_scale_* are fractions of each parameter's std.
 GETDIST_SETTINGS = {
-    "smooth_scale_2D": 0.2,
+    "smooth_scale_1D": 0.26,
+    "smooth_scale_2D": 0.28,
     "fine_bins_2D": 256,
     "mult_bias_correction_order": 1,
     "boundary_correction_order": 1,
