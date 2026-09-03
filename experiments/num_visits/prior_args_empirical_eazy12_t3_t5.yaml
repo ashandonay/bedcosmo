@@ -10,11 +10,11 @@
 #   ./submit.sh train num_visits empirical \
 #     --prior-args-path prior_args_empirical_eazy12_t1_t7.yaml
 
-prior_dir: $SCRATCH/bedcosmo/num_visits/empirical_prior/eazy12-t1-t7
+prior_dir: $SCRATCH/bedcosmo/num_visits/empirical_prior/eazy12-t3-t5
 prior_source: flow
 
 template_dir: null
-template_param: "templates/reduced/fsps_QSF_12_v3_t1-t7.param"
+template_param: "templates/reduced/fsps_QSF_12_v3_t3-t5.param"
 template_norm_min: 4000.0
 template_norm_max: 8000.0
 # Input fitted-spectrum flux-unit conversion to erg / (s cm^2 Angstrom).
