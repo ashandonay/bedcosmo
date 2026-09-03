@@ -419,7 +419,14 @@ and read-only. Two axes — `--space {native,gaussianized,both}` and `--plot {pa
 
 ```bash
 # everything (both spaces, panels + triangles), threads capped for a login node
+# default: production eazy12 KDE + flows beside it
 python -m bedcosmo.num_visits.empirical.validate_prior_flow --threads 8
+
+# alternate prior build (eazy6, eazy12-t1-t7, …): point at its native KDE joblib;
+# flow .pt files are resolved automatically from the same directory
+python -m bedcosmo.num_visits.empirical.validate_prior_flow \
+  --artifact $SCRATCH/bedcosmo/num_visits/empirical_prior/eazy12-t1-t7/sed_prior_kde_native.joblib \
+  --threads 8
 
 # just the native panel (fast)
 python -m bedcosmo.num_visits.empirical.validate_prior_flow --space native --plot panel --threads 8
@@ -432,11 +439,13 @@ python -m bedcosmo.num_visits.empirical.validate_prior_flow --space native --plo
   blotchy contours.
 
 Writes `validate_prior_flow_{native,gaussianized}{,_triangle}.png` beside the KDE (override
-`--out-dir`). The native/`transform_input: false` path is validated end-to-end (A/B PASS;
-eval `H_prior` matches the offline flow entropy).
+`--out-dir`). Pass `--artifact` to the KDE joblib for non-default builds (`--prior-dir` is
+**not** a flag on this script; it is used by `diagnostic_plots` and other tools). The native/
+`transform_input: false` path is validated end-to-end (A/B PASS; eval `H_prior` matches the
+offline flow entropy).
 
-The flows must exist in `prior_dir` beside the KDE (train them first). Runtime loads the
-frozen copies from `artifacts/empirical/` after snapshot.
+The flows must exist beside the KDE artifact (train them first with `--kde-path` /
+`--out-dir`). Runtime loads the frozen copies from `artifacts/empirical/` after snapshot.
 
 ---
 
@@ -657,7 +666,7 @@ Legacy layouts (`desi_eazy_hp*` at scratch root, `desi_eazy_empirical_prior_full
 | NF bijector | **`gaussianizer_state` in KDE artifact** (not rebuilt at train/eval) |
 | y-KDE (offline) | **`sed_prior_kde_gaussianized.joblib`** beside KDE (diagnostic only; runtime uses prior flows) |
 | **Prior flow** | `./train_prior_flow.sh --space both` → `sed_prior_flow_*.pt` beside KDE (default `prior_source: flow`) |
-| Validate flow | `python -m bedcosmo.num_visits.empirical.validate_prior_flow --threads 8` |
+| Validate flow | `validate_prior_flow --threads 8` (non-default build: `--artifact …/sed_prior_kde_native.joblib`) |
 | Training | `prior_dir: null` at snapshot; runtime uses `artifacts/empirical/` |
 | Fit diagnostics | `./run_healpix_diagnostic_plots.sh` |
 | KDE diagnostics | `diagnostic_plots all --prior-dir .../empirical_prior/eazy12` |
