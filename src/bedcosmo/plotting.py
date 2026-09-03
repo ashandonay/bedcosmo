@@ -46,14 +46,47 @@ plt.rcParams['text.usetex'] = False
 plt.rcParams['font.family'] = 'DejaVu Sans'
 plt.rcParams['font.serif'] = ['DejaVu Serif', 'Times New Roman', 'Times', 'serif']
 
+# Contour alpha for prior overlays in posterior triangle plots.
+PRIOR_CONTOUR_ALPHA = 0.4
 
-def load_eig_data_file(artifacts_dir, eval_step=None):
+
+def _step_keys_for_eval(data, eval_step=None):
+    """Return step_* keys to inspect, optionally restricted to eval_step."""
+    if eval_step is not None:
+        step_str = f"step_{eval_step}" if not str(eval_step).startswith('step_') else str(eval_step)
+        return [step_str] if step_str in data else []
+    return [k for k in data.keys() if k.startswith('step_')]
+
+
+def _eig_data_has_variable_eigs(data, eval_step=None):
+    """True when eig_data contains joint (variable) EIG averages."""
+    for step_key in _step_keys_for_eval(data, eval_step):
+        variable = data.get(step_key, {}).get('variable', {})
+        if variable.get('eigs_avg') is not None:
+            return True
+    return False
+
+
+def _eig_data_has_marginal_eigs(data, eval_step=None):
+    """True when eig_data contains marginal EIG blocks."""
+    for step_key in _step_keys_for_eval(data, eval_step):
+        marginal = data.get(step_key, {}).get('marginal', {})
+        if marginal:
+            return True
+    return False
+
+
+def load_eig_data_file(artifacts_dir, eval_step=None, eig_kind='any'):
     """
     Load the most recent completed eig_data JSON file from the artifacts directory.
 
     Args:
         artifacts_dir (str): Path to the artifacts directory containing eig_data files
         eval_step (str or int, optional): If provided, verify that the loaded file contains this step
+        eig_kind (str): Which EIG content the file must contain: ``'any'`` (default),
+            ``'variable'`` (joint EIG under ``step_*/variable``), or ``'marginal'``
+            (marginal EIG under ``step_*/marginal``). Use ``'variable'`` when comparing
+            joint EIGs so a newer marginal-only eval file is skipped.
 
     Returns:
         tuple: (json_path, data) where json_path is the path to the file and data is the loaded JSON.
@@ -62,6 +95,9 @@ def load_eig_data_file(artifacts_dir, eval_step=None):
     Raises:
         ValueError: If no completed eig_data files are found, if file cannot be loaded, or if eval_step is not found in the data.
     """
+    if eig_kind not in ('any', 'variable', 'marginal'):
+        raise ValueError(f"eig_kind must be 'any', 'variable', or 'marginal', got {eig_kind!r}")
+
     if not os.path.exists(artifacts_dir):
         raise ValueError(f"Artifacts directory not found: {artifacts_dir}")
 
@@ -93,6 +129,11 @@ def load_eig_data_file(artifacts_dir, eval_step=None):
                     # This file doesn't have the requested step, try next file
                     continue
 
+            if eig_kind == 'variable' and not _eig_data_has_variable_eigs(data, eval_step):
+                continue
+            if eig_kind == 'marginal' and not _eig_data_has_marginal_eigs(data, eval_step):
+                continue
+
             # Found a complete file (and it has the requested step if eval_step was provided)
             return json_path, data
 
@@ -102,10 +143,12 @@ def load_eig_data_file(artifacts_dir, eval_step=None):
             continue
 
     # No completed files found (or no file with the requested eval_step)
+    kind_suffix = f" with {eig_kind} EIG data" if eig_kind != 'any' else ""
     if eval_step is not None:
-        raise ValueError(f"No completed eig_data files with step {eval_step} found in {artifacts_dir}")
-    else:
-        raise ValueError(f"No completed eig_data files found in {artifacts_dir}")
+        raise ValueError(
+            f"No completed eig_data files with step {eval_step}{kind_suffix} found in {artifacts_dir}"
+        )
+    raise ValueError(f"No completed eig_data files{kind_suffix} found in {artifacts_dir}")
 
 
 # ============================================================================
@@ -671,13 +714,46 @@ class BasePlotter:
             display = (display,)
         return tuple(display)
 
-    def _entropy_legend_suffix(self, prior_entropy=None, posterior_entropy=None):
-        if prior_entropy is None or posterior_entropy is None:
+    def _entropy_legend_suffix(
+        self, prior_entropy=None, posterior_entropy=None, *, include_prior=True
+    ):
+        parts = []
+        if include_prior and prior_entropy is not None:
+            parts.append(f"H_prior: {float(prior_entropy):.2f} bits")
+        if posterior_entropy is not None:
+            parts.append(f"H_post: {float(posterior_entropy):.2f} bits")
+        if not parts:
             return ""
-        return (
-            f", H_prior: {float(prior_entropy):.2f} bits"
-            f", H_post: {float(posterior_entropy):.2f} bits"
-        )
+        return ", " + ", ".join(parts)
+
+    def _prior_entropy_legend_suffix(self, prior_entropy=None):
+        if prior_entropy is None:
+            return ""
+        return f", H_prior: {float(prior_entropy):.2f} bits"
+
+    def _nominal_prior_entropy_for_run(self, run_data_item, eval_step=None):
+        """Read nominal prior entropy from a run's joint eig_data, if available."""
+        exp_id = run_data_item.get('exp_id')
+        run_id = run_data_item.get('run_id')
+        if exp_id is None or run_id is None:
+            return None
+        artifacts_dir = f"{self.storage_path}/mlruns/{exp_id}/{run_id}/artifacts"
+        try:
+            _, eig_data = self.load_eig_data_file(
+                artifacts_dir, eval_step=eval_step, eig_kind='variable'
+            )
+            _, step_str = self._resolve_step(eig_data, eval_step)
+            if step_str is None:
+                return None
+            nominal_data = eig_data.get(step_str, {}).get('nominal', {})
+            val = nominal_data.get('prior_entropy_avg')
+            if val is None:
+                return None
+            if isinstance(val, list):
+                val = val[0] if len(val) > 0 else None
+            return float(val) if val is not None else None
+        except ValueError:
+            return None
 
     def _nf_display_samples(
         self,
@@ -704,6 +780,7 @@ class BasePlotter:
         eval_step=None,
         params=None,
         marginal_eig=False,
+        plot_prior=False,
     ):
         """
         NF guide samples for each entry in display ('nominal' and/or 'optimal').
@@ -731,17 +808,46 @@ class BasePlotter:
                 experiment, step, run_obj, run_args, device, global_rank=global_rank
             )
             auto_seed(seed)
-            if 'optimal' in display:
+            if 'optimal' in display or 'nominal' in display:
                 run_id = run_obj.info.run_id
                 artifacts_dir = f"{self.storage_path}/mlruns/{exp_id}/{run_id}/artifacts"
-                _, eig_data = self.load_eig_data_file(artifacts_dir, eval_step=eval_step)
-                input_designs, eig_values, nominal_eig, entropy_info = self._parse_eig_for_posterior(
-                    eig_data, eval_step
-                )
-                nominal_prior_entropy = entropy_info.get("nominal_prior_entropy")
-                nominal_posterior_entropy = entropy_info.get("nominal_posterior_entropy")
-                prior_entropy_by_design = entropy_info.get("prior_entropy_by_design")
-                posterior_entropy_by_design = entropy_info.get("posterior_entropy_by_design")
+                try:
+                    _, eig_data = self.load_eig_data_file(
+                        artifacts_dir, eval_step=eval_step, eig_kind='variable'
+                    )
+                    if 'optimal' in display:
+                        input_designs, eig_values, nominal_eig, entropy_info = self._parse_eig_for_posterior(
+                            eig_data, eval_step
+                        )
+                    else:
+                        _, step_str = self._resolve_step(eig_data, eval_step)
+                        nominal_data = eig_data.get(step_str, {}).get('nominal', {})
+                        nominal_eig_val = nominal_data.get('eigs_avg')
+                        if isinstance(nominal_eig_val, list):
+                            nominal_eig_val = nominal_eig_val[0] if nominal_eig_val else None
+                        nominal_eig = float(nominal_eig_val) if nominal_eig_val is not None else None
+
+                        def _scalar_entropy(block, key):
+                            val = block.get(key)
+                            if val is None:
+                                return None
+                            if isinstance(val, list):
+                                val = val[0] if len(val) > 0 else None
+                            return float(val) if val is not None else None
+
+                        entropy_info = {
+                            "nominal_prior_entropy": _scalar_entropy(nominal_data, "prior_entropy_avg"),
+                            "nominal_posterior_entropy": _scalar_entropy(nominal_data, "posterior_entropy_avg"),
+                            "prior_entropy_by_design": None,
+                            "posterior_entropy_by_design": None,
+                        }
+                    nominal_prior_entropy = entropy_info.get("nominal_prior_entropy")
+                    nominal_posterior_entropy = entropy_info.get("nominal_posterior_entropy")
+                    prior_entropy_by_design = entropy_info.get("prior_entropy_by_design")
+                    posterior_entropy_by_design = entropy_info.get("posterior_entropy_by_design")
+                except ValueError:
+                    if 'optimal' in display:
+                        raise
         elif experiment is None:
             raise ValueError("Either experiment or run_obj must be provided")
 
@@ -753,6 +859,7 @@ class BasePlotter:
 
         entries = []
         eig_label = "Marginal EIG" if marginal_eig else "EIG"
+        include_prior_in_legend = not plot_prior
 
         if 'nominal' in display:
             nominal_samples_gd = experiment.get_guide_samples(
@@ -766,7 +873,9 @@ class BasePlotter:
                 f", {eig_label}: {nominal_eig:.3f} bits" if nominal_eig is not None else ""
             )
             eig_str += self._entropy_legend_suffix(
-                nominal_prior_entropy, nominal_posterior_entropy
+                nominal_prior_entropy,
+                nominal_posterior_entropy,
+                include_prior=include_prior_in_legend,
             )
             entries.append({
                 'samples': nominal_samples_gd,
@@ -794,7 +903,9 @@ class BasePlotter:
                     opt_prior_h = float(prior_entropy_by_design[optimal_idx])
                 if posterior_entropy_by_design is not None and len(posterior_entropy_by_design) > optimal_idx:
                     opt_post_h = float(posterior_entropy_by_design[optimal_idx])
-                eig_str += self._entropy_legend_suffix(opt_prior_h, opt_post_h)
+                eig_str += self._entropy_legend_suffix(
+                    opt_prior_h, opt_post_h, include_prior=include_prior_in_legend
+                )
                 label = f'Optimal Design (NF){eig_str}'
             elif len(input_designs) >= 1:
                 optimal_design = input_designs[0]
@@ -874,7 +985,7 @@ class BasePlotter:
             guide_samples (int): Number of samples to generate.
             device (str): Device to use.
             seed (int): Random seed.
-            plot_prior (bool): If True, also plot the prior.
+            plot_prior (bool): If True, also plot the prior as a faint contour (alpha=0.4).
             transform_output (bool): Whether to transform output to physical space.
             title (str, optional): Title of the plot.
             grid_samples (np.ndarray, optional): Grid-based posterior parameter samples.
@@ -911,6 +1022,7 @@ class BasePlotter:
             device=device,
             params=params,
             marginal_eig=marginal_eig,
+            plot_prior=plot_prior,
         )
         for entry in nf_entries:
             all_samples.append(entry['samples'])
@@ -979,9 +1091,11 @@ class BasePlotter:
             prior_samples_gd = restrict_mcsamples(prior_samples_gd, params)
             all_samples.append(prior_samples_gd)
             all_colors.append('black')
-            all_alphas.append(1.0)
+            all_alphas.append(PRIOR_CONTOUR_ALPHA)
             all_line_styles.append('-')
-            legend_labels.append('Prior')
+            legend_labels.append(
+                f'Prior{self._prior_entropy_legend_suffix(nominal_prior_entropy)}'
+            )
 
         if not all_samples:
             print("Warning: No samples to plot.")
@@ -1031,7 +1145,15 @@ class BasePlotter:
         for i, label in enumerate(legend_labels):
             color = all_colors[i]
             custom_legend.append(
-                Line2D([0], [0], color=color, label=label, linewidth=1.2, linestyle=all_line_styles[i])
+                Line2D(
+                    [0],
+                    [0],
+                    color=color,
+                    label=label,
+                    linewidth=1.2,
+                    linestyle=all_line_styles[i],
+                    alpha=all_alphas[i],
+                )
             )
 
         if title is None:
@@ -1051,9 +1173,9 @@ class BasePlotter:
 
         return g
 
-    def load_eig_data_file(self, artifacts_dir, eval_step=None):
+    def load_eig_data_file(self, artifacts_dir, eval_step=None, eig_kind='any'):
         """Load the most recent completed eig_data JSON file (see module-level ``load_eig_data_file``)."""
-        return load_eig_data_file(artifacts_dir, eval_step=eval_step)
+        return load_eig_data_file(artifacts_dir, eval_step=eval_step, eig_kind=eig_kind)
 
     def _resolve_step(self, eig_data, eval_step):
         """Resolve eval_step to a step string key in eig_data (see RunPlotter usage)."""
@@ -2087,7 +2209,7 @@ class RunPlotter(BasePlotter):
         
         return fig
     
-    def _get_eig_data(self, eval_step=None, eig_data=None):
+    def _get_eig_data(self, eval_step=None, eig_data=None, eig_kind='variable'):
         """
         Helper method to load EIG data from artifacts directory.
         Finds the artifacts directory by searching for the run_id without needing experiment_id.
@@ -2095,6 +2217,7 @@ class RunPlotter(BasePlotter):
         Args:
             eval_step (str or int, optional): Step to load data for.
             eig_data (dict, optional): Pre-loaded eig_data to use instead of reading from disk.
+            eig_kind (str): Passed to ``load_eig_data_file`` when reading from disk.
 
         Returns:
             tuple: (eig_data_dict, artifacts_dir)
@@ -2130,7 +2253,9 @@ class RunPlotter(BasePlotter):
             if artifacts_dir is None or not os.path.exists(artifacts_dir):
                 raise ValueError(f"Could not find artifacts directory for run {self.run_id}")
         
-        json_path, eig_data = self.load_eig_data_file(artifacts_dir, eval_step=eval_step)
+        json_path, eig_data = self.load_eig_data_file(
+            artifacts_dir, eval_step=eval_step, eig_kind=eig_kind
+        )
         return eig_data
     
     
@@ -2515,7 +2640,7 @@ class RunPlotter(BasePlotter):
             include_nominal (bool): Overlay the nominal-design marginal EIG.
         """
         if eig_data is None:
-            eig_data = self._get_eig_data(eval_step=eval_step)
+            eig_data = self._get_eig_data(eval_step=eval_step, eig_kind='marginal')
         eval_step, step_str = self._resolve_step(eig_data, eval_step)
         if step_str is None:
             raise ValueError("No step data found for marginal EIG plot")
@@ -2569,7 +2694,8 @@ class ComparisonPlotter(BasePlotter):
     """
     
     def __init__(self, cosmo_exp='num_tracers', mlflow_exp=None, run_ids=None, 
-                 excluded_runs=None, filter_string=None, run_labels=None, var=None):
+                 excluded_runs=None, filter_string=None, run_labels=None, var=None,
+                 colors=None):
         """
         Initialize the comparison plotter.
         
@@ -2582,6 +2708,9 @@ class ComparisonPlotter(BasePlotter):
             run_labels (list, optional): Labels for each run (same order as run_ids / run_data_list). Used by compare_optimal_designs and compare_eigs.
             var (str or list, optional): Default MLflow param(s) used to differentiate runs in labels/grouping.
                 Individual compare_* methods can override this by passing their own ``var``.
+            colors (list, optional): Colors for each run in ``run_ids`` order. When set, the same
+                run always receives the same color across comparison plots regardless of sorting
+                or ``sort_reference``. Method-level ``colors`` overrides this for a single call.
         """
         super().__init__(cosmo_exp=cosmo_exp)
         
@@ -2596,6 +2725,7 @@ class ComparisonPlotter(BasePlotter):
         self.filter_string = filter_string
         self.run_labels = run_labels
         self.var = var
+        self.colors = [convert_color(c) for c in colors] if colors is not None else None
         
         # Cache for run data (will be populated on first use)
         self._run_data_cache = {}
@@ -2648,6 +2778,58 @@ class ComparisonPlotter(BasePlotter):
 
         keyed.sort(key=lambda item: item[0])
         return [run_id for _, run_id in keyed] + missing
+
+    def _canonical_run_id_order(self, run_data_list, run_ids):
+        """
+        Stable run ordering for color assignment.
+
+        When ``self.run_ids`` is set, colors follow that list's order. Otherwise
+        use ``var`` sorting (if configured) or the caller's ``run_ids`` order.
+        """
+        if not isinstance(run_ids, list):
+            run_ids = [run_ids]
+        run_id_set = set(run_ids)
+        if self.run_ids:
+            ordered = [rid for rid in self.run_ids if rid in run_id_set]
+            ordered += [rid for rid in run_ids if rid not in set(ordered)]
+            return ordered
+
+        var = self._resolve_var(None)
+        if var is not None:
+            return self._sort_run_ids_by_var(run_data_list, list(run_ids))
+        return list(run_ids)
+
+    def _resolve_run_color_map(self, run_data_list, run_ids, colors=None):
+        """
+        Map each run_id to a color, locked to canonical run order.
+
+        ``colors`` (or ``self.colors``) is indexed by ``self.run_ids`` when that
+        list is provided; otherwise by ``_canonical_run_id_order``.
+        """
+        if not isinstance(run_ids, list):
+            run_ids = [run_ids]
+
+        palette_source = colors if colors is not None else self.colors
+        assign_ids = self.run_ids if self.run_ids else self._canonical_run_id_order(
+            run_data_list, run_ids
+        )
+
+        if palette_source is not None:
+            if len(palette_source) != len(assign_ids):
+                raise ValueError(
+                    "colors must match the number of runs in run_ids "
+                    f"({len(assign_ids)}), got {len(palette_source)}."
+                )
+            palette = [convert_color(c) for c in palette_source]
+        else:
+            prop_cycle = plt.rcParams['axes.prop_cycle'].by_key()['color']
+            palette = [convert_color(c) for c in prop_cycle]
+
+        color_map = {
+            run_id: palette[i % len(palette)]
+            for i, run_id in enumerate(assign_ids)
+        }
+        return {run_id: color_map[run_id] for run_id in run_ids if run_id in color_map}
     
     def _get_run_data_list(self, parse_params=True, filter_string=None):
         """
@@ -2825,8 +3007,9 @@ class ComparisonPlotter(BasePlotter):
             transform_output (bool): Transform NF samples to physical space (default True).
             display (tuple or str): 'nominal' and/or 'optimal' (default both).
             eval_step (str or int, optional): EIG eval step for optimal design; latest if None.
-            plot_prior (bool): If True, overlay each group's prior. Uses black when all
-                groups share the same prior_args, otherwise matches group colors.
+            plot_prior (bool): If True, overlay each group's prior as a faint contour
+                (alpha=0.4). Uses black when all groups share the same prior_args,
+                otherwise matches group colors.
 
         Returns:
             GetDist plotter object.
@@ -2891,35 +3074,62 @@ class ComparisonPlotter(BasePlotter):
         if var:
             sorted_group_keys = sorted(grouped_runs.keys(), key=self._var_group_sort_key)
         else:
-            sorted_group_keys = sorted(grouped_runs.keys())
+            sorted_group_keys = self._canonical_run_id_order(
+                run_data_list, list(grouped_runs.keys())
+            )
         
+        all_run_ids = [
+            run_data_item['run_id']
+            for group_runs in grouped_runs.values()
+            for run_data_item in group_runs
+        ]
+        run_color_map = self._resolve_run_color_map(run_data_list, all_run_ids, colors=colors)
+
         # Collect samples
         all_samples = []
         all_colors = []
-        legend_handles = []
+        all_alphas = []
+        all_line_styles = []
+        legend_labels = []
         plotted_group_keys = []
         group_labels = {}
+        group_prior_entropy = {}
         
-        if colors is not None:
-            if len(colors) < len(sorted_group_keys):
-                print(f"Warning: Only {len(colors)} colors provided for {len(sorted_group_keys)} groups. Repeating colors.")
-            group_colors = {group_key: colors[i % len(colors)] for i, group_key in enumerate(sorted_group_keys)}
+        if var is not None:
+            if colors is not None:
+                if len(colors) < len(sorted_group_keys):
+                    print(f"Warning: Only {len(colors)} colors provided for {len(sorted_group_keys)} groups. Repeating colors.")
+                group_colors = {group_key: colors[i % len(colors)] for i, group_key in enumerate(sorted_group_keys)}
+            else:
+                prop_cycle_colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
+                group_colors = {
+                    group_key: prop_cycle_colors[i % len(prop_cycle_colors)]
+                    for i, group_key in enumerate(sorted_group_keys)
+                }
         else:
-            prop_cycle_colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
-            group_colors = {group_key: prop_cycle_colors[i % len(prop_cycle_colors)] for i, group_key in enumerate(sorted_group_keys)}
+            group_colors = {
+                group_key: run_color_map[group_key]
+                for group_key in grouped_runs
+            }
         
         for group_key in sorted_group_keys:
             group_runs = grouped_runs[group_key]
             group_color = group_colors[group_key]
+            group_label = self._comparison_group_label(
+                group_key, group_runs, vars_list, var, run_id_to_label
+            )
+            group_labels[group_key] = group_label
+            group_prior_entropy[group_key] = self._nominal_prior_entropy_for_run(
+                group_runs[0], eval_step=eval_step
+            )
+            group_has_samples = False
             
-            group_samples = []
-            
-            for run_data_item in group_runs:
+            for run_idx, run_data_item in enumerate(group_runs):
                 exp_id = run_data_item.get('exp_id')
                 if exp_id is None:
                     print(f"Warning: No experiment id for run {run_data_item['run_id']}, skipping.")
                     continue
-                for rank in global_ranks:
+                for rank_idx, rank in enumerate(global_ranks):
                     try:
                         nf_entries, _ = self._nf_display_samples(
                             display,
@@ -2933,32 +3143,31 @@ class ComparisonPlotter(BasePlotter):
                             device=device,
                             global_rank=rank,
                             eval_step=eval_step,
+                            plot_prior=plot_prior,
                         )
-                        run_samples = [entry['samples'] for entry in nf_entries]
                     except Exception as e:
                         print(
                             f"Warning: Could not get guide samples for run "
                             f"{run_data_item['run_id']} (rank {rank}): {e}"
                         )
                         continue
-                    group_samples.extend(run_samples)
+                    for entry in nf_entries:
+                        all_samples.append(entry['samples'])
+                        all_colors.append(group_color)
+                        all_alphas.append(entry.get('alpha', 1.0))
+                        all_line_styles.append(entry.get('line_style', '-'))
+                        if run_idx == 0 and rank_idx == 0:
+                            label = entry.get('label', group_label)
+                            if len(sorted_group_keys) > 1:
+                                label = f"{group_label}: {label}"
+                            legend_labels.append(label)
+                    group_has_samples = group_has_samples or bool(nf_entries)
             
-            if not group_samples:
+            if not group_has_samples:
                 print(f"Warning: No valid samples for group {group_key}. Skipping.")
                 continue
             
-            all_samples.extend(group_samples)
-            all_colors.extend([group_color] * len(group_samples))
             plotted_group_keys.append(group_key)
-            
-            group_label = self._comparison_group_label(
-                group_key, group_runs, vars_list, var, run_id_to_label
-            )
-            group_labels[group_key] = group_label
-            
-            legend_handles.append(
-                Line2D([0], [0], color=group_color, label=group_label)
-            )
         
         if not all_samples:
             print("No samples generated for any group. Cannot plot.")
@@ -2985,9 +3194,9 @@ class ComparisonPlotter(BasePlotter):
                 )
                 all_samples.append(nominal_samples_gd)
                 all_colors.append('black')
-                legend_handles.append(
-                    Line2D([0], [0], color='black', label=nominal_label)
-                )
+                all_alphas.append(1.0)
+                all_line_styles.append('--')
+                legend_labels.append(nominal_label)
             except (NotImplementedError, FileNotFoundError, OSError) as e:
                 print(f"Warning: Could not load MCMC reference samples: {e}")
 
@@ -3034,23 +3243,34 @@ class ComparisonPlotter(BasePlotter):
                 if all_priors_identical:
                     all_samples.append(prior_entries[0][0])
                     all_colors.append('black')
-                    legend_handles.append(
-                        Line2D([0], [0], color='black', label='Prior')
+                    all_alphas.append(PRIOR_CONTOUR_ALPHA)
+                    all_line_styles.append('-')
+                    prior_h = group_prior_entropy.get(prior_entries[0][3])
+                    legend_labels.append(
+                        f"Prior{self._prior_entropy_legend_suffix(prior_h)}"
                     )
                 else:
                     for prior_samples_gd, color, _, group_key in prior_entries:
                         all_samples.append(prior_samples_gd)
                         all_colors.append(color)
-                        legend_handles.append(
-                            Line2D(
-                                [0],
-                                [0],
-                                color=color,
-                                label=f"Prior ({group_labels[group_key]})",
-                            )
+                        all_alphas.append(PRIOR_CONTOUR_ALPHA)
+                        all_line_styles.append('-')
+                        prior_h = group_prior_entropy.get(group_key)
+                        legend_labels.append(
+                            f"Prior ({group_labels[group_key]})"
+                            f"{self._prior_entropy_legend_suffix(prior_h)}"
                         )
         
-        g = self.plot_posterior(all_samples, all_colors, show_scatter=show_scatter, levels=levels, width_inch=width_inch)
+        g = self.plot_posterior(
+            all_samples,
+            all_colors,
+            legend_labels=legend_labels,
+            show_scatter=show_scatter,
+            levels=levels,
+            width_inch=width_inch,
+            alpha=all_alphas,
+            line_style=all_line_styles,
+        )
 
         plotted_params = all_samples[0].paramNames.list()
         marker_entries = []
@@ -3095,6 +3315,20 @@ class ComparisonPlotter(BasePlotter):
             title += f' (filter: {filter_str})'
         
         g.fig.set_constrained_layout(True)
+        legend_handles = [
+            Line2D(
+                [0],
+                [0],
+                color=color,
+                label=label,
+                linewidth=1.2,
+                linestyle=line_style,
+                alpha=alpha,
+            )
+            for label, color, line_style, alpha in zip(
+                legend_labels, all_colors, all_line_styles, all_alphas
+            )
+        ]
         leg = g.fig.legend(
             handles=legend_handles,
             loc='upper right',
@@ -3154,7 +3388,11 @@ class ComparisonPlotter(BasePlotter):
                                         If provided and self.run_labels is None, labels will be generated from these parameters. Otherwise run ID (first 8 chars).
             eval_step (str or int, optional): Step identifier (if omitted the most recent step is used).
             figsize (tuple): Matplotlib figure size.
-            colors (list, optional): Explicit colors for each run. Must be the same length as `run_ids`.
+            colors (list, optional): Explicit colors for each run. Must match ``run_ids`` passed
+                to ``ComparisonPlotter`` (not the number of runs that successfully loaded).
+                When omitted, uses ``self.colors`` from ``__init__`` if set, otherwise the
+                default matplotlib cycle. Colors are locked to each run_id regardless of
+                ``sort_reference`` or internal reordering.
             x_lim (tuple, optional): X-axis limits.
             y_lim (tuple, optional): Y-axis limits.
             show_optimal (bool): If True, highlight each run's optimal EIG point when available.
@@ -3210,7 +3448,9 @@ class ComparisonPlotter(BasePlotter):
             artifacts_dir = f"{storage_path}/mlruns/{exp_id}/{run_id}/artifacts"
             
             try:
-                json_path, data = self.load_eig_data_file(artifacts_dir, eval_step=eval_step)
+                json_path, data = self.load_eig_data_file(
+                    artifacts_dir, eval_step=eval_step, eig_kind='variable'
+                )
                 if data is None:
                     print(f"Warning: No completed eig_data file found for run {run_id}, skipping...")
                     continue
@@ -3258,18 +3498,13 @@ class ComparisonPlotter(BasePlotter):
                     selected_step = int(step_keys[0].split('_')[1])
             step_numbers.append(selected_step)
 
-        if colors is not None:
-            if len(colors) != len(found_run_ids):
-                raise ValueError("When provided, colors must match the number of run_ids.")
-            color_list = [convert_color(c) for c in colors]
-        else:
-            prop_cycle = plt.rcParams['axes.prop_cycle'].by_key()['color']
-            color_list = [convert_color(c) for c in prop_cycle]
+        run_color_map = self._resolve_run_color_map(run_data_list, found_run_ids, colors=colors)
 
         design_shape = None
         run_records = []
 
-        for data, run_id, run_label, color, step_num in zip(all_data, found_run_ids, run_labels, color_list, step_numbers):
+        for data, run_id, run_label, step_num in zip(all_data, found_run_ids, run_labels, step_numbers):
+            color = run_color_map[run_id]
             step_key_name = f"step_{int(step_num)}"
             if step_key_name not in data:
                 print(f"Warning: Step {step_num} not found for run {run_id}, skipping...")
@@ -3850,7 +4085,9 @@ class ComparisonPlotter(BasePlotter):
                 
                 # Load completed eig_data file
                 try:
-                    json_path, data = self.load_eig_data_file(artifacts_dir, eval_step=None)
+                    json_path, data = self.load_eig_data_file(
+                        artifacts_dir, eval_step=None, eig_kind='variable'
+                    )
                     if data is None:
                         print(f"Warning: No completed eig_data file found for run {run_id}, skipping...")
                         continue
@@ -3920,18 +4157,8 @@ class ComparisonPlotter(BasePlotter):
             if len(labels) != len(optimal_designs):
                 labels = labels[:len(optimal_designs)]
             
-            # Generate colors if not provided
-            if colors is None:
-                prop_cycle = plt.rcParams['axes.prop_cycle']
-                colors = [prop_cycle.by_key()['color'][i % len(prop_cycle.by_key()['color'])] 
-                         for i in range(len(optimal_designs))]
-            else:
-                if len(colors) < len(optimal_designs):
-                    colors = [colors[i % len(colors)] for i in range(len(optimal_designs))]
-                else:
-                    colors = colors[:len(optimal_designs)]
-            
-            colors = [convert_color(c) for c in colors]
+            run_color_map = self._resolve_run_color_map(run_data_list, found_run_ids, colors=colors)
+            colors = [run_color_map[run_id] for run_id in found_run_ids]
             
             # Initialize experiments for each run to get per-run nominal designs and other metadata
             nominal_total_obs_list = []
@@ -4148,7 +4375,9 @@ class ComparisonPlotter(BasePlotter):
                 artifacts_dir = f"{storage_path}/mlruns/{exp_id}/{run_id}/artifacts"
                 
                 try:
-                    json_path, data = self.load_eig_data_file(artifacts_dir, eval_step=None)
+                    json_path, data = self.load_eig_data_file(
+                        artifacts_dir, eval_step=None, eig_kind='variable'
+                    )
                     if data is None:
                         print(f"Warning: No completed eig_data file found for run {run_id}, skipping...")
                         continue
@@ -4460,7 +4689,13 @@ class ComparisonPlotter(BasePlotter):
                     grouped_runs[group_key_tuple].append(run_data_item)
 
         # Sort groups for consistent ordering - descending for numerical, alphabetical for text
-        sorted_group_keys = sorted(grouped_runs.keys(), key=self._var_group_sort_key)
+        if var:
+            sorted_group_keys = sorted(grouped_runs.keys(), key=self._var_group_sort_key)
+        else:
+            canonical_ids = self._canonical_run_id_order(
+                run_data_list, [run_id for (run_id,) in grouped_runs]
+            )
+            sorted_group_keys = [(run_id,) for run_id in canonical_ids]
         
         # Create a mapping of run_id to its group key for color assignment
         run_to_group = {}
@@ -4552,6 +4787,11 @@ class ComparisonPlotter(BasePlotter):
             print("No runs with valid data to plot.")
             return
 
+        valid_run_ids = [r['run_id'] for r in valid_runs_processed_for_metrics]
+        run_color_map = self._resolve_run_color_map(
+            run_data_list, valid_run_ids, colors=colors
+        )
+
         # --- Plotting Setup ---
         # Calculate number of subplots based on what we want to show
         num_subplots = 1  # Always show loss
@@ -4588,17 +4828,22 @@ class ComparisonPlotter(BasePlotter):
         if show_lr:
             ax_lr = axes[current_ax]
 
-        # Use provided colors or default matplotlib colors
-        if colors is not None:
-            if len(colors) < len(sorted_group_keys):
-                print(f"Warning: Only {len(colors)} colors provided for {len(sorted_group_keys)} groups. Repeating colors.")
-            group_colors = {group_key: colors[i % len(colors)] for i, group_key in enumerate(sorted_group_keys)}
-        else:
-            default_colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
-            group_colors = {group_key: default_colors[i % len(default_colors)] for i, group_key in enumerate(sorted_group_keys)}
+        # Use provided colors or default matplotlib colors (var grouping only).
+        group_colors = {}
+        if var is not None:
+            if colors is not None:
+                if len(colors) < len(sorted_group_keys):
+                    print(f"Warning: Only {len(colors)} colors provided for {len(sorted_group_keys)} groups. Repeating colors.")
+                group_colors = {group_key: colors[i % len(colors)] for i, group_key in enumerate(sorted_group_keys)}
+            else:
+                default_colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
+                group_colors = {
+                    group_key: default_colors[i % len(default_colors)]
+                    for i, group_key in enumerate(sorted_group_keys)
+                }
         
         for run_id, group_key in run_to_group.items():
-            if group_key is not None:
+            if group_key is not None and var is not None:
                 color = group_colors.get(group_key, 'gray')
 
         num_runs = len(valid_runs_processed_for_metrics)
@@ -4641,10 +4886,12 @@ class ComparisonPlotter(BasePlotter):
             group_key_tuple = run_to_group.get(run_id_iter)
             is_valid_for_grouping = group_key_tuple is not None
             
-            if is_valid_for_grouping:
-                color = group_colors.get(group_key_tuple, 'gray')  # Use gray for ungrouped runs
+            if var is None:
+                color = run_color_map.get(run_id_iter, 'gray')
+            elif is_valid_for_grouping:
+                color = group_colors.get(group_key_tuple, 'gray')
             else:
-                color = 'gray'  # Use gray for runs that don't match grouping criteria
+                color = 'gray'
 
             # Resolve run_labels using centralized method
             resolved_labels = self._resolve_run_labels(run_data_list, [run_id_iter], var=var)
@@ -4892,7 +5139,9 @@ class ComparisonPlotter(BasePlotter):
             
             # Load completed eig_data file using class method
             try:
-                json_path, data = self.load_eig_data_file(artifacts_dir, eval_step=None)
+                json_path, data = self.load_eig_data_file(
+                    artifacts_dir, eval_step=None, eig_kind='variable'
+                )
                 if data is None:
                     print(f"Warning: No completed eig_data file found for run {run_id}, skipping...")
                     continue
@@ -5199,7 +5448,9 @@ def compare_increasing_design(
                 if os.path.exists(ref_artifacts_dir):
                     # Load completed reference eig_data file
                     try:
-                        ref_json_path, ref_data = load_eig_data_file(ref_artifacts_dir, eval_step=None)
+                        ref_json_path, ref_data = load_eig_data_file(
+                            ref_artifacts_dir, eval_step=None, eig_kind='variable'
+                        )
                         if ref_data is not None:
                             print(f"Loaded reference EIG data from {ref_json_path}")
                             
@@ -5311,7 +5562,9 @@ def compare_increasing_design(
         
         # Load completed eig_data file
         try:
-            json_path, data = load_eig_data_file(artifacts_dir, eval_step=None)
+            json_path, data = load_eig_data_file(
+                artifacts_dir, eval_step=None, eig_kind='variable'
+            )
             if data is None:
                 print(f"Warning: No completed eig_data file found for run {run_id}, skipping...")
                 continue
@@ -6067,7 +6320,9 @@ def plot_2d_eig(
     artifacts_dir = f"{storage_path}/mlruns/{exp_id}/{run_id}/artifacts"
     
     # Load completed eig_data file
-    json_path, eig_data = load_eig_data_file(artifacts_dir, eval_step=None)
+    json_path, eig_data = load_eig_data_file(
+        artifacts_dir, eval_step=None, eig_kind='variable'
+    )
     if eig_data is None:
         raise ValueError(f"No completed eig_data file found for run {run_id}")
     

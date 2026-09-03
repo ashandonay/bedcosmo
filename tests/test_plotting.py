@@ -20,6 +20,7 @@ try:
 except ImportError:
     plt = Mock()
 
+from bedcosmo.util import convert_color
 from bedcosmo.plotting import (
     BasePlotter,
     RunPlotter,
@@ -479,6 +480,53 @@ class TestComparisonPlotter:
             call_args = mock_plot_posterior.call_args
             assert 'colors' in call_args.kwargs or len(call_args[0]) > 1
 
+    def test_compare_posterior_prior_alpha_and_entropy_legend(
+        self, comparison_plotter, mock_run_data_list, tmp_path
+    ):
+        """Prior overlays use faint contours; posteriors include entropy in legend."""
+        with patch('bedcosmo.plotting.get_runs_data') as mock_get_runs, \
+             patch('bedcosmo.plotting.init_experiment') as mock_init_exp, \
+             patch.object(ComparisonPlotter, '_nf_display_samples') as mock_nf_samples, \
+             patch.object(
+                 ComparisonPlotter,
+                 '_nominal_prior_entropy_for_run',
+                 return_value=4.5,
+             ), \
+             patch.object(ComparisonPlotter, 'plot_posterior') as mock_plot_posterior, \
+             patch.object(comparison_plotter, 'save_figure'), \
+             patch.object(comparison_plotter, 'get_save_dir', return_value=str(tmp_path)), \
+             patch.object(comparison_plotter, 'generate_filename', return_value='test.png'):
+
+            mock_get_runs.return_value = (mock_run_data_list, 'exp_123', 'test_exp')
+
+            mock_sample = Mock()
+            mock_sample.paramNames.names = ['param1', 'param2']
+            mock_sample.paramNames.list.return_value = ['param1', 'param2']
+            mock_nf_samples.return_value = ([{
+                'samples': mock_sample,
+                'label': 'Nominal Design (NF), EIG: 1.23 bits, H_post: 3.20 bits',
+                'alpha': 1.0,
+                'line_style': '-',
+            }], 'step_1000')
+
+            mock_experiment = Mock()
+            mock_experiment.get_prior_samples.return_value = mock_sample
+            mock_experiment.prior_args = {'foo': 'bar'}
+            mock_init_exp.return_value = mock_experiment
+
+            mock_plotter = Mock()
+            mock_plotter.fig = Mock()
+            mock_plotter.fig.legends = []
+            mock_plot_posterior.return_value = mock_plotter
+
+            comparison_plotter.compare_posterior(var='pyro_seed', plot_prior=True)
+
+            kwargs = mock_plot_posterior.call_args.kwargs
+            assert kwargs['alpha'][-1] == 0.4
+            assert 'H_prior' not in kwargs['legend_labels'][0]
+            assert 'H_post' in kwargs['legend_labels'][0]
+            assert kwargs['legend_labels'][-1] == 'Prior, H_prior: 4.50 bits'
+
 
 # ============================================================================
 # Standalone Plotting Functions Tests
@@ -737,6 +785,80 @@ class TestLoadEigDataFile:
         with pytest.raises(ValueError, match="No completed eig_data files with step 2000 found"):
             plotter.load_eig_data_file(str(artifacts_dir), eval_step='2000')
 
+    def test_load_eig_data_file_skips_marginal_only_for_variable(self, tmp_path, mock_scratch_env):
+        """Newer marginal-only files should be skipped when joint EIG is requested."""
+        from bedcosmo.plotting import load_eig_data_file
+
+        artifacts_dir = tmp_path / "artifacts"
+        artifacts_dir.mkdir()
+
+        variable_data = {
+            'status': 'complete',
+            'input_designs': [[1.0]],
+            'step_50000': {
+                'variable': {'eigs_avg': [0.5]},
+                'nominal': {'eigs_avg': 0.4},
+            },
+        }
+        marginal_only_data = {
+            'status': 'complete',
+            'input_designs': [[1.0]],
+            'marginal_subsets': [['z']],
+            'step_50000': {
+                'marginal': {
+                    'z': {'eigs_avg': [0.3], 'nominal': {'eigs_avg': 0.2}},
+                },
+            },
+        }
+        variable_file = artifacts_dir / "eig_data_20260830_2109.json"
+        marginal_file = artifacts_dir / "eig_data_20260831_0449.json"
+        with open(variable_file, 'w') as f:
+            json.dump(variable_data, f)
+        with open(marginal_file, 'w') as f:
+            json.dump(marginal_only_data, f)
+
+        json_path, data = load_eig_data_file(str(artifacts_dir), eig_kind='variable')
+
+        assert json_path == str(variable_file)
+        assert 'variable' in data['step_50000']
+
+    def test_load_eig_data_file_prefers_marginal_only_for_marginal_kind(self, tmp_path, mock_scratch_env):
+        """Marginal-only eval files should be selected when marginal EIG is requested."""
+        from bedcosmo.plotting import load_eig_data_file
+
+        artifacts_dir = tmp_path / "artifacts"
+        artifacts_dir.mkdir()
+
+        variable_data = {
+            'status': 'complete',
+            'input_designs': [[1.0]],
+            'step_50000': {
+                'variable': {'eigs_avg': [0.5]},
+                'nominal': {'eigs_avg': 0.4},
+            },
+        }
+        marginal_only_data = {
+            'status': 'complete',
+            'input_designs': [[1.0]],
+            'marginal_subsets': [['z']],
+            'step_50000': {
+                'marginal': {
+                    'z': {'eigs_avg': [0.3], 'nominal': {'eigs_avg': 0.2}},
+                },
+            },
+        }
+        variable_file = artifacts_dir / "eig_data_20260830_2109.json"
+        marginal_file = artifacts_dir / "eig_data_20260831_0449.json"
+        with open(variable_file, 'w') as f:
+            json.dump(variable_data, f)
+        with open(marginal_file, 'w') as f:
+            json.dump(marginal_only_data, f)
+
+        json_path, data = load_eig_data_file(str(artifacts_dir), eig_kind='marginal')
+
+        assert json_path == str(marginal_file)
+        assert 'marginal' in data['step_50000']
+
 
 class TestPlotLrSchedule:
     """Test cases for plot_lr_schedule function."""
@@ -804,6 +926,15 @@ class TestHelperFunctions:
         result = plotter._is_interactive_environment()
         assert isinstance(result, bool)
 
+    def test_entropy_legend_suffix(self, mock_scratch_env):
+        """Posterior legend omits H_prior when the prior contour is plotted separately."""
+        plotter = BasePlotter(cosmo_exp='test_exp')
+        both = plotter._entropy_legend_suffix(4.5, 3.2, include_prior=True)
+        post_only = plotter._entropy_legend_suffix(4.5, 3.2, include_prior=False)
+        assert both == ", H_prior: 4.50 bits, H_post: 3.20 bits"
+        assert post_only == ", H_post: 3.20 bits"
+        assert plotter._entropy_legend_suffix(4.5, None, include_prior=True) == ", H_prior: 4.50 bits"
+
     def test_display_figure(self, mock_scratch_env):
         """Test _display_figure helper method."""
         plotter = BasePlotter(cosmo_exp='test_exp')
@@ -818,6 +949,30 @@ class TestHelperFunctions:
 # ============================================================================
 # Comparison Functions Tests
 # ============================================================================
+
+class TestComparisonPlotterColors:
+    """Run colors should stay locked to run_ids regardless of plot ordering."""
+
+    @pytest.fixture
+    def mock_scratch_env(self, monkeypatch):
+        monkeypatch.setenv("SCRATCH", "/mock/scratch")
+
+    def test_resolve_run_color_map_follows_run_ids_order(self, mock_scratch_env):
+        plotter = ComparisonPlotter(
+            cosmo_exp='test_exp',
+            run_ids=['run_b', 'run_a'],
+            colors=['red', 'blue'],
+        )
+        run_data_list = [
+            {'run_id': 'run_b', 'params': {}},
+            {'run_id': 'run_a', 'params': {}},
+        ]
+        color_map = plotter._resolve_run_color_map(
+            run_data_list, ['run_a', 'run_b']
+        )
+        assert color_map['run_b'] == convert_color('red')
+        assert color_map['run_a'] == convert_color('blue')
+
 
 class TestCompareEigs:
     """Test cases for ComparisonPlotter.compare_eigs method."""
