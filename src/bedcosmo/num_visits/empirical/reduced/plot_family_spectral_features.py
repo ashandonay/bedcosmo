@@ -13,7 +13,6 @@ import pandas as pd
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
-from matplotlib.lines import Line2D  # noqa: E402
 
 from .discover_template_cohorts import (  # noqa: E402
     solve_subset_nnls,
@@ -46,34 +45,26 @@ DEFAULT_GROUPS = (
 )
 EMISSION_WINDOWS = {
     "oii": ((3717.0, 3737.0), (3655.0, 3705.0), (3755.0, 3805.0)),
-    "neiii": ((3859.0, 3879.0), (3815.0, 3845.0), (3890.0, 3915.0)),
     "hbeta": ((4851.0, 4871.0), (4800.0, 4835.0), (4885.0, 4920.0)),
     "oiii": ((4997.0, 5017.0), (4950.0, 4985.0), (5025.0, 5060.0)),
     "halpha": ((6553.0, 6573.0), (6485.0, 6525.0), (6605.0, 6645.0)),
-    "nii": ((6575.0, 6591.0), (6485.0, 6525.0), (6605.0, 6645.0)),
-    "sii": ((6705.0, 6740.0), (6650.0, 6690.0), (6750.0, 6790.0)),
 }
 
 # Lick/IDS passbands from Worthey et al. (1994) and Worthey & Ottaviani (1997).
 # Ca H+K is a deliberately broad custom pseudo-equivalent-width diagnostic.
 ABSORPTION_WINDOWS = {
-    r"H$\delta_A$ EW [$\AA$]": (
-        (4083.50, 4122.25),
-        (4041.60, 4079.75),
-        (4128.50, 4161.00),
-    ),
-    r"Ca H+K EW [$\AA$]": ((3925.0, 3980.0), (3890.0, 3910.0), (4000.0, 4020.0)),
-    r"G4300 EW [$\AA$]": (
+    "Ca H+K": ((3925.0, 3980.0), (3890.0, 3910.0), (4000.0, 4020.0)),
+    "G4300": (
         (4281.375, 4316.375),
         (4266.375, 4282.625),
         (4318.875, 4335.125),
     ),
-    r"Mg $b$ EW [$\AA$]": (
+    r"Mg $b$": (
         (5160.125, 5192.625),
         (5142.625, 5161.375),
         (5191.375, 5206.375),
     ),
-    r"Na D EW [$\AA$]": (
+    "Na D": (
         (5876.875, 5909.375),
         (5860.625, 5875.625),
         (5922.125, 5948.125),
@@ -90,6 +81,24 @@ FE5335_WINDOWS = (
     (5304.625, 5315.875),
     (5353.375, 5363.375),
 )
+EMISSION_LABELS = {
+    "oii": "[O II]",
+    "hbeta": r"H$\beta$",
+    "oiii": "[O III]",
+    "halpha": r"H$\alpha$",
+}
+
+
+def _format_angstrom(value: float) -> str:
+    return str(int(round(value)))
+
+
+def ew_label(name: str, *features: tuple[float, float]) -> str:
+    """Panel title with the feature integration window(s) in Angstroms."""
+    ranges = ", ".join(
+        f"{_format_angstrom(lo)}–{_format_angstrom(hi)}" for lo, hi in features
+    )
+    return rf"{name} EW $[{ranges}\,\AA]$"
 
 
 @dataclass(frozen=True)
@@ -233,28 +242,6 @@ def pseudo_equivalent_width(
     return np.trapz(1.0 - ratio, feature_wave, axis=1)
 
 
-def emission_line_flux(
-    spectra: np.ndarray,
-    wave: np.ndarray,
-    windows: tuple[tuple[float, float], tuple[float, float], tuple[float, float]],
-) -> np.ndarray:
-    feature, blue, red = windows
-    select = (wave >= feature[0]) & (wave <= feature[1])
-    feature_wave = wave[select]
-    continuum = interpolated_continuum(spectra, wave, feature_wave, blue, red)
-    return np.trapz(spectra[:, select] - continuum, feature_wave, axis=1)
-
-
-def positive_ratio(numerator: np.ndarray, denominator: np.ndarray) -> np.ndarray:
-    valid = (numerator > 0) & (denominator > 0)
-    return np.divide(
-        numerator,
-        denominator,
-        out=np.full_like(numerator, np.nan),
-        where=valid,
-    )
-
-
 def diagnostics(spectra: np.ndarray, wave: np.ndarray) -> dict[str, np.ndarray]:
     blue = window_mean(spectra, wave, (3850.0, 3950.0), fnu=True)
     red = window_mean(spectra, wave, (4000.0, 4100.0), fnu=True)
@@ -279,32 +266,21 @@ def diagnostics(spectra: np.ndarray, wave: np.ndarray) -> dict[str, np.ndarray]:
             where=optical_nir > 0,
         ),
     }
-    for label, (feature, blue_window, red_window) in ABSORPTION_WINDOWS.items():
-        result[label] = pseudo_equivalent_width(
+    for name, (feature, blue_window, red_window) in ABSORPTION_WINDOWS.items():
+        result[ew_label(name, feature)] = pseudo_equivalent_width(
             spectra, wave, feature, blue_window, red_window
         )
     fe5270 = pseudo_equivalent_width(spectra, wave, *FE5270_WINDOWS)
     fe5335 = pseudo_equivalent_width(spectra, wave, *FE5335_WINDOWS)
-    result[r"$\langle$Fe$\rangle$ EW [$\AA$]"] = 0.5 * (fe5270 + fe5335)
-
-    line_fluxes = {
-        name: emission_line_flux(spectra, wave, windows)
-        for name, windows in EMISSION_WINDOWS.items()
-    }
-    emission_labels = {
-        "oii": r"[O II] 3727 EW [$\AA$]",
-        "neiii": r"[Ne III] 3869 EW [$\AA$]",
-        "hbeta": r"H$\beta$ 4861 EW [$\AA$]",
-        "oiii": r"[O III] 5007 EW [$\AA$]",
-        "halpha": r"H$\alpha$ 6563 EW [$\AA$]",
-    }
-    for name, label in emission_labels.items():
-        result[label] = pseudo_equivalent_width(
-            spectra, wave, *EMISSION_WINDOWS[name]
-        )
-    result[r"H$\alpha$ / H$\beta$"] = positive_ratio(
-        line_fluxes["halpha"], line_fluxes["hbeta"]
+    result[ew_label(r"$\langle$Fe$\rangle$", FE5270_WINDOWS[0], FE5335_WINDOWS[0])] = (
+        0.5 * (fe5270 + fe5335)
     )
+
+    for key, name in EMISSION_LABELS.items():
+        feature, blue_window, red_window = EMISSION_WINDOWS[key]
+        result[ew_label(name, feature)] = pseudo_equivalent_width(
+            spectra, wave, feature, blue_window, red_window
+        )
     return result
 
 
@@ -406,7 +382,6 @@ def make_figure(
         r"$D_n(4000)$",
         "UV / optical",
         "NIR / optical",
-        r"H$\alpha$ / H$\beta$",
     }
     for ax_feature, diagnostic in zip(feature_axes, diagnostic_labels):
         reference = 1.0 if diagnostic in ratio_diagnostics else 0.0
@@ -421,25 +396,16 @@ def make_figure(
     feature_axes[0].set_title(
         "Continuum and feature power\n" + diagnostic_labels[0], loc="left"
     )
-    style_handles = [
-        Line2D([0], [0], marker="o", color=INK, lw=0, label="median"),
-        Line2D([0], [0], color=INK, lw=1.4, label="10th–90th percentile"),
-    ]
     if len(diagnostic_labels) < diagnostic_rows * diagnostic_columns:
         key_ax = fig.add_subplot(grid[-1, -1])
         key_ax.axis("off")
-        key_ax.legend(handles=style_handles, frameon=False, loc="center", ncol=2)
         key_ax.text(
             0.5,
-            0.22,
+            0.5,
             r"Independent x scales; EW: $+$ absorption, $-$ emission",
             ha="center",
             va="center",
             transform=key_ax.transAxes,
-        )
-    else:
-        feature_axes[-1].legend(
-            handles=style_handles, frameon=False, loc="lower right"
         )
 
     for ax in (ax_spectra, *feature_axes):
