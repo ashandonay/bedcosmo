@@ -108,8 +108,7 @@ Production default (`prior_args_empirical.yaml`, 12 templates) is unchanged.
 | `run_healpix_fits.sh` | Batch fits only (no combine/KDE; see orchestrator instead) |
 | `run_healpix_diagnostic_plots.sh` | Per-patch `--plot-only` triangles + cross-patch comparison |
 | `compare_healpix_prior_params.py` | Cross-patch overlays of prior coordinates |
-| `discover_template_cohorts.py` | Exhaustive exact-N DESI refits and reduced-template cohort assignments |
-| `plot_template_subset_examples.py` | Observed/full/reduced DESI fit galleries with individual template contributions |
+| `reduced/` | Reduced-template cohort discovery, galleries, traits/representativeness plots, and prior builds |
 | `diagnostic_plots.py` | Post-build KDE/NumVisits diagnostics |
 | `diagnose_transform_input.py` | NumVisits `transform_input` triangle diagnostics |
 | `sed_prior.py` | Empirical prior: GPU pool, sampling, log-density scoring, and flow attachment (`prior_source` {kde, flow}) |
@@ -549,7 +548,7 @@ To connect majority-T1 and majority-T7 subsets back to their actual DESI
 coadds, run:
 
 ```bash
-python experiments/num_visits/scripts/plot_eazy_dominant_cohort_traits.py
+python -m bedcosmo.num_visits.empirical.reduced.plot_eazy_dominant_cohort_traits
 ```
 
 This writes a physical-traits figure plus a TARGETID/HEALPix-level CSV. The
@@ -564,7 +563,7 @@ To refit every quality-passing DESI spectrum with every size-N subset of the
 12-template bank:
 
 ```bash
-python -m bedcosmo.num_visits.empirical.discover_template_cohorts \
+python -m bedcosmo.num_visits.empirical.reduced.discover_template_cohorts \
   --n-templates 3 \
   --max-chi2-dof 1.2 \
   --max-delta-chi2-dof 0.05 \
@@ -597,7 +596,7 @@ To inspect what the templates contribute for explicit subsets or the largest
 cohorts, generate example-fit galleries from a discovery directory:
 
 ```bash
-python -m bedcosmo.num_visits.empirical.plot_template_subset_examples \
+python -m bedcosmo.num_visits.empirical.reduced.plot_template_subset_examples \
   --cohort-dir experiments/num_visits/plots/reduced_template_cohorts/eazy12/n3 \
   --templates T1+T7+T9 \
   --top-sets 3
@@ -637,15 +636,17 @@ Turn the passing members of any discovered subset into a standalone empirical
 prior with:
 
 ```bash
-python -m bedcosmo.num_visits.empirical.build_reduced_template_prior \
-  --cohort-dir experiments/num_visits/plots/reduced_template_cohorts/eazy12/n2 \
+python -m bedcosmo.num_visits.empirical.reduced.build_reduced_template_prior \
   --templates T1+T7
 ```
 
-This writes a reduced EAZY `.param` file, a compatible coefficient table,
-complete selection/template provenance, and the native and gaussianized KDEs.
-For T1+T7 the prior has three features: one ILR shape coordinate, `log_c_scale`,
-and `z`. Use `prior_args_empirical_eazy12_t1_t7.yaml` to load it in NumVisits.
+`--cohort-dir` is optional: when omitted, the builder looks under the source
+full-template build (`--source-build-name`, default `empirical_prior/eazy12`)
+at `reduced_template_cohorts/nN/` for the subset size. This writes a reduced
+EAZY `.param` file, a compatible coefficient table, complete selection/template
+provenance, and the native and gaussianized KDEs. For T1+T7 the prior has three
+features: one ILR shape coordinate, `log_c_scale`, and `z`. Use
+`prior_args_empirical_eazy12_t1_t7.yaml` to load it in NumVisits.
 The prior is conditioned on passing the cohort discovery thresholds; it does
 not represent DESI galaxies that require other template directions.
 

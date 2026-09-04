@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from bedcosmo.num_visits.empirical.build_reduced_template_prior import (
+from bedcosmo.num_visits.empirical.reduced.build_reduced_template_prior import (
     parse_template_subset,
     reduced_weights_table,
     write_reduced_template_param,

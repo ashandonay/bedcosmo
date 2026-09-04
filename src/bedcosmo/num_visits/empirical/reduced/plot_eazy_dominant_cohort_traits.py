@@ -25,10 +25,8 @@ from scipy.ndimage import gaussian_filter1d
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
-from _paths import plot_path  # noqa: E402
-
-from bedcosmo.num_visits.empirical.desi_data import get_local_desi_paths  # noqa: E402
-from bedcosmo.num_visits.empirical.paths import (  # noqa: E402
+from ..desi_data import get_local_desi_paths  # noqa: E402
+from ..paths import (  # noqa: E402
     DEFAULT_PROGRAM,
     DEFAULT_SPECPROD,
     DEFAULT_SURVEY,
@@ -384,7 +382,7 @@ def main() -> None:
         scratch / "bedcosmo/num_visits/empirical_prior/eazy12/desi_eazy_empirical_weights.csv"
     )
     desi_dir = args.desi_dir or get_desi_data_dir()
-    output = args.output or plot_path("eazy12_dominant_cohort_spectral_traits.png")
+    output = args.output or weights_csv.parent / "eazy12_dominant_cohort_spectral_traits.png"
     output_csv = args.output_csv or output.with_suffix(".csv")
     if not 0.0 <= args.min_anchor_weight <= 1.0:
         raise ValueError("--min-anchor-weight must be between 0 and 1")

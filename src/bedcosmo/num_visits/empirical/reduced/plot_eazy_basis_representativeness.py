@@ -13,8 +13,8 @@ DESI redshift and remove the mean magnitude, so ``log_c_scale`` does not enter.
 
 Usage::
 
-    conda run -n bedcosmo python \
-      experiments/num_visits/scripts/plot_eazy_basis_representativeness.py \
+    conda run -n bedcosmo python -m \
+      bedcosmo.num_visits.empirical.reduced.plot_eazy_basis_representativeness \
       --build eazy6
 
 Use ``--build eazy12`` for the production twelve-template bank. The default
@@ -35,10 +35,9 @@ from speclite import filters as speclite_filters
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
-from _paths import plot_path  # noqa: E402
 from matplotlib.ticker import PercentFormatter  # noqa: E402
 
-from bedcosmo.num_visits.empirical.templates import load_eazy_template_bank  # noqa: E402
+from ..templates import load_eazy_template_bank  # noqa: E402
 
 INK = "#25272B"
 MUTED = "#6B7280"
@@ -504,7 +503,7 @@ def main() -> None:
         prior_dir / "desi_eazy_empirical_weights.csv", n_templates=len(templates)
     )
     responses = lsst_template_responses(wave, templates, redshift)
-    output = args.output or plot_path(f"{args.build}_basis_representativeness.png")
+    output = args.output or prior_dir / f"{args.build}_basis_representativeness.png"
     metrics = make_figure(weights, redshift, wave, templates, responses, output)
 
     print(f"Wrote {output}")

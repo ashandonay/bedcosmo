@@ -19,18 +19,18 @@ from astropy.io import fits
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 
-from .desi_data import get_local_desi_paths
+from ..desi_data import get_local_desi_paths
 from .discover_template_cohorts import (
     _coefficient_columns,
     _read_target_spectrum,
     load_quality_fit_table,
 )
-from .fit_eazy_weights_to_desi import (
+from ..fit_eazy_weights_to_desi import (
     _divide_by_continuum,
     _gaussian_smooth_segments,
     build_template_matrix_on_observed_grid,
 )
-from .paths import (
+from ..paths import (
     DEFAULT_EMPIRICAL_PRIOR_DIR,
     DEFAULT_PROGRAM,
     DEFAULT_SPECPROD,
@@ -39,7 +39,7 @@ from .paths import (
     get_prior_build_dir,
     get_template_dir,
 )
-from .templates import (
+from ..templates import (
     DEFAULT_TEMPLATE_NORM_MAX_AA,
     DEFAULT_TEMPLATE_NORM_MIN_AA,
     DEFAULT_TEMPLATE_PARAM_12D,
@@ -69,8 +69,13 @@ def template_label(subset: tuple[int, ...]) -> str:
     return "+".join(f"T{value}" for value in subset)
 
 
-def select_examples(members: pd.DataFrame, subset: tuple[int, ...]) -> pd.DataFrame:
-    """Choose one representative and one component-rich member per template."""
+def select_examples(
+    members: pd.DataFrame,
+    subset: tuple[int, ...],
+    *,
+    extra_samples: int = 0,
+) -> pd.DataFrame:
+    """Choose representative, component-rich, and optional additional members."""
     a_columns = [f"a_{position + 1}" for position in range(len(subset))]
     missing = set(a_columns).difference(members.columns)
     if missing:
@@ -95,6 +100,15 @@ def select_examples(members: pd.DataFrame, subset: tuple[int, ...]) -> pd.DataFr
                 chosen.append(int(index))
                 roles.append(f"T{template}-rich")
                 break
+    target_count = 1 + len(subset) + extra_samples
+    if extra_samples > 0:
+        for index in np.argsort(distance):
+            if len(chosen) >= target_count:
+                break
+            if int(index) in chosen:
+                continue
+            chosen.append(int(index))
+            roles.append(f"additional {len(chosen) - (1 + len(subset))}")
     selected = members.iloc[chosen].copy().reset_index(drop=True)
     selected.insert(0, "example_role", roles)
     return selected
@@ -222,6 +236,7 @@ def make_gallery(
     wavelength_frame: str = "observed",
     shared_x: bool = False,
     redshift_window: tuple[float, float] | None = None,
+    output_dpi: int = 180,
 ) -> None:
     n_examples = len(selected)
     n_full_templates = len(template_waves)
@@ -466,7 +481,7 @@ def make_gallery(
         )
     fig.suptitle(title, fontsize=15, y=0.985)
     output.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(output, dpi=180, bbox_inches="tight")
+    fig.savefig(output, dpi=output_dpi, bbox_inches="tight")
     plt.close(fig)
 
 
@@ -552,7 +567,14 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Do not reuse a TARGETID when plotting several subsets.",
     )
+    parser.add_argument(
+        "--extra-samples",
+        type=int,
+        default=0,
+        help="Add this many representative cohort members beyond the default rows.",
+    )
     parser.add_argument("--output-dir", type=Path, default=None)
+    parser.add_argument("--output-dpi", type=int, default=180)
     return parser.parse_args()
 
 
@@ -568,6 +590,10 @@ def main() -> None:
         raise ValueError("--continuum-min-fraction must be in [0, 1)")
     if args.continuum_min_snr < 0:
         raise ValueError("--continuum-min-snr must be nonnegative")
+    if args.extra_samples < 0:
+        raise ValueError("--extra-samples must be nonnegative")
+    if args.output_dpi <= 0:
+        raise ValueError("--output-dpi must be positive")
     if (args.z_min is None) != (args.z_max is None):
         raise ValueError("Provide both --z-min and --z-max")
     if args.z_min is not None and args.z_min > args.z_max:
@@ -601,7 +627,7 @@ def main() -> None:
             members = members.loc[~members["targetid"].isin(used_targetids)].copy()
         if members.empty:
             raise ValueError(f"No eligible passing members found for {label}")
-        selected = select_examples(members, subset)
+        selected = select_examples(members, subset, extra_samples=args.extra_samples)
         if args.distinct_across_subsets:
             used_targetids.update(selected["targetid"].astype(int))
         spectra = load_spectra(
@@ -632,6 +658,7 @@ def main() -> None:
             wavelength_frame=args.wavelength_frame,
             shared_x=args.shared_x,
             redshift_window=redshift_window,
+            output_dpi=args.output_dpi,
         )
         output_dir.mkdir(parents=True, exist_ok=True)
         selected.to_csv(output_dir / f"{stem}_selected_examples.csv", index=False)

@@ -1,10 +1,9 @@
-# Reduced EAZY12 T1+T7 empirical prior.
-# One ILR shape coordinate (T1:T7), plus log_c_scale and redshift.
+# Reduced EAZY12 T3+T5 empirical prior.
+# One ILR shape coordinate (T3:T5), plus log_c_scale and redshift.
 #
 # Build:
-#   python -m bedcosmo.num_visits.empirical.build_reduced_template_prior \
-#     --cohort-dir experiments/num_visits/plots/reduced_template_cohorts/eazy12/n2 \
-#     --templates T1+T7
+#   python -m bedcosmo.num_visits.empirical.reduced.build_reduced_template_prior \
+#     --templates T3+T5
 #
 # Train / eval:
 #   ./submit.sh train num_visits empirical \

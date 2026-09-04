@@ -4,12 +4,12 @@ import numpy as np
 import pandas as pd
 from scipy.optimize import nnls
 
-from bedcosmo.num_visits.empirical.discover_template_cohorts import (
+from bedcosmo.num_visits.empirical.reduced.discover_template_cohorts import (
     full_fit_chi2_dof_from_statistics,
     solve_subset_nnls,
 )
 from bedcosmo.num_visits.empirical.fit_eazy_weights_to_desi import _divide_by_continuum
-from bedcosmo.num_visits.empirical.plot_template_subset_examples import (
+from bedcosmo.num_visits.empirical.reduced.plot_template_subset_examples import (
     continuum_sigma_in_observed_frame,
     divide_by_display_continuum,
     ivar_bin_spectrum,
@@ -86,6 +86,18 @@ def test_subset_example_selection_includes_representative_and_rich_members():
         "T9-rich",
     ]
     assert selected["targetid"].is_unique
+
+    with_extra = select_examples(
+        members, parse_template_label("T1+T7+T9"), extra_samples=1
+    )
+    assert with_extra["example_role"].tolist() == [
+        "representative",
+        "T1-rich",
+        "T7-rich",
+        "T9-rich",
+        "additional 1",
+    ]
+    assert with_extra["targetid"].is_unique
 
 
 def test_ivar_display_binning():

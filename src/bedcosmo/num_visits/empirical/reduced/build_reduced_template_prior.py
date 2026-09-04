@@ -12,13 +12,14 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from .paths import (
+from ..paths import (
     BUILD_PROVENANCE_FILENAME,
+    DEFAULT_EMPIRICAL_PRIOR_DIR,
     SED_PRIOR_KDE_NATIVE_FILENAME,
     get_prior_build_dir,
     get_template_dir,
 )
-from .provenance import write_provenance
+from ..provenance import write_provenance
 
 KDE_MODULE = "bedcosmo.num_visits.empirical.fit_sed_prior_kde"
 
@@ -137,7 +138,17 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
-    parser.add_argument("--cohort-dir", type=Path, required=True)
+    parser.add_argument(
+        "--cohort-dir",
+        type=Path,
+        default=None,
+        help="Fixed-N cohort directory; inferred from --source-build-name and subset size",
+    )
+    parser.add_argument(
+        "--source-build-name",
+        default=DEFAULT_EMPIRICAL_PRIOR_DIR,
+        help="Full-template empirical build used when --cohort-dir is omitted",
+    )
     parser.add_argument("--templates", required=True, help="Subset label, e.g. T1+T7")
     parser.add_argument("--build-name", default=None)
     parser.add_argument("--template-dir", type=Path, default=None)
@@ -153,7 +164,13 @@ def main() -> None:
     build_name = args.build_name or f"empirical_prior/eazy12-{slug}"
     prior_dir = get_prior_build_dir(build_name)
     template_dir = (args.template_dir or get_template_dir()).expanduser().resolve()
-    cohort_dir = args.cohort_dir.expanduser().resolve()
+    cohort_dir = (
+        args.cohort_dir
+        if args.cohort_dir is not None
+        else get_prior_build_dir(args.source_build_name)
+        / "reduced_template_cohorts"
+        / f"n{len(subset)}"
+    ).expanduser().resolve()
 
     discovery_path = cohort_dir / "discovery_parameters.json"
     memberships_path = cohort_dir / "subset_memberships.csv"
@@ -197,6 +214,7 @@ def main() -> None:
             },
             "selection": {
                 "source_cohort_dir": cohort_dir,
+                "source_build_name": args.source_build_name,
                 "source_memberships": memberships_path,
                 "subset": label,
                 "n_rows": int(len(weights)),
