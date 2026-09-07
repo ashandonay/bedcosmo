@@ -30,6 +30,11 @@ from bedcosmo.plotting import (
     compare_contours,
     loss_area_plot,
     plot_2d_eig,
+    _extract_eig_values,
+    _normalize_marginal_subset_id,
+    _eig_correlation_stats,
+    _directional_delta_correlations,
+    _weighted_pearson,
 )
 
 
@@ -1006,6 +1011,280 @@ class TestCompareEigs:
 
             with pytest.raises(ValueError, match="No valid EIG data files found"):
                 plotter.compare_eigs()
+
+
+def _make_eig_data(
+    designs,
+    variable_eigs=None,
+    marginal=None,
+    status="complete",
+    design_labels=None,
+    step=50000,
+):
+    """Build a minimal complete eig_data dict for tests."""
+    designs = np.asarray(designs, dtype=float)
+    if designs.ndim == 1:
+        designs = designs.reshape(-1, 1)
+    step_key = f"step_{step}"
+    step_payload = {}
+    if variable_eigs is not None:
+        variable_eigs = np.asarray(variable_eigs, dtype=float)
+        step_payload["variable"] = {
+            "eigs_avg": variable_eigs.tolist(),
+            "eigs_std": np.zeros_like(variable_eigs).tolist(),
+        }
+    if marginal is not None:
+        step_payload["marginal"] = {}
+        for subset_id, eigs in marginal.items():
+            eigs = np.asarray(eigs, dtype=float)
+            step_payload["marginal"][subset_id] = {
+                "eigs_avg": eigs.tolist(),
+                "eigs_std": np.zeros_like(eigs).tolist(),
+                "params": subset_id.split("+"),
+            }
+    data = {
+        "status": status,
+        "input_designs": designs.tolist(),
+        step_key: step_payload,
+    }
+    if design_labels is not None:
+        data["metadata"] = {"design_labels": list(design_labels)}
+    return data
+
+
+class TestEigCorrelationHelpers:
+    """Unit tests for EIG correlation helper functions."""
+
+    def test_normalize_marginal_subset_id(self):
+        assert _normalize_marginal_subset_id("z") == "z"
+        assert _normalize_marginal_subset_id(["log_c_scale", "z"]) == "log_c_scale+z"
+        assert _normalize_marginal_subset_id("a,b") == "a+b"
+        assert _normalize_marginal_subset_id("a+b") == "a+b"
+
+    def test_extract_variable_and_marginal(self):
+        designs = [[1.0, 0.0], [0.0, 1.0], [0.5, 0.5]]
+        data = _make_eig_data(
+            designs,
+            variable_eigs=[1.0, 2.0, 3.0],
+            marginal={"z": [0.1, 0.2, 0.3]},
+            design_labels=["u", "g"],
+        )
+        d, eigs, std, label = _extract_eig_values(data, "step_50000", "variable")
+        assert label == "variable"
+        assert eigs.tolist() == [1.0, 2.0, 3.0]
+        assert d.shape == (3, 2)
+
+        d2, eigs2, _, label2 = _extract_eig_values(
+            data, "step_50000", "marginal", subset="z"
+        )
+        assert label2 == "marginal(z)"
+        assert eigs2.tolist() == [0.1, 0.2, 0.3]
+        np.testing.assert_allclose(d, d2)
+
+    def test_extract_missing_subset(self):
+        data = _make_eig_data([[0.0], [1.0]], marginal={"z": [1.0, 2.0]})
+        with pytest.raises(ValueError, match="subset 'w'"):
+            _extract_eig_values(data, "step_50000", "marginal", subset="w")
+
+    def test_eig_correlation_stats_perfect(self):
+        eigs = np.array([1.0, 2.0, 3.0, 4.0])
+        stats = _eig_correlation_stats(eigs, 2.0 * eigs + 1.0)
+        assert stats["rho_pearson"] == pytest.approx(1.0)
+        assert stats["rho_spearman"] == pytest.approx(1.0)
+        assert stats["top10_overlap"] == 4
+        assert stats["n_designs"] == 4
+
+    def test_weighted_pearson_and_directional(self):
+        # Axis-aligned fibers: EIGs agree along dim 0, anti-agree along dim 1.
+        designs = np.array(
+            [
+                [0.0, 0.0],
+                [1.0, 0.0],
+                [2.0, 0.0],
+                [3.0, 0.0],
+                [0.0, 1.0],
+                [0.0, 2.0],
+                [0.0, 3.0],
+            ],
+            dtype=float,
+        )
+        eigs_x = designs[:, 0] + 0.05 * designs[:, 1]
+        eigs_y = designs[:, 0] - 2.0 * designs[:, 1]
+        per_dim = _directional_delta_correlations(
+            designs, eigs_x, eigs_y, min_pair_weight=0.9
+        )
+        assert per_dim[0]["rho"] > per_dim[1]["rho"]
+        assert _weighted_pearson([1.0, 2.0, 3.0], [2.0, 4.0, 6.0], [1.0, 1.0, 1.0]) == pytest.approx(1.0)
+
+
+class TestCompareEigCorrelation:
+    """Tests for ComparisonPlotter.compare_eig_correlation / directional."""
+
+    @pytest.fixture
+    def mock_scratch_env(self, monkeypatch):
+        monkeypatch.setenv("SCRATCH", "/mock/scratch")
+
+    def _write_eig_json(self, path, data):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w") as f:
+            json.dump(data, f)
+        return path
+
+    def test_path_override_marginal_vs_variable(self, mock_scratch_env, tmp_path):
+        designs = [[1.0, 0.0], [0.0, 1.0], [0.5, 0.5], [0.2, 0.8]]
+        variable = [1.0, 2.0, 1.5, 1.8]
+        marginal = [0.9, 1.9, 1.4, 1.7]
+        path_x = self._write_eig_json(
+            tmp_path / "eig_x.json",
+            _make_eig_data(designs, marginal={"z": marginal}, design_labels=["u", "g"]),
+        )
+        path_y = self._write_eig_json(
+            tmp_path / "eig_y.json",
+            _make_eig_data(designs, variable_eigs=variable, design_labels=["u", "g"]),
+        )
+
+        plotter = ComparisonPlotter(
+            cosmo_exp="test_exp",
+            run_ids=["aaaaaaaa", "bbbbbbbb"],
+        )
+        with patch.object(plotter, "_get_run_data_list") as mock_runs:
+            mock_runs.return_value = (
+                [
+                    {"run_id": "aaaaaaaa", "exp_id": "exp_1"},
+                    {"run_id": "bbbbbbbb", "exp_id": "exp_1"},
+                ],
+                "exp_1",
+                "test_exp",
+            )
+            fig, axes, stats = plotter.compare_eig_correlation(
+                x={"eig_kind": "marginal", "subset": "z", "eig_data_path": str(path_x)},
+                y={"eig_kind": "variable", "eig_data_path": str(path_y)},
+                save_dir=str(tmp_path / "plots"),
+                dpi=80,
+            )
+        assert stats["rho_pearson"] == pytest.approx(1.0, abs=1e-6)
+        assert stats["rho_spearman"] == pytest.approx(1.0, abs=1e-6)
+        assert stats["n_designs"] == 4
+        assert axes[0] is not None and axes[1] is not None
+        assert fig is not None
+
+    def test_same_run_via_auto_load(self, mock_scratch_env, tmp_path):
+        designs = [[0.0], [1.0], [2.0]]
+        data = _make_eig_data(
+            designs,
+            variable_eigs=[1.0, 2.0, 3.0],
+            marginal={"z": [1.1, 2.1, 3.1]},
+        )
+        artifacts = tmp_path / "mlruns" / "exp_1" / "run_same" / "artifacts"
+        self._write_eig_json(artifacts / "eig_data_20260101_1200.json", data)
+
+        plotter = ComparisonPlotter(cosmo_exp="test_exp", run_ids=["run_same", "run_other"])
+        # Point storage at tmp so auto-load finds the file.
+        plotter.storage_path = str(tmp_path)
+
+        with patch.object(plotter, "_get_run_data_list") as mock_runs:
+            mock_runs.return_value = (
+                [
+                    {"run_id": "run_same", "exp_id": "exp_1"},
+                    {"run_id": "run_other", "exp_id": "exp_1"},
+                ],
+                "exp_1",
+                "test_exp",
+            )
+            fig, axes, stats = plotter.compare_eig_correlation(
+                x={"run_id": "run_same", "eig_kind": "marginal", "subset": ["z"]},
+                y={"run_id": "run_same", "eig_kind": "variable"},
+                save_dir=str(tmp_path / "plots"),
+                dpi=80,
+            )
+        assert stats["rho_pearson"] == pytest.approx(1.0)
+        assert "marginal(z)" in stats["label_x"]
+
+    def test_design_mismatch(self, mock_scratch_env, tmp_path):
+        path_x = self._write_eig_json(
+            tmp_path / "a.json",
+            _make_eig_data([[0.0], [1.0]], marginal={"z": [1.0, 2.0]}),
+        )
+        path_y = self._write_eig_json(
+            tmp_path / "b.json",
+            _make_eig_data([[0.0], [2.0]], variable_eigs=[1.0, 2.0]),
+        )
+        plotter = ComparisonPlotter(cosmo_exp="test_exp", run_ids=["a", "b"])
+        with patch.object(plotter, "_get_run_data_list") as mock_runs:
+            mock_runs.return_value = (
+                [{"run_id": "a", "exp_id": "e"}, {"run_id": "b", "exp_id": "e"}],
+                "e",
+                "test_exp",
+            )
+            with pytest.raises(ValueError, match="input_designs differ"):
+                plotter.compare_eig_correlation(
+                    x={"eig_kind": "marginal", "subset": "z", "eig_data_path": str(path_x)},
+                    y={"eig_kind": "variable", "eig_data_path": str(path_y)},
+                    save_dir=str(tmp_path / "plots"),
+                )
+
+    def test_incomplete_path_override(self, mock_scratch_env, tmp_path):
+        path = self._write_eig_json(
+            tmp_path / "inc.json",
+            _make_eig_data([[0.0], [1.0]], variable_eigs=[1.0, 2.0], status="incomplete"),
+        )
+        plotter = ComparisonPlotter(cosmo_exp="test_exp", run_ids=["a", "b"])
+        with patch.object(plotter, "_get_run_data_list") as mock_runs:
+            mock_runs.return_value = (
+                [{"run_id": "a", "exp_id": "e"}, {"run_id": "b", "exp_id": "e"}],
+                "e",
+                "test_exp",
+            )
+            with pytest.raises(ValueError, match="not complete"):
+                plotter.compare_eig_correlation(
+                    x={"eig_kind": "variable", "eig_data_path": str(path)},
+                    y={"eig_kind": "variable", "eig_data_path": str(path)},
+                    save_dir=str(tmp_path / "plots"),
+                )
+
+    def test_directional_prefers_agreeing_dim(self, mock_scratch_env, tmp_path):
+        designs = [
+            [0.0, 0.0],
+            [1.0, 0.0],
+            [2.0, 0.0],
+            [3.0, 0.0],
+            [0.0, 1.0],
+            [0.0, 2.0],
+            [0.0, 3.0],
+        ]
+        designs_arr = np.asarray(designs, dtype=float)
+        eigs_x = designs_arr[:, 0] + 0.05 * designs_arr[:, 1]
+        eigs_y = designs_arr[:, 0] - 2.0 * designs_arr[:, 1]
+        path_x = self._write_eig_json(
+            tmp_path / "artifacts_x" / "eig_data.json",
+            _make_eig_data(designs, variable_eigs=eigs_x),
+        )
+        path_y = self._write_eig_json(
+            tmp_path / "artifacts_y" / "eig_data.json",
+            _make_eig_data(designs, variable_eigs=eigs_y),
+        )
+        # Same fallback path as compare_eigs: labels from design_args.yaml
+        (tmp_path / "artifacts_x" / "design_args.yaml").write_text(
+            "labels: [u, g]\n"
+        )
+        plotter = ComparisonPlotter(cosmo_exp="test_exp", run_ids=["a", "b"])
+        with patch.object(plotter, "_get_run_data_list") as mock_runs:
+            mock_runs.return_value = (
+                [{"run_id": "a", "exp_id": "e"}, {"run_id": "b", "exp_id": "e"}],
+                "e",
+                "test_exp",
+            )
+            fig, ax, stats = plotter.compare_eig_directional_correlation(
+                x={"eig_kind": "variable", "eig_data_path": str(path_x)},
+                y={"eig_kind": "variable", "eig_data_path": str(path_y)},
+                min_pair_weight=0.9,
+                save_dir=str(tmp_path / "plots"),
+                dpi=80,
+            )
+        assert stats["best_dim"] == "u"
+        assert stats["per_dim"][0]["label"] == "u"
+        assert stats["per_dim"][0]["rho"] > stats["per_dim"][1]["rho"]
+        assert fig is not None and ax is not None
 
 
 class TestCompareTraining:

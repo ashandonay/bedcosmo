@@ -151,6 +151,194 @@ def load_eig_data_file(artifacts_dir, eval_step=None, eig_kind='any'):
     raise ValueError(f"No completed eig_data files{kind_suffix} found in {artifacts_dir}")
 
 
+def _normalize_marginal_subset_id(subset):
+    """Normalize a marginal subset spec to the ``+``-joined subset_id used in eig_data."""
+    if subset is None:
+        raise ValueError("subset is required when eig_kind='marginal'")
+    if isinstance(subset, str):
+        if "+" in subset:
+            return subset
+        if "," in subset:
+            return "+".join(part.strip() for part in subset.split(",") if part.strip())
+        return subset.strip()
+    return "+".join(str(part) for part in subset)
+
+
+def _extract_eig_values(eig_data, step_str, eig_kind, subset=None):
+    """Extract designs and per-design EIG averages/std from an eig_data step.
+
+    Args:
+        eig_data (dict): Loaded eig_data JSON.
+        step_str (str): Step key, e.g. ``'step_50000'``.
+        eig_kind (str): ``'variable'`` (joint) or ``'marginal'``.
+        subset (str or list, optional): Marginal parameter subset; required for marginal.
+
+    Returns:
+        tuple: ``(designs, eigs_avg, eigs_std, label)`` with designs shape ``(n, d)``.
+    """
+    if eig_kind not in ("variable", "marginal"):
+        raise ValueError(f"eig_kind must be 'variable' or 'marginal', got {eig_kind!r}")
+    if step_str not in eig_data:
+        raise ValueError(f"Step {step_str!r} not found in eig_data")
+
+    step_payload = eig_data[step_str]
+    designs = np.asarray(eig_data.get("input_designs", []), dtype=float)
+    if designs.size == 0:
+        raise ValueError("input_designs missing or empty in eig_data")
+    if designs.ndim == 1:
+        designs = designs.reshape(-1, 1)
+
+    if eig_kind == "variable":
+        block = step_payload.get("variable", {})
+        eigs_raw = block.get("eigs_avg")
+        if eigs_raw is None:
+            raise ValueError(f"`eigs_avg` missing under {step_str}/variable")
+        std_raw = block.get("eigs_std")
+        label = "variable"
+    else:
+        subset_id = _normalize_marginal_subset_id(subset)
+        marginal_all = step_payload.get("marginal", {}) or {}
+        if subset_id not in marginal_all:
+            raise ValueError(
+                f"Marginal EIG for subset {subset_id!r} not found in {step_str}. "
+                f"Available: {list(marginal_all.keys())}"
+            )
+        block = marginal_all[subset_id]
+        eigs_raw = block.get("eigs_avg")
+        if eigs_raw is None:
+            raise ValueError(f"`eigs_avg` missing under {step_str}/marginal/{subset_id}")
+        std_raw = block.get("eigs_std")
+        label = f"marginal({subset_id})"
+
+    eigs_avg = np.asarray(eigs_raw, dtype=float).reshape(-1)
+    if eigs_avg.shape[0] != designs.shape[0]:
+        raise ValueError(
+            f"EIG length {eigs_avg.shape[0]} does not match n_designs={designs.shape[0]}"
+        )
+    if std_raw is None:
+        eigs_std = np.zeros_like(eigs_avg)
+    else:
+        eigs_std = np.asarray(std_raw, dtype=float).reshape(-1)
+        if eigs_std.shape != eigs_avg.shape:
+            raise ValueError("eigs_std shape does not match eigs_avg")
+
+    return designs, eigs_avg, eigs_std, label
+
+
+def _weighted_pearson(x, y, weights):
+    """Weighted Pearson correlation of 1-D arrays ``x`` and ``y``."""
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    weights = np.asarray(weights, dtype=float)
+    mask = np.isfinite(x) & np.isfinite(y) & np.isfinite(weights) & (weights > 0)
+    if mask.sum() < 2:
+        return float("nan")
+    x = x[mask]
+    y = y[mask]
+    weights = weights[mask]
+    weight_sum = float(weights.sum())
+    if weight_sum <= 0:
+        return float("nan")
+    mean_x = float(np.sum(weights * x) / weight_sum)
+    mean_y = float(np.sum(weights * y) / weight_sum)
+    dx = x - mean_x
+    dy = y - mean_y
+    cov = float(np.sum(weights * dx * dy) / weight_sum)
+    std_x = float(np.sqrt(np.sum(weights * dx * dx) / weight_sum))
+    std_y = float(np.sqrt(np.sum(weights * dy * dy) / weight_sum))
+    if std_x == 0.0 or std_y == 0.0:
+        return float("nan")
+    return cov / (std_x * std_y)
+
+
+def _directional_delta_correlations(
+    designs,
+    eigs_x,
+    eigs_y,
+    min_pair_weight=0.0,
+    max_pairs=None,
+    rng=None,
+):
+    """Per-dimension weighted Pearson of ΔEIG_x vs ΔEIG_y over design pairs.
+
+    Pair weight onto axis ``j`` is ``|Δd_j| / ||Δd||``.
+    """
+    designs = np.asarray(designs, dtype=float)
+    eigs_x = np.asarray(eigs_x, dtype=float).reshape(-1)
+    eigs_y = np.asarray(eigs_y, dtype=float).reshape(-1)
+    if designs.ndim != 2:
+        raise ValueError(f"designs must be 2-D, got shape {designs.shape}")
+    n_designs, n_dim = designs.shape
+    if eigs_x.shape[0] != n_designs or eigs_y.shape[0] != n_designs:
+        raise ValueError("EIG vectors must match the number of designs")
+    if n_designs < 2:
+        raise ValueError("Need at least 2 designs for directional correlation")
+
+    i_idx, k_idx = np.triu_indices(n_designs, k=1)
+    n_pairs = len(i_idx)
+    if max_pairs is not None and n_pairs > int(max_pairs):
+        rng = np.random.default_rng(rng)
+        chosen = rng.choice(n_pairs, size=int(max_pairs), replace=False)
+        i_idx = i_idx[chosen]
+        k_idx = k_idx[chosen]
+
+    delta_d = designs[k_idx] - designs[i_idx]
+    norms = np.linalg.norm(delta_d, axis=1)
+    valid = norms > 0
+    if not np.any(valid):
+        raise ValueError("All design pairs have zero separation")
+    delta_d = delta_d[valid]
+    norms = norms[valid]
+    delta_ex = eigs_x[k_idx][valid] - eigs_x[i_idx][valid]
+    delta_ey = eigs_y[k_idx][valid] - eigs_y[i_idx][valid]
+    weights = np.abs(delta_d) / norms[:, None]
+
+    per_dim = []
+    for dim in range(n_dim):
+        w = weights[:, dim]
+        if min_pair_weight > 0:
+            keep = w >= float(min_pair_weight)
+            w_use = w[keep]
+            dx_use = delta_ex[keep]
+            dy_use = delta_ey[keep]
+        else:
+            w_use = w
+            dx_use = delta_ex
+            dy_use = delta_ey
+        rho = _weighted_pearson(dx_use, dy_use, w_use)
+        n_eff = float(np.sum(w_use)) if w_use.size else 0.0
+        per_dim.append({"dim": dim, "rho": float(rho), "n_eff_pairs": n_eff})
+    return per_dim
+
+
+def _eig_correlation_stats(eigs_x, eigs_y):
+    """Pearson / Spearman / offset / top-10 overlap for two per-design EIG vectors."""
+    eigs_x = np.asarray(eigs_x, dtype=float).reshape(-1)
+    eigs_y = np.asarray(eigs_y, dtype=float).reshape(-1)
+    if eigs_x.shape != eigs_y.shape:
+        raise ValueError("EIG vectors must have the same length")
+    if eigs_x.size < 2:
+        raise ValueError("Need at least 2 designs to compute EIG correlation")
+
+    rank_x = np.argsort(np.argsort(-eigs_x)) + 1
+    rank_y = np.argsort(np.argsort(-eigs_y)) + 1
+    rho_pearson = float(np.corrcoef(eigs_x, eigs_y)[0, 1])
+    rho_spearman = float(np.corrcoef(rank_x, rank_y)[0, 1])
+    top_n = min(10, eigs_x.size)
+    top10_overlap = int(
+        len(set(np.argsort(-eigs_x)[:top_n]) & set(np.argsort(-eigs_y)[:top_n]))
+    )
+    return {
+        "rho_pearson": rho_pearson,
+        "rho_spearman": rho_spearman,
+        "mean_offset": float(np.mean(eigs_y - eigs_x)),
+        "top10_overlap": top10_overlap,
+        "n_designs": int(eigs_x.size),
+        "rank_x": rank_x,
+        "rank_y": rank_y,
+    }
+
+
 # ============================================================================
 # Base Plotter Class
 # ============================================================================
@@ -3635,7 +3823,6 @@ class ComparisonPlotter(BasePlotter):
         # Resolve design_labels / nominal_design via experiment when needed
         # (same pattern as compare_optimal_designs / eig_designs). Prefer the
         # sort_reference run when available.
-        need_labels = design_labels is None
         need_nominal = show_ratio_to_nominal and not is_1d_design
         nominal_design = None
         ref_run_id = run_for_nominal['run_id']
@@ -3662,21 +3849,18 @@ class ComparisonPlotter(BasePlotter):
                         )
                 break
 
-        # Lightweight label fallback from design_args.yaml (source of experiment.design_labels).
-        if need_labels and ref_artifacts is not None:
-            design_args_path = os.path.join(ref_artifacts, "design_args.yaml")
-            if os.path.exists(design_args_path):
-                try:
-                    with open(design_args_path, "r") as f:
-                        design_args = yaml.safe_load(f) or {}
-                    labels = design_args.get("labels")
-                    if labels is not None and len(labels) == num_dims:
-                        design_labels = list(labels)
-                        need_labels = False
-                except Exception as e:
-                    print(f"Warning: Could not load design_labels from {design_args_path}: {e}")
+        design_labels = self._resolve_design_labels(
+            num_dims,
+            design_labels=design_labels,
+            metadata_label_sources=[
+                (data.get("metadata") or {}).get("design_labels") for data in all_data
+            ],
+            artifacts_dirs=[ref_artifacts],
+            run_ids=[ref_run_id],
+            run_data_list=run_data_list,
+        )
 
-        if need_labels or (need_nominal and nominal_design is None):
+        if need_nominal and nominal_design is None:
             try:
                 device = "cuda:0"
                 run_data_item = next(
@@ -3685,7 +3869,6 @@ class ComparisonPlotter(BasePlotter):
                 )
                 if run_data_item and run_data_item.get('run_obj') is not None:
                     run_params = run_data_item['params'].copy()
-                    # init_experiment loads prior_args / design_args from artifacts
                     experiment = init_experiment(
                         run_data_item['run_obj'],
                         run_params,
@@ -3694,16 +3877,7 @@ class ComparisonPlotter(BasePlotter):
                         global_rank=0,
                         verbose=False,
                     )
-                    if need_labels and hasattr(experiment, 'design_labels'):
-                        exp_labels = list(experiment.design_labels)
-                        if len(exp_labels) == num_dims:
-                            design_labels = exp_labels
-                        else:
-                            print(
-                                f"Warning: experiment.design_labels length ({len(exp_labels)}) "
-                                f"doesn't match design dimensions ({num_dims})."
-                            )
-                    if need_nominal and nominal_design is None and hasattr(experiment, 'nominal_design'):
+                    if hasattr(experiment, 'nominal_design'):
                         candidate = experiment.nominal_design.cpu().numpy()
                         if candidate.ndim == 1 and candidate.shape[0] == num_dims:
                             nominal_design = candidate
@@ -3713,18 +3887,8 @@ class ComparisonPlotter(BasePlotter):
                                 f"design dimensions {num_dims}, disabling ratio display."
                             )
             except Exception as e:
-                what = []
-                if need_labels and design_labels is None:
-                    what.append('design_labels')
-                if need_nominal and nominal_design is None:
-                    what.append('nominal_design')
-                if what:
-                    print(f"Warning: Could not initialize experiment to get {'/'.join(what)}: {e}")
-                if need_nominal and nominal_design is None:
-                    print("Will display designs as absolute values instead of ratios.")
-
-        if design_labels is None:
-            design_labels = [f'$d_{i}$' for i in range(num_dims)]
+                print(f"Warning: Could not initialize experiment to get nominal_design: {e}")
+                print("Will display designs as absolute values instead of ratios.")
 
         # Determine if we should show heatmap (only if not per-run sorting)
         show_heatmap = not per_run_sort and (not is_1d_design or sort)
@@ -4000,6 +4164,410 @@ class ComparisonPlotter(BasePlotter):
         self.save_figure(fig, filename=filename, save_dir=save_dir, dpi=dpi)
    
         return fig, (ax_line, ax_heat)
+
+    def _default_eig_axis_run_ids(self):
+        """Return ``(run_id_x, run_id_y)`` defaults when exactly two run_ids are set."""
+        if self.run_ids is not None and len(self.run_ids) == 2:
+            return self.run_ids[0], self.run_ids[1]
+        return None, None
+
+    def _resolve_eig_axis(self, spec, default_run_id=None, axis_name="x"):
+        """Load designs/EIGs for one correlation axis from a run or pinned JSON path.
+
+        Args:
+            spec (dict): Axis specification with ``eig_kind``, optional ``subset``,
+                ``run_id``, ``eig_data_path``, ``eval_step``, and ``label``.
+            default_run_id (str, optional): Fallback run when ``run_id`` omitted.
+            axis_name (str): Label used in error messages (``'x'`` or ``'y'``).
+
+        Returns:
+            dict: ``designs``, ``eigs``, ``eigs_std``, ``label``, ``run_id``,
+            ``design_labels``, ``step_str``, ``eig_data_path``.
+        """
+        if not isinstance(spec, dict):
+            raise ValueError(f"{axis_name} must be a dict of axis options, got {type(spec)!r}")
+
+        eig_kind = spec.get("eig_kind")
+        if eig_kind not in ("variable", "marginal"):
+            raise ValueError(
+                f"{axis_name}: eig_kind must be 'variable' or 'marginal', got {eig_kind!r}"
+            )
+        subset = spec.get("subset")
+        eval_step = spec.get("eval_step")
+        eig_data_path = spec.get("eig_data_path")
+        run_id = spec.get("run_id", default_run_id)
+        label_override = spec.get("label")
+        loaded_path = None
+
+        if eig_data_path is not None:
+            path = os.path.expandvars(os.path.expanduser(str(eig_data_path)))
+            if not os.path.isfile(path):
+                raise ValueError(f"{axis_name}: eig_data_path not found: {path}")
+            with open(path, "r") as f:
+                eig_data = json.load(f)
+            if eig_data.get("status") != "complete":
+                raise ValueError(
+                    f"{axis_name}: eig_data at {path} is not complete "
+                    f"(status={eig_data.get('status')!r})"
+                )
+            if eig_kind == "variable" and not _eig_data_has_variable_eigs(eig_data, eval_step):
+                raise ValueError(f"{axis_name}: no variable EIG data in {path}")
+            if eig_kind == "marginal" and not _eig_data_has_marginal_eigs(eig_data, eval_step):
+                raise ValueError(f"{axis_name}: no marginal EIG data in {path}")
+            loaded_path = path
+        else:
+            if run_id is None:
+                raise ValueError(
+                    f"{axis_name}: run_id is required when eig_data_path is not set "
+                    "(provide run_id on the axis, or construct ComparisonPlotter with "
+                    "exactly two run_ids)"
+                )
+            run_data_list, _, _ = self._get_run_data_list(parse_params=False)
+            if not run_data_list:
+                raise ValueError(f"No runs found in experiment {self.cosmo_exp}")
+            rid_to_exp = self._get_run_id_to_exp_id(run_data_list)
+            exp_id = rid_to_exp.get(run_id)
+            if exp_id is None:
+                raise ValueError(
+                    f"{axis_name}: run {run_id} not found in experiment {self.cosmo_exp}"
+                )
+            artifacts_dir = f"{self.storage_path}/mlruns/{exp_id}/{run_id}/artifacts"
+            loaded_path, eig_data = self.load_eig_data_file(
+                artifacts_dir, eval_step=eval_step, eig_kind=eig_kind
+            )
+
+        _, step_str = self._resolve_step(eig_data, eval_step)
+        if step_str is None:
+            raise ValueError(f"{axis_name}: could not resolve eval step in eig_data")
+
+        designs, eigs, eigs_std, auto_label = _extract_eig_values(
+            eig_data, step_str, eig_kind, subset=subset
+        )
+        meta_labels = (eig_data.get("metadata") or {}).get("design_labels")
+        if label_override is not None:
+            label = label_override
+        elif run_id is not None:
+            label = f"{auto_label} [{run_id[:8]}]"
+        else:
+            label = auto_label
+
+        artifacts_dir = None
+        if loaded_path is not None:
+            artifacts_dir = os.path.dirname(os.path.abspath(loaded_path))
+
+        return {
+            "designs": designs,
+            "eigs": eigs,
+            "eigs_std": eigs_std,
+            "label": label,
+            "run_id": run_id,
+            "design_labels": list(meta_labels) if meta_labels is not None else None,
+            "step_str": step_str,
+            "eig_data_path": loaded_path,
+            "eig_kind": eig_kind,
+            "artifacts_dir": artifacts_dir,
+        }
+
+    @staticmethod
+    def _default_eig_axis_spec():
+        """Default axis dict: joint/variable EIG (no subset)."""
+        return {"eig_kind": "variable"}
+
+    def _resolve_design_labels(
+        self,
+        n_dim,
+        design_labels=None,
+        *,
+        metadata_label_sources=None,
+        artifacts_dirs=None,
+        run_ids=None,
+        run_data_list=None,
+    ):
+        """Resolve design-dimension names for comparison plots.
+
+        Lookup order:
+          1. explicit ``design_labels``
+          2. eig_data metadata sources (first length match)
+          3. ``design_args.yaml`` ``labels`` under each artifacts dir
+          4. ``experiment.design_labels`` via ``init_experiment`` for each run_id
+          5. ``$d_i$`` fallback
+        """
+        n_dim = int(n_dim)
+        if design_labels is not None:
+            if isinstance(design_labels, str):
+                design_labels = [design_labels]
+            if len(design_labels) != n_dim:
+                raise ValueError(
+                    f"design_labels length {len(design_labels)} != n_dim={n_dim}"
+                )
+            return list(design_labels)
+
+        if metadata_label_sources:
+            for meta_labels in metadata_label_sources:
+                if meta_labels is not None and len(meta_labels) == n_dim:
+                    return list(meta_labels)
+
+        if artifacts_dirs:
+            for artifacts_dir in artifacts_dirs:
+                if not artifacts_dir:
+                    continue
+                design_args_path = os.path.join(artifacts_dir, "design_args.yaml")
+                if not os.path.exists(design_args_path):
+                    continue
+                try:
+                    with open(design_args_path, "r") as f:
+                        design_args = yaml.safe_load(f) or {}
+                    labels = design_args.get("labels")
+                    if labels is not None and len(labels) == n_dim:
+                        return list(labels)
+                except Exception as e:
+                    print(f"Warning: Could not load design_labels from {design_args_path}: {e}")
+
+        if run_ids:
+            if run_data_list is None:
+                try:
+                    run_data_list, _, _ = self._get_run_data_list(parse_params=True)
+                except Exception:
+                    run_data_list = []
+            for run_id in run_ids:
+                if run_id is None:
+                    continue
+                try:
+                    run_data_item = next(
+                        (r for r in run_data_list if r["run_id"] == run_id),
+                        None,
+                    )
+                    if run_data_item is None or run_data_item.get("run_obj") is None:
+                        continue
+                    experiment = init_experiment(
+                        run_data_item["run_obj"],
+                        run_data_item["params"].copy(),
+                        device="cuda:0",
+                        design_args=None,
+                        global_rank=0,
+                        verbose=False,
+                    )
+                    if hasattr(experiment, "design_labels") and experiment.design_labels is not None:
+                        exp_labels = list(experiment.design_labels)
+                        if len(exp_labels) == n_dim:
+                            return exp_labels
+                        print(
+                            f"Warning: experiment.design_labels length ({len(exp_labels)}) "
+                            f"doesn't match design dimensions ({n_dim})."
+                        )
+                except Exception as e:
+                    print(f"Warning: Could not initialize experiment to get design_labels: {e}")
+
+        return [f"$d_{i}$" for i in range(n_dim)]
+
+    def _load_eig_correlation_axes(self, x, y):
+        """Resolve both axes and require matching ``input_designs``."""
+        if x is None:
+            x = self._default_eig_axis_spec()
+        if y is None:
+            y = self._default_eig_axis_spec()
+        default_x, default_y = self._default_eig_axis_run_ids()
+        axis_x = self._resolve_eig_axis(x, default_run_id=default_x, axis_name="x")
+        axis_y = self._resolve_eig_axis(y, default_run_id=default_y, axis_name="y")
+        if not np.allclose(axis_x["designs"], axis_y["designs"]):
+            raise ValueError("input_designs differ between the two EIG axes")
+        return axis_x, axis_y
+
+    def compare_eig_correlation(
+        self,
+        x=None,
+        y=None,
+        figsize=(12.4, 6.0),
+        title=None,
+        xlabel=None,
+        ylabel=None,
+        show_errorbars=True,
+        filename=None,
+        save_dir=None,
+        dpi=400,
+    ):
+        """Scatter two per-design EIG maps with Pearson (value) and Spearman (rank).
+
+        Each of ``x`` / ``y`` is a dict selecting a source (default:
+        ``{"eig_kind": "variable"}`` — joint EIG, no subset):
+
+        - ``eig_kind``: ``'variable'`` or ``'marginal'``
+        - ``subset``: required for marginal (str or list of param names)
+        - ``run_id``: optional; defaults to ``run_ids[0]`` / ``run_ids[1]`` when the
+          plotter has exactly two runs
+        - ``eig_data_path``: optional pinned ``eig_data_*.json`` (skips latest-file lookup)
+        - ``eval_step`` / ``label``: optional overrides
+
+        Returns:
+            tuple: ``(fig, (ax_value, ax_rank), stats)``
+        """
+        axis_x, axis_y = self._load_eig_correlation_axes(x, y)
+        eigs_x = axis_x["eigs"]
+        eigs_y = axis_y["eigs"]
+        std_x = axis_x["eigs_std"]
+        std_y = axis_y["eigs_std"]
+        stats = _eig_correlation_stats(eigs_x, eigs_y)
+        rank_x = stats["rank_x"]
+        rank_y = stats["rank_y"]
+
+        x_label = xlabel if xlabel is not None else axis_x["label"]
+        y_label = ylabel if ylabel is not None else axis_y["label"]
+
+        fig, (ax_value, ax_rank) = plt.subplots(1, 2, figsize=figsize)
+
+        if show_errorbars and (np.any(std_x > 0) or np.any(std_y > 0)):
+            ax_value.errorbar(
+                eigs_x, eigs_y, xerr=std_x, yerr=std_y,
+                fmt="o", ms=4.5, alpha=0.75, capsize=1.5,
+            )
+        else:
+            ax_value.scatter(eigs_x, eigs_y, s=28, alpha=0.75)
+        lo = float(min(eigs_x.min(), eigs_y.min()))
+        hi = float(max(eigs_x.max(), eigs_y.max()))
+        pad = 0.05 * (hi - lo if hi > lo else 1.0)
+        lim = (lo - pad, hi + pad)
+        ax_value.plot(lim, lim, "k--", lw=1, alpha=0.6)
+        ax_value.set_xlim(lim)
+        ax_value.set_ylim(lim)
+        ax_value.set_aspect("equal", adjustable="box")
+        ax_value.set_xlabel(x_label)
+        ax_value.set_ylabel(y_label)
+        ax_value.set_title(f"value  $\\rho={stats['rho_pearson']:.3f}$")
+
+        n = stats["n_designs"]
+        rlim = (0.5, n + 0.5)
+        ax_rank.scatter(rank_x, rank_y, s=28, alpha=0.75)
+        ax_rank.plot([1, n], [1, n], "k--", lw=1, alpha=0.6)
+        ax_rank.set_xlim(rlim)
+        ax_rank.set_ylim(rlim)
+        ax_rank.invert_xaxis()
+        ax_rank.invert_yaxis()
+        ax_rank.set_aspect("equal", adjustable="box")
+        ax_rank.set_xlabel(f"{x_label} rank (1 = highest)")
+        ax_rank.set_ylabel(f"{y_label} rank (1 = highest)")
+        ax_rank.set_title(f"rank  $\\rho={stats['rho_spearman']:.3f}$")
+
+        if title is None:
+            title = "EIG correlation"
+        fig.suptitle(title, fontsize=14, weight="bold")
+        fig.tight_layout()
+
+        if filename is None:
+            filename = "compare_eig_correlation"
+        _, experiment_id, _ = self._get_run_data_list(parse_params=False)
+        if save_dir is None and experiment_id is not None:
+            save_dir = self.get_save_dir(experiment_id=experiment_id, subdir="plots")
+        self.save_figure(fig, filename=filename, save_dir=save_dir, dpi=dpi)
+
+        public_stats = {
+            "rho_pearson": stats["rho_pearson"],
+            "rho_spearman": stats["rho_spearman"],
+            "mean_offset": stats["mean_offset"],
+            "top10_overlap": stats["top10_overlap"],
+            "n_designs": stats["n_designs"],
+            "label_x": x_label,
+            "label_y": y_label,
+        }
+        return fig, (ax_value, ax_rank), public_stats
+
+    def compare_eig_directional_correlation(
+        self,
+        x=None,
+        y=None,
+        design_labels=None,
+        min_pair_weight=0.0,
+        max_pairs=None,
+        rng=None,
+        figsize=(8.0, 5.0),
+        title=None,
+        filename=None,
+        save_dir=None,
+        dpi=400,
+    ):
+        """Bar chart of per-design-dimension ΔEIG agreement between two EIG maps.
+
+        For design pairs, weights ``|Δd_j| / ||Δd||`` soft-assign the pair to
+        axis ``j``; reports weighted Pearson of ``ΔEIG_x`` vs ``ΔEIG_y`` per dim.
+
+        ``x`` / ``y`` use the same axis dicts as :meth:`compare_eig_correlation`
+        (default ``{"eig_kind": "variable"}``). Design dimension names come from
+        :meth:`_resolve_design_labels`.
+
+        Returns:
+            tuple: ``(fig, ax, stats)`` where ``stats['per_dim']`` is sorted by ρ.
+        """
+        axis_x, axis_y = self._load_eig_correlation_axes(x, y)
+        designs = axis_x["designs"]
+        n_dim = designs.shape[1]
+
+        design_labels = self._resolve_design_labels(
+            n_dim,
+            design_labels=design_labels,
+            metadata_label_sources=[
+                axis_x.get("design_labels"),
+                axis_y.get("design_labels"),
+            ],
+            artifacts_dirs=[
+                axis_x.get("artifacts_dir"),
+                axis_y.get("artifacts_dir"),
+            ],
+            run_ids=[axis_x.get("run_id"), axis_y.get("run_id")],
+        )
+
+        per_dim = _directional_delta_correlations(
+            designs,
+            axis_x["eigs"],
+            axis_y["eigs"],
+            min_pair_weight=min_pair_weight,
+            max_pairs=max_pairs,
+            rng=rng,
+        )
+        for entry, label in zip(per_dim, design_labels):
+            entry["label"] = label
+
+        ordered = sorted(
+            per_dim,
+            key=lambda item: (-item["rho"] if np.isfinite(item["rho"]) else float("inf"), item["dim"]),
+        )
+        best = ordered[0] if ordered else None
+
+        labels_plot = [item["label"] for item in ordered]
+        rhos_plot = [item["rho"] for item in ordered]
+        y_pos = np.arange(len(ordered))
+
+        fig, ax = plt.subplots(figsize=figsize)
+        ax.barh(y_pos, rhos_plot, align="center")
+        ax.set_yticks(y_pos)
+        ax.set_yticklabels(labels_plot)
+        ax.invert_yaxis()
+        ax.axvline(0.0, color="k", lw=0.8, alpha=0.5)
+        ax.set_xlabel(r"weighted Pearson $\rho$ of $\Delta$EIG")
+        ax.set_ylabel("design dimension")
+        if title is None:
+            title = (
+                f"Directional EIG agreement\n"
+                f"{axis_x['label']} vs {axis_y['label']}"
+            )
+        ax.set_title(title)
+        fig.tight_layout()
+
+        if filename is None:
+            filename = "compare_eig_directional_correlation"
+        _, experiment_id, _ = self._get_run_data_list(parse_params=False)
+        if save_dir is None and experiment_id is not None:
+            save_dir = self.get_save_dir(experiment_id=experiment_id, subdir="plots")
+        self.save_figure(fig, filename=filename, save_dir=save_dir, dpi=dpi)
+
+        stats = {
+            "per_dim": ordered,
+            "best_dim": best["label"] if best is not None else None,
+            "best_rho": best["rho"] if best is not None else None,
+            "n_designs": int(designs.shape[0]),
+            "n_dim": int(n_dim),
+            "label_x": axis_x["label"],
+            "label_y": axis_y["label"],
+        }
+        return fig, ax, stats
     
     def compare_optimal_designs(
         self,
