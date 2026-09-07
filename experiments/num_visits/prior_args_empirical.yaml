@@ -1,14 +1,29 @@
-# Empirical SED prior from DESI+EAZY KDE (ILR parameterization, v3).
-# 11 isometric log-ratio coords f1..f11 (K-1 for K=12 templates) + log_c_scale + z.
-# Rebuild: fit_sed_prior_kde.py on desi_eazy_empirical_weights.csv
+# Empirical SED prior from DESI+EAZY (ILR parameterization).
 #
-# prior_dir: build directory containing sed_prior_kde_native.joblib and (for prior_source=flow)
-# the sed_prior_flow_*.pt files. null = default
-# $SCRATCH/bedcosmo/num_visits/empirical_prior/eazy12.
-# At runtime, trained runs load from artifacts/empirical/ instead.
-prior_dir: null
+# Select the template bank with the two fields below (or CLI overrides):
+#   template_source: eazy12 | eazy6
+#   reduced_templates: null (full bank) or "t7,t10" (comma-separated, case-insensitive)
+#
+# These resolve prior_dir, template_param, and the parameters: block automatically
+# at submit/snapshot time (written into the run's artifacts/prior_args.yaml).
+# Examples:
+#   ./submit.sh train num_visits empirical
+#   ./submit.sh train num_visits empirical --prior-template-source eazy6
+#   ./submit.sh train num_visits empirical --prior-reduced-templates t7,t10
+#   ./submit.sh train num_visits empirical --prior-density-type kde
+#
+# Rebuild the selected prior with:
+#   python -m bedcosmo.num_visits.empirical.build_prior          # full eazy12
+#   python -m bedcosmo.num_visits.empirical.build_prior \
+#     --build-name empirical_prior/eazy6 \
+#     --template-param templates/eazy_v1.0.spectra.param
+#   python -m bedcosmo.num_visits.empirical.reduced.build_reduced_template_prior \
+#     --templates T7+T10
 
-# Prior source:
+template_source: eazy12
+reduced_templates: null
+
+# Density backend:
 #   "flow" (default) -- draw the prior pool from the trained native normalizing flow and
 #           use it as the prior density for entropy (native for transform_input=False;
 #           gaussianized flow for transform_input=True).
@@ -16,13 +31,14 @@ prior_dir: null
 #           confirmed to match in the eval pipeline.
 #   "kde"  -- draw the pool from the frozen KDE plug-in instead (the pre-flow baseline; set
 #           this for a KDE A/B comparison).
-# The flow(s) (sed_prior_flow_native.pt / _gaussianized.pt) must exist in prior_dir.
+# The flow(s) (sed_prior_flow_native.pt / _gaussianized.pt) must exist in the resolved
+# prior build dir ($SCRATCH/bedcosmo/num_visits/empirical_prior/<variant>/).
 # Train them with:
 #   python -m bedcosmo.num_visits.empirical.prior_flow --space both
-prior_source: flow
+# CLI: --prior-density-type flow|kde
+density_type: flow
 
 template_dir: null
-template_param: "templates/fsps_full/fsps_QSF_12_v3.param"
 template_norm_min: 4000.0
 template_norm_max: 8000.0
 # Input fitted-spectrum flux-unit conversion to erg / (s cm^2 Angstrom).
@@ -31,73 +47,9 @@ flux_unit_scale: 1.0e-17
 prior_pool_size: 65536
 prior_pool_seed: 7
 
+# Optional plot-range overrides. When omitted (or only partially specified),
+# missing f_i / log_c_scale / z entries are filled for the selected K.
 parameters:
-  f1:
-    distribution:
-      type: empirical
-    plot: 
-      lower: -8.0
-      upper: 8.0
-  f2:
-    distribution:
-      type: empirical
-    plot:
-      lower: -8.0
-      upper: 8.0
-  f3:
-    distribution:
-      type: empirical
-    plot:
-      lower: -8.0
-      upper: 8.0
-  f4:
-    distribution:
-      type: empirical
-    plot:
-      lower: -8.0
-      upper: 8.0
-  f5:
-    distribution:
-      type: empirical
-    plot:
-      lower: -8.0
-      upper: 8.0
-  f6:
-    distribution:
-      type: empirical
-    plot:
-      lower: -8.0
-      upper: 8.0
-  f7:
-    distribution:
-      type: empirical
-    plot:
-      lower: -8.0
-      upper: 8.0
-  f8:
-    distribution:
-      type: empirical
-    plot:
-      lower: -8.0
-      upper: 8.0
-  f9:
-    distribution:
-      type: empirical
-    plot:
-      lower: -8.0
-      upper: 8.0
-  f10:
-    distribution:
-      type: empirical
-    plot:
-      lower: -8.0
-      upper: 8.0
-  f11:
-    distribution:
-      type: empirical
-    plot:
-      lower: -8.0
-      upper: 8.0
   log_c_scale:
     distribution:
       type: empirical

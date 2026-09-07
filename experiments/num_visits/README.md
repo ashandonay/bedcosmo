@@ -88,7 +88,7 @@ Each parameter entry contains:
 - **`prior_args_gamma.yaml`** -- `z ~ Gamma(shape=3.0, z_0=0.3)`, a more realistic galaxy redshift distribution.
 - **`prior_args_bbt.yaml`** -- the gamma `z` prior plus a broad `T ~ Uniform(4000, 10000)` K (for `bbt`). Band normalization lets `T` span a wide color range without cool sources dropping out of the LSST bands.
 - **`prior_args_bbtm.yaml`** -- the gamma `z` prior plus `T ~ Uniform(4000, 10000)` K and `M_ref ~ Uniform(-22, -20)` (for `bbtm`). `M_ref` is the rest-frame AB absolute magnitude at `ref_wavelength`; under `norm_mode: monochromatic` the SED amplitude is pinned to it, so brightness (`M_ref`) and color (`T`) are decoupled and cooling does not dim the source in-band. The range straddles a bright super-L* galaxy (-22) and a fainter one (-20); `M* ~ -21` for the local luminosity function.
-- **`prior_args_empirical.yaml`** -- the empirical SED prior over the 13D ILR features (`f1..f11`, `log_c_scale`, `z`); `prior_source` selects `{kde, flow}` and **defaults to `flow`**. See the [Cosmology Models](#cosmology-models-modelsyaml) section (`empirical`) for details.
+- **`prior_args_empirical.yaml`** -- the empirical SED prior over ILR features (`f1..f_{K-1}`, `log_c_scale`, `z`). Select the bank with `template_source: {eazy12, eazy6}` and optional `reduced_templates: "t7,t10"` (default `null` = full bank). `density_type` selects `{kde, flow}` and **defaults to `flow`**. See the [Cosmology Models](#cosmology-models-modelsyaml) section (`empirical`) for details.
 
 ## Likelihood Model
 
@@ -201,7 +201,7 @@ Defines which parameters belong to each named training variant. `train_args.yaml
 | `bb` | `z` | Blackbody (fixed T, bolometric) | Analytic gamma on `z` |
 | `bbt` | `z`, `T` | Blackbody (band-normalized, fixed `M_ref`) | Analytic gamma + uniform `T` |
 | `bbtm` | `z`, `T`, `M_ref` | Blackbody (band-normalized) | Analytic gamma + uniform `T` + uniform `M_ref` |
-| `empirical` | `f1`…`f11`, `log_c_scale`, `z` (13D; ILR simplex coords, see §1b) | EAZY template mixture | Empirical SED prior — KDE or normalizing flow (`artifacts/empirical/`; rebuild with `--parameterization ilr`) |
+| `empirical` | `f1`…`f_{K-1}`, `log_c_scale`, `z` (ILR; K from `template_source` / `reduced_templates`) | EAZY template mixture | Empirical SED prior — KDE or normalizing flow (`artifacts/empirical/`; rebuild with `--parameterization ilr`) |
 
 Example:
 
@@ -211,9 +211,13 @@ empirical:
   latex_labels: ["$a_1$", ..., "$z$"]
 ```
 
-For `empirical`, the prior is selected by `prior_source` in [`prior_args_empirical.yaml`](prior_args_empirical.yaml) — a strict enum `{kde, flow}` that **defaults to `flow`**. Both are fit to the DESI/EAZY template weights by `src/bedcosmo/num_visits/empirical/`:
+For `empirical`, choose the SED bank with `template_source` / `reduced_templates`
+in [`prior_args_empirical.yaml`](prior_args_empirical.yaml) (or
+`--prior-template-source` / `--prior-reduced-templates`), and the prior density with
+`density_type` — a strict enum `{kde, flow}` that **defaults to `flow`**. Both
+are fit to the DESI/EAZY template weights by `src/bedcosmo/num_visits/empirical/`:
 
-- **`flow` (default)** — a trained normalizing flow over the ILR features. Empirical runs **require** the trained flow checkpoints (`sed_prior_flow_native.pt`, plus `sed_prior_flow_gaussianized.pt` when `transform_input=True`) in `$SCRATCH/bedcosmo/num_visits/empirical_prior/eazy12/`; they are snapshotted into each run's `artifacts/empirical/`. Train them (~10 min, CPU, both at once) with `./scripts/train_prior_flow.sh --space both`.
+- **`flow` (default)** — a trained normalizing flow over the ILR features. Empirical runs **require** the trained flow checkpoints (`sed_prior_flow_native.pt`, plus `sed_prior_flow_gaussianized.pt` when `transform_input=True`) under `$SCRATCH/bedcosmo/num_visits/empirical_prior/<variant>/` (e.g. `eazy12/` or `eazy12-t7-t10/`); they are snapshotted into each run's `artifacts/empirical/`. Train them (~10 min, CPU, both at once) with `./scripts/train_prior_flow.sh --space both`.
 - **`kde`** — a masked KDE (`sed_prior_kde_native.joblib`); the legacy/fallback path.
 
 Either way, training draws from a GPU-resident pool of prior samples (drawn from the flow, or KDE samples) and integrates the template SEDs on the GPU. See [`empirical/README.md`](../../src/bedcosmo/num_visits/empirical/README.md).

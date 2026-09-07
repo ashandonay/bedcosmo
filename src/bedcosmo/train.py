@@ -1158,10 +1158,40 @@ class Trainer:
                 if not os.path.exists(self.prior_args_path):
                     raise FileNotFoundError(f"Prior file not found at {self.prior_args_path}")
 
-                shutil.copy2(self.prior_args_path, prior_artifact_path)
+                from bedcosmo.util import apply_prior_cli_overrides
+
+                with open(self.prior_args_path) as f:
+                    prior_args = yaml.safe_load(f) or {}
+                overrides = self.run_args.get("prior_cli_overrides")
+                if overrides or prior_args.get("template_source") is not None:
+                    prior_args = apply_prior_cli_overrides(prior_args, overrides)
+                    with open(prior_artifact_path, "w") as f:
+                        yaml.dump(prior_args, f, default_flow_style=False, sort_keys=False)
+                else:
+                    shutil.copy2(self.prior_args_path, prior_artifact_path)
                 mlflow.log_artifact(prior_artifact_path)
                 if self.verbose:
                     print(f"Saved prior_args.yaml to artifacts: {prior_artifact_path}")
+
+                if (
+                    self.cosmo_exp == "num_visits"
+                    and self.run_args.get("cosmo_model") == "empirical"
+                    and os.path.exists(prior_artifact_path)
+                ):
+                    from bedcosmo.num_visits.empirical.sed_prior import snapshot_sed_prior
+
+                    with open(prior_artifact_path) as f:
+                        prior_args = yaml.safe_load(f) or {}
+                    prior_args = snapshot_sed_prior(
+                        prior_args, artifacts_dir, cosmo_exp=self.cosmo_exp
+                    )
+                    with open(prior_artifact_path, "w") as f:
+                        yaml.dump(prior_args, f, default_flow_style=False, sort_keys=False)
+                    if self.verbose:
+                        print(
+                            f"Snapshotted empirical prior artifacts under "
+                            f"{artifacts_dir}/empirical"
+                        )
             else:
                 if self.global_rank == 0:
                     print(f"Warning: prior_args_path not set in run_args, skipping prior_args.yaml save")

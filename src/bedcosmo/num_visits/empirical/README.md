@@ -66,14 +66,15 @@ python -m bedcosmo.num_visits.empirical.build_prior \
   --template-param templates/eazy_v1.0.spectra.param
 ```
 
-Train against that build with the same `cosmo_model: empirical`, overriding prior_args:
+Train against that build with the same `cosmo_model: empirical`, overriding the
+template bank via CLI (or the matching fields in `prior_args_empirical.yaml`):
 
 ```bash
-./submit.sh train num_visits empirical --prior-args-path prior_args_empirical_eazy6.yaml
+./submit.sh train num_visits empirical --prior-template-source eazy6
 ```
 
-See [`prior_args_empirical_eazy6.yaml`](../../../../experiments/num_visits/prior_args_empirical_eazy6.yaml).
-Production default (`prior_args_empirical.yaml`, 12 templates) is unchanged.
+Production default is `template_source: eazy12` with `reduced_templates: null`
+(full twelve-template bank).
 
 ### Key flags
 
@@ -413,7 +414,7 @@ calling that function with its path.
 
 ### Validate (`validate_prior_flow.py`)
 
-The gate before trusting `prior_source: flow`: the flow must reproduce the KDE. Run-free
+The gate before trusting `density_type: flow`: the flow must reproduce the KDE. Run-free
 and read-only. Two axes — `--space {native,gaussianized,both}` and `--plot {panel,triangle,both}`.
 
 ```bash
@@ -480,27 +481,31 @@ python -m bedcosmo.num_visits.empirical.diagnostic_plots clr-triangle \
 
 ### Config
 
-- **Parameters:** taken at runtime from the KDE artifact’s `feature_names` (not hardcoded from `models.yaml`). Production 12-template builds use `f1`…`f11`, `log_c_scale`, `z`; a 6-template prior_args points at a K=6 artifact and gets `f1`…`f5`, `log_c_scale`, `z` automatically.
-- **Prior build dir:** [`prior_args_empirical.yaml`](../../../../experiments/num_visits/prior_args_empirical.yaml). Set `prior_dir: null` to use `$SCRATCH/bedcosmo/num_visits/empirical_prior/eazy12`. That directory holds `sed_prior_kde_native.joblib` and (for `prior_source: flow`) the `sed_prior_flow_*.pt` files. Trained runs load the frozen copies from `artifacts/empirical/`.
+- **Parameters:** taken at runtime from the KDE artifact’s `feature_names` (not hardcoded from `models.yaml`). Production 12-template builds use `f1`…`f11`, `log_c_scale`, `z`; a 6-template prior gets `f1`…`f5`, `log_c_scale`, `z` automatically.
+- **Prior build dir:** [`prior_args_empirical.yaml`](../../../../experiments/num_visits/prior_args_empirical.yaml). Set `template_source` (`eazy12` / `eazy6`) and optional `reduced_templates` (`null` or `"t7,t10"`). These resolve `prior_dir` to `$SCRATCH/bedcosmo/num_visits/empirical_prior/<variant>` and fill `template_param` / `parameters`. Trained runs load the frozen copies from `artifacts/empirical/`.
 
 ```yaml
-prior_dir: null            # null = default scratch empirical_prior/eazy12 build
-template_dir: null         # defaults to $SCRATCH/bedcosmo/eazy/
-prior_source: flow         # {flow (default), kde}; flow needs sed_prior_flow_*.pt in prior_dir
+template_source: eazy12      # or eazy6
+reduced_templates: null      # or "t7,t10"
+template_dir: null           # defaults to $SCRATCH/bedcosmo/eazy/
+density_type: flow           # {flow (default), kde}; flow needs sed_prior_flow_*.pt in prior_dir
 ```
 
-For the classic 6-template bank use [`prior_args_empirical_eazy6.yaml`](../../../../experiments/num_visits/prior_args_empirical_eazy6.yaml)
-(`prior_dir` → `empirical_prior/eazy6`, `template_param: templates/eazy_v1.0.spectra.param`,
-`prior_source: kde` until a flow is trained) with:
+CLI overrides:
 
 ```bash
-./submit.sh train num_visits empirical --prior-args-path prior_args_empirical_eazy6.yaml
+./submit.sh train num_visits empirical --prior-template-source eazy6
+./submit.sh train num_visits empirical --prior-reduced-templates t7,t10
+./submit.sh train num_visits empirical --prior-density-type kde
 ```
 
-Override `prior_dir` with an absolute path when using a non-default `--build-name`.
-With `prior_source: flow` (the default), the trained flows are snapshotted into the run's
+Any `prior_args.yaml` field can be overridden with `--prior-<field>` (dashes for
+underscores). Reserved top-level flags: `--prior-args-path`, `--prior-flow-path`.
+Fields that already start with `prior_` accept a short form (`--prior-pool-size` →
+`prior_pool_size`).
+With `density_type: flow` (the default), the trained flows are snapshotted into the run's
 `artifacts/empirical/` alongside the KDE and drive the prior pool + entropy; set
-`prior_source: kde` for the pre-flow KDE baseline (e.g. a flow-vs-KDE A/B). See
+`density_type: kde` for the pre-flow KDE baseline (e.g. a flow-vs-KDE A/B). See
 [Step 3](#step-3-prior-normalizing-flow-prior_flowpy) to train and validate the flows.
 
 - **Training:** [`train_args.yaml`](../../../../experiments/num_visits/train_args.yaml) `empirical` block:
@@ -645,8 +650,12 @@ full-template build (`--source-build-name`, default `empirical_prior/eazy12`)
 at `reduced_template_cohorts/nN/` for the subset size. This writes a reduced
 EAZY `.param` file, a compatible coefficient table, complete selection/template
 provenance, and the native and gaussianized KDEs. For T1+T7 the prior has three
-features: one ILR shape coordinate, `log_c_scale`, and `z`. Use
-`prior_args_empirical_eazy12_t1_t7.yaml` to load it in NumVisits.
+features: one ILR shape coordinate, `log_c_scale`, and `z`. Train with:
+
+```bash
+./submit.sh train num_visits empirical --prior-reduced-templates t1,t7
+```
+
 The prior is conditioned on passing the cohort discovery thresholds; it does
 not represent DESI galaxies that require other template directions.
 
@@ -666,9 +675,9 @@ Legacy layouts (`desi_eazy_hp*` at scratch root, `desi_eazy_empirical_prior_full
 | KDE | **ILR**, **smooth**, \(\varepsilon=10^{-5}\), bandwidth **0.3** |
 | NF bijector | **`gaussianizer_state` in KDE artifact** (not rebuilt at train/eval) |
 | y-KDE (offline) | **`sed_prior_kde_gaussianized.joblib`** beside KDE (diagnostic only; runtime uses prior flows) |
-| **Prior flow** | `./train_prior_flow.sh --space both` → `sed_prior_flow_*.pt` beside KDE (default `prior_source: flow`) |
+| **Prior flow** | `./train_prior_flow.sh --space both` → `sed_prior_flow_*.pt` beside KDE (default `density_type: flow`) |
 | Validate flow | `validate_prior_flow --threads 8` (non-default build: `--artifact …/sed_prior_kde_native.joblib`) |
-| Training | `prior_dir: null` at snapshot; runtime uses `artifacts/empirical/` |
+| Training | `template_source` / `reduced_templates` at snapshot; runtime uses `artifacts/empirical/` |
 | Fit diagnostics | `./run_healpix_diagnostic_plots.sh` |
 | KDE diagnostics | `diagnostic_plots all --prior-dir .../empirical_prior/eazy12` |
 

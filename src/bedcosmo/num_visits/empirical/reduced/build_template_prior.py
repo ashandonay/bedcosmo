@@ -161,7 +161,10 @@ def main() -> None:
     subset = parse_template_subset(args.templates)
     label = template_label(subset)
     slug = label.lower().replace("+", "-")
-    build_name = args.build_name or f"empirical_prior/eazy12-{slug}"
+    source_variant = Path(str(args.source_build_name).rstrip("/")).name
+    if not source_variant.startswith("eazy"):
+        source_variant = "eazy12"
+    build_name = args.build_name or f"empirical_prior/{source_variant}-{slug}"
     prior_dir = get_prior_build_dir(build_name)
     template_dir = (args.template_dir or get_template_dir()).expanduser().resolve()
     cohort_dir = (

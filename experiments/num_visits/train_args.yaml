@@ -134,6 +134,8 @@ empirical:
   pyro_seed: 1
   nf_seed: 1
   prior_args_path: prior_args_empirical.yaml
+  # Prefer --prior-<field> CLI overrides (e.g. --prior-template-source eazy6,
+  # --prior-reduced-templates t7,t10) rather than top-level train_args keys.
   flow_type: NAF
   transform_input: false
   input_transform_type: joint
@@ -152,7 +154,7 @@ empirical:
   nf_transform: affine
   spline_bins: 16
   design_args_path: design_args.yaml
-  total_steps: 100000
+  total_steps: 50000
   optimizer: Adam
   initial_lr: 0.002
   final_lr: 0.0

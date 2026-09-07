@@ -180,6 +180,15 @@ class NumVisits(BaseExperiment, CosmologyMixin):
 
         self.prior_args = prior_args or {}
         self.cosmo_model = cosmo_model
+        if cosmo_model == "empirical":
+            from bedcosmo.num_visits.empirical.sed_prior import canonicalize_density_type
+            from bedcosmo.num_visits.empirical.template_config import (
+                materialize_empirical_prior_args,
+            )
+
+            self.prior_args = canonicalize_density_type(
+                materialize_empirical_prior_args(self.prior_args)
+            )
 
         self.prior, self.latex_labels, self.cosmo_params = self.init_prior(
             cosmo_model=cosmo_model,
@@ -487,7 +496,9 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         template_norm_min=None,
         template_norm_max=None,
         flux_unit_scale=None,
-        prior_source="kde",
+        density_type=None,
+        source=None,
+        prior_source=None,
         **kwargs,
     ):
         """
@@ -495,7 +506,7 @@ class NumVisits(BaseExperiment, CosmologyMixin):
 
         For ``empirical``, resolves a prior root directory (frozen run artifacts,
         else ``prior_dir``, else the default scratch build) and loads the KDE /
-        PriorFlows from there according to ``prior_source``.
+        PriorFlows from there according to ``density_type`` (``flow`` / ``kde``).
         Otherwise uses analytic Pyro distributions and optional ``prior_flow_path``.
         """
         if cosmo_model is None:
@@ -515,12 +526,19 @@ class NumVisits(BaseExperiment, CosmologyMixin):
 
         if cosmo_model == "empirical":
             # Parameter names / latex come from the KDE artifact (+ optional
-            # latex_labels in prior_args), so alternate template banks only need
-            # a different prior_args file — not a new models.yaml entry.
+            # latex_labels in prior_args). Prefer template_source /
+            # reduced_templates in prior_args (materialized upstream); legacy
+            # configs may still set prior_dir / template_param directly.
             prior_root = resolve_runtime_prior_root(
                 artifacts_dir=artifacts_dir,
                 prior_dir=prior_dir,
             )
+            if not template_param:
+                template_param = "templates/fsps_full/fsps_QSF_12_v3.param"
+            # ``density_type`` is current; ``source`` / ``prior_source`` are legacy.
+            resolved_density = density_type
+            if resolved_density is None:
+                resolved_density = source if source is not None else prior_source
             return self._init_prior_empirical(
                 parameters,
                 prior_root=prior_root,
@@ -531,7 +549,7 @@ class NumVisits(BaseExperiment, CosmologyMixin):
                 template_norm_min=template_norm_min,
                 template_norm_max=template_norm_max,
                 flux_unit_scale=flux_unit_scale,
-                prior_source=str(prior_source),
+                density_type=str(resolved_density) if resolved_density is not None else "kde",
                 latex_labels=kwargs.get("latex_labels"),
             )
 
@@ -636,7 +654,7 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         template_norm_min: float | None,
         template_norm_max: float | None,
         flux_unit_scale: float | None,
-        prior_source: str = "kde",
+        density_type: str = "kde",
         latex_labels: list[str] | None = None,
     ) -> tuple[dict, list[str], list[str]]:
         from bedcosmo.num_visits.empirical.paths import SED_PRIOR_KDE_NATIVE_FILENAME
@@ -662,7 +680,7 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         kde_path = prior_root / SED_PRIOR_KDE_NATIVE_FILENAME
         if self.global_rank == 0 and self.verbose:
             print(f"Loading empirical prior from {prior_root}")
-            print(f"  prior_source={prior_source}; pool n={prior_pool_size}")
+            print(f"  density_type={density_type}; pool n={prior_pool_size}")
         self.sed_prior = EmpiricalSedPrior.from_kde_path(
             kde_path,
             pool_size=int(prior_pool_size),
@@ -709,7 +727,7 @@ class NumVisits(BaseExperiment, CosmologyMixin):
                 f"Expected keys matching artifact feature_names {model_parameters}."
             )
 
-        if normalize_prior_source(prior_source) == PRIOR_SOURCE_FLOW:
+        if normalize_prior_source(density_type) == PRIOR_SOURCE_FLOW:
             loaded = self.sed_prior.enable_flow_prior(
                 prior_pool_size,
                 seed=prior_pool_seed,

@@ -165,7 +165,7 @@ def test_use_flow_requires_native_flow_attached():
 
 
 def test_snapshot_copies_flows_into_artifacts(tmp_path):
-    """prior_source=flow freezes the .pt files into artifacts/empirical/ beside the KDE."""
+    """density_type=flow freezes the .pt files into artifacts/empirical/ beside the KDE."""
     from bedcosmo.num_visits.empirical.prior_flow import (
         SED_PRIOR_FLOW_FILENAMES,
         SPACE_GAUSSIANIZED,
@@ -185,7 +185,7 @@ def test_snapshot_copies_flows_into_artifacts(tmp_path):
 
     artifacts_dir = tmp_path / "artifacts"
     prior_args = {
-        "prior_source": "flow",
+        "density_type": "flow",
         "prior_dir": str(src_dir),
     }
     out = snapshot_sed_prior(prior_args, artifacts_dir)
@@ -194,6 +194,9 @@ def test_snapshot_copies_flows_into_artifacts(tmp_path):
     assert sed_prior_flow_artifact_path(artifacts_dir, SPACE_NATIVE).is_file()
     assert sed_prior_flow_artifact_path(artifacts_dir, SPACE_GAUSSIANIZED).is_file()
     assert out["prior_dir"] == str(src_dir)
+    assert out["density_type"] == "flow"
+    assert "prior_source" not in out
+    assert "source" not in out
 
 
 def test_snapshot_flow_missing_native_raises(tmp_path):
@@ -204,7 +207,7 @@ def test_snapshot_flow_missing_native_raises(tmp_path):
     (src_dir / "sed_prior_kde_native.joblib").write_bytes(b"kde")  # KDE present, flow absent
 
     prior_args = {
-        "prior_source": "flow",
+        "density_type": "flow",
         "prior_dir": str(src_dir),
     }
     with pytest.raises(FileNotFoundError, match="native flow not found"):

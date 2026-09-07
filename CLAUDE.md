@@ -99,6 +99,13 @@ Unprefixed `--<arg>` args default to training. Use `--train-` or `--eval-` prefi
 ./submit.sh train num_tracers base --train-initial-lr 0.0001 --eval-grid --eval-n-evals 5
 ```
 
+Override any `prior_args.yaml` field with `--prior-<field>` (applied at submit snapshot):
+```bash
+./submit.sh train num_visits empirical --prior-template-source eazy6 --prior-reduced-templates t7,t10
+./submit.sh train num_visits empirical --prior-density-type kde
+```
+Reserved: `--prior-args-path`, `--prior-flow-path` (top-level train flags, not prior_args fields).
+
 SLURM infrastructure flags also support prefixes: `--train-time`, `--train-queue`, `--train-nodes`, `--eval-time`.
 
 ## Architecture
