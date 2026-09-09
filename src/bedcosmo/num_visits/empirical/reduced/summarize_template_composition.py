@@ -29,11 +29,9 @@ def summarize(
     subset_summary: pd.DataFrame,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     position_columns = sorted(
-        (
-            int(name.removeprefix("template_"))
-            for name in memberships.columns
-            if name.startswith("template_") and name.removeprefix("template_").isdigit()
-        )
+        int(name.removeprefix("template_"))
+        for name in memberships.columns
+        if name.startswith("template_") and name.removeprefix("template_").isdigit()
     )
     if not position_columns:
         raise ValueError("No template_<position> columns found in subset_memberships.csv")

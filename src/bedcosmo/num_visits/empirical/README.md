@@ -109,7 +109,7 @@ Production default is `template_source: eazy12` with `reduced_templates: null`
 | `run_healpix_fits.sh` | Batch fits only (no combine/KDE; see orchestrator instead) |
 | `run_healpix_diagnostic_plots.sh` | Per-patch `--plot-only` triangles + cross-patch comparison |
 | `compare_healpix_prior_params.py` | Cross-patch overlays of prior coordinates |
-| `reduced/` | Reduced-template cohort discovery, galleries, traits/representativeness plots, and prior builds |
+| `reduced/` | Reduced-template search, family discovery, diagnostics, and prior construction; see [`reduced/README.md`](reduced/README.md) |
 | `diagnostic_plots.py` | Post-build KDE/NumVisits diagnostics |
 | `diagnose_transform_input.py` | NumVisits `transform_input` triangle diagnostics |
 | `sed_prior.py` | Empirical prior: GPU pool, sampling, log-density scoring, and flow attachment (`prior_source` {kde, flow}) |

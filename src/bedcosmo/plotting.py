@@ -2,6 +2,7 @@ import sys
 import os
 import io
 import contextlib
+from collections.abc import Mapping
 
 import torch
 import mlflow
@@ -844,10 +845,10 @@ class BasePlotter:
         return value_a == value_b
 
     def _mark_central_parameter_values(
-        self, 
-        g, 
-        experiment, 
-        transform_output=True, 
+        self,
+        g,
+        experiment,
+        transform_output=True,
         plotted_params=None,
         color='black',
     ):
@@ -3463,7 +3464,8 @@ class ComparisonPlotter(BasePlotter):
         plotted_params = all_samples[0].paramNames.list()
         marker_entries = []
         for group_key, experiment in group_experiments.items():
-            if getattr(experiment, "central_params", None):
+            central_params = getattr(experiment, "central_params", None)
+            if isinstance(central_params, Mapping) and central_params:
                 marker_entries.append((experiment, group_colors[group_key]))
 
         if marker_entries:

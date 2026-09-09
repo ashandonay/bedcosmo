@@ -25,6 +25,7 @@ from scipy.ndimage import gaussian_filter1d
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
+
 from ..desi_data import get_local_desi_paths  # noqa: E402
 from ..paths import (  # noqa: E402
     DEFAULT_PROGRAM,

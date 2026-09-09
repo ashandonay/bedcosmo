@@ -7,7 +7,7 @@ from typing import Any
 
 from .paths import EMPIRICAL_PRIOR_ROOT_DIR, get_prior_build_dir
 from .simplex import prior_ilr_feature_names
-from .templates import DEFAULT_TEMPLATE_PARAM_12D, DEFAULT_TEMPLATE_PARAM_6D
+from .templates import DEFAULT_TEMPLATE_PARAM_6D, DEFAULT_TEMPLATE_PARAM_12D
 
 TEMPLATE_SOURCES = ("eazy12", "eazy6")
 

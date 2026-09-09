@@ -20,11 +20,6 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 
 from ..desi_data import get_local_desi_paths
-from .discover_template_cohorts import (
-    _coefficient_columns,
-    _read_target_spectrum,
-    load_quality_fit_table,
-)
 from ..fit_eazy_weights_to_desi import (
     _divide_by_continuum,
     _gaussian_smooth_segments,
@@ -44,6 +39,11 @@ from ..templates import (
     DEFAULT_TEMPLATE_NORM_MIN_AA,
     DEFAULT_TEMPLATE_PARAM_12D,
     load_eazy_templates,
+)
+from .discover_template_cohorts import (
+    _coefficient_columns,
+    _read_target_spectrum,
+    load_quality_fit_table,
 )
 
 INK = "#25272B"
