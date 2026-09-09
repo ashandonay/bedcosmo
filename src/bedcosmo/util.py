@@ -21,12 +21,15 @@ import time
 import inspect
 import concurrent.futures
 import warnings
+import shutil
 from itertools import combinations
 
-# GetDist KDE settings used for all MCSamples constructions. 2D smoothing
-# reduces contour pixel noise while preserving broad structure.
+# GetDist KDE settings used for all MCSamples constructions and triangle plots.
+# Single smoothing scale for every trace in a comparison (prior + posteriors).
+# smooth_scale_* are fractions of each parameter's std.
 GETDIST_SETTINGS = {
-    "smooth_scale_2D": 0.2,
+    "smooth_scale_1D": 0.26,
+    "smooth_scale_2D": 0.28,
     "fine_bins_2D": 256,
     "mult_bias_correction_order": 1,
     "boundary_correction_order": 1,
@@ -89,6 +92,63 @@ def get_experiments_dir() -> Path:
 def get_experiment_config_path(cosmo_exp: str, config_name: str) -> Path:
     """Get full path to experiment config file."""
     return get_experiments_dir() / cosmo_exp / config_name
+
+
+def resolve_design_args_input_path(
+    design_args: dict | None,
+    config_path: str | Path | None = None,
+) -> dict | None:
+    """Resolve ``input_designs_path`` from a design-arguments document.
+
+    Environment variables and ``~`` are expanded. Relative paths are anchored
+    to the directory containing the YAML file, or to the current directory when
+    the arguments were supplied directly as a dictionary.
+    """
+    if design_args is None:
+        return None
+    resolved = dict(design_args)
+    raw = resolved.get("input_designs_path")
+    if raw in (None, ""):
+        return resolved
+    expanded = os.path.expandvars(os.path.expanduser(os.fspath(raw)))
+    if "$" in expanded:
+        raise ValueError(
+            f"input_designs_path contains an undefined environment variable: {raw}"
+        )
+    path = Path(expanded)
+    if not path.is_absolute():
+        base = Path(config_path).expanduser().resolve().parent if config_path else Path.cwd()
+        path = base / path
+    resolved["input_designs_path"] = str(path.resolve())
+    return resolved
+
+
+def snapshot_design_args_config(
+    source_path: str | Path,
+    destination_path: str | Path,
+) -> dict:
+    """Freeze a design YAML and its referenced array into an artifact directory."""
+    source_path = Path(source_path).expanduser().resolve()
+    destination_path = Path(destination_path).expanduser().resolve()
+    with source_path.open() as stream:
+        design_args = yaml.safe_load(stream) or {}
+    design_args = resolve_design_args_input_path(design_args, source_path)
+
+    input_path = design_args.get("input_designs_path")
+    if input_path is not None:
+        input_path = Path(input_path)
+        if not input_path.is_file():
+            raise FileNotFoundError(f"input_designs_path not found: {input_path}")
+        frozen_path = destination_path.parent / "designs.npy"
+        destination_path.parent.mkdir(parents=True, exist_ok=True)
+        if input_path.resolve() != frozen_path.resolve():
+            shutil.copy2(input_path, frozen_path)
+        design_args["input_designs_path"] = str(frozen_path.resolve())
+
+    destination_path.parent.mkdir(parents=True, exist_ok=True)
+    with destination_path.open("w") as stream:
+        yaml.safe_dump(design_args, stream, default_flow_style=False, sort_keys=False)
+    return design_args
 
 
 def extract_run_info_from_checkpoint_path(checkpoint_path: str) -> tuple[str, str, str]:
@@ -731,6 +791,7 @@ def init_experiment(
         **kwargs: Additional arguments (e.g., device, profile) that will be added to run_args.
     """
     artifacts_dir = None
+    design_config_path = None
     ref_cov_artifact_path = None
     if run_obj is not None and run_args is not None:
 
@@ -750,6 +811,7 @@ def init_experiment(
         if design_args is None:
             design_args_artifact_path = artifacts_dir + "/design_args.yaml"
             if os.path.exists(design_args_artifact_path):
+                design_config_path = design_args_artifact_path
                 with open(design_args_artifact_path, 'r') as f:
                     design_args = yaml.safe_load(f)
             else:
@@ -760,6 +822,7 @@ def init_experiment(
                         raise FileNotFoundError(f"Design args file not found: {design_args_path}")
                     with open(design_args_path, 'r') as f:
                         design_args = yaml.safe_load(f)
+                    design_config_path = design_args_path
         
         # If prior_args is not provided (None), try to load from artifacts
         if prior_args is None:
@@ -782,6 +845,7 @@ def init_experiment(
                     raise FileNotFoundError(f"Design args file not found: {resolved_path}")
                 with open(resolved_path, 'r') as f:
                     design_args = yaml.safe_load(f)
+                design_config_path = resolved_path
 
         if prior_args is None:
             if prior_args_path is not None:
@@ -791,9 +855,18 @@ def init_experiment(
                 with open(resolved_path, 'r') as f:
                     prior_args = yaml.safe_load(f)
     
+    design_args = resolve_design_args_input_path(design_args, design_config_path)
+
     # Initialize run_args if None
     if run_args is None:
         run_args = {}
+
+    # Apply --prior-<field> CLI overrides, then materialize empirical selectors.
+    if prior_args is not None:
+        prior_args = apply_prior_cli_overrides(
+            prior_args,
+            run_args.get("prior_cli_overrides"),
+        )
     
     # Add design_args and prior_args
     run_args['design_args'] = design_args
@@ -1403,6 +1476,135 @@ def apply_central_param_cli_flags(kwargs):
     return kwargs
 
 
+# Top-level train flags that start with prior_ but are NOT prior_args.yaml fields.
+_PRIOR_CLI_RESERVED = frozenset({"prior_args_path", "prior_flow_path", "prior_args", "prior_cli_overrides"})
+
+# Convenience for yaml fields that already start with prior_ (pool_size → prior_pool_size).
+_PRIOR_CLI_FIELD_ALIASES = {
+    "pool_size": "prior_pool_size",
+    "pool_seed": "prior_pool_seed",
+    "dir": "prior_dir",
+}
+
+
+def _coerce_prior_cli_value(value):
+    """Coerce a prior CLI string the same way as :func:`parse_extra_args`."""
+    if not isinstance(value, str):
+        return value
+    try:
+        return int(value)
+    except ValueError:
+        pass
+    try:
+        return float(value)
+    except ValueError:
+        pass
+    lower = value.lower()
+    if lower == "true":
+        return True
+    if lower == "false":
+        return False
+    if lower in {"none", "null", "~"}:
+        return None
+    return value
+
+
+def _normalize_prior_cli_field(field: str) -> str:
+    return _PRIOR_CLI_FIELD_ALIASES.get(field, field)
+
+
+def parse_prior_cli_overrides(argv) -> tuple[dict, list]:
+    """Split ``--prior-*`` flags out of an argv list.
+
+    Reserved top-level flags (``--prior-args-path``, ``--prior-flow-path``) are
+    left in ``remaining``. Everything else becomes a prior_args field override:
+    ``--prior-template-source eazy6`` → ``{"template_source": "eazy6"}``.
+    Fields that already start with ``prior_`` in YAML accept a short form
+    (``--prior-pool-size`` → ``prior_pool_size``). ``--prior-density-type`` maps
+    to ``density_type`` (``flow`` / ``kde``).
+
+    Returns:
+        ``(overrides, remaining_argv)``
+    """
+    overrides: dict = {}
+    remaining: list = []
+    i = 0
+    argv = list(argv or [])
+    while i < len(argv):
+        arg = argv[i]
+        if not (isinstance(arg, str) and arg.startswith("--prior-")):
+            remaining.append(arg)
+            i += 1
+            continue
+        key = arg[len("--") :].replace("-", "_")  # prior_template_source
+        if key in _PRIOR_CLI_RESERVED:
+            remaining.append(arg)
+            if i + 1 < len(argv) and not str(argv[i + 1]).startswith("--"):
+                remaining.append(argv[i + 1])
+                i += 2
+            else:
+                i += 1
+            continue
+        field = _normalize_prior_cli_field(key[len("prior_") :])
+        if not field:
+            raise ValueError(f"Invalid prior CLI flag {arg!r}; expected --prior-<field>")
+        if i + 1 < len(argv) and not str(argv[i + 1]).startswith("--"):
+            overrides[field] = _coerce_prior_cli_value(argv[i + 1])
+            i += 2
+        else:
+            overrides[field] = True
+            i += 1
+    return overrides, remaining
+
+
+def extract_prior_cli_overrides(mapping: dict | None) -> tuple[dict, dict]:
+    """Pull ``prior_*`` override keys out of a flat run_args / extras dict.
+
+    Keys ``prior_args_path`` / ``prior_flow_path`` stay put. A key like
+    ``prior_template_source`` becomes override ``template_source``.
+
+    Returns:
+        ``(overrides, cleaned_mapping)``
+    """
+    mapping = dict(mapping or {})
+    overrides: dict = {}
+    for key in list(mapping):
+        if key in _PRIOR_CLI_RESERVED or not key.startswith("prior_"):
+            continue
+        field = _normalize_prior_cli_field(key[len("prior_") :])
+        if not field:
+            continue
+        overrides[field] = mapping.pop(key)
+    return overrides, mapping
+
+
+def apply_prior_cli_overrides(prior_args: dict | None, overrides: dict | None) -> dict:
+    """Merge CLI prior overrides into ``prior_args``, then materialize selectors.
+
+    Always safe to call: with empty overrides and no ``template_source``, returns
+    a shallow copy (legacy prior_args unchanged aside from the copy). Canonicalizes
+    legacy ``source`` / ``prior_source`` → ``density_type``.
+    """
+    from bedcosmo.num_visits.empirical.sed_prior import canonicalize_density_type
+
+    out = canonicalize_density_type(prior_args)
+    for key, value in dict(overrides or {}).items():
+        # Accept legacy override keys as density_type.
+        if key in ("source", "prior_source"):
+            out["density_type"] = value
+            out.pop("source", None)
+            out.pop("prior_source", None)
+        else:
+            out[key] = value
+    out = canonicalize_density_type(out)
+    if out.get("template_source") is not None:
+        from bedcosmo.num_visits.empirical.template_config import materialize_empirical_prior_args
+
+        out = materialize_empirical_prior_args(out)
+        out = canonicalize_density_type(out)
+    return out
+
+
 def _coerce_train_arg_override(key, value, yaml_default, project_root):
     """Coerce a single train CLI override according to the YAML default type."""
     if key == "input_designs":
@@ -1453,9 +1655,9 @@ def finalize_train_run_args(parsed_args, yaml_config, unknown_argv=None, project
     Merge argparse output, train_args.yaml defaults, and extension CLI flags.
 
     Flags registered on the train parser override YAML when set. Extension flags
-    (not registered), including ``--central-param-<name>``, are taken from
-    ``unknown_argv`` — the return value of ``parse_known_args()`` — and parsed
-    via :func:`parse_extra_args`.
+    (not registered), including ``--central-param-<name>`` and ``--prior-<field>``,
+    are taken from ``unknown_argv`` — the return value of ``parse_known_args()`` —
+    and parsed via :func:`parse_extra_args` / :func:`parse_prior_cli_overrides`.
     """
     run_args = dict(parsed_args)
 
@@ -1466,15 +1668,27 @@ def finalize_train_run_args(parsed_args, yaml_config, unknown_argv=None, project
         else:
             run_args[key] = default
 
+    prior_overrides: dict = {}
     if unknown_argv:
+        prior_from_argv, unknown_argv = parse_prior_cli_overrides(unknown_argv)
+        prior_overrides.update(prior_from_argv)
         extra = parse_extra_args(unknown_argv)
         if "central_params" in extra:
             base = _central_params_as_dict(run_args.get("central_params"))
             base.update(_central_params_as_dict(extra.pop("central_params")))
             run_args["central_params"] = base
+        prior_from_extra, extra = extract_prior_cli_overrides(extra)
+        prior_overrides.update(prior_from_extra)
         for key, value in extra.items():
             if value is not None:
                 run_args[key] = value
+
+    # Also catch --prior-* that argparse accepted as known extras somehow, or
+    # flat prior_* keys left in run_args from YAML mistakes.
+    prior_from_run, run_args = extract_prior_cli_overrides(run_args)
+    prior_overrides.update(prior_from_run)
+    if prior_overrides:
+        run_args["prior_cli_overrides"] = prior_overrides
 
     return apply_central_param_cli_flags(run_args)
 

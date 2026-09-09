@@ -33,7 +33,13 @@ $SCRATCH/bedcosmo/num_visits/empirical_prior/eazy12/
 
 Shared inputs (reused across builds): `$SCRATCH/bedcosmo/desi/tiny_dr1/`, `$SCRATCH/bedcosmo/eazy/`.
 
-`build_prior` also writes ``build.log`` into that directory (fit success counts, KDE messages, etc.).
+`build_prior` also writes ``build.log`` and ``build_provenance.json`` into that
+directory. The provenance records the template bank, template normalization
+interval, spectral fitting and selection cuts, input paths, and KDE request.
+Each HEALPix fit also has a ``fit_provenance.json`` beside its CSV. Combining
+patches rejects incompatible template/normalization settings, and the build
+provenance is embedded in the KDE artifact so NumVisits can validate and reuse
+the exact normalization at runtime.
 
 Default HEALPix patches: `23040 27257 27245 27259 27247 27256 27258 27344 26282`.
 
@@ -60,14 +66,15 @@ python -m bedcosmo.num_visits.empirical.build_prior \
   --template-param templates/eazy_v1.0.spectra.param
 ```
 
-Train against that build with the same `cosmo_model: empirical`, overriding prior_args:
+Train against that build with the same `cosmo_model: empirical`, overriding the
+template bank via CLI (or the matching fields in `prior_args_empirical.yaml`):
 
 ```bash
-./submit.sh train num_visits empirical --prior-args-path prior_args_empirical_eazy6.yaml
+./submit.sh train num_visits empirical --prior-template-source eazy6
 ```
 
-See [`prior_args_empirical_eazy6.yaml`](../../../../experiments/num_visits/prior_args_empirical_eazy6.yaml).
-Production default (`prior_args_empirical.yaml`, 12 templates) is unchanged.
+Production default is `template_source: eazy12` with `reduced_templates: null`
+(full twelve-template bank).
 
 ### Key flags
 
@@ -102,6 +109,7 @@ Production default (`prior_args_empirical.yaml`, 12 templates) is unchanged.
 | `run_healpix_fits.sh` | Batch fits only (no combine/KDE; see orchestrator instead) |
 | `run_healpix_diagnostic_plots.sh` | Per-patch `--plot-only` triangles + cross-patch comparison |
 | `compare_healpix_prior_params.py` | Cross-patch overlays of prior coordinates |
+| `reduced/` | Reduced-template search, family discovery, diagnostics, and prior construction; see [`reduced/README.md`](reduced/README.md) |
 | `diagnostic_plots.py` | Post-build KDE/NumVisits diagnostics |
 | `diagnose_transform_input.py` | NumVisits `transform_input` triangle diagnostics |
 | `sed_prior.py` | Empirical prior: GPU pool, sampling, log-density scoring, and flow attachment (`prior_source` {kde, flow}) |
@@ -406,12 +414,19 @@ calling that function with its path.
 
 ### Validate (`validate_prior_flow.py`)
 
-The gate before trusting `prior_source: flow`: the flow must reproduce the KDE. Run-free
+The gate before trusting `density_type: flow`: the flow must reproduce the KDE. Run-free
 and read-only. Two axes — `--space {native,gaussianized,both}` and `--plot {panel,triangle,both}`.
 
 ```bash
 # everything (both spaces, panels + triangles), threads capped for a login node
+# default: production eazy12 KDE + flows beside it
 python -m bedcosmo.num_visits.empirical.validate_prior_flow --threads 8
+
+# alternate prior build (eazy6, eazy12-t1-t7, …): point at its native KDE joblib;
+# flow .pt files are resolved automatically from the same directory
+python -m bedcosmo.num_visits.empirical.validate_prior_flow \
+  --artifact $SCRATCH/bedcosmo/num_visits/empirical_prior/eazy12-t1-t7/sed_prior_kde_native.joblib \
+  --threads 8
 
 # just the native panel (fast)
 python -m bedcosmo.num_visits.empirical.validate_prior_flow --space native --plot panel --threads 8
@@ -424,11 +439,13 @@ python -m bedcosmo.num_visits.empirical.validate_prior_flow --space native --plo
   blotchy contours.
 
 Writes `validate_prior_flow_{native,gaussianized}{,_triangle}.png` beside the KDE (override
-`--out-dir`). The native/`transform_input: false` path is validated end-to-end (A/B PASS;
-eval `H_prior` matches the offline flow entropy).
+`--out-dir`). Pass `--artifact` to the KDE joblib for non-default builds (`--prior-dir` is
+**not** a flag on this script; it is used by `diagnostic_plots` and other tools). The native/
+`transform_input: false` path is validated end-to-end (A/B PASS; eval `H_prior` matches the
+offline flow entropy).
 
-The flows must exist in `prior_dir` beside the KDE (train them first). Runtime loads the
-frozen copies from `artifacts/empirical/` after snapshot.
+The flows must exist beside the KDE artifact (train them first with `--kde-path` /
+`--out-dir`). Runtime loads the frozen copies from `artifacts/empirical/` after snapshot.
 
 ---
 
@@ -464,27 +481,31 @@ python -m bedcosmo.num_visits.empirical.diagnostic_plots clr-triangle \
 
 ### Config
 
-- **Parameters:** taken at runtime from the KDE artifact’s `feature_names` (not hardcoded from `models.yaml`). Production 12-template builds use `f1`…`f11`, `log_c_scale`, `z`; a 6-template prior_args points at a K=6 artifact and gets `f1`…`f5`, `log_c_scale`, `z` automatically.
-- **Prior build dir:** [`prior_args_empirical.yaml`](../../../../experiments/num_visits/prior_args_empirical.yaml). Set `prior_dir: null` to use `$SCRATCH/bedcosmo/num_visits/empirical_prior/eazy12`. That directory holds `sed_prior_kde_native.joblib` and (for `prior_source: flow`) the `sed_prior_flow_*.pt` files. Trained runs load the frozen copies from `artifacts/empirical/`.
+- **Parameters:** taken at runtime from the KDE artifact’s `feature_names` (not hardcoded from `models.yaml`). Production 12-template builds use `f1`…`f11`, `log_c_scale`, `z`; a 6-template prior gets `f1`…`f5`, `log_c_scale`, `z` automatically.
+- **Prior build dir:** [`prior_args_empirical.yaml`](../../../../experiments/num_visits/prior_args_empirical.yaml). Set `template_source` (`eazy12` / `eazy6`) and optional `reduced_templates` (`null` or `"t7,t10"`). These resolve `prior_dir` to `$SCRATCH/bedcosmo/num_visits/empirical_prior/<variant>` and fill `template_param` / `parameters`. Trained runs load the frozen copies from `artifacts/empirical/`.
 
 ```yaml
-prior_dir: null            # null = default scratch empirical_prior/eazy12 build
-template_dir: null         # defaults to $SCRATCH/bedcosmo/eazy/
-prior_source: flow         # {flow (default), kde}; flow needs sed_prior_flow_*.pt in prior_dir
+template_source: eazy12      # or eazy6
+reduced_templates: null      # or "t7,t10"
+template_dir: null           # defaults to $SCRATCH/bedcosmo/eazy/
+density_type: flow           # {flow (default), kde}; flow needs sed_prior_flow_*.pt in prior_dir
 ```
 
-For the classic 6-template bank use [`prior_args_empirical_eazy6.yaml`](../../../../experiments/num_visits/prior_args_empirical_eazy6.yaml)
-(`prior_dir` → `empirical_prior/eazy6`, `template_param: templates/eazy_v1.0.spectra.param`,
-`prior_source: kde` until a flow is trained) with:
+CLI overrides:
 
 ```bash
-./submit.sh train num_visits empirical --prior-args-path prior_args_empirical_eazy6.yaml
+./submit.sh train num_visits empirical --prior-template-source eazy6
+./submit.sh train num_visits empirical --prior-reduced-templates t7,t10
+./submit.sh train num_visits empirical --prior-density-type kde
 ```
 
-Override `prior_dir` with an absolute path when using a non-default `--build-name`.
-With `prior_source: flow` (the default), the trained flows are snapshotted into the run's
+Any `prior_args.yaml` field can be overridden with `--prior-<field>` (dashes for
+underscores). Reserved top-level flags: `--prior-args-path`, `--prior-flow-path`.
+Fields that already start with `prior_` accept a short form (`--prior-pool-size` →
+`prior_pool_size`).
+With `density_type: flow` (the default), the trained flows are snapshotted into the run's
 `artifacts/empirical/` alongside the KDE and drive the prior pool + entropy; set
-`prior_source: kde` for the pre-flow KDE baseline (e.g. a flow-vs-KDE A/B). See
+`density_type: kde` for the pre-flow KDE baseline (e.g. a flow-vs-KDE A/B). See
 [Step 3](#step-3-prior-normalizing-flow-prior_flowpy) to train and validate the flows.
 
 - **Training:** [`train_args.yaml`](../../../../experiments/num_visits/train_args.yaml) `empirical` block:
@@ -528,6 +549,116 @@ Writes physical \((a_k, \log s, z)\) and post-transform Gaussian triangles.
 
 Use `diagnostic_plots sed-examples` for production-pipeline SED checks (KDE-sampled weights, not synthetic mixtures).
 
+To connect majority-T1 and majority-T7 subsets back to their actual DESI
+coadds, run:
+
+```bash
+python -m bedcosmo.num_visits.empirical.reduced.plot_eazy_dominant_cohort_traits
+```
+
+This writes a physical-traits figure plus a TARGETID/HEALPix-level CSV. The
+measurements include narrow Dn4000 and local-continuum emission equivalent
+widths for [O II], Hβ, [O III], and Hα. `--min-anchor-weight` controls cohort
+purity (default: the dominant anchor must carry at least 50% of the fitted
+weight).
+
+### Discover fixed-size reduced-template cohorts
+
+To refit every quality-passing DESI spectrum with every size-N subset of the
+12-template bank:
+
+```bash
+python -m bedcosmo.num_visits.empirical.reduced.discover_template_cohorts \
+  --n-templates 3 \
+  --max-chi2-dof 1.2 \
+  --max-delta-chi2-dof 0.05 \
+  --max-color-rms 0.02 \
+  --min-component-weight 0.01 \
+  --min-cohort-size 100
+```
+
+The first run caches each spectrum's weighted 12-template sufficient
+statistics; searches with other values of N reuse that cache. Outputs under
+`<prior-dir>/reduced_template_cohorts/nN/` are:
+
+| File | Contents |
+|------|----------|
+| `subset_summary.csv` | Independent total coverage, strictly exclusive coverage, and fit-quality distribution summaries for every subset |
+| `subset_memberships.csv` | Every passing spectrum-subset pair, including that subset's reduced coefficients, scale, fit degradation, and LSST color RMS |
+| `spectrum_assignments.csv` | Optional disjoint view that selects the best passing subset per spectrum |
+| `subset_quality_matrices.npz` | Per-spectrum quality and pass mask for every candidate subset |
+| `subset_discovery.png` | Largest independent cohorts with distributions of DESI fit degradation, absolute reduced-fit quality, and disjoint-assignment redshift |
+| `discovery_parameters.json` | Exact thresholds and template settings |
+
+`--min-component-weight` prevents an N-template cohort from being padded with
+an unused template. Set it to zero to interpret N as "at most N"; leave it
+positive when discovering physically distinct exact-N cohorts.
+`exclusive_count` means spectra that pass exactly one candidate subset of the
+requested N; it is distinct from `assigned_count`, which selects the best
+passing subset even when several subsets pass.
+
+To inspect what the templates contribute for explicit subsets or the largest
+cohorts, generate example-fit galleries from a discovery directory:
+
+```bash
+python -m bedcosmo.num_visits.empirical.reduced.plot_template_subset_examples \
+  --cohort-dir experiments/num_visits/plots/reduced_template_cohorts/eazy12/n3 \
+  --templates T1+T7+T9 \
+  --top-sets 3
+```
+
+For comparisons at fixed redshift, pass `--z-min` and `--z-max`. Add
+`--distinct-across-subsets` when plotting several subsets to prevent the same
+DESI target from appearing in more than one gallery.
+
+Each gallery includes a representative member and one member rich in each
+selected template. It overlays the observed DESI coadd, full-basis fit,
+reduced fit, and each reduced template contribution; the side bars show the
+normalized reduced coefficients. For EAZY6, also pass
+`--build-name empirical_prior/eazy6 --template-param templates/eazy_v1.0.spectra.param`.
+By default, every trace is divided by the same continuum estimated from the
+DESI coadd with a 250-rest-Angstrom Gaussian and then smoothed by 8 observed
+Angstroms for display. Defining the broad continuum scale in the rest frame
+makes physical feature comparisons consistent across redshift while keeping
+the additive template decomposition intact. The continuum estimate is weighted
+by the DESI inverse variance so very noisy pixels cannot control the displayed
+normalization. The wavelength axis defaults to
+the observed frame. The continuum smoother reflects the
+measured spectrum at its endpoints rather than extending a potentially noisy
+last pixel. Values below 5% of the spectrum's 75th-percentile continuum or
+below continuum S/N 3 are masked to prevent unstable display division. Use
+`--no-continuum-normalize` for the
+original flux view; there, the DESI measurements default to independent
+inverse-variance-weighted 25-Angstrom bins with one-sigma error bars, and
+`--display-bin-aa 0` shows every original pixel. The fits and quoted chi-square
+values always use every original pixel, so none of these display transforms
+affect cohort membership or fit quality. `--wavelength-frame rest` switches
+the plotted coordinates, and `--shared-x` enables a shared union range.
+
+### Build a prior from one reduced-template cohort
+
+Turn the passing members of any discovered subset into a standalone empirical
+prior with:
+
+```bash
+python -m bedcosmo.num_visits.empirical.reduced.build_reduced_template_prior \
+  --templates T1+T7
+```
+
+`--cohort-dir` is optional: when omitted, the builder looks under the source
+full-template build (`--source-build-name`, default `empirical_prior/eazy12`)
+at `reduced_template_cohorts/nN/` for the subset size. This writes a reduced
+EAZY `.param` file, a compatible coefficient table, complete selection/template
+provenance, and the native and gaussianized KDEs. For T1+T7 the prior has three
+features: one ILR shape coordinate, `log_c_scale`, and `z`. Train with:
+
+```bash
+./submit.sh train num_visits empirical --prior-reduced-templates t1,t7
+```
+
+The prior is conditioned on passing the cohort discovery thresholds; it does
+not represent DESI galaxies that require other template directions.
+
 ### Older scratch trees
 
 Legacy layouts (`desi_eazy_hp*` at scratch root, `desi_eazy_empirical_prior_full`, etc.) are still discovered by `find_healpix_weights_csv()` for backward compatibility. New builds should use `num_visits/<build-name>/healpix/hp*/`.
@@ -544,9 +675,9 @@ Legacy layouts (`desi_eazy_hp*` at scratch root, `desi_eazy_empirical_prior_full
 | KDE | **ILR**, **smooth**, \(\varepsilon=10^{-5}\), bandwidth **0.3** |
 | NF bijector | **`gaussianizer_state` in KDE artifact** (not rebuilt at train/eval) |
 | y-KDE (offline) | **`sed_prior_kde_gaussianized.joblib`** beside KDE (diagnostic only; runtime uses prior flows) |
-| **Prior flow** | `./train_prior_flow.sh --space both` → `sed_prior_flow_*.pt` beside KDE (default `prior_source: flow`) |
-| Validate flow | `python -m bedcosmo.num_visits.empirical.validate_prior_flow --threads 8` |
-| Training | `prior_dir: null` at snapshot; runtime uses `artifacts/empirical/` |
+| **Prior flow** | `./train_prior_flow.sh --space both` → `sed_prior_flow_*.pt` beside KDE (default `density_type: flow`) |
+| Validate flow | `validate_prior_flow --threads 8` (non-default build: `--artifact …/sed_prior_kde_native.joblib`) |
+| Training | `template_source` / `reduced_templates` at snapshot; runtime uses `artifacts/empirical/` |
 | Fit diagnostics | `./run_healpix_diagnostic_plots.sh` |
 | KDE diagnostics | `diagnostic_plots all --prior-dir .../empirical_prior/eazy12` |
 

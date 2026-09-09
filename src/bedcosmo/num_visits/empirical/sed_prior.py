@@ -30,7 +30,7 @@ VALID_PRIOR_SOURCES = (PRIOR_SOURCE_KDE, PRIOR_SOURCE_FLOW)
 
 
 def normalize_prior_source(value: Any) -> str:
-    """Validate ``prior_source`` to exactly {'kde','flow'}; raise on anything else.
+    """Validate ``density_type`` to exactly {'kde','flow'}; raise otherwise.
 
     An absent / null / empty value defaults to ``'kde'``; any other unrecognized
     value (e.g. a typo) is a loud ``ValueError`` rather than a silent KDE fallback.
@@ -42,10 +42,38 @@ def normalize_prior_source(value: Any) -> str:
         return PRIOR_SOURCE_KDE
     if s not in VALID_PRIOR_SOURCES:
         raise ValueError(
-            f"prior_source must be one of {VALID_PRIOR_SOURCES} (or null for the "
+            f"density_type must be one of {VALID_PRIOR_SOURCES} (or null for the "
             f"default 'kde'); got {value!r}."
         )
     return s
+
+
+def config_density_type(prior_args: dict[str, Any] | None) -> Any:
+    """Read the density backend from prior_args.
+
+    Prefer ``density_type``; accept legacy ``source`` / ``prior_source``.
+    """
+    if not prior_args:
+        return None
+    if "density_type" in prior_args:
+        return prior_args.get("density_type")
+    if "source" in prior_args:
+        return prior_args.get("source")
+    return prior_args.get("prior_source")
+
+
+def canonicalize_density_type(prior_args: dict[str, Any] | None) -> dict[str, Any]:
+    """Rewrite legacy ``source`` / ``prior_source`` to ``density_type``."""
+    out = dict(prior_args or {})
+    if "density_type" in out:
+        out.pop("source", None)
+        out.pop("prior_source", None)
+    elif "source" in out:
+        out["density_type"] = out.pop("source")
+        out.pop("prior_source", None)
+    elif "prior_source" in out:
+        out["density_type"] = out.pop("prior_source")
+    return out
 
 
 def _is_null_path(value: Any) -> bool:
@@ -84,13 +112,20 @@ def resolve_prior_dir(
 ) -> Path:
     """Resolve the empirical prior build directory.
 
-    Contains ``sed_prior_kde_native.joblib`` and, when ``prior_source=flow``, the
-    ``sed_prior_flow_*.pt`` files. ``null`` / omitted → default scratch build
+    Contains ``sed_prior_kde_native.joblib`` and, when ``density_type=flow``, the
+    ``sed_prior_flow_*.pt`` files. When ``prior_args`` includes
+    ``template_source``, that (plus optional ``reduced_templates``) selects the
+    build. Otherwise ``null`` / omitted ``prior_dir`` → default scratch build
     (``$SCRATCH/bedcosmo/num_visits/empirical_prior/eazy12``).
     """
     raw = prior_dir
     if _is_null_path(raw) and prior_args:
-        raw = prior_args.get("prior_dir")
+        from .template_config import materialize_empirical_prior_args
+
+        materialized = materialize_empirical_prior_args(prior_args)
+        raw = materialized.get("prior_dir")
+        if _is_null_path(raw):
+            raw = prior_args.get("prior_dir")
     if _is_null_path(raw):
         return get_prior_build_dir()
     return Path(os.path.expandvars(os.path.expanduser(str(raw)))).resolve()
@@ -104,7 +139,7 @@ def resolve_runtime_prior_root(
     """Directory that holds the empirical prior files for this run.
 
     Prefers the frozen ``artifacts/empirical/`` tree when present (contains the
-    native KDE and, for ``prior_source=flow``, the flow ``.pt`` files). Otherwise
+    native KDE and, for ``density_type=flow``, the flow ``.pt`` files). Otherwise
     uses ``prior_dir`` or the default scratch build.
     """
     if artifacts_dir is not None:
@@ -119,16 +154,28 @@ def snapshot_sed_prior(
     artifacts_dir: str | Path,
     *,
     cosmo_exp: str = "num_visits",
+    template_source: Any = None,
+    reduced_templates: Any = None,
 ) -> dict[str, Any]:
     """Freeze the empirical prior into ``artifacts/empirical/``.
 
     Always copies ``sed_prior_kde_native.joblib`` from ``prior_dir``. When
-    ``prior_source == 'flow'`` also copies ``sed_prior_flow_*.pt`` from the same
-    directory.
+    ``density_type == 'flow'`` also copies ``sed_prior_flow_*.pt`` from the same
+    directory. Resolves ``template_source`` / ``reduced_templates`` into
+    ``prior_dir`` / ``template_param`` / ``parameters`` before copying.
     """
     if cosmo_exp != "num_visits" or not prior_args:
         return prior_args
-    src = resolve_prior_dir(prior_args) / SED_PRIOR_KDE_NATIVE_FILENAME
+    from .template_config import materialize_empirical_prior_args
+
+    out = canonicalize_density_type(
+        materialize_empirical_prior_args(
+            prior_args,
+            template_source=template_source,
+            reduced_templates=reduced_templates,
+        )
+    )
+    src = resolve_prior_dir(out) / SED_PRIOR_KDE_NATIVE_FILENAME
     if not src.is_file():
         raise FileNotFoundError(f"prior KDE not found: {src}")
 
@@ -138,13 +185,11 @@ def snapshot_sed_prior(
 
     # NOTE: sed_prior_kde_gaussianized.joblib is intentionally NOT snapshotted.
     # Runtime empirical entropy uses the trained native/gaussianized PriorFlows
-    # (or the N(0,I) shortcut when prior_source=kde); the offline gaussianized
+    # (or the N(0,I) shortcut when density_type=kde); the offline gaussianized
     # KDE is diagnostic only.
 
-    out = dict(prior_args)
-
-    # prior_source=flow: freeze the trained flow(s) from the same prior_dir.
-    if normalize_prior_source(out.get("prior_source")) == PRIOR_SOURCE_FLOW:
+    # density_type=flow: freeze the trained flow(s) from the same prior_dir.
+    if normalize_prior_source(config_density_type(out)) == PRIOR_SOURCE_FLOW:
         _snapshot_sed_prior_flows(artifacts_dir, src_dir=src.parent)
 
     return out
@@ -161,7 +206,7 @@ def _snapshot_sed_prior_flows(
     native_src = src_dir / SED_PRIOR_FLOW_FILENAMES[SPACE_NATIVE]
     if not native_src.is_file():
         raise FileNotFoundError(
-            f"prior_source='flow' but native flow not found: {native_src}. Train it with "
+            f"density_type='flow' but native flow not found: {native_src}. Train it with "
             "python -m bedcosmo.num_visits.empirical.prior_flow --space both."
         )
     dest_dir = Path(artifacts_dir) / EMPIRICAL_ARTIFACT_DIR
@@ -396,7 +441,7 @@ class EmpiricalSedPrior:
         native_path = root / SED_PRIOR_FLOW_FILENAMES[SPACE_NATIVE]
         if not native_path.is_file():
             raise FileNotFoundError(
-                f"prior_source='flow' requires a native flow at {native_path}. Train it with "
+                f"density_type='flow' requires a native flow at {native_path}. Train it with "
                 "python -m bedcosmo.num_visits.empirical.prior_flow --space both."
             )
         self.attach_flow_from_path(native_path)

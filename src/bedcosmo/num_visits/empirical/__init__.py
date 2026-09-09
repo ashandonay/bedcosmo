@@ -46,6 +46,8 @@ from .sed_prior import (
     EmpiricalPriorPool,
     EmpiricalSedPrior,
     build_gpu_prior_pool,
+    canonicalize_density_type,
+    config_density_type,
     copy_sed_prior_artifacts,
     resolve_prior_dir,
     resolve_runtime_prior_root,
@@ -76,6 +78,15 @@ from .templates import (
     load_eazy_template_bank,
     load_eazy_templates,
 )
+from .template_config import (
+    empirical_prior_build_name,
+    empirical_prior_variant,
+    format_reduced_templates,
+    materialize_empirical_prior_args,
+    n_templates_for,
+    parse_reduced_templates,
+    resolve_template_param,
+)
 
 __all__ = [
     "DEFAULT_EMPIRICAL_PRIOR_DIR",
@@ -98,6 +109,8 @@ __all__ = [
     "SED_PRIOR_KDE_FILENAMES",
     "SED_PRIOR_KDE_GAUSSIANIZED_FILENAME",
     "SED_PRIOR_KDE_NATIVE_FILENAME",
+    "canonicalize_density_type",
+    "config_density_type",
     "clr_to_weights",
     "copy_sed_prior_artifacts",
     "resolve_prior_dir",
@@ -125,6 +138,13 @@ __all__ = [
     "get_scratch_root",
     "load_eazy_template_bank",
     "load_eazy_templates",
+    "empirical_prior_build_name",
+    "empirical_prior_variant",
+    "format_reduced_templates",
+    "materialize_empirical_prior_args",
+    "n_templates_for",
+    "parse_reduced_templates",
+    "resolve_template_param",
     "load_prior_training_table",
     "load_sed_prior_kde",
     "load_gaussianized_kde",

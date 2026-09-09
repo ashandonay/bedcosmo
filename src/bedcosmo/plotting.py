@@ -2,6 +2,7 @@ import sys
 import os
 import io
 import contextlib
+from collections.abc import Mapping
 
 import torch
 import mlflow
@@ -46,14 +47,47 @@ plt.rcParams['text.usetex'] = False
 plt.rcParams['font.family'] = 'DejaVu Sans'
 plt.rcParams['font.serif'] = ['DejaVu Serif', 'Times New Roman', 'Times', 'serif']
 
+# Contour alpha for prior overlays in posterior triangle plots.
+PRIOR_CONTOUR_ALPHA = 0.4
 
-def load_eig_data_file(artifacts_dir, eval_step=None):
+
+def _step_keys_for_eval(data, eval_step=None):
+    """Return step_* keys to inspect, optionally restricted to eval_step."""
+    if eval_step is not None:
+        step_str = f"step_{eval_step}" if not str(eval_step).startswith('step_') else str(eval_step)
+        return [step_str] if step_str in data else []
+    return [k for k in data.keys() if k.startswith('step_')]
+
+
+def _eig_data_has_variable_eigs(data, eval_step=None):
+    """True when eig_data contains joint (variable) EIG averages."""
+    for step_key in _step_keys_for_eval(data, eval_step):
+        variable = data.get(step_key, {}).get('variable', {})
+        if variable.get('eigs_avg') is not None:
+            return True
+    return False
+
+
+def _eig_data_has_marginal_eigs(data, eval_step=None):
+    """True when eig_data contains marginal EIG blocks."""
+    for step_key in _step_keys_for_eval(data, eval_step):
+        marginal = data.get(step_key, {}).get('marginal', {})
+        if marginal:
+            return True
+    return False
+
+
+def load_eig_data_file(artifacts_dir, eval_step=None, eig_kind='any'):
     """
     Load the most recent completed eig_data JSON file from the artifacts directory.
 
     Args:
         artifacts_dir (str): Path to the artifacts directory containing eig_data files
         eval_step (str or int, optional): If provided, verify that the loaded file contains this step
+        eig_kind (str): Which EIG content the file must contain: ``'any'`` (default),
+            ``'variable'`` (joint EIG under ``step_*/variable``), or ``'marginal'``
+            (marginal EIG under ``step_*/marginal``). Use ``'variable'`` when comparing
+            joint EIGs so a newer marginal-only eval file is skipped.
 
     Returns:
         tuple: (json_path, data) where json_path is the path to the file and data is the loaded JSON.
@@ -62,6 +96,9 @@ def load_eig_data_file(artifacts_dir, eval_step=None):
     Raises:
         ValueError: If no completed eig_data files are found, if file cannot be loaded, or if eval_step is not found in the data.
     """
+    if eig_kind not in ('any', 'variable', 'marginal'):
+        raise ValueError(f"eig_kind must be 'any', 'variable', or 'marginal', got {eig_kind!r}")
+
     if not os.path.exists(artifacts_dir):
         raise ValueError(f"Artifacts directory not found: {artifacts_dir}")
 
@@ -93,6 +130,11 @@ def load_eig_data_file(artifacts_dir, eval_step=None):
                     # This file doesn't have the requested step, try next file
                     continue
 
+            if eig_kind == 'variable' and not _eig_data_has_variable_eigs(data, eval_step):
+                continue
+            if eig_kind == 'marginal' and not _eig_data_has_marginal_eigs(data, eval_step):
+                continue
+
             # Found a complete file (and it has the requested step if eval_step was provided)
             return json_path, data
 
@@ -102,10 +144,200 @@ def load_eig_data_file(artifacts_dir, eval_step=None):
             continue
 
     # No completed files found (or no file with the requested eval_step)
+    kind_suffix = f" with {eig_kind} EIG data" if eig_kind != 'any' else ""
     if eval_step is not None:
-        raise ValueError(f"No completed eig_data files with step {eval_step} found in {artifacts_dir}")
+        raise ValueError(
+            f"No completed eig_data files with step {eval_step}{kind_suffix} found in {artifacts_dir}"
+        )
+    raise ValueError(f"No completed eig_data files{kind_suffix} found in {artifacts_dir}")
+
+
+def _normalize_marginal_subset_id(subset):
+    """Normalize a marginal subset spec to the ``+``-joined subset_id used in eig_data."""
+    if subset is None:
+        raise ValueError("subset is required when eig_kind='marginal'")
+    if isinstance(subset, str):
+        if "+" in subset:
+            return subset
+        if "," in subset:
+            return "+".join(part.strip() for part in subset.split(",") if part.strip())
+        return subset.strip()
+    return "+".join(str(part) for part in subset)
+
+
+def _extract_eig_values(eig_data, step_str, eig_kind, subset=None):
+    """Extract designs and per-design EIG averages/std from an eig_data step.
+
+    Args:
+        eig_data (dict): Loaded eig_data JSON.
+        step_str (str): Step key, e.g. ``'step_50000'``.
+        eig_kind (str): ``'variable'`` (joint) or ``'marginal'``.
+        subset (str or list, optional): Marginal parameter subset; required for marginal.
+
+    Returns:
+        tuple: ``(designs, eigs_avg, eigs_std, label)`` with designs shape ``(n, d)``.
+    """
+    if eig_kind not in ("variable", "marginal"):
+        raise ValueError(f"eig_kind must be 'variable' or 'marginal', got {eig_kind!r}")
+    if step_str not in eig_data:
+        raise ValueError(f"Step {step_str!r} not found in eig_data")
+
+    step_payload = eig_data[step_str]
+    designs = np.asarray(eig_data.get("input_designs", []), dtype=float)
+    if designs.size == 0:
+        raise ValueError("input_designs missing or empty in eig_data")
+    if designs.ndim == 1:
+        designs = designs.reshape(-1, 1)
+
+    if eig_kind == "variable":
+        block = step_payload.get("variable", {})
+        eigs_raw = block.get("eigs_avg")
+        if eigs_raw is None:
+            raise ValueError(f"`eigs_avg` missing under {step_str}/variable")
+        std_raw = block.get("eigs_std")
+        label = "variable"
     else:
-        raise ValueError(f"No completed eig_data files found in {artifacts_dir}")
+        subset_id = _normalize_marginal_subset_id(subset)
+        marginal_all = step_payload.get("marginal", {}) or {}
+        if subset_id not in marginal_all:
+            raise ValueError(
+                f"Marginal EIG for subset {subset_id!r} not found in {step_str}. "
+                f"Available: {list(marginal_all.keys())}"
+            )
+        block = marginal_all[subset_id]
+        eigs_raw = block.get("eigs_avg")
+        if eigs_raw is None:
+            raise ValueError(f"`eigs_avg` missing under {step_str}/marginal/{subset_id}")
+        std_raw = block.get("eigs_std")
+        label = f"marginal({subset_id})"
+
+    eigs_avg = np.asarray(eigs_raw, dtype=float).reshape(-1)
+    if eigs_avg.shape[0] != designs.shape[0]:
+        raise ValueError(
+            f"EIG length {eigs_avg.shape[0]} does not match n_designs={designs.shape[0]}"
+        )
+    if std_raw is None:
+        eigs_std = np.zeros_like(eigs_avg)
+    else:
+        eigs_std = np.asarray(std_raw, dtype=float).reshape(-1)
+        if eigs_std.shape != eigs_avg.shape:
+            raise ValueError("eigs_std shape does not match eigs_avg")
+
+    return designs, eigs_avg, eigs_std, label
+
+
+def _weighted_pearson(x, y, weights):
+    """Weighted Pearson correlation of 1-D arrays ``x`` and ``y``."""
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    weights = np.asarray(weights, dtype=float)
+    mask = np.isfinite(x) & np.isfinite(y) & np.isfinite(weights) & (weights > 0)
+    if mask.sum() < 2:
+        return float("nan")
+    x = x[mask]
+    y = y[mask]
+    weights = weights[mask]
+    weight_sum = float(weights.sum())
+    if weight_sum <= 0:
+        return float("nan")
+    mean_x = float(np.sum(weights * x) / weight_sum)
+    mean_y = float(np.sum(weights * y) / weight_sum)
+    dx = x - mean_x
+    dy = y - mean_y
+    cov = float(np.sum(weights * dx * dy) / weight_sum)
+    std_x = float(np.sqrt(np.sum(weights * dx * dx) / weight_sum))
+    std_y = float(np.sqrt(np.sum(weights * dy * dy) / weight_sum))
+    if std_x == 0.0 or std_y == 0.0:
+        return float("nan")
+    return cov / (std_x * std_y)
+
+
+def _directional_delta_correlations(
+    designs,
+    eigs_x,
+    eigs_y,
+    min_pair_weight=0.0,
+    max_pairs=None,
+    rng=None,
+):
+    """Per-dimension weighted Pearson of ΔEIG_x vs ΔEIG_y over design pairs.
+
+    Pair weight onto axis ``j`` is ``|Δd_j| / ||Δd||``.
+    """
+    designs = np.asarray(designs, dtype=float)
+    eigs_x = np.asarray(eigs_x, dtype=float).reshape(-1)
+    eigs_y = np.asarray(eigs_y, dtype=float).reshape(-1)
+    if designs.ndim != 2:
+        raise ValueError(f"designs must be 2-D, got shape {designs.shape}")
+    n_designs, n_dim = designs.shape
+    if eigs_x.shape[0] != n_designs or eigs_y.shape[0] != n_designs:
+        raise ValueError("EIG vectors must match the number of designs")
+    if n_designs < 2:
+        raise ValueError("Need at least 2 designs for directional correlation")
+
+    i_idx, k_idx = np.triu_indices(n_designs, k=1)
+    n_pairs = len(i_idx)
+    if max_pairs is not None and n_pairs > int(max_pairs):
+        rng = np.random.default_rng(rng)
+        chosen = rng.choice(n_pairs, size=int(max_pairs), replace=False)
+        i_idx = i_idx[chosen]
+        k_idx = k_idx[chosen]
+
+    delta_d = designs[k_idx] - designs[i_idx]
+    norms = np.linalg.norm(delta_d, axis=1)
+    valid = norms > 0
+    if not np.any(valid):
+        raise ValueError("All design pairs have zero separation")
+    delta_d = delta_d[valid]
+    norms = norms[valid]
+    delta_ex = eigs_x[k_idx][valid] - eigs_x[i_idx][valid]
+    delta_ey = eigs_y[k_idx][valid] - eigs_y[i_idx][valid]
+    weights = np.abs(delta_d) / norms[:, None]
+
+    per_dim = []
+    for dim in range(n_dim):
+        w = weights[:, dim]
+        if min_pair_weight > 0:
+            keep = w >= float(min_pair_weight)
+            w_use = w[keep]
+            dx_use = delta_ex[keep]
+            dy_use = delta_ey[keep]
+        else:
+            w_use = w
+            dx_use = delta_ex
+            dy_use = delta_ey
+        rho = _weighted_pearson(dx_use, dy_use, w_use)
+        n_eff = float(np.sum(w_use)) if w_use.size else 0.0
+        per_dim.append({"dim": dim, "rho": float(rho), "n_eff_pairs": n_eff})
+    return per_dim
+
+
+def _eig_correlation_stats(eigs_x, eigs_y):
+    """Pearson / Spearman / offset / top-10 overlap for two per-design EIG vectors."""
+    eigs_x = np.asarray(eigs_x, dtype=float).reshape(-1)
+    eigs_y = np.asarray(eigs_y, dtype=float).reshape(-1)
+    if eigs_x.shape != eigs_y.shape:
+        raise ValueError("EIG vectors must have the same length")
+    if eigs_x.size < 2:
+        raise ValueError("Need at least 2 designs to compute EIG correlation")
+
+    rank_x = np.argsort(np.argsort(-eigs_x)) + 1
+    rank_y = np.argsort(np.argsort(-eigs_y)) + 1
+    rho_pearson = float(np.corrcoef(eigs_x, eigs_y)[0, 1])
+    rho_spearman = float(np.corrcoef(rank_x, rank_y)[0, 1])
+    top_n = min(10, eigs_x.size)
+    top10_overlap = int(
+        len(set(np.argsort(-eigs_x)[:top_n]) & set(np.argsort(-eigs_y)[:top_n]))
+    )
+    return {
+        "rho_pearson": rho_pearson,
+        "rho_spearman": rho_spearman,
+        "mean_offset": float(np.mean(eigs_y - eigs_x)),
+        "top10_overlap": top10_overlap,
+        "n_designs": int(eigs_x.size),
+        "rank_x": rank_x,
+        "rank_y": rank_y,
+    }
 
 
 # ============================================================================
@@ -558,8 +790,67 @@ class BasePlotter:
             return False
         raise ValueError(f"Invalid parameter space: {param_space}")
 
+    @staticmethod
+    def _central_params_equal(central_params_a, central_params_b):
+        """Return True when two central-param dicts match on keys and values."""
+        if set(central_params_a) != set(central_params_b):
+            return False
+        return all(
+            np.isclose(central_params_a[key], central_params_b[key])
+            for key in central_params_a
+        )
+
+    @staticmethod
+    def _format_contour_level(level):
+        """Format a GetDist contour fraction as a percentage string."""
+        pct = 100.0 * float(level)
+        if np.isclose(pct, round(pct)):
+            return f"{int(round(pct))}%"
+        return f"{pct:.1f}%"
+
+    @classmethod
+    def _format_contour_levels_list(cls, levels):
+        """Format contour levels as a bracketed list for plot titles."""
+        if isinstance(levels, (int, float)):
+            levels = [levels]
+        parts = [cls._format_contour_level(level) for level in levels]
+        return f"[{', '.join(parts)}]"
+
+    @classmethod
+    def _prior_args_equal(cls, prior_args_a, prior_args_b):
+        """Return True when two prior_args configs match recursively."""
+        return cls._nested_config_equal(prior_args_a or {}, prior_args_b or {})
+
+    @staticmethod
+    def _nested_config_equal(value_a, value_b):
+        """Recursively compare nested config structures."""
+        if isinstance(value_a, dict) and isinstance(value_b, dict):
+            if set(value_a) != set(value_b):
+                return False
+            return all(
+                BasePlotter._nested_config_equal(value_a[key], value_b[key])
+                for key in value_a
+            )
+        if isinstance(value_a, (list, tuple)) and isinstance(value_b, (list, tuple)):
+            if len(value_a) != len(value_b):
+                return False
+            return all(
+                BasePlotter._nested_config_equal(item_a, item_b)
+                for item_a, item_b in zip(value_a, value_b)
+            )
+        if isinstance(value_a, (int, float, np.floating)) and isinstance(
+            value_b, (int, float, np.floating)
+        ):
+            return np.isclose(float(value_a), float(value_b))
+        return value_a == value_b
+
     def _mark_central_parameter_values(
-        self, g, experiment, transform_output=True, plotted_params=None
+        self,
+        g,
+        experiment,
+        transform_output=True,
+        plotted_params=None,
+        color='black',
     ):
         """Mark ``experiment.central_params`` on GetDist triangle-plot axes.
 
@@ -592,7 +883,7 @@ class BasePlotter:
                 if p in central_params
             }
 
-        line_kw = dict(color='black', linestyle='--', linewidth=1.0)
+        line_kw = dict(color=color, linestyle='--', linewidth=1.0)
         params = list(plotted_params) if plotted_params is not None else list(experiment.cosmo_params)
         n = g.subplots.shape[0]
 
@@ -612,13 +903,46 @@ class BasePlotter:
             display = (display,)
         return tuple(display)
 
-    def _entropy_legend_suffix(self, prior_entropy=None, posterior_entropy=None):
-        if prior_entropy is None or posterior_entropy is None:
+    def _entropy_legend_suffix(
+        self, prior_entropy=None, posterior_entropy=None, *, include_prior=True
+    ):
+        parts = []
+        if include_prior and prior_entropy is not None:
+            parts.append(f"H_prior: {float(prior_entropy):.2f} bits")
+        if posterior_entropy is not None:
+            parts.append(f"H_post: {float(posterior_entropy):.2f} bits")
+        if not parts:
             return ""
-        return (
-            f", H_prior: {float(prior_entropy):.2f} bits"
-            f", H_post: {float(posterior_entropy):.2f} bits"
-        )
+        return ", " + ", ".join(parts)
+
+    def _prior_entropy_legend_suffix(self, prior_entropy=None):
+        if prior_entropy is None:
+            return ""
+        return f", H_prior: {float(prior_entropy):.2f} bits"
+
+    def _nominal_prior_entropy_for_run(self, run_data_item, eval_step=None):
+        """Read nominal prior entropy from a run's joint eig_data, if available."""
+        exp_id = run_data_item.get('exp_id')
+        run_id = run_data_item.get('run_id')
+        if exp_id is None or run_id is None:
+            return None
+        artifacts_dir = f"{self.storage_path}/mlruns/{exp_id}/{run_id}/artifacts"
+        try:
+            _, eig_data = self.load_eig_data_file(
+                artifacts_dir, eval_step=eval_step, eig_kind='variable'
+            )
+            _, step_str = self._resolve_step(eig_data, eval_step)
+            if step_str is None:
+                return None
+            nominal_data = eig_data.get(step_str, {}).get('nominal', {})
+            val = nominal_data.get('prior_entropy_avg')
+            if val is None:
+                return None
+            if isinstance(val, list):
+                val = val[0] if len(val) > 0 else None
+            return float(val) if val is not None else None
+        except ValueError:
+            return None
 
     def _nf_display_samples(
         self,
@@ -645,6 +969,7 @@ class BasePlotter:
         eval_step=None,
         params=None,
         marginal_eig=False,
+        plot_prior=False,
     ):
         """
         NF guide samples for each entry in display ('nominal' and/or 'optimal').
@@ -672,17 +997,46 @@ class BasePlotter:
                 experiment, step, run_obj, run_args, device, global_rank=global_rank
             )
             auto_seed(seed)
-            if 'optimal' in display:
+            if 'optimal' in display or 'nominal' in display:
                 run_id = run_obj.info.run_id
                 artifacts_dir = f"{self.storage_path}/mlruns/{exp_id}/{run_id}/artifacts"
-                _, eig_data = self.load_eig_data_file(artifacts_dir, eval_step=eval_step)
-                input_designs, eig_values, nominal_eig, entropy_info = self._parse_eig_for_posterior(
-                    eig_data, eval_step
-                )
-                nominal_prior_entropy = entropy_info.get("nominal_prior_entropy")
-                nominal_posterior_entropy = entropy_info.get("nominal_posterior_entropy")
-                prior_entropy_by_design = entropy_info.get("prior_entropy_by_design")
-                posterior_entropy_by_design = entropy_info.get("posterior_entropy_by_design")
+                try:
+                    _, eig_data = self.load_eig_data_file(
+                        artifacts_dir, eval_step=eval_step, eig_kind='variable'
+                    )
+                    if 'optimal' in display:
+                        input_designs, eig_values, nominal_eig, entropy_info = self._parse_eig_for_posterior(
+                            eig_data, eval_step
+                        )
+                    else:
+                        _, step_str = self._resolve_step(eig_data, eval_step)
+                        nominal_data = eig_data.get(step_str, {}).get('nominal', {})
+                        nominal_eig_val = nominal_data.get('eigs_avg')
+                        if isinstance(nominal_eig_val, list):
+                            nominal_eig_val = nominal_eig_val[0] if nominal_eig_val else None
+                        nominal_eig = float(nominal_eig_val) if nominal_eig_val is not None else None
+
+                        def _scalar_entropy(block, key):
+                            val = block.get(key)
+                            if val is None:
+                                return None
+                            if isinstance(val, list):
+                                val = val[0] if len(val) > 0 else None
+                            return float(val) if val is not None else None
+
+                        entropy_info = {
+                            "nominal_prior_entropy": _scalar_entropy(nominal_data, "prior_entropy_avg"),
+                            "nominal_posterior_entropy": _scalar_entropy(nominal_data, "posterior_entropy_avg"),
+                            "prior_entropy_by_design": None,
+                            "posterior_entropy_by_design": None,
+                        }
+                    nominal_prior_entropy = entropy_info.get("nominal_prior_entropy")
+                    nominal_posterior_entropy = entropy_info.get("nominal_posterior_entropy")
+                    prior_entropy_by_design = entropy_info.get("prior_entropy_by_design")
+                    posterior_entropy_by_design = entropy_info.get("posterior_entropy_by_design")
+                except ValueError:
+                    if 'optimal' in display:
+                        raise
         elif experiment is None:
             raise ValueError("Either experiment or run_obj must be provided")
 
@@ -694,6 +1048,7 @@ class BasePlotter:
 
         entries = []
         eig_label = "Marginal EIG" if marginal_eig else "EIG"
+        include_prior_in_legend = not plot_prior
 
         if 'nominal' in display:
             nominal_samples_gd = experiment.get_guide_samples(
@@ -707,7 +1062,9 @@ class BasePlotter:
                 f", {eig_label}: {nominal_eig:.3f} bits" if nominal_eig is not None else ""
             )
             eig_str += self._entropy_legend_suffix(
-                nominal_prior_entropy, nominal_posterior_entropy
+                nominal_prior_entropy,
+                nominal_posterior_entropy,
+                include_prior=include_prior_in_legend,
             )
             entries.append({
                 'samples': nominal_samples_gd,
@@ -735,7 +1092,9 @@ class BasePlotter:
                     opt_prior_h = float(prior_entropy_by_design[optimal_idx])
                 if posterior_entropy_by_design is not None and len(posterior_entropy_by_design) > optimal_idx:
                     opt_post_h = float(posterior_entropy_by_design[optimal_idx])
-                eig_str += self._entropy_legend_suffix(opt_prior_h, opt_post_h)
+                eig_str += self._entropy_legend_suffix(
+                    opt_prior_h, opt_post_h, include_prior=include_prior_in_legend
+                )
                 label = f'Optimal Design (NF){eig_str}'
             elif len(input_designs) >= 1:
                 optimal_design = input_designs[0]
@@ -815,7 +1174,7 @@ class BasePlotter:
             guide_samples (int): Number of samples to generate.
             device (str): Device to use.
             seed (int): Random seed.
-            plot_prior (bool): If True, also plot the prior.
+            plot_prior (bool): If True, also plot the prior as a faint contour (alpha=0.4).
             transform_output (bool): Whether to transform output to physical space.
             title (str, optional): Title of the plot.
             grid_samples (np.ndarray, optional): Grid-based posterior parameter samples.
@@ -852,6 +1211,7 @@ class BasePlotter:
             device=device,
             params=params,
             marginal_eig=marginal_eig,
+            plot_prior=plot_prior,
         )
         for entry in nf_entries:
             all_samples.append(entry['samples'])
@@ -920,9 +1280,11 @@ class BasePlotter:
             prior_samples_gd = restrict_mcsamples(prior_samples_gd, params)
             all_samples.append(prior_samples_gd)
             all_colors.append('black')
-            all_alphas.append(1.0)
+            all_alphas.append(PRIOR_CONTOUR_ALPHA)
             all_line_styles.append('-')
-            legend_labels.append('Prior')
+            legend_labels.append(
+                f'Prior{self._prior_entropy_legend_suffix(nominal_prior_entropy)}'
+            )
 
         if not all_samples:
             print("Warning: No samples to plot.")
@@ -972,7 +1334,15 @@ class BasePlotter:
         for i, label in enumerate(legend_labels):
             color = all_colors[i]
             custom_legend.append(
-                Line2D([0], [0], color=color, label=label, linewidth=1.2, linestyle=all_line_styles[i])
+                Line2D(
+                    [0],
+                    [0],
+                    color=color,
+                    label=label,
+                    linewidth=1.2,
+                    linestyle=all_line_styles[i],
+                    alpha=all_alphas[i],
+                )
             )
 
         if title is None:
@@ -992,9 +1362,9 @@ class BasePlotter:
 
         return g
 
-    def load_eig_data_file(self, artifacts_dir, eval_step=None):
+    def load_eig_data_file(self, artifacts_dir, eval_step=None, eig_kind='any'):
         """Load the most recent completed eig_data JSON file (see module-level ``load_eig_data_file``)."""
-        return load_eig_data_file(artifacts_dir, eval_step=eval_step)
+        return load_eig_data_file(artifacts_dir, eval_step=eval_step, eig_kind=eig_kind)
 
     def _resolve_step(self, eig_data, eval_step):
         """Resolve eval_step to a step string key in eig_data (see RunPlotter usage)."""
@@ -1100,7 +1470,7 @@ class BasePlotter:
         ranges=None,
         scatter_alpha=0.6,
         contour_alpha_factor=0.8,
-        style=style
+        style=style,
     ):
         """
         Plots posterior distributions using GetDist triangle plots.
@@ -1118,7 +1488,7 @@ class BasePlotter:
                 If a single float is provided, it is converted to a list.
                 If None, the default GetDist settings are used.
             width_inch (float): Width of the plot in inches. Higher values increase resolution.
-            ranges (dict, optional): Dictionary specifying fixed ranges for parameters. 
+            ranges (dict, optional): Dictionary specifying fixed ranges for parameters.
                 Keys should be parameter names, values should be tuples of (min, max).
             scatter_alpha (float): Alpha value for scatter points. Default 0.6 for better distinguishability.
             contour_alpha_factor (float): Factor to adjust contour alpha for distinguishability. Default 0.8.
@@ -1206,6 +1576,9 @@ class BasePlotter:
 
         # Prepare contour_args with custom levels if provided
         # For GetDist, we don't pass line styles in contour_args when using multiple styles
+
+        for sample in samples:
+            sample.updateSettings(GETDIST_SETTINGS)
 
         # Set contour levels if provided
         if levels is not None:
@@ -2025,7 +2398,7 @@ class RunPlotter(BasePlotter):
         
         return fig
     
-    def _get_eig_data(self, eval_step=None, eig_data=None):
+    def _get_eig_data(self, eval_step=None, eig_data=None, eig_kind='variable'):
         """
         Helper method to load EIG data from artifacts directory.
         Finds the artifacts directory by searching for the run_id without needing experiment_id.
@@ -2033,6 +2406,7 @@ class RunPlotter(BasePlotter):
         Args:
             eval_step (str or int, optional): Step to load data for.
             eig_data (dict, optional): Pre-loaded eig_data to use instead of reading from disk.
+            eig_kind (str): Passed to ``load_eig_data_file`` when reading from disk.
 
         Returns:
             tuple: (eig_data_dict, artifacts_dir)
@@ -2068,7 +2442,9 @@ class RunPlotter(BasePlotter):
             if artifacts_dir is None or not os.path.exists(artifacts_dir):
                 raise ValueError(f"Could not find artifacts directory for run {self.run_id}")
         
-        json_path, eig_data = self.load_eig_data_file(artifacts_dir, eval_step=eval_step)
+        json_path, eig_data = self.load_eig_data_file(
+            artifacts_dir, eval_step=eval_step, eig_kind=eig_kind
+        )
         return eig_data
     
     
@@ -2453,7 +2829,7 @@ class RunPlotter(BasePlotter):
             include_nominal (bool): Overlay the nominal-design marginal EIG.
         """
         if eig_data is None:
-            eig_data = self._get_eig_data(eval_step=eval_step)
+            eig_data = self._get_eig_data(eval_step=eval_step, eig_kind='marginal')
         eval_step, step_str = self._resolve_step(eig_data, eval_step)
         if step_str is None:
             raise ValueError("No step data found for marginal EIG plot")
@@ -2507,7 +2883,8 @@ class ComparisonPlotter(BasePlotter):
     """
     
     def __init__(self, cosmo_exp='num_tracers', mlflow_exp=None, run_ids=None, 
-                 excluded_runs=None, filter_string=None, run_labels=None, var=None):
+                 excluded_runs=None, filter_string=None, run_labels=None, var=None,
+                 colors=None):
         """
         Initialize the comparison plotter.
         
@@ -2520,6 +2897,9 @@ class ComparisonPlotter(BasePlotter):
             run_labels (list, optional): Labels for each run (same order as run_ids / run_data_list). Used by compare_optimal_designs and compare_eigs.
             var (str or list, optional): Default MLflow param(s) used to differentiate runs in labels/grouping.
                 Individual compare_* methods can override this by passing their own ``var``.
+            colors (list, optional): Colors for each run in ``run_ids`` order. When set, the same
+                run always receives the same color across comparison plots regardless of sorting
+                or ``sort_reference``. Method-level ``colors`` overrides this for a single call.
         """
         super().__init__(cosmo_exp=cosmo_exp)
         
@@ -2534,6 +2914,7 @@ class ComparisonPlotter(BasePlotter):
         self.filter_string = filter_string
         self.run_labels = run_labels
         self.var = var
+        self.colors = [convert_color(c) for c in colors] if colors is not None else None
         
         # Cache for run data (will be populated on first use)
         self._run_data_cache = {}
@@ -2586,6 +2967,58 @@ class ComparisonPlotter(BasePlotter):
 
         keyed.sort(key=lambda item: item[0])
         return [run_id for _, run_id in keyed] + missing
+
+    def _canonical_run_id_order(self, run_data_list, run_ids):
+        """
+        Stable run ordering for color assignment.
+
+        When ``self.run_ids`` is set, colors follow that list's order. Otherwise
+        use ``var`` sorting (if configured) or the caller's ``run_ids`` order.
+        """
+        if not isinstance(run_ids, list):
+            run_ids = [run_ids]
+        run_id_set = set(run_ids)
+        if self.run_ids:
+            ordered = [rid for rid in self.run_ids if rid in run_id_set]
+            ordered += [rid for rid in run_ids if rid not in set(ordered)]
+            return ordered
+
+        var = self._resolve_var(None)
+        if var is not None:
+            return self._sort_run_ids_by_var(run_data_list, list(run_ids))
+        return list(run_ids)
+
+    def _resolve_run_color_map(self, run_data_list, run_ids, colors=None):
+        """
+        Map each run_id to a color, locked to canonical run order.
+
+        ``colors`` (or ``self.colors``) is indexed by ``self.run_ids`` when that
+        list is provided; otherwise by ``_canonical_run_id_order``.
+        """
+        if not isinstance(run_ids, list):
+            run_ids = [run_ids]
+
+        palette_source = colors if colors is not None else self.colors
+        assign_ids = self.run_ids if self.run_ids else self._canonical_run_id_order(
+            run_data_list, run_ids
+        )
+
+        if palette_source is not None:
+            if len(palette_source) != len(assign_ids):
+                raise ValueError(
+                    "colors must match the number of runs in run_ids "
+                    f"({len(assign_ids)}), got {len(palette_source)}."
+                )
+            palette = [convert_color(c) for c in palette_source]
+        else:
+            prop_cycle = plt.rcParams['axes.prop_cycle'].by_key()['color']
+            palette = [convert_color(c) for c in prop_cycle]
+
+        color_map = {
+            run_id: palette[i % len(palette)]
+            for i, run_id in enumerate(assign_ids)
+        }
+        return {run_id: color_map[run_id] for run_id in run_ids if run_id in color_map}
     
     def _get_run_data_list(self, parse_params=True, filter_string=None):
         """
@@ -2716,13 +3149,31 @@ class ComparisonPlotter(BasePlotter):
             return ax.legend(handles, labels, **legend_kwargs)
         else:
             return ax.legend(**legend_kwargs)
-    
+
+    def _comparison_group_label(self, group_key, group_runs, vars_list, var, run_id_to_label):
+        """Build the legend label for a comparison-plot group."""
+        label_parts = []
+        if run_id_to_label:
+            group_run_labels = [
+                run_id_to_label.get(run_data_item['run_id'])
+                for run_data_item in group_runs
+            ]
+            group_run_labels = [label for label in group_run_labels if label is not None]
+            if group_run_labels:
+                label_parts.append(group_run_labels[0])
+        if var:
+            var_label = ', '.join([f'{vars_list[j]}={val}' for j, val in enumerate(group_key)])
+            label_parts.append(var_label)
+        if label_parts:
+            return ', '.join(label_parts)
+        return group_key[:8] if isinstance(group_key, str) else str(group_key)[:8]
+
     def compare_posterior(self, var=None, guide_samples=10000, show_scatter=False,
                          step='loss_best', seed=1, device="cuda:0",
-                         global_rank=0, levels=[0.68, 0.95], width_inch=10,
+                         global_rank=0, levels=[0.68], width_inch=10,
                          colors=None, filter_string=None, filename=None, save_dir=None,
                          dpi=400, transform_output=True, display=('nominal', 'optimal'),
-                         eval_step=None, **kwargs):
+                         eval_step=None, plot_prior=True, **kwargs):
         """
         Compare posterior distributions across multiple runs in a triangle plot.
 
@@ -2745,6 +3196,9 @@ class ComparisonPlotter(BasePlotter):
             transform_output (bool): Transform NF samples to physical space (default True).
             display (tuple or str): 'nominal' and/or 'optimal' (default both).
             eval_step (str or int, optional): EIG eval step for optimal design; latest if None.
+            plot_prior (bool): If True, overlay each group's prior as a faint contour
+                (alpha=0.4). Uses black when all groups share the same prior_args,
+                otherwise matches group colors.
 
         Returns:
             GetDist plotter object.
@@ -2809,33 +3263,62 @@ class ComparisonPlotter(BasePlotter):
         if var:
             sorted_group_keys = sorted(grouped_runs.keys(), key=self._var_group_sort_key)
         else:
-            sorted_group_keys = sorted(grouped_runs.keys())
+            sorted_group_keys = self._canonical_run_id_order(
+                run_data_list, list(grouped_runs.keys())
+            )
         
+        all_run_ids = [
+            run_data_item['run_id']
+            for group_runs in grouped_runs.values()
+            for run_data_item in group_runs
+        ]
+        run_color_map = self._resolve_run_color_map(run_data_list, all_run_ids, colors=colors)
+
         # Collect samples
         all_samples = []
         all_colors = []
-        legend_handles = []
+        all_alphas = []
+        all_line_styles = []
+        legend_labels = []
+        plotted_group_keys = []
+        group_labels = {}
+        group_prior_entropy = {}
         
-        if colors is not None:
-            if len(colors) < len(sorted_group_keys):
-                print(f"Warning: Only {len(colors)} colors provided for {len(sorted_group_keys)} groups. Repeating colors.")
-            group_colors = {group_key: colors[i % len(colors)] for i, group_key in enumerate(sorted_group_keys)}
+        if var is not None:
+            if colors is not None:
+                if len(colors) < len(sorted_group_keys):
+                    print(f"Warning: Only {len(colors)} colors provided for {len(sorted_group_keys)} groups. Repeating colors.")
+                group_colors = {group_key: colors[i % len(colors)] for i, group_key in enumerate(sorted_group_keys)}
+            else:
+                prop_cycle_colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
+                group_colors = {
+                    group_key: prop_cycle_colors[i % len(prop_cycle_colors)]
+                    for i, group_key in enumerate(sorted_group_keys)
+                }
         else:
-            prop_cycle_colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
-            group_colors = {group_key: prop_cycle_colors[i % len(prop_cycle_colors)] for i, group_key in enumerate(sorted_group_keys)}
+            group_colors = {
+                group_key: run_color_map[group_key]
+                for group_key in grouped_runs
+            }
         
         for group_key in sorted_group_keys:
             group_runs = grouped_runs[group_key]
             group_color = group_colors[group_key]
+            group_label = self._comparison_group_label(
+                group_key, group_runs, vars_list, var, run_id_to_label
+            )
+            group_labels[group_key] = group_label
+            group_prior_entropy[group_key] = self._nominal_prior_entropy_for_run(
+                group_runs[0], eval_step=eval_step
+            )
+            group_has_samples = False
             
-            group_samples = []
-            
-            for run_data_item in group_runs:
+            for run_idx, run_data_item in enumerate(group_runs):
                 exp_id = run_data_item.get('exp_id')
                 if exp_id is None:
                     print(f"Warning: No experiment id for run {run_data_item['run_id']}, skipping.")
                     continue
-                for rank in global_ranks:
+                for rank_idx, rank in enumerate(global_ranks):
                     try:
                         nf_entries, _ = self._nf_display_samples(
                             display,
@@ -2849,56 +3332,31 @@ class ComparisonPlotter(BasePlotter):
                             device=device,
                             global_rank=rank,
                             eval_step=eval_step,
+                            plot_prior=plot_prior,
                         )
-                        run_samples = [entry['samples'] for entry in nf_entries]
                     except Exception as e:
                         print(
                             f"Warning: Could not get guide samples for run "
                             f"{run_data_item['run_id']} (rank {rank}): {e}"
                         )
                         continue
-                    group_samples.extend(run_samples)
+                    for entry in nf_entries:
+                        all_samples.append(entry['samples'])
+                        all_colors.append(group_color)
+                        all_alphas.append(entry.get('alpha', 1.0))
+                        all_line_styles.append(entry.get('line_style', '-'))
+                        if run_idx == 0 and rank_idx == 0:
+                            label = entry.get('label', group_label)
+                            if len(sorted_group_keys) > 1:
+                                label = f"{group_label}: {label}"
+                            legend_labels.append(label)
+                    group_has_samples = group_has_samples or bool(nf_entries)
             
-            if not group_samples:
+            if not group_has_samples:
                 print(f"Warning: No valid samples for group {group_key}. Skipping.")
                 continue
             
-            all_samples.extend(group_samples)
-            all_colors.extend([group_color] * len(group_samples))
-            
-            # Determine group label: combine run_labels and var if both are available
-            label_parts = []
-            
-            # Get run_label if available
-            if run_id_to_label:
-                # Get labels for all runs in this group
-                group_run_labels = [run_id_to_label.get(run_data_item['run_id'], None) 
-                                   for run_data_item in group_runs]
-                # Filter out None values
-                group_run_labels = [label for label in group_run_labels if label is not None]
-                
-                if group_run_labels:
-                    # If all runs in group have the same label, use it; otherwise use first label
-                    if len(set(group_run_labels)) == 1:
-                        label_parts.append(group_run_labels[0])
-                    else:
-                        # Multiple different labels in group - use first one
-                        label_parts.append(group_run_labels[0])
-            
-            # Add var information if specified
-            if var:
-                var_label = ', '.join([f'{vars_list[j]}={val}' for j, val in enumerate(group_key)])
-                label_parts.append(var_label)
-            
-            # Combine label parts, or fall back to run_id if nothing available
-            if label_parts:
-                group_label = ', '.join(label_parts)
-            else:
-                group_label = group_key[:8] if isinstance(group_key, str) else str(group_key)[:8]
-            
-            legend_handles.append(
-                Line2D([0], [0], color=group_color, label=group_label)
-            )
+            plotted_group_keys.append(group_key)
         
         if not all_samples:
             print("No samples generated for any group. Cannot plot.")
@@ -2925,25 +3383,147 @@ class ComparisonPlotter(BasePlotter):
                 )
                 all_samples.append(nominal_samples_gd)
                 all_colors.append('black')
-                legend_handles.append(
-                    Line2D([0], [0], color='black', label=nominal_label)
-                )
+                all_alphas.append(1.0)
+                all_line_styles.append('--')
+                legend_labels.append(nominal_label)
             except (NotImplementedError, FileNotFoundError, OSError) as e:
                 print(f"Warning: Could not load MCMC reference samples: {e}")
+
+        group_experiments = {}
+        for group_key in plotted_group_keys:
+            run_data_item = grouped_runs[group_key][0]
+            try:
+                group_experiments[group_key] = init_experiment(
+                    run_data_item['run_obj'],
+                    run_data_item['params'].copy(),
+                    device=device,
+                    global_rank=0,
+                    verbose=False,
+                )
+            except Exception as e:
+                print(
+                    f"Warning: Could not initialize experiment for group {group_key}: {e}"
+                )
+
+        prior_entries = []
+        if plot_prior and group_experiments:
+            auto_seed(seed)
+            for group_key, experiment in group_experiments.items():
+                if not hasattr(experiment, 'get_prior_samples'):
+                    continue
+                try:
+                    prior_samples_gd = experiment.get_prior_samples(num_samples=guide_samples)
+                except Exception as e:
+                    print(
+                        f"Warning: Could not get prior samples for group {group_key}: {e}"
+                    )
+                    continue
+                prior_args = getattr(experiment, 'prior_args', None) or {}
+                prior_entries.append(
+                    (prior_samples_gd, group_colors[group_key], prior_args, group_key)
+                )
+
+            if prior_entries:
+                reference_prior_args = prior_entries[0][2]
+                all_priors_identical = all(
+                    self._prior_args_equal(reference_prior_args, prior_args)
+                    for _, _, prior_args, _ in prior_entries[1:]
+                )
+                if all_priors_identical:
+                    all_samples.append(prior_entries[0][0])
+                    all_colors.append('black')
+                    all_alphas.append(PRIOR_CONTOUR_ALPHA)
+                    all_line_styles.append('-')
+                    prior_h = group_prior_entropy.get(prior_entries[0][3])
+                    legend_labels.append(
+                        f"Prior{self._prior_entropy_legend_suffix(prior_h)}"
+                    )
+                else:
+                    for prior_samples_gd, color, _, group_key in prior_entries:
+                        all_samples.append(prior_samples_gd)
+                        all_colors.append(color)
+                        all_alphas.append(PRIOR_CONTOUR_ALPHA)
+                        all_line_styles.append('-')
+                        prior_h = group_prior_entropy.get(group_key)
+                        legend_labels.append(
+                            f"Prior ({group_labels[group_key]})"
+                            f"{self._prior_entropy_legend_suffix(prior_h)}"
+                        )
         
-        g = self.plot_posterior(all_samples, all_colors, show_scatter=show_scatter, levels=levels, width_inch=width_inch)
+        g = self.plot_posterior(
+            all_samples,
+            all_colors,
+            legend_labels=legend_labels,
+            show_scatter=show_scatter,
+            levels=levels,
+            width_inch=width_inch,
+            alpha=all_alphas,
+            line_style=all_line_styles,
+        )
+
+        plotted_params = all_samples[0].paramNames.list()
+        marker_entries = []
+        for group_key, experiment in group_experiments.items():
+            central_params = getattr(experiment, "central_params", None)
+            if isinstance(central_params, Mapping) and central_params:
+                marker_entries.append((experiment, group_colors[group_key]))
+
+        if marker_entries:
+            reference_central_params = dict(marker_entries[0][0].central_params)
+            all_identical = all(
+                self._central_params_equal(reference_central_params, dict(experiment.central_params))
+                for experiment, _ in marker_entries[1:]
+            )
+            if all_identical:
+                self._mark_central_parameter_values(
+                    g,
+                    marker_entries[0][0],
+                    transform_output=transform_output,
+                    plotted_params=plotted_params,
+                    color='black',
+                )
+            else:
+                for experiment, color in marker_entries:
+                    self._mark_central_parameter_values(
+                        g,
+                        experiment,
+                        transform_output=transform_output,
+                        plotted_params=plotted_params,
+                        color=color,
+                    )
 
         if g.fig.legends:
             for legend in g.fig.legends:
                 legend.remove()
         
-        title = f'Posterior Comparison ({", ".join(display)}), Step: {step}'
+        title = (
+            f'Posterior Comparison ({", ".join(display)}), Step: {step}, '
+            f'Levels: {self._format_contour_levels_list(levels)}'
+        )
         filter_str = filter_string if filter_string is not None else self.filter_string
         if filter_str:
             title += f' (filter: {filter_str})'
         
         g.fig.set_constrained_layout(True)
-        leg = g.fig.legend(handles=legend_handles, loc='upper right', bbox_to_anchor=(0.99, 0.96))
+        legend_handles = [
+            Line2D(
+                [0],
+                [0],
+                color=color,
+                label=label,
+                linewidth=1.2,
+                linestyle=line_style,
+                alpha=alpha,
+            )
+            for label, color, line_style, alpha in zip(
+                legend_labels, all_colors, all_line_styles, all_alphas
+            )
+        ]
+        leg = g.fig.legend(
+            handles=legend_handles,
+            loc='upper right',
+            bbox_to_anchor=(0.99, 0.96),
+        )
         leg.set_in_layout(False)
         g.fig.suptitle(title)
         
@@ -2998,7 +3578,11 @@ class ComparisonPlotter(BasePlotter):
                                         If provided and self.run_labels is None, labels will be generated from these parameters. Otherwise run ID (first 8 chars).
             eval_step (str or int, optional): Step identifier (if omitted the most recent step is used).
             figsize (tuple): Matplotlib figure size.
-            colors (list, optional): Explicit colors for each run. Must be the same length as `run_ids`.
+            colors (list, optional): Explicit colors for each run. Must match ``run_ids`` passed
+                to ``ComparisonPlotter`` (not the number of runs that successfully loaded).
+                When omitted, uses ``self.colors`` from ``__init__`` if set, otherwise the
+                default matplotlib cycle. Colors are locked to each run_id regardless of
+                ``sort_reference`` or internal reordering.
             x_lim (tuple, optional): X-axis limits.
             y_lim (tuple, optional): Y-axis limits.
             show_optimal (bool): If True, highlight each run's optimal EIG point when available.
@@ -3054,7 +3638,9 @@ class ComparisonPlotter(BasePlotter):
             artifacts_dir = f"{storage_path}/mlruns/{exp_id}/{run_id}/artifacts"
             
             try:
-                json_path, data = self.load_eig_data_file(artifacts_dir, eval_step=eval_step)
+                json_path, data = self.load_eig_data_file(
+                    artifacts_dir, eval_step=eval_step, eig_kind='variable'
+                )
                 if data is None:
                     print(f"Warning: No completed eig_data file found for run {run_id}, skipping...")
                     continue
@@ -3102,18 +3688,13 @@ class ComparisonPlotter(BasePlotter):
                     selected_step = int(step_keys[0].split('_')[1])
             step_numbers.append(selected_step)
 
-        if colors is not None:
-            if len(colors) != len(found_run_ids):
-                raise ValueError("When provided, colors must match the number of run_ids.")
-            color_list = [convert_color(c) for c in colors]
-        else:
-            prop_cycle = plt.rcParams['axes.prop_cycle'].by_key()['color']
-            color_list = [convert_color(c) for c in prop_cycle]
+        run_color_map = self._resolve_run_color_map(run_data_list, found_run_ids, colors=colors)
 
         design_shape = None
         run_records = []
 
-        for data, run_id, run_label, color, step_num in zip(all_data, found_run_ids, run_labels, color_list, step_numbers):
+        for data, run_id, run_label, step_num in zip(all_data, found_run_ids, run_labels, step_numbers):
+            color = run_color_map[run_id]
             step_key_name = f"step_{int(step_num)}"
             if step_key_name not in data:
                 print(f"Warning: Step {step_num} not found for run {run_id}, skipping...")
@@ -3244,7 +3825,6 @@ class ComparisonPlotter(BasePlotter):
         # Resolve design_labels / nominal_design via experiment when needed
         # (same pattern as compare_optimal_designs / eig_designs). Prefer the
         # sort_reference run when available.
-        need_labels = design_labels is None
         need_nominal = show_ratio_to_nominal and not is_1d_design
         nominal_design = None
         ref_run_id = run_for_nominal['run_id']
@@ -3271,21 +3851,18 @@ class ComparisonPlotter(BasePlotter):
                         )
                 break
 
-        # Lightweight label fallback from design_args.yaml (source of experiment.design_labels).
-        if need_labels and ref_artifacts is not None:
-            design_args_path = os.path.join(ref_artifacts, "design_args.yaml")
-            if os.path.exists(design_args_path):
-                try:
-                    with open(design_args_path, "r") as f:
-                        design_args = yaml.safe_load(f) or {}
-                    labels = design_args.get("labels")
-                    if labels is not None and len(labels) == num_dims:
-                        design_labels = list(labels)
-                        need_labels = False
-                except Exception as e:
-                    print(f"Warning: Could not load design_labels from {design_args_path}: {e}")
+        design_labels = self._resolve_design_labels(
+            num_dims,
+            design_labels=design_labels,
+            metadata_label_sources=[
+                (data.get("metadata") or {}).get("design_labels") for data in all_data
+            ],
+            artifacts_dirs=[ref_artifacts],
+            run_ids=[ref_run_id],
+            run_data_list=run_data_list,
+        )
 
-        if need_labels or (need_nominal and nominal_design is None):
+        if need_nominal and nominal_design is None:
             try:
                 device = "cuda:0"
                 run_data_item = next(
@@ -3294,7 +3871,6 @@ class ComparisonPlotter(BasePlotter):
                 )
                 if run_data_item and run_data_item.get('run_obj') is not None:
                     run_params = run_data_item['params'].copy()
-                    # init_experiment loads prior_args / design_args from artifacts
                     experiment = init_experiment(
                         run_data_item['run_obj'],
                         run_params,
@@ -3303,16 +3879,7 @@ class ComparisonPlotter(BasePlotter):
                         global_rank=0,
                         verbose=False,
                     )
-                    if need_labels and hasattr(experiment, 'design_labels'):
-                        exp_labels = list(experiment.design_labels)
-                        if len(exp_labels) == num_dims:
-                            design_labels = exp_labels
-                        else:
-                            print(
-                                f"Warning: experiment.design_labels length ({len(exp_labels)}) "
-                                f"doesn't match design dimensions ({num_dims})."
-                            )
-                    if need_nominal and nominal_design is None and hasattr(experiment, 'nominal_design'):
+                    if hasattr(experiment, 'nominal_design'):
                         candidate = experiment.nominal_design.cpu().numpy()
                         if candidate.ndim == 1 and candidate.shape[0] == num_dims:
                             nominal_design = candidate
@@ -3322,18 +3889,8 @@ class ComparisonPlotter(BasePlotter):
                                 f"design dimensions {num_dims}, disabling ratio display."
                             )
             except Exception as e:
-                what = []
-                if need_labels and design_labels is None:
-                    what.append('design_labels')
-                if need_nominal and nominal_design is None:
-                    what.append('nominal_design')
-                if what:
-                    print(f"Warning: Could not initialize experiment to get {'/'.join(what)}: {e}")
-                if need_nominal and nominal_design is None:
-                    print("Will display designs as absolute values instead of ratios.")
-
-        if design_labels is None:
-            design_labels = [f'$d_{i}$' for i in range(num_dims)]
+                print(f"Warning: Could not initialize experiment to get nominal_design: {e}")
+                print("Will display designs as absolute values instead of ratios.")
 
         # Determine if we should show heatmap (only if not per-run sorting)
         show_heatmap = not per_run_sort and (not is_1d_design or sort)
@@ -3609,6 +4166,410 @@ class ComparisonPlotter(BasePlotter):
         self.save_figure(fig, filename=filename, save_dir=save_dir, dpi=dpi)
    
         return fig, (ax_line, ax_heat)
+
+    def _default_eig_axis_run_ids(self):
+        """Return ``(run_id_x, run_id_y)`` defaults when exactly two run_ids are set."""
+        if self.run_ids is not None and len(self.run_ids) == 2:
+            return self.run_ids[0], self.run_ids[1]
+        return None, None
+
+    def _resolve_eig_axis(self, spec, default_run_id=None, axis_name="x"):
+        """Load designs/EIGs for one correlation axis from a run or pinned JSON path.
+
+        Args:
+            spec (dict): Axis specification with ``eig_kind``, optional ``subset``,
+                ``run_id``, ``eig_data_path``, ``eval_step``, and ``label``.
+            default_run_id (str, optional): Fallback run when ``run_id`` omitted.
+            axis_name (str): Label used in error messages (``'x'`` or ``'y'``).
+
+        Returns:
+            dict: ``designs``, ``eigs``, ``eigs_std``, ``label``, ``run_id``,
+            ``design_labels``, ``step_str``, ``eig_data_path``.
+        """
+        if not isinstance(spec, dict):
+            raise ValueError(f"{axis_name} must be a dict of axis options, got {type(spec)!r}")
+
+        eig_kind = spec.get("eig_kind")
+        if eig_kind not in ("variable", "marginal"):
+            raise ValueError(
+                f"{axis_name}: eig_kind must be 'variable' or 'marginal', got {eig_kind!r}"
+            )
+        subset = spec.get("subset")
+        eval_step = spec.get("eval_step")
+        eig_data_path = spec.get("eig_data_path")
+        run_id = spec.get("run_id", default_run_id)
+        label_override = spec.get("label")
+        loaded_path = None
+
+        if eig_data_path is not None:
+            path = os.path.expandvars(os.path.expanduser(str(eig_data_path)))
+            if not os.path.isfile(path):
+                raise ValueError(f"{axis_name}: eig_data_path not found: {path}")
+            with open(path, "r") as f:
+                eig_data = json.load(f)
+            if eig_data.get("status") != "complete":
+                raise ValueError(
+                    f"{axis_name}: eig_data at {path} is not complete "
+                    f"(status={eig_data.get('status')!r})"
+                )
+            if eig_kind == "variable" and not _eig_data_has_variable_eigs(eig_data, eval_step):
+                raise ValueError(f"{axis_name}: no variable EIG data in {path}")
+            if eig_kind == "marginal" and not _eig_data_has_marginal_eigs(eig_data, eval_step):
+                raise ValueError(f"{axis_name}: no marginal EIG data in {path}")
+            loaded_path = path
+        else:
+            if run_id is None:
+                raise ValueError(
+                    f"{axis_name}: run_id is required when eig_data_path is not set "
+                    "(provide run_id on the axis, or construct ComparisonPlotter with "
+                    "exactly two run_ids)"
+                )
+            run_data_list, _, _ = self._get_run_data_list(parse_params=False)
+            if not run_data_list:
+                raise ValueError(f"No runs found in experiment {self.cosmo_exp}")
+            rid_to_exp = self._get_run_id_to_exp_id(run_data_list)
+            exp_id = rid_to_exp.get(run_id)
+            if exp_id is None:
+                raise ValueError(
+                    f"{axis_name}: run {run_id} not found in experiment {self.cosmo_exp}"
+                )
+            artifacts_dir = f"{self.storage_path}/mlruns/{exp_id}/{run_id}/artifacts"
+            loaded_path, eig_data = self.load_eig_data_file(
+                artifacts_dir, eval_step=eval_step, eig_kind=eig_kind
+            )
+
+        _, step_str = self._resolve_step(eig_data, eval_step)
+        if step_str is None:
+            raise ValueError(f"{axis_name}: could not resolve eval step in eig_data")
+
+        designs, eigs, eigs_std, auto_label = _extract_eig_values(
+            eig_data, step_str, eig_kind, subset=subset
+        )
+        meta_labels = (eig_data.get("metadata") or {}).get("design_labels")
+        if label_override is not None:
+            label = label_override
+        elif run_id is not None:
+            label = f"{auto_label} [{run_id[:8]}]"
+        else:
+            label = auto_label
+
+        artifacts_dir = None
+        if loaded_path is not None:
+            artifacts_dir = os.path.dirname(os.path.abspath(loaded_path))
+
+        return {
+            "designs": designs,
+            "eigs": eigs,
+            "eigs_std": eigs_std,
+            "label": label,
+            "run_id": run_id,
+            "design_labels": list(meta_labels) if meta_labels is not None else None,
+            "step_str": step_str,
+            "eig_data_path": loaded_path,
+            "eig_kind": eig_kind,
+            "artifacts_dir": artifacts_dir,
+        }
+
+    @staticmethod
+    def _default_eig_axis_spec():
+        """Default axis dict: joint/variable EIG (no subset)."""
+        return {"eig_kind": "variable"}
+
+    def _resolve_design_labels(
+        self,
+        n_dim,
+        design_labels=None,
+        *,
+        metadata_label_sources=None,
+        artifacts_dirs=None,
+        run_ids=None,
+        run_data_list=None,
+    ):
+        """Resolve design-dimension names for comparison plots.
+
+        Lookup order:
+          1. explicit ``design_labels``
+          2. eig_data metadata sources (first length match)
+          3. ``design_args.yaml`` ``labels`` under each artifacts dir
+          4. ``experiment.design_labels`` via ``init_experiment`` for each run_id
+          5. ``$d_i$`` fallback
+        """
+        n_dim = int(n_dim)
+        if design_labels is not None:
+            if isinstance(design_labels, str):
+                design_labels = [design_labels]
+            if len(design_labels) != n_dim:
+                raise ValueError(
+                    f"design_labels length {len(design_labels)} != n_dim={n_dim}"
+                )
+            return list(design_labels)
+
+        if metadata_label_sources:
+            for meta_labels in metadata_label_sources:
+                if meta_labels is not None and len(meta_labels) == n_dim:
+                    return list(meta_labels)
+
+        if artifacts_dirs:
+            for artifacts_dir in artifacts_dirs:
+                if not artifacts_dir:
+                    continue
+                design_args_path = os.path.join(artifacts_dir, "design_args.yaml")
+                if not os.path.exists(design_args_path):
+                    continue
+                try:
+                    with open(design_args_path, "r") as f:
+                        design_args = yaml.safe_load(f) or {}
+                    labels = design_args.get("labels")
+                    if labels is not None and len(labels) == n_dim:
+                        return list(labels)
+                except Exception as e:
+                    print(f"Warning: Could not load design_labels from {design_args_path}: {e}")
+
+        if run_ids:
+            if run_data_list is None:
+                try:
+                    run_data_list, _, _ = self._get_run_data_list(parse_params=True)
+                except Exception:
+                    run_data_list = []
+            for run_id in run_ids:
+                if run_id is None:
+                    continue
+                try:
+                    run_data_item = next(
+                        (r for r in run_data_list if r["run_id"] == run_id),
+                        None,
+                    )
+                    if run_data_item is None or run_data_item.get("run_obj") is None:
+                        continue
+                    experiment = init_experiment(
+                        run_data_item["run_obj"],
+                        run_data_item["params"].copy(),
+                        device="cuda:0",
+                        design_args=None,
+                        global_rank=0,
+                        verbose=False,
+                    )
+                    if hasattr(experiment, "design_labels") and experiment.design_labels is not None:
+                        exp_labels = list(experiment.design_labels)
+                        if len(exp_labels) == n_dim:
+                            return exp_labels
+                        print(
+                            f"Warning: experiment.design_labels length ({len(exp_labels)}) "
+                            f"doesn't match design dimensions ({n_dim})."
+                        )
+                except Exception as e:
+                    print(f"Warning: Could not initialize experiment to get design_labels: {e}")
+
+        return [f"$d_{i}$" for i in range(n_dim)]
+
+    def _load_eig_correlation_axes(self, x, y):
+        """Resolve both axes and require matching ``input_designs``."""
+        if x is None:
+            x = self._default_eig_axis_spec()
+        if y is None:
+            y = self._default_eig_axis_spec()
+        default_x, default_y = self._default_eig_axis_run_ids()
+        axis_x = self._resolve_eig_axis(x, default_run_id=default_x, axis_name="x")
+        axis_y = self._resolve_eig_axis(y, default_run_id=default_y, axis_name="y")
+        if not np.allclose(axis_x["designs"], axis_y["designs"]):
+            raise ValueError("input_designs differ between the two EIG axes")
+        return axis_x, axis_y
+
+    def compare_eig_correlation(
+        self,
+        x=None,
+        y=None,
+        figsize=(12.4, 6.0),
+        title=None,
+        xlabel=None,
+        ylabel=None,
+        show_errorbars=True,
+        filename=None,
+        save_dir=None,
+        dpi=400,
+    ):
+        """Scatter two per-design EIG maps with Pearson (value) and Spearman (rank).
+
+        Each of ``x`` / ``y`` is a dict selecting a source (default:
+        ``{"eig_kind": "variable"}`` — joint EIG, no subset):
+
+        - ``eig_kind``: ``'variable'`` or ``'marginal'``
+        - ``subset``: required for marginal (str or list of param names)
+        - ``run_id``: optional; defaults to ``run_ids[0]`` / ``run_ids[1]`` when the
+          plotter has exactly two runs
+        - ``eig_data_path``: optional pinned ``eig_data_*.json`` (skips latest-file lookup)
+        - ``eval_step`` / ``label``: optional overrides
+
+        Returns:
+            tuple: ``(fig, (ax_value, ax_rank), stats)``
+        """
+        axis_x, axis_y = self._load_eig_correlation_axes(x, y)
+        eigs_x = axis_x["eigs"]
+        eigs_y = axis_y["eigs"]
+        std_x = axis_x["eigs_std"]
+        std_y = axis_y["eigs_std"]
+        stats = _eig_correlation_stats(eigs_x, eigs_y)
+        rank_x = stats["rank_x"]
+        rank_y = stats["rank_y"]
+
+        x_label = xlabel if xlabel is not None else axis_x["label"]
+        y_label = ylabel if ylabel is not None else axis_y["label"]
+
+        fig, (ax_value, ax_rank) = plt.subplots(1, 2, figsize=figsize)
+
+        if show_errorbars and (np.any(std_x > 0) or np.any(std_y > 0)):
+            ax_value.errorbar(
+                eigs_x, eigs_y, xerr=std_x, yerr=std_y,
+                fmt="o", ms=4.5, alpha=0.75, capsize=1.5,
+            )
+        else:
+            ax_value.scatter(eigs_x, eigs_y, s=28, alpha=0.75)
+        lo = float(min(eigs_x.min(), eigs_y.min()))
+        hi = float(max(eigs_x.max(), eigs_y.max()))
+        pad = 0.05 * (hi - lo if hi > lo else 1.0)
+        lim = (lo - pad, hi + pad)
+        ax_value.plot(lim, lim, "k--", lw=1, alpha=0.6)
+        ax_value.set_xlim(lim)
+        ax_value.set_ylim(lim)
+        ax_value.set_aspect("equal", adjustable="box")
+        ax_value.set_xlabel(x_label)
+        ax_value.set_ylabel(y_label)
+        ax_value.set_title(f"value  $\\rho={stats['rho_pearson']:.3f}$")
+
+        n = stats["n_designs"]
+        rlim = (0.5, n + 0.5)
+        ax_rank.scatter(rank_x, rank_y, s=28, alpha=0.75)
+        ax_rank.plot([1, n], [1, n], "k--", lw=1, alpha=0.6)
+        ax_rank.set_xlim(rlim)
+        ax_rank.set_ylim(rlim)
+        ax_rank.invert_xaxis()
+        ax_rank.invert_yaxis()
+        ax_rank.set_aspect("equal", adjustable="box")
+        ax_rank.set_xlabel(f"{x_label} rank (1 = highest)")
+        ax_rank.set_ylabel(f"{y_label} rank (1 = highest)")
+        ax_rank.set_title(f"rank  $\\rho={stats['rho_spearman']:.3f}$")
+
+        if title is None:
+            title = "EIG correlation"
+        fig.suptitle(title, fontsize=14, weight="bold")
+        fig.tight_layout()
+
+        if filename is None:
+            filename = "compare_eig_correlation"
+        _, experiment_id, _ = self._get_run_data_list(parse_params=False)
+        if save_dir is None and experiment_id is not None:
+            save_dir = self.get_save_dir(experiment_id=experiment_id, subdir="plots")
+        self.save_figure(fig, filename=filename, save_dir=save_dir, dpi=dpi)
+
+        public_stats = {
+            "rho_pearson": stats["rho_pearson"],
+            "rho_spearman": stats["rho_spearman"],
+            "mean_offset": stats["mean_offset"],
+            "top10_overlap": stats["top10_overlap"],
+            "n_designs": stats["n_designs"],
+            "label_x": x_label,
+            "label_y": y_label,
+        }
+        return fig, (ax_value, ax_rank), public_stats
+
+    def compare_eig_directional_correlation(
+        self,
+        x=None,
+        y=None,
+        design_labels=None,
+        min_pair_weight=0.0,
+        max_pairs=None,
+        rng=None,
+        figsize=(8.0, 5.0),
+        title=None,
+        filename=None,
+        save_dir=None,
+        dpi=400,
+    ):
+        """Bar chart of per-design-dimension ΔEIG agreement between two EIG maps.
+
+        For design pairs, weights ``|Δd_j| / ||Δd||`` soft-assign the pair to
+        axis ``j``; reports weighted Pearson of ``ΔEIG_x`` vs ``ΔEIG_y`` per dim.
+
+        ``x`` / ``y`` use the same axis dicts as :meth:`compare_eig_correlation`
+        (default ``{"eig_kind": "variable"}``). Design dimension names come from
+        :meth:`_resolve_design_labels`.
+
+        Returns:
+            tuple: ``(fig, ax, stats)`` where ``stats['per_dim']`` is sorted by ρ.
+        """
+        axis_x, axis_y = self._load_eig_correlation_axes(x, y)
+        designs = axis_x["designs"]
+        n_dim = designs.shape[1]
+
+        design_labels = self._resolve_design_labels(
+            n_dim,
+            design_labels=design_labels,
+            metadata_label_sources=[
+                axis_x.get("design_labels"),
+                axis_y.get("design_labels"),
+            ],
+            artifacts_dirs=[
+                axis_x.get("artifacts_dir"),
+                axis_y.get("artifacts_dir"),
+            ],
+            run_ids=[axis_x.get("run_id"), axis_y.get("run_id")],
+        )
+
+        per_dim = _directional_delta_correlations(
+            designs,
+            axis_x["eigs"],
+            axis_y["eigs"],
+            min_pair_weight=min_pair_weight,
+            max_pairs=max_pairs,
+            rng=rng,
+        )
+        for entry, label in zip(per_dim, design_labels):
+            entry["label"] = label
+
+        ordered = sorted(
+            per_dim,
+            key=lambda item: (-item["rho"] if np.isfinite(item["rho"]) else float("inf"), item["dim"]),
+        )
+        best = ordered[0] if ordered else None
+
+        labels_plot = [item["label"] for item in ordered]
+        rhos_plot = [item["rho"] for item in ordered]
+        y_pos = np.arange(len(ordered))
+
+        fig, ax = plt.subplots(figsize=figsize)
+        ax.barh(y_pos, rhos_plot, align="center")
+        ax.set_yticks(y_pos)
+        ax.set_yticklabels(labels_plot)
+        ax.invert_yaxis()
+        ax.axvline(0.0, color="k", lw=0.8, alpha=0.5)
+        ax.set_xlabel(r"weighted Pearson $\rho$ of $\Delta$EIG")
+        ax.set_ylabel("design dimension")
+        if title is None:
+            title = (
+                f"Directional EIG agreement\n"
+                f"{axis_x['label']} vs {axis_y['label']}"
+            )
+        ax.set_title(title)
+        fig.tight_layout()
+
+        if filename is None:
+            filename = "compare_eig_directional_correlation"
+        _, experiment_id, _ = self._get_run_data_list(parse_params=False)
+        if save_dir is None and experiment_id is not None:
+            save_dir = self.get_save_dir(experiment_id=experiment_id, subdir="plots")
+        self.save_figure(fig, filename=filename, save_dir=save_dir, dpi=dpi)
+
+        stats = {
+            "per_dim": ordered,
+            "best_dim": best["label"] if best is not None else None,
+            "best_rho": best["rho"] if best is not None else None,
+            "n_designs": int(designs.shape[0]),
+            "n_dim": int(n_dim),
+            "label_x": axis_x["label"],
+            "label_y": axis_y["label"],
+        }
+        return fig, ax, stats
     
     def compare_optimal_designs(
         self,
@@ -3694,7 +4655,9 @@ class ComparisonPlotter(BasePlotter):
                 
                 # Load completed eig_data file
                 try:
-                    json_path, data = self.load_eig_data_file(artifacts_dir, eval_step=None)
+                    json_path, data = self.load_eig_data_file(
+                        artifacts_dir, eval_step=None, eig_kind='variable'
+                    )
                     if data is None:
                         print(f"Warning: No completed eig_data file found for run {run_id}, skipping...")
                         continue
@@ -3764,18 +4727,8 @@ class ComparisonPlotter(BasePlotter):
             if len(labels) != len(optimal_designs):
                 labels = labels[:len(optimal_designs)]
             
-            # Generate colors if not provided
-            if colors is None:
-                prop_cycle = plt.rcParams['axes.prop_cycle']
-                colors = [prop_cycle.by_key()['color'][i % len(prop_cycle.by_key()['color'])] 
-                         for i in range(len(optimal_designs))]
-            else:
-                if len(colors) < len(optimal_designs):
-                    colors = [colors[i % len(colors)] for i in range(len(optimal_designs))]
-                else:
-                    colors = colors[:len(optimal_designs)]
-            
-            colors = [convert_color(c) for c in colors]
+            run_color_map = self._resolve_run_color_map(run_data_list, found_run_ids, colors=colors)
+            colors = [run_color_map[run_id] for run_id in found_run_ids]
             
             # Initialize experiments for each run to get per-run nominal designs and other metadata
             nominal_total_obs_list = []
@@ -3992,7 +4945,9 @@ class ComparisonPlotter(BasePlotter):
                 artifacts_dir = f"{storage_path}/mlruns/{exp_id}/{run_id}/artifacts"
                 
                 try:
-                    json_path, data = self.load_eig_data_file(artifacts_dir, eval_step=None)
+                    json_path, data = self.load_eig_data_file(
+                        artifacts_dir, eval_step=None, eig_kind='variable'
+                    )
                     if data is None:
                         print(f"Warning: No completed eig_data file found for run {run_id}, skipping...")
                         continue
@@ -4304,7 +5259,13 @@ class ComparisonPlotter(BasePlotter):
                     grouped_runs[group_key_tuple].append(run_data_item)
 
         # Sort groups for consistent ordering - descending for numerical, alphabetical for text
-        sorted_group_keys = sorted(grouped_runs.keys(), key=self._var_group_sort_key)
+        if var:
+            sorted_group_keys = sorted(grouped_runs.keys(), key=self._var_group_sort_key)
+        else:
+            canonical_ids = self._canonical_run_id_order(
+                run_data_list, [run_id for (run_id,) in grouped_runs]
+            )
+            sorted_group_keys = [(run_id,) for run_id in canonical_ids]
         
         # Create a mapping of run_id to its group key for color assignment
         run_to_group = {}
@@ -4396,6 +5357,11 @@ class ComparisonPlotter(BasePlotter):
             print("No runs with valid data to plot.")
             return
 
+        valid_run_ids = [r['run_id'] for r in valid_runs_processed_for_metrics]
+        run_color_map = self._resolve_run_color_map(
+            run_data_list, valid_run_ids, colors=colors
+        )
+
         # --- Plotting Setup ---
         # Calculate number of subplots based on what we want to show
         num_subplots = 1  # Always show loss
@@ -4432,17 +5398,22 @@ class ComparisonPlotter(BasePlotter):
         if show_lr:
             ax_lr = axes[current_ax]
 
-        # Use provided colors or default matplotlib colors
-        if colors is not None:
-            if len(colors) < len(sorted_group_keys):
-                print(f"Warning: Only {len(colors)} colors provided for {len(sorted_group_keys)} groups. Repeating colors.")
-            group_colors = {group_key: colors[i % len(colors)] for i, group_key in enumerate(sorted_group_keys)}
-        else:
-            default_colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
-            group_colors = {group_key: default_colors[i % len(default_colors)] for i, group_key in enumerate(sorted_group_keys)}
+        # Use provided colors or default matplotlib colors (var grouping only).
+        group_colors = {}
+        if var is not None:
+            if colors is not None:
+                if len(colors) < len(sorted_group_keys):
+                    print(f"Warning: Only {len(colors)} colors provided for {len(sorted_group_keys)} groups. Repeating colors.")
+                group_colors = {group_key: colors[i % len(colors)] for i, group_key in enumerate(sorted_group_keys)}
+            else:
+                default_colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
+                group_colors = {
+                    group_key: default_colors[i % len(default_colors)]
+                    for i, group_key in enumerate(sorted_group_keys)
+                }
         
         for run_id, group_key in run_to_group.items():
-            if group_key is not None:
+            if group_key is not None and var is not None:
                 color = group_colors.get(group_key, 'gray')
 
         num_runs = len(valid_runs_processed_for_metrics)
@@ -4485,10 +5456,12 @@ class ComparisonPlotter(BasePlotter):
             group_key_tuple = run_to_group.get(run_id_iter)
             is_valid_for_grouping = group_key_tuple is not None
             
-            if is_valid_for_grouping:
-                color = group_colors.get(group_key_tuple, 'gray')  # Use gray for ungrouped runs
+            if var is None:
+                color = run_color_map.get(run_id_iter, 'gray')
+            elif is_valid_for_grouping:
+                color = group_colors.get(group_key_tuple, 'gray')
             else:
-                color = 'gray'  # Use gray for runs that don't match grouping criteria
+                color = 'gray'
 
             # Resolve run_labels using centralized method
             resolved_labels = self._resolve_run_labels(run_data_list, [run_id_iter], var=var)
@@ -4736,7 +5709,9 @@ class ComparisonPlotter(BasePlotter):
             
             # Load completed eig_data file using class method
             try:
-                json_path, data = self.load_eig_data_file(artifacts_dir, eval_step=None)
+                json_path, data = self.load_eig_data_file(
+                    artifacts_dir, eval_step=None, eig_kind='variable'
+                )
                 if data is None:
                     print(f"Warning: No completed eig_data file found for run {run_id}, skipping...")
                     continue
@@ -5043,7 +6018,9 @@ def compare_increasing_design(
                 if os.path.exists(ref_artifacts_dir):
                     # Load completed reference eig_data file
                     try:
-                        ref_json_path, ref_data = load_eig_data_file(ref_artifacts_dir, eval_step=None)
+                        ref_json_path, ref_data = load_eig_data_file(
+                            ref_artifacts_dir, eval_step=None, eig_kind='variable'
+                        )
                         if ref_data is not None:
                             print(f"Loaded reference EIG data from {ref_json_path}")
                             
@@ -5155,7 +6132,9 @@ def compare_increasing_design(
         
         # Load completed eig_data file
         try:
-            json_path, data = load_eig_data_file(artifacts_dir, eval_step=None)
+            json_path, data = load_eig_data_file(
+                artifacts_dir, eval_step=None, eig_kind='variable'
+            )
             if data is None:
                 print(f"Warning: No completed eig_data file found for run {run_id}, skipping...")
                 continue
@@ -5911,7 +6890,9 @@ def plot_2d_eig(
     artifacts_dir = f"{storage_path}/mlruns/{exp_id}/{run_id}/artifacts"
     
     # Load completed eig_data file
-    json_path, eig_data = load_eig_data_file(artifacts_dir, eval_step=None)
+    json_path, eig_data = load_eig_data_file(
+        artifacts_dir, eval_step=None, eig_kind='variable'
+    )
     if eig_data is None:
         raise ValueError(f"No completed eig_data file found for run {run_id}")
     

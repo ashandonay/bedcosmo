@@ -6,6 +6,7 @@
 set -e  # Exit on error
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$PROJECT_ROOT/scripts/job_logging.sh"
 
 # Ensure SCRATCH is set (used for MLflow storage, logs, etc.)
 if [ -z "${SCRATCH:-}" ]; then
@@ -58,6 +59,9 @@ if [ $# -eq 0 ]; then
     echo "  --no-eval           - Disable auto-eval (on by default, off for --debug)"
     echo "  --eval-<arg> <val>  - Pass args to auto-eval (e.g. --eval-grid --eval-param-pts 2000)"
     echo "  --eval-time <HH:MM> - SLURM time limit for auto-eval job (default: 00:30)"
+    echo "  --prior-<field> <v> - Override a prior_args.yaml field (e.g. --prior-template-source eazy6,"
+    echo "                        --prior-reduced-templates t7,t10, --prior-density-type flow)."
+    echo "                        Reserved: --prior-args-path, --prior-flow-path (top-level train flags)."
     echo "  --marginal          - (eval only) Run ONLY the marginal EIG loop (+ per-subset plots),"
     echo "                        skipping the full joint EIG pipeline. Needs --marginal-eig-subsets"
     echo "                        (or marginal_eig_subsets in eval_args.yaml). Other --marginal-* args apply."
@@ -1391,11 +1395,30 @@ else
     echo "Logging output to: $LOG_FILE"
     echo ""
 
+    {
+        echo "=========================================="
+        echo "Local Job Started"
+        echo "=========================================="
+        echo "Job Type:      $JOB_TYPE"
+        echo "Cosmo Exp:     $COSMO_EXP"
+        echo "Cosmo Model:   $COSMO_MODEL"
+        echo "Torchrun workers: ${GPUS:-1}"
+        echo "Start Time:    $(date '+%Y-%m-%d %H:%M:%S')"
+        echo ""
+        if [ "$JOB_TYPE" = "grid" ]; then
+            print_bed_cli_overrides "none"
+        else
+            print_bed_cli_overrides
+        fi
+        echo "=========================================="
+        echo ""
+    } | tee "$LOG_FILE"
+
     if [ "$JOB_TYPE" = "grid" ]; then
         # grid_calc: single-process python (no torchrun); use --node-type gpu for GPU SLURM nodes
         echo "Executing: python -m $PYTHON_MODULE [${#FINAL_ARGS[@]} arguments]"
         echo ""
-        python -m "$PYTHON_MODULE" "${FINAL_ARGS[@]}" > "$LOG_FILE" 2>&1
+        python -m "$PYTHON_MODULE" "${FINAL_ARGS[@]}" >> "$LOG_FILE" 2>&1
         TRAIN_EXIT_CODE=$?
 
         # Copy the log into the grid_calc output directory
@@ -1409,7 +1432,7 @@ else
     else
         echo "Executing: torchrun --nproc_per_node=$GPUS -m $PYTHON_MODULE [${#FINAL_ARGS[@]} arguments]"
         echo ""
-        torchrun --nproc_per_node=$GPUS -m "$PYTHON_MODULE" "${FINAL_ARGS[@]}" > "$LOG_FILE" 2>&1 &
+        torchrun --nproc_per_node=$GPUS -m "$PYTHON_MODULE" "${FINAL_ARGS[@]}" >> "$LOG_FILE" 2>&1 &
         TRAIN_PID=$!
 
         if [ "$JOB_TYPE" = "eval" ] && [ "$GRID" = true ]; then

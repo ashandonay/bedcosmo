@@ -18,6 +18,8 @@ DEFAULT_TEMPLATE_PARAM_6D = "templates/eazy_v1.0.spectra.param"
 # Native EAZY files span ~91–1e8 Å; LSST needs dense sampling in the optical/NIR only.
 DEFAULT_BANK_WAVE_MIN_AA = 500.0
 DEFAULT_BANK_WAVE_MAX_AA = 50000.0
+DEFAULT_TEMPLATE_NORM_MIN_AA = 4000.0
+DEFAULT_TEMPLATE_NORM_MAX_AA = 8000.0
 
 
 def download(url: str, path: Path, overwrite: bool = False) -> None:
@@ -62,6 +64,8 @@ def normalize_shape(
     norm_min: float,
     norm_max: float,
 ) -> np.ndarray:
+    if norm_min >= norm_max:
+        raise ValueError(f"norm_min must be < norm_max, got {norm_min:g} >= {norm_max:g}")
     wave = np.asarray(wave, dtype=float)
     flux = np.asarray(flux, dtype=float)
     flux = np.clip(flux, 0.0, None)
@@ -78,8 +82,8 @@ def load_eazy_templates(
     template_param: str = DEFAULT_TEMPLATE_PARAM_12D,
     *,
     overwrite: bool = False,
-    norm_min: float = 4000.0,
-    norm_max: float = 8000.0,
+    norm_min: float = DEFAULT_TEMPLATE_NORM_MIN_AA,
+    norm_max: float = DEFAULT_TEMPLATE_NORM_MAX_AA,
     template_dir: Path | str = DEFAULT_TEMPLATE_DIR,
 ) -> tuple[list[np.ndarray], list[np.ndarray], list[str]]:
     """Download/load per-template wavelength and normalized flux arrays.
@@ -153,6 +157,8 @@ def load_eazy_template_bank(
     wave_max: float | None = None,
     log_spacing: bool = True,
     overwrite: bool = False,
+    norm_min: float = DEFAULT_TEMPLATE_NORM_MIN_AA,
+    norm_max: float = DEFAULT_TEMPLATE_NORM_MAX_AA,
 ) -> tuple[np.ndarray, np.ndarray, list[str]]:
     """
     Returns
@@ -162,7 +168,11 @@ def load_eazy_template_bank(
     rel_paths : template filenames
     """
     waves, fluxes, rel_paths = load_eazy_templates(
-        template_param, template_dir=template_dir, overwrite=overwrite
+        template_param,
+        template_dir=template_dir,
+        overwrite=overwrite,
+        norm_min=norm_min,
+        norm_max=norm_max,
     )
     wave_common = build_common_rest_grid(
         waves,

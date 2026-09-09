@@ -11,12 +11,13 @@ MLflow run now, copies the referenced config into the run's artifacts, tags the 
 the job, which attaches to this run (see bedcosmo.train._init_run) instead of creating a new one.
 
 Snapshotted artifacts:
-  - prior_args.yaml   (from --prior-args-path, or from --prior-flow-path's run when set)
+  - prior_args.yaml   (from --prior-args-path, or from --prior-flow-path's run when set;
+                       ``--prior-<field>`` CLI overrides are applied before freeze)
   - design_args.yaml  (from --design-args-path)
   - ref_cov.npy       (scaling mode only; the reference covariance, from --ref-cov or the dataset default)
   - emulators/<tracer_bin>.pt  (when --likelihood-mode == emulator)
   - empirical/sed_prior_kde_native.joblib  (num_visits empirical; loaded from artifacts/empirical/)
-  - empirical/sed_prior_flow_*.pt   (num_visits empirical, prior_source=flow; beside the KDE)
+  - empirical/sed_prior_flow_*.pt   (num_visits empirical, density_type=flow; beside the KDE)
 
 Only the train flow uses this. resume/restart/eval/grid attach to runs derived from MLflow state.
 
@@ -36,7 +37,13 @@ import mlflow
 import yaml
 from mlflow.tracking import MlflowClient
 
-from bedcosmo.util import extract_run_info_from_checkpoint_path, get_experiment_config_path
+from bedcosmo.util import (
+    apply_prior_cli_overrides,
+    extract_run_info_from_checkpoint_path,
+    get_experiment_config_path,
+    parse_prior_cli_overrides,
+    snapshot_design_args_config,
+)
 
 
 def _parse_args():
@@ -51,7 +58,9 @@ def _parse_args():
     parser.add_argument("--design-args-path", type=str, default=None)
     parser.add_argument("--prior-flow-path", type=str, default=None)
     parser.add_argument("--ref-cov", type=str, default=None)
-    args, _ = parser.parse_known_args()
+    args, unknown = parser.parse_known_args()
+    prior_overrides, _ = parse_prior_cli_overrides(unknown)
+    args.prior_cli_overrides = prior_overrides
     return args
 
 
@@ -78,6 +87,16 @@ def _snapshot_prior_args(args, storage_path, artifacts_dir):
         shutil.copy2(src, dest)
     else:
         print("Warning: no prior_args_path/prior_flow_path; skipping prior_args.yaml snapshot", file=sys.stderr)
+        return
+
+    if not os.path.exists(dest):
+        return
+
+    with open(dest) as f:
+        prior_args = yaml.safe_load(f) or {}
+    prior_args = apply_prior_cli_overrides(prior_args, getattr(args, "prior_cli_overrides", None))
+    with open(dest, "w") as f:
+        yaml.dump(prior_args, f, default_flow_style=False, sort_keys=False)
 
 
 def _snapshot_design_args(args, artifacts_dir):
@@ -87,7 +106,15 @@ def _snapshot_design_args(args, artifacts_dir):
     src = _resolve_config_path(args.cosmo_exp, args.design_args_path)
     if not os.path.exists(src):
         raise FileNotFoundError(f"design_args file not found: {src}")
-    shutil.copy2(src, os.path.join(artifacts_dir, "design_args.yaml"))
+    frozen = snapshot_design_args_config(
+        src,
+        os.path.join(artifacts_dir, "design_args.yaml"),
+    )
+    if frozen.get("input_designs_path") is not None:
+        print(
+            f"Snapshotted explicit designs -> {frozen['input_designs_path']}",
+            file=sys.stderr,
+        )
 
 
 def _snapshot_ref_cov(args, artifacts_dir):
@@ -143,6 +170,7 @@ def _snapshot_sed_prior(args, artifacts_dir):
         return
     from bedcosmo.num_visits.empirical.sed_prior import (
         PRIOR_SOURCE_FLOW,
+        config_density_type,
         normalize_prior_source,
         sed_prior_kde_artifact_path,
         snapshot_sed_prior,
@@ -150,10 +178,12 @@ def _snapshot_sed_prior(args, artifacts_dir):
 
     with open(prior_path) as f:
         prior_args = yaml.safe_load(f) or {}
+    # Overrides already applied in _snapshot_prior_args; re-apply is idempotent.
+    prior_args = apply_prior_cli_overrides(prior_args, getattr(args, "prior_cli_overrides", None))
     prior_args = snapshot_sed_prior(prior_args, artifacts_dir, cosmo_exp=args.cosmo_exp)
     with open(prior_path, "w") as f:
         yaml.dump(prior_args, f, default_flow_style=False, sort_keys=False)
-    with_flow = normalize_prior_source(prior_args.get("prior_source")) == PRIOR_SOURCE_FLOW
+    with_flow = normalize_prior_source(config_density_type(prior_args)) == PRIOR_SOURCE_FLOW
     kind = "KDE + prior flow(s)" if with_flow else "KDE"
     print(
         f"Snapshotted empirical prior ({kind}) -> "

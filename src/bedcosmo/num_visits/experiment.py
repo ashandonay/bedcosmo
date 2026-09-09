@@ -29,6 +29,7 @@ from bedcosmo.custom_dist import EmpiricalPrior
 from bedcosmo.num_visits.empirical.fit_sed_prior_kde import (
     mode_central_params_from_artifact,
 )
+from bedcosmo.num_visits.empirical.provenance import resolve_template_settings
 from bedcosmo.num_visits.empirical.sed_prior import (
     PRIOR_SOURCE_FLOW,
     EmpiricalSedPrior,
@@ -179,6 +180,15 @@ class NumVisits(BaseExperiment, CosmologyMixin):
 
         self.prior_args = prior_args or {}
         self.cosmo_model = cosmo_model
+        if cosmo_model == "empirical":
+            from bedcosmo.num_visits.empirical.sed_prior import canonicalize_density_type
+            from bedcosmo.num_visits.empirical.template_config import (
+                materialize_empirical_prior_args,
+            )
+
+            self.prior_args = canonicalize_density_type(
+                materialize_empirical_prior_args(self.prior_args)
+            )
 
         self.prior, self.latex_labels, self.cosmo_params = self.init_prior(
             cosmo_model=cosmo_model,
@@ -483,7 +493,12 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         prior_pool_seed=7,
         template_dir=None,
         template_param="templates/fsps_full/fsps_QSF_12_v3.param",
-        prior_source="kde",
+        template_norm_min=None,
+        template_norm_max=None,
+        flux_unit_scale=None,
+        density_type=None,
+        source=None,
+        prior_source=None,
         **kwargs,
     ):
         """
@@ -491,7 +506,7 @@ class NumVisits(BaseExperiment, CosmologyMixin):
 
         For ``empirical``, resolves a prior root directory (frozen run artifacts,
         else ``prior_dir``, else the default scratch build) and loads the KDE /
-        PriorFlows from there according to ``prior_source``.
+        PriorFlows from there according to ``density_type`` (``flow`` / ``kde``).
         Otherwise uses analytic Pyro distributions and optional ``prior_flow_path``.
         """
         if cosmo_model is None:
@@ -511,12 +526,19 @@ class NumVisits(BaseExperiment, CosmologyMixin):
 
         if cosmo_model == "empirical":
             # Parameter names / latex come from the KDE artifact (+ optional
-            # latex_labels in prior_args), so alternate template banks only need
-            # a different prior_args file — not a new models.yaml entry.
+            # latex_labels in prior_args). Prefer template_source /
+            # reduced_templates in prior_args (materialized upstream); legacy
+            # configs may still set prior_dir / template_param directly.
             prior_root = resolve_runtime_prior_root(
                 artifacts_dir=artifacts_dir,
                 prior_dir=prior_dir,
             )
+            if not template_param:
+                template_param = "templates/fsps_full/fsps_QSF_12_v3.param"
+            # ``density_type`` is current; ``source`` / ``prior_source`` are legacy.
+            resolved_density = density_type
+            if resolved_density is None:
+                resolved_density = source if source is not None else prior_source
             return self._init_prior_empirical(
                 parameters,
                 prior_root=prior_root,
@@ -524,7 +546,10 @@ class NumVisits(BaseExperiment, CosmologyMixin):
                 prior_pool_seed=int(prior_pool_seed),
                 template_dir=template_dir,
                 template_param=template_param,
-                prior_source=str(prior_source),
+                template_norm_min=template_norm_min,
+                template_norm_max=template_norm_max,
+                flux_unit_scale=flux_unit_scale,
+                density_type=str(resolved_density) if resolved_density is not None else "kde",
                 latex_labels=kwargs.get("latex_labels"),
             )
 
@@ -626,10 +651,25 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         prior_pool_seed: int,
         template_dir: str | None,
         template_param: str,
-        prior_source: str = "kde",
+        template_norm_min: float | None,
+        template_norm_max: float | None,
+        flux_unit_scale: float | None,
+        density_type: str = "kde",
         latex_labels: list[str] | None = None,
     ) -> tuple[dict, list[str], list[str]]:
         from bedcosmo.num_visits.empirical.paths import SED_PRIOR_KDE_NATIVE_FILENAME
+
+        if flux_unit_scale is None:
+            raise ValueError(
+                "Empirical prior_args must explicitly set flux_unit_scale "
+                "from the fitted spectrum flux unit"
+            )
+        self.flux_unit_scale = float(flux_unit_scale)
+        if not np.isfinite(self.flux_unit_scale) or self.flux_unit_scale <= 0:
+            raise ValueError(
+                "flux_unit_scale must be a positive finite cgs conversion factor, "
+                f"got {flux_unit_scale!r}"
+            )
 
         if not template_dir:
             from bedcosmo.num_visits.empirical.paths import get_template_dir
@@ -640,7 +680,7 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         kde_path = prior_root / SED_PRIOR_KDE_NATIVE_FILENAME
         if self.global_rank == 0 and self.verbose:
             print(f"Loading empirical prior from {prior_root}")
-            print(f"  prior_source={prior_source}; pool n={prior_pool_size}")
+            print(f"  density_type={density_type}; pool n={prior_pool_size}")
         self.sed_prior = EmpiricalSedPrior.from_kde_path(
             kde_path,
             pool_size=int(prior_pool_size),
@@ -651,6 +691,15 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         self._prior_parameterization = self.sed_prior.parameterization
         self._n_eazy_templates = self.sed_prior.n_templates
         model_parameters = list(self.sed_prior.feature_names)
+
+        template_param, norm_min, norm_max = resolve_template_settings(
+            self.sed_prior.artifact,
+            configured_template_param=template_param,
+            configured_norm_min=template_norm_min,
+            configured_norm_max=template_norm_max,
+        )
+        self.template_norm_min = norm_min
+        self.template_norm_max = norm_max
 
         # Optional latex overrides in prior_args; otherwise f_i / log s / z.
         if latex_labels is not None:
@@ -678,7 +727,7 @@ class NumVisits(BaseExperiment, CosmologyMixin):
                 f"Expected keys matching artifact feature_names {model_parameters}."
             )
 
-        if normalize_prior_source(prior_source) == PRIOR_SOURCE_FLOW:
+        if normalize_prior_source(density_type) == PRIOR_SOURCE_FLOW:
             loaded = self.sed_prior.enable_flow_prior(
                 prior_pool_size,
                 seed=prior_pool_seed,
@@ -695,6 +744,8 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         wave_rest, template_stack, _ = load_eazy_template_bank(
             template_param,
             template_dir=template_dir,
+            norm_min=norm_min,
+            norm_max=norm_max,
         )
         self._template_wave_rest = torch.tensor(wave_rest, device=self.device, dtype=torch.float64)
         self._template_flux = torch.tensor(template_stack, device=self.device, dtype=torch.float64)
@@ -722,7 +773,9 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         if self.global_rank == 0 and self.verbose:
             print(
                 f"  EAZY templates: {self._n_eazy_templates} on "
-                f"{self._template_wave_rest.shape[0]} rest-frame grid points"
+                f"{self._template_wave_rest.shape[0]} rest-frame grid points; "
+                f"normalization=[{norm_min:g}, {norm_max:g}] Angstrom; "
+                f"flux unit scale={self.flux_unit_scale:g} cgs"
             )
 
         return prior, latex_labels, model_parameters
@@ -778,8 +831,12 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         if input_type == "nominal":
             design_pts = self.nominal_design.unsqueeze(0)  # Add batch dimension
         elif input_type == "variable":
-            # If input_designs_path is provided, load from path (assumed to be absolute)
+            # Config loading normally resolves this path relative to its YAML and
+            # snapshots the array. Expand variables here as well for direct callers.
             if input_designs_path is not None:
+                input_designs_path = os.path.expandvars(
+                    os.path.expanduser(os.fspath(input_designs_path))
+                )
                 if not os.path.isabs(input_designs_path):
                     raise ValueError(
                         f"input_designs_path must be an absolute path, got: {input_designs_path}"
@@ -942,8 +999,9 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         min_flux = torch.finfo(photon_flux.dtype).tiny * 1e10
         A_cm2 = (319 / 9.6) * 1e4
         photon_flux_pixel = torch.clamp(photon_flux * A_cm2, min=min_flux)
-        flux_ratio = torch.clamp(photon_flux_pixel / s0_vals, min=min_flux)
-        mags_flat = 24.0 - 2.5 * torch.log10(flux_ratio)
+        # SMTN-002 defines s0 as the AB magnitude producing 1 count/s:
+        # https://smtn-002.lsst.io/#photometric-zeropoints
+        mags_flat = s0_vals - 2.5 * torch.log10(photon_flux_pixel)
         return mags_flat.reshape(*batch_shape, self.num_filters)
 
     def _scalar_temperature_k(self) -> torch.Tensor:
@@ -1048,7 +1106,10 @@ class NumVisits(BaseExperiment, CosmologyMixin):
 
             # Per-particle weighted sum over templates: replaces the loop's accumulation.
             flux_obs = torch.einsum("bk,kbw->bw", c, T_all)
-            flux_obs = flux_obs / one_plus_z
+            # Convert the fitted spectrum's tabulated flux unit to physical cgs.
+            # For the current DESI builds this is the coadd FLUX BUNIT of 1e-17
+            # erg / (s cm^2 Angstrom). This applies only to the empirical branch.
+            flux_obs = flux_obs * self.flux_unit_scale / one_plus_z
             return flux_obs.reshape(*z.shape, n_wlen)
 
         z_tensor = z
