@@ -147,7 +147,61 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-chi2-dof", type=float, default=1.2)
     parser.add_argument("--max-delta-chi2-dof", type=float, default=0.05)
     parser.add_argument("--max-color-rms", type=float, default=0.02)
+    parser.add_argument(
+        "--spectra-only",
+        action="store_true",
+        help="Write only the reduced-fit spectrum panel (no feature grid).",
+    )
     return parser.parse_args()
+
+
+def family_color(family: str, fallback_index: int) -> str:
+    digits = "".join(character for character in family if character.isdigit())
+    if digits:
+        return COLORS[(int(digits) - 1) % len(COLORS)]
+    return COLORS[fallback_index % len(COLORS)]
+
+
+def plot_family_spectra(
+    ax: plt.Axes,
+    groups: list[FamilyBasis],
+    wave: np.ndarray,
+    spectra_by_group: dict[str, np.ndarray],
+    counts: dict[str, int],
+    *,
+    legend_fontsize: float = 11,
+) -> None:
+    display = (wave >= 3400.0) & (wave <= 7000.0)
+    for index, group in enumerate(groups):
+        key = f"{group.family}:{group.templates}"
+        color = family_color(group.family, index)
+        spectra = spectra_by_group[key]
+        low, median, high = np.percentile(spectra[:, display], [10, 50, 90], axis=0)
+        label = f"{group.family} {group.templates} (n={counts[key]:,})"
+        ax.fill_between(wave[display], low, high, color=color, alpha=0.12)
+        ax.plot(wave[display], median, color=color, lw=1.7, alpha=0.65, label=label)
+
+    for feature, _, _ in EMISSION_WINDOWS.values():
+        center = 0.5 * sum(feature)
+        if 3400 <= center <= 7000:
+            ax.axvline(center, color="#7A7F87", ls=":", lw=0.8)
+    ax.set_yscale("log")
+    ax.set_xlim(3400, 7000)
+    ax.set_xlabel(r"Rest wavelength $\lambda$ [$\AA$]", fontsize=legend_fontsize)
+    ax.set_ylabel(
+        r"Pipeline-normalized $f_\lambda$ [$\AA^{-1}$]", fontsize=legend_fontsize
+    )
+    ax.set_title("Reduced-fit spectral shapes", loc="left", fontsize=legend_fontsize + 2)
+    ax.tick_params(axis="both", labelsize=legend_fontsize - 2)
+    ax.legend(
+        frameon=False,
+        fontsize=legend_fontsize,
+        loc="upper center",
+        bbox_to_anchor=(0.5, -0.14),
+        ncol=min(4, len(groups)),
+    )
+    ax.grid(True, color=GRID, alpha=0.65, linewidth=0.7)
+    ax.set_axisbelow(True)
 
 
 def load_reduced_weights(
@@ -318,7 +372,23 @@ def make_figure(
     diagnostics_by_group: dict[str, dict[str, np.ndarray]],
     counts: dict[str, int],
     output: Path,
+    *,
+    spectra_only: bool = False,
 ) -> None:
+    if spectra_only:
+        fig, ax_spectra = plt.subplots(figsize=(11, 7), constrained_layout=True)
+        plot_family_spectra(
+            ax_spectra, groups, wave, spectra_by_group, counts, legend_fontsize=11
+        )
+        fig.suptitle(
+            "Reduced EAZY12 family spectral shapes",
+            fontsize=14,
+        )
+        output.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(output, dpi=180, bbox_inches="tight")
+        plt.close(fig)
+        return
+
     diagnostic_labels = list(next(iter(diagnostics_by_group.values())).keys())
     diagnostic_columns = 2
     diagnostic_rows = int(np.ceil(len(diagnostic_labels) / diagnostic_columns))
@@ -332,17 +402,13 @@ def make_figure(
         column = index // diagnostic_rows + 1
         row = index % diagnostic_rows
         feature_axes.append(fig.add_subplot(grid[row, column]))
-    display = (wave >= 3400.0) & (wave <= 7000.0)
 
+    plot_family_spectra(
+        ax_spectra, groups, wave, spectra_by_group, counts, legend_fontsize=11
+    )
     for index, group in enumerate(groups):
         key = f"{group.family}:{group.templates}"
-        color = COLORS[index % len(COLORS)]
-        spectra = spectra_by_group[key]
-        low, median, high = np.percentile(spectra[:, display], [10, 50, 90], axis=0)
-        label = f"{group.family} {group.templates} (n={counts[key]:,})"
-        ax_spectra.fill_between(wave[display], low, high, color=color, alpha=0.12)
-        ax_spectra.plot(wave[display], median, color=color, lw=1.7, label=label)
-
+        color = family_color(group.family, index)
         offset = (index - (len(groups) - 1) / 2) * 0.12
         for ax_feature, diagnostic in zip(feature_axes, diagnostic_labels):
             values = diagnostics_by_group[key][diagnostic]
@@ -361,23 +427,6 @@ def make_figure(
                 zorder=3,
             )
 
-    for feature, _, _ in EMISSION_WINDOWS.values():
-        center = 0.5 * sum(feature)
-        if 3400 <= center <= 7000:
-            ax_spectra.axvline(center, color="#7A7F87", ls=":", lw=0.8)
-    ax_spectra.set_yscale("log")
-    ax_spectra.set_xlim(3400, 7000)
-    ax_spectra.set_xlabel(r"Rest wavelength $\lambda$ [$\AA$]")
-    ax_spectra.set_ylabel(r"Pipeline-normalized $f_\lambda$ [$\AA^{-1}$]")
-    ax_spectra.set_title("Reduced-fit spectral shapes", loc="left")
-    ax_spectra.legend(
-        frameon=False,
-        fontsize=8,
-        loc="upper center",
-        bbox_to_anchor=(0.5, -0.12),
-        ncol=4,
-    )
-
     ratio_diagnostics = {
         r"$D_n(4000)$",
         "UV / optical",
@@ -393,6 +442,8 @@ def make_figure(
         if natural_xlim[0] <= reference <= natural_xlim[1]:
             ax_feature.axvline(reference, color="#7A7F87", ls="--", lw=1.0)
             ax_feature.set_xlim(natural_xlim)
+        ax_feature.grid(True, color=GRID, alpha=0.65, linewidth=0.7)
+        ax_feature.set_axisbelow(True)
     feature_axes[0].set_title(
         "Continuum and feature power\n" + diagnostic_labels[0], loc="left"
     )
@@ -408,9 +459,6 @@ def make_figure(
             transform=key_ax.transAxes,
         )
 
-    for ax in (ax_spectra, *feature_axes):
-        ax.grid(True, color=GRID, alpha=0.65, linewidth=0.7)
-        ax.set_axisbelow(True)
     fig.suptitle("Spectral features encoded by reduced EAZY12 family bases", fontsize=16)
     output.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output, dpi=180, bbox_inches="tight")
@@ -483,12 +531,14 @@ def main() -> None:
         diagnostics_by_group,
         counts,
         args.output,
+        spectra_only=args.spectra_only,
     )
-    output_csv = args.output_csv or args.output.with_suffix(".csv")
-    output_csv.parent.mkdir(parents=True, exist_ok=True)
-    pd.DataFrame(summary_rows).to_csv(output_csv, index=False)
+    if not args.spectra_only:
+        output_csv = args.output_csv or args.output.with_suffix(".csv")
+        output_csv.parent.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame(summary_rows).to_csv(output_csv, index=False)
+        print(f"Wrote {output_csv}")
     print(f"Wrote {args.output}")
-    print(f"Wrote {output_csv}")
 
 
 if __name__ == "__main__":
