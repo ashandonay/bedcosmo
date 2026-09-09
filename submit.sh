@@ -1045,6 +1045,29 @@ fi
 CLI_OVERRIDES_STR="${CLI_OVERRIDES_STR% }"
 export BED_CLI_OVERRIDES="$CLI_OVERRIDES_STR"
 
+print_cli_overrides() {
+    if [ -n "$BED_CLI_OVERRIDES" ]; then
+        echo "CLI Overrides (non-default values):"
+        echo "------------------------------------"
+        set -- $BED_CLI_OVERRIDES
+        while [ $# -gt 0 ]; do
+            if [[ "$1" == --* ]]; then
+                if [ $# -gt 1 ] && [[ "$2" != --* ]]; then
+                    echo "  $1 $2"
+                    shift 2
+                else
+                    echo "  $1"
+                    shift 1
+                fi
+            else
+                shift 1
+            fi
+        done
+    else
+        echo "CLI Overrides: (none - using YAML defaults)"
+    fi
+}
+
 # ──────────────────────────────────────────────────────────────────────
 # Pre-create the MLflow run at submission time (train only) and snapshot the
 # referenced config (prior_args/design_args/emulator .pt files) into its artifacts,
@@ -1394,11 +1417,26 @@ else
     echo "Logging output to: $LOG_FILE"
     echo ""
 
+    {
+        echo "=========================================="
+        echo "Local Job Started"
+        echo "=========================================="
+        echo "Job Type:      $JOB_TYPE"
+        echo "Cosmo Exp:     $COSMO_EXP"
+        echo "Cosmo Model:   $COSMO_MODEL"
+        echo "Processes:     ${GPUS:-1}"
+        echo "Start Time:    $(date '+%Y-%m-%d %H:%M:%S')"
+        echo ""
+        print_cli_overrides
+        echo "=========================================="
+        echo ""
+    } | tee "$LOG_FILE"
+
     if [ "$JOB_TYPE" = "grid" ]; then
         # grid_calc: single-process python (no torchrun); use --node-type gpu for GPU SLURM nodes
         echo "Executing: python -m $PYTHON_MODULE [${#FINAL_ARGS[@]} arguments]"
         echo ""
-        python -m "$PYTHON_MODULE" "${FINAL_ARGS[@]}" > "$LOG_FILE" 2>&1
+        python -m "$PYTHON_MODULE" "${FINAL_ARGS[@]}" >> "$LOG_FILE" 2>&1
         TRAIN_EXIT_CODE=$?
 
         # Copy the log into the grid_calc output directory
@@ -1412,7 +1450,7 @@ else
     else
         echo "Executing: torchrun --nproc_per_node=$GPUS -m $PYTHON_MODULE [${#FINAL_ARGS[@]} arguments]"
         echo ""
-        torchrun --nproc_per_node=$GPUS -m "$PYTHON_MODULE" "${FINAL_ARGS[@]}" > "$LOG_FILE" 2>&1 &
+        torchrun --nproc_per_node=$GPUS -m "$PYTHON_MODULE" "${FINAL_ARGS[@]}" >> "$LOG_FILE" 2>&1 &
         TRAIN_PID=$!
 
         if [ "$JOB_TYPE" = "eval" ] && [ "$GRID" = true ]; then
