@@ -6,6 +6,7 @@
 set -e  # Exit on error
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$PROJECT_ROOT/scripts/job_logging.sh"
 
 # Ensure SCRATCH is set (used for MLflow storage, logs, etc.)
 if [ -z "${SCRATCH:-}" ]; then
@@ -1045,29 +1046,6 @@ fi
 CLI_OVERRIDES_STR="${CLI_OVERRIDES_STR% }"
 export BED_CLI_OVERRIDES="$CLI_OVERRIDES_STR"
 
-print_cli_overrides() {
-    if [ -n "$BED_CLI_OVERRIDES" ]; then
-        echo "CLI Overrides (non-default values):"
-        echo "------------------------------------"
-        set -- $BED_CLI_OVERRIDES
-        while [ $# -gt 0 ]; do
-            if [[ "$1" == --* ]]; then
-                if [ $# -gt 1 ] && [[ "$2" != --* ]]; then
-                    echo "  $1 $2"
-                    shift 2
-                else
-                    echo "  $1"
-                    shift 1
-                fi
-            else
-                shift 1
-            fi
-        done
-    else
-        echo "CLI Overrides: (none - using YAML defaults)"
-    fi
-}
-
 # ──────────────────────────────────────────────────────────────────────
 # Pre-create the MLflow run at submission time (train only) and snapshot the
 # referenced config (prior_args/design_args/emulator .pt files) into its artifacts,
@@ -1424,10 +1402,14 @@ else
         echo "Job Type:      $JOB_TYPE"
         echo "Cosmo Exp:     $COSMO_EXP"
         echo "Cosmo Model:   $COSMO_MODEL"
-        echo "Processes:     ${GPUS:-1}"
+        echo "Torchrun workers: ${GPUS:-1}"
         echo "Start Time:    $(date '+%Y-%m-%d %H:%M:%S')"
         echo ""
-        print_cli_overrides
+        if [ "$JOB_TYPE" = "grid" ]; then
+            print_bed_cli_overrides "none"
+        else
+            print_bed_cli_overrides
+        fi
         echo "=========================================="
         echo ""
     } | tee "$LOG_FILE"

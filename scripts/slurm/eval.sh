@@ -9,6 +9,9 @@
 #SBATCH --error=/dev/null
 # Note: --time, --qos, and --nodes are set by submit.sh via sbatch CLI flags
 
+SLURM_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SLURM_SCRIPT_DIR/../job_logging.sh"
+
 # Parse named arguments
 COSMO_EXP=""
 RUN_ID=""
@@ -102,27 +105,7 @@ echo "Cosmo Exp:    $COSMO_EXP"
 echo "Run ID:       $RUN_ID"
 echo "Start Time:   $(date '+%Y-%m-%d %H:%M:%S')"
 echo ""
-if [ -n "$BED_CLI_OVERRIDES" ]; then
-    echo "CLI Overrides (non-default values):"
-    echo "------------------------------------"
-    # Parse and print key-value pairs
-    set -- $BED_CLI_OVERRIDES
-    while [ $# -gt 0 ]; do
-        if [[ "$1" == --* ]]; then
-            if [ $# -gt 1 ] && [[ "$2" != --* ]]; then
-                echo "  $1 $2"
-                shift 2
-            else
-                echo "  $1"
-                shift 1
-            fi
-        else
-            shift 1
-        fi
-    done
-else
-    echo "CLI Overrides: (none - using YAML defaults)"
-fi
+print_bed_cli_overrides
 echo "=========================================="
 echo ""
 
