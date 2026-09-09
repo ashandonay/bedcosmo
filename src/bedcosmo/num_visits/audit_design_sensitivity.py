@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Read-only audit of design sensitivity for a trained num_visits run.
+"""Read-only audit of design sensitivity for a trained NumVisits run.
 
 The audit uses common prior rows and Gaussian noise draws across designs.  It
 reports how strongly the likelihood errors and the trained guide respond to the
