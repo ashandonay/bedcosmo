@@ -1,12 +1,32 @@
-# Emulator checkpoint paths, organized like models.yaml: <analysis>: <cosmo_model>: <dataset>: <tracer_bin>: <path>
-# Relative paths resolve against
-#   $SCRATCH/bedcosmo/num_tracers/emulator/{analysis}/models/{dataset}/{cosmo_model}/ ;
-# absolute paths are used verbatim; null means "no checkpoint -> fall back to the fixed DESI nominal covariance".
+# Emulator checkpoint paths.
+#
+# Nesting MIRRORS the on-disk layout, so the file can be read straight against
+# the storage tree:
+#     <analysis>: <dataset>: <cosmo_model>: [<space>:] <tracer_bin>: <path>
+#     $SCRATCH/bedcosmo/num_tracers/emulator/{analysis}/models/{dataset}/{cosmo_model}/
+# (It used to nest cosmo_model above dataset, the reverse of the path, which
+# meant transposing two levels in your head to check an entry.)
+#
+# Relative paths resolve against that directory; absolute paths are used
+# verbatim; null means "no checkpoint -> fall back to the fixed DESI nominal
+# covariance" for that tracer bin.
+#
+# A cosmo_model entry may map tracer bins directly (flat), or be keyed by
+# forecast space first when more than one space has trained emulators -- bao's
+# base has both config-space xi and windowed Fourier P(k). Select with
+# `emulator_space` in train_args.yaml or --emulator-space.
+
 bao:
-  base:
-    # bao has TWO forecast spaces and both have trained emulators, so this entry carries a space level (config | fourier)
-    # Select with `emulator_space` in train_args.yaml or --emulator-space on the command line.
-    dr1:
+  dr1:
+    base:
+      # config/v5 (2026-09-09). Supersedes v4 on BOTH counts:
+      #   data - v4 predates the 2026-09-07 regeneration (de-wiggling fix, n(z)
+      #          rework, S121, area seam), so its labels are stale.
+      #   arch - v5 is 6/4/4 + log_normalize; v4 was 24/6/4 raw, which measures
+      #          p90 38.6% on v5 data against v5's 1.0-2.4%.
+      # Per-tracer physical relative error: median 0.25-0.82%, DESI-band p90
+      # 0.5-1.5%. These carry log_normalize=True (v4 did not);
+      # decode_emulator_outputs inverts it from the checkpoint metadata.
       config:
         BGS: config/v5/BGS.pt
         LRG1: config/v5/LRG1.pt
@@ -15,6 +35,11 @@ bao:
         ELG2: config/v5/ELG2.pt
         QSO: config/v5/QSO.pt
         Lya_QSO: null
+      # fourier/v2 (2026-09-08), windowed thecov. Same 6/4/4 + log_normalize
+      # architecture as config -- convergence, not a copy: both datasets share a
+      # regeneration epoch and so the same Om-driven tail. Fourier is the harder
+      # of the two to emulate at equal capacity (median 0.49-1.32%, p90
+      # 0.84-3.74%) because its targets span ~1.5 more decades.
       fourier:
         BGS: fourier/v2/BGS.pt
         LRG1: fourier/v2/LRG1.pt
@@ -23,9 +48,7 @@ bao:
         ELG2: fourier/v2/ELG2.pt
         QSO: fourier/v2/QSO.pt
         Lya_QSO: null
-
-  base_omegak:
-    dr1:
+    base_omegak:
       BGS: /path/to/base_omegak/BGS/model.pt
       LRG1: /path/to/base_omegak/LRG1/model.pt
       LRG2: /path/to/base_omegak/LRG2/model.pt
@@ -33,9 +56,7 @@ bao:
       ELG2: /path/to/base_omegak/ELG2/model.pt
       QSO: /path/to/base_omegak/QSO/model.pt
       Lya_QSO: /path/to/base_omegak/Lya_QSO/model.pt
-
-  base_w:
-    dr1:
+    base_w:
       BGS: /path/to/base_w/BGS/model.pt
       LRG1: /path/to/base_w/LRG1/model.pt
       LRG2: /path/to/base_w/LRG2/model.pt
@@ -43,9 +64,7 @@ bao:
       ELG2: /path/to/base_w/ELG2/model.pt
       QSO: /path/to/base_w/QSO/model.pt
       Lya_QSO: /path/to/base_w/Lya_QSO/model.pt
-
-  base_w_wa:
-    dr1:
+    base_w_wa:
       BGS: /path/to/base_w_wa/BGS/model.pt
       LRG1: /path/to/base_w_wa/LRG1/model.pt
       LRG2: /path/to/base_w_wa/LRG2/model.pt
@@ -53,9 +72,7 @@ bao:
       ELG2: /path/to/base_w_wa/ELG2/model.pt
       QSO: /path/to/base_w_wa/QSO/model.pt
       Lya_QSO: /path/to/base_w_wa/Lya_QSO/model.pt
-
-  base_omegak_w_wa:
-    dr1:
+    base_omegak_w_wa:
       BGS: config/v2/BGS.pt
       LRG1: config/v2/LRG1.pt
       LRG2: config/v2/LRG2.pt

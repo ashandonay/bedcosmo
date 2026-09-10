@@ -1303,7 +1303,8 @@ class NumTracers(BaseExperiment, CosmologyMixin):
     def resolve_emulator_checkpoints(analysis, cosmo_model, dataset, space=None):
         """Resolve emulator checkpoint paths for a (analysis, cosmo_model, dataset) from emulators.yaml.
 
-        Emulator checkpoints live in emulators.yaml under <analysis>.<cosmo_model>.<dataset>. Relative
+        Emulator checkpoints live in emulators.yaml under <analysis>.<dataset>.<cosmo_model>,
+        mirroring the storage path models/{dataset}/{cosmo_model}/. Relative
         paths resolve against
         $SCRATCH/bedcosmo/num_tracers/emulator/{analysis}/models/{dataset}/{cosmo_model}/;
         absolute paths are used verbatim; null -> fall back to fixed DESI nominal covariance.
@@ -1320,17 +1321,29 @@ class NumTracers(BaseExperiment, CosmologyMixin):
         emulators_yaml_path = get_experiment_config_path("num_tracers", "emulators.yaml")
         with open(emulators_yaml_path, "r") as f:
             all_emulators = yaml.safe_load(f)
-        if cosmo_model not in all_emulators.get(analysis, {}):
+        by_analysis = all_emulators.get(analysis, {})
+        if dataset not in by_analysis:
+            # The nesting used to be analysis.cosmo_model.dataset, the reverse of
+            # the storage path. If this file still has the old order, say so
+            # rather than reporting a confusing "no such dataset".
+            if cosmo_model in by_analysis:
+                raise ValueError(
+                    f"emulators.yaml nests {analysis}.{cosmo_model}.{dataset} (cosmo_model "
+                    f"above dataset), but the resolver expects "
+                    f"{analysis}.{dataset}.{cosmo_model}, mirroring "
+                    f"models/{{dataset}}/{{cosmo_model}}/. Transpose those two levels."
+                )
             raise ValueError(
-                f"Cosmo model '{cosmo_model}' has no emulator entry under '{analysis}' in emulators.yaml"
+                f"No emulator checkpoints for dataset '{dataset}' under '{analysis}' "
+                f"in emulators.yaml (have: {sorted(by_analysis)})"
             )
-        emu_by_dataset = all_emulators[analysis][cosmo_model]
-        if dataset not in emu_by_dataset:
+        by_dataset = by_analysis[dataset]
+        if cosmo_model not in by_dataset:
             raise ValueError(
-                f"No emulator checkpoints for dataset '{dataset}' under "
-                f"{analysis}.{cosmo_model} in emulators.yaml (have: {list(emu_by_dataset)})"
+                f"Cosmo model '{cosmo_model}' has no emulator entry under "
+                f"{analysis}.{dataset} in emulators.yaml (have: {sorted(by_dataset)})"
             )
-        entry = emu_by_dataset[dataset]
+        entry = by_dataset[cosmo_model]
 
         # An entry either maps tracer_bin -> path (flat, the original layout) or
         # space -> {tracer_bin -> path}. bao has two forecast spaces (config and
