@@ -73,6 +73,7 @@ class NumTracers(BaseExperiment, CosmologyMixin):
         vary_lya_qso=False,
         ref_cov=None,
         emulator_sqrtn_ref=None,
+        emulator_space=None,
         artifacts_dir=None,
         input_transform_type="marginal",
         joint_transform_shrinkage=1e-3,
@@ -272,6 +273,10 @@ class NumTracers(BaseExperiment, CosmologyMixin):
                 f"emulator_sqrtn_ref must be None, 'sampled', or 'fiducial'; got {emulator_sqrtn_ref!r}."
             )
         self.emulator_sqrtn_ref = emulator_sqrtn_ref
+        # Which forecast space's emulators to load, for entries in emulators.yaml
+        # that are keyed by space (bao has both config and fourier). None is
+        # correct for the flat legacy entries; required for nested ones.
+        self.emulator_space = emulator_space
         self._sqrtn_n_ref_cache = None  # per-bin nominal N_tracers (design-independent)
         self._sqrtn_ref_cov_cache = None  # frozen fiducial reference covariance
         if self.likelihood_mode == "emulator":
@@ -287,7 +292,8 @@ class NumTracers(BaseExperiment, CosmologyMixin):
                     checkpoints[tracer_bin] = ckpt_path if os.path.exists(ckpt_path) else None
             else:
                 checkpoints = self.resolve_emulator_checkpoints(
-                    self.analysis, self.cosmo_model, self.dataset
+                    self.analysis, self.cosmo_model, self.dataset,
+                    space=self.emulator_space,
                 )
             self._emulator_checkpoints = checkpoints
             self._load_emulators()
@@ -1294,10 +1300,12 @@ class NumTracers(BaseExperiment, CosmologyMixin):
         return parameters
 
     @staticmethod
-    def resolve_emulator_checkpoints(analysis, cosmo_model, dataset):
+    def resolve_emulator_checkpoints(analysis, cosmo_model, dataset, space=None):
         """Resolve emulator checkpoint paths for a (analysis, cosmo_model, dataset) from emulators.yaml.
 
-        Emulator checkpoints live in emulators.yaml under <analysis>.<cosmo_model>.<dataset>. Relative
+        Emulator checkpoints live in emulators.yaml under
+        <analysis>.<dataset>.<cosmo_model>.<space>, mirroring the storage path
+        models/{dataset}/{cosmo_model}/{space}/. Relative
         paths resolve against
         $SCRATCH/bedcosmo/num_tracers/emulator/{analysis}/models/{dataset}/{cosmo_model}/;
         absolute paths are used verbatim; null -> fall back to fixed DESI nominal covariance.
@@ -1314,21 +1322,37 @@ class NumTracers(BaseExperiment, CosmologyMixin):
         emulators_yaml_path = get_experiment_config_path("num_tracers", "emulators.yaml")
         with open(emulators_yaml_path, "r") as f:
             all_emulators = yaml.safe_load(f)
-        if cosmo_model not in all_emulators.get(analysis, {}):
+        by_analysis = all_emulators.get(analysis, {})
+        if dataset not in by_analysis:
             raise ValueError(
-                f"Cosmo model '{cosmo_model}' has no emulator entry under '{analysis}' in emulators.yaml"
+                f"No emulator checkpoints for dataset '{dataset}' under '{analysis}' "
+                f"in emulators.yaml (have: {sorted(by_analysis)})"
             )
-        emu_by_dataset = all_emulators[analysis][cosmo_model]
-        if dataset not in emu_by_dataset:
+        by_dataset = by_analysis[dataset]
+        if cosmo_model not in by_dataset:
             raise ValueError(
-                f"No emulator checkpoints for dataset '{dataset}' under "
-                f"{analysis}.{cosmo_model} in emulators.yaml (have: {list(emu_by_dataset)})"
+                f"Cosmo model '{cosmo_model}' has no emulator entry under "
+                f"{analysis}.{dataset} in emulators.yaml (have: {sorted(by_dataset)})"
             )
+        by_space = by_dataset[cosmo_model]
+        if space is None:
+            raise ValueError(
+                f"emulator_space is required: {analysis}.{dataset}.{cosmo_model} in "
+                f"emulators.yaml is keyed by forecast space (have: {sorted(by_space)}). "
+                f"Set it in train_args.yaml or pass --emulator-space."
+            )
+        if space not in by_space:
+            raise ValueError(
+                f"No emulator checkpoints for space '{space}' under "
+                f"{analysis}.{dataset}.{cosmo_model} (have: {sorted(by_space)})"
+            )
+        entry = by_space[space]
+
         base_dir = os.path.join(
             storage_path, "emulator", analysis, "models", dataset, cosmo_model)
         return {
             tb: (None if p is None else (p if os.path.isabs(p) else os.path.join(base_dir, p)))
-            for tb, p in emu_by_dataset[dataset].items()
+            for tb, p in entry.items()
         }
 
     def _load_emulators(self):
