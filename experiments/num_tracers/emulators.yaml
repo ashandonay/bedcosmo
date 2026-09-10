@@ -1,32 +1,11 @@
-# Emulator checkpoint paths.
-#
-# Nesting MIRRORS the on-disk layout, so the file can be read straight against
-# the storage tree:
-#     <analysis>: <dataset>: <cosmo_model>: [<space>:] <tracer_bin>: <path>
-#     $SCRATCH/bedcosmo/num_tracers/emulator/{analysis}/models/{dataset}/{cosmo_model}/
-# (It used to nest cosmo_model above dataset, the reverse of the path, which
-# meant transposing two levels in your head to check an entry.)
-#
-# Relative paths resolve against that directory; absolute paths are used
-# verbatim; null means "no checkpoint -> fall back to the fixed DESI nominal
-# covariance" for that tracer bin.
-#
-# A cosmo_model entry may map tracer bins directly (flat), or be keyed by
-# forecast space first when more than one space has trained emulators -- bao's
-# base has both config-space xi and windowed Fourier P(k). Select with
-# `emulator_space` in train_args.yaml or --emulator-space.
-
+# Emulator checkpoint paths: <analysis>: <dataset>: <cosmo_model>: [<space>:] <tracer_bin>: <path>
+# Nesting mirrors the storage path $SCRATCH/bedcosmo/num_tracers/emulator/{analysis}/models/{dataset}/{cosmo_model}/
+# Relative paths resolve against it; absolute paths are used verbatim; null means "no checkpoint -> fall back to the fixed DESI nominal covariance".
 bao:
   dr1:
     base:
-      # config/v5 (2026-09-09). Supersedes v4 on BOTH counts:
-      #   data - v4 predates the 2026-09-07 regeneration (de-wiggling fix, n(z)
-      #          rework, S121, area seam), so its labels are stale.
-      #   arch - v5 is 6/4/4 + log_normalize; v4 was 24/6/4 raw, which measures
-      #          p90 38.6% on v5 data against v5's 1.0-2.4%.
-      # Per-tracer physical relative error: median 0.25-0.82%, DESI-band p90
-      # 0.5-1.5%. These carry log_normalize=True (v4 did not);
-      # decode_emulator_outputs inverts it from the checkpoint metadata.
+      # bao has TWO forecast spaces and both have trained emulators, so this entry carries a space level (config | fourier)
+      # Select with `emulator_space` in train_args.yaml or --emulator-space on the command line.
       config:
         BGS: config/v5/BGS.pt
         LRG1: config/v5/LRG1.pt
@@ -35,11 +14,6 @@ bao:
         ELG2: config/v5/ELG2.pt
         QSO: config/v5/QSO.pt
         Lya_QSO: null
-      # fourier/v2 (2026-09-08), windowed thecov. Same 6/4/4 + log_normalize
-      # architecture as config -- convergence, not a copy: both datasets share a
-      # regeneration epoch and so the same Om-driven tail. Fourier is the harder
-      # of the two to emulate at equal capacity (median 0.49-1.32%, p90
-      # 0.84-3.74%) because its targets span ~1.5 more decades.
       fourier:
         BGS: fourier/v2/BGS.pt
         LRG1: fourier/v2/LRG1.pt
