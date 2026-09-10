@@ -73,6 +73,7 @@ class NumTracers(BaseExperiment, CosmologyMixin):
         vary_lya_qso=False,
         ref_cov=None,
         emulator_sqrtn_ref=None,
+        emulator_space=None,
         artifacts_dir=None,
         input_transform_type="marginal",
         joint_transform_shrinkage=1e-3,
@@ -272,6 +273,10 @@ class NumTracers(BaseExperiment, CosmologyMixin):
                 f"emulator_sqrtn_ref must be None, 'sampled', or 'fiducial'; got {emulator_sqrtn_ref!r}."
             )
         self.emulator_sqrtn_ref = emulator_sqrtn_ref
+        # Which forecast space's emulators to load, for entries in emulators.yaml
+        # that are keyed by space (bao has both config and fourier). None is
+        # correct for the flat legacy entries; required for nested ones.
+        self.emulator_space = emulator_space
         self._sqrtn_n_ref_cache = None  # per-bin nominal N_tracers (design-independent)
         self._sqrtn_ref_cov_cache = None  # frozen fiducial reference covariance
         if self.likelihood_mode == "emulator":
@@ -287,7 +292,8 @@ class NumTracers(BaseExperiment, CosmologyMixin):
                     checkpoints[tracer_bin] = ckpt_path if os.path.exists(ckpt_path) else None
             else:
                 checkpoints = self.resolve_emulator_checkpoints(
-                    self.analysis, self.cosmo_model, self.dataset
+                    self.analysis, self.cosmo_model, self.dataset,
+                    space=self.emulator_space,
                 )
             self._emulator_checkpoints = checkpoints
             self._load_emulators()
@@ -1294,7 +1300,7 @@ class NumTracers(BaseExperiment, CosmologyMixin):
         return parameters
 
     @staticmethod
-    def resolve_emulator_checkpoints(analysis, cosmo_model, dataset):
+    def resolve_emulator_checkpoints(analysis, cosmo_model, dataset, space=None):
         """Resolve emulator checkpoint paths for a (analysis, cosmo_model, dataset) from emulators.yaml.
 
         Emulator checkpoints live in emulators.yaml under <analysis>.<cosmo_model>.<dataset>. Relative
@@ -1324,11 +1330,40 @@ class NumTracers(BaseExperiment, CosmologyMixin):
                 f"No emulator checkpoints for dataset '{dataset}' under "
                 f"{analysis}.{cosmo_model} in emulators.yaml (have: {list(emu_by_dataset)})"
             )
+        entry = emu_by_dataset[dataset]
+
+        # An entry either maps tracer_bin -> path (flat, the original layout) or
+        # space -> {tracer_bin -> path}. bao has two forecast spaces (config and
+        # fourier) with separate emulators, so its base entry is nested; the rest
+        # stay flat. Detect by shape rather than by analysis name so adding a
+        # space level anywhere else needs no code change.
+        is_nested = bool(entry) and all(isinstance(v, dict) for v in entry.values())
+        if is_nested:
+            if space is None:
+                raise ValueError(
+                    f"{analysis}.{cosmo_model}.{dataset} in emulators.yaml is keyed by "
+                    f"space (have: {sorted(entry)}), so emulator_space must be set "
+                    f"(train_args.yaml key 'emulator_space', or --emulator-space). "
+                    f"Leaving it unset would silently pick a space for you."
+                )
+            if space not in entry:
+                raise ValueError(
+                    f"No emulator checkpoints for space '{space}' under "
+                    f"{analysis}.{cosmo_model}.{dataset} (have: {sorted(entry)})"
+                )
+            entry = entry[space]
+        elif space is not None:
+            raise ValueError(
+                f"emulator_space={space!r} was given, but "
+                f"{analysis}.{cosmo_model}.{dataset} in emulators.yaml has no space "
+                f"level (it maps tracer bins directly). Add one, or drop the setting."
+            )
+
         base_dir = os.path.join(
             storage_path, "emulator", analysis, "models", dataset, cosmo_model)
         return {
             tb: (None if p is None else (p if os.path.isabs(p) else os.path.join(base_dir, p)))
-            for tb, p in emu_by_dataset[dataset].items()
+            for tb, p in entry.items()
         }
 
     def _load_emulators(self):
