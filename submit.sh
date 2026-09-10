@@ -6,6 +6,7 @@
 set -e  # Exit on error
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export BED_PROJECT_ROOT="$PROJECT_ROOT"
 source "$PROJECT_ROOT/scripts/job_logging.sh"
 
 # Ensure SCRATCH is set (used for MLflow storage, logs, etc.)
