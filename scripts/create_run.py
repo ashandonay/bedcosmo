@@ -54,6 +54,10 @@ def _parse_args():
     parser.add_argument("--dataset", type=str, default="dr2")
     parser.add_argument("--analysis", type=str, default="bao")
     parser.add_argument("--likelihood-mode", type=str, default="scaling")
+    # Required when the emulators.yaml entry is keyed by forecast space (bao's is:
+    # config | fourier). Snapshotting happens here, so this must be threaded through
+    # or submission aborts -- which is how the omission surfaced.
+    parser.add_argument("--emulator-space", type=str, default=None)
     parser.add_argument("--prior-args-path", type=str, default=None)
     parser.add_argument("--design-args-path", type=str, default=None)
     parser.add_argument("--prior-flow-path", type=str, default=None)
@@ -145,7 +149,10 @@ def _snapshot_emulators(args, artifacts_dir):
         return
     from bedcosmo.num_tracers.experiment import NumTracers
 
-    checkpoints = NumTracers.resolve_emulator_checkpoints(args.analysis, args.cosmo_model, args.dataset)
+    checkpoints = NumTracers.resolve_emulator_checkpoints(
+        args.analysis, args.cosmo_model, args.dataset,
+        space=getattr(args, "emulator_space", None),
+    )
     emu_dir = os.path.join(artifacts_dir, "emulators")
     os.makedirs(emu_dir, exist_ok=True)
     copied = []
