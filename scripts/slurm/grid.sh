@@ -8,8 +8,13 @@
 #SBATCH --error=/dev/null
 # Note: --job-name, --constraint (cpu/gpu), --time, --qos, and --nodes are set by submit.sh via sbatch CLI flags
 
-SLURM_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "$SLURM_SCRIPT_DIR/../job_logging.sh"
+BED_PROJECT_ROOT="${BED_PROJECT_ROOT:-${SLURM_SUBMIT_DIR:-}}"
+JOB_LOGGING_HELPER="$BED_PROJECT_ROOT/scripts/job_logging.sh"
+if [ ! -f "$JOB_LOGGING_HELPER" ]; then
+    echo "Error: shared job logging helper not found: $JOB_LOGGING_HELPER"
+    exit 1
+fi
+source "$JOB_LOGGING_HELPER"
 
 # Parse named arguments
 COSMO_EXP=""
