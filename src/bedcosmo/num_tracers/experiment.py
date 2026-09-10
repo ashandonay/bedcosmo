@@ -1303,8 +1303,9 @@ class NumTracers(BaseExperiment, CosmologyMixin):
     def resolve_emulator_checkpoints(analysis, cosmo_model, dataset, space=None):
         """Resolve emulator checkpoint paths for a (analysis, cosmo_model, dataset) from emulators.yaml.
 
-        Emulator checkpoints live in emulators.yaml under <analysis>.<dataset>.<cosmo_model>,
-        mirroring the storage path models/{dataset}/{cosmo_model}/. Relative
+        Emulator checkpoints live in emulators.yaml under
+        <analysis>.<dataset>.<cosmo_model>.<space>, mirroring the storage path
+        models/{dataset}/{cosmo_model}/{space}/. Relative
         paths resolve against
         $SCRATCH/bedcosmo/num_tracers/emulator/{analysis}/models/{dataset}/{cosmo_model}/;
         absolute paths are used verbatim; null -> fall back to fixed DESI nominal covariance.
@@ -1323,16 +1324,6 @@ class NumTracers(BaseExperiment, CosmologyMixin):
             all_emulators = yaml.safe_load(f)
         by_analysis = all_emulators.get(analysis, {})
         if dataset not in by_analysis:
-            # The nesting used to be analysis.cosmo_model.dataset, the reverse of
-            # the storage path. If this file still has the old order, say so
-            # rather than reporting a confusing "no such dataset".
-            if cosmo_model in by_analysis:
-                raise ValueError(
-                    f"emulators.yaml nests {analysis}.{cosmo_model}.{dataset} (cosmo_model "
-                    f"above dataset), but the resolver expects "
-                    f"{analysis}.{dataset}.{cosmo_model}, mirroring "
-                    f"models/{{dataset}}/{{cosmo_model}}/. Transpose those two levels."
-                )
             raise ValueError(
                 f"No emulator checkpoints for dataset '{dataset}' under '{analysis}' "
                 f"in emulators.yaml (have: {sorted(by_analysis)})"
@@ -1343,34 +1334,19 @@ class NumTracers(BaseExperiment, CosmologyMixin):
                 f"Cosmo model '{cosmo_model}' has no emulator entry under "
                 f"{analysis}.{dataset} in emulators.yaml (have: {sorted(by_dataset)})"
             )
-        entry = by_dataset[cosmo_model]
-
-        # An entry either maps tracer_bin -> path (flat, the original layout) or
-        # space -> {tracer_bin -> path}. bao has two forecast spaces (config and
-        # fourier) with separate emulators, so its base entry is nested; the rest
-        # stay flat. Detect by shape rather than by analysis name so adding a
-        # space level anywhere else needs no code change.
-        is_nested = bool(entry) and all(isinstance(v, dict) for v in entry.values())
-        if is_nested:
-            if space is None:
-                raise ValueError(
-                    f"{analysis}.{cosmo_model}.{dataset} in emulators.yaml is keyed by "
-                    f"space (have: {sorted(entry)}), so emulator_space must be set "
-                    f"(train_args.yaml key 'emulator_space', or --emulator-space). "
-                    f"Leaving it unset would silently pick a space for you."
-                )
-            if space not in entry:
-                raise ValueError(
-                    f"No emulator checkpoints for space '{space}' under "
-                    f"{analysis}.{cosmo_model}.{dataset} (have: {sorted(entry)})"
-                )
-            entry = entry[space]
-        elif space is not None:
+        by_space = by_dataset[cosmo_model]
+        if space is None:
             raise ValueError(
-                f"emulator_space={space!r} was given, but "
-                f"{analysis}.{cosmo_model}.{dataset} in emulators.yaml has no space "
-                f"level (it maps tracer bins directly). Add one, or drop the setting."
+                f"emulator_space is required: {analysis}.{dataset}.{cosmo_model} in "
+                f"emulators.yaml is keyed by forecast space (have: {sorted(by_space)}). "
+                f"Set it in train_args.yaml or pass --emulator-space."
             )
+        if space not in by_space:
+            raise ValueError(
+                f"No emulator checkpoints for space '{space}' under "
+                f"{analysis}.{dataset}.{cosmo_model} (have: {sorted(by_space)})"
+            )
+        entry = by_space[space]
 
         base_dir = os.path.join(
             storage_path, "emulator", analysis, "models", dataset, cosmo_model)

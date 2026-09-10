@@ -1,4 +1,4 @@
-# Emulator checkpoint paths: <analysis>: <dataset>: <cosmo_model>: [<space>:] <tracer_bin>: <path>
+# Emulator checkpoint paths: <analysis>: <dataset>: <cosmo_model>: <space>: <tracer_bin>: <path>
 # Nesting mirrors the storage path $SCRATCH/bedcosmo/num_tracers/emulator/{analysis}/models/{dataset}/{cosmo_model}/
 # Relative paths resolve against it; absolute paths are used verbatim; null means "no checkpoint -> fall back to the fixed DESI nominal covariance".
 bao:
@@ -23,34 +23,38 @@ bao:
         QSO: fourier/v2/QSO.pt
         Lya_QSO: null
     base_omegak:
-      BGS: /path/to/base_omegak/BGS/model.pt
-      LRG1: /path/to/base_omegak/LRG1/model.pt
-      LRG2: /path/to/base_omegak/LRG2/model.pt
-      LRG3_ELG1: /path/to/base_omegak/LRG3_ELG1/model.pt
-      ELG2: /path/to/base_omegak/ELG2/model.pt
-      QSO: /path/to/base_omegak/QSO/model.pt
-      Lya_QSO: /path/to/base_omegak/Lya_QSO/model.pt
+      config:
+        BGS: /path/to/base_omegak/BGS/model.pt
+        LRG1: /path/to/base_omegak/LRG1/model.pt
+        LRG2: /path/to/base_omegak/LRG2/model.pt
+        LRG3_ELG1: /path/to/base_omegak/LRG3_ELG1/model.pt
+        ELG2: /path/to/base_omegak/ELG2/model.pt
+        QSO: /path/to/base_omegak/QSO/model.pt
+        Lya_QSO: /path/to/base_omegak/Lya_QSO/model.pt
     base_w:
-      BGS: /path/to/base_w/BGS/model.pt
-      LRG1: /path/to/base_w/LRG1/model.pt
-      LRG2: /path/to/base_w/LRG2/model.pt
-      LRG3_ELG1: /path/to/base_w/LRG3_ELG1/model.pt
-      ELG2: /path/to/base_w/ELG2/model.pt
-      QSO: /path/to/base_w/QSO/model.pt
-      Lya_QSO: /path/to/base_w/Lya_QSO/model.pt
+      config:
+        BGS: /path/to/base_w/BGS/model.pt
+        LRG1: /path/to/base_w/LRG1/model.pt
+        LRG2: /path/to/base_w/LRG2/model.pt
+        LRG3_ELG1: /path/to/base_w/LRG3_ELG1/model.pt
+        ELG2: /path/to/base_w/ELG2/model.pt
+        QSO: /path/to/base_w/QSO/model.pt
+        Lya_QSO: /path/to/base_w/Lya_QSO/model.pt
     base_w_wa:
-      BGS: /path/to/base_w_wa/BGS/model.pt
-      LRG1: /path/to/base_w_wa/LRG1/model.pt
-      LRG2: /path/to/base_w_wa/LRG2/model.pt
-      LRG3_ELG1: /path/to/base_w_wa/LRG3_ELG1/model.pt
-      ELG2: /path/to/base_w_wa/ELG2/model.pt
-      QSO: /path/to/base_w_wa/QSO/model.pt
-      Lya_QSO: /path/to/base_w_wa/Lya_QSO/model.pt
+      config:
+        BGS: /path/to/base_w_wa/BGS/model.pt
+        LRG1: /path/to/base_w_wa/LRG1/model.pt
+        LRG2: /path/to/base_w_wa/LRG2/model.pt
+        LRG3_ELG1: /path/to/base_w_wa/LRG3_ELG1/model.pt
+        ELG2: /path/to/base_w_wa/ELG2/model.pt
+        QSO: /path/to/base_w_wa/QSO/model.pt
+        Lya_QSO: /path/to/base_w_wa/Lya_QSO/model.pt
     base_omegak_w_wa:
-      BGS: config/v2/BGS.pt
-      LRG1: config/v2/LRG1.pt
-      LRG2: config/v2/LRG2.pt
-      LRG3_ELG1: config/v2/LRG3_ELG1.pt
-      ELG2: config/v2/ELG2.pt
-      QSO: config/v2/QSO.pt
-      Lya_QSO: null
+      config:
+        BGS: config/v2/BGS.pt
+        LRG1: config/v2/LRG1.pt
+        LRG2: config/v2/LRG2.pt
+        LRG3_ELG1: config/v2/LRG3_ELG1.pt
+        ELG2: config/v2/ELG2.pt
+        QSO: config/v2/QSO.pt
+        Lya_QSO: null

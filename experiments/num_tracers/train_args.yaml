@@ -176,6 +176,7 @@ base_omegak_w_wa:
   nf_seed: 1
   prior_args_path: prior_args_hrdrag.yaml
   dataset: dr1
+  emulator_space: config
   flow_type: NAF
   transform_input: true
   input_transform_type: marginal
