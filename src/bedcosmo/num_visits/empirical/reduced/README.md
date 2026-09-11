@@ -32,6 +32,7 @@ features: one shape coordinate, scale, and redshift.
 | `compare_eazy_family_embeddings` | Test PCA variance cutoffs and standardized versus raw PC scores. |
 | `scan_hdbscan_family_hyperparameters` | Independently scan retained PC count, HDBSCAN minimum cluster size, minimum samples, and EOM/leaf selection. |
 | `bootstrap_hdbscan_family_stability` | Refit PCA and HDBSCAN on repeated DESI subsamples to test family reproducibility, splits, and merges. |
+| `compare_family_reduced_basis_utility` | Rank family solutions by the completeness, purity, and total DESI coverage of their selected reduced-template bases. |
 | `plot_family_spectral_features` | Compare reconstructed family spectra, continua, absorption indices, emission EWs, and the Balmer decrement. |
 | `plot_eazy_basis_representativeness` | Diagnose full-bank template usage, omission losses, and PCA reconstruction fidelity. |
 | `plot_eazy_dominant_cohort_traits` | Older exploratory T1/T7 majority-cohort diagnostic; not part of the recommended discovery workflow. |
@@ -175,6 +176,20 @@ artificially change HDBSCAN densities. The two density-count thresholds are
 scaled by the sampled fraction (300/30 becomes 240/24 at 80%) so their
 population meaning remains comparable; use `--no-scale-density-counts` to test
 fixed absolute thresholds instead.
+
+Clustering stability is a guardrail rather than the final selection objective.
+Compare candidate family solutions by their downstream reduced-template bases:
+
+```bash
+python -m bedcosmo.num_visits.empirical.reduced.compare_family_reduced_basis_utility \
+  --build-name empirical_prior/eazy12 \
+  --cohort-root experiments/num_visits/plots/reduced_template_cohorts/eazy12
+```
+
+For every family, this applies the same 99%-supported template pool and balanced
+completeness/purity selection used by the discovery overview. It reports both
+family-conditional performance and the end-to-end fraction of all DESI spectra
+that are assigned to a family and pass that family's selected reduced basis.
 
 ## 3. Build reduced empirical priors
 

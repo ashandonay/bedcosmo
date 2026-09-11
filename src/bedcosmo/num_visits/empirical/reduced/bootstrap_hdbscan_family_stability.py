@@ -75,18 +75,41 @@ def parse_config(value: str) -> ClusterConfig:
     return ClusterConfig(n_components, min_cluster_size, min_samples, method)
 
 
-def fit_embedding(ilr: np.ndarray, config: ClusterConfig, scaling: str) -> np.ndarray:
+def embedding_scores(ilr: np.ndarray, config: ClusterConfig, scaling: str) -> np.ndarray:
     pca = PCA(n_components=config.n_components).fit(ilr)
     scores = pca.transform(ilr)
     if scaling == "standardized":
         scores = scores / np.sqrt(pca.explained_variance_)[None, :]
     elif scaling != "raw":
         raise ValueError(f"Unknown PCA scaling {scaling!r}")
+    return scores
+
+
+def fit_embedding(ilr: np.ndarray, config: ClusterConfig, scaling: str) -> np.ndarray:
+    scores = embedding_scores(ilr, config, scaling)
     return HDBSCAN(
         min_cluster_size=config.min_cluster_size,
         min_samples=config.min_samples,
         cluster_selection_method=config.selection_method,
     ).fit_predict(scores)
+
+
+def fit_ordered_embedding(ilr: np.ndarray, config: ClusterConfig, scaling: str) -> np.ndarray:
+    """Fit and number clusters by their PC1/PC2 centers like family discovery."""
+    scores = embedding_scores(ilr, config, scaling)
+    raw_labels = HDBSCAN(
+        min_cluster_size=config.min_cluster_size,
+        min_samples=config.min_samples,
+        cluster_selection_method=config.selection_method,
+    ).fit_predict(scores)
+    clusters = [int(value) for value in np.unique(raw_labels) if value >= 0]
+    clusters.sort(
+        key=lambda value: tuple(
+            np.mean(scores[raw_labels == value, : min(2, scores.shape[1])], axis=0)
+        )
+    )
+    relabel = {old: new + 1 for new, old in enumerate(clusters)}
+    return np.asarray([relabel.get(int(value), 0) for value in raw_labels], dtype=int)
 
 
 def _pair_count(counts: np.ndarray) -> float:
