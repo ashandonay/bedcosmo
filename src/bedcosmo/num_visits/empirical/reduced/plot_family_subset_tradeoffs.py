@@ -23,6 +23,7 @@ def select_family_candidates(
     min_completeness: float = 0.0,
     min_purity: float = 0.0,
     max_templates: int | None = None,
+    supported_templates: set[str] | None = None,
 ) -> pd.DataFrame:
     """Return a reproducibly ordered table of subsets tested for one family."""
     family = family.upper()
@@ -36,10 +37,36 @@ def select_family_candidates(
     ]
     if max_templates is not None:
         selected = selected.loc[selected["n_templates"] <= max_templates]
+    if supported_templates is not None:
+        selected = selected.loc[
+            selected["templates"].map(
+                lambda value: set(str(value).split("+")).issubset(supported_templates)
+            )
+        ]
     return selected.sort_values(
         ["n_templates", "coverage_fraction", "purity_fraction", "templates"],
         ascending=[True, False, False, True],
     ).reset_index(drop=True)
+
+
+def select_family_template_pool(
+    family_weights: pd.DataFrame,
+    family: str,
+    *,
+    required_weight: float = 0.95,
+) -> tuple[list[str], float]:
+    """Find the smallest mean-weight-ranked template pool reaching a target share."""
+    if not 0 < required_weight <= 1:
+        raise ValueError("required_weight must lie in (0, 1]")
+    family = family.upper()
+    rows = family_weights.loc[family_weights["family"].str.upper() == family].copy()
+    if rows.empty:
+        raise ValueError(f"No template weights found for {family}")
+    rows = rows.sort_values(["mean_weight", "template"], ascending=[False, True])
+    cumulative = rows["mean_weight"].cumsum()
+    count = min(len(rows), int((cumulative < required_weight).sum() + 1))
+    selected = rows.head(count)
+    return selected["template"].tolist(), float(selected["mean_weight"].sum())
 
 
 def make_family_candidate_report(
@@ -48,6 +75,7 @@ def make_family_candidate_report(
     *,
     output: Path,
     top: int = 15,
+    support_description: str | None = None,
 ) -> None:
     """Compare the top subsets ranked separately by completeness and purity."""
     if top < 1:
@@ -123,7 +151,10 @@ def make_family_candidate_report(
         ax.set_axisbelow(True)
     handles, labels = axes[0].get_legend_handles_labels()
     fig.legend(handles, labels, loc="outside lower center", ncol=2, frameon=False)
-    fig.suptitle(f"{family}: reduced-template subset tradeoffs", fontsize=15)
+    title = f"{family}: reduced-template subset tradeoffs"
+    if support_description:
+        title += f"\n{support_description}"
+    fig.suptitle(title, fontsize=15)
     fig.savefig(output, dpi=180, bbox_inches="tight")
     plt.close(fig)
 
@@ -135,11 +166,23 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--family", required=True, help="Family label, for example F01")
     parser.add_argument("--build-name", default=DEFAULT_EMPIRICAL_PRIOR_DIR)
     parser.add_argument("--candidate-csv", type=Path, default=None)
+    parser.add_argument("--family-weights-csv", type=Path, default=None)
     parser.add_argument("--output", type=Path, default=None)
     parser.add_argument("--top", type=int, default=15, help="Rows shown in each ranking")
     parser.add_argument("--min-completeness", type=float, default=0.0)
     parser.add_argument("--min-purity", type=float, default=0.0)
     parser.add_argument("--max-templates", type=int, default=None)
+    parser.add_argument(
+        "--family-weight-coverage",
+        type=float,
+        default=0.95,
+        help="Cumulative mean family weight defining its supported template pool",
+    )
+    parser.add_argument(
+        "--unrestricted",
+        action="store_true",
+        help="Rank all tested subsets instead of only family-supported subsets",
+    )
     return parser.parse_args()
 
 
@@ -150,13 +193,28 @@ def main() -> None:
     family = args.family.upper()
     family_dir = get_prior_build_dir(args.build_name) / "reduced_template_cohorts/spectral_families"
     candidate_csv = args.candidate_csv or family_dir / "family_basis_candidates.csv"
+    family_weights_csv = args.family_weights_csv or family_dir / "family_template_weights.csv"
     output = args.output or family_dir / f"{family.lower()}_subset_tradeoffs.png"
+    supported_templates = None
+    support_description = "Unrestricted subset search"
+    if not args.unrestricted:
+        template_pool, achieved_weight = select_family_template_pool(
+            pd.read_csv(family_weights_csv),
+            family,
+            required_weight=args.family_weight_coverage,
+        )
+        supported_templates = set(template_pool)
+        support_description = (
+            f"{args.family_weight_coverage:.0%} family-weight pool: "
+            f"{'+'.join(template_pool)} ({achieved_weight:.1%} retained)"
+        )
     selected = select_family_candidates(
         pd.read_csv(candidate_csv),
         family,
         min_completeness=args.min_completeness,
         min_purity=args.min_purity,
         max_templates=args.max_templates,
+        supported_templates=supported_templates,
     )
     selected["completeness_rank"] = (
         selected["coverage_fraction"].rank(method="first", ascending=False).astype(int)
@@ -172,6 +230,7 @@ def main() -> None:
         family,
         output=output,
         top=args.top,
+        support_description=support_description,
     )
     print(f"Wrote {len(selected):,} {family} subset rows to {table_output}")
     print(f"Wrote top-{args.top} completeness/purity comparison to {output}")

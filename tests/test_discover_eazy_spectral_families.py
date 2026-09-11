@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from bedcosmo.num_visits.empirical.reduced.discover_eazy_spectral_families import (
     decode_family_bases,
 )
 from bedcosmo.num_visits.empirical.reduced.plot_family_subset_tradeoffs import (
     select_family_candidates,
+    select_family_template_pool,
 )
 
 
@@ -77,3 +79,36 @@ def test_select_family_candidates_filters_and_orders_subsets():
         max_templates=2,
     )
     assert selected["templates"].tolist() == ["T1+T3"]
+
+
+def test_family_supported_candidates_use_cumulative_mean_weight_pool():
+    family_weights = pd.DataFrame(
+        {
+            "family": ["F01", "F01", "F01", "F02"],
+            "template": ["T1", "T2", "T3", "T1"],
+            "mean_weight": [0.6, 0.3, 0.1, 1.0],
+        }
+    )
+    pool, retained = select_family_template_pool(
+        family_weights,
+        "f01",
+        required_weight=0.85,
+    )
+    assert pool == ["T1", "T2"]
+    assert retained == pytest.approx(0.9)
+
+    candidates = pd.DataFrame(
+        {
+            "family": ["F01", "F01", "F01"],
+            "n_templates": [1, 2, 2],
+            "templates": ["T1", "T1+T2", "T1+T3"],
+            "coverage_fraction": [0.5, 0.8, 0.9],
+            "purity_fraction": [0.5, 0.6, 0.7],
+        }
+    )
+    selected = select_family_candidates(
+        candidates,
+        "F01",
+        supported_templates=set(pool),
+    )
+    assert selected["templates"].tolist() == ["T1", "T1+T2"]

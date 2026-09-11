@@ -129,7 +129,10 @@ python -m bedcosmo.num_visits.empirical.reduced.plot_family_subset_tradeoffs \
 
 The default is the top 15 in each panel. Use `--top`, `--min-completeness`,
 `--min-purity`, and `--max-templates` to adjust the view without changing the
-original candidate table.
+original candidate table. By default, the rankings only admit combinations
+drawn from the smallest mean-weight-ranked template pool that contains 95% of
+the family's mean full-fit mixture. Use `--family-weight-coverage` to change
+that definition or `--unrestricted` to recover the exhaustive ranking.
 
 In the current EAZY12/DESI run, the 90% setting retained eight PCs and found
 thirteen dense families. This result motivated compact candidates including
