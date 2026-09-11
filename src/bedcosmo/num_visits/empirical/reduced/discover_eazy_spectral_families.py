@@ -7,6 +7,7 @@ that space and HDBSCAN identifies dense families without prescribing their
 number. Existing fixed-N cohort quality matrices are then used only as a
 decoder: for every family, choose the smallest original-template subset that
 passes the DESI-fit and LSST-color cuts for a requested fraction of members.
+For every family-subset pair, report both family completeness and subset purity.
 """
 
 from __future__ import annotations
@@ -250,13 +251,20 @@ def decode_family_bases(
         for n_templates, search in sorted(searches.items()):
             coverage = search["passes"][members].mean(axis=0)
             for subset_index, subset in enumerate(search["subsets"]):
-                passing = members & search["passes"][:, subset_index]
+                subset_passing = search["passes"][:, subset_index]
+                passing = members & subset_passing
+                passing_count = int(passing.sum())
+                subset_passing_count = int(subset_passing.sum())
                 row = {
                     "family": f"F{family:02d}",
                     "n_templates": n_templates,
                     "templates": subset_label(subset),
                     "coverage_fraction": float(coverage[subset_index]),
-                    "passing_count": int(passing.sum()),
+                    "passing_count": passing_count,
+                    "subset_passing_count": subset_passing_count,
+                    "purity_fraction": (
+                        passing_count / subset_passing_count if subset_passing_count else np.nan
+                    ),
                     "median_delta_chi2_dof": (
                         float(np.median(search["delta"][passing, subset_index]))
                         if np.any(passing)
@@ -310,10 +318,20 @@ def decode_family_bases(
                 "selected_coverage_fraction": (
                     float(selected["coverage_fraction"]) if selected else np.nan
                 ),
+                "selected_passing_count": (int(selected["passing_count"]) if selected else np.nan),
+                "selected_subset_passing_count": (
+                    int(selected["subset_passing_count"]) if selected else np.nan
+                ),
+                "selected_purity_fraction": (
+                    float(selected["purity_fraction"]) if selected else np.nan
+                ),
                 "meets_required_coverage": selected is not None,
                 "best_tested_n": int(best_tested["n_templates"]),
                 "best_tested_templates": str(best_tested["templates"]),
                 "best_tested_coverage_fraction": float(best_tested["coverage_fraction"]),
+                "best_tested_passing_count": int(best_tested["passing_count"]),
+                "best_tested_subset_passing_count": int(best_tested["subset_passing_count"]),
+                "best_tested_purity_fraction": float(best_tested["purity_fraction"]),
             }
         )
     return pd.DataFrame(summaries), pd.DataFrame(candidates)
@@ -563,7 +581,19 @@ def make_overview_figure(
     coverage = family_summary["selected_coverage_fraction"].fillna(
         family_summary["best_tested_coverage_fraction"]
     )
-    passed_counts = np.rint(coverage * family_summary["member_count"]).astype(int)
+    passed_counts = (
+        family_summary["selected_passing_count"]
+        .fillna(family_summary["best_tested_passing_count"])
+        .astype(int)
+    )
+    subset_passing_counts = (
+        family_summary["selected_subset_passing_count"]
+        .fillna(family_summary["best_tested_subset_passing_count"])
+        .astype(int)
+    )
+    purity = family_summary["selected_purity_fraction"].fillna(
+        family_summary["best_tested_purity_fraction"]
+    )
     total_counts = family_summary["member_count"].astype(int)
     failed_counts = total_counts - passed_counts
     ax_basis.barh(
@@ -592,15 +622,22 @@ def make_overview_figure(
         ax_basis.text(
             float(total_counts.iloc[position]) + text_offset,
             position,
-            f"{passed_counts.iloc[position]:,} / {total_counts.iloc[position]:,}",
+            f"complete: {passed_counts.iloc[position]:,}/{total_counts.iloc[position]:,} "
+            f"({coverage.iloc[position]:.1%})\n"
+            f"pure: {passed_counts.iloc[position]:,}/{subset_passing_counts.iloc[position]:,} "
+            f"({purity.iloc[position]:.1%})",
             va="center",
-            fontsize=8.5,
+            fontsize=7.8,
+            linespacing=1.15,
         )
     ax_basis.set_yticks(y, subset_labels)
     ax_basis.invert_yaxis()
-    ax_basis.set_xlim(0, float(total_counts.max()) * 1.18)
+    ax_basis.set_xlim(0, float(total_counts.max()) * 1.62)
     ax_basis.set_xlabel("DESI spectra")
-    ax_basis.set_title("Subset fits: dark=passed; full bar=family size", loc="left")
+    ax_basis.set_title(
+        "Displayed subset: completeness (bars) and all-DESI purity (labels)",
+        loc="left",
+    )
 
     for ax in (ax_scores, ax_weights, ax_basis):
         ax.grid(True, color=GRID, alpha=0.65, linewidth=0.7)
@@ -947,8 +984,10 @@ def main() -> None:
             "selected_n",
             "selected_templates",
             "selected_coverage_fraction",
+            "selected_purity_fraction",
             "best_tested_templates",
             "best_tested_coverage_fraction",
+            "best_tested_purity_fraction",
             "median_dn4000",
             "median_uv_to_optical_fnu",
         ]

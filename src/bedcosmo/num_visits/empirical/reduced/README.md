@@ -104,6 +104,17 @@ standardizes the retained PC scores, and applies HDBSCAN. The saved fixed-`N`
 quality matrices then identify the smallest original-template subset that
 accurately represents most members of each family.
 
+The family outputs distinguish two directions that should not be conflated:
+
+- **completeness** is the fraction of a family's members that pass a subset,
+  `P(subset passes | family)`;
+- **purity** is the fraction of all DESI spectra passing that subset that belong
+  to the family, `P(family | subset passes)`.
+
+`family_basis_candidates.csv` records both values for every tested
+family-subset pair. The overview annotates both for each family's displayed
+subset; a highly complete decoder is not necessarily a family-specific prior.
+
 In the current EAZY12/DESI run, the 90% setting retained eight PCs and found
 thirteen dense families. This result motivated compact candidates including
 `T1+T7`, `T7+T10`, and `T1+T8`; the PC vectors themselves are not passed to
