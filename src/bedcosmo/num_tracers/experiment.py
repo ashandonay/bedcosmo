@@ -1364,7 +1364,7 @@ class NumTracers(BaseExperiment, CosmologyMixin):
         """
         from desilike_emulator.util import build_model, DEFAULT_SIGMA_FLOOR
 
-        # Sigma clamps passed to decode_emulator_outputs. The floor is the
+        # Sigma clamps passed to decode_and_unscale. The floor is the
         # emulator's own convention (single-sourced from util, so it can't drift
         # from what the model was decoded with); the ceiling is a bedcosmo choice
         # (util has no default -- it defaults OFF) that caps non-detection-tail
@@ -1408,6 +1408,11 @@ class NumTracers(BaseExperiment, CosmologyMixin):
                 half = (3.0 ** 0.5) * xsg
                 n_train_lo, n_train_hi = xmu - half, xmu + half
 
+            # scale_data.py recipe recorded by train.py. Empty = unscaled (legacy).
+            # Must be passed to decode_and_unscale or σ comes back still multiplied
+            # by the scale factor (e.g. hrdrag ~ 100) and hits _SIGMA_CEILING.
+            scale_expressions = list(ckpt.get("scale_expressions") or [])
+
             self._emulators[tracer_bin] = {
                 "model": model,
                 "n_train_lo": n_train_lo,
@@ -1424,10 +1429,26 @@ class NumTracers(BaseExperiment, CosmologyMixin):
                     if ckpt.get("y_linthresh") is not None
                     else None
                 ),
+                "scale_expressions": scale_expressions,
             }
 
         if self.global_rank == 0:
             print(f"Loaded emulators for tracer bins: {list(self._emulators.keys())}")
+            scaled = {
+                tb: emu["scale_expressions"]
+                for tb, emu in self._emulators.items()
+                if emu["scale_expressions"]
+            }
+            if scaled:
+                # One line per distinct recipe so a mixed pool is obvious.
+                recipes = {}
+                for tb, exprs in scaled.items():
+                    recipes.setdefault(tuple(exprs), []).append(tb)
+                for exprs, bins in recipes.items():
+                    print(
+                        f"  scaled targets ({', '.join(bins)}): "
+                        f"y *= {' * '.join(exprs)}"
+                    )
             if self._emulator_fallback_bins:
                 print(
                     f"No emulator checkpoint for tracer bins {self._emulator_fallback_bins}; "
@@ -1440,14 +1461,15 @@ class NumTracers(BaseExperiment, CosmologyMixin):
         Args:
             tracer_bin: Key into self._emulators (e.g. 'LRG1')
             emulator_input: Tensor of shape (..., in_dim) with columns
-                [N_tracers, Om, Ok, w0, wa, hrdrag]
+                matching the checkpoint's ``param_names`` (raw / physical).
 
         Returns:
             Tensor of shape (..., n_targets) in physical units (σ ≥ sigma_floor;
             ρ from tanh decode). Target order matches the checkpoint's
-            ``target_names``.
+            ``target_names``. Checkpoints trained on scale_data.py-rewritten
+            labels are unscaled here via ``decode_and_unscale``.
         """
-        from desilike_emulator.util import decode_emulator_outputs
+        from desilike_emulator.util import decode_and_unscale
 
         emu = self._emulators[tracer_bin]
         model_dtype = next(emu["model"].parameters()).dtype
@@ -1463,9 +1485,9 @@ class NumTracers(BaseExperiment, CosmologyMixin):
         # pull rho strictly inside (-1, 1) so the assembled covariance is always
         # finite and every 2x2 block is strictly positive-definite. Both are
         # applied inside the decode (rho clip is always-on there; the ceiling is
-        # opt-in via sigma_ceiling and off for training/eval). In-domain values
-        # are untouched (see _SIGMA_CEILING).
-        return decode_emulator_outputs(
+        # opt-in via sigma_ceiling and off for training/eval). Floor/ceiling run
+        # AFTER unscaling so they keep physical units (see _SIGMA_CEILING).
+        return decode_and_unscale(
             y_norm,
             y_mu,
             y_sigma,
@@ -1474,6 +1496,9 @@ class NumTracers(BaseExperiment, CosmologyMixin):
             y_linthresh=emu["y_linthresh"],
             sigma_floor=self._sigma_floor,
             sigma_ceiling=self._sigma_ceiling,
+            scale_expressions=emu["scale_expressions"],
+            x_raw=x,
+            param_names=emu["param_names"],
         )
 
     # How far outside the trained N_tracers box counts as "gross" extrapolation
@@ -1544,13 +1569,15 @@ class NumTracers(BaseExperiment, CosmologyMixin):
     # non-finite -- the training generator discards those rows -- so the emulator
     # has no signal there and its decode's expm1 overflows sigma to +inf, which
     # poisons the assembled covariance and crashes the MultivariateNormal
-    # Cholesky. Passing this as ``sigma_ceiling`` to decode_emulator_outputs
+    # Cholesky. Passing this as ``sigma_ceiling`` to decode_and_unscale
     # caps sigma to a finite value that reproduces the true "no information"
-    # verdict (precision -> 0) instead of crashing. Chosen to never touch
-    # in-domain values: it sits far above any real forecast (in-domain
-    # sigma <~ 1e2, training-tail finite max ~1.5e7). The companion rho clip to
-    # strictly inside (-1, 1) -- which keeps every 2x2 block PD -- lives in the
-    # decode itself (util._RHO_CLIP), always-on, mirroring the forward transform.
+    # verdict (precision -> 0) instead of crashing. Applied after unscaling so
+    # a scale_data.py factor (e.g. hrdrag) is not mistaken for a non-detection.
+    # Chosen to never touch in-domain values: it sits far above any real
+    # forecast (in-domain sigma <~ 1e2, training-tail finite max ~1.5e7). The
+    # companion rho clip to strictly inside (-1, 1) -- which keeps every 2x2
+    # block PD -- lives in the decode itself (util._RHO_CLIP), always-on,
+    # mirroring the forward transform.
     _SIGMA_CEILING = 1.0e8          # cap on decoded sigma (encodes zero precision)
 
     # Maps emulator tracer-bin keys (models.yaml likelihood_emulator) to the
