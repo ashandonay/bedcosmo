@@ -7,6 +7,7 @@ that space and HDBSCAN identifies dense families without prescribing their
 number. Existing fixed-N cohort quality matrices are then used only as a
 decoder: for every family, choose the smallest original-template subset that
 passes the DESI-fit and LSST-color cuts for a requested fraction of members.
+For every family-subset pair, report both family completeness and subset purity.
 """
 
 from __future__ import annotations
@@ -31,6 +32,7 @@ except ImportError as error:  # pragma: no cover - depends on the local analysis
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
+from matplotlib.ticker import PercentFormatter  # noqa: E402
 
 from ..paths import (  # noqa: E402
     DEFAULT_EMPIRICAL_PRIOR_DIR,
@@ -47,6 +49,11 @@ from ..templates import (  # noqa: E402
     DEFAULT_TEMPLATE_NORM_MIN_AA,
     DEFAULT_TEMPLATE_PARAM_12D,
     load_eazy_templates,
+)
+from .plot_family_subset_tradeoffs import (  # noqa: E402
+    DEFAULT_FAMILY_WEIGHT_COVERAGE,
+    select_family_candidates,
+    select_family_template_pool,
 )
 
 INK = "#25272B"
@@ -245,18 +252,27 @@ def decode_family_bases(
     candidates: list[dict[str, object]] = []
     for family in sorted(value for value in np.unique(labels) if value > 0):
         members = labels == family
+        family_member_count = int(members.sum())
         family_candidates: list[dict[str, object]] = []
         best_by_n: list[dict[str, object]] = []
         for n_templates, search in sorted(searches.items()):
             coverage = search["passes"][members].mean(axis=0)
             for subset_index, subset in enumerate(search["subsets"]):
-                passing = members & search["passes"][:, subset_index]
+                subset_passing = search["passes"][:, subset_index]
+                passing = members & subset_passing
+                passing_count = int(passing.sum())
+                subset_passing_count = int(subset_passing.sum())
                 row = {
                     "family": f"F{family:02d}",
+                    "family_member_count": family_member_count,
                     "n_templates": n_templates,
                     "templates": subset_label(subset),
                     "coverage_fraction": float(coverage[subset_index]),
-                    "passing_count": int(passing.sum()),
+                    "passing_count": passing_count,
+                    "subset_passing_count": subset_passing_count,
+                    "purity_fraction": (
+                        passing_count / subset_passing_count if subset_passing_count else np.nan
+                    ),
                     "median_delta_chi2_dof": (
                         float(np.median(search["delta"][passing, subset_index]))
                         if np.any(passing)
@@ -310,10 +326,20 @@ def decode_family_bases(
                 "selected_coverage_fraction": (
                     float(selected["coverage_fraction"]) if selected else np.nan
                 ),
+                "selected_passing_count": (int(selected["passing_count"]) if selected else np.nan),
+                "selected_subset_passing_count": (
+                    int(selected["subset_passing_count"]) if selected else np.nan
+                ),
+                "selected_purity_fraction": (
+                    float(selected["purity_fraction"]) if selected else np.nan
+                ),
                 "meets_required_coverage": selected is not None,
                 "best_tested_n": int(best_tested["n_templates"]),
                 "best_tested_templates": str(best_tested["templates"]),
                 "best_tested_coverage_fraction": float(best_tested["coverage_fraction"]),
+                "best_tested_passing_count": int(best_tested["passing_count"]),
+                "best_tested_subset_passing_count": int(best_tested["subset_passing_count"]),
+                "best_tested_purity_fraction": float(best_tested["purity_fraction"]),
             }
         )
     return pd.DataFrame(summaries), pd.DataFrame(candidates)
@@ -431,6 +457,51 @@ def summarize_family_properties(
                 summary.loc[family, f"p10_{feature}"] = float(np.percentile(values, 10))
                 summary.loc[family, f"p90_{feature}"] = float(np.percentile(values, 90))
     return summary.reset_index(drop=True), pd.DataFrame(weight_rows)
+
+
+def select_balanced_family_bases(
+    candidates: pd.DataFrame,
+    family_weights: pd.DataFrame,
+    *,
+    family_weight_coverage: float = DEFAULT_FAMILY_WEIGHT_COVERAGE,
+) -> pd.DataFrame:
+    """Select each family's highest harmonic-mean completeness/purity subset."""
+    rows: list[dict[str, object]] = []
+    for family in sorted(candidates["family"].unique()):
+        template_pool, retained_weight = select_family_template_pool(
+            family_weights,
+            family,
+            required_weight=family_weight_coverage,
+        )
+        supported = select_family_candidates(
+            candidates,
+            family,
+            supported_templates=set(template_pool),
+        ).copy()
+        completeness = supported["coverage_fraction"]
+        purity = supported["purity_fraction"].fillna(0.0)
+        supported["balanced_f1"] = (2 * completeness * purity / (completeness + purity)).fillna(
+            0.0
+        )
+        best = supported.sort_values(
+            ["balanced_f1", "n_templates", "coverage_fraction"],
+            ascending=[False, True, False],
+        ).iloc[0]
+        rows.append(
+            {
+                "family": family,
+                "balanced_n": int(best["n_templates"]),
+                "balanced_templates": str(best["templates"]),
+                "balanced_completeness": float(best["coverage_fraction"]),
+                "balanced_purity": float(best["purity_fraction"]),
+                "balanced_f1": float(best["balanced_f1"]),
+                "balanced_passing_count": int(best["passing_count"]),
+                "balanced_subset_passing_count": int(best["subset_passing_count"]),
+                "family_supported_templates": "+".join(template_pool),
+                "family_supported_weight": retained_weight,
+            }
+        )
+    return pd.DataFrame(rows)
 
 
 def make_overview_figure(
@@ -560,47 +631,63 @@ def make_overview_figure(
     ax_weights.set_title("How each family occupies the 12D basis", loc="left")
     handles, legend_labels = ax_weights.get_legend_handles_labels()
 
-    coverage = family_summary["selected_coverage_fraction"].fillna(
-        family_summary["best_tested_coverage_fraction"]
-    )
-    passed_counts = np.rint(coverage * family_summary["member_count"]).astype(int)
-    total_counts = family_summary["member_count"].astype(int)
-    failed_counts = total_counts - passed_counts
-    ax_basis.barh(
-        y,
-        passed_counts,
+    coverage = family_summary["balanced_completeness"]
+    purity = family_summary["balanced_purity"]
+    balanced_f1 = family_summary["balanced_f1"]
+    passed_counts = family_summary["balanced_passing_count"].astype(int)
+    subset_passing_counts = family_summary["balanced_subset_passing_count"].astype(int)
+    family_counts = family_summary["member_count"].astype(int)
+    bar_height = 0.34
+    completeness_bars = ax_basis.barh(
+        y - bar_height / 1.8,
+        coverage,
+        height=bar_height,
         color="#3366CC",
-        edgecolor="#3366CC",
-        linewidth=0.8,
-        label="passed",
+        label="Completeness",
     )
-    ax_basis.barh(
-        y,
-        failed_counts,
-        left=passed_counts,
-        color="#C8D6EC",
-        edgecolor="#3366CC",
-        linewidth=0.8,
-        label="did not pass",
+    purity_bars = ax_basis.barh(
+        y + bar_height / 1.8,
+        purity,
+        height=bar_height,
+        color="#E07A3F",
+        label="Purity",
     )
-    subset_labels = []
-    text_offset = max(float(total_counts.max()) * 0.012, 5.0)
-    for position, row in enumerate(family_summary.itertuples(index=False)):
-        subset_labels.append(
-            row.selected_templates if row.meets_required_coverage else row.best_tested_templates
-        )
-        ax_basis.text(
-            float(total_counts.iloc[position]) + text_offset,
-            position,
-            f"{passed_counts.iloc[position]:,} / {total_counts.iloc[position]:,}",
-            va="center",
-            fontsize=8.5,
-        )
+    subset_labels = [
+        f"{templates}\nF1 = {score:.1%}"
+        for templates, score in zip(family_summary["balanced_templates"], balanced_f1)
+    ]
+    ax_basis.bar_label(
+        completeness_bars,
+        labels=[
+            f"{value:.1%} ({passed:,}/{total:,})"
+            for value, passed, total in zip(coverage, passed_counts, family_counts)
+        ],
+        padding=3,
+        fontsize=7.5,
+    )
+    ax_basis.bar_label(
+        purity_bars,
+        labels=[
+            f"{value:.1%} ({passed:,}/{total:,})"
+            for value, passed, total in zip(purity, passed_counts, subset_passing_counts)
+        ],
+        padding=3,
+        fontsize=7.5,
+    )
     ax_basis.set_yticks(y, subset_labels)
     ax_basis.invert_yaxis()
-    ax_basis.set_xlim(0, float(total_counts.max()) * 1.18)
-    ax_basis.set_xlabel("DESI spectra")
-    ax_basis.set_title("Subset fits: dark=passed; full bar=family size", loc="left")
+    ax_basis.set_xlim(0, 1.38)
+    ax_basis.set_xticks(np.linspace(0, 1, 6))
+    ax_basis.xaxis.set_major_formatter(PercentFormatter(1.0))
+    ax_basis.set_xlabel("Spectra passing quality threshold")
+    ax_basis.set_title("Best balanced F1 subset per family", loc="left")
+    ax_basis.legend(
+        loc="upper center",
+        bbox_to_anchor=(0.5, -0.12),
+        ncol=2,
+        frameon=False,
+        fontsize=8,
+    )
 
     for ax in (ax_scores, ax_weights, ax_basis):
         ax.grid(True, color=GRID, alpha=0.65, linewidth=0.7)
@@ -792,6 +879,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--min-cluster-size", type=int, default=300)
     parser.add_argument("--min-samples", type=int, default=30)
     parser.add_argument("--required-family-coverage", type=float, default=0.80)
+    parser.add_argument(
+        "--family-weight-coverage",
+        type=float,
+        default=DEFAULT_FAMILY_WEIGHT_COVERAGE,
+        help="Cumulative mean family weight defining supported template pools",
+    )
     parser.add_argument("--max-chi2-dof", type=float, default=1.2)
     parser.add_argument("--max-delta-chi2-dof", type=float, default=0.05)
     parser.add_argument("--max-color-rms", type=float, default=0.02)
@@ -809,6 +902,8 @@ def main() -> None:
         raise ValueError("--variance-threshold must be in (0, 1]")
     if not 0 < args.required_family_coverage <= 1:
         raise ValueError("--required-family-coverage must be in (0, 1]")
+    if not 0 < args.family_weight_coverage <= 1:
+        raise ValueError("--family-weight-coverage must be in (0, 1]")
 
     table, weights = load_fit_population(Path(weights_csv))
     pca, scores, labels, probabilities = fit_population_embedding(
@@ -860,6 +955,17 @@ def main() -> None:
         table,
         weights,
         features,
+    )
+    balanced_bases = select_balanced_family_bases(
+        candidates,
+        family_weights,
+        family_weight_coverage=args.family_weight_coverage,
+    )
+    family_summary = family_summary.merge(
+        balanced_bases,
+        on="family",
+        how="left",
+        validate="one_to_one",
     )
 
     output_dir = Path(output_dir)
@@ -947,8 +1053,10 @@ def main() -> None:
             "selected_n",
             "selected_templates",
             "selected_coverage_fraction",
+            "selected_purity_fraction",
             "best_tested_templates",
             "best_tested_coverage_fraction",
+            "best_tested_purity_fraction",
             "median_dn4000",
             "median_uv_to_optical_fnu",
         ]
