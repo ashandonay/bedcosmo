@@ -94,19 +94,28 @@ def make_family_candidate_report(
         )
         ax.bar_label(
             complete,
-            labels=[f"{value:.1%}" for value in shown["coverage_fraction"]],
+            labels=[
+                f"{row.coverage_fraction:.1%} "
+                f"({int(row.passing_count):,}/{int(row.family_member_count):,})"
+                for row in shown.itertuples(index=False)
+            ],
             padding=2,
             fontsize=7,
         )
         ax.bar_label(
             pure,
-            labels=[f"{value:.1%}" for value in shown["purity_fraction"].fillna(0.0)],
+            labels=[
+                f"{row.purity_fraction:.1%} "
+                f"({int(row.passing_count):,}/{int(row.subset_passing_count):,})"
+                for row in shown.itertuples(index=False)
+            ],
             padding=2,
             fontsize=7,
         )
         ax.set_yticks(y, shown["templates"])
         ax.invert_yaxis()
-        ax.set_xlim(0, 1.12)
+        ax.set_xlim(0, 1.42)
+        ax.set_xticks([0.0, 0.2, 0.4, 0.6, 0.8, 1.0])
         ax.xaxis.set_major_formatter(PercentFormatter(1.0))
         ax.set_xlabel("Fraction")
         ax.set_title(title, loc="left")

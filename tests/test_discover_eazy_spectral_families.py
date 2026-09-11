@@ -46,6 +46,7 @@ def test_decode_family_bases_reports_completeness_and_purity():
         (candidates["family"] == "F01") & (candidates["templates"] == "T1+T2")
     ].iloc[0]
     assert f01_t1_t2["passing_count"] == 2
+    assert f01_t1_t2["family_member_count"] == 3
     assert f01_t1_t2["subset_passing_count"] == 4
     assert f01_t1_t2["coverage_fraction"] == 2 / 3
     assert f01_t1_t2["purity_fraction"] == 1 / 2

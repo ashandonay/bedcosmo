@@ -247,6 +247,7 @@ def decode_family_bases(
     candidates: list[dict[str, object]] = []
     for family in sorted(value for value in np.unique(labels) if value > 0):
         members = labels == family
+        family_member_count = int(members.sum())
         family_candidates: list[dict[str, object]] = []
         best_by_n: list[dict[str, object]] = []
         for n_templates, search in sorted(searches.items()):
@@ -258,6 +259,7 @@ def decode_family_bases(
                 subset_passing_count = int(subset_passing.sum())
                 row = {
                     "family": f"F{family:02d}",
+                    "family_member_count": family_member_count,
                     "n_templates": n_templates,
                     "templates": subset_label(subset),
                     "coverage_fraction": float(coverage[subset_index]),
@@ -585,6 +587,17 @@ def make_overview_figure(
     purity = family_summary["selected_purity_fraction"].fillna(
         family_summary["best_tested_purity_fraction"]
     )
+    passed_counts = (
+        family_summary["selected_passing_count"]
+        .fillna(family_summary["best_tested_passing_count"])
+        .astype(int)
+    )
+    subset_passing_counts = (
+        family_summary["selected_subset_passing_count"]
+        .fillna(family_summary["best_tested_subset_passing_count"])
+        .astype(int)
+    )
+    family_counts = family_summary["member_count"].astype(int)
     bar_height = 0.34
     completeness_bars = ax_basis.barh(
         y - bar_height / 1.8,
@@ -607,19 +620,26 @@ def make_overview_figure(
         )
     ax_basis.bar_label(
         completeness_bars,
-        labels=[f"{value:.1%}" for value in coverage],
+        labels=[
+            f"{value:.1%} ({passed:,}/{total:,})"
+            for value, passed, total in zip(coverage, passed_counts, family_counts)
+        ],
         padding=3,
         fontsize=7.5,
     )
     ax_basis.bar_label(
         purity_bars,
-        labels=[f"{value:.1%}" for value in purity],
+        labels=[
+            f"{value:.1%} ({passed:,}/{total:,})"
+            for value, passed, total in zip(purity, passed_counts, subset_passing_counts)
+        ],
         padding=3,
         fontsize=7.5,
     )
     ax_basis.set_yticks(y, subset_labels)
     ax_basis.invert_yaxis()
-    ax_basis.set_xlim(0, 1.12)
+    ax_basis.set_xlim(0, 1.38)
+    ax_basis.set_xticks(np.linspace(0, 1, 6))
     ax_basis.xaxis.set_major_formatter(PercentFormatter(1.0))
     ax_basis.set_xlabel("Spectra passing quality threshold")
     ax_basis.set_title("Displayed subset: completeness and all-DESI purity", loc="left")
