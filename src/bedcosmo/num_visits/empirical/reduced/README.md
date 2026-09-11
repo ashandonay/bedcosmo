@@ -186,10 +186,12 @@ python -m bedcosmo.num_visits.empirical.reduced.compare_family_reduced_basis_uti
   --cohort-root experiments/num_visits/plots/reduced_template_cohorts/eazy12
 ```
 
-For every family, this applies the same 99%-supported template pool and balanced
-completeness/purity selection used by the discovery overview. It reports both
-family-conditional performance and the end-to-end fraction of all DESI spectra
-that are assigned to a family and pass that family's selected reduced basis.
+The default proposal views use 6, 8, and 9 PCs while holding HDBSCAN fixed at
+300/30 EOM. For every family, this applies the same 99%-supported template pool
+used by the discovery overview and retains every supported family/template-set
+pairing. It writes a candidate catalog with completeness, purity, passing count,
+basis dimension, Pareto flags, and (when available) bootstrap stability. PC count
+is retained as provenance rather than treated as the optimization target.
 
 ## 3. Build reduced empirical priors
 

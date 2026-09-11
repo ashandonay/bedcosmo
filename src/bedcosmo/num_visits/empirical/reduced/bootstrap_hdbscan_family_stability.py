@@ -94,8 +94,14 @@ def fit_embedding(ilr: np.ndarray, config: ClusterConfig, scaling: str) -> np.nd
     ).fit_predict(scores)
 
 
-def fit_ordered_embedding(ilr: np.ndarray, config: ClusterConfig, scaling: str) -> np.ndarray:
-    """Fit and number clusters by their PC1/PC2 centers like family discovery."""
+def fit_ordered_embedding(
+    ilr: np.ndarray,
+    config: ClusterConfig,
+    scaling: str,
+    *,
+    family_labels: bool = False,
+) -> np.ndarray:
+    """Fit and order clusters by their PC1/PC2 centers like family discovery."""
     scores = embedding_scores(ilr, config, scaling)
     raw_labels = HDBSCAN(
         min_cluster_size=config.min_cluster_size,
@@ -108,8 +114,11 @@ def fit_ordered_embedding(ilr: np.ndarray, config: ClusterConfig, scaling: str) 
             np.mean(scores[raw_labels == value, : min(2, scores.shape[1])], axis=0)
         )
     )
-    relabel = {old: new + 1 for new, old in enumerate(clusters)}
-    return np.asarray([relabel.get(int(value), 0) for value in raw_labels], dtype=int)
+    if family_labels:
+        relabel = {old: new + 1 for new, old in enumerate(clusters)}
+        return np.asarray([relabel.get(int(value), 0) for value in raw_labels], dtype=int)
+    relabel = {old: new for new, old in enumerate(clusters)}
+    return np.asarray([relabel.get(int(value), -1) for value in raw_labels], dtype=int)
 
 
 def _pair_count(counts: np.ndarray) -> float:
@@ -215,7 +224,7 @@ def run_bootstrap_stability(
     total = len(configs) * repetitions
     completed = 0
     for config in configs:
-        reference = fit_embedding(ilr, config, scaling)
+        reference = fit_ordered_embedding(ilr, config, scaling)
         resample_config = config.scaled_counts(sample_fraction) if scale_density_counts else config
         reference_clustered = reference >= 0
         reference_rows.append(
@@ -231,7 +240,7 @@ def run_bootstrap_stability(
             }
         )
         for repetition, indices in enumerate(subsamples):
-            candidate = fit_embedding(ilr[indices], resample_config, scaling)
+            candidate = fit_ordered_embedding(ilr[indices], resample_config, scaling)
             reference_sample = reference[indices]
             reference_assigned = reference_sample >= 0
             candidate_assigned = candidate >= 0

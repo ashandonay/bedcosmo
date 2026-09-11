@@ -3,6 +3,7 @@
 import pandas as pd
 
 from bedcosmo.num_visits.empirical.reduced.compare_family_reduced_basis_utility import (
+    mark_pareto_front,
     summarize_selected_bases,
 )
 
@@ -25,3 +26,17 @@ def test_summarize_selected_bases_uses_end_to_end_population_denominators():
     assert result["micro_purity"] == 80 / 175
     assert result["member_weighted_family_f1"] == (100 * 0.8 + 50 * 0.4) / 150
     assert result["median_selected_n"] == 3
+
+
+def test_mark_pareto_front_preserves_quality_tradeoffs():
+    candidates = pd.DataFrame(
+        {
+            "completeness": [0.9, 0.8, 0.7, 0.9],
+            "purity": [0.5, 0.7, 0.4, 0.5],
+            "passing_count": [100, 80, 200, 120],
+            "n_templates": [2, 2, 2, 1],
+        }
+    )
+    marked = mark_pareto_front(candidates)
+    assert marked["pareto_completeness_purity"].tolist() == [True, True, False, True]
+    assert marked["pareto_quality_size_dimension"].tolist() == [False, True, True, True]
