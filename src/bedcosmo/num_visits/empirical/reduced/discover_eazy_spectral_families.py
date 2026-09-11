@@ -32,6 +32,7 @@ except ImportError as error:  # pragma: no cover - depends on the local analysis
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
+from matplotlib.ticker import PercentFormatter  # noqa: E402
 
 from ..paths import (  # noqa: E402
     DEFAULT_EMPIRICAL_PRIOR_DIR,
@@ -581,62 +582,53 @@ def make_overview_figure(
     coverage = family_summary["selected_coverage_fraction"].fillna(
         family_summary["best_tested_coverage_fraction"]
     )
-    passed_counts = (
-        family_summary["selected_passing_count"]
-        .fillna(family_summary["best_tested_passing_count"])
-        .astype(int)
-    )
-    subset_passing_counts = (
-        family_summary["selected_subset_passing_count"]
-        .fillna(family_summary["best_tested_subset_passing_count"])
-        .astype(int)
-    )
     purity = family_summary["selected_purity_fraction"].fillna(
         family_summary["best_tested_purity_fraction"]
     )
-    total_counts = family_summary["member_count"].astype(int)
-    failed_counts = total_counts - passed_counts
-    ax_basis.barh(
-        y,
-        passed_counts,
+    bar_height = 0.34
+    completeness_bars = ax_basis.barh(
+        y - bar_height / 1.8,
+        coverage,
+        height=bar_height,
         color="#3366CC",
-        edgecolor="#3366CC",
-        linewidth=0.8,
-        label="passed",
+        label="Completeness",
     )
-    ax_basis.barh(
-        y,
-        failed_counts,
-        left=passed_counts,
-        color="#C8D6EC",
-        edgecolor="#3366CC",
-        linewidth=0.8,
-        label="did not pass",
+    purity_bars = ax_basis.barh(
+        y + bar_height / 1.8,
+        purity,
+        height=bar_height,
+        color="#E07A3F",
+        label="Purity",
     )
     subset_labels = []
-    text_offset = max(float(total_counts.max()) * 0.012, 5.0)
-    for position, row in enumerate(family_summary.itertuples(index=False)):
+    for row in family_summary.itertuples(index=False):
         subset_labels.append(
             row.selected_templates if row.meets_required_coverage else row.best_tested_templates
         )
-        ax_basis.text(
-            float(total_counts.iloc[position]) + text_offset,
-            position,
-            f"complete: {passed_counts.iloc[position]:,}/{total_counts.iloc[position]:,} "
-            f"({coverage.iloc[position]:.1%})\n"
-            f"pure: {passed_counts.iloc[position]:,}/{subset_passing_counts.iloc[position]:,} "
-            f"({purity.iloc[position]:.1%})",
-            va="center",
-            fontsize=7.8,
-            linespacing=1.15,
-        )
+    ax_basis.bar_label(
+        completeness_bars,
+        labels=[f"{value:.1%}" for value in coverage],
+        padding=3,
+        fontsize=7.5,
+    )
+    ax_basis.bar_label(
+        purity_bars,
+        labels=[f"{value:.1%}" for value in purity],
+        padding=3,
+        fontsize=7.5,
+    )
     ax_basis.set_yticks(y, subset_labels)
     ax_basis.invert_yaxis()
-    ax_basis.set_xlim(0, float(total_counts.max()) * 1.62)
-    ax_basis.set_xlabel("DESI spectra")
-    ax_basis.set_title(
-        "Displayed subset: completeness (bars) and all-DESI purity (labels)",
-        loc="left",
+    ax_basis.set_xlim(0, 1.12)
+    ax_basis.xaxis.set_major_formatter(PercentFormatter(1.0))
+    ax_basis.set_xlabel("Spectra passing quality threshold")
+    ax_basis.set_title("Displayed subset: completeness and all-DESI purity", loc="left")
+    ax_basis.legend(
+        loc="upper center",
+        bbox_to_anchor=(0.5, -0.12),
+        ncol=2,
+        frameon=False,
+        fontsize=8,
     )
 
     for ax in (ax_scores, ax_weights, ax_basis):

@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import numpy as np
+import pandas as pd
 
 from bedcosmo.num_visits.empirical.reduced.discover_eazy_spectral_families import (
     decode_family_bases,
+)
+from bedcosmo.num_visits.empirical.reduced.plot_family_subset_tradeoffs import (
+    select_family_candidates,
 )
 
 
@@ -52,3 +56,23 @@ def test_decode_family_bases_reports_completeness_and_purity():
     assert f01["selected_subset_passing_count"] == 4
     assert f01["selected_coverage_fraction"] == 1.0
     assert f01["selected_purity_fraction"] == 3 / 4
+
+
+def test_select_family_candidates_filters_and_orders_subsets():
+    candidates = pd.DataFrame(
+        {
+            "family": ["F01", "F01", "F01", "F02"],
+            "n_templates": [2, 3, 2, 2],
+            "templates": ["T1+T2", "T1+T2+T3", "T1+T3", "T1+T2"],
+            "coverage_fraction": [0.8, 0.95, 0.9, 1.0],
+            "purity_fraction": [0.7, 0.9, 0.6, 1.0],
+        }
+    )
+    selected = select_family_candidates(
+        candidates,
+        "f01",
+        min_completeness=0.85,
+        min_purity=0.5,
+        max_templates=2,
+    )
+    assert selected["templates"].tolist() == ["T1+T3"]
