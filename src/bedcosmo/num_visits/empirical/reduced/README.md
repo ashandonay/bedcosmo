@@ -28,7 +28,7 @@ features: one shape coordinate, scale, and redshift.
 | `plot_template_subset_examples` | Plot observed DESI spectra, full fits, reduced fits, and individual template contributions. |
 | `summarize_template_composition` | Summarize integrated flux shares and template-dominance fractions within fixed-`N` cohorts. |
 | `discover_eazy_spectral_families` | Transform full-fit weights to ILR space, apply PCA, cluster with HDBSCAN, and decode families back to sparse original-template subsets. |
-| `plot_family_subset_tradeoffs` | Generate a paginated paired-bar report of completeness and purity for every tested subset of one family. |
+| `plot_family_subset_tradeoffs` | Compare the top subsets of one family when ranked separately by completeness and purity. |
 | `compare_eazy_family_embeddings` | Test PCA variance cutoffs and standardized versus raw PC scores. |
 | `plot_family_spectral_features` | Compare reconstructed family spectra, continua, absorption indices, emission EWs, and the Balmer decrement. |
 | `plot_eazy_basis_representativeness` | Diagnose full-bank template usage, omission losses, and PCA reconstruction fidelity. |
@@ -116,8 +116,10 @@ The family outputs distinguish two directions that should not be conflated:
 family-subset pair. The overview annotates both for each family's displayed
 subset; a highly complete decoder is not necessarily a family-specific prior.
 
-To inspect every tested combination for one family, generate a paginated PDF
-and its identically sorted CSV:
+To inspect the best combinations for one family, generate two paired-bar
+rankings—one sorted by completeness and one by purity. Both panels show both
+metrics, while the companion CSV retains every tested combination and records
+both ranks:
 
 ```bash
 python -m bedcosmo.num_visits.empirical.reduced.plot_family_subset_tradeoffs \
@@ -125,8 +127,9 @@ python -m bedcosmo.num_visits.empirical.reduced.plot_family_subset_tradeoffs \
   --family F01
 ```
 
-The optional `--min-completeness`, `--min-purity`, and `--max-templates`
-arguments filter the report without changing the original candidate table.
+The default is the top 15 in each panel. Use `--top`, `--min-completeness`,
+`--min-purity`, and `--max-templates` to adjust the view without changing the
+original candidate table.
 
 In the current EAZY12/DESI run, the 90% setting retained eight PCs and found
 thirteen dense families. This result motivated compact candidates including
