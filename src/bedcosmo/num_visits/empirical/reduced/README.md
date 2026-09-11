@@ -30,6 +30,7 @@ features: one shape coordinate, scale, and redshift.
 | `discover_eazy_spectral_families` | Transform full-fit weights to ILR space, apply PCA, cluster with HDBSCAN, and decode families back to sparse original-template subsets. |
 | `plot_family_subset_tradeoffs` | Compare the top subsets of one family when ranked separately by completeness and purity. |
 | `compare_eazy_family_embeddings` | Test PCA variance cutoffs and standardized versus raw PC scores. |
+| `scan_hdbscan_family_hyperparameters` | Independently scan retained PC count, HDBSCAN minimum cluster size, minimum samples, and EOM/leaf selection. |
 | `plot_family_spectral_features` | Compare reconstructed family spectra, continua, absorption indices, emission EWs, and the Balmer decrement. |
 | `plot_eazy_basis_representativeness` | Diagnose full-bank template usage, omission losses, and PCA reconstruction fidelity. |
 | `plot_eazy_dominant_cohort_traits` | Older exploratory T1/T7 majority-cohort diagnostic; not part of the recommended discovery workflow. |
@@ -141,6 +142,20 @@ In the current EAZY12/DESI run, the 90% setting retained eight PCs and found
 thirteen dense families. This result motivated compact candidates including
 `T1+T7`, `T7+T10`, and `T1+T8`; the PC vectors themselves are not passed to
 EAZY or BED.
+
+The original local sensitivity check varied minimum cluster size and minimum
+samples together. For a proper independent scan of the primary clustering
+choices, run:
+
+```bash
+python -m bedcosmo.num_visits.empirical.reduced.scan_hdbscan_family_hyperparameters \
+  --build-name empirical_prior/eazy12
+```
+
+The default grid covers 6–11 retained PCs, five minimum-cluster sizes, five
+minimum-samples values, and both EOM and leaf selection (300 configurations).
+It saves the complete result table, a component-level sensitivity summary,
+metric heatmaps, and exact scan provenance.
 
 ## 3. Build reduced empirical priors
 
