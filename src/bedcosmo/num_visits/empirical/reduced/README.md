@@ -130,7 +130,7 @@ python -m bedcosmo.num_visits.empirical.reduced.plot_family_subset_tradeoffs \
 The default is the top 15 in each panel. Use `--top`, `--min-completeness`,
 `--min-purity`, and `--max-templates` to adjust the view without changing the
 original candidate table. By default, the rankings only admit combinations
-drawn from the smallest mean-weight-ranked template pool that contains 95% of
+drawn from the smallest mean-weight-ranked template pool that contains 99% of
 the family's mean full-fit mixture. Use `--family-weight-coverage` to change
 that definition or `--unrestricted` to recover the exhaustive ranking.
 

@@ -53,7 +53,7 @@ def select_family_template_pool(
     family_weights: pd.DataFrame,
     family: str,
     *,
-    required_weight: float = 0.95,
+    required_weight: float = 0.99,
 ) -> tuple[list[str], float]:
     """Find the smallest mean-weight-ranked template pool reaching a target share."""
     if not 0 < required_weight <= 1:
@@ -175,7 +175,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--family-weight-coverage",
         type=float,
-        default=0.95,
+        default=0.99,
         help="Cumulative mean family weight defining its supported template pool",
     )
     parser.add_argument(
