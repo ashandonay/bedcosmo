@@ -50,6 +50,11 @@ from ..templates import (  # noqa: E402
     DEFAULT_TEMPLATE_PARAM_12D,
     load_eazy_templates,
 )
+from .plot_family_subset_tradeoffs import (  # noqa: E402
+    DEFAULT_FAMILY_WEIGHT_COVERAGE,
+    select_family_candidates,
+    select_family_template_pool,
+)
 
 INK = "#25272B"
 MUTED = "#6B7280"
@@ -454,6 +459,51 @@ def summarize_family_properties(
     return summary.reset_index(drop=True), pd.DataFrame(weight_rows)
 
 
+def select_balanced_family_bases(
+    candidates: pd.DataFrame,
+    family_weights: pd.DataFrame,
+    *,
+    family_weight_coverage: float = DEFAULT_FAMILY_WEIGHT_COVERAGE,
+) -> pd.DataFrame:
+    """Select each family's highest harmonic-mean completeness/purity subset."""
+    rows: list[dict[str, object]] = []
+    for family in sorted(candidates["family"].unique()):
+        template_pool, retained_weight = select_family_template_pool(
+            family_weights,
+            family,
+            required_weight=family_weight_coverage,
+        )
+        supported = select_family_candidates(
+            candidates,
+            family,
+            supported_templates=set(template_pool),
+        ).copy()
+        completeness = supported["coverage_fraction"]
+        purity = supported["purity_fraction"].fillna(0.0)
+        supported["balanced_f1"] = (2 * completeness * purity / (completeness + purity)).fillna(
+            0.0
+        )
+        best = supported.sort_values(
+            ["balanced_f1", "n_templates", "coverage_fraction"],
+            ascending=[False, True, False],
+        ).iloc[0]
+        rows.append(
+            {
+                "family": family,
+                "balanced_n": int(best["n_templates"]),
+                "balanced_templates": str(best["templates"]),
+                "balanced_completeness": float(best["coverage_fraction"]),
+                "balanced_purity": float(best["purity_fraction"]),
+                "balanced_f1": float(best["balanced_f1"]),
+                "balanced_passing_count": int(best["passing_count"]),
+                "balanced_subset_passing_count": int(best["subset_passing_count"]),
+                "family_supported_templates": "+".join(template_pool),
+                "family_supported_weight": retained_weight,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
 def make_overview_figure(
     pca: PCA,
     scores: np.ndarray,
@@ -581,22 +631,11 @@ def make_overview_figure(
     ax_weights.set_title("How each family occupies the 12D basis", loc="left")
     handles, legend_labels = ax_weights.get_legend_handles_labels()
 
-    coverage = family_summary["selected_coverage_fraction"].fillna(
-        family_summary["best_tested_coverage_fraction"]
-    )
-    purity = family_summary["selected_purity_fraction"].fillna(
-        family_summary["best_tested_purity_fraction"]
-    )
-    passed_counts = (
-        family_summary["selected_passing_count"]
-        .fillna(family_summary["best_tested_passing_count"])
-        .astype(int)
-    )
-    subset_passing_counts = (
-        family_summary["selected_subset_passing_count"]
-        .fillna(family_summary["best_tested_subset_passing_count"])
-        .astype(int)
-    )
+    coverage = family_summary["balanced_completeness"]
+    purity = family_summary["balanced_purity"]
+    balanced_f1 = family_summary["balanced_f1"]
+    passed_counts = family_summary["balanced_passing_count"].astype(int)
+    subset_passing_counts = family_summary["balanced_subset_passing_count"].astype(int)
     family_counts = family_summary["member_count"].astype(int)
     bar_height = 0.34
     completeness_bars = ax_basis.barh(
@@ -613,11 +652,10 @@ def make_overview_figure(
         color="#E07A3F",
         label="Purity",
     )
-    subset_labels = []
-    for row in family_summary.itertuples(index=False):
-        subset_labels.append(
-            row.selected_templates if row.meets_required_coverage else row.best_tested_templates
-        )
+    subset_labels = [
+        f"{templates}\nF1 = {score:.1%}"
+        for templates, score in zip(family_summary["balanced_templates"], balanced_f1)
+    ]
     ax_basis.bar_label(
         completeness_bars,
         labels=[
@@ -642,7 +680,7 @@ def make_overview_figure(
     ax_basis.set_xticks(np.linspace(0, 1, 6))
     ax_basis.xaxis.set_major_formatter(PercentFormatter(1.0))
     ax_basis.set_xlabel("Spectra passing quality threshold")
-    ax_basis.set_title("Displayed subset: completeness and all-DESI purity", loc="left")
+    ax_basis.set_title("Best balanced F1 subset per family", loc="left")
     ax_basis.legend(
         loc="upper center",
         bbox_to_anchor=(0.5, -0.12),
@@ -841,6 +879,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--min-cluster-size", type=int, default=300)
     parser.add_argument("--min-samples", type=int, default=30)
     parser.add_argument("--required-family-coverage", type=float, default=0.80)
+    parser.add_argument(
+        "--family-weight-coverage",
+        type=float,
+        default=DEFAULT_FAMILY_WEIGHT_COVERAGE,
+        help="Cumulative mean family weight defining supported template pools",
+    )
     parser.add_argument("--max-chi2-dof", type=float, default=1.2)
     parser.add_argument("--max-delta-chi2-dof", type=float, default=0.05)
     parser.add_argument("--max-color-rms", type=float, default=0.02)
@@ -858,6 +902,8 @@ def main() -> None:
         raise ValueError("--variance-threshold must be in (0, 1]")
     if not 0 < args.required_family_coverage <= 1:
         raise ValueError("--required-family-coverage must be in (0, 1]")
+    if not 0 < args.family_weight_coverage <= 1:
+        raise ValueError("--family-weight-coverage must be in (0, 1]")
 
     table, weights = load_fit_population(Path(weights_csv))
     pca, scores, labels, probabilities = fit_population_embedding(
@@ -909,6 +955,17 @@ def main() -> None:
         table,
         weights,
         features,
+    )
+    balanced_bases = select_balanced_family_bases(
+        candidates,
+        family_weights,
+        family_weight_coverage=args.family_weight_coverage,
+    )
+    family_summary = family_summary.merge(
+        balanced_bases,
+        on="family",
+        how="left",
+        validate="one_to_one",
     )
 
     output_dir = Path(output_dir)

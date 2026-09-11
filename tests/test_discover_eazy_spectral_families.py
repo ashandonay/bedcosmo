@@ -8,6 +8,7 @@ import pytest
 
 from bedcosmo.num_visits.empirical.reduced.discover_eazy_spectral_families import (
     decode_family_bases,
+    select_balanced_family_bases,
 )
 from bedcosmo.num_visits.empirical.reduced.plot_family_subset_tradeoffs import (
     select_family_candidates,
@@ -112,3 +113,31 @@ def test_family_supported_candidates_use_cumulative_mean_weight_pool():
         supported_templates=set(pool),
     )
     assert selected["templates"].tolist() == ["T1", "T1+T2"]
+
+
+def test_balanced_family_basis_uses_harmonic_mean():
+    candidates = pd.DataFrame(
+        {
+            "family": ["F01", "F01"],
+            "n_templates": [1, 2],
+            "templates": ["T1", "T1+T2"],
+            "coverage_fraction": [0.9, 0.7],
+            "purity_fraction": [0.2, 0.6],
+            "passing_count": [90, 70],
+            "subset_passing_count": [450, 117],
+        }
+    )
+    family_weights = pd.DataFrame(
+        {
+            "family": ["F01", "F01"],
+            "template": ["T1", "T2"],
+            "mean_weight": [0.7, 0.3],
+        }
+    )
+    result = select_balanced_family_bases(
+        candidates,
+        family_weights,
+        family_weight_coverage=0.99,
+    ).iloc[0]
+    assert result["balanced_templates"] == "T1+T2"
+    assert result["balanced_f1"] == pytest.approx(2 * 0.7 * 0.6 / (0.7 + 0.6))

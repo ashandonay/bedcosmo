@@ -115,6 +115,9 @@ The family outputs distinguish two directions that should not be conflated:
 `family_basis_candidates.csv` records both values for every tested
 family-subset pair. The overview annotates both for each family's displayed
 subset; a highly complete decoder is not necessarily a family-specific prior.
+The overview selects the family-supported subset maximizing their harmonic
+mean, `F1 = 2 * completeness * purity / (completeness + purity)`, and shows
+its completeness, purity, and F1 together.
 
 To inspect the best combinations for one family, generate two paired-bar
 rankings—one sorted by completeness and one by purity. Both panels show both

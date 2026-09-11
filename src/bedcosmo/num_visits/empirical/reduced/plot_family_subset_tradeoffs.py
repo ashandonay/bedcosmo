@@ -15,6 +15,8 @@ from matplotlib.ticker import PercentFormatter  # noqa: E402
 
 from ..paths import DEFAULT_EMPIRICAL_PRIOR_DIR, get_prior_build_dir  # noqa: E402
 
+DEFAULT_FAMILY_WEIGHT_COVERAGE = 0.99
+
 
 def select_family_candidates(
     candidates: pd.DataFrame,
@@ -53,7 +55,7 @@ def select_family_template_pool(
     family_weights: pd.DataFrame,
     family: str,
     *,
-    required_weight: float = 0.99,
+    required_weight: float = DEFAULT_FAMILY_WEIGHT_COVERAGE,
 ) -> tuple[list[str], float]:
     """Find the smallest mean-weight-ranked template pool reaching a target share."""
     if not 0 < required_weight <= 1:
@@ -175,7 +177,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--family-weight-coverage",
         type=float,
-        default=0.99,
+        default=DEFAULT_FAMILY_WEIGHT_COVERAGE,
         help="Cumulative mean family weight defining its supported template pool",
     )
     parser.add_argument(
