@@ -31,6 +31,7 @@ features: one shape coordinate, scale, and redshift.
 | `plot_family_subset_tradeoffs` | Compare the top subsets of one family when ranked separately by completeness and purity. |
 | `compare_eazy_family_embeddings` | Test PCA variance cutoffs and standardized versus raw PC scores. |
 | `scan_hdbscan_family_hyperparameters` | Independently scan retained PC count, HDBSCAN minimum cluster size, minimum samples, and EOM/leaf selection. |
+| `bootstrap_hdbscan_family_stability` | Refit PCA and HDBSCAN on repeated DESI subsamples to test family reproducibility, splits, and merges. |
 | `plot_family_spectral_features` | Compare reconstructed family spectra, continua, absorption indices, emission EWs, and the Balmer decrement. |
 | `plot_eazy_basis_representativeness` | Diagnose full-bank template usage, omission losses, and PCA reconstruction fidelity. |
 | `plot_eazy_dominant_cohort_traits` | Older exploratory T1/T7 majority-cohort diagnostic; not part of the recommended discovery workflow. |
@@ -156,6 +157,24 @@ The default grid covers 6–11 retained PCs, five minimum-cluster sizes, five
 minimum-samples values, and both EOM and leaf selection (300 configurations).
 It saves the complete result table, a component-level sensitivity summary,
 metric heatmaps, and exact scan provenance.
+
+After identifying plausible configurations, test whether their families survive
+population perturbations with:
+
+```bash
+python -m bedcosmo.num_visits.empirical.reduced.bootstrap_hdbscan_family_stability \
+  --build-name empirical_prior/eazy12
+```
+
+The default comparison refits 6-, 7-, 8-, and 9-PC solutions with
+`min_cluster_size=300` and `min_samples=30` on fifty random 80% subsamples.
+It reports assignment stability, adjusted Rand agreement, same-family pair
+precision/recall/F1, and the best matching resampled cluster for every
+full-data family. Sampling is without replacement so duplicated spectra do not
+artificially change HDBSCAN densities. The two density-count thresholds are
+scaled by the sampled fraction (300/30 becomes 240/24 at 80%) so their
+population meaning remains comparable; use `--no-scale-density-counts` to test
+fixed absolute thresholds instead.
 
 ## 3. Build reduced empirical priors
 
