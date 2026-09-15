@@ -70,6 +70,7 @@ class NumTracers(BaseExperiment, CosmologyMixin):
         fullshape_ells=(0, 2, 4),
         likelihood_mode="scaling",
         apply_desi_syst=False,
+        vary_z_eff=False,
         vary_lya_qso=False,
         ref_cov=None,
         emulator_sqrtn_ref=None,
@@ -262,6 +263,22 @@ class NumTracers(BaseExperiment, CosmologyMixin):
         # per-tracer systematic budget (desilike_emulator desi_reference.apply_desi_syst).
         self.apply_desi_syst = apply_desi_syst
         self._desi_syst_factors_cache = None
+        # Evaluate the BAO means at each tracer bin's effective redshift for the
+        # design's N_tracers (desilike_emulator util.effective_redshift, DESI 2024 III
+        # Eq. 2.1 in the fiducial frame) instead of desi_data.csv's fixed DR1 z. The
+        # emulator's sigma labels are defined at z_eff(N) (desilike-emulator shapefit
+        # CHANGELOG §159), so this makes mean and covariance describe the same
+        # redshift. Emulator mode only: scaling-mode sigmas are DESI's, measured at
+        # DESI's z. DR1 only: desilike-emulator ships DR1 n(z) tables. Off by default.
+        if vary_z_eff and likelihood_mode != "emulator":
+            raise ValueError(
+                "vary_z_eff requires likelihood_mode='emulator': scaling-mode sigmas "
+                "are DESI's own, measured at desi_data.csv's fixed z.")
+        if vary_z_eff and dataset != "dr1":
+            raise ValueError(
+                f"vary_z_eff is DR1-only (desilike-emulator has no {dataset} n(z) "
+                "tables); got dataset={dataset!r}.")
+        self.vary_z_eff = bool(vary_z_eff)
         # Diagnostic: replace the emulator's nonlinear N-dependence with pure 1/sqrt(N)
         # scaling anchored to the nominal design, while keeping the emulator's magnitude.
         # None -> off (full emulator); "sampled" -> reference sigma at sampled cosmology,
@@ -1931,6 +1948,38 @@ class NumTracers(BaseExperiment, CosmologyMixin):
         cov = 0.5 * (cov + cov.transpose(-1, -2))
         return cov
 
+    # Tracer bins with no n(z) tables: their mean stays at desi_data.csv's z.
+    _FIXED_Z_EFF_TRACERS = ("Lya QSO",)
+
+    def _mean_z_eff(self, quantity, passed_ratio):
+        """Redshifts at which the ``quantity`` rows of the BAO mean are evaluated.
+
+        Returns desi_data.csv's fixed ``z`` for those rows (shape ``(n_rows,)``) unless
+        ``vary_z_eff`` is set, in which case each row's tracer bin gets
+        ``util.effective_redshift(bin, N)`` at the design's passed ``N_tracers``, with
+        shape ``passed_ratio.shape[:-1] + (n_rows,)``. Tracers without n(z) tables
+        (``_FIXED_Z_EFF_TRACERS``) keep their fixed z. Both shapes are accepted by
+        ``D_H_func``/``D_M_func``/``D_V_func``.
+        """
+        rows = self.desi_data[self.desi_data["quantity"] == quantity]
+        z_fixed = torch.tensor(rows["z"].to_list(), device=self.device)
+        if not self.vary_z_eff:
+            return z_fixed
+
+        from desilike_emulator.util import effective_redshift
+
+        n_tracers = self._passed_ratio_to_n_tracers(passed_ratio)
+        desi_to_bin = {v: k for k, v in self._EMULATOR_TRACER_TO_DESI.items()}
+        batch_shape = passed_ratio.shape[:-1]
+        cols = []
+        for i, tracer in enumerate(rows["tracer"].to_list()):
+            if tracer in self._FIXED_Z_EFF_TRACERS:
+                cols.append(z_fixed[i].to(passed_ratio.dtype).expand(batch_shape))
+            else:
+                tracer_bin = desi_to_bin[tracer]
+                cols.append(effective_redshift(tracer_bin, n_tracers[tracer_bin], "dr1"))
+        return torch.stack(cols, dim=-1)
+
     @profile_method
     def pyro_model(self, tracer_ratio):
         passed_ratio = self.calc_passed(tracer_ratio)
@@ -1942,22 +1991,13 @@ class NumTracers(BaseExperiment, CosmologyMixin):
                 means = torch.zeros(
                     passed_ratio.shape[:-1] + (self.sigmas.shape[-1],), device=self.device
                 )
-                z_eff = torch.tensor(
-                    self.desi_data[self.desi_data["quantity"] == "DH_over_rs"]["z"].to_list(),
-                    device=self.device,
-                )
+                z_eff = self._mean_z_eff("DH_over_rs", passed_ratio)
                 means[:, :, self.DH_idx] = self.D_H_func(z_eff, **parameters)
                 if self.include_D_M:
-                    z_eff = torch.tensor(
-                        self.desi_data[self.desi_data["quantity"] == "DM_over_rs"]["z"].to_list(),
-                        device=self.device,
-                    )
+                    z_eff = self._mean_z_eff("DM_over_rs", passed_ratio)
                     means[:, :, self.DM_idx] = self.D_M_func(z_eff, **parameters)
                 if self.include_D_V:
-                    z_eff = torch.tensor(
-                        self.desi_data[self.desi_data["quantity"] == "DV_over_rs"]["z"].to_list(),
-                        device=self.device,
-                    )
+                    z_eff = self._mean_z_eff("DV_over_rs", passed_ratio)
                     means[:, :, self.DV_idx] = self.D_V_func(z_eff, **parameters)
                 means = means.to(self.device)
 
