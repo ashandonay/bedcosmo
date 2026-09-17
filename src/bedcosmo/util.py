@@ -28,9 +28,10 @@ from itertools import combinations
 # Single smoothing scale for every trace in a comparison (prior + posteriors).
 # smooth_scale_* are fractions of each parameter's std.
 GETDIST_SETTINGS = {
-    "smooth_scale_1D": 0.26,
-    "smooth_scale_2D": 0.28,
-    "fine_bins_2D": 512,
+    "smooth_scale_1D": 0.35,
+    "smooth_scale_2D": 0.40,
+    "fine_bins": 2048,
+    "fine_bins_2D": 1024,
     "mult_bias_correction_order": 1,
     "boundary_correction_order": 1,
 }
