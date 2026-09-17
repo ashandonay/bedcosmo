@@ -30,7 +30,7 @@ from itertools import combinations
 GETDIST_SETTINGS = {
     "smooth_scale_1D": 0.26,
     "smooth_scale_2D": 0.28,
-    "fine_bins_2D": 256,
+    "fine_bins_2D": 512,
     "mult_bias_correction_order": 1,
     "boundary_correction_order": 1,
 }
