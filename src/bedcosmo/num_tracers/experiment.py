@@ -1454,30 +1454,54 @@ class NumTracers(BaseExperiment, CosmologyMixin):
                     else None
                 ),
                 "scale_expressions": scale_expressions,
+                # Provenance, for the summary printed below. A forecast is only
+                # as good as the emulator behind it, and the run log is the only
+                # place that pairing is recorded.
+                "ckpt_path": str(ckpt_path),
+                "arch": (f"{ckpt['hidden_dim']},{ckpt['n_hidden']},"
+                         f"{ckpt.get('expand', 4)}"),
+                "n_params": sum(p_.numel() for p_ in model.parameters()),
+                "git_commit": str(ckpt.get("git_commit", "") or ""),
             }
 
         if self.global_rank == 0:
-            print(f"Loaded emulators for tracer bins: {list(self._emulators.keys())}")
-            scaled = {
-                tb: emu["scale_expressions"]
-                for tb, emu in self._emulators.items()
-                if emu["scale_expressions"]
-            }
-            if scaled:
-                # One line per distinct recipe so a mixed pool is obvious.
-                recipes = {}
-                for tb, exprs in scaled.items():
-                    recipes.setdefault(tuple(exprs), []).append(tb)
-                for exprs, bins in recipes.items():
-                    print(
-                        f"  scaled targets ({', '.join(bins)}): "
-                        f"y *= {' * '.join(exprs)}"
-                    )
+            self._print_emulator_summary()
             if self._emulator_fallback_bins:
                 print(
                     f"No emulator checkpoint for tracer bins {self._emulator_fallback_bins}; "
                     f"falling back to fixed DESI nominal covariance for these."
                 )
+
+    def _print_emulator_summary(self):
+        """Log WHICH emulators were loaded and their defining properties.
+
+        Every forecast this class produces is conditioned on these checkpoints, and
+        a run log that records only "loaded 6 emulators" cannot be audited later:
+        the same tracer name has meant a 6/4/4 unscaled net and a 64/6/4 net trained
+        on hrdrag-scaled targets within one week. Printing the path, architecture,
+        target transform and scaling recipe makes a stale or mixed pool obvious at a
+        glance instead of after re-deriving it from the numbers.
+        """
+        if not self._emulators:
+            print("No emulators loaded; every tracer bin falls back to the fixed "
+                  "DESI nominal covariance.")
+            return
+        print(f"Loaded {len(self._emulators)} emulator(s):")
+        w = max(len(tb) for tb in self._emulators)
+        for tb, emu in self._emulators.items():
+            n_lo, n_hi = emu.get("n_train_lo"), emu.get("n_train_hi")
+            nbox = (f"N[{n_lo:.3g}, {n_hi:.3g}]" if n_lo is not None else "N box unknown")
+            print(f"  {tb:<{w}}  {emu['arch']:>9} ({emu['n_params']:,} params)  "
+                  f"{'symlog' if emu['log_normalize'] else 'raw'}  {nbox}")
+            print(f"  {'':<{w}}  {emu['ckpt_path']}")
+            # An empty recipe is meaningful, not missing: it says the targets are
+            # already physical. Say so rather than printing nothing.
+            recipe = (" * ".join(emu["scale_expressions"]) if emu["scale_expressions"]
+                      else "none (targets already physical)")
+            extra = f"  git {emu['git_commit'][:8]}" if emu["git_commit"] else ""
+            print(f"  {'':<{w}}  targets {', '.join(emu['target_names'])}"
+                  f"  | inputs {', '.join(emu['param_names'])}"
+                  f"  | scaling: {recipe}{extra}")
 
     def _emulator_predict(self, tracer_bin, emulator_input):
         """Run differentiable inference through an emulator.
