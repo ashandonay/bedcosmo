@@ -40,9 +40,20 @@ import traceback
 
 home_dir = os.environ["HOME"]
 
-# Crimson edge markers for out-of-fence posterior samples (desilike-emulator style).
-# Extremes are NOT silently dropped: GetDist sees the bulk; outliers stay visible.
+# Fallback color for aggregated 1D outlier titles (multi-series) and explicit overrides.
+# Per-series edge markers / legend second-lines default to that series' plot color.
 _OUTLIER_MARKER_COLOR = "crimson"
+
+
+def _series_outlier_color(series_color, outlier_color=None):
+    """Resolve marker/legend color for one series' out-of-fence points.
+
+    ``outlier_color=None`` (default) uses the series plot color; a non-None
+    value forces a single override color for all series.
+    """
+    if outlier_color is not None:
+        return convert_color(outlier_color)
+    return convert_color(series_color)
 
 
 def _compact_series_label(label, index: int = 0) -> str:
@@ -97,12 +108,13 @@ def make_outlier_legend_entries(
     line_styles="-",
     alphas=1.0,
     outlier_stats=None,
-    outlier_color=_OUTLIER_MARKER_COLOR,
+    outlier_color=None,
 ):
-    """Build legend handles/labels with optional crimson second lines per series.
+    """Build legend handles/labels with optional second lines per series.
 
     Each series contributes its main label; if that series has ``n_out > 0``, a
-    second (invisible-handle) entry carries the compact outlier count. Call
+    second (invisible-handle) entry carries the compact outlier count, colored
+    like that series (or ``outlier_color`` when set). Call
     ``style_outlier_legend`` after ``fig.legend`` to color those texts.
     """
     n = len(legend_labels)
@@ -135,7 +147,7 @@ def make_outlier_legend_entries(
         if second is not None:
             sub = Line2D([0], [0], color="none", linewidth=0, markersize=0)
             sub._bedcosmo_outlier_sub = True
-            sub._bedcosmo_outlier_color = outlier_color
+            sub._bedcosmo_outlier_color = _series_outlier_color(colors[i], outlier_color)
             handles.append(sub)
             labels.append(second)
     return handles, labels
@@ -165,7 +177,7 @@ def apply_outlier_legend(
     line_styles="-",
     alphas=1.0,
     outlier_stats=None,
-    outlier_color=_OUTLIER_MARKER_COLOR,
+    outlier_color=None,
     loc="upper right",
     bbox_to_anchor=(0.99, 0.96),
     fontsize=None,
@@ -189,7 +201,11 @@ def apply_outlier_legend(
             except Exception:
                 pass
     stats = outlier_stats if outlier_stats is not None else getattr(g, "_outlier_stats", None)
-    color = outlier_color or getattr(g, "_outlier_annot_color", _OUTLIER_MARKER_COLOR)
+    # Prefer explicit arg; else value stored by plot_posterior (may be None = series colors).
+    if outlier_color is None and hasattr(g, "_outlier_annot_color"):
+        color = g._outlier_annot_color
+    else:
+        color = outlier_color
     handles, labels = make_outlier_legend_entries(
         colors,
         legend_labels,
@@ -209,19 +225,6 @@ def apply_outlier_legend(
     style_outlier_legend(leg, handles)
     g._outlier_legend_handles = handles
     return leg
-
-
-# Back-compat no-op: floating under-legend text was removed in favor of 2-line legends.
-def place_outlier_annotation(g, color=None, fontsize: float = 8):
-    """Deprecated: outlier counts now live in legend second-lines via ``apply_outlier_legend``."""
-    prev = getattr(g, "_outlier_annot_artist", None)
-    if prev is not None:
-        try:
-            prev.remove()
-        except Exception:
-            pass
-        g._outlier_annot_artist = None
-    return None
 
 
 def iqr_display_range(values, k: float = 3.0, pad: float = 0.04):
@@ -1658,7 +1661,7 @@ class BasePlotter:
         fence_iqr=3.0,
         show_outliers=True,
         outlier_annotate=True,
-        outlier_color=_OUTLIER_MARKER_COLOR,
+        outlier_color=None,
         outlier_min_keep=16,
     ):
         """
@@ -1694,11 +1697,13 @@ class BasePlotter:
                 ranges when ``ranges`` is not provided. Default 3.0. Set to 0/None to
                 disable IQR fencing (explicit ``ranges`` still apply as axis limits).
             show_outliers (bool): If True (default), mark out-of-fence samples from the
-                full draw as crimson ``x`` markers clamped to the frame edge.
-            outlier_annotate (bool): If True (default), add compact crimson second lines
-                under each legend entry with that series' outside-fence count (only when
+                full draw as ``x`` markers clamped to the frame edge (series plot color).
+            outlier_annotate (bool): If True (default), add compact second lines under
+                each legend entry with that series' outside-fence count (only when
                 ``n_out > 0``), plus 1D diagonal ``N below / M above`` titles.
-            outlier_color (str): Color for out-of-fence markers and legend second-lines.
+            outlier_color (str, optional): If set, force this color for all out-of-fence
+                markers and legend second-lines. Default ``None`` uses each series'
+                plot color. Aggregated 1D titles still use crimson for readability.
             outlier_min_keep (int): Minimum in-fence samples required before replacing
                 a series for GetDist; otherwise fencing is skipped for that series.
         Returns:
@@ -1963,7 +1968,7 @@ class BasePlotter:
                                         alpha=scatter_alpha,
                                     )
 
-        # Outlier overlay: clamp full-draw extremes to the frame as crimson x's.
+        # Outlier overlay: clamp full-draw extremes to the frame as series-colored x's.
         if show_outliers and fence_ranges is not None:
             for i in range(len(param_name_list)):
                 for j in range(i):
@@ -1991,7 +1996,7 @@ class BasePlotter:
                             np.clip(yv, yr[0], yr[1]),
                             s=34,
                             marker="x",
-                            color=outlier_color,
+                            color=_series_outlier_color(colors[k], outlier_color),
                             linewidths=1.3,
                             zorder=6,
                             clip_on=False,
@@ -2004,15 +2009,21 @@ class BasePlotter:
                 n_lo = sum(stat["n_lo"].get(p, 0) for stat in outlier_stats)
                 n_hi = sum(stat["n_hi"].get(p, 0) for stat in outlier_stats)
                 if outlier_annotate and (n_lo or n_hi):
+                    # Aggregated across series — keep a fixed readable color.
+                    title_color = (
+                        convert_color(outlier_color)
+                        if outlier_color is not None
+                        else _OUTLIER_MARKER_COLOR
+                    )
                     ax1.set_title(
                         f"{n_lo} below / {n_hi} above range",
                         fontsize=9,
-                        color=outlier_color,
+                        color=title_color,
                         pad=3,
                     )
 
         # Store stats for callers that rebuild the legend; put counts in legend
-        # second-lines (crimson) rather than a floating fig.text block.
+        # second-lines (series-colored) rather than a floating fig.text block.
         g._outlier_stats = outlier_stats
         g._outlier_annot_color = outlier_color
         if legend_labels is not None:
@@ -3497,6 +3508,12 @@ class ComparisonPlotter(BasePlotter):
         For each run, loads the posterior flow and samples via experiment.get_guide_samples
         using the same display options as generate_posterior.
 
+        Outlier fencing matches ``plot_posterior`` / eval defaults (Tukey
+        ``fence_iqr=3.0``, series-colored edge markers, 2-line legend counts).
+        Pass any ``plot_posterior`` fencing kwargs via ``**kwargs``
+        (``fence_iqr``, ``ranges``, ``show_outliers``, ``outlier_annotate``,
+        ``outlier_color``, ``outlier_min_keep``, …).
+
         Args:
             var (str or list, optional): Parameter(s) to group runs by.
                 Defaults to ``self.var`` from ``__init__`` when omitted.
@@ -3516,6 +3533,7 @@ class ComparisonPlotter(BasePlotter):
             plot_prior (bool): If True, overlay each group's prior as a faint contour
                 (alpha=0.4). Uses black when all groups share the same prior_args,
                 otherwise matches group colors.
+            **kwargs: Forwarded to ``plot_posterior`` (fencing, style, alphas, …).
 
         Returns:
             GetDist plotter object.
@@ -3776,6 +3794,7 @@ class ComparisonPlotter(BasePlotter):
             width_inch=width_inch,
             alpha=all_alphas,
             line_style=all_line_styles,
+            **kwargs,
         )
 
         plotted_params = all_samples[0].paramNames.list()
@@ -3825,6 +3844,7 @@ class ComparisonPlotter(BasePlotter):
             line_styles=all_line_styles,
             alphas=all_alphas,
             outlier_stats=getattr(g, "_outlier_stats", None),
+            outlier_color=kwargs.get("outlier_color", getattr(g, "_outlier_annot_color", None)),
         )
         g.fig.suptitle(title)
         
