@@ -74,78 +74,149 @@ def _fmt_sample_count(n: int) -> str:
     return f"{mant:.1f}e{exp}"
 
 
-def format_outlier_annotation_lines(outlier_stats, legend_labels=None, full_samples=None) -> list:
-    """Build compact per-series outlier lines (no EIG / entropy)."""
-    lines = []
-    for k, stat in enumerate(outlier_stats):
-        if not stat or int(stat.get("n_out", 0)) <= 0:
-            continue
-        label = None
-        if legend_labels is not None and k < len(legend_labels):
-            label = legend_labels[k]
-        if not label and full_samples is not None and k < len(full_samples):
-            label = getattr(full_samples[k], "label", None)
-        tag = _compact_series_label(label, k)
-        n_out = int(stat["n_out"])
-        n_tot = int(stat["n_tot"])
-        frac = 100.0 * n_out / max(n_tot, 1)
-        lines.append(f"{tag} {n_out}/{_fmt_sample_count(n_tot)} ({frac:.2f}%)")
-    return lines
-
-
-def place_outlier_annotation(g, color=None, fontsize: float = 8):
-    """Place compact outlier text under the figure legend (not over axis labels).
-
-    Expects ``g._outlier_annot_lines`` set by ``plot_posterior``. Safe to call again
-    after callers rebuild ``fig.legend`` (generate_posterior / replot / compare).
-    """
-    lines = getattr(g, "_outlier_annot_lines", None)
-    if not lines:
+def _outlier_second_line(stat) -> str | None:
+    """Compact second legend line, or None when there are no outliers."""
+    if not stat:
         return None
-    color = color or getattr(g, "_outlier_annot_color", _OUTLIER_MARKER_COLOR)
+    n_out = int(stat.get("n_out", 0))
+    if n_out <= 0:
+        return None
+    n_tot = int(stat.get("n_tot", 0))
+    frac = 100.0 * n_out / max(n_tot, 1)
+    return f"  {n_out}/{_fmt_sample_count(n_tot)} outside ({frac:.2f}%)"
+
+
+def make_outlier_legend_entries(
+    colors,
+    legend_labels,
+    line_styles="-",
+    alphas=1.0,
+    outlier_stats=None,
+    outlier_color=_OUTLIER_MARKER_COLOR,
+):
+    """Build legend handles/labels with optional crimson second lines per series.
+
+    Each series contributes its main label; if that series has ``n_out > 0``, a
+    second (invisible-handle) entry carries the compact outlier count. Call
+    ``style_outlier_legend`` after ``fig.legend`` to color those texts.
+    """
+    n = len(legend_labels)
+    if isinstance(line_styles, str):
+        line_styles = [line_styles] * n
+    if isinstance(alphas, (int, float)):
+        alphas = [alphas] * n
+    if isinstance(colors, str):
+        colors = [colors] * n
+    colors = [convert_color(c) for c in colors]
+
+    handles, labels = [], []
+    for i in range(n):
+        h = Line2D(
+            [0],
+            [0],
+            color=colors[i],
+            linestyle=line_styles[i],
+            linewidth=1.2,
+            alpha=float(alphas[i]),
+        )
+        h._bedcosmo_outlier_sub = False
+        handles.append(h)
+        labels.append(str(legend_labels[i]))
+
+        stat = None
+        if outlier_stats is not None and i < len(outlier_stats):
+            stat = outlier_stats[i]
+        second = _outlier_second_line(stat)
+        if second is not None:
+            sub = Line2D([0], [0], color="none", linewidth=0, markersize=0)
+            sub._bedcosmo_outlier_sub = True
+            sub._bedcosmo_outlier_color = outlier_color
+            handles.append(sub)
+            labels.append(second)
+    return handles, labels
+
+
+def style_outlier_legend(leg, handles, fontsize: float | None = None):
+    """Color/shrink legend texts that are outlier second-lines."""
+    if leg is None:
+        return
+    texts = leg.get_texts()
+    for text, handle in zip(texts, handles):
+        if getattr(handle, "_bedcosmo_outlier_sub", False):
+            text.set_color(getattr(handle, "_bedcosmo_outlier_color", _OUTLIER_MARKER_COLOR))
+            if fontsize is not None:
+                text.set_fontsize(fontsize)
+            else:
+                try:
+                    text.set_fontsize(max(7, float(text.get_fontsize()) * 0.85))
+                except Exception:
+                    text.set_fontsize(8)
+
+
+def apply_outlier_legend(
+    g,
+    colors,
+    legend_labels,
+    line_styles="-",
+    alphas=1.0,
+    outlier_stats=None,
+    outlier_color=_OUTLIER_MARKER_COLOR,
+    loc="upper right",
+    bbox_to_anchor=(0.99, 0.96),
+    fontsize=None,
+    **legend_kwargs,
+):
+    """Replace figure legends with two-line outlier-aware entries; return Legend."""
+    if legend_labels is None:
+        return None
+    # Drop floating annotation from older plot_posterior revisions if present.
     prev = getattr(g, "_outlier_annot_artist", None)
     if prev is not None:
         try:
             prev.remove()
         except Exception:
             pass
-
-    # Multi-line block under the legend; short enough to sit in the empty UR corner.
-    text = "Outliers:\n" + "\n".join(lines)
-    fig = g.fig
-    x, y, ha, va = 0.99, 0.62, "right", "top"
-    legends = getattr(fig, "legends", None)
-    if legends:
-        try:
-            leg = legends[-1]
-        except (TypeError, IndexError, KeyError):
-            leg = None
-        if leg is not None:
+        g._outlier_annot_artist = None
+    if getattr(g, "fig", None) is not None and getattr(g.fig, "legends", None):
+        for leg in list(g.fig.legends):
             try:
-                fig.canvas.draw()
-                renderer = fig.canvas.get_renderer()
-                bbox = leg.get_window_extent(renderer).transformed(fig.transFigure.inverted())
-                # Left-align with legend box, just below it.
-                x = float(bbox.x0)
-                y = max(float(bbox.y0) - 0.015, 0.08)
-                ha, va = "left", "top"
+                leg.remove()
             except Exception:
                 pass
-
-    artist = fig.text(
-        x,
-        y,
-        text,
-        fontsize=fontsize,
-        color=color,
-        ha=ha,
-        va=va,
-        linespacing=1.3,
-        clip_on=False,
-        zorder=20,
+    stats = outlier_stats if outlier_stats is not None else getattr(g, "_outlier_stats", None)
+    color = outlier_color or getattr(g, "_outlier_annot_color", _OUTLIER_MARKER_COLOR)
+    handles, labels = make_outlier_legend_entries(
+        colors,
+        legend_labels,
+        line_styles=line_styles,
+        alphas=alphas,
+        outlier_stats=stats,
+        outlier_color=color,
     )
-    g._outlier_annot_artist = artist
-    return artist
+    kw = dict(loc=loc, bbox_to_anchor=bbox_to_anchor, **legend_kwargs)
+    if fontsize is not None:
+        kw["fontsize"] = fontsize
+    leg = g.fig.legend(handles=handles, labels=labels, **kw)
+    try:
+        leg.set_in_layout(False)
+    except Exception:
+        pass
+    style_outlier_legend(leg, handles)
+    g._outlier_legend_handles = handles
+    return leg
+
+
+# Back-compat no-op: floating under-legend text was removed in favor of 2-line legends.
+def place_outlier_annotation(g, color=None, fontsize: float = 8):
+    """Deprecated: outlier counts now live in legend second-lines via ``apply_outlier_legend``."""
+    prev = getattr(g, "_outlier_annot_artist", None)
+    if prev is not None:
+        try:
+            prev.remove()
+        except Exception:
+            pass
+        g._outlier_annot_artist = None
+    return None
 
 
 def iqr_display_range(values, k: float = 3.0, pad: float = 0.04):
@@ -1547,33 +1618,19 @@ class BasePlotter:
         elif n_params == 2:
             legend_fontsize = max(legend_fontsize * 1.25, 12)
 
-        if g.fig.legends:
-            for legend in g.fig.legends:
-                legend.remove()
-
-        # Create custom legend with proper formatting
-        custom_legend = []
-        for i, label in enumerate(legend_labels):
-            color = all_colors[i]
-            custom_legend.append(
-                Line2D(
-                    [0],
-                    [0],
-                    color=color,
-                    label=label,
-                    linewidth=1.2,
-                    linestyle=all_line_styles[i],
-                    alpha=all_alphas[i],
-                )
-            )
-
         if title is None:
             title = "Posterior Evaluation"
         g.fig.suptitle(title, fontsize=title_fontsize, weight='bold')
         g.fig.set_constrained_layout(True)
-        leg = g.fig.legend(handles=custom_legend, loc='upper right', bbox_to_anchor=(0.99, 0.96), fontsize=legend_fontsize)
-        leg.set_in_layout(False)
-        place_outlier_annotation(g)
+        apply_outlier_legend(
+            g,
+            all_colors,
+            legend_labels,
+            line_styles=all_line_styles,
+            alphas=all_alphas,
+            outlier_stats=getattr(g, "_outlier_stats", None),
+            fontsize=legend_fontsize,
+        )
 
         # Save figure
         if filename is None:
@@ -1734,13 +1791,16 @@ class BasePlotter:
                 disable IQR fencing (explicit ``ranges`` still apply as axis limits).
             show_outliers (bool): If True (default), mark out-of-fence samples from the
                 full draw as crimson ``x`` markers clamped to the frame edge.
-            outlier_annotate (bool): If True (default), annotate per-series outlier
-                counts/fractions on the figure.
-            outlier_color (str): Color for out-of-fence markers and annotation.
+            outlier_annotate (bool): If True (default), add compact crimson second lines
+                under each legend entry with that series' outside-fence count (only when
+                ``n_out > 0``), plus 1D diagonal ``N below / M above`` titles.
+            outlier_color (str): Color for out-of-fence markers and legend second-lines.
             outlier_min_keep (int): Minimum in-fence samples required before replacing
                 a series for GetDist; otherwise fencing is skipped for that series.
         Returns:
             g: GetDist plotter object with the generated triangle plot.
+              Stores ``g._outlier_stats`` for callers that rebuild the legend via
+              ``apply_outlier_legend``.
         """
         g = plots.get_single_plotter(width_inch=width_inch, ratio=plot_size_ratio, scaling=True)
         
@@ -1875,11 +1935,12 @@ class BasePlotter:
             for sample in contour_samples:
                 sample.updateSettings({'contours': levels})
 
-        # Create triangle plot from fenced (bulk) samples
+        # Create triangle plot from fenced (bulk) samples.
+        # Suppress GetDist's legend; we attach a two-line outlier-aware legend below.
         g.triangle_plot(
             contour_samples,
             colors=contour_colors,
-            legend_labels=legend_labels,
+            legend_labels=None,
             filled=False,
             normalized=True,
             diag1d_kwargs={
@@ -2046,18 +2107,20 @@ class BasePlotter:
                         pad=3,
                     )
 
-        if outlier_annotate and fence_ranges is not None:
-            lines = format_outlier_annotation_lines(
-                outlier_stats, legend_labels=legend_labels, full_samples=full_samples
+        # Store stats for callers that rebuild the legend; put counts in legend
+        # second-lines (crimson) rather than a floating fig.text block.
+        g._outlier_stats = outlier_stats
+        g._outlier_annot_color = outlier_color
+        if legend_labels is not None:
+            apply_outlier_legend(
+                g,
+                colors,
+                legend_labels,
+                line_styles=line_style,
+                alphas=alpha if not isinstance(alpha, list) else alpha,
+                outlier_stats=outlier_stats if outlier_annotate else None,
+                outlier_color=outlier_color,
             )
-            g._outlier_annot_lines = lines
-            g._outlier_annot_color = outlier_color
-            if lines:
-                # Under GetDist's legend when present; callers that rebuild the
-                # legend should call place_outlier_annotation(g) again.
-                place_outlier_annotation(g, color=outlier_color)
-            else:
-                g._outlier_annot_artist = None
 
         return g
 
@@ -2961,7 +3024,7 @@ class RunPlotter(BasePlotter):
         
         all_samples = []
         all_colors = []
-        custom_legend = []
+        legend_labels_steps = []
         
         device = "cuda:0" if torch.cuda.is_available() else "cpu"
         run_obj = self.run_data['run_obj']
@@ -2996,10 +3059,7 @@ class RunPlotter(BasePlotter):
                 step_label = 'Best Loss'
             else:
                 step_label = step
-            custom_legend.append(
-                Line2D([0], [0], color=color_hex, 
-                        label=f'Step {step_label}', linewidth=1.2)
-            )
+            legend_labels_steps.append(f'Step {step_label}')
         
         # Get nominal samples using reference experiment (already initialized above)
         nominal_added = False
@@ -3037,19 +3097,17 @@ class RunPlotter(BasePlotter):
         elif n_params == 2:
             legend_fontsize = max(legend_fontsize * 1.25, 12)
 
-        if g.fig.legends:
-            for legend in g.fig.legends:
-                legend.remove()
-
         if nominal_added:
             nominal_label = 'DESI' if self.cosmo_exp == 'num_tracers' else 'Nominal Design'
-            custom_legend.append(
-                Line2D([0], [0], color='black', label=nominal_label, linewidth=1.2)
-            )
+            legend_labels_steps.append(nominal_label)
         g.fig.set_constrained_layout(True)
-        leg = g.fig.legend(handles=custom_legend, loc='upper right', bbox_to_anchor=(0.99, 0.96), fontsize=legend_fontsize)
-        leg.set_in_layout(False)
-        place_outlier_annotation(g)
+        apply_outlier_legend(
+            g,
+            all_colors,
+            legend_labels_steps,
+            outlier_stats=getattr(g, "_outlier_stats", None),
+            fontsize=legend_fontsize,
+        )
         title = f"Posterior Steps - Run: {self.run_id[:8]}"
         g.fig.suptitle(title, fontsize=title_fontsize, weight='bold')
         
@@ -3847,10 +3905,6 @@ class ComparisonPlotter(BasePlotter):
                         color=color,
                     )
 
-        if g.fig.legends:
-            for legend in g.fig.legends:
-                legend.remove()
-        
         title = (
             f'Posterior Comparison ({", ".join(display)}), Step: {step}, '
             f'Levels: {self._format_contour_levels_list(levels)}'
@@ -3860,27 +3914,14 @@ class ComparisonPlotter(BasePlotter):
             title += f' (filter: {filter_str})'
         
         g.fig.set_constrained_layout(True)
-        legend_handles = [
-            Line2D(
-                [0],
-                [0],
-                color=color,
-                label=label,
-                linewidth=1.2,
-                linestyle=line_style,
-                alpha=alpha,
-            )
-            for label, color, line_style, alpha in zip(
-                legend_labels, all_colors, all_line_styles, all_alphas
-            )
-        ]
-        leg = g.fig.legend(
-            handles=legend_handles,
-            loc='upper right',
-            bbox_to_anchor=(0.99, 0.96),
+        apply_outlier_legend(
+            g,
+            all_colors,
+            legend_labels,
+            line_styles=all_line_styles,
+            alphas=all_alphas,
+            outlier_stats=getattr(g, "_outlier_stats", None),
         )
-        leg.set_in_layout(False)
-        place_outlier_annotation(g)
         g.fig.suptitle(title)
         
         # Save figure

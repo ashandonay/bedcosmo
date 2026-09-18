@@ -15,7 +15,7 @@ import numpy as np
 import torch
 import getdist
 import argparse
-from bedcosmo.plotting import RunPlotter, place_outlier_annotation
+from bedcosmo.plotting import RunPlotter, apply_outlier_legend
 import traceback
 from bedcosmo.pyro_oed_src import nf_loss, LikelihoodDataset
 from bedcosmo.entropy import (
@@ -468,20 +468,19 @@ class Evaluator:
         g.fig.set_constrained_layout(True)
         # Set title with proper positioning
         # add labels for Nominal and Optimal to total legend
-        custom_legend = []
-        custom_legend.append(
-            Line2D([0], [0], color='tab:orange', label=f'Optimal Design', linewidth=1.2)
+        eval_legend_labels = [
+            "Optimal Design",
+            "Nominal Design",
+            "Nominal DESI Result",
+        ]
+        eval_colors = ["tab:orange", "tab:blue", "black"]
+        apply_outlier_legend(
+            g,
+            eval_colors,
+            eval_legend_labels,
+            outlier_stats=getattr(g, "_outlier_stats", None),
+            fontsize=legend_fontsize,
         )
-        custom_legend.append(
-            Line2D([0], [0], color='tab:blue', label=f'Nominal Design', linewidth=1.2)
-        )
-        custom_legend.append(
-            Line2D([0], [0], color='black', label=f'Nominal DESI Result', linewidth=1.2)
-        )
-        g.fig.set_constrained_layout(True)
-        leg = g.fig.legend(handles=custom_legend, loc='upper right', bbox_to_anchor=(0.99, 0.96), fontsize=legend_fontsize)
-        leg.set_in_layout(False)
-        place_outlier_annotation(g)
         levels_str = ', '.join([f"{int(level*100)}%" for level in levels])
         if self.display_run:
             title = f"Posterior Evaluations for {num_data_samples} Likelihood Samples - Run: {self.run_id[:8]}"
