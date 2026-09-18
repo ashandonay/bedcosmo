@@ -75,6 +75,34 @@ _C_ANGSTROM_S = 2.99792458e18  # speed of light in Angstrom / s (for L_nu -> L_l
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
+def _required_template_rest_range(
+    observed_wave_aa,
+    transmission,
+    z_min,
+    z_max,
+    *,
+    response_floor=1e-3,
+):
+    """Rest-frame interval needed by active filters over a redshift range."""
+    observed_wave_aa = np.asarray(observed_wave_aa, dtype=float)
+    transmission = np.asarray(transmission, dtype=float)
+    if transmission.ndim != 2 or transmission.shape[1] != len(observed_wave_aa):
+        raise ValueError("transmission must have shape (n_filters, n_wavelengths)")
+    peaks = np.max(transmission, axis=1)
+    nonempty = peaks > 0
+    active = np.any(
+        transmission[nonempty] >= response_floor * peaks[nonempty, None], axis=0
+    )
+    if not np.any(active):
+        raise ValueError("filter transmission has no active wavelengths")
+    if z_min < 0 or z_max < z_min:
+        raise ValueError("template wavelength validation requires 0 <= z_min <= z_max")
+    return (
+        float(np.min(observed_wave_aa[active]) / (1.0 + z_max)),
+        float(np.max(observed_wave_aa[active]) / (1.0 + z_min)),
+    )
+
+
 class NumVisits(BaseExperiment, CosmologyMixin):
     """
     Experiment that models LSST magnitude measurements as a function of redshift
@@ -769,6 +797,26 @@ class NumVisits(BaseExperiment, CosmologyMixin):
             span = max(high - low, 1e-12)
             pad = max(1e-6, 0.02 * span)
             prior[name] = EmpiricalPrior(low - pad, high + pad, device=self.device)
+
+        if "z" in prior:
+            z_min = max(0.0, float(prior["z"].low.cpu()))
+            z_max = float(prior["z"].high.cpu())
+            required_min, required_max = _required_template_rest_range(
+                self._wlen_aa_tensor.detach().cpu().numpy(),
+                self._transmission_tensor.detach().cpu().numpy(),
+                z_min,
+                z_max,
+            )
+            available_min = float(wave_rest[0])
+            available_max = float(wave_rest[-1])
+            if available_min > required_min or available_max < required_max:
+                raise ValueError(
+                    "Template wavelength range does not cover the active LSST filters over "
+                    f"the empirical redshift prior: need [{required_min:.1f}, "
+                    f"{required_max:.1f}] Angstrom, have [{available_min:.1f}, "
+                    f"{available_max:.1f}]. Extend the template explicitly; endpoint "
+                    "clamping is not allowed."
+                )
 
         if self.global_rank == 0 and self.verbose:
             print(
