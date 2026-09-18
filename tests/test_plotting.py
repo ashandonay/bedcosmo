@@ -537,6 +537,69 @@ class TestComparisonPlotter:
 # Standalone Plotting Functions Tests
 # ============================================================================
 
+class TestPosteriorFenceHelpers:
+    """desilike-style IQR fencing helpers used by plot_posterior."""
+
+    def test_iqr_display_range_ignores_extremes(self):
+        from bedcosmo.plotting import iqr_display_range
+
+        rng = np.random.default_rng(0)
+        bulk = rng.normal(0.3, 0.01, size=2000)
+        vals = np.concatenate([bulk, [-10.0, 5.0]])
+        lo, hi = iqr_display_range(vals, k=3.0)
+        assert lo > 0.2
+        assert hi < 0.4
+
+    def test_fence_mask_and_subset(self):
+        import contextlib
+        import io
+
+        import getdist
+
+        from bedcosmo.plotting import (
+            fence_mask_for_samples,
+            resolve_fence_ranges,
+            subset_mcsamples,
+        )
+        from bedcosmo.util import GETDIST_SETTINGS
+
+        rng = np.random.default_rng(1)
+        om = np.concatenate([rng.normal(0.3, 0.01, 5000), [-10.0] * 5])
+        h = np.concatenate([rng.normal(10000, 100, 5000), [-1e5] * 3, rng.normal(10000, 100, 2)])
+        with contextlib.redirect_stdout(io.StringIO()):
+            gd = getdist.MCSamples(
+                samples=np.column_stack([om, h]),
+                names=["Om", "hrdrag"],
+                labels=[r"\Omega_m", r"H_0 r_d"],
+                settings=GETDIST_SETTINGS,
+            )
+        fence = resolve_fence_ranges([gd], ["Om", "hrdrag"], ranges=None, fence_iqr=3.0)
+        mask = fence_mask_for_samples(gd, fence)
+        assert int((~mask).sum()) >= 5
+        fenced, _, _ = subset_mcsamples(gd, mask)
+        assert len(fenced.samples) == int(mask.sum())
+
+    def test_explicit_ranges_preferred_over_iqr(self):
+        import contextlib
+        import io
+
+        import getdist
+
+        from bedcosmo.plotting import resolve_fence_ranges
+        from bedcosmo.util import GETDIST_SETTINGS
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            gd = getdist.MCSamples(
+                samples=np.random.randn(100, 2),
+                names=["Om", "hrdrag"],
+                labels=["Om", "H"],
+                settings=GETDIST_SETTINGS,
+            )
+        ranges = {"Om": (0.2, 0.45), "hrdrag": (8000.0, 12000.5)}
+        fence = resolve_fence_ranges([gd], ["Om", "hrdrag"], ranges=ranges, fence_iqr=3.0)
+        assert fence == ranges
+
+
 class TestPlotPosterior:
     """Test cases for plot_posterior function."""
     
