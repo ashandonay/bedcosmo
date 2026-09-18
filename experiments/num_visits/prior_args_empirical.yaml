@@ -1,7 +1,7 @@
-# Empirical SED prior from DESI+EAZY (ILR parameterization).
+# Empirical SED prior from fitted DESI spectra (ILR parameterization).
 #
 # Select the template bank with the two fields below (or CLI overrides):
-#   template_source: eazy12 | eazy6
+#   template_source: desi8 | eazy12 | eazy6
 #   reduced_templates: null (full bank) or "t7,t10" (comma-separated, case-insensitive)
 #
 # These resolve prior_dir, template_param, and the parameters: block automatically
@@ -20,7 +20,7 @@
 #   python -m bedcosmo.num_visits.empirical.reduced.build_reduced_template_prior \
 #     --templates T7+T10
 
-template_source: eazy12
+template_source: desi8
 reduced_templates: null
 
 # Density backend:
@@ -39,8 +39,8 @@ reduced_templates: null
 density_type: flow
 
 template_dir: null
-template_norm_min: 4000.0
-template_norm_max: 8000.0
+template_norm_min: 3600.0
+template_norm_max: 4200.0
 # Input fitted-spectrum flux-unit conversion to erg / (s cm^2 Angstrom).
 # This DESI build inherits the coadd FLUX BUNIT of 1e-17.
 flux_unit_scale: 1.0e-17

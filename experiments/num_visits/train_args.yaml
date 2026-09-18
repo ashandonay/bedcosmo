@@ -137,7 +137,7 @@ empirical:
   # Prefer --prior-<field> CLI overrides (e.g. --prior-template-source eazy6,
   # --prior-reduced-templates t7,t10) rather than top-level train_args keys.
   flow_type: NAF
-  transform_input: false
+  transform_input: true
   input_transform_type: joint
   # Which cosmo_params the guide infers. [] = all (joint). A strict subset (e.g.
   # ["z"]) trains a focused guide; requires transform_input: false. Override via
@@ -154,7 +154,7 @@ empirical:
   nf_transform: affine
   spline_bins: 16
   design_args_path: design_args.yaml
-  total_steps: 50000
+  total_steps: 32000
   optimizer: Adam
   initial_lr: 0.002
   final_lr: 0.0
@@ -165,7 +165,7 @@ empirical:
   gamma: 0.1
   step_freq: 1
   checkpoint_step_freq: 1000
-  n_particles_per_device: 50
+  n_particles_per_device: 25
   mag_err_cap: 10
   cdf_bins: 5000
   cdf_samples: 1000000

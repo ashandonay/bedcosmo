@@ -12,7 +12,7 @@
 #   ./train_prior_flow.sh --local --threads 8 --space native --n 20000
 #
 # Module flags: --space {native,gaussianized,both} --n --epochs --hidden --transforms
-#               --bins --batch-size --lr --seed --out-dir --kde-path --threads
+#               --bins --batch-size --lr --seed --out-dir --kde-path --threads --device
 
 set -euo pipefail
 
