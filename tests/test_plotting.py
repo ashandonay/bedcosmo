@@ -599,6 +599,36 @@ class TestPosteriorFenceHelpers:
         fence = resolve_fence_ranges([gd], ["Om", "hrdrag"], ranges=ranges, fence_iqr=3.0)
         assert fence == ranges
 
+    def test_compact_outlier_annotation_lines(self):
+        from bedcosmo.plotting import (
+            _compact_series_label,
+            _fmt_sample_count,
+            format_outlier_annotation_lines,
+        )
+
+        assert _compact_series_label(
+            "Nominal Design (NF), EIG: 9.54 bits, H_prior: 3.28 bits, H_post: -6.26 bits"
+        ) == "Nom NF"
+        assert _compact_series_label("Optimal Design (NF), EIG: 1.0 bits") == "Opt NF"
+        assert _compact_series_label("Nominal Design (MCMC)") == "MCMC"
+        assert _fmt_sample_count(500000) == "5e5"
+        assert _fmt_sample_count(30544).startswith("3")
+        lines = format_outlier_annotation_lines(
+            [
+                {"n_out": 2895, "n_tot": 500000},
+                {"n_out": 2635, "n_tot": 500000},
+                {"n_out": 1, "n_tot": 30544},
+            ],
+            legend_labels=[
+                "Nominal Design (NF), EIG: 9.5 bits",
+                "Optimal Design (NF), EIG: 9.6 bits",
+                "Nominal Design (MCMC)",
+            ],
+        )
+        assert lines[0].startswith("Nom NF 2895/5e5")
+        assert "EIG" not in "".join(lines)
+        assert len(lines) == 3
+
 
 class TestPlotPosterior:
     """Test cases for plot_posterior function."""
