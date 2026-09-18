@@ -441,24 +441,71 @@ class TestComparisonPlotter:
             # Create mock GetDist samples
             mock_sample = Mock()
             mock_sample.paramNames.names = ['param1', 'param2']
+            mock_sample.paramNames.list.return_value = ['param1', 'param2']
             mock_nf_samples.return_value = ([{'samples': mock_sample}], 'step_1000')
 
             # Mock plot_posterior (inherited from BasePlotter)
             mock_plotter = Mock()
             mock_plotter.fig = Mock()
             mock_plotter.fig.legends = []
+            mock_plotter._outlier_stats = None
+            mock_plotter._outlier_annot_color = None
             mock_plot_posterior.return_value = mock_plotter
 
             # Use tmp_path for save directory to avoid permission issues
             mock_get_dir.return_value = str(tmp_path / "plots")
             mock_gen_filename.return_value = "test.png"
 
-            with patch('bedcosmo.plotting.os.makedirs'):
+            with patch('bedcosmo.plotting.os.makedirs'), \
+                 patch('bedcosmo.plotting.apply_outlier_legend'):
                 result = comparison_plotter.compare_posterior(var='pyro_seed')
 
                 assert result == mock_plotter
                 mock_plot_posterior.assert_called_once()
+                # Defaults engage fencing inside plot_posterior; no explicit disable.
+                call_kwargs = mock_plot_posterior.call_args.kwargs
+                assert "fence_iqr" not in call_kwargs  # uses plot_posterior default 3.0
                 mock_save.assert_called_once()
+
+    def test_compare_posterior_forwards_fence_kwargs(
+        self, comparison_plotter, mock_run_data_list, tmp_path
+    ):
+        """compare_posterior forwards fencing kwargs to plot_posterior."""
+        with patch('bedcosmo.plotting.get_runs_data') as mock_get_runs, \
+             patch.object(ComparisonPlotter, '_nf_display_samples') as mock_nf_samples, \
+             patch.object(ComparisonPlotter, 'plot_posterior') as mock_plot_posterior, \
+             patch.object(comparison_plotter, 'save_figure'), \
+             patch.object(comparison_plotter, 'get_save_dir') as mock_get_dir, \
+             patch.object(comparison_plotter, 'generate_filename') as mock_gen_filename:
+
+            mock_get_runs.return_value = (mock_run_data_list, 'exp_123', 'test_exp')
+            mock_sample = Mock()
+            mock_sample.paramNames.names = ['param1', 'param2']
+            mock_sample.paramNames.list.return_value = ['param1', 'param2']
+            mock_nf_samples.return_value = ([{'samples': mock_sample}], 'step_1000')
+            mock_plotter = Mock()
+            mock_plotter.fig = Mock()
+            mock_plotter.fig.legends = []
+            mock_plotter._outlier_stats = [{"n_out": 0, "n_tot": 100}]
+            mock_plotter._outlier_annot_color = None
+            mock_plot_posterior.return_value = mock_plotter
+            mock_get_dir.return_value = str(tmp_path / "plots")
+            mock_gen_filename.return_value = "test.png"
+
+            with patch('bedcosmo.plotting.os.makedirs'), \
+                 patch('bedcosmo.plotting.apply_outlier_legend') as mock_leg:
+                comparison_plotter.compare_posterior(
+                    var='pyro_seed',
+                    fence_iqr=5.0,
+                    show_outliers=True,
+                    outlier_color=None,
+                )
+                kw = mock_plot_posterior.call_args.kwargs
+                assert kw["fence_iqr"] == 5.0
+                assert kw["show_outliers"] is True
+                assert kw["outlier_color"] is None
+                mock_leg.assert_called_once()
+                assert mock_leg.call_args.kwargs.get("outlier_color") is None
 
     def test_compare_posterior_with_colors(self, comparison_plotter, mock_run_data_list):
         """Test compare_posterior with custom colors."""
@@ -467,15 +514,19 @@ class TestComparisonPlotter:
              patch.object(ComparisonPlotter, 'plot_posterior') as mock_plot_posterior, \
              patch.object(comparison_plotter, 'save_figure'), \
              patch.object(comparison_plotter, 'get_save_dir'), \
-             patch.object(comparison_plotter, 'generate_filename'):
+             patch.object(comparison_plotter, 'generate_filename'), \
+             patch('bedcosmo.plotting.apply_outlier_legend'):
 
             mock_get_runs.return_value = (mock_run_data_list, 'exp_123', 'test_exp')
             mock_sample = Mock()
             mock_sample.paramNames.names = ['param1', 'param2']
+            mock_sample.paramNames.list.return_value = ['param1', 'param2']
             mock_nf_samples.return_value = ([{'samples': mock_sample}], 'step_1000')
             mock_plotter = Mock()
             mock_plotter.fig = Mock()
             mock_plotter.fig.legends = []
+            mock_plotter._outlier_stats = None
+            mock_plotter._outlier_annot_color = None
             mock_plot_posterior.return_value = mock_plotter
 
             custom_colors = ['red', 'blue']
@@ -500,7 +551,8 @@ class TestComparisonPlotter:
              patch.object(ComparisonPlotter, 'plot_posterior') as mock_plot_posterior, \
              patch.object(comparison_plotter, 'save_figure'), \
              patch.object(comparison_plotter, 'get_save_dir', return_value=str(tmp_path)), \
-             patch.object(comparison_plotter, 'generate_filename', return_value='test.png'):
+             patch.object(comparison_plotter, 'generate_filename', return_value='test.png'), \
+             patch('bedcosmo.plotting.apply_outlier_legend'):
 
             mock_get_runs.return_value = (mock_run_data_list, 'exp_123', 'test_exp')
 
@@ -517,11 +569,14 @@ class TestComparisonPlotter:
             mock_experiment = Mock()
             mock_experiment.get_prior_samples.return_value = mock_sample
             mock_experiment.prior_args = {'foo': 'bar'}
+            mock_experiment.central_params = None
             mock_init_exp.return_value = mock_experiment
 
             mock_plotter = Mock()
             mock_plotter.fig = Mock()
             mock_plotter.fig.legends = []
+            mock_plotter._outlier_stats = None
+            mock_plotter._outlier_annot_color = None
             mock_plot_posterior.return_value = mock_plotter
 
             comparison_plotter.compare_posterior(var='pyro_seed', plot_prior=True)
@@ -623,13 +678,38 @@ class TestPosteriorFenceHelpers:
                 {"n_out": 0, "n_tot": 30544},
             ],
         )
-        # NF gets main + crimson subline; MCMC only main (no outliers)
+        # NF gets main + series-colored subline; MCMC only main (no outliers)
         assert len(handles) == 3
         assert labels[0].startswith("Nominal Design (NF)")
         assert "EIG" in labels[0]
         assert labels[1].startswith("  2895/5e5 outside")
         assert getattr(handles[1], "_bedcosmo_outlier_sub")
+        from bedcosmo.util import convert_color
+
+        assert handles[1]._bedcosmo_outlier_color == convert_color("tab:blue")
         assert labels[2] == "Nominal Design (MCMC)"
+
+        # Explicit outlier_color overrides series color for second-lines.
+        handles2, _ = make_outlier_legend_entries(
+            ["tab:blue", "tab:orange"],
+            ["A", "B"],
+            outlier_stats=[
+                {"n_out": 10, "n_tot": 100},
+                {"n_out": 5, "n_tot": 100},
+            ],
+            outlier_color="crimson",
+        )
+        assert handles2[1]._bedcosmo_outlier_color == convert_color("crimson")
+        assert handles2[3]._bedcosmo_outlier_color == convert_color("crimson")
+
+    def test_series_outlier_color_helper(self):
+        from bedcosmo.plotting import _series_outlier_color
+        from bedcosmo.util import convert_color
+
+        assert _series_outlier_color("tab:orange") == convert_color("tab:orange")
+        assert _series_outlier_color("tab:orange", outlier_color="crimson") == convert_color(
+            "crimson"
+        )
 
 
 class TestPlotPosterior:
