@@ -601,33 +601,35 @@ class TestPosteriorFenceHelpers:
 
     def test_compact_outlier_annotation_lines(self):
         from bedcosmo.plotting import (
-            _compact_series_label,
             _fmt_sample_count,
-            format_outlier_annotation_lines,
+            _outlier_second_line,
+            make_outlier_legend_entries,
+            style_outlier_legend,
         )
 
-        assert _compact_series_label(
-            "Nominal Design (NF), EIG: 9.54 bits, H_prior: 3.28 bits, H_post: -6.26 bits"
-        ) == "Nom NF"
-        assert _compact_series_label("Optimal Design (NF), EIG: 1.0 bits") == "Opt NF"
-        assert _compact_series_label("Nominal Design (MCMC)") == "MCMC"
         assert _fmt_sample_count(500000) == "5e5"
         assert _fmt_sample_count(30544).startswith("3")
-        lines = format_outlier_annotation_lines(
+        assert _outlier_second_line({"n_out": 0, "n_tot": 100}) is None
+        assert "outside" in _outlier_second_line({"n_out": 2895, "n_tot": 500000})
+
+        handles, labels = make_outlier_legend_entries(
+            ["tab:blue", "black"],
             [
-                {"n_out": 2895, "n_tot": 500000},
-                {"n_out": 2635, "n_tot": 500000},
-                {"n_out": 1, "n_tot": 30544},
-            ],
-            legend_labels=[
-                "Nominal Design (NF), EIG: 9.5 bits",
-                "Optimal Design (NF), EIG: 9.6 bits",
+                "Nominal Design (NF), EIG: 9.5 bits, H_prior: 3.28 bits",
                 "Nominal Design (MCMC)",
             ],
+            outlier_stats=[
+                {"n_out": 2895, "n_tot": 500000},
+                {"n_out": 0, "n_tot": 30544},
+            ],
         )
-        assert lines[0].startswith("Nom NF 2895/5e5")
-        assert "EIG" not in "".join(lines)
-        assert len(lines) == 3
+        # NF gets main + crimson subline; MCMC only main (no outliers)
+        assert len(handles) == 3
+        assert labels[0].startswith("Nominal Design (NF)")
+        assert "EIG" in labels[0]
+        assert labels[1].startswith("  2895/5e5 outside")
+        assert getattr(handles[1], "_bedcosmo_outlier_sub")
+        assert labels[2] == "Nominal Design (MCMC)"
 
 
 class TestPlotPosterior:
