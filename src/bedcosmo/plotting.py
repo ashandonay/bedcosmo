@@ -39,6 +39,120 @@ import traceback
 
 
 home_dir = os.environ["HOME"]
+
+# Crimson edge markers for out-of-fence posterior samples (desilike-emulator style).
+# Extremes are NOT silently dropped: GetDist sees the bulk; outliers stay visible.
+_OUTLIER_MARKER_COLOR = "crimson"
+
+
+def iqr_display_range(values, k: float = 3.0, pad: float = 0.04):
+    """Tukey fence (k*IQR past Q1/Q3) snugged to in-fence data, with edge pad.
+
+    Adapted from desilike-emulator ``plotting.visualize_training_data._display_range``
+    (linear axes). Returns ``(lo, hi)`` or ``None`` if fencing is disabled / impossible.
+    """
+    if k is None or k <= 0:
+        return None
+    v = np.asarray(values, dtype=np.float64)
+    v = v[np.isfinite(v)]
+    if v.size < 4:
+        return None
+    q1, q3 = np.quantile(v, [0.25, 0.75])
+    iqr = q3 - q1
+    if not np.isfinite(iqr) or iqr <= 0:
+        return None
+    lo_f, hi_f = q1 - k * iqr, q3 + k * iqr
+    w_in = v[(v >= lo_f) & (v <= hi_f)]
+    if w_in.size == 0:
+        return None
+    lo, hi = float(w_in.min()), float(w_in.max())
+    span = hi - lo
+    if span <= 0:
+        return None
+    if (v < lo_f).any():
+        lo -= pad * span
+    if (v > hi_f).any():
+        hi += pad * span
+    return lo, hi
+
+
+def resolve_fence_ranges(samples_list, param_names, ranges=None, fence_iqr: float = 3.0):
+    """Per-parameter display/GetDist fence limits.
+
+    Preference: explicit ``ranges`` (e.g. prior_args plot window) when provided;
+    otherwise joint Tukey fences across all series (``fence_iqr``). Returns ``None``
+    when fencing is disabled.
+    """
+    if ranges is not None:
+        out = {}
+        for p in param_names:
+            if p in ranges:
+                lo, hi = ranges[p]
+                out[p] = (float(lo), float(hi))
+        return out or None
+    if fence_iqr is None or fence_iqr <= 0:
+        return None
+    out = {}
+    for p in param_names:
+        cols = []
+        for s in samples_list:
+            names = list(s.paramNames.list())
+            if p not in names:
+                continue
+            cols.append(np.asarray(s.samples[:, names.index(p)], dtype=np.float64))
+        if not cols:
+            continue
+        fr = iqr_display_range(np.concatenate(cols), k=fence_iqr)
+        if fr is not None:
+            out[p] = fr
+    return out or None
+
+
+def fence_mask_for_samples(sample, fence_ranges):
+    """Boolean mask: True where *all* fenced parameters lie inside the fence."""
+    n = int(np.asarray(sample.samples).shape[0])
+    if not fence_ranges:
+        return np.ones(n, dtype=bool)
+    names = list(sample.paramNames.list())
+    ok = np.ones(n, dtype=bool)
+    arr = np.asarray(sample.samples, dtype=np.float64)
+    for p, (lo, hi) in fence_ranges.items():
+        if p not in names:
+            continue
+        col = arr[:, names.index(p)]
+        ok &= np.isfinite(col) & (col >= lo) & (col <= hi)
+    return ok
+
+
+def subset_mcsamples(sample, mask, min_keep: int = 16):
+    """Return an MCSamples restricted to ``mask``, or the original if too few remain."""
+    mask = np.asarray(mask, dtype=bool)
+    n_keep = int(mask.sum())
+    if n_keep == mask.size:
+        return sample, mask, 0
+    if n_keep < min_keep:
+        warnings.warn(
+            f"Fence would keep only {n_keep}/{mask.size} samples; skipping fence for this series.",
+            stacklevel=2,
+        )
+        return sample, np.ones(mask.size, dtype=bool), 0
+    names = list(sample.paramNames.list())
+    labels = []
+    for i, p in enumerate(sample.paramNames.names):
+        lab = getattr(p, "label", None)
+        labels.append(lab if isinstance(lab, str) else names[i])
+    with contextlib.redirect_stdout(io.StringIO()):
+        fenced = getdist.MCSamples(
+            samples=np.asarray(sample.samples)[mask],
+            names=names,
+            labels=labels,
+            settings=GETDIST_SETTINGS,
+        )
+    if getattr(sample, "label", None) is not None:
+        fenced.label = sample.label
+    return fenced, mask, int((~mask).sum())
+
+
 try:
     from desi_y1_plotting import KP7StylePaper
     style = KP7StylePaper()
@@ -1375,10 +1489,22 @@ class BasePlotter:
         scatter_alpha=0.6,
         contour_alpha_factor=0.8,
         style=style,
+        fence_iqr=3.0,
+        show_outliers=True,
+        outlier_annotate=True,
+        outlier_color=_OUTLIER_MARKER_COLOR,
+        outlier_min_keep=16,
     ):
         """
         Plots posterior distributions using GetDist triangle plots.
         Shared method available to all plotter classes.
+
+        Extreme / NF-tail handling (desilike-emulator style; **not** a silent mask):
+        GetDist contours use in-fence samples only so KDE tracks the bulk, while
+        out-of-fence points from the full draw are overlaid as edge markers and
+        counted in an annotation. Fence limits come from ``ranges`` when provided
+        (e.g. prior_args plot windows in training frames), otherwise from joint
+        Tukey fences (``fence_iqr``).
 
         Args:
             samples (list): List of GetDist MCSamples objects.
@@ -1394,9 +1520,20 @@ class BasePlotter:
             width_inch (float): Width of the plot in inches. Higher values increase resolution.
             ranges (dict, optional): Dictionary specifying fixed ranges for parameters.
                 Keys should be parameter names, values should be tuples of (min, max).
+                When set, these limits are also used as the outlier fence.
             scatter_alpha (float): Alpha value for scatter points. Default 0.6 for better distinguishability.
             contour_alpha_factor (float): Factor to adjust contour alpha for distinguishability. Default 0.8.
             style (object, optional): Style object (like KP7StylePaper) to apply to the plotter settings.
+            fence_iqr (float, optional): Tukey fence multiplier for robust display/GetDist
+                ranges when ``ranges`` is not provided. Default 3.0. Set to 0/None to
+                disable IQR fencing (explicit ``ranges`` still apply as axis limits).
+            show_outliers (bool): If True (default), mark out-of-fence samples from the
+                full draw as crimson ``x`` markers clamped to the frame edge.
+            outlier_annotate (bool): If True (default), annotate per-series outlier
+                counts/fractions on the figure.
+            outlier_color (str): Color for out-of-fence markers and annotation.
+            outlier_min_keep (int): Minimum in-fence samples required before replacing
+                a series for GetDist; otherwise fencing is skipped for that series.
         Returns:
             g: GetDist plotter object with the generated triangle plot.
         """
@@ -1422,6 +1559,7 @@ class BasePlotter:
             legend_labels = [legend_labels]
 
         colors = [convert_color(c) for c in colors]
+        full_samples = list(samples)
 
         # Create adjusted colors for contours and scatter points
         def adjust_color_brightness(color, factor):
@@ -1481,19 +1619,60 @@ class BasePlotter:
         # Prepare contour_args with custom levels if provided
         # For GetDist, we don't pass line styles in contour_args when using multiple styles
 
-        for sample in samples:
+        param_name_list = list(full_samples[0].paramNames.list())
+        fence_ranges = resolve_fence_ranges(
+            full_samples, param_name_list, ranges=ranges, fence_iqr=fence_iqr
+        )
+
+        # GetDist sees in-fence samples only; full draws kept for outlier overlay.
+        contour_samples = []
+        in_fence_masks = []
+        outlier_stats = []
+        for sample in full_samples:
+            if fence_ranges is None:
+                contour_samples.append(sample)
+                in_fence_masks.append(np.ones(len(sample.samples), dtype=bool))
+                outlier_stats.append({"n_out": 0, "n_tot": len(sample.samples), "n_lo": {}, "n_hi": {}})
+                continue
+            mask = fence_mask_for_samples(sample, fence_ranges)
+            fenced, _, _ = subset_mcsamples(
+                sample, mask, min_keep=outlier_min_keep
+            )
+            # Overlay / counts always use the true fence mask (even if GetDist
+            # kept the full series because too few in-fence samples remained).
+            contour_samples.append(fenced)
+            in_fence_masks.append(mask)
+            names = list(sample.paramNames.list())
+            arr = np.asarray(sample.samples, dtype=np.float64)
+            n_lo, n_hi = {}, {}
+            for p, (lo, hi) in fence_ranges.items():
+                if p not in names:
+                    continue
+                col = arr[:, names.index(p)]
+                n_lo[p] = int(np.sum(np.isfinite(col) & (col < lo)))
+                n_hi[p] = int(np.sum(np.isfinite(col) & (col > hi)))
+            outlier_stats.append(
+                {
+                    "n_out": int((~mask).sum()),
+                    "n_tot": int(mask.size),
+                    "n_lo": n_lo,
+                    "n_hi": n_hi,
+                }
+            )
+
+        for sample in contour_samples:
             sample.updateSettings(GETDIST_SETTINGS)
 
         # Set contour levels if provided
         if levels is not None:
             if isinstance(levels, float):
                 levels = [levels]
-            for sample in samples:
+            for sample in contour_samples:
                 sample.updateSettings({'contours': levels})
 
-        # Create triangle plot
+        # Create triangle plot from fenced (bulk) samples
         g.triangle_plot(
-            samples,
+            contour_samples,
             colors=contour_colors,
             legend_labels=legend_labels,
             filled=False,
@@ -1510,17 +1689,17 @@ class BasePlotter:
         if levels is not None and len(levels) > 1:
             level_lighten = [0.0, 0.22]  # inner level keeps base color; outer is slightly lighter
             n_levels = len(levels)
-            n_params = len(samples[0].paramNames.names)
+            n_params = len(contour_samples[0].paramNames.names)
             for i in range(1, n_params):
                 for j in range(i):
                     ax = g.subplots[i, j]
                     if ax is None:
                         continue
                     collections = ax.collections
-                    expected = len(samples) * n_levels
+                    expected = len(contour_samples) * n_levels
                     if len(collections) < expected:
                         continue
-                    for sample_idx in range(len(samples)):
+                    for sample_idx in range(len(contour_samples)):
                         base_color = contour_colors[sample_idx]
                         for level_idx in range(n_levels):
                             coll_idx = sample_idx * n_levels + level_idx
@@ -1532,52 +1711,57 @@ class BasePlotter:
         # If alpha is a list, manually set alpha for each sample's lines and contours
         if isinstance(alpha, list):
             # Iterate through all subplots and set alpha for lines and collections
-            n_params = len(samples[0].paramNames.names)
+            n_params = len(contour_samples[0].paramNames.names)
             for i in range(n_params):
                 for j in range(i + 1):
                     ax = g.subplots[i, j]
                     if ax is not None:
                         if i == j:
                             lines = ax.get_lines()
-                            n_lines_per_sample = len(lines) // len(samples) if len(samples) > 0 else 0
-                            for sample_idx in range(len(samples)):
+                            n_lines_per_sample = len(lines) // len(contour_samples) if len(contour_samples) > 0 else 0
+                            for sample_idx in range(len(contour_samples)):
                                 start_idx = sample_idx * n_lines_per_sample
                                 end_idx = (sample_idx + 1) * n_lines_per_sample
                                 for line in lines[start_idx:end_idx]:
                                     line.set_alpha(adjusted_alpha[sample_idx])
                         else:
                             collections = ax.collections
-                            n_collections_per_sample = len(collections) // len(samples) if len(samples) > 0 else 0
-                            for sample_idx in range(len(samples)):
+                            n_collections_per_sample = len(collections) // len(contour_samples) if len(contour_samples) > 0 else 0
+                            for sample_idx in range(len(contour_samples)):
                                 start_idx = sample_idx * n_collections_per_sample
                                 end_idx = (sample_idx + 1) * n_collections_per_sample
                                 for collection in collections[start_idx:end_idx]:
                                     collection.set_alpha(adjusted_alpha[sample_idx])
 
-        param_names = g.param_names_for_root(samples[0])
+        param_names = g.param_names_for_root(contour_samples[0])
         param_name_list = [p.name for p in param_names.names]
-        
-        # Manual axis limits if ranges is provided and didn't work
-        if ranges is not None:
-            # Set axis limits manually for each parameter
+        # GetDist / Mock may yield non-str .name; fall back to list() order.
+        if not all(isinstance(p, str) for p in param_name_list):
+            param_name_list = list(contour_samples[0].paramNames.list())
+
+        # Axis limits: explicit ranges, else resolved fence window.
+        display_ranges = ranges if ranges is not None else fence_ranges
+        if display_ranges is not None and hasattr(g, "subplots") and g.subplots is not None:
             for i, param in enumerate(param_name_list):
-                if param in ranges:
-                    min_val, max_val = ranges[param]
-                    # Set limits for diagonal (1D) plots
-                    if hasattr(g, 'subplots') and g.subplots is not None:
-                        g.subplots[i, i].set_xlim(min_val, max_val)
-                        # Set limits for off-diagonal (2D) plots
-                        for j in range(i):
-                            if param_name_list[j] in ranges:
-                                g.subplots[i, j].set_xlim(ranges[param_name_list[j]][0], ranges[param_name_list[j]][1])
-                                g.subplots[i, j].set_ylim(min_val, max_val)
+                if param not in display_ranges:
+                    continue
+                min_val, max_val = display_ranges[param]
+                ax_diag = g.subplots[i, i]
+                if ax_diag is not None:
+                    ax_diag.set_xlim(min_val, max_val)
+                for j in range(i):
+                    ax = g.subplots[i, j]
+                    if ax is None or param_name_list[j] not in display_ranges:
+                        continue
+                    ax.set_xlim(display_ranges[param_name_list[j]][0], display_ranges[param_name_list[j]][1])
+                    ax.set_ylim(min_val, max_val)
 
         if any(show_scatter):
             for i, param in enumerate(param_name_list):
                 if i < len(g.subplots) and i < len(g.subplots[i]):
                     ax = g.subplots[i][i]
                     current_ylim = ax.get_ylim()
-                    for k, sample in enumerate(samples):
+                    for k, sample in enumerate(contour_samples):
                         if show_scatter[k]:  # Only show scatter for this sample if enabled
                             param_index = sample.paramNames.list().index(param)
                             if param_index is not None:
@@ -1597,7 +1781,7 @@ class BasePlotter:
                     for j in range(i):
                         if param_name_list[i] == param_y and param_name_list[j] == param_x:
                             ax = g.subplots[i][j]
-                            for k, sample in enumerate(samples):
+                            for k, sample in enumerate(contour_samples):
                                 if show_scatter[k]:  # Only show scatter for this sample if enabled
                                     g.add_2d_scatter(
                                         sample,
@@ -1608,6 +1792,78 @@ class BasePlotter:
                                         scatter_size=4,
                                         alpha=scatter_alpha,
                                     )
+
+        # Outlier overlay: clamp full-draw extremes to the frame as crimson x's.
+        if show_outliers and fence_ranges is not None:
+            for i in range(len(param_name_list)):
+                for j in range(i):
+                    ax = g.subplots[i, j]
+                    if ax is None:
+                        continue
+                    py, px = param_name_list[i], param_name_list[j]
+                    if px not in fence_ranges or py not in fence_ranges:
+                        continue
+                    xr, yr = fence_ranges[px], fence_ranges[py]
+                    for k, sample in enumerate(full_samples):
+                        names = list(sample.paramNames.list())
+                        if px not in names or py not in names:
+                            continue
+                        mask = in_fence_masks[k]
+                        if mask.all():
+                            continue
+                        arr = np.asarray(sample.samples, dtype=np.float64)
+                        xv = arr[~mask, names.index(px)]
+                        yv = arr[~mask, names.index(py)]
+                        if xv.size == 0:
+                            continue
+                        ax.scatter(
+                            np.clip(xv, xr[0], xr[1]),
+                            np.clip(yv, yr[0], yr[1]),
+                            s=34,
+                            marker="x",
+                            color=outlier_color,
+                            linewidths=1.3,
+                            zorder=6,
+                            clip_on=False,
+                        )
+                # 1D: annotate below/above counts on the diagonal title when present
+                ax1 = g.subplots[i, i]
+                if ax1 is None:
+                    continue
+                p = param_name_list[i]
+                n_lo = sum(stat["n_lo"].get(p, 0) for stat in outlier_stats)
+                n_hi = sum(stat["n_hi"].get(p, 0) for stat in outlier_stats)
+                if outlier_annotate and (n_lo or n_hi):
+                    ax1.set_title(
+                        f"{n_lo} below / {n_hi} above range",
+                        fontsize=9,
+                        color=outlier_color,
+                        pad=3,
+                    )
+
+        if outlier_annotate and fence_ranges is not None:
+            lines = []
+            for k, stat in enumerate(outlier_stats):
+                if stat["n_out"] <= 0:
+                    continue
+                label = None
+                if legend_labels is not None and k < len(legend_labels):
+                    label = legend_labels[k]
+                if not label:
+                    label = getattr(full_samples[k], "label", None) or f"series {k}"
+                frac = 100.0 * stat["n_out"] / max(stat["n_tot"], 1)
+                lines.append(f"{label}: {stat['n_out']}/{stat['n_tot']} outside fence ({frac:.3f}%)")
+            if lines:
+                g.fig.text(
+                    0.01,
+                    0.01,
+                    "Outliers (not masked): " + "; ".join(lines),
+                    fontsize=8,
+                    color=outlier_color,
+                    ha="left",
+                    va="bottom",
+                    wrap=True,
+                )
 
         return g
 
