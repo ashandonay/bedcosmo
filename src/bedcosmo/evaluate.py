@@ -15,7 +15,7 @@ import numpy as np
 import torch
 import getdist
 import argparse
-from bedcosmo.plotting import RunPlotter
+from bedcosmo.plotting import RunPlotter, place_outlier_annotation
 import traceback
 from bedcosmo.pyro_oed_src import nf_loss, LikelihoodDataset
 from bedcosmo.entropy import (
@@ -673,6 +673,7 @@ class Evaluator:
             fontsize=legend_fontsize,
         )
         leg.set_in_layout(False)
+        place_outlier_annotation(g)
         if self.display_run:
             title = (
                 f"Posterior Evaluations for {num_data_samples} Likelihood Samples "

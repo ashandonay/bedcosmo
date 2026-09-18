@@ -45,6 +45,114 @@ home_dir = os.environ["HOME"]
 _OUTLIER_MARKER_COLOR = "crimson"
 
 
+def _compact_series_label(label, index: int = 0) -> str:
+    """Short legend/outlier tag: strip EIG/entropy suffixes; map common names."""
+    s = str(label or f"series {index}").strip()
+    for sep in (", EIG", ", H_prior", ", H_post", ", H_"):
+        if sep in s:
+            s = s.split(sep, 1)[0].strip()
+    replacements = (
+        ("Nominal Design (NF)", "Nom NF"),
+        ("Optimal Design (NF)", "Opt NF"),
+        ("Nominal Design (MCMC)", "MCMC"),
+        ("Nominal Design", "Nom"),
+        ("Optimal Design", "Opt"),
+    )
+    for old, new in replacements:
+        if s == old or s.startswith(old):
+            return new
+    # Already short (e.g. train frames "NF" / "MCMC")
+    if len(s) <= 12:
+        return s
+    return s[:10] + "…"
+
+
+def _fmt_sample_count(n: int) -> str:
+    """Compact count for annotations, e.g. 500000 -> 5e5, 30544 -> 3.1e4."""
+    n = int(n)
+    if n < 1000:
+        return str(n)
+    exp = int(np.floor(np.log10(n)))
+    mant = n / (10 ** exp)
+    if abs(mant - round(mant)) < 1e-9:
+        return f"{int(round(mant))}e{exp}"
+    return f"{mant:.1f}e{exp}"
+
+
+def format_outlier_annotation_lines(outlier_stats, legend_labels=None, full_samples=None) -> list:
+    """Build compact per-series outlier lines (no EIG / entropy)."""
+    lines = []
+    for k, stat in enumerate(outlier_stats):
+        if not stat or int(stat.get("n_out", 0)) <= 0:
+            continue
+        label = None
+        if legend_labels is not None and k < len(legend_labels):
+            label = legend_labels[k]
+        if not label and full_samples is not None and k < len(full_samples):
+            label = getattr(full_samples[k], "label", None)
+        tag = _compact_series_label(label, k)
+        n_out = int(stat["n_out"])
+        n_tot = int(stat["n_tot"])
+        frac = 100.0 * n_out / max(n_tot, 1)
+        lines.append(f"{tag} {n_out}/{_fmt_sample_count(n_tot)} ({frac:.2f}%)")
+    return lines
+
+
+def place_outlier_annotation(g, color=None, fontsize: float = 8):
+    """Place compact outlier text under the figure legend (not over axis labels).
+
+    Expects ``g._outlier_annot_lines`` set by ``plot_posterior``. Safe to call again
+    after callers rebuild ``fig.legend`` (generate_posterior / replot / compare).
+    """
+    lines = getattr(g, "_outlier_annot_lines", None)
+    if not lines:
+        return None
+    color = color or getattr(g, "_outlier_annot_color", _OUTLIER_MARKER_COLOR)
+    prev = getattr(g, "_outlier_annot_artist", None)
+    if prev is not None:
+        try:
+            prev.remove()
+        except Exception:
+            pass
+
+    # Multi-line block under the legend; short enough to sit in the empty UR corner.
+    text = "Outliers:\n" + "\n".join(lines)
+    fig = g.fig
+    x, y, ha, va = 0.99, 0.62, "right", "top"
+    legends = getattr(fig, "legends", None)
+    if legends:
+        try:
+            leg = legends[-1]
+        except (TypeError, IndexError, KeyError):
+            leg = None
+        if leg is not None:
+            try:
+                fig.canvas.draw()
+                renderer = fig.canvas.get_renderer()
+                bbox = leg.get_window_extent(renderer).transformed(fig.transFigure.inverted())
+                # Left-align with legend box, just below it.
+                x = float(bbox.x0)
+                y = max(float(bbox.y0) - 0.015, 0.08)
+                ha, va = "left", "top"
+            except Exception:
+                pass
+
+    artist = fig.text(
+        x,
+        y,
+        text,
+        fontsize=fontsize,
+        color=color,
+        ha=ha,
+        va=va,
+        linespacing=1.3,
+        clip_on=False,
+        zorder=20,
+    )
+    g._outlier_annot_artist = artist
+    return artist
+
+
 def iqr_display_range(values, k: float = 3.0, pad: float = 0.04):
     """Tukey fence (k*IQR past Q1/Q3) snugged to in-fence data, with edge pad.
 
@@ -1369,6 +1477,7 @@ class BasePlotter:
         g.fig.set_constrained_layout(True)
         leg = g.fig.legend(handles=custom_legend, loc='upper right', bbox_to_anchor=(0.99, 0.96), fontsize=legend_fontsize)
         leg.set_in_layout(False)
+        place_outlier_annotation(g)
 
         # Save figure
         if filename is None:
@@ -1842,28 +1951,17 @@ class BasePlotter:
                     )
 
         if outlier_annotate and fence_ranges is not None:
-            lines = []
-            for k, stat in enumerate(outlier_stats):
-                if stat["n_out"] <= 0:
-                    continue
-                label = None
-                if legend_labels is not None and k < len(legend_labels):
-                    label = legend_labels[k]
-                if not label:
-                    label = getattr(full_samples[k], "label", None) or f"series {k}"
-                frac = 100.0 * stat["n_out"] / max(stat["n_tot"], 1)
-                lines.append(f"{label}: {stat['n_out']}/{stat['n_tot']} outside fence ({frac:.3f}%)")
+            lines = format_outlier_annotation_lines(
+                outlier_stats, legend_labels=legend_labels, full_samples=full_samples
+            )
+            g._outlier_annot_lines = lines
+            g._outlier_annot_color = outlier_color
             if lines:
-                g.fig.text(
-                    0.01,
-                    0.01,
-                    "Outliers (not masked): " + "; ".join(lines),
-                    fontsize=8,
-                    color=outlier_color,
-                    ha="left",
-                    va="bottom",
-                    wrap=True,
-                )
+                # Under GetDist's legend when present; callers that rebuild the
+                # legend should call place_outlier_annotation(g) again.
+                place_outlier_annotation(g, color=outlier_color)
+            else:
+                g._outlier_annot_artist = None
 
         return g
 
@@ -2855,6 +2953,7 @@ class RunPlotter(BasePlotter):
         g.fig.set_constrained_layout(True)
         leg = g.fig.legend(handles=custom_legend, loc='upper right', bbox_to_anchor=(0.99, 0.96), fontsize=legend_fontsize)
         leg.set_in_layout(False)
+        place_outlier_annotation(g)
         title = f"Posterior Steps - Run: {self.run_id[:8]}"
         g.fig.suptitle(title, fontsize=title_fontsize, weight='bold')
         
@@ -3685,6 +3784,7 @@ class ComparisonPlotter(BasePlotter):
             bbox_to_anchor=(0.99, 0.96),
         )
         leg.set_in_layout(False)
+        place_outlier_annotation(g)
         g.fig.suptitle(title)
         
         # Save figure
