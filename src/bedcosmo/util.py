@@ -2384,6 +2384,9 @@ def convert_color(c):
         return colors.to_hex(c)
     elif isinstance(c, str):
         return c
+    elif isinstance(c, (tuple, list)) and len(c) in (3, 4):
+        # Matplotlib prop_cycle yields RGB(A) float tuples.
+        return colors.to_hex(c)
     else:
         return str(c)
 
