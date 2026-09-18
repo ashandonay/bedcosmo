@@ -1012,6 +1012,60 @@ class TestCompareEigs:
             with pytest.raises(ValueError, match="No valid EIG data files found"):
                 plotter.compare_eigs()
 
+    def test_compare_eigs_mean_line_and_sort(self, mock_scratch_env, tmp_path):
+        """Average EIG is a gray line; designs sort by mean; runs keep their colors."""
+        designs = [[0.0], [1.0], [2.0], [3.0]]
+        # Means: design0=1.0, design1=3.0, design2=2.0, design3=4.0 -> order 3,1,2,0
+        eigs_a = [1.0, 2.0, 3.0, 5.0]
+        eigs_b = [1.0, 4.0, 1.0, 3.0]
+        data_a = _make_eig_data(designs, variable_eigs=eigs_a, design_labels=["d"])
+        data_b = _make_eig_data(designs, variable_eigs=eigs_b, design_labels=["d"])
+
+        plotter = ComparisonPlotter(
+            cosmo_exp="test_exp",
+            run_ids=["run_aaaa", "run_bbbb"],
+            run_labels=["A", "B"],
+            colors=["#ff0000", "#0000ff"],
+        )
+        with patch.object(plotter, "_get_run_data_list") as mock_runs, \
+             patch.object(plotter, "load_eig_data_file") as mock_load, \
+             patch.object(plotter, "save_figure"):
+            mock_runs.return_value = (
+                [
+                    {"run_id": "run_aaaa", "exp_id": "exp_1", "params": {}, "run_obj": None},
+                    {"run_id": "run_bbbb", "exp_id": "exp_1", "params": {}, "run_obj": None},
+                ],
+                "exp_1",
+                "test_exp",
+            )
+            mock_load.side_effect = [
+                ("/fake/a.json", data_a),
+                ("/fake/b.json", data_b),
+            ]
+            fig, (ax_line, ax_heat) = plotter.compare_eigs(
+                sort=True,
+                design_labels=["d"],
+                show_ratio_to_nominal=False,
+                save_dir=str(tmp_path / "plots"),
+                dpi=80,
+            )
+
+        # Gray average + two colored run lines
+        labels = [line.get_label() for line in ax_line.get_lines()]
+        assert "Average" in labels
+        avg_line = ax_line.get_lines()[labels.index("Average")]
+        assert avg_line.get_color() in ("gray", "grey", (0.5, 0.5, 0.5, 1.0), (0.5, 0.5, 0.5))
+
+        # Sorted by mean descending: means [1, 3, 2, 4] -> indices [3, 1, 2, 0]
+        expected_mean = np.array([4.0, 3.0, 2.0, 1.0])
+        np.testing.assert_allclose(avg_line.get_ydata(), expected_mean)
+
+        run_lines = [line for line in ax_line.get_lines() if line.get_label() in ("A", "B")]
+        assert len(run_lines) == 2
+        assert ax_heat is not None
+        assert "mean EIG" in (ax_heat.get_xlabel() or "")
+        plt.close(fig)
+
 
 def _make_eig_data(
     designs,
