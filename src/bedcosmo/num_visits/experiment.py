@@ -341,6 +341,30 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         self._wlen_over_hc_tensor = torch.tensor(
             wlen_over_hc_common, device=self.device, dtype=torch.float64
         )  # (n_wlen,)
+
+        # Empirical template coverage can only be checked after both the prior/template
+        # bank and the common observed-frame filter grid have been initialized.
+        if self.cosmo_model == "empirical" and "z" in self.prior_feature_names:
+            z_index = self.prior_feature_names.index("z")
+            z_min = max(0.0, float(self.prior_pool.bounds_min[z_index].cpu()))
+            z_max = float(self.prior_pool.bounds_max[z_index].cpu())
+            required_min, required_max = _required_template_rest_range(
+                wlen_common_aa,
+                transmission_array,
+                z_min,
+                z_max,
+            )
+            available_min = float(self._template_wave_rest[0].cpu())
+            available_max = float(self._template_wave_rest[-1].cpu())
+            if available_min > required_min or available_max < required_max:
+                raise ValueError(
+                    "Template wavelength range does not cover the active LSST filters over "
+                    f"the empirical redshift prior: need [{required_min:.1f}, "
+                    f"{required_max:.1f}] Angstrom, have [{available_min:.1f}, "
+                    f"{available_max:.1f}]. Extend the template explicitly; endpoint "
+                    "clamping is not allowed."
+                )
+
         defaults = {"z": 1.0}
         if self.cosmo_model == "empirical":
             defaults = mode_central_params_from_artifact(self.sed_prior_artifact)
@@ -797,26 +821,6 @@ class NumVisits(BaseExperiment, CosmologyMixin):
             span = max(high - low, 1e-12)
             pad = max(1e-6, 0.02 * span)
             prior[name] = EmpiricalPrior(low - pad, high + pad, device=self.device)
-
-        if "z" in prior:
-            z_min = max(0.0, float(prior["z"].low.cpu()))
-            z_max = float(prior["z"].high.cpu())
-            required_min, required_max = _required_template_rest_range(
-                self._wlen_aa_tensor.detach().cpu().numpy(),
-                self._transmission_tensor.detach().cpu().numpy(),
-                z_min,
-                z_max,
-            )
-            available_min = float(wave_rest[0])
-            available_max = float(wave_rest[-1])
-            if available_min > required_min or available_max < required_max:
-                raise ValueError(
-                    "Template wavelength range does not cover the active LSST filters over "
-                    f"the empirical redshift prior: need [{required_min:.1f}, "
-                    f"{required_max:.1f}] Angstrom, have [{available_min:.1f}, "
-                    f"{available_max:.1f}]. Extend the template explicitly; endpoint "
-                    "clamping is not allowed."
-                )
 
         if self.global_rank == 0 and self.verbose:
             print(

@@ -97,6 +97,27 @@ def test_build_pool_from_flow_requires_native_flow():
         prior.build_pool_from_flow(100)
 
 
+def test_build_pool_from_flow_rejects_samples_outside_training_support():
+    class StubNativeFlow:
+        space = SPACE_NATIVE
+
+        @staticmethod
+        def sample(n, *, seed):
+            del seed
+            values = np.resize(np.array([-0.5, 0.5, 1.5]), n)
+            return np.repeat(values[:, None], len(FEATURES), axis=1)
+
+    prior = _prior_with_pool()
+    prior.artifact["feature_bounds_min"] = np.zeros(len(FEATURES))
+    prior.artifact["feature_bounds_max"] = np.ones(len(FEATURES))
+    prior.attach_flow(StubNativeFlow())
+    prior.build_pool_from_flow(100, seed=2)
+    samples = prior.pool.pool.numpy()
+    assert samples.shape == (100, len(FEATURES))
+    assert np.all(samples >= 0.0)
+    assert np.all(samples <= 1.0)
+
+
 def test_enable_flow_prior_loads_native_and_gaussianized(tmp_path):
     """enable_flow_prior attaches both flows and rebuilds the pool from native."""
     from bedcosmo.num_visits.empirical.prior_flow import SED_PRIOR_FLOW_FILENAMES

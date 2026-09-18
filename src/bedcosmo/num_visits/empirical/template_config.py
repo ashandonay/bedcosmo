@@ -5,11 +5,15 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from .paths import EMPIRICAL_PRIOR_ROOT_DIR, get_prior_build_dir
+from .paths import (
+    EMPIRICAL_PRIOR_ROOT_DIR,
+    get_num_visits_spectral_template_dir,
+    get_prior_build_dir,
+)
 from .simplex import prior_ilr_feature_names
 from .templates import DEFAULT_TEMPLATE_PARAM_6D, DEFAULT_TEMPLATE_PARAM_12D
 
-TEMPLATE_SOURCES = ("eazy12", "eazy6")
+TEMPLATE_SOURCES = ("eazy12", "eazy6", "desi8")
 
 _SOURCE_CONFIG: dict[str, dict[str, Any]] = {
     "eazy12": {
@@ -20,6 +24,12 @@ _SOURCE_CONFIG: dict[str, dict[str, Any]] = {
         "n_templates": 6,
         "template_param": DEFAULT_TEMPLATE_PARAM_6D,
     },
+    "desi8": {
+        "n_templates": 8,
+        "template_param": "desi8/desi8.param",
+        "template_norm_min": 3600.0,
+        "template_norm_max": 4200.0,
+    },
 }
 
 _DEFAULT_F_PLOT = {"lower": -8.0, "upper": 8.0}
@@ -28,9 +38,9 @@ _DEFAULT_Z_PLOT = {"lower": 0.0, "upper": 1.75}
 
 
 def normalize_template_source(value: str | None) -> str:
-    """Return a validated ``eazy12`` / ``eazy6`` source name."""
+    """Return a validated empirical spectral-template source name."""
     if value is None:
-        raise ValueError("template_source is required (eazy12 or eazy6)")
+        raise ValueError(f"template_source is required ({', '.join(TEMPLATE_SOURCES)})")
     source = str(value).strip().lower()
     if source not in _SOURCE_CONFIG:
         raise ValueError(
@@ -85,6 +95,8 @@ def empirical_prior_variant(
     """Scratch subdirectory under ``empirical_prior/``, e.g. ``eazy12-t7-t10``."""
     source = normalize_template_source(template_source)
     subset = parse_reduced_templates(reduced_templates)
+    if source == "desi8" and subset is not None:
+        raise ValueError("reduced_templates is not supported for template_source='desi8'")
     if subset is None:
         return source
     return f"{source}-{reduced_template_slug(subset)}"
@@ -106,6 +118,8 @@ def resolve_template_param(
     source = normalize_template_source(template_source)
     full_param = str(_SOURCE_CONFIG[source]["template_param"])
     subset = parse_reduced_templates(reduced_templates)
+    if source == "desi8" and subset is not None:
+        raise ValueError("reduced_templates is not supported for template_source='desi8'")
     if subset is None:
         return full_param
     stem = Path(full_param).stem
@@ -119,6 +133,8 @@ def n_templates_for(
 ) -> int:
     source = normalize_template_source(template_source)
     subset = parse_reduced_templates(reduced_templates)
+    if source == "desi8" and subset is not None:
+        raise ValueError("reduced_templates is not supported for template_source='desi8'")
     if subset is None:
         return int(_SOURCE_CONFIG[source]["n_templates"])
     return len(subset)
@@ -188,6 +204,11 @@ def materialize_empirical_prior_args(
     out["reduced_templates"] = format_reduced_templates(subset)
     out["prior_dir"] = str(prior_dir)
     out["template_param"] = template_param
+    source_config = _SOURCE_CONFIG[source]
+    if source == "desi8":
+        out["template_dir"] = str(get_num_visits_spectral_template_dir())
+        out["template_norm_min"] = float(source_config["template_norm_min"])
+        out["template_norm_max"] = float(source_config["template_norm_max"])
     out["parameters"] = default_empirical_parameters(
         n_templates,
         existing=out.get("parameters") if isinstance(out.get("parameters"), dict) else None,
