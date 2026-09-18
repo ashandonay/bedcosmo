@@ -3588,8 +3588,10 @@ class ComparisonPlotter(BasePlotter):
             show_optimal (bool): If True, highlight each run's optimal EIG point when available.
             show_nominal (bool): If True, draw horizontal lines for nominal EIGs when available.
             title (str, optional): Custom figure title.
-            sort (bool): Whether to reorder designs by descending EIG using the reference run.
-            sort_reference (str, optional): Run ID or label that defines the sorting EIG. Required when `sort=True`.
+            sort (bool): Whether to reorder designs by descending EIG. Default True sorts by the
+                mean EIG across runs (symmetric). Pass ``sort_reference`` to sort by one run instead.
+            sort_reference (str, optional): Run ID or label whose EIG defines the sort order.
+                When omitted and ``sort=True``, designs are sorted by the cross-run mean EIG.
             normalize (bool): If True, plot percent difference vs each run's nominal EIG:
                                     ``100 * (EIG - EIG_nominal) / EIG_nominal``.
             show_errorbars (bool): If True, draw the filled std bands for each run.
@@ -3789,9 +3791,26 @@ class ComparisonPlotter(BasePlotter):
         # Check if designs are 1D or multi-dimensional
         is_1d_design = (num_dims == 1)
 
+        # Per-run plot values (normalized or raw) for the average line and optional mean sort.
+        plot_eigs_per_run = []
+        for record in run_records:
+            if normalize:
+                nominal_eig = record['nominal_eig']
+                if nominal_eig is None:
+                    raise ValueError(f"normalize=True requires nominal_eig for run {record['run_id']}")
+                if nominal_eig == 0:
+                    raise ValueError(
+                        f"normalize=True cannot divide by nominal_eig=0 for run {record['run_id']}"
+                    )
+                plot_eigs_per_run.append(
+                    100.0 * (record['eigs_avg'] - nominal_eig) / nominal_eig
+                )
+            else:
+                plot_eigs_per_run.append(np.asarray(record['eigs_avg'], dtype=float))
+        mean_eigs_plot = np.mean(np.stack(plot_eigs_per_run, axis=0), axis=0)
+
         reference_record = None
         global_sort_idx = None
-        per_run_sort = False  # Flag to indicate per-run sorting (no sort_reference)
 
         if sort:
             if sort_reference is not None:
@@ -3801,21 +3820,18 @@ class ComparisonPlotter(BasePlotter):
                 )
                 if reference_record is None:
                     raise ValueError(f"sort_reference '{sort_reference}' not found among provided run_ids or labels.")
-                global_sort_idx = np.argsort(reference_record['eigs_avg'])[::-1]
+                # Sort by the same units shown on the y-axis for that reference run.
+                ref_idx = next(
+                    i for i, rec in enumerate(run_records) if rec is reference_record
+                )
+                global_sort_idx = np.argsort(plot_eigs_per_run[ref_idx])[::-1]
             else:
-                # Sort each run independently from highest to lowest
-                per_run_sort = True
-                # Store per-run sort indices in each record
-                for record in run_records:
-                    record['sort_idx'] = np.argsort(record['eigs_avg'])[::-1]
+                # Symmetric default: order designs by cross-run mean EIG (highest first).
+                global_sort_idx = np.argsort(mean_eigs_plot)[::-1]
         else:
             global_sort_idx = np.arange(num_designs)
 
-        # Get sorted designs for heatmap (only if not per-run sorting)
-        if per_run_sort:
-            sorted_designs = None  # No heatmap when sorting per-run
-            run_for_nominal = run_records[0]  # Use first run for nominal design
-        elif reference_record is not None:
+        if reference_record is not None:
             sorted_designs = reference_record['designs'][global_sort_idx]
             run_for_nominal = reference_record
         else:
@@ -3892,22 +3908,12 @@ class ComparisonPlotter(BasePlotter):
                 print(f"Warning: Could not initialize experiment to get nominal_design: {e}")
                 print("Will display designs as absolute values instead of ratios.")
 
-        # Determine if we should show heatmap (only if not per-run sorting)
-        show_heatmap = not per_run_sort and (not is_1d_design or sort)
-        
-        if is_1d_design and not sort and not per_run_sort:
+        if is_1d_design and not sort:
             fig, ax_line = plt.subplots(figsize=figsize)
             ax_heat = None
             cbar_ax = None
             x_vals = sorted_designs[:, 0]
             x_label = design_labels[0]
-        elif per_run_sort:
-            # Per-run sorting: no heatmap, just line plot
-            fig, ax_line = plt.subplots(figsize=figsize)
-            ax_heat = None
-            cbar_ax = None
-            x_vals = np.arange(num_designs)
-            x_label = "Design Index (sorted per run, highest to lowest)"
         else:
             # For sorted 1D or multi-dimensional designs, align heatmap beneath line plot and add a vertical colorbar
             if is_1d_design and sort:
@@ -3940,8 +3946,7 @@ class ComparisonPlotter(BasePlotter):
             if sort_reference is not None:
                 x_label_suffix = f" (sorted by {reference_record['run_label']})"
             elif sort:
-                # Use first run as reference when sort_reference is not specified
-                x_label_suffix = f" (sorted by {run_records[0]['run_label']})"
+                x_label_suffix = " (sorted by mean EIG)"
             else:
                 x_label_suffix = ""
             x_label = f"Design Index{x_label_suffix}"
@@ -3952,30 +3957,32 @@ class ComparisonPlotter(BasePlotter):
 
         handles_for_legend = []
         nominal_handle = None
+        average_handle = None
 
-        for record in run_records:
-            # Use per-run sort_idx if per_run_sort, otherwise use global_sort_idx
-            if per_run_sort:
-                sort_idx = record['sort_idx']
+        # Cross-run average as a neutral gray line (symmetric reference for all runs).
+        mean_eigs_sorted = mean_eigs_plot[global_sort_idx]
+        if len(run_records) > 1:
+            if len(mean_eigs_sorted) == 1:
+                average_handle = ax_line.scatter(
+                    x_vals, mean_eigs_sorted, color='gray', zorder=3, label='Average'
+                )
             else:
-                sort_idx = global_sort_idx
+                average_handle = ax_line.plot(
+                    x_vals, mean_eigs_sorted, color='gray', linewidth=2.5,
+                    label='Average', zorder=3,
+                )[0]
 
-            eig_vals = record['eigs_avg'][sort_idx]
+        for record, plot_eigs in zip(run_records, plot_eigs_per_run):
+            sort_idx = global_sort_idx
+
             eig_std_vals = record['eigs_std'][sort_idx]
             color = record['color']
+            eig_vals_plot = plot_eigs[sort_idx]
 
             if normalize:
                 nominal_eig = record['nominal_eig']
-                if nominal_eig is None:
-                    raise ValueError(f"normalize=True requires nominal_eig for run {record['run_id']}")
-                if nominal_eig == 0:
-                    raise ValueError(
-                        f"normalize=True cannot divide by nominal_eig=0 for run {record['run_id']}"
-                    )
-                eig_vals_plot = 100.0 * (eig_vals - nominal_eig) / nominal_eig
                 eig_std_vals_plot = 100.0 * eig_std_vals / abs(nominal_eig)
             else:
-                eig_vals_plot = eig_vals
                 eig_std_vals_plot = eig_std_vals
 
             # Determine if single point or line
@@ -4080,6 +4087,9 @@ class ComparisonPlotter(BasePlotter):
         ax_line.grid(True, alpha=0.3)
         legend_handles = []
         legend_labels = []
+        if average_handle is not None:
+            legend_handles.append(average_handle)
+            legend_labels.append(average_handle.get_label())
         if nominal_handle is not None:
             legend_handles.append(nominal_handle)
             legend_labels.append(nominal_handle.get_label())
@@ -4087,8 +4097,8 @@ class ComparisonPlotter(BasePlotter):
         legend_labels.extend([h.get_label() for h in handles_for_legend])
         self._set_legend(ax_line, len(legend_labels), handles=legend_handles, labels=legend_labels)
         
-        # Plot sorted designs (heatmap) if ax_heat exists and we're not doing per-run sorting
-        if ax_heat is not None and not per_run_sort:
+        # Plot sorted designs (heatmap) if ax_heat exists
+        if ax_heat is not None:
             if is_1d_design and not sort:
                 extent = [x_vals.min(), x_vals.max(), -0.5, 0.5]
                 im = ax_heat.imshow(
