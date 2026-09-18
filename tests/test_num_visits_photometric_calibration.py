@@ -4,11 +4,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import numpy as np
 import pytest
 import torch
 
 from bedcosmo.num_visits import NumVisits
-from bedcosmo.num_visits.experiment import s0
+from bedcosmo.num_visits.experiment import _required_template_rest_range, s0
 
 
 def _bare_experiment() -> NumVisits:
@@ -34,6 +35,15 @@ def test_zeropoint_magnitude_is_count_rate_of_one():
 
     expected = torch.tensor([[s0["u"], s0["g"]]], dtype=torch.float64)
     torch.testing.assert_close(magnitudes, expected)
+
+
+def test_required_template_range_redshifts_active_filter_support():
+    observed_wave = np.array([3000.0, 4000.0, 5000.0, 6000.0])
+    transmission = np.array([[0.0, 0.5, 1.0, 0.0]])
+    required = _required_template_rest_range(
+        observed_wave, transmission, z_min=0.0, z_max=1.0
+    )
+    assert required == (2000.0, 5000.0)
 
 
 def test_empirical_template_flux_applies_desi_coadd_unit_only():
