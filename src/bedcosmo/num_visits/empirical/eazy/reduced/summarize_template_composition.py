@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Summarize how each EAZY template contributes within reduced-fit cohorts."""
+"""Summarize each EAZY template's contribution within reduced-fit cohorts."""
 
 from __future__ import annotations
 

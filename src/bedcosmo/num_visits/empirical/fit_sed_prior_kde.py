@@ -62,7 +62,7 @@ from sklearn.preprocessing import StandardScaler
 
 from bedcosmo.transform import Bijector, _whitening_to_apply_joint
 
-from .fit_eazy_weights_to_desi import (
+from .eazy.fit_eazy_weights_to_desi import (
     DEFAULT_MAX_CHI2_DOF,
     apply_quality_cuts,
     build_prior_parameter_samples,

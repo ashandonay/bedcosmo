@@ -1,4 +1,4 @@
-"""Alternating nonnegative least squares with missing, weighted observations."""
+"""Nonnegative matrix factorization with missing, weighted observations."""
 
 from __future__ import annotations
 

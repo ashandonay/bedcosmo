@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any
 
 from .paths import (
@@ -11,7 +10,12 @@ from .paths import (
     get_prior_build_dir,
 )
 from .simplex import prior_ilr_feature_names
-from .templates import DEFAULT_TEMPLATE_PARAM_6D, DEFAULT_TEMPLATE_PARAM_12D
+from .templates import (
+    DEFAULT_TEMPLATE_NORM_MAX_AA,
+    DEFAULT_TEMPLATE_NORM_MIN_AA,
+    DEFAULT_TEMPLATE_PARAM_6D,
+    DEFAULT_TEMPLATE_PARAM_12D,
+)
 
 TEMPLATE_SOURCES = ("eazy12", "eazy6", "desi8")
 
@@ -19,10 +23,14 @@ _SOURCE_CONFIG: dict[str, dict[str, Any]] = {
     "eazy12": {
         "n_templates": 12,
         "template_param": DEFAULT_TEMPLATE_PARAM_12D,
+        "template_norm_min": DEFAULT_TEMPLATE_NORM_MIN_AA,
+        "template_norm_max": DEFAULT_TEMPLATE_NORM_MAX_AA,
     },
     "eazy6": {
         "n_templates": 6,
         "template_param": DEFAULT_TEMPLATE_PARAM_6D,
+        "template_norm_min": DEFAULT_TEMPLATE_NORM_MIN_AA,
+        "template_norm_max": DEFAULT_TEMPLATE_NORM_MAX_AA,
     },
     "desi8": {
         "n_templates": 8,
@@ -122,9 +130,8 @@ def resolve_template_param(
         raise ValueError("reduced_templates is not supported for template_source='desi8'")
     if subset is None:
         return full_param
-    stem = Path(full_param).stem
     slug = reduced_template_slug(subset)
-    return f"templates/reduced/{stem}_{slug}.param"
+    return f"{source}/reduced/{source}_{slug}.param"
 
 
 def n_templates_for(
@@ -205,10 +212,9 @@ def materialize_empirical_prior_args(
     out["prior_dir"] = str(prior_dir)
     out["template_param"] = template_param
     source_config = _SOURCE_CONFIG[source]
-    if source == "desi8":
-        out["template_dir"] = str(get_num_visits_spectral_template_dir())
-        out["template_norm_min"] = float(source_config["template_norm_min"])
-        out["template_norm_max"] = float(source_config["template_norm_max"])
+    out["template_dir"] = str(get_num_visits_spectral_template_dir())
+    out["template_norm_min"] = float(source_config["template_norm_min"])
+    out["template_norm_max"] = float(source_config["template_norm_max"])
     out["parameters"] = default_empirical_parameters(
         n_templates,
         existing=out.get("parameters") if isinstance(out.get("parameters"), dict) else None,

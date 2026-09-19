@@ -12,14 +12,14 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from ..paths import (
+from ...paths import (
     BUILD_PROVENANCE_FILENAME,
     DEFAULT_EMPIRICAL_PRIOR_DIR,
     SED_PRIOR_KDE_NATIVE_FILENAME,
     get_prior_build_dir,
     get_template_dir,
 )
-from ..provenance import write_provenance
+from ...provenance import write_provenance
 
 KDE_MODULE = "bedcosmo.num_visits.empirical.fit_sed_prior_kde"
 
@@ -189,8 +189,9 @@ def main() -> None:
         max_chi2_dof=max_chi2_dof,
     )
 
-    source_stem = Path(str(discovery["template_param"])).stem
-    reduced_param_rel = Path("templates/reduced") / f"{source_stem}_{slug}.param"
+    reduced_param_rel = (
+        Path(source_variant) / "reduced" / f"{source_variant}_{slug}.param"
+    )
     reduced_param_path = write_reduced_template_param(
         template_dir / reduced_param_rel, template_paths, subset
     )

@@ -42,11 +42,11 @@ def test_variant_and_paths(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     assert empirical_prior_build_name("eazy12", "t7,t10") == (
         "empirical_prior/eazy12-t7-t10"
     )
-    assert resolve_template_param("eazy12") == "templates/fsps_full/fsps_QSF_12_v3.param"
-    assert resolve_template_param("eazy6") == "templates/eazy_v1.0.spectra.param"
+    assert resolve_template_param("eazy12") == "eazy12/eazy12.param"
+    assert resolve_template_param("eazy6") == "eazy6/eazy6.param"
     assert resolve_template_param("desi8") == "desi8/desi8.param"
     assert resolve_template_param("eazy12", "t7,t10") == (
-        "templates/reduced/fsps_QSF_12_v3_t7-t10.param"
+        "eazy12/reduced/eazy12_t7-t10.param"
     )
     assert n_templates_for("eazy12") == 12
     assert n_templates_for("eazy6") == 6
@@ -78,7 +78,10 @@ def test_materialize_empirical_prior_args(monkeypatch: pytest.MonkeyPatch, tmp_p
     assert full["template_source"] == "eazy12"
     assert full["reduced_templates"] is None
     assert full["prior_dir"].endswith("empirical_prior/eazy12")
-    assert full["template_param"] == "templates/fsps_full/fsps_QSF_12_v3.param"
+    assert full["template_dir"].endswith("num_visits/spectral_templates")
+    assert full["template_param"] == "eazy12/eazy12.param"
+    assert full["template_norm_min"] == 4000.0
+    assert full["template_norm_max"] == 8000.0
     assert list(full["parameters"]) == [f"f{i}" for i in range(1, 12)] + [
         "log_c_scale",
         "z",
@@ -88,7 +91,7 @@ def test_materialize_empirical_prior_args(monkeypatch: pytest.MonkeyPatch, tmp_p
     reduced = materialize_empirical_prior_args(base, reduced_templates="t7,t10")
     assert reduced["reduced_templates"] == "t7,t10"
     assert reduced["prior_dir"].endswith("empirical_prior/eazy12-t7-t10")
-    assert reduced["template_param"] == "templates/reduced/fsps_QSF_12_v3_t7-t10.param"
+    assert reduced["template_param"] == "eazy12/reduced/eazy12_t7-t10.param"
     assert list(reduced["parameters"]) == ["f1", "log_c_scale", "z"]
     assert format_reduced_templates((7, 10)) == "t7,t10"
 

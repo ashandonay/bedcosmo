@@ -17,15 +17,15 @@ Default output tree (``--build-name empirical_prior/eazy12``)::
 Shared inputs (downloaded once, reused across builds)::
 
     $SCRATCH/bedcosmo/desi/tiny_dr1/
-    $SCRATCH/bedcosmo/eazy/
+    $SCRATCH/bedcosmo/num_visits/spectral_templates/eazy12/
 
 Example::
 
-  python -m bedcosmo.num_visits.empirical.build_prior
-  python -m bedcosmo.num_visits.empirical.build_prior --build-name empirical_prior_test --n-max 600
-  python -m bedcosmo.num_visits.empirical.build_prior --healpix 23040 --skip-kde
-  python -m bedcosmo.num_visits.empirical.build_prior \\
-    --build-name empirical_prior/eazy6 --template-param templates/eazy_v1.0.spectra.param
+  python -m bedcosmo.num_visits.empirical.eazy.build_prior
+  python -m bedcosmo.num_visits.empirical.eazy.build_prior --build-name empirical_prior_test --n-max 600
+  python -m bedcosmo.num_visits.empirical.eazy.build_prior --healpix 23040 --skip-kde
+  python -m bedcosmo.num_visits.empirical.eazy.build_prior \\
+    --build-name empirical_prior/eazy6 --template-param eazy6/eazy6.param
 """
 
 from __future__ import annotations
@@ -37,9 +37,8 @@ import subprocess
 import sys
 from pathlib import Path
 
-from .combine_healpix_weights import combine_healpix_weights
-from .desi_data import ensure_desi_healpix
-from .paths import (
+from ..desi_data import ensure_desi_healpix
+from ..paths import (
     BUILD_PROVENANCE_FILENAME,
     DEFAULT_EMPIRICAL_PRIOR_DIR,
     DEFAULT_HEALPIX,
@@ -51,17 +50,18 @@ from .paths import (
     get_prior_weights_csv,
     resolve_desi_dir,
 )
-from .provenance import write_provenance
-from .templates import (
+from ..provenance import write_provenance
+from ..templates import (
     DEFAULT_TEMPLATE_NORM_MAX_AA,
     DEFAULT_TEMPLATE_NORM_MIN_AA,
     DEFAULT_TEMPLATE_PARAM_12D,
 )
+from .combine_healpix_weights import combine_healpix_weights
 
 DEFAULT_MAX_CHI2_DOF = 1.2
 DEFAULT_Z_MIN = 0.01
 
-FIT_MODULE = "bedcosmo.num_visits.empirical.fit_eazy_weights_to_desi"
+FIT_MODULE = "bedcosmo.num_visits.empirical.eazy.fit_eazy_weights_to_desi"
 KDE_MODULE = "bedcosmo.num_visits.empirical.fit_sed_prior_kde"
 
 
@@ -472,7 +472,7 @@ def main() -> None:
         default=DEFAULT_TEMPLATE_PARAM_12D,
         help=(
             "Template-bank listing file (.param) relative to the templates dir. "
-            "Use templates/eazy_v1.0.spectra.param for the classic 6-template bank."
+            "Use eazy6/eazy6.param for the classic 6-template bank."
         ),
     )
     parser.add_argument(

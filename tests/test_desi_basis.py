@@ -4,26 +4,26 @@ from __future__ import annotations
 
 import numpy as np
 
-from bedcosmo.num_visits.empirical.desi_basis.build_prior import (
+from bedcosmo.num_visits.empirical.desi.build_prior import (
     normalize_basis_for_export,
     physical_prior_coefficients,
 )
-from bedcosmo.num_visits.empirical.desi_basis.evaluate_factorization_methods import (
+from bedcosmo.num_visits.empirical.desi.evaluate_factorization_methods import (
     fit_anls,
     shared_initialization,
 )
-from bedcosmo.num_visits.empirical.desi_basis.fit_basis import (
+from bedcosmo.num_visits.empirical.desi.fit_basis import (
     desi_covered_lsst_color_rms,
 )
-from bedcosmo.num_visits.empirical.desi_basis.support import (
+from bedcosmo.num_visits.empirical.desi.support import (
     largest_contiguous_region,
     lsst_demand_weighted_coverage,
     select_wavelength_support,
 )
-from bedcosmo.num_visits.empirical.desi_basis.training_matrix import (
+from bedcosmo.num_visits.empirical.desi.training_matrix import (
     bin_rest_frame_spectrum,
 )
-from bedcosmo.num_visits.empirical.desi_basis.weighted_nmf import (
+from bedcosmo.num_visits.empirical.desi.weighted_nmf import (
     fit_weighted_nmf,
     infer_coefficients,
     weighted_reconstruction_error,

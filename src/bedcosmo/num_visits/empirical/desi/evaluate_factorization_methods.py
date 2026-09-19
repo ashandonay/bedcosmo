@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Compare signed-data weighted nonnegative factorization algorithms."""
+"""Compare weighted factorization algorithms on signed DESI data."""
 
 from __future__ import annotations
 
@@ -262,41 +262,45 @@ def evaluate_basis(
 
 
 def make_summary_plot(metrics: pd.DataFrame, output: Path) -> None:
-    fig, axes = plt.subplots(2, 2, figsize=(14, 10), constrained_layout=True)
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5.4), constrained_layout=True)
     colors = {"anls": "#4C78A8", "nearly_nmf": "#E45756"}
     labels = {"anls": "Alternating NNLS", "nearly_nmf": "Nearly-NMF"}
+    ranks = np.array(sorted(metrics["rank"].unique()))
     for method, group in metrics.groupby("method"):
         summary = group.groupby("rank")
-        ranks = np.array(sorted(group["rank"].unique()))
-        for ax, column, ylabel in [
-            (axes[0, 0], "validation_median_reduced_chi2", "Median validation $\\chi^2_\\nu$"),
-            (axes[0, 1], "validation_p90_reduced_chi2", "90th percentile validation $\\chi^2_\\nu$"),
-            (axes[1, 1], "elapsed_seconds", "First-stage training wall time [s]"),
-        ]:
-            median = summary[column].median().reindex(ranks).to_numpy()
-            low = summary[column].min().reindex(ranks).to_numpy()
-            high = summary[column].max().reindex(ranks).to_numpy()
-            ax.plot(ranks, median, marker="o", color=colors[method], label=labels[method])
-            ax.fill_between(ranks, low, high, color=colors[method], alpha=0.16)
-            ax.set(xlabel="Basis rank", ylabel=ylabel, xticks=ranks)
         selected = group[group["selected_for_test"]].sort_values("rank")
-        axes[1, 0].plot(
+        axes[0].plot(
             selected["rank"],
-            selected["test_median_reduced_chi2"],
+            selected["test_pull_std"],
             marker="o",
             color=colors[method],
             label=labels[method],
         )
-        axes[1, 0].set(
-            xlabel="Basis rank",
-            ylabel="Median test $\\chi^2_\\nu$\n(validation-selected start)",
-            xticks=ranks,
+        median = summary["elapsed_seconds"].median().reindex(ranks).to_numpy()
+        low = summary["elapsed_seconds"].min().reindex(ranks).to_numpy()
+        high = summary["elapsed_seconds"].max().reindex(ranks).to_numpy()
+        axes[1].plot(
+            ranks, median, marker="o", color=colors[method], label=labels[method]
         )
-    for ax in axes.ravel():
+        axes[1].fill_between(ranks, low, high, color=colors[method], alpha=0.16)
+    axes[0].axhline(1.0, color="black", lw=1.0, linestyle="--", label="Ideal = 1")
+    axes[0].set(
+        xlabel="Basis rank",
+        ylabel="Standardized residual width",
+        xticks=ranks,
+        title="Test residual calibration",
+    )
+    axes[1].set(
+        xlabel="Basis rank",
+        ylabel="Wall time [s]",
+        xticks=ranks,
+        title="Initial fit time across five starts\nmedian and min–max per start",
+    )
+    for ax in axes:
         ax.grid(alpha=0.25)
         ax.set_axisbelow(True)
-    axes[0, 0].legend(frameon=False)
-    fig.suptitle("Signed-DESI factorization comparison\nline = median start; band = full start range")
+    axes[0].legend(frameon=False)
+    fig.suptitle("Signed-DESI factorization comparison")
     fig.savefig(output, dpi=180, bbox_inches="tight")
     plt.close(fig)
 

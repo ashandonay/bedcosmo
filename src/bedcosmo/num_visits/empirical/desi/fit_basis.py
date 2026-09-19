@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Fit and compare low-rank nonnegative spectral bases from direct DESI data."""
+"""Fit and compare low-rank nonnegative spectral bases from DESI data."""
 
 from __future__ import annotations
 
