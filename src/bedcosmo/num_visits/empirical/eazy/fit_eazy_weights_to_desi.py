@@ -38,6 +38,7 @@ from scipy.ndimage import gaussian_filter1d
 from scipy.optimize import nnls
 from tqdm import tqdm
 
+from ..desi.training_matrix import load_desi_manifest
 from ..desi_data import ensure_desi_healpix, get_local_desi_paths
 from ..paths import (
     DEFAULT_EMPIRICAL_PRIOR_DIR,
@@ -1215,6 +1216,15 @@ def main() -> None:
     )
     parser.add_argument("--z-max", type=float, default=None)
     parser.add_argument("--target-spectype", default="GALAXY")
+    parser.add_argument(
+        "--target-manifest",
+        type=Path,
+        default=None,
+        help=(
+            "Shared DESI candidate manifest. When set, only TARGETIDs listed for "
+            "this HEALPix are eligible for fitting."
+        ),
+    )
 
     parser.add_argument(
         "--allow-nonzero-zwarn",
@@ -1456,6 +1466,18 @@ def main() -> None:
 
     if args.z_max is not None:
         select &= np.asarray(rr["Z"]) <= args.z_max
+
+    if args.target_manifest is not None:
+        target_manifest_path = args.target_manifest.expanduser().resolve()
+        target_manifest = load_desi_manifest(target_manifest_path)
+        eligible = target_manifest.loc[
+            target_manifest["healpix"] == int(args.healpix), "targetid"
+        ].to_numpy(np.int64)
+        select &= np.isin(np.asarray(rr["TARGETID"], dtype=np.int64), eligible)
+        print(
+            f"Shared candidate manifest: {target_manifest_path} "
+            f"({len(eligible):,} targets for HEALPix {args.healpix})"
+        )
 
     candidate_rows = np.where(select)[0]
 

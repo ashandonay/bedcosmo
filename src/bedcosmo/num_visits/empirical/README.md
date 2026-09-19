@@ -135,6 +135,11 @@ Production default is `template_source: eazy12` with `reduced_templates: null`
 | Combined weights | `num_visits/empirical_prior/eazy12/desi_eazy_empirical_weights.csv` |
 | KDE artifact | `num_visits/empirical_prior/eazy12/sed_prior_kde_native.joblib` |
 | gaussianized KDE (diagnostic) | `num_visits/empirical_prior/eazy12/sed_prior_kde_gaussianized.joblib` |
+
+`num_visits/desi_samples/desi_candidate_manifest.csv` is the shared
+catalog-level DESI population for both EAZY and directly learned DESI bases.
+EAZY continues fitting the native coadd pixels for those targets; direct-DESI
+basis learning additionally uses the rest-frame matrix stored beside it.
 | Training config | [`prior_args_empirical.yaml`](../../../../experiments/num_visits/prior_args_empirical.yaml) (`prior_dir: null` → default scratch build at snapshot) |
 
 **Notebook:** `experiments/num_visits/notebooks/empircal_prior.ipynb`
