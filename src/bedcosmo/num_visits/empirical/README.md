@@ -67,9 +67,7 @@ python -m bedcosmo.num_visits.empirical.eazy.build_prior \
 python -m bedcosmo.num_visits.empirical.eazy.build_prior --force-fit
 
 # Classic 6-template EAZY bank (separate scratch tree; 7D ILR prior)
-python -m bedcosmo.num_visits.empirical.eazy.build_prior \
-  --build-name empirical_prior/eazy6 \
-  --template-param eazy6/eazy6.param
+python -m bedcosmo.num_visits.empirical.eazy.build_prior --template-source eazy6
 ```
 
 Train against that build with the same `cosmo_model: empirical`, overriding the
@@ -86,8 +84,9 @@ Production default is `template_source: eazy12` with `reduced_templates: null`
 
 | Flag | Default | Notes |
 |------|---------|--------|
-| `--build-name` | `empirical_prior/eazy12` | Relative path under `num_visits/` |
-| `--template-param` | `eazy12/eazy12.param` | Template-bank listing (`.param`); use `eazy6/eazy6.param` for classic 6. |
+| `--template-source` | `eazy12` | Standard bank selector; use `eazy6` for the classic six-template bank. |
+| `--build-name` | derived | Advanced output override; otherwise `empirical_prior/<template-source>`. |
+| `--template-param` | derived | Advanced custom-bank override; otherwise `<template-source>/<template-source>.param`. |
 | `--healpix` | 9 patches above | Override patch list |
 | `--desi-dir` | `$SCRATCH/bedcosmo/desi/tiny_dr1` | Local DESI tree root |
 | `--n-max` | all candidates | Subsample per patch (testing only) |
