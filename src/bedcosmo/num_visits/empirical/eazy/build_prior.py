@@ -42,6 +42,7 @@ from ..paths import (
     BUILD_PROVENANCE_FILENAME,
     DEFAULT_EMPIRICAL_PRIOR_DIR,
     DEFAULT_HEALPIX,
+    SED_PRIOR_KDE_GAUSSIANIZED_FILENAME,
     ZWARN_UNSTABLE_BIT,
     add_desi_dir_argument,
     get_healpix_fit_dir,
@@ -425,8 +426,6 @@ def _build_prior_body(
         print(f"  Combined weights: {weights_csv}")
     if kde_path.exists():
         print(f"  KDE (native):     {kde_path}")
-        from .paths import SED_PRIOR_KDE_GAUSSIANIZED_FILENAME
-
         gauss_kde_path = kde_path.parent / SED_PRIOR_KDE_GAUSSIANIZED_FILENAME
         if gauss_kde_path.exists():
             print(f"  KDE (gaussianized): {gauss_kde_path}")
