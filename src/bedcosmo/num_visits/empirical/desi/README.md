@@ -4,10 +4,10 @@ This package is a new empirical-prior source parallel to the EAZY template
 pipeline. It learns nonnegative rest-frame component spectra from DESI B/R/Z
 coadd fluxes rather than selecting or combining EAZY templates.
 
-The current implementation uses an existing fit table only as a manifest of `TARGETID`,
-HEALPix, redshift, and the quality-selected population. EAZY coefficient and
-template columns are never read by the basis fitter. A later input adapter can
-replace this manifest with a selection made directly from Redrock.
+The DESI sample is selected directly from each patch's Redrock `REDSHIFTS`
+table and coadd `FIBERMAP`; it does not use an EAZY fit table or EAZY selection.
+The defaults retain Redrock `GALAXY` rows with finite `z >= 0.01`, `ZWARN == 0`,
+a matching coadd target, and at least 100 usable pixels on the rest-frame grid.
 
 The training path:
 
@@ -21,18 +21,33 @@ The training path:
 6. evaluates reconstruction on a fixed held-out galaxy sample; and
 7. saves simplex-normalized component coefficients for eventual prior fitting.
 
-Run a bounded pilot with:
+First create the direct-DESI sample manifests and rest-frame matrix. This
+example processes the complete selected population and evaluates rank 8 in the
+exploratory basis diagnostic:
 
 ```bash
 python -m bedcosmo.num_visits.empirical.desi.fit_basis \
-  --manifest "$SCRATCH/bedcosmo/num_visits/empirical_prior/eazy12/desi_eazy_empirical_weights.csv" \
-  --max-spectra 1500 \
-  --ranks 2 3 4 5 6
+  --max-spectra 0 \
+  --ranks 8
 ```
 
-Use `--max-spectra 0` to load the complete manifest. For example, the full
-12,531-spectrum rank scan used during development was run with
-`--max-spectra 0 --ranks 2 3 4 5 6 7 8 9 10 11 12`.
+The default output is:
+
+```text
+$SCRATCH/bedcosmo/num_visits/desi_samples/
+├── desi_candidate_manifest.csv
+├── desi_sample_manifest.csv
+└── desi_rest_frame_training_matrix.npz
+```
+
+The candidate manifest records objects passing the Redrock/FIBERMAP cuts. The
+sample manifest is the final subset with enough usable spectral pixels. Pass
+`--manifest /path/to/table.csv` only when deliberately overriding the direct
+selection with a table containing `targetid`, `healpix`, and `z`.
+
+The default `--max-spectra 1500` is useful for a bounded pilot; set it to zero
+for a production matrix. A development rank scan can use
+`--ranks 2 3 4 5 6 7 8 9 10 11 12`.
 
 DESI rest-frame wavelength support is strongly redshift-dependent. A global
 catalog-fraction cutoff is inappropriate: low-redshift spectra supply the red
@@ -64,9 +79,11 @@ tabulated LSST `ugrizy` bandpasses without endpoint extrapolation.
 
 ```bash
 python -m bedcosmo.num_visits.empirical.desi.build_prior \
-  --training-matrix /path/to/full12531/desi_rest_frame_training_matrix.npz \
   --rank 8
 ```
+
+With no `--training-matrix` override, this reads
+`$SCRATCH/bedcosmo/num_visits/desi_samples/desi_rest_frame_training_matrix.npz`.
 
 `--rank` controls both the number of learned spectral components and the
 dimension of the generated prior. Because the default build name is `desi8`,
@@ -74,7 +91,6 @@ give other ranks their own build name. For example, the production K=4 build is:
 
 ```bash
 python -m bedcosmo.num_visits.empirical.desi.build_prior \
-  --training-matrix /path/to/full12531/desi_rest_frame_training_matrix.npz \
   --rank 4 \
   --build-name empirical_prior/desi4
 ```

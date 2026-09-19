@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from bedcosmo.num_visits.empirical.desi.build_prior import (
     normalize_basis_for_export,
@@ -22,6 +23,7 @@ from bedcosmo.num_visits.empirical.desi.support import (
 )
 from bedcosmo.num_visits.empirical.desi.training_matrix import (
     bin_rest_frame_spectrum,
+    discover_desi_manifest,
 )
 from bedcosmo.num_visits.empirical.desi.weighted_nmf import (
     fit_weighted_nmf,
@@ -44,6 +46,44 @@ def test_rest_frame_binning_combines_pixels_and_masks_bad_data():
     assert values[0] == 3.0 / scale
     assert weights[1] == 0
     assert values[2] == 8.0 / scale
+
+
+def test_direct_manifest_selects_quality_redrock_galaxies(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+):
+    coadd = tmp_path / "coadd.fits"
+    redrock = tmp_path / "redrock.fits"
+    coadd.touch()
+    redrock.touch()
+    redshifts = np.array(
+        [
+            (1, 0.4, 0, "GALAXY"),
+            (2, 0.5, 1, "GALAXY"),
+            (3, 0.6, 0, "QSO"),
+            (4, 0.005, 0, "GALAXY"),
+            (5, 0.8, 0, "GALAXY"),
+            (6, np.nan, 0, "GALAXY"),
+        ],
+        dtype=[("TARGETID", "i8"), ("Z", "f8"), ("ZWARN", "i8"), ("SPECTYPE", "U10")],
+    )
+    fibermap = np.array([(1,), (2,), (3,), (4,), (6,)], dtype=[("TARGETID", "i8")])
+
+    monkeypatch.setattr(
+        "bedcosmo.num_visits.empirical.desi.training_matrix.get_local_desi_paths",
+        lambda *args, **kwargs: (coadd, redrock),
+    )
+
+    def fake_getdata(path, extension):
+        return redshifts if extension == "REDSHIFTS" else fibermap
+
+    monkeypatch.setattr(
+        "bedcosmo.num_visits.empirical.desi.training_matrix.fits.getdata",
+        fake_getdata,
+    )
+    manifest = discover_desi_manifest([23040], desi_dir=tmp_path)
+    assert manifest.to_dict("records") == [
+        {"targetid": 1, "healpix": 23040, "z": 0.4}
+    ]
 
 
 def test_weighted_nmf_recovers_nonnegative_low_rank_data_with_missing_pixels():

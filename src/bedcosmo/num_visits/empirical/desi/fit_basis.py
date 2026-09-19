@@ -15,12 +15,22 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 from speclite import filters as speclite_filters  # noqa: E402
 
-from ..paths import get_desi_data_dir, get_prior_build_dir  # noqa: E402
+from ..desi_data import ensure_desi_healpix  # noqa: E402
+from ..paths import (  # noqa: E402
+    DEFAULT_HEALPIX,
+    ZWARN_UNSTABLE_BIT,
+    get_desi_data_dir,
+    get_desi_samples_dir,
+)
 from .support import (  # noqa: E402
     lsst_demand_weighted_coverage,
     select_wavelength_support,
 )
-from .training_matrix import build_rest_frame_matrix, load_desi_manifest  # noqa: E402
+from .training_matrix import (  # noqa: E402
+    build_rest_frame_matrix,
+    discover_desi_manifest,
+    load_desi_manifest,
+)
 from .weighted_nmf import (  # noqa: E402
     fit_weighted_nmf,
     infer_coefficients,
@@ -85,11 +95,22 @@ def parse_args() -> argparse.Namespace:
         "--manifest",
         type=Path,
         default=None,
-        help="DESI target/redshift manifest; EAZY coefficient columns are never read",
+        help="Explicit target/redshift manifest override; default discovers directly from DESI",
     )
-    parser.add_argument("--manifest-build", default="empirical_prior/eazy12")
     parser.add_argument("--desi-dir", type=Path, default=None)
     parser.add_argument("--output-dir", type=Path, default=None)
+    parser.add_argument("--healpix", type=int, nargs="+", default=list(DEFAULT_HEALPIX))
+    parser.add_argument("--target-spectype", default="GALAXY")
+    parser.add_argument("--z-min", type=float, default=0.01)
+    parser.add_argument("--z-max", type=float, default=None)
+    parser.add_argument("--allow-nonzero-zwarn", action="store_true")
+    parser.add_argument("--zwarn-forbid-mask", type=int, default=None, metavar="BITS")
+    parser.add_argument(
+        "--drop-unstable-zwarn",
+        action="store_true",
+        help=f"Shorthand for --zwarn-forbid-mask {ZWARN_UNSTABLE_BIT}.",
+    )
+    parser.add_argument("--min-good-pixels", type=int, default=100)
     parser.add_argument("--ranks", type=int, nargs="+", default=(2, 3, 4, 5, 6))
     parser.add_argument("--max-spectra", type=int, default=1500)
     parser.add_argument("--wave-min", type=float, default=1400.0)
@@ -189,22 +210,59 @@ def make_figure(
 
 def main() -> None:
     args = parse_args()
-    prior_dir = get_prior_build_dir(args.manifest_build)
-    manifest_path = args.manifest or prior_dir / "desi_eazy_empirical_weights.csv"
-    desi_dir = args.desi_dir or get_desi_data_dir()
-    output_dir = args.output_dir or prior_dir / "desi_basis"
-    output_dir = Path(output_dir)
+    if args.min_good_pixels <= 0:
+        raise ValueError("--min-good-pixels must be positive")
+    if args.z_max is not None and args.z_min is not None and args.z_min >= args.z_max:
+        raise ValueError("--z-min must be below --z-max")
+    desi_dir = Path(args.desi_dir or get_desi_data_dir()).expanduser().resolve()
+    output_dir = Path(args.output_dir or get_desi_samples_dir()).expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    manifest = load_desi_manifest(manifest_path)
+    zwarn_forbid_mask = args.zwarn_forbid_mask
+    if args.drop_unstable_zwarn:
+        if zwarn_forbid_mask is not None and zwarn_forbid_mask != ZWARN_UNSTABLE_BIT:
+            raise ValueError(
+                "Use only one of --drop-unstable-zwarn and --zwarn-forbid-mask, "
+                f"or pass --zwarn-forbid-mask {ZWARN_UNSTABLE_BIT}."
+            )
+        zwarn_forbid_mask = ZWARN_UNSTABLE_BIT
+
+    if args.manifest is not None:
+        manifest_path = args.manifest.expanduser().resolve()
+        manifest = load_desi_manifest(manifest_path)
+        sample_source = "explicit_manifest"
+    else:
+        for healpix in args.healpix:
+            ensure_desi_healpix(int(healpix), desi_dir=desi_dir)
+        manifest = discover_desi_manifest(
+            args.healpix,
+            desi_dir=desi_dir,
+            target_spectype=args.target_spectype,
+            z_min=args.z_min,
+            z_max=args.z_max,
+            allow_nonzero_zwarn=args.allow_nonzero_zwarn,
+            zwarn_forbid_mask=zwarn_forbid_mask,
+        )
+        manifest_path = None
+        sample_source = "direct_desi_redrock"
+    if manifest.empty:
+        raise ValueError("No DESI spectra passed the sample selection")
     if args.max_spectra and len(manifest) > args.max_spectra:
         manifest = manifest.sample(args.max_spectra, random_state=args.seed).sort_values(
             ["healpix", "targetid"]
         ).reset_index(drop=True)
+    n_candidates = len(manifest)
+    candidate_manifest_path = output_dir / "desi_candidate_manifest.csv"
+    manifest.to_csv(candidate_manifest_path, index=False)
     wave = np.arange(args.wave_min, args.wave_max + 0.5 * args.wave_step, args.wave_step)
     manifest, flux, weights, scales = build_rest_frame_matrix(
-        manifest, desi_dir=Path(desi_dir), rest_wave=wave
+        manifest,
+        desi_dir=desi_dir,
+        rest_wave=wave,
+        min_good_pixels=args.min_good_pixels,
     )
+    sample_manifest_path = output_dir / "desi_sample_manifest.csv"
+    manifest.to_csv(sample_manifest_path, index=False)
     rng = np.random.default_rng(args.seed)
     test = rng.random(len(manifest)) < args.test_fraction
     if not np.any(test) or not np.any(~test):
@@ -327,9 +385,13 @@ def main() -> None:
     parameters = vars(args).copy()
     parameters.update(
         {
-            "manifest": str(Path(manifest_path).expanduser().resolve()),
-            "desi_dir": str(Path(desi_dir).expanduser().resolve()),
-            "output_dir": str(output_dir.expanduser().resolve()),
+            "sample_source": sample_source,
+            "input_manifest": str(manifest_path) if manifest_path is not None else None,
+            "candidate_manifest": str(candidate_manifest_path),
+            "sample_manifest": str(sample_manifest_path),
+            "desi_dir": str(desi_dir),
+            "output_dir": str(output_dir),
+            "n_candidate_spectra": n_candidates,
             "n_loaded_spectra": len(manifest),
             "learned_wave_min_aa": float(learned_wave.min()),
             "learned_wave_max_aa": float(learned_wave.max()),
@@ -339,8 +401,14 @@ def main() -> None:
                 "largest contiguous interval with at least the required number "
                 "of observed spectra in every bin"
             ),
-            "uses_eazy_coefficients": False,
-            "manifest_role": "target identity, HEALPix, redshift, and quality selection only",
+            "uses_eazy_selection": (
+                False if sample_source == "direct_desi_redrock" else None
+            ),
+            "selection_role": (
+                "Direct Redrock/FIBERMAP galaxy selection"
+                if sample_source == "direct_desi_redrock"
+                else "Explicit user-supplied manifest override"
+            ),
             "desi_flux_unit_scale_cgs": 1e-17,
         }
     )
