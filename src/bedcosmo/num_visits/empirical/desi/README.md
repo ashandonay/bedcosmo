@@ -34,7 +34,7 @@ python -m bedcosmo.num_visits.empirical.desi.fit_basis \
 The default output is:
 
 ```text
-$SCRATCH/bedcosmo/num_visits/desi_samples/
+$SCRATCH/bedcosmo/num_visits/desi_training_data/
 ├── desi_candidate_manifest.csv
 ├── desi_sample_manifest.csv
 └── desi_rest_frame_training_matrix.npz
@@ -86,7 +86,7 @@ python -m bedcosmo.num_visits.empirical.desi.build_prior \
 ```
 
 With no `--training-matrix` override, this reads
-`$SCRATCH/bedcosmo/num_visits/desi_samples/desi_rest_frame_training_matrix.npz`.
+`$SCRATCH/bedcosmo/num_visits/desi_training_data/desi_rest_frame_training_matrix.npz`.
 
 `--rank` controls both the number of learned spectral components and the
 dimension of the generated prior. Because the default build name is `desi8`,
