@@ -16,6 +16,7 @@ import yaml
 from ..paths import (
     BUILD_PROVENANCE_FILENAME,
     SED_PRIOR_KDE_NATIVE_FILENAME,
+    get_desi_samples_dir,
     get_num_visits_spectral_template_dir,
     get_prior_build_dir,
 )
@@ -200,7 +201,12 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
-    parser.add_argument("--training-matrix", type=Path, required=True)
+    parser.add_argument(
+        "--training-matrix",
+        type=Path,
+        default=None,
+        help="Rest-frame matrix (default: <num_visits>/desi_samples/desi_rest_frame_training_matrix.npz).",
+    )
     parser.add_argument("--rank", type=int, default=8)
     parser.add_argument("--build-name", default="empirical_prior/desi8")
     parser.add_argument("--output-dir", type=Path, default=None)
@@ -263,6 +269,11 @@ def require_compatible_checkpoints(
 
 def main() -> None:
     args = parse_args()
+    args.training_matrix = (
+        args.training_matrix.expanduser().resolve()
+        if args.training_matrix is not None
+        else get_desi_samples_dir() / "desi_rest_frame_training_matrix.npz"
+    )
     if args.rank < 2:
         raise ValueError("The ILR prior requires a basis rank of at least two")
     if not 0 < args.train_fraction < 1:

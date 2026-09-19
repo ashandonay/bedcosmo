@@ -12,6 +12,72 @@ from ..desi_data import get_local_desi_paths
 from ..paths import DEFAULT_PROGRAM, DEFAULT_SPECPROD, DEFAULT_SURVEY
 
 
+def discover_desi_manifest(
+    healpix: list[int] | tuple[int, ...],
+    *,
+    desi_dir: Path,
+    target_spectype: str = "GALAXY",
+    z_min: float | None = 0.01,
+    z_max: float | None = None,
+    allow_nonzero_zwarn: bool = False,
+    zwarn_forbid_mask: int | None = None,
+    specprod: str = DEFAULT_SPECPROD,
+    survey: str = DEFAULT_SURVEY,
+    program: str = DEFAULT_PROGRAM,
+) -> pd.DataFrame:
+    """Select basis-training targets directly from DESI Redrock and FIBERMAP."""
+    frames: list[pd.DataFrame] = []
+    for hp in healpix:
+        coadd_path, redrock_path = get_local_desi_paths(
+            desi_dir, specprod, survey, program, int(hp)
+        )
+        if not coadd_path.is_file():
+            raise FileNotFoundError(coadd_path)
+        if not redrock_path.is_file():
+            raise FileNotFoundError(redrock_path)
+        redrock = fits.getdata(redrock_path, "REDSHIFTS")
+        fibermap = fits.getdata(coadd_path, "FIBERMAP")
+        names = set(redrock.dtype.names or ())
+        required = {"TARGETID", "Z", "ZWARN", "SPECTYPE"}
+        missing = required.difference(names)
+        if missing:
+            raise ValueError(f"Redrock table {redrock_path} lacks {sorted(missing)}")
+
+        targetid = np.asarray(redrock["TARGETID"], dtype=np.int64)
+        redshift = np.asarray(redrock["Z"], dtype=float)
+        zwarn = np.asarray(redrock["ZWARN"], dtype=np.int64)
+        spectype = np.char.strip(np.asarray(redrock["SPECTYPE"]).astype(str))
+        fiber_targetid = np.asarray(fibermap["TARGETID"], dtype=np.int64)
+        select = np.isfinite(redshift) & np.isin(targetid, fiber_targetid)
+        if target_spectype:
+            select &= spectype == target_spectype
+        if zwarn_forbid_mask is not None:
+            select &= (zwarn & int(zwarn_forbid_mask)) == 0
+        elif not allow_nonzero_zwarn:
+            select &= zwarn == 0
+        if z_min is not None:
+            select &= redshift >= float(z_min)
+        if z_max is not None:
+            select &= redshift <= float(z_max)
+
+        patch = pd.DataFrame(
+            {
+                "targetid": targetid[select],
+                "healpix": np.full(np.count_nonzero(select), int(hp), dtype=np.int64),
+                "z": redshift[select],
+            }
+        ).drop_duplicates("targetid")
+        frames.append(patch)
+        print(
+            f"Selected direct DESI galaxies for HEALPix {int(hp)}: "
+            f"{len(patch):,}/{len(redrock):,} Redrock rows"
+        )
+    if not frames:
+        return pd.DataFrame(columns=["targetid", "healpix", "z"])
+    manifest = pd.concat(frames, ignore_index=True)
+    return manifest.drop_duplicates("targetid").reset_index(drop=True)
+
+
 def load_desi_manifest(path: Path | str) -> pd.DataFrame:
     """Load the DESI object identity/redshift columns used for basis training."""
     table = pd.read_csv(path)
@@ -110,6 +176,7 @@ def build_rest_frame_matrix(
     specprod: str = DEFAULT_SPECPROD,
     survey: str = DEFAULT_SURVEY,
     program: str = DEFAULT_PROGRAM,
+    min_good_pixels: int = 100,
 ) -> tuple[pd.DataFrame, np.ndarray, np.ndarray, np.ndarray]:
     """Read DESI coadds and return flux, relative inverse variance, and scales."""
     flux_matrix = np.zeros((len(manifest), len(rest_wave)), dtype=np.float32)
@@ -155,14 +222,16 @@ def build_rest_frame_matrix(
                 scales[matrix_row] = scale
                 found[matrix_row] = True
         accepted = np.isfinite(scales[patch.index]) & (
-            np.sum(weight_matrix[patch.index] > 0, axis=1) >= 100
+            np.sum(weight_matrix[patch.index] > 0, axis=1) >= int(min_good_pixels)
         )
         print(
             f"Loaded direct DESI spectra for HEALPix {int(healpix)}: "
             f"{int(np.sum(accepted)):,}/{len(patch):,} usable"
         )
 
-    keep = np.isfinite(scales) & (np.sum(weight_matrix > 0, axis=1) >= 100)
+    keep = np.isfinite(scales) & (
+        np.sum(weight_matrix > 0, axis=1) >= int(min_good_pixels)
+    )
     if np.any(~found):
         print(f"Warning: {int(np.sum(~found)):,} manifest targets were absent from coadds")
     return (

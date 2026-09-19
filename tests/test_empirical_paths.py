@@ -9,6 +9,7 @@ import pytest
 from bedcosmo.num_visits.empirical.paths import (
     get_bedcosmo_scratch,
     get_desi_data_dir,
+    get_desi_samples_dir,
     get_healpix_fit_dir,
     get_num_visits_scratch,
     get_prior_build_dir,
@@ -28,6 +29,9 @@ def test_scratch_paths_use_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) 
     assert get_bedcosmo_scratch() == scratch / "bedcosmo"
     assert get_num_visits_scratch() == scratch / "bedcosmo" / "num_visits"
     assert get_desi_data_dir() == scratch / "bedcosmo" / "desi" / "tiny_dr1"
+    assert get_desi_samples_dir() == (
+        scratch / "bedcosmo" / "num_visits" / "desi_samples"
+    )
     assert get_template_dir() == (
         scratch / "bedcosmo" / "num_visits" / "spectral_templates"
     )
