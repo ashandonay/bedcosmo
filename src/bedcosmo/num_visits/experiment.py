@@ -827,7 +827,7 @@ class NumVisits(BaseExperiment, CosmologyMixin):
 
         if self.global_rank == 0 and self.verbose:
             print(
-                f"  EAZY templates: {self._n_eazy_templates} on "
+                f"  Spectral template bank: {self._n_eazy_templates} components on "
                 f"{self._template_wave_rest.shape[0]} rest-frame grid points; "
                 f"normalization=[{norm_min:g}, {norm_max:g}] Angstrom; "
                 f"flux unit scale={self.flux_unit_scale:g} cgs"
