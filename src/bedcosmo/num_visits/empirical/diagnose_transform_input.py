@@ -26,8 +26,8 @@ import numpy as np
 import torch
 import yaml
 
+from .eazy.fit_eazy_weights_to_desi import save_triangle_plot
 from .fit_sed_prior_kde import load_sed_prior_kde
-from .fit_eazy_weights_to_desi import save_triangle_plot
 from .simplex import PARAMETERIZATION_ILR, split_feature_matrix
 
 

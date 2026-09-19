@@ -14,7 +14,7 @@ DESI redshift and remove the mean magnitude, so ``log_c_scale`` does not enter.
 Usage::
 
     conda run -n bedcosmo python -m \
-      bedcosmo.num_visits.empirical.reduced.plot_eazy_basis_representativeness \
+      bedcosmo.num_visits.empirical.eazy.reduced.plot_eazy_basis_representativeness \
       --build eazy6
 
 Use ``--build eazy12`` for the production twelve-template bank. The default
@@ -37,7 +37,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 from matplotlib.ticker import PercentFormatter  # noqa: E402
 
-from ..templates import load_eazy_template_bank  # noqa: E402
+from ...templates import load_eazy_template_bank  # noqa: E402
 
 INK = "#25272B"
 MUTED = "#6B7280"
@@ -46,8 +46,8 @@ PC_COLOR = "#3366CC"
 ILR_COLOR = "#DC3912"
 
 BUILD_CONFIG = {
-    "eazy6": "templates/eazy_v1.0.spectra.param",
-    "eazy12": "templates/fsps_full/fsps_QSF_12_v3.param",
+    "eazy6": "eazy6/eazy6.param",
+    "eazy12": "eazy12/eazy12.param",
 }
 
 

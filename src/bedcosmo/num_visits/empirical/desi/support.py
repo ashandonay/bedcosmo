@@ -1,4 +1,4 @@
-"""Wavelength-support diagnostics for a direct-DESI spectral basis."""
+"""Wavelength-support diagnostics for a direct DESI spectral basis."""
 
 from __future__ import annotations
 

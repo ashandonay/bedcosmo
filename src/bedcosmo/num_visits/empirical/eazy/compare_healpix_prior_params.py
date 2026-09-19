@@ -16,17 +16,17 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
+from ..paths import (
+    DEFAULT_EMPIRICAL_PRIOR_DIR,
+    DEFAULT_HEALPIX,
+    find_healpix_weights_csv,
+    get_prior_build_dir,
+)
 from .fit_eazy_weights_to_desi import (
     build_prior_parameter_samples,
     prior_a_column_names,
     prior_quality_mask,
     save_triangle_plot,
-)
-from .paths import (
-    DEFAULT_EMPIRICAL_PRIOR_DIR,
-    DEFAULT_HEALPIX,
-    find_healpix_weights_csv,
-    get_prior_build_dir,
 )
 
 

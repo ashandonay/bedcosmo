@@ -13,11 +13,11 @@
 #   ./submit.sh train num_visits empirical --prior-density-type kde
 #
 # Rebuild the selected prior with:
-#   python -m bedcosmo.num_visits.empirical.build_prior          # full eazy12
-#   python -m bedcosmo.num_visits.empirical.build_prior \
+#   python -m bedcosmo.num_visits.empirical.eazy.build_prior          # full eazy12
+#   python -m bedcosmo.num_visits.empirical.eazy.build_prior \
 #     --build-name empirical_prior/eazy6 \
-#     --template-param templates/eazy_v1.0.spectra.param
-#   python -m bedcosmo.num_visits.empirical.reduced.build_reduced_template_prior \
+#     --template-param eazy6/eazy6.param
+#   python -m bedcosmo.num_visits.empirical.eazy.reduced.build_reduced_template_prior \
 #     --templates T7+T10
 
 template_source: desi8

@@ -40,7 +40,10 @@ from bedcosmo.num_visits.empirical.simplex import (
     PARAMETERIZATION_ILR,
     ilr_to_weights_torch,
 )
-from bedcosmo.num_visits.empirical.templates import load_eazy_template_bank
+from bedcosmo.num_visits.empirical.templates import (
+    DEFAULT_TEMPLATE_PARAM_12D,
+    load_eazy_template_bank,
+)
 from bedcosmo.cosmology import CosmologyMixin, _cumsimpson
 
 # LSST photometric zeropoints (AB magnitudes that produce 1 count per second)
@@ -479,7 +482,7 @@ class NumVisits(BaseExperiment, CosmologyMixin):
             raise RuntimeError(
                 "empirical NumVisits with transform_input=True requires "
                 "gaussianizer_state in the KDE artifact. Rebuild with "
-                "`python -m bedcosmo.num_visits.empirical.build_prior` "
+                "`python -m bedcosmo.num_visits.empirical.eazy.build_prior` "
                 "(do not pass --no-gaussianizer)."
             )
 
@@ -544,7 +547,7 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         prior_pool_size=65536,
         prior_pool_seed=7,
         template_dir=None,
-        template_param="templates/fsps_full/fsps_QSF_12_v3.param",
+        template_param=DEFAULT_TEMPLATE_PARAM_12D,
         template_norm_min=None,
         template_norm_max=None,
         flux_unit_scale=None,
@@ -586,7 +589,7 @@ class NumVisits(BaseExperiment, CosmologyMixin):
                 prior_dir=prior_dir,
             )
             if not template_param:
-                template_param = "templates/fsps_full/fsps_QSF_12_v3.param"
+                template_param = DEFAULT_TEMPLATE_PARAM_12D
             # ``density_type`` is current; ``source`` / ``prior_source`` are legacy.
             resolved_density = density_type
             if resolved_density is None:

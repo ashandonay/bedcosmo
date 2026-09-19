@@ -24,7 +24,7 @@ The training path:
 Run a bounded pilot with:
 
 ```bash
-python -m bedcosmo.num_visits.empirical.desi_basis.fit_basis \
+python -m bedcosmo.num_visits.empirical.desi.fit_basis \
   --manifest "$SCRATCH/bedcosmo/num_visits/empirical_prior/eazy12/desi_eazy_empirical_weights.csv" \
   --max-spectra 1500 \
   --ranks 2 3 4 5 6
@@ -52,7 +52,7 @@ weight during factorization. These components must not be extrapolated by
 silently clamping their endpoint values; the portions of LSST `u` and `y`
 outside DESI's observed-frame range still require an explicit external anchor.
 
-## Build the K=8 NumVisits prior
+## Build a rank-K NumVisits prior
 
 `build_prior` performs the production build in one command. It selects the best
 of several Nearly-NMF initializations on validation spectra, reports the result
@@ -63,16 +63,31 @@ coefficient/redshift rows used to train the prior are restricted to the default
 tabulated LSST `ugrizy` bandpasses without endpoint extrapolation.
 
 ```bash
-python -m bedcosmo.num_visits.empirical.desi_basis.build_prior \
+python -m bedcosmo.num_visits.empirical.desi.build_prior \
   --training-matrix /path/to/full12531/desi_rest_frame_training_matrix.npz \
   --rank 8
 ```
 
+`--rank` controls both the number of learned spectral components and the
+dimension of the generated prior. Because the default build name is `desi8`,
+give other ranks their own build name. For example, the production K=4 build is:
+
+```bash
+python -m bedcosmo.num_visits.empirical.desi.build_prior \
+  --training-matrix /path/to/full12531/desi_rest_frame_training_matrix.npz \
+  --rank 4 \
+  --build-name empirical_prior/desi4
+```
+
+That command writes the prior artifacts under
+`$SCRATCH/bedcosmo/num_visits/empirical_prior/desi4/` and the four-component
+template bank under `$SCRATCH/bedcosmo/num_visits/spectral_templates/desi4/`.
+
 With no path overrides, the prior artifacts are written to
 `$SCRATCH/bedcosmo/num_visits/empirical_prior/desi8/` and the learned template
-bank to `$SCRATCH/bedcosmo/num_visits/spectral_templates/desi8/`. This keeps the direct
-DESI components separate from the cached EAZY templates under
-`$SCRATCH/bedcosmo/eazy/templates/`.
+bank to `$SCRATCH/bedcosmo/num_visits/spectral_templates/desi8/`. EAZY banks
+use the parallel `spectral_templates/eazy6/` and `spectral_templates/eazy12/`
+directories with the same flat component-plus-parameter-file layout.
 
 The command writes an EAZY-compatible component bank, the standard
 `desi_eazy_empirical_weights.csv`, build provenance, native and gaussianized KDE
@@ -112,7 +127,7 @@ The generated basis, template bank, and KDE artifacts do not require
 Then run, for example:
 
 ```bash
-python -m bedcosmo.num_visits.empirical.desi_basis.evaluate_factorization_methods \
+python -m bedcosmo.num_visits.empirical.desi.evaluate_factorization_methods \
   --training-matrix /path/to/desi_rest_frame_training_matrix.npz \
   --output-dir /path/to/factorization_evaluation \
   --max-spectra 3000 \

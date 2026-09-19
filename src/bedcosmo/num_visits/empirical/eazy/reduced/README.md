@@ -41,13 +41,13 @@ without depending on the repository's `experiments/` directory.
 The path helpers default to:
 
 ```text
-$SCRATCH/bedcosmo/eazy/
+$SCRATCH/bedcosmo/num_visits/spectral_templates/
 $SCRATCH/bedcosmo/num_visits/empirical_prior/eazy12/
 ```
 
-The full EAZY12 build must contain `desi_eazy_empirical_weights.csv`. The EAZY
-root must contain `templates/fsps_full/fsps_QSF_12_v3.param` and its referenced
-spectra.
+The full EAZY12 build must contain `desi_eazy_empirical_weights.csv`. The shared
+template root contains `eazy12/eazy12.param` and its referenced components;
+these are downloaded automatically when first loaded.
 
 ## 1. Search all fixed-size subsets
 
@@ -55,11 +55,11 @@ Run once for every subset size of interest. The sufficient-statistics cache is
 shared, so later searches do not reread and reproject every DESI spectrum.
 
 ```bash
-python -m bedcosmo.num_visits.empirical.reduced.discover_template_cohorts \
+python -m bedcosmo.num_visits.empirical.eazy.reduced.discover_template_cohorts \
   --n-templates 2 \
   --build-name empirical_prior/eazy12
 
-python -m bedcosmo.num_visits.empirical.reduced.discover_template_cohorts \
+python -m bedcosmo.num_visits.empirical.eazy.reduced.discover_template_cohorts \
   --n-templates 3 \
   --build-name empirical_prior/eazy12
 ```
@@ -92,7 +92,7 @@ After searches through the largest subset size that should be considered (the
 current analysis used `N=1,...,5`), run:
 
 ```bash
-python -m bedcosmo.num_visits.empirical.reduced.discover_eazy_spectral_families \
+python -m bedcosmo.num_visits.empirical.eazy.reduced.discover_eazy_spectral_families \
   --build-name empirical_prior/eazy12 \
   --variance-threshold 0.90 \
   --pca-scaling standardized
@@ -115,11 +115,11 @@ If the default full build and cohort layout are present, only the template
 label is required:
 
 ```bash
-python -m bedcosmo.num_visits.empirical.reduced.build_template_prior \
+python -m bedcosmo.num_visits.empirical.eazy.reduced.build_template_prior \
   --templates T1+T7 \
   --kde-sample 2000
 
-python -m bedcosmo.num_visits.empirical.reduced.build_template_prior \
+python -m bedcosmo.num_visits.empirical.eazy.reduced.build_template_prior \
   --templates T7+T10 \
   --kde-sample 2000
 ```
@@ -142,7 +142,7 @@ Each build writes:
 - `sed_prior_kde_native.joblib`
 - `sed_prior_kde_gaussianized.joblib`
 - KDE diagnostic triangle plots
-- `templates/reduced/<source>_<subset>.param` under the EAZY root
+- `<source>/reduced/<source>_<subset>.param` under `spectral_templates/`
 
 The coefficient scale and KDE `log_c_scale` inherit the full-fit template
 normalization recorded in `discovery_parameters.json`. DESI coadd fluxes are

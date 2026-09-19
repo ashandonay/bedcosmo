@@ -50,7 +50,7 @@ import yaml
 from bedcosmo.num_visits import NumVisits
 from bedcosmo.util import get_experiment_config_path
 
-from .fit_eazy_weights_to_desi import prior_a_column_names, read_redrock
+from .eazy.fit_eazy_weights_to_desi import prior_a_column_names, read_redrock
 from .fit_sed_prior_kde import (
     DEFAULT_KDE_DIAGNOSTIC_SAMPLES,
     apply_training_support_mask,

@@ -57,7 +57,7 @@ def get_num_visits_scratch() -> Path:
 
 
 def get_num_visits_spectral_template_dir() -> Path:
-    """Template banks produced specifically for NumVisits experiments."""
+    """Shared downloaded and learned template banks for NumVisits experiments."""
     return get_num_visits_scratch() / NUM_VISITS_SPECTRAL_TEMPLATE_ROOT_DIR
 
 
@@ -90,8 +90,12 @@ def add_desi_dir_argument(parser) -> None:
 
 
 def get_template_dir() -> Path:
-    """Cached EAZY template bank (auto-downloaded from GitHub)."""
-    return get_bedcosmo_scratch() / "eazy"
+    """Shared NumVisits spectral-template root.
+
+    EAZY and directly learned DESI banks live side by side beneath this root,
+    for example ``eazy12/eazy12.param`` and ``desi8/desi8.param``.
+    """
+    return get_num_visits_spectral_template_dir()
 
 
 def get_prior_build_dir(name: str = DEFAULT_EMPIRICAL_PRIOR_DIR) -> Path:

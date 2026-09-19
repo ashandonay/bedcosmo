@@ -1,4 +1,4 @@
-"""Construct a masked rest-frame training matrix from DESI coadds."""
+"""Construct the masked rest-frame training matrix from DESI coadds."""
 
 from __future__ import annotations
 

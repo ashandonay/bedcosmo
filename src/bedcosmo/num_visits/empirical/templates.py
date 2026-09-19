@@ -1,4 +1,4 @@
-"""Load EAZY template SEDs onto a common rest-frame wavelength grid."""
+"""Materialize and load EAZY SED banks from the shared template directory."""
 
 from __future__ import annotations
 
@@ -12,8 +12,18 @@ from .paths import get_template_dir
 
 EAZY_RAW_BASE = "https://raw.githubusercontent.com/gbrammer/eazy-photoz/master/"
 DEFAULT_TEMPLATE_DIR = get_template_dir()
-DEFAULT_TEMPLATE_PARAM_12D = "templates/fsps_full/fsps_QSF_12_v3.param"
-DEFAULT_TEMPLATE_PARAM_6D = "templates/eazy_v1.0.spectra.param"
+DEFAULT_TEMPLATE_PARAM_12D = "eazy12/eazy12.param"
+DEFAULT_TEMPLATE_PARAM_6D = "eazy6/eazy6.param"
+
+_EAZY_BANK_COMPONENTS: dict[str, tuple[str, ...]] = {
+    DEFAULT_TEMPLATE_PARAM_12D: tuple(
+        f"templates/fsps_full/fsps_QSF_12_v3_{index:03d}.dat"
+        for index in range(1, 13)
+    ),
+    DEFAULT_TEMPLATE_PARAM_6D: tuple(
+        f"templates/EAZY_v1.0/eazy_v1.0_sed{index}.dat" for index in range(1, 7)
+    ),
+}
 # Rest-frame tabulation range for NumVisits / template bank (Angstrom).
 # Native EAZY files span ~91–1e8 Å; LSST needs dense sampling in the optical/NIR only.
 DEFAULT_BANK_WAVE_MIN_AA = 500.0
@@ -27,6 +37,45 @@ def download(url: str, path: Path, overwrite: bool = False) -> None:
     if path.exists() and not overwrite:
         return
     urlretrieve(url, path)
+
+
+def materialize_eazy_template_bank(
+    template_param: str,
+    *,
+    template_dir: Path | str = DEFAULT_TEMPLATE_DIR,
+    overwrite: bool = False,
+) -> Path:
+    """Download a standard EAZY bank into ``spectral_templates/<source>``.
+
+    The upstream repository nests its template files below several different
+    directories. NumVisits instead exports the same simple layout as a learned
+    DESI bank: one source directory containing ``component_*.dat`` and a local
+    ``<source>.param`` file whose paths are relative to the shared template root.
+    """
+    if template_param not in _EAZY_BANK_COMPONENTS:
+        raise ValueError(f"Unknown standard EAZY template bank: {template_param!r}")
+
+    root = Path(os.path.expanduser(template_dir))
+    param_path = root / template_param
+    source = Path(template_param).parent.as_posix()
+    component_paths: list[str] = []
+    for index, upstream_path in enumerate(_EAZY_BANK_COMPONENTS[template_param], start=1):
+        relative_path = f"{source}/component_{index:02d}.dat"
+        download(
+            EAZY_RAW_BASE + upstream_path,
+            root / relative_path,
+            overwrite=overwrite,
+        )
+        component_paths.append(relative_path)
+
+    if overwrite or not param_path.exists():
+        lines = [
+            f"# {source.upper()} bank materialized from gbrammer/eazy-photoz.",
+            *(f"{index} {path} 1.0" for index, path in enumerate(component_paths, 1)),
+        ]
+        param_path.parent.mkdir(parents=True, exist_ok=True)
+        param_path.write_text("\n".join(lines) + "\n")
+    return param_path
 
 
 def read_template_param(param_path: Path) -> list[str]:
@@ -93,7 +142,16 @@ def load_eazy_templates(
     """
     template_dir = Path(os.path.expanduser(template_dir))
     local_param = template_dir / template_param
-    download(EAZY_RAW_BASE + template_param, local_param, overwrite=overwrite)
+    if template_param in _EAZY_BANK_COMPONENTS:
+        local_param = materialize_eazy_template_bank(
+            template_param,
+            template_dir=template_dir,
+            overwrite=overwrite,
+        )
+    elif not local_param.exists() or overwrite:
+        # Keep explicit upstream EAZY parameter files usable for exploratory
+        # calls, while standard NumVisits sources use the canonical layout.
+        download(EAZY_RAW_BASE + template_param, local_param, overwrite=overwrite)
     rel_paths = read_template_param(local_param)
     waves: list[np.ndarray] = []
     fluxes: list[np.ndarray] = []
@@ -131,7 +189,10 @@ def build_common_rest_grid(
     if wmin >= wmax:
         raise ValueError(f"Invalid template bank grid: {wmin} >= {wmax}")
     if log_spacing:
-        return np.logspace(np.log10(wmin), np.log10(wmax), n_points, dtype=np.float64)
+        grid = np.logspace(np.log10(wmin), np.log10(wmax), n_points, dtype=np.float64)
+        # Avoid roundoff nudging the nominal endpoints just outside requested bounds.
+        grid[0], grid[-1] = wmin, wmax
+        return grid
     return np.linspace(wmin, wmax, n_points, dtype=np.float64)
 
 

@@ -10,14 +10,14 @@ from pathlib import Path
 
 import pandas as pd
 
-from .paths import (
+from ..paths import (
     BUILD_PROVENANCE_FILENAME,
     DEFAULT_EMPIRICAL_PRIOR_DIR,
     DEFAULT_HEALPIX,
     find_healpix_weights_csv,
     get_prior_build_dir,
 )
-from .provenance import fit_provenance_path, read_provenance, write_provenance
+from ..provenance import fit_provenance_path, read_provenance, write_provenance
 
 
 def _template_identity(settings: dict | None) -> tuple | None:
