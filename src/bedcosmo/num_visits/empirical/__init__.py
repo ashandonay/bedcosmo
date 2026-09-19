@@ -1,7 +1,7 @@
-"""Empirical galaxy SED prior from DESI spectra and EAZY template fits."""
+"""Empirical galaxy SED prior from DESI spectra and template fits."""
 
-from .build_prior import build_prior
-from .combine_healpix_weights import combine_healpix_weights
+from typing import Any
+
 from .desi_data import ensure_desi_healpix, get_local_desi_paths
 from .fit_sed_prior_kde import (
     DEFAULT_GAUSSIANIZED_KDE_SAMPLES,
@@ -11,15 +11,15 @@ from .fit_sed_prior_kde import (
     fit_and_save_gaussianized_kde_for_run,
     fit_gaussianized_kde,
     fit_gaussianized_kde_from_artifact,
+    load_gaussianized_kde,
     load_prior_training_table,
     load_sed_prior_kde,
-    load_gaussianized_kde,
     mode_central_params_from_artifact,
     sample_sed_prior,
     sample_sed_prior_kde,
     samples_to_coeffs,
-    save_sed_prior_kde,
     save_gaussianized_kde,
+    save_sed_prior_kde,
 )
 from .paths import (
     DEFAULT_EMPIRICAL_PRIOR_DIR,
@@ -30,8 +30,9 @@ from .paths import (
     SED_PRIOR_KDE_GAUSSIANIZED_FILENAME,
     SED_PRIOR_KDE_NATIVE_FILENAME,
     get_bedcosmo_scratch,
+    get_desi_candidate_manifest_path,
     get_desi_data_dir,
-    get_template_dir,
+    get_desi_training_data_dir,
     get_healpix_fit_dir,
     get_num_visits_scratch,
     get_prior_build_dir,
@@ -39,6 +40,7 @@ from .paths import (
     get_prior_kde_path,
     get_prior_weights_csv,
     get_scratch_root,
+    get_template_dir,
 )
 from .sed_prior import (
     EMPIRICAL_ARTIFACT_DIR,
@@ -71,13 +73,6 @@ from .simplex import (
     weights_to_clr,
     weights_to_ilr,
 )
-from .templates import (
-    DEFAULT_TEMPLATE_PARAM_12D,
-    DEFAULT_TEMPLATE_PARAM_6D,
-    DEFAULT_TEMPLATE_DIR,
-    load_eazy_template_bank,
-    load_eazy_templates,
-)
 from .template_config import (
     empirical_prior_build_name,
     empirical_prior_variant,
@@ -87,6 +82,27 @@ from .template_config import (
     parse_reduced_templates,
     resolve_template_param,
 )
+from .templates import (
+    DEFAULT_TEMPLATE_DIR,
+    DEFAULT_TEMPLATE_PARAM_6D,
+    DEFAULT_TEMPLATE_PARAM_12D,
+    load_eazy_template_bank,
+    load_eazy_templates,
+)
+
+
+def build_prior(*args: Any, **kwargs: Any) -> Any:
+    """Compatibility wrapper for :mod:`empirical.eazy.build_prior`."""
+    from .eazy.build_prior import build_prior as _build_prior
+
+    return _build_prior(*args, **kwargs)
+
+
+def combine_healpix_weights(*args: Any, **kwargs: Any) -> Any:
+    """Compatibility wrapper for :mod:`empirical.eazy.combine_healpix_weights`."""
+    from .eazy.combine_healpix_weights import combine_healpix_weights as _combine
+
+    return _combine(*args, **kwargs)
 
 __all__ = [
     "DEFAULT_EMPIRICAL_PRIOR_DIR",
@@ -127,6 +143,8 @@ __all__ = [
     "ensure_desi_healpix",
     "get_bedcosmo_scratch",
     "get_desi_data_dir",
+    "get_desi_candidate_manifest_path",
+    "get_desi_training_data_dir",
     "get_template_dir",
     "get_healpix_fit_dir",
     "get_local_desi_paths",

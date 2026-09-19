@@ -454,6 +454,11 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--weight-decay", type=float, default=0.0)
     ap.add_argument("--threads", type=int, default=8)
     ap.add_argument(
+        "--device",
+        default="cpu",
+        help="Torch device used to fit the flow (for example cpu or cuda:0).",
+    )
+    ap.add_argument(
         "--whitening",
         choices=["default", "cholesky", "none"],
         default="default",
@@ -478,6 +483,7 @@ def main(argv: list[str] | None = None) -> None:
         "batch_size": args.batch_size,
         "lr": args.lr,
         "weight_decay": args.weight_decay,
+        "device": args.device,
     }
 
     print(f"[load] KDE artifact: {kde_path}", flush=True)

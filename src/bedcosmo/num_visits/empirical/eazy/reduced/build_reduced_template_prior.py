@@ -1,4 +1,4 @@
-"""Alias for ``build_template_prior`` (historical module name used in docs/tests)."""
+"""Compatibility alias for the reduced EAZY-template prior builder."""
 
 from .build_template_prior import *  # noqa: F403
 from .build_template_prior import main

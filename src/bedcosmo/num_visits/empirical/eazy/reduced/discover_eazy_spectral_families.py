@@ -32,17 +32,17 @@ except ImportError as error:  # pragma: no cover - depends on the local analysis
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 
-from ..paths import (  # noqa: E402
+from ...paths import (  # noqa: E402
     DEFAULT_EMPIRICAL_PRIOR_DIR,
     get_prior_build_dir,
     get_template_dir,
 )
-from ..simplex import (  # noqa: E402
+from ...simplex import (  # noqa: E402
     DEFAULT_CLR_EPS,
     ilr_basis,
     weights_to_ilr,
 )
-from ..templates import (  # noqa: E402
+from ...templates import (  # noqa: E402
     DEFAULT_TEMPLATE_NORM_MAX_AA,
     DEFAULT_TEMPLATE_NORM_MIN_AA,
     DEFAULT_TEMPLATE_PARAM_12D,

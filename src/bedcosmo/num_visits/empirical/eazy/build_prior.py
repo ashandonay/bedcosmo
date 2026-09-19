@@ -17,15 +17,15 @@ Default output tree (``--build-name empirical_prior/eazy12``)::
 Shared inputs (downloaded once, reused across builds)::
 
     $SCRATCH/bedcosmo/desi/tiny_dr1/
-    $SCRATCH/bedcosmo/eazy/
+    $SCRATCH/bedcosmo/num_visits/spectral_templates/eazy12/
 
 Example::
 
-  python -m bedcosmo.num_visits.empirical.build_prior
-  python -m bedcosmo.num_visits.empirical.build_prior --build-name empirical_prior_test --n-max 600
-  python -m bedcosmo.num_visits.empirical.build_prior --healpix 23040 --skip-kde
-  python -m bedcosmo.num_visits.empirical.build_prior \\
-    --build-name empirical_prior/eazy6 --template-param templates/eazy_v1.0.spectra.param
+  python -m bedcosmo.num_visits.empirical.eazy.build_prior
+  python -m bedcosmo.num_visits.empirical.eazy.build_prior --build-name empirical_prior_test --n-max 600
+  python -m bedcosmo.num_visits.empirical.eazy.build_prior --healpix 23040 --skip-kde
+  python -m bedcosmo.num_visits.empirical.eazy.build_prior \\
+    --template-source eazy6
 """
 
 from __future__ import annotations
@@ -37,32 +37,60 @@ import subprocess
 import sys
 from pathlib import Path
 
-from .combine_healpix_weights import combine_healpix_weights
-from .desi_data import ensure_desi_healpix
-from .paths import (
+from ..desi.training_matrix import discover_desi_manifest
+from ..desi_data import ensure_desi_healpix
+from ..paths import (
     BUILD_PROVENANCE_FILENAME,
     DEFAULT_EMPIRICAL_PRIOR_DIR,
     DEFAULT_HEALPIX,
+    SED_PRIOR_KDE_GAUSSIANIZED_FILENAME,
     ZWARN_UNSTABLE_BIT,
     add_desi_dir_argument,
+    get_desi_candidate_manifest_path,
     get_healpix_fit_dir,
     get_prior_build_dir,
     get_prior_kde_path,
     get_prior_weights_csv,
     resolve_desi_dir,
 )
-from .provenance import write_provenance
-from .templates import (
+from ..provenance import write_provenance
+from ..template_config import (
+    empirical_prior_build_name,
+    normalize_template_source,
+    resolve_template_param,
+)
+from ..templates import (
     DEFAULT_TEMPLATE_NORM_MAX_AA,
     DEFAULT_TEMPLATE_NORM_MIN_AA,
     DEFAULT_TEMPLATE_PARAM_12D,
 )
+from .combine_healpix_weights import combine_healpix_weights
 
 DEFAULT_MAX_CHI2_DOF = 1.2
 DEFAULT_Z_MIN = 0.01
+EAZY_TEMPLATE_SOURCES = ("eazy12", "eazy6")
 
-FIT_MODULE = "bedcosmo.num_visits.empirical.fit_eazy_weights_to_desi"
+FIT_MODULE = "bedcosmo.num_visits.empirical.eazy.fit_eazy_weights_to_desi"
 KDE_MODULE = "bedcosmo.num_visits.empirical.fit_sed_prior_kde"
+
+
+def resolve_eazy_build_selection(
+    template_source: str,
+    *,
+    build_name: str | None = None,
+    template_param: str | None = None,
+) -> tuple[str, str]:
+    """Resolve standard source defaults while preserving explicit overrides."""
+    source = normalize_template_source(template_source)
+    if source not in EAZY_TEMPLATE_SOURCES:
+        raise ValueError(
+            f"EAZY builder template_source must be one of {EAZY_TEMPLATE_SOURCES}, "
+            f"got {template_source!r}"
+        )
+    return (
+        build_name or empirical_prior_build_name(source),
+        template_param or resolve_template_param(source),
+    )
 
 
 def resolve_kde_python(explicit: str | None = None) -> str:
@@ -181,6 +209,7 @@ def build_prior(
     log_path = prior_dir / "build.log"
     fit_python = sys.executable
     kde_py = resolve_kde_python(kde_python)
+    candidate_manifest_path = get_desi_candidate_manifest_path()
 
     provenance_path = prior_dir / BUILD_PROVENANCE_FILENAME
     write_provenance(
@@ -214,7 +243,10 @@ def build_prior(
                 "seed": int(seed),
             },
             "quality": {"max_chi2_dof": max_chi2_dof},
-            "inputs": {"desi_dir": desi_dir},
+            "inputs": {
+                "desi_dir": desi_dir,
+                "candidate_manifest": candidate_manifest_path,
+            },
             "kde_request": {
                 "sample": int(kde_sample),
                 "requested_python": kde_python,
@@ -262,6 +294,7 @@ def build_prior(
                 kde_py=kde_py,
                 allow_nonzero_zwarn=allow_nonzero_zwarn,
                 zwarn_forbid_mask=zwarn_forbid_mask,
+                candidate_manifest_path=candidate_manifest_path,
             )
         finally:
             sys.stdout = orig_out
@@ -273,6 +306,7 @@ def build_prior(
         "kde_path": kde_path,
         "build_log": log_path,
         "build_provenance": provenance_path,
+        "candidate_manifest": candidate_manifest_path,
     }
 
 
@@ -309,6 +343,7 @@ def _build_prior_body(
     kde_py: str,
     allow_nonzero_zwarn: bool,
     zwarn_forbid_mask: int | None,
+    candidate_manifest_path: Path,
 ) -> None:
     if not skip_desi:
         print(f"\nStep 1/4: ensure DESI coadd + redrock under {desi_dir}")
@@ -321,6 +356,22 @@ def _build_prior_body(
             print(f"  HEALPIX {hp}: OK ({coadd.name}, {redrock.name})")
     else:
         print("\nStep 1/4: skipped (--skip-desi)")
+
+    print(f"\nShared DESI population → {candidate_manifest_path}")
+    candidate_manifest = discover_desi_manifest(
+        healpix,
+        desi_dir=desi_dir,
+        target_spectype=target_spectype,
+        z_min=z_min,
+        z_max=z_max,
+        allow_nonzero_zwarn=allow_nonzero_zwarn,
+        zwarn_forbid_mask=zwarn_forbid_mask,
+    )
+    if candidate_manifest.empty:
+        raise ValueError("No DESI spectra passed the shared candidate selection")
+    candidate_manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    candidate_manifest.to_csv(candidate_manifest_path, index=False)
+    print(f"  wrote {len(candidate_manifest):,} shared candidates")
 
     if not skip_fit:
         print(f"\nStep 2/4: fit EAZY template weights → {prior_dir}/healpix/hp*/")
@@ -356,6 +407,8 @@ def _build_prior_body(
                 str(min_good_pixels),
                 "--target-spectype",
                 target_spectype,
+                "--target-manifest",
+                str(candidate_manifest_path),
                 "--z-min",
                 str(z_min),
                 "--seed",
@@ -425,8 +478,6 @@ def _build_prior_body(
         print(f"  Combined weights: {weights_csv}")
     if kde_path.exists():
         print(f"  KDE (native):     {kde_path}")
-        from .paths import SED_PRIOR_KDE_GAUSSIANIZED_FILENAME
-
         gauss_kde_path = kde_path.parent / SED_PRIOR_KDE_GAUSSIANIZED_FILENAME
         if gauss_kde_path.exists():
             print(f"  KDE (gaussianized): {gauss_kde_path}")
@@ -439,9 +490,18 @@ def main() -> None:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument(
+        "--template-source",
+        choices=EAZY_TEMPLATE_SOURCES,
+        default="eazy12",
+        help="Standard EAZY bank; derives --build-name and --template-param when omitted.",
+    )
+    parser.add_argument(
         "--build-name",
-        default=DEFAULT_EMPIRICAL_PRIOR_DIR,
-        help="Output directory name under $SCRATCH/bedcosmo/num_visits/.",
+        default=None,
+        help=(
+            "Advanced output override under $SCRATCH/bedcosmo/num_visits/ "
+            "(default: empirical_prior/<template-source>)."
+        ),
     )
     parser.add_argument("--healpix", type=int, nargs="+", default=list(DEFAULT_HEALPIX))
     add_desi_dir_argument(parser)
@@ -469,10 +529,10 @@ def main() -> None:
     parser.add_argument("--coeff-norm", choices=("l1", "max"), default="l1")
     parser.add_argument(
         "--template-param",
-        default=DEFAULT_TEMPLATE_PARAM_12D,
+        default=None,
         help=(
-            "Template-bank listing file (.param) relative to the templates dir. "
-            "Use templates/eazy_v1.0.spectra.param for the classic 6-template bank."
+            "Advanced template-bank .param override relative to spectral_templates/ "
+            "(default: derived from --template-source)."
         ),
     )
     parser.add_argument(
@@ -522,6 +582,11 @@ def main() -> None:
     parser.add_argument("--skip-combine", action="store_true")
     parser.add_argument("--skip-kde", action="store_true")
     args = parser.parse_args()
+    build_name, template_param = resolve_eazy_build_selection(
+        args.template_source,
+        build_name=args.build_name,
+        template_param=args.template_param,
+    )
     zwarn_forbid_mask = args.zwarn_forbid_mask
     if args.drop_unstable_zwarn:
         if zwarn_forbid_mask is not None and zwarn_forbid_mask != ZWARN_UNSTABLE_BIT:
@@ -532,7 +597,7 @@ def main() -> None:
         zwarn_forbid_mask = ZWARN_UNSTABLE_BIT
 
     build_prior(
-        build_name=args.build_name,
+        build_name=build_name,
         healpix=args.healpix,
         desi_dir=args.desi_dir,
         force_desi=args.force_desi,
@@ -543,7 +608,7 @@ def main() -> None:
         z_max=args.z_max,
         fit_method=args.fit_method,
         coeff_norm=args.coeff_norm,
-        template_param=args.template_param,
+        template_param=template_param,
         norm_min=args.norm_min,
         norm_max=args.norm_max,
         wave_obs_min=args.wave_obs_min,

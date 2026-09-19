@@ -478,13 +478,36 @@ class EmpiricalSedPrior:
         if int(pool_size) <= 0:
             raise ValueError("pool_size must be positive")
         dev = torch.device(device) if device is not None else self.pool.pool.device
-        x = self.native_flow.sample(int(pool_size), seed=int(seed)).astype(np.float64)
-        pool = torch.tensor(x, device=dev, dtype=torch.float64)
         bmin = self.artifact.get("feature_bounds_min")
         bmax = self.artifact.get("feature_bounds_max")
-        if bmin is None or bmax is None:
+        if bmin is not None and bmax is not None:
+            bmin = np.asarray(bmin, dtype=np.float64)
+            bmax = np.asarray(bmax, dtype=np.float64)
+            accepted: list[np.ndarray] = []
+            n_accepted = 0
+            attempt = 0
+            while n_accepted < int(pool_size) and attempt < 100:
+                remaining = int(pool_size) - n_accepted
+                candidates = self.native_flow.sample(
+                    max(1024, 2 * remaining), seed=int(seed) + attempt
+                ).astype(np.float64)
+                inside = np.all((candidates >= bmin) & (candidates <= bmax), axis=1)
+                if np.any(inside):
+                    kept = candidates[inside][:remaining]
+                    accepted.append(kept)
+                    n_accepted += len(kept)
+                attempt += 1
+            if n_accepted < int(pool_size):
+                raise RuntimeError(
+                    "Could not draw enough native-flow samples inside the empirical "
+                    f"training support: accepted {n_accepted}/{pool_size} after {attempt} batches"
+                )
+            x = np.concatenate(accepted, axis=0)
+        else:
+            x = self.native_flow.sample(int(pool_size), seed=int(seed)).astype(np.float64)
             bmin = x.min(axis=0)
             bmax = x.max(axis=0)
+        pool = torch.tensor(x, device=dev, dtype=torch.float64)
         self.pool = EmpiricalPriorPool(
             pool=pool,
             feature_names=list(self.pool.feature_names),

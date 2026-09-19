@@ -38,20 +38,21 @@ from scipy.ndimage import gaussian_filter1d
 from scipy.optimize import nnls
 from tqdm import tqdm
 
-from .desi_data import ensure_desi_healpix, get_local_desi_paths
-from .paths import (
+from ..desi.training_matrix import load_desi_manifest
+from ..desi_data import ensure_desi_healpix, get_local_desi_paths
+from ..paths import (
     DEFAULT_EMPIRICAL_PRIOR_DIR,
     add_desi_dir_argument,
     get_healpix_fit_dir,
     resolve_desi_dir,
 )
-from .provenance import fit_provenance_path, write_provenance
-from .templates import (
+from ..provenance import fit_provenance_path, write_provenance
+from ..templates import (
     DEFAULT_TEMPLATE_DIR,
     DEFAULT_TEMPLATE_NORM_MAX_AA,
     DEFAULT_TEMPLATE_NORM_MIN_AA,
-    DEFAULT_TEMPLATE_PARAM_12D,
     DEFAULT_TEMPLATE_PARAM_6D,
+    DEFAULT_TEMPLATE_PARAM_12D,
     load_eazy_templates,
 )
 
@@ -1215,6 +1216,15 @@ def main() -> None:
     )
     parser.add_argument("--z-max", type=float, default=None)
     parser.add_argument("--target-spectype", default="GALAXY")
+    parser.add_argument(
+        "--target-manifest",
+        type=Path,
+        default=None,
+        help=(
+            "Shared DESI candidate manifest. When set, only TARGETIDs listed for "
+            "this HEALPix are eligible for fitting."
+        ),
+    )
 
     parser.add_argument(
         "--allow-nonzero-zwarn",
@@ -1457,6 +1467,18 @@ def main() -> None:
     if args.z_max is not None:
         select &= np.asarray(rr["Z"]) <= args.z_max
 
+    if args.target_manifest is not None:
+        target_manifest_path = args.target_manifest.expanduser().resolve()
+        target_manifest = load_desi_manifest(target_manifest_path)
+        eligible = target_manifest.loc[
+            target_manifest["healpix"] == int(args.healpix), "targetid"
+        ].to_numpy(np.int64)
+        select &= np.isin(np.asarray(rr["TARGETID"], dtype=np.int64), eligible)
+        print(
+            f"Shared candidate manifest: {target_manifest_path} "
+            f"({len(eligible):,} targets for HEALPix {args.healpix})"
+        )
+
     candidate_rows = np.where(select)[0]
 
     candidate_rows = [i for i in candidate_rows if int(rr["TARGETID"][i]) in targetid_to_index]
@@ -1583,7 +1605,6 @@ def main() -> None:
 
         max_chi2 = None if args.no_quality_cuts else args.max_chi2_dof
         df = apply_quality_cuts(df, max_chi2_dof=max_chi2)
-        prior_mask = prior_quality_mask(df)
 
         dropped = df[df["success"].astype(bool) & ~df["quality_pass"].astype(bool)]
         dropped_path = outdir / "dropped_fits.csv"
@@ -1627,12 +1648,12 @@ def main() -> None:
     if summary_path is not None:
         print(f"\nOutlier ranking: {summary_path}")
 
-    plot_kwargs = dict(
-        smooth_sigma_aa=args.plot_smooth_angstrom,
-        cont_sigma_aa=args.plot_cont_angstrom,
-        normalize_continuum=args.plot_normalize,
-        fit_method=args.fit_method,
-    )
+    plot_kwargs = {
+        "smooth_sigma_aa": args.plot_smooth_angstrom,
+        "cont_sigma_aa": args.plot_cont_angstrom,
+        "normalize_continuum": args.plot_normalize,
+        "fit_method": args.fit_method,
+    }
 
     plot_df = filter_df_to_loaded_healpix(df, args.healpix)
 

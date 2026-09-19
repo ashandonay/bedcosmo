@@ -5,7 +5,7 @@ import json
 import pandas as pd
 import pytest
 
-from bedcosmo.num_visits.empirical.combine_healpix_weights import (
+from bedcosmo.num_visits.empirical.eazy.combine_healpix_weights import (
     combine_healpix_weights,
 )
 from bedcosmo.num_visits.empirical.provenance import (

@@ -82,6 +82,9 @@ docs = [
 sed-prior = [
     "fitsio>=1.1.0",
 ]
+desi-basis = [
+    "nearly-nmf @ git+https://github.com/dylanagreen/nearly_nmf.git@2269e385d75048da9576f453f8d4939b00de6528",
+]
 
 [project.urls]
 Homepage = "https://github.com/ashandonay/bedcosmo"
