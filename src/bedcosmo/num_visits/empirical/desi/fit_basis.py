@@ -21,7 +21,7 @@ from ..paths import (  # noqa: E402
     ZWARN_UNSTABLE_BIT,
     get_desi_candidate_manifest_path,
     get_desi_data_dir,
-    get_desi_samples_dir,
+    get_desi_training_data_dir,
 )
 from .support import (  # noqa: E402
     lsst_demand_weighted_coverage,
@@ -216,7 +216,7 @@ def main() -> None:
     if args.z_max is not None and args.z_min is not None and args.z_min >= args.z_max:
         raise ValueError("--z-min must be below --z-max")
     desi_dir = Path(args.desi_dir or get_desi_data_dir()).expanduser().resolve()
-    output_dir = Path(args.output_dir or get_desi_samples_dir()).expanduser().resolve()
+    output_dir = Path(args.output_dir or get_desi_training_data_dir()).expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
     zwarn_forbid_mask = args.zwarn_forbid_mask

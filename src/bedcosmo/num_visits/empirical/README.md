@@ -129,14 +129,14 @@ Production default is `template_source: eazy12` with `reduced_templates: null`
 | EAZY templates | `eazy/` (auto-downloaded on first fit) |
 | DESI tiny DR1 | `desi/tiny_dr1/` |
 | Empirical-prior variants | `num_visits/empirical_prior/{eazy12,eazy6,allow_zwarn,no_unstable}/` |
-| Direct DESI samples and matrix | `num_visits/desi_samples/` |
+| Shared DESI training data | `num_visits/desi_training_data/` |
 | **Production prior build** | `num_visits/empirical_prior/eazy12/` |
 | Per-patch fits | `num_visits/empirical_prior/eazy12/healpix/hp{HEALPIX}/` |
 | Combined weights | `num_visits/empirical_prior/eazy12/desi_eazy_empirical_weights.csv` |
 | KDE artifact | `num_visits/empirical_prior/eazy12/sed_prior_kde_native.joblib` |
 | gaussianized KDE (diagnostic) | `num_visits/empirical_prior/eazy12/sed_prior_kde_gaussianized.joblib` |
 
-`num_visits/desi_samples/desi_candidate_manifest.csv` is the shared
+`num_visits/desi_training_data/desi_candidate_manifest.csv` is the shared
 catalog-level DESI population for both EAZY and directly learned DESI bases.
 EAZY continues fitting the native coadd pixels for those targets; direct-DESI
 basis learning additionally uses the rest-frame matrix stored beside it.

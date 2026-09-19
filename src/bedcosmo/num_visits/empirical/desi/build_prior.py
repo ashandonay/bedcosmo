@@ -16,7 +16,7 @@ import yaml
 from ..paths import (
     BUILD_PROVENANCE_FILENAME,
     SED_PRIOR_KDE_NATIVE_FILENAME,
-    get_desi_samples_dir,
+    get_desi_training_data_dir,
     get_num_visits_spectral_template_dir,
     get_prior_build_dir,
 )
@@ -205,7 +205,10 @@ def parse_args() -> argparse.Namespace:
         "--training-matrix",
         type=Path,
         default=None,
-        help="Rest-frame matrix (default: <num_visits>/desi_samples/desi_rest_frame_training_matrix.npz).",
+        help=(
+            "Rest-frame matrix (default: "
+            "<num_visits>/desi_training_data/desi_rest_frame_training_matrix.npz)."
+        ),
     )
     parser.add_argument("--rank", type=int, default=8)
     parser.add_argument("--build-name", default="empirical_prior/desi8")
@@ -272,7 +275,7 @@ def main() -> None:
     args.training_matrix = (
         args.training_matrix.expanduser().resolve()
         if args.training_matrix is not None
-        else get_desi_samples_dir() / "desi_rest_frame_training_matrix.npz"
+        else get_desi_training_data_dir() / "desi_rest_frame_training_matrix.npz"
     )
     if args.rank < 2:
         raise ValueError("The ILR prior requires a basis rank of at least two")
