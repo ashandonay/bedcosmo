@@ -19,6 +19,7 @@ from ..desi_data import ensure_desi_healpix  # noqa: E402
 from ..paths import (  # noqa: E402
     DEFAULT_HEALPIX,
     ZWARN_UNSTABLE_BIT,
+    get_desi_candidate_manifest_path,
     get_desi_data_dir,
     get_desi_samples_dir,
 )
@@ -247,13 +248,18 @@ def main() -> None:
         sample_source = "direct_desi_redrock"
     if manifest.empty:
         raise ValueError("No DESI spectra passed the sample selection")
+    n_candidates = len(manifest)
+    candidate_manifest_path = (
+        get_desi_candidate_manifest_path()
+        if args.output_dir is None
+        else output_dir / "desi_candidate_manifest.csv"
+    )
+    candidate_manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest.to_csv(candidate_manifest_path, index=False)
     if args.max_spectra and len(manifest) > args.max_spectra:
         manifest = manifest.sample(args.max_spectra, random_state=args.seed).sort_values(
             ["healpix", "targetid"]
         ).reset_index(drop=True)
-    n_candidates = len(manifest)
-    candidate_manifest_path = output_dir / "desi_candidate_manifest.csv"
-    manifest.to_csv(candidate_manifest_path, index=False)
     wave = np.arange(args.wave_min, args.wave_max + 0.5 * args.wave_step, args.wave_step)
     manifest, flux, weights, scales = build_rest_frame_matrix(
         manifest,

@@ -40,8 +40,11 @@ $SCRATCH/bedcosmo/num_visits/desi_samples/
 └── desi_rest_frame_training_matrix.npz
 ```
 
-The candidate manifest records objects passing the Redrock/FIBERMAP cuts. The
-sample manifest is the final subset with enough usable spectral pixels. Pass
+The candidate manifest records the shared catalog-level population passing the
+Redrock/FIBERMAP cuts. Both EAZY prior builds and direct-DESI basis builds use
+this population. EAZY fits its native observed-frame coadd pixels; the direct
+DESI path additionally creates the rest-frame matrix. The sample manifest is
+the final direct-basis subset with enough usable matrix pixels. Pass
 `--manifest /path/to/table.csv` only when deliberately overriding the direct
 selection with a table containing `targetid`, `healpix`, and `z`.
 
