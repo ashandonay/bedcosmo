@@ -25,7 +25,7 @@ Example::
   python -m bedcosmo.num_visits.empirical.eazy.build_prior --build-name empirical_prior_test --n-max 600
   python -m bedcosmo.num_visits.empirical.eazy.build_prior --healpix 23040 --skip-kde
   python -m bedcosmo.num_visits.empirical.eazy.build_prior \\
-    --build-name empirical_prior/eazy6 --template-param eazy6/eazy6.param
+    --template-source eazy6
 """
 
 from __future__ import annotations
@@ -52,6 +52,11 @@ from ..paths import (
     resolve_desi_dir,
 )
 from ..provenance import write_provenance
+from ..template_config import (
+    empirical_prior_build_name,
+    normalize_template_source,
+    resolve_template_param,
+)
 from ..templates import (
     DEFAULT_TEMPLATE_NORM_MAX_AA,
     DEFAULT_TEMPLATE_NORM_MIN_AA,
@@ -61,9 +66,29 @@ from .combine_healpix_weights import combine_healpix_weights
 
 DEFAULT_MAX_CHI2_DOF = 1.2
 DEFAULT_Z_MIN = 0.01
+EAZY_TEMPLATE_SOURCES = ("eazy12", "eazy6")
 
 FIT_MODULE = "bedcosmo.num_visits.empirical.eazy.fit_eazy_weights_to_desi"
 KDE_MODULE = "bedcosmo.num_visits.empirical.fit_sed_prior_kde"
+
+
+def resolve_eazy_build_selection(
+    template_source: str,
+    *,
+    build_name: str | None = None,
+    template_param: str | None = None,
+) -> tuple[str, str]:
+    """Resolve standard source defaults while preserving explicit overrides."""
+    source = normalize_template_source(template_source)
+    if source not in EAZY_TEMPLATE_SOURCES:
+        raise ValueError(
+            f"EAZY builder template_source must be one of {EAZY_TEMPLATE_SOURCES}, "
+            f"got {template_source!r}"
+        )
+    return (
+        build_name or empirical_prior_build_name(source),
+        template_param or resolve_template_param(source),
+    )
 
 
 def resolve_kde_python(explicit: str | None = None) -> str:
@@ -438,9 +463,18 @@ def main() -> None:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument(
+        "--template-source",
+        choices=EAZY_TEMPLATE_SOURCES,
+        default="eazy12",
+        help="Standard EAZY bank; derives --build-name and --template-param when omitted.",
+    )
+    parser.add_argument(
         "--build-name",
-        default=DEFAULT_EMPIRICAL_PRIOR_DIR,
-        help="Output directory name under $SCRATCH/bedcosmo/num_visits/.",
+        default=None,
+        help=(
+            "Advanced output override under $SCRATCH/bedcosmo/num_visits/ "
+            "(default: empirical_prior/<template-source>)."
+        ),
     )
     parser.add_argument("--healpix", type=int, nargs="+", default=list(DEFAULT_HEALPIX))
     add_desi_dir_argument(parser)
@@ -468,10 +502,10 @@ def main() -> None:
     parser.add_argument("--coeff-norm", choices=("l1", "max"), default="l1")
     parser.add_argument(
         "--template-param",
-        default=DEFAULT_TEMPLATE_PARAM_12D,
+        default=None,
         help=(
-            "Template-bank listing file (.param) relative to the templates dir. "
-            "Use eazy6/eazy6.param for the classic 6-template bank."
+            "Advanced template-bank .param override relative to spectral_templates/ "
+            "(default: derived from --template-source)."
         ),
     )
     parser.add_argument(
@@ -521,6 +555,11 @@ def main() -> None:
     parser.add_argument("--skip-combine", action="store_true")
     parser.add_argument("--skip-kde", action="store_true")
     args = parser.parse_args()
+    build_name, template_param = resolve_eazy_build_selection(
+        args.template_source,
+        build_name=args.build_name,
+        template_param=args.template_param,
+    )
     zwarn_forbid_mask = args.zwarn_forbid_mask
     if args.drop_unstable_zwarn:
         if zwarn_forbid_mask is not None and zwarn_forbid_mask != ZWARN_UNSTABLE_BIT:
@@ -531,7 +570,7 @@ def main() -> None:
         zwarn_forbid_mask = ZWARN_UNSTABLE_BIT
 
     build_prior(
-        build_name=args.build_name,
+        build_name=build_name,
         healpix=args.healpix,
         desi_dir=args.desi_dir,
         force_desi=args.force_desi,
@@ -542,7 +581,7 @@ def main() -> None:
         z_max=args.z_max,
         fit_method=args.fit_method,
         coeff_norm=args.coeff_norm,
-        template_param=args.template_param,
+        template_param=template_param,
         norm_min=args.norm_min,
         norm_max=args.norm_max,
         wave_obs_min=args.wave_obs_min,

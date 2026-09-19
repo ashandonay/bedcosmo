@@ -6,6 +6,9 @@ from pathlib import Path
 
 import pytest
 
+from bedcosmo.num_visits.empirical.eazy.build_prior import (
+    resolve_eazy_build_selection,
+)
 from bedcosmo.num_visits.empirical.template_config import (
     empirical_prior_build_name,
     empirical_prior_variant,
@@ -15,6 +18,24 @@ from bedcosmo.num_visits.empirical.template_config import (
     parse_reduced_templates,
     resolve_template_param,
 )
+
+
+def test_eazy_builder_source_defaults_and_overrides():
+    assert resolve_eazy_build_selection("eazy12") == (
+        "empirical_prior/eazy12",
+        "eazy12/eazy12.param",
+    )
+    assert resolve_eazy_build_selection("eazy6") == (
+        "empirical_prior/eazy6",
+        "eazy6/eazy6.param",
+    )
+    assert resolve_eazy_build_selection(
+        "eazy6",
+        build_name="empirical_prior/custom",
+        template_param="custom/custom.param",
+    ) == ("empirical_prior/custom", "custom/custom.param")
+    with pytest.raises(ValueError, match="EAZY builder"):
+        resolve_eazy_build_selection("desi8")
 
 
 def test_parse_reduced_templates_variants():

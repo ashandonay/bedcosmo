@@ -91,12 +91,11 @@ python -m bedcosmo.num_visits.empirical.eazy.build_prior \
 
 ## Build an EAZY6 prior
 
-Select the six-component bank and give the artifacts their own build name:
+Select the six-component bank; the builder derives both its template path and
+its `empirical_prior/eazy6` output directory:
 
 ```bash
-python -m bedcosmo.num_visits.empirical.eazy.build_prior \
-  --build-name empirical_prior/eazy6 \
-  --template-param eazy6/eazy6.param
+python -m bedcosmo.num_visits.empirical.eazy.build_prior --template-source eazy6
 ```
 
 At runtime, `template_source: eazy6` or `template_source: eazy12` in
