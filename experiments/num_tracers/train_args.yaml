@@ -13,7 +13,7 @@ base:
   # config = config-space xi (Grieb), fourier = windowed P(k) (thecov).
   emulator_space: fourier
   flow_type: NAF
-  transform_input: false
+  transform_input: true
   input_transform_type: marginal
   activation: elu
   n_transforms: 4
