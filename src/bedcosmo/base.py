@@ -891,9 +891,14 @@ class BaseExperiment(ABC):
             transform_output: If True, transform parameters to physical space
 
         Returns:
-            numpy array with shape (num_data_samples, num_param_samples, num_params)
+            tuple ``(theta, y)`` where
+              theta: ndarray ``(num_data_samples, num_param_samples, num_params)``
+              y: ndarray ``(num_data_samples, n_obs)`` observations used in context
         """
+        from bedcosmo.posterior_samples import observations_to_numpy
+
         data_samples = self.sample_data(design, num_data_samples, central)
+        y_np = observations_to_numpy(data_samples, num_data_samples)
 
         # Create context: concatenate design and observations
         if design.dim() == 2:
@@ -933,8 +938,7 @@ class BaseExperiment(ABC):
                 noise_scale = abs(col[0, 0]) * 1e-10 if col[0, 0] != 0 else 1e-10
                 param_samples[:, :, i] = col + torch.randn_like(col) * noise_scale
 
-        return param_samples.cpu().numpy()
-
+        return param_samples.cpu().numpy(), y_np
     # =========================================================================
     # Prior Flow Sampling Methods
     # =========================================================================

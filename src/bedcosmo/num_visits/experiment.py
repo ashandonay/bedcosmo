@@ -1561,7 +1561,10 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         central=False,
         transform_output=True,
     ):
+        from bedcosmo.posterior_samples import observations_to_numpy
+
         data_samples = self.sample_data(designs, num_data_samples, central)
+        y_np = observations_to_numpy(data_samples, num_data_samples)
         context = torch.cat(
             [designs.expand(num_data_samples, -1), data_samples],
             dim=-1,
@@ -1576,8 +1579,7 @@ class NumVisits(BaseExperiment, CosmologyMixin):
                 transform_output=transform_output,
             )
             param_samples_list.append(param_samples_i.samples)
-        return np.stack(param_samples_list, axis=0)
-
+        return np.stack(param_samples_list, axis=0), y_np
     @profile_method
     def unnorm_lfunc(self, params, features, designs):
         """

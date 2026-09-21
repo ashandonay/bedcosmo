@@ -670,10 +670,15 @@ class VariableRedshift(BaseExperiment, CosmologyMixin):
             transform_output: if True, transform parameters back to physical space
         
         Returns:
-            np.ndarray: parameter samples with shape (num_data_samples, num_param_samples, num_params)
+            tuple ``(theta, y)`` with shapes
+              ``(num_data_samples, num_param_samples, num_params)`` and
+              ``(num_data_samples, n_obs)``.
         """
+        from bedcosmo.posterior_samples import observations_to_numpy
+
         data_samples = self.sample_data(designs, num_data_samples, central)
-        
+        y_np = observations_to_numpy(data_samples, num_data_samples)
+
         # Create context: concatenate design and observations
         # data_samples is now always a tensor with shape (num_data_samples, num_observations)
         context = torch.cat([designs.expand(num_data_samples, -1), data_samples], dim=-1)
@@ -709,8 +714,7 @@ class VariableRedshift(BaseExperiment, CosmologyMixin):
         # Convert to numpy array: [num_data_samples, num_param_samples, num_params]
         param_samples_array = param_samples.cpu().numpy()
         
-        return param_samples_array
-
+        return param_samples_array, y_np
     def unnorm_lfunc(self, params, features, designs):
         """
         Unnormalized likelihood function for BED bayesdesign package.
