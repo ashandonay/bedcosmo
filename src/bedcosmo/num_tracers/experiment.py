@@ -1055,7 +1055,10 @@ class NumTracers(BaseExperiment, CosmologyMixin):
             central (bool): Whether to use the fixed central value of the data samples.
 
         """
+        from bedcosmo.artifacts import observations_to_numpy
+
         data_samples = self.sample_data(tracer_ratio, num_data_samples, central)
+        y_np = observations_to_numpy(data_samples, num_data_samples)
         # Expand tracer_ratio to match data_samples shape for concatenation
         # tracer_ratio is [1, 4], need to expand to [num_data_samples, 1, 4]
         if tracer_ratio.dim() == 2:
@@ -1105,8 +1108,7 @@ class NumTracers(BaseExperiment, CosmologyMixin):
         # Convert to numpy array: [num_data_samples, num_param_samples, num_params]
         param_samples_array = param_samples.cpu().numpy()
 
-        return param_samples_array
-
+        return param_samples_array, y_np
     def sample_brute_force(
         self,
         tracer_ratio,

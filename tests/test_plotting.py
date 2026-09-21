@@ -792,7 +792,7 @@ class TestLoadEigDataFile:
 
     def test_load_eig_data_file_skips_marginal_only_for_variable(self, tmp_path, mock_scratch_env):
         """Newer marginal-only files should be skipped when joint EIG is requested."""
-        from bedcosmo.plotting import load_eig_data_file
+        from bedcosmo.artifacts import load_eig_data_file
 
         artifacts_dir = tmp_path / "artifacts"
         artifacts_dir.mkdir()
@@ -829,7 +829,7 @@ class TestLoadEigDataFile:
 
     def test_load_eig_data_file_prefers_marginal_only_for_marginal_kind(self, tmp_path, mock_scratch_env):
         """Marginal-only eval files should be selected when marginal EIG is requested."""
-        from bedcosmo.plotting import load_eig_data_file
+        from bedcosmo.artifacts import load_eig_data_file
 
         artifacts_dir = tmp_path / "artifacts"
         artifacts_dir.mkdir()

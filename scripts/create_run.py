@@ -37,12 +37,12 @@ import mlflow
 import yaml
 from mlflow.tracking import MlflowClient
 
+from bedcosmo.artifacts import snapshot_design_args_config
 from bedcosmo.util import (
     apply_prior_cli_overrides,
     extract_run_info_from_checkpoint_path,
     get_experiment_config_path,
     parse_prior_cli_overrides,
-    snapshot_design_args_config,
 )
 
 
