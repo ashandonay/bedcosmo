@@ -56,12 +56,18 @@ def _series_outlier_color(series_color, outlier_color=None):
     return convert_color(series_color)
 
 
-def _compact_series_label(label, index: int = 0) -> str:
-    """Short legend/outlier tag: strip EIG/entropy suffixes; map common names."""
-    s = str(label or f"series {index}").strip()
+def _series_label_base(label) -> str:
+    """Strip EIG/entropy suffixes from a legend / MCSamples label."""
+    s = str(label or "").strip()
     for sep in (", EIG", ", H_prior", ", H_post", ", H_"):
         if sep in s:
             s = s.split(sep, 1)[0].strip()
+    return s
+
+
+def _compact_series_label(label, index: int = 0) -> str:
+    """Short legend/outlier tag: strip EIG/entropy suffixes; map common names."""
+    s = _series_label_base(label) or f"series {index}"
     replacements = (
         ("Nominal Design (NF)", "Nom NF"),
         ("Optimal Design (NF)", "Opt NF"),
@@ -76,6 +82,49 @@ def _compact_series_label(label, index: int = 0) -> str:
     if len(s) <= 12:
         return s
     return s[:10] + "…"
+
+
+def _is_prior_series_label(label) -> bool:
+    """True for prior overlays: ``Prior``, ``Prior (...)``, entropy-suffixed forms."""
+    base = _series_label_base(label)
+    return base == "Prior" or base.startswith("Prior ")
+
+
+def _should_skip_fence(
+    sample,
+    label=None,
+    *,
+    no_fence_for_prior: bool = True,
+    fence_skip_labels=None,
+) -> bool:
+    """Whether a series should be exempt from Tukey fencing / outlier overlays.
+
+    Prefer explicit markers over string matching:
+    - ``sample._bedcosmo_no_fence`` / ``sample._bedcosmo_is_prior``
+    - ``fence_skip_labels`` (exact full label or suffix-stripped base)
+    - when ``no_fence_for_prior``, labels matching :func:`_is_prior_series_label`
+    """
+    if getattr(sample, "_bedcosmo_no_fence", False):
+        return True
+    resolved = label if label is not None else getattr(sample, "label", None)
+    if fence_skip_labels:
+        skip = {str(x) for x in fence_skip_labels}
+        if resolved is not None and (
+            str(resolved) in skip or _series_label_base(resolved) in skip
+        ):
+            return True
+    if no_fence_for_prior and (
+        getattr(sample, "_bedcosmo_is_prior", False) or _is_prior_series_label(resolved)
+    ):
+        return True
+    return False
+
+
+def _mark_prior_mcsamples(sample):
+    """Tag a prior MCSamples so fencing can skip it without relying on labels."""
+    sample._bedcosmo_is_prior = True
+    sample._bedcosmo_no_fence = True
+    return sample
 
 
 def _fmt_sample_count(n: int) -> str:
@@ -1478,6 +1527,7 @@ class BasePlotter:
         if plot_prior and hasattr(experiment, 'get_prior_samples'):
             prior_samples_gd = experiment.get_prior_samples(num_samples=guide_samples)
             prior_samples_gd = restrict_mcsamples(prior_samples_gd, params)
+            _mark_prior_mcsamples(prior_samples_gd)
             all_samples.append(prior_samples_gd)
             all_colors.append('black')
             all_alphas.append(PRIOR_CONTOUR_ALPHA)
@@ -1663,6 +1713,8 @@ class BasePlotter:
         outlier_annotate=True,
         outlier_color=None,
         outlier_min_keep=16,
+        no_fence_for_prior=True,
+        fence_skip_labels=None,
     ):
         """
         Plots posterior distributions using GetDist triangle plots.
@@ -1673,7 +1725,8 @@ class BasePlotter:
         out-of-fence points from the full draw are overlaid as edge markers and
         counted in an annotation. Fence limits come from ``ranges`` when provided
         (e.g. prior_args plot windows in training frames), otherwise from joint
-        Tukey fences (``fence_iqr``).
+        Tukey fences (``fence_iqr``) over **fenced** series only (prior overlays
+        are excluded by default).
 
         Args:
             samples (list): List of GetDist MCSamples objects.
@@ -1706,6 +1759,13 @@ class BasePlotter:
                 plot color. Aggregated 1D titles still use crimson for readability.
             outlier_min_keep (int): Minimum in-fence samples required before replacing
                 a series for GetDist; otherwise fencing is skipped for that series.
+            no_fence_for_prior (bool): If True (default), prior overlays are not
+                Tukey-subsetted, do not get edge outlier markers, and do not get
+                "outside fence" legend second-lines. Detection uses
+                ``sample._bedcosmo_is_prior`` / ``_bedcosmo_no_fence`` when set,
+                else labels matching ``Prior`` / ``Prior (...)``.
+            fence_skip_labels (iterable, optional): Additional series labels (full
+                or suffix-stripped) to exempt from fencing.
         Returns:
             g: GetDist plotter object with the generated triangle plot.
               Stores ``g._outlier_stats`` for callers that rebuild the legend via
@@ -1794,19 +1854,52 @@ class BasePlotter:
         # For GetDist, we don't pass line styles in contour_args when using multiple styles
 
         param_name_list = list(full_samples[0].paramNames.list())
+
+        # Resolve per-series labels for fence-skip decisions (prior, explicit skips).
+        n_series = len(full_samples)
+        labels_aligned = (
+            legend_labels is not None
+            and isinstance(legend_labels, list)
+            and len(legend_labels) == n_series
+        )
+        series_labels = []
+        for i, sample in enumerate(full_samples):
+            if labels_aligned:
+                series_labels.append(legend_labels[i])
+            else:
+                series_labels.append(getattr(sample, "label", None))
+
+        skip_fence = [
+            _should_skip_fence(
+                sample,
+                series_labels[i],
+                no_fence_for_prior=no_fence_for_prior,
+                fence_skip_labels=fence_skip_labels,
+            )
+            for i, sample in enumerate(full_samples)
+        ]
+        # Joint Tukey fences from posteriors only so prior support does not
+        # inflate the window; skipped series still plot with full samples.
+        fence_source = [s for s, skip in zip(full_samples, skip_fence) if not skip]
         fence_ranges = resolve_fence_ranges(
-            full_samples, param_name_list, ranges=ranges, fence_iqr=fence_iqr
+            fence_source if fence_source else full_samples,
+            param_name_list,
+            ranges=ranges,
+            fence_iqr=fence_iqr,
         )
 
         # GetDist sees in-fence samples only; full draws kept for outlier overlay.
+        # Prior / fence_skip series keep full samples (no markers, no n_out counts).
         contour_samples = []
         in_fence_masks = []
         outlier_stats = []
-        for sample in full_samples:
-            if fence_ranges is None:
+        for i, sample in enumerate(full_samples):
+            n_tot = len(sample.samples)
+            empty_stats = {"n_out": 0, "n_tot": n_tot, "n_lo": {}, "n_hi": {}}
+            if fence_ranges is None or skip_fence[i]:
                 contour_samples.append(sample)
-                in_fence_masks.append(np.ones(len(sample.samples), dtype=bool))
-                outlier_stats.append({"n_out": 0, "n_tot": len(sample.samples), "n_lo": {}, "n_hi": {}})
+                in_fence_masks.append(np.ones(n_tot, dtype=bool))
+                outlier_stats.append(empty_stats)
                 continue
             mask = fence_mask_for_samples(sample, fence_ranges)
             fenced, _, _ = subset_mcsamples(
@@ -3510,9 +3603,12 @@ class ComparisonPlotter(BasePlotter):
 
         Outlier fencing matches ``plot_posterior`` / eval defaults (Tukey
         ``fence_iqr=3.0``, series-colored edge markers, 2-line legend counts).
-        Pass any ``plot_posterior`` fencing kwargs via ``**kwargs``
+        Prior overlays are exempt by default (``no_fence_for_prior=True``):
+        full prior samples for GetDist, no edge markers, no outside-fence
+        legend counts. Pass any ``plot_posterior`` fencing kwargs via ``**kwargs``
         (``fence_iqr``, ``ranges``, ``show_outliers``, ``outlier_annotate``,
-        ``outlier_color``, ``outlier_min_keep``, …).
+        ``outlier_color``, ``outlier_min_keep``, ``no_fence_for_prior``,
+        ``fence_skip_labels``, …).
 
         Args:
             var (str or list, optional): Parameter(s) to group runs by.
@@ -3765,6 +3861,7 @@ class ComparisonPlotter(BasePlotter):
                     for _, _, prior_args, _ in prior_entries[1:]
                 )
                 if all_priors_identical:
+                    _mark_prior_mcsamples(prior_entries[0][0])
                     all_samples.append(prior_entries[0][0])
                     all_colors.append('black')
                     all_alphas.append(PRIOR_CONTOUR_ALPHA)
@@ -3775,6 +3872,7 @@ class ComparisonPlotter(BasePlotter):
                     )
                 else:
                     for prior_samples_gd, color, _, group_key in prior_entries:
+                        _mark_prior_mcsamples(prior_samples_gd)
                         all_samples.append(prior_samples_gd)
                         all_colors.append(color)
                         all_alphas.append(PRIOR_CONTOUR_ALPHA)

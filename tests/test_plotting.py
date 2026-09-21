@@ -711,6 +711,113 @@ class TestPosteriorFenceHelpers:
             "crimson"
         )
 
+    def test_prior_fence_skip_detection(self):
+        """Prior overlays are detected by flag and/or Prior* legend labels."""
+        from types import SimpleNamespace
+
+        from bedcosmo.plotting import (
+            _is_prior_series_label,
+            _mark_prior_mcsamples,
+            _should_skip_fence,
+        )
+
+        assert _is_prior_series_label("Prior")
+        assert _is_prior_series_label("Prior, H_prior: 3.28 bits")
+        assert _is_prior_series_label("Prior (Config Space)")
+        assert not _is_prior_series_label("Nominal Design (NF)")
+        assert not _is_prior_series_label("Nominal Design (MCMC)")
+
+        bare = SimpleNamespace()
+        assert not _should_skip_fence(bare, "Nominal Design (NF)")
+        assert _should_skip_fence(bare, "Prior, H_prior: 1.0 bits")
+        assert not _should_skip_fence(
+            bare, "Prior", no_fence_for_prior=False
+        )
+        assert _should_skip_fence(bare, "NF", fence_skip_labels=["NF"])
+
+        tagged = SimpleNamespace()
+        _mark_prior_mcsamples(tagged)
+        assert _should_skip_fence(tagged, "something else")
+        assert tagged._bedcosmo_is_prior and tagged._bedcosmo_no_fence
+
+    def test_plot_posterior_skips_fencing_prior_series(self, monkeypatch):
+        """Prior series keep full samples; NF is still Tukey-subsetted."""
+        import contextlib
+        import io
+
+        import getdist
+
+        from bedcosmo.plotting import BasePlotter, _mark_prior_mcsamples, subset_mcsamples
+        from bedcosmo.util import GETDIST_SETTINGS
+
+        monkeypatch.setenv("SCRATCH", "/mock/scratch")
+        rng = np.random.default_rng(2)
+        nf = np.column_stack(
+            [
+                np.concatenate([rng.normal(0.3, 0.01, 2000), [-8.0] * 10]),
+                np.concatenate([rng.normal(10000, 80, 2000), [1e5] * 10]),
+            ]
+        )
+        prior = np.column_stack(
+            [
+                rng.uniform(0.1, 0.5, 2000),
+                rng.uniform(8000, 12000, 2000),
+            ]
+        )
+        with contextlib.redirect_stdout(io.StringIO()):
+            nf_gd = getdist.MCSamples(
+                samples=nf,
+                names=["Om", "hrdrag"],
+                labels=["Om", "H"],
+                settings=GETDIST_SETTINGS,
+            )
+            prior_gd = getdist.MCSamples(
+                samples=prior,
+                names=["Om", "hrdrag"],
+                labels=["Om", "H"],
+                settings=GETDIST_SETTINGS,
+            )
+        _mark_prior_mcsamples(prior_gd)
+        nf_gd.label = "Nominal Design (NF)"
+        prior_gd.label = "Prior"
+
+        subset_calls = []
+        real_subset = subset_mcsamples
+
+        def tracking_subset(sample, mask, min_keep=16):
+            subset_calls.append(getattr(sample, "label", None))
+            return real_subset(sample, mask, min_keep=min_keep)
+
+        monkeypatch.setattr("bedcosmo.plotting.subset_mcsamples", tracking_subset)
+
+        mock_g = MagicMock()
+        mock_g.subplots = np.array([[MagicMock(), None], [MagicMock(), MagicMock()]], dtype=object)
+        mock_g.fig = MagicMock()
+        mock_g.fig.legends = []
+        mock_g.param_names_for_root.return_value = nf_gd.paramNames
+        mock_g.triangle_plot = MagicMock()
+
+        with patch("bedcosmo.plotting.plots.get_single_plotter", return_value=mock_g), patch(
+            "bedcosmo.plotting.apply_outlier_legend"
+        ):
+            plotter = BasePlotter(cosmo_exp="test_exp")
+            g = plotter.plot_posterior(
+                [nf_gd, prior_gd],
+                ["tab:blue", "black"],
+                legend_labels=["Nominal Design (NF)", "Prior"],
+                levels=[0.68],
+                width_inch=5,
+            )
+
+        assert subset_calls == ["Nominal Design (NF)"]
+        assert g._outlier_stats[0]["n_out"] >= 10
+        assert g._outlier_stats[1]["n_out"] == 0
+        assert g._outlier_stats[1]["n_tot"] == len(prior)
+        # Contours for prior use the original full MCSamples object
+        triangle_samples = mock_g.triangle_plot.call_args[0][0]
+        assert triangle_samples[1] is prior_gd
+        assert len(triangle_samples[0].samples) < len(nf)
+
 
 class TestPlotPosterior:
     """Test cases for plot_posterior function."""
