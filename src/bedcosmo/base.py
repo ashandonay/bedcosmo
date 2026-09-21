@@ -895,7 +895,7 @@ class BaseExperiment(ABC):
               theta: ndarray ``(num_data_samples, num_param_samples, num_params)``
               y: ndarray ``(num_data_samples, n_obs)`` observations used in context
         """
-        from bedcosmo.posterior_samples import observations_to_numpy
+        from bedcosmo.artifacts import observations_to_numpy
 
         data_samples = self.sample_data(design, num_data_samples, central)
         y_np = observations_to_numpy(data_samples, num_data_samples)

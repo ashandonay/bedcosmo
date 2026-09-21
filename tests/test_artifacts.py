@@ -8,7 +8,7 @@ import time
 import numpy as np
 import pytest
 
-from bedcosmo.posterior_samples import (
+from bedcosmo.artifacts import (
     load_posterior_samples,
     load_posterior_samples_file,
     make_posterior_samples_path,

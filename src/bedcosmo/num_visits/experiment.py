@@ -1561,7 +1561,7 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         central=False,
         transform_output=True,
     ):
-        from bedcosmo.posterior_samples import observations_to_numpy
+        from bedcosmo.artifacts import observations_to_numpy
 
         data_samples = self.sample_data(designs, num_data_samples, central)
         y_np = observations_to_numpy(data_samples, num_data_samples)

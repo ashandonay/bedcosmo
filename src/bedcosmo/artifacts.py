@@ -1,17 +1,190 @@
-"""Save / load posterior sample bundles (theta + design/y provenance) as one npz."""
+"""MLflow run artifact helpers: designs, eig_data JSON, posterior sample npz."""
 
 from __future__ import annotations
 
 import glob
 import json
 import os
+import shutil
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Optional
 
 import numpy as np
+import yaml
 
-SCHEMA_VERSION = 1
-DEFAULT_SUBDIR = "posterior_samples"
+# ---------------------------------------------------------------------------
+# Design args snapshot
+# ---------------------------------------------------------------------------
+
+
+def resolve_design_args_input_path(
+    design_args: dict | None,
+    config_path: str | Path | None = None,
+) -> dict | None:
+    """Resolve ``input_designs_path`` from a design-arguments document.
+
+    Environment variables and ``~`` are expanded. Relative paths are anchored
+    to the directory containing the YAML file, or to the current directory when
+    the arguments were supplied directly as a dictionary.
+    """
+    if design_args is None:
+        return None
+    resolved = dict(design_args)
+    raw = resolved.get("input_designs_path")
+    if raw in (None, ""):
+        return resolved
+    expanded = os.path.expandvars(os.path.expanduser(os.fspath(raw)))
+    if "$" in expanded:
+        raise ValueError(
+            f"input_designs_path contains an undefined environment variable: {raw}"
+        )
+    path = Path(expanded)
+    if not path.is_absolute():
+        base = Path(config_path).expanduser().resolve().parent if config_path else Path.cwd()
+        path = base / path
+    resolved["input_designs_path"] = str(path.resolve())
+    return resolved
+
+
+def snapshot_design_args_config(
+    source_path: str | Path,
+    destination_path: str | Path,
+) -> dict:
+    """Freeze a design YAML and its referenced array into an artifact directory."""
+    source_path = Path(source_path).expanduser().resolve()
+    destination_path = Path(destination_path).expanduser().resolve()
+    with source_path.open() as stream:
+        design_args = yaml.safe_load(stream) or {}
+    design_args = resolve_design_args_input_path(design_args, source_path)
+
+    input_path = design_args.get("input_designs_path")
+    if input_path is not None:
+        input_path = Path(input_path)
+        if not input_path.is_file():
+            raise FileNotFoundError(f"input_designs_path not found: {input_path}")
+        frozen_path = destination_path.parent / "designs.npy"
+        destination_path.parent.mkdir(parents=True, exist_ok=True)
+        if input_path.resolve() != frozen_path.resolve():
+            shutil.copy2(input_path, frozen_path)
+        design_args["input_designs_path"] = str(frozen_path.resolve())
+
+    destination_path.parent.mkdir(parents=True, exist_ok=True)
+    with destination_path.open("w") as stream:
+        yaml.safe_dump(design_args, stream, default_flow_style=False, sort_keys=False)
+    return design_args
+
+
+# ---------------------------------------------------------------------------
+# eig_data JSON discovery
+# ---------------------------------------------------------------------------
+
+
+def _step_keys_for_eval(data, eval_step=None):
+    """Return step_* keys to inspect, optionally restricted to eval_step."""
+    if eval_step is not None:
+        step_str = f"step_{eval_step}" if not str(eval_step).startswith("step_") else str(eval_step)
+        return [step_str] if step_str in data else []
+    return [k for k in data.keys() if k.startswith("step_")]
+
+
+def _eig_data_has_variable_eigs(data, eval_step=None):
+    """True when eig_data contains joint (variable) EIG averages."""
+    for step_key in _step_keys_for_eval(data, eval_step):
+        variable = data.get(step_key, {}).get("variable", {})
+        if variable.get("eigs_avg") is not None:
+            return True
+    return False
+
+
+def _eig_data_has_marginal_eigs(data, eval_step=None):
+    """True when eig_data contains marginal EIG blocks."""
+    for step_key in _step_keys_for_eval(data, eval_step):
+        marginal = data.get(step_key, {}).get("marginal", {})
+        if marginal:
+            return True
+    return False
+
+
+def load_eig_data_file(artifacts_dir, eval_step=None, eig_kind="any"):
+    """
+    Load the most recent completed eig_data JSON file from the artifacts directory.
+
+    Args:
+        artifacts_dir (str): Path to the artifacts directory containing eig_data files
+        eval_step (str or int, optional): If provided, verify that the loaded file contains this step
+        eig_kind (str): Which EIG content the file must contain: ``'any'`` (default),
+            ``'variable'`` (joint EIG under ``step_*/variable``), or ``'marginal'``
+            (marginal EIG under ``step_*/marginal``). Use ``'variable'`` when comparing
+            joint EIGs so a newer marginal-only eval file is skipped.
+
+    Returns:
+        tuple: (json_path, data) where json_path is the path to the file and data is the loaded JSON.
+
+    Raises:
+        ValueError: If no completed eig_data files are found, if file cannot be loaded,
+            or if eval_step is not found in the data.
+    """
+    if eig_kind not in ("any", "variable", "marginal"):
+        raise ValueError(f"eig_kind must be 'any', 'variable', or 'marginal', got {eig_kind!r}")
+
+    if not os.path.exists(artifacts_dir):
+        raise ValueError(f"Artifacts directory not found: {artifacts_dir}")
+
+    eig_files = glob.glob(f"{artifacts_dir}/eig_data_*.json")
+
+    if len(eig_files) == 0:
+        raise ValueError(f"No eig_data JSON files found in {artifacts_dir}")
+
+    # Sort by filename (most recent first)
+    eig_files.sort(key=lambda x: os.path.basename(x), reverse=True)
+
+    for json_path in eig_files:
+        try:
+            with open(json_path, "r") as f:
+                data = json.load(f)
+
+            status = data.get("status")
+            if status != "complete":
+                continue
+
+            if eval_step is not None:
+                step_str = (
+                    f"step_{eval_step}"
+                    if not str(eval_step).startswith("step_")
+                    else str(eval_step)
+                )
+                if step_str not in data:
+                    continue
+
+            if eig_kind == "variable" and not _eig_data_has_variable_eigs(data, eval_step):
+                continue
+            if eig_kind == "marginal" and not _eig_data_has_marginal_eigs(data, eval_step):
+                continue
+
+            return json_path, data
+
+        except Exception as e:
+            print(f"Warning: Error loading {json_path}: {e}, skipping...")
+            continue
+
+    kind_suffix = f" with {eig_kind} EIG data" if eig_kind != "any" else ""
+    if eval_step is not None:
+        raise ValueError(
+            f"No completed eig_data files with step {eval_step}{kind_suffix} found in {artifacts_dir}"
+        )
+    raise ValueError(f"No completed eig_data files{kind_suffix} found in {artifacts_dir}")
+
+
+# ---------------------------------------------------------------------------
+# Posterior sample npz bundles
+# ---------------------------------------------------------------------------
+
+POSTERIOR_SAMPLES_SCHEMA_VERSION = 1
+POSTERIOR_SAMPLES_SUBDIR = "posterior_samples"
+# Backward-compatible aliases
+SCHEMA_VERSION = POSTERIOR_SAMPLES_SCHEMA_VERSION
+DEFAULT_SUBDIR = POSTERIOR_SAMPLES_SUBDIR
 
 
 def _meta_to_array(meta: dict) -> np.ndarray:
@@ -115,7 +288,6 @@ def save_posterior_samples(
         path = path + ".npz"
 
     saver = np.savez_compressed if compress else np.savez
-    # Write via temp then rename so readers never see a partial file.
     tmp_path = path + ".writing.npz"
     saver(
         tmp_path,

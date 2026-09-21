@@ -15,6 +15,11 @@ from bedcosmo.util import (
     load_nominal_samples, get_contour_area, parse_mlflow_params, sort_key_for_group_tuple,
     GETDIST_SETTINGS, restrict_mcsamples,
 )
+from bedcosmo.artifacts import (
+    load_eig_data_file,
+    _eig_data_has_variable_eigs,
+    _eig_data_has_marginal_eigs,
+)
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 from matplotlib.lines import Line2D
@@ -49,107 +54,6 @@ plt.rcParams['font.serif'] = ['DejaVu Serif', 'Times New Roman', 'Times', 'serif
 
 # Contour alpha for prior overlays in posterior triangle plots.
 PRIOR_CONTOUR_ALPHA = 0.4
-
-
-def _step_keys_for_eval(data, eval_step=None):
-    """Return step_* keys to inspect, optionally restricted to eval_step."""
-    if eval_step is not None:
-        step_str = f"step_{eval_step}" if not str(eval_step).startswith('step_') else str(eval_step)
-        return [step_str] if step_str in data else []
-    return [k for k in data.keys() if k.startswith('step_')]
-
-
-def _eig_data_has_variable_eigs(data, eval_step=None):
-    """True when eig_data contains joint (variable) EIG averages."""
-    for step_key in _step_keys_for_eval(data, eval_step):
-        variable = data.get(step_key, {}).get('variable', {})
-        if variable.get('eigs_avg') is not None:
-            return True
-    return False
-
-
-def _eig_data_has_marginal_eigs(data, eval_step=None):
-    """True when eig_data contains marginal EIG blocks."""
-    for step_key in _step_keys_for_eval(data, eval_step):
-        marginal = data.get(step_key, {}).get('marginal', {})
-        if marginal:
-            return True
-    return False
-
-
-def load_eig_data_file(artifacts_dir, eval_step=None, eig_kind='any'):
-    """
-    Load the most recent completed eig_data JSON file from the artifacts directory.
-
-    Args:
-        artifacts_dir (str): Path to the artifacts directory containing eig_data files
-        eval_step (str or int, optional): If provided, verify that the loaded file contains this step
-        eig_kind (str): Which EIG content the file must contain: ``'any'`` (default),
-            ``'variable'`` (joint EIG under ``step_*/variable``), or ``'marginal'``
-            (marginal EIG under ``step_*/marginal``). Use ``'variable'`` when comparing
-            joint EIGs so a newer marginal-only eval file is skipped.
-
-    Returns:
-        tuple: (json_path, data) where json_path is the path to the file and data is the loaded JSON.
-               Returns (None, None) if no valid file is found.
-
-    Raises:
-        ValueError: If no completed eig_data files are found, if file cannot be loaded, or if eval_step is not found in the data.
-    """
-    if eig_kind not in ('any', 'variable', 'marginal'):
-        raise ValueError(f"eig_kind must be 'any', 'variable', or 'marginal', got {eig_kind!r}")
-
-    if not os.path.exists(artifacts_dir):
-        raise ValueError(f"Artifacts directory not found: {artifacts_dir}")
-
-    # Find all eig_data JSON files
-    eig_files = glob_module.glob(f"{artifacts_dir}/eig_data_*.json")
-
-    if len(eig_files) == 0:
-        raise ValueError(f"No eig_data JSON files found in {artifacts_dir}")
-
-    # Sort by filename (most recent first)
-    eig_files.sort(key=lambda x: os.path.basename(x), reverse=True)
-
-    # Check each file for completion status (most recent first)
-    for json_path in eig_files:
-        try:
-            with open(json_path, 'r') as f:
-                data = json.load(f)
-
-            # Check if evaluation is completed using status field
-            status = data.get('status')
-            if status != 'complete':
-                # Skip incomplete files
-                continue
-
-            # If eval_step is provided, verify it exists in the data
-            if eval_step is not None:
-                step_str = f"step_{eval_step}" if not str(eval_step).startswith('step_') else str(eval_step)
-                if step_str not in data:
-                    # This file doesn't have the requested step, try next file
-                    continue
-
-            if eig_kind == 'variable' and not _eig_data_has_variable_eigs(data, eval_step):
-                continue
-            if eig_kind == 'marginal' and not _eig_data_has_marginal_eigs(data, eval_step):
-                continue
-
-            # Found a complete file (and it has the requested step if eval_step was provided)
-            return json_path, data
-
-        except Exception as e:
-            # Skip files that can't be loaded and continue to next
-            print(f"Warning: Error loading {json_path}: {e}, skipping...")
-            continue
-
-    # No completed files found (or no file with the requested eval_step)
-    kind_suffix = f" with {eig_kind} EIG data" if eig_kind != 'any' else ""
-    if eval_step is not None:
-        raise ValueError(
-            f"No completed eig_data files with step {eval_step}{kind_suffix} found in {artifacts_dir}"
-        )
-    raise ValueError(f"No completed eig_data files{kind_suffix} found in {artifacts_dir}")
 
 
 def _normalize_marginal_subset_id(subset):

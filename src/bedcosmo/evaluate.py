@@ -15,7 +15,7 @@ import numpy as np
 import torch
 import getdist
 import argparse
-from bedcosmo.plotting import RunPlotter, load_eig_data_file
+from bedcosmo.plotting import RunPlotter
 import traceback
 from bedcosmo.pyro_oed_src import nf_loss, LikelihoodDataset
 from bedcosmo.entropy import (
@@ -38,14 +38,17 @@ from bedcosmo.util import (
     get_rng_state, parse_extra_args, render_overlay,
     get_checkpoint, get_contour_area,
 )
-from bedcosmo.posterior_samples import (
+from bedcosmo.artifacts import (
+    load_eig_data_file,
     load_posterior_samples_file,
     make_posterior_samples_path,
     save_posterior_samples,
 )
 import mlflow
 import inspect
-import yaml# Sentinel for "not computed yet", so a legitimately-None result is still cached.
+import yaml
+
+# Sentinel for "not computed yet", so a legitimately-None result is still cached.
 _UNSET = object()
 
 
