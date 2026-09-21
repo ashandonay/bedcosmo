@@ -368,6 +368,146 @@ class Evaluator:
                 data["input_designs"], device=self.device, dtype=torch.float64
             )
 
+    def _resolve_optimal_design(self, step):
+        """Return ``(optimal_design, optimal_idx)`` from cached EIG or a fresh get_eig."""
+        step_key = f"step_{step}"
+        step_data = self.eig_data.get(step_key, {}).get("variable", {})
+        eigs = step_data.get("eigs_avg")
+        if eigs is None:
+            eigs, _ = self.get_eig(step, nominal_design=False)
+        else:
+            eigs = np.asarray(eigs)
+        eigs_1d = np.atleast_1d(eigs)
+        optimal_idx = int(np.argmax(eigs_1d)) if eigs_1d.size > 0 else 0
+        if len(self.input_designs) > 1:
+            optimal_design = self.input_designs[optimal_idx]
+        else:
+            optimal_design = self.input_designs[0]
+            optimal_idx = 0
+        return optimal_design, optimal_idx
+
+    @staticmethod
+    def _design_to_numpy(design) -> np.ndarray:
+        if isinstance(design, torch.Tensor):
+            return design.detach().cpu().numpy().reshape(-1)
+        return np.asarray(design).reshape(-1)
+
+    def _central_observation_numpy(self) -> np.ndarray:
+        """Observation vector used for central-context plot conditioning."""
+        central = self.experiment.central_val
+        if isinstance(central, torch.Tensor):
+            return central.detach().cpu().numpy().reshape(-1)
+        return np.asarray(central).reshape(-1)
+
+    @profile_method
+    def _save_run_posterior_samples(self, step):
+        """
+        Persist the central-context nominal/optimal guide samples that default
+        ``run()`` / ``generate_posterior`` plot.
+
+        Schema matches ``artifacts.save_posterior_samples`` with ``n_data=1``:
+        each series is conditioned on the exact ``central_val`` (no likelihood
+        noise), identical to ``BasePlotter._nf_display_samples``. This is *not*
+        the multi-y bundle from ``sample_posterior`` (``num_data_samples``>1);
+        full multi-y reuse still requires ``--sample-posterior``.
+
+        Returns:
+            Path to the written npz, or None if sampling/save failed.
+        """
+        posterior_flow, selected_step = load_model(
+            self.experiment,
+            step,
+            self.run_obj,
+            self.run_args,
+            device=self.device,
+            global_rank=self.global_rank,
+        )
+        posterior_flow = posterior_flow.to(self.device)
+        optimal_design, optimal_idx = self._resolve_optimal_design(selected_step)
+
+        inputs_spec = (
+            ("optimal", "tab:orange", optimal_design),
+            ("nominal", "tab:blue", self.experiment.nominal_design),
+        )
+        y_vec = self._central_observation_numpy()
+        samples_by_series = {}
+        y_by_series = {}
+        design_by_series = {}
+        series_meta = []
+        param_names = None
+
+        for design_type, color, design in inputs_spec:
+            if design_type == "nominal":
+                context = self.experiment.nominal_context
+            else:
+                design_t = design if isinstance(design, torch.Tensor) else torch.as_tensor(
+                    design, device=self.device, dtype=torch.float64
+                )
+                design_t = design_t.reshape(-1).to(device=self.device, dtype=torch.float64)
+                context = torch.cat([design_t, self.experiment.central_val.reshape(-1)], dim=-1)
+
+            samples_gd = self.experiment.get_guide_samples(
+                posterior_flow,
+                context,
+                num_samples=self.guide_samples,
+                transform_output=self.nf_transform_output,
+            )
+            theta = np.asarray(samples_gd.samples, dtype=np.float64)
+            if theta.ndim != 2:
+                raise ValueError(
+                    f"Expected guide samples shape (n_guide, n_params), got {theta.shape}"
+                )
+            if param_names is None:
+                param_names = list(samples_gd.paramNames.list())
+            samples_by_series[design_type] = theta[np.newaxis, ...]  # (1, n_guide, n_params)
+            y_by_series[design_type] = y_vec.reshape(1, -1)  # (1, n_obs)
+            design_by_series[design_type] = self._design_to_numpy(design)
+            series_meta.append({"name": design_type, "color": color})
+
+        series_names = [s["name"] for s in series_meta]
+        theta_all = np.stack([samples_by_series[n] for n in series_names], axis=0)
+        y_all = np.stack([y_by_series[n] for n in series_names], axis=0)
+        design_all = np.stack([design_by_series[n] for n in series_names], axis=0)
+
+        eig_file = self.eig_file_path or self.output_path
+        if eig_file is not None:
+            eig_file = os.path.basename(str(eig_file))
+
+        meta = {
+            "status": "complete",
+            "schema_version": 1,
+            "run_id": self.run_id,
+            "step": int(selected_step) if str(selected_step).isdigit() else selected_step,
+            "eig_file": eig_file,
+            "optimal_design_index": int(optimal_idx),
+            "central": True,
+            "conditioning": "central_val",
+            "seed": int(self.seed),
+            "guide_samples": int(self.guide_samples),
+            "num_data_samples": 1,
+            "transform_output": bool(self.nf_transform_output),
+            "param_space": self.param_space,
+            "cosmo_exp": self.cosmo_exp,
+            "series": series_meta,
+            "generated_by": "Evaluator.run",
+        }
+
+        out_path = make_posterior_samples_path(self.save_path, step=selected_step)
+        save_posterior_samples(
+            out_path,
+            theta=theta_all,
+            y=y_all,
+            design=design_all,
+            series_names=series_names,
+            param_names=param_names,
+            meta=meta,
+        )
+        print(
+            f"  Saved central-context posterior plot samples "
+            f"(n_data=1, series={series_names}) to {out_path}"
+        )
+        return out_path
+
     @profile_method
     def sample_posterior(
         self,
@@ -2068,6 +2208,16 @@ class Evaluator:
                 json.dump(self.eig_data, f, indent=2)
             print(f"Saved EIG data to {eig_data_save_path}")
 
+        # Persist the central-context nominal/optimal guide samples used for the
+        # main posterior plot (n_data=1). Reusable via --reuse-posterior-samples;
+        # multi-y bundles still require --sample-posterior.
+        try:
+            self._save_run_posterior_samples(eval_step)
+            self._update_runtime()
+        except Exception as e:
+            print(f"Warning: saving run posterior samples failed: {e}")
+            traceback.print_exc()
+
         # Make some evaluation plots
         try:
             self.plotter.generate_posterior(
@@ -2287,9 +2437,9 @@ if __name__ == "__main__":
     parser.add_argument('--marginal-knn-k', type=int, default=3, help='Neighbor rank k for the k-NN entropy estimator (default: 3)')
     parser.add_argument('--marginal', action='store_true', help='Run only the marginal EIG evaluation loop (and its per-subset plots), skipping the full joint EIG pipeline. Requires --marginal-eig-subsets (or marginal_eig_subsets in eval_args.yaml).')
     parser.add_argument('--step-diagnostics', action='store_true', help='Run intermediate-step diagnostics (posterior_steps and eig_designs_steps). Disabled by default.')
-    parser.add_argument('--sample-posterior', dest='sample_posterior_only', action='store_true', help='Only run sample_posterior (multi-y conditioned posteriors) and save an npz bundle; skip the full EIG pipeline.')
+    parser.add_argument('--sample-posterior', dest='sample_posterior_only', action='store_true', help='Only run sample_posterior (multi-y conditioned posteriors) and save an npz bundle; skip the full EIG pipeline. Default eval (run) already saves central-context n_data=1 plot samples.')
     parser.add_argument('--num-data-samples', type=int, default=10, help='Number of likelihood data realizations for sample_posterior (default: 10)')
-    parser.add_argument('--reuse-posterior-samples', action='store_true', help='Replot from the newest cached posterior_*.npz for the eval step instead of resampling.')
+    parser.add_argument('--reuse-posterior-samples', action='store_true', help='Replot from the newest cached posterior_*.npz for the eval step instead of resampling (works for run() central n_data=1 or sample_posterior multi-y bundles).')
     parser.add_argument('--posterior-samples-path', type=str, default=None, help='Explicit path to a posterior_*.npz bundle (implies reuse).')
 
     args, extra_args = parser.parse_known_args()
