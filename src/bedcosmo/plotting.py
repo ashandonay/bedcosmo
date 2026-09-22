@@ -17,7 +17,8 @@ from bedcosmo.util import (
 )
 from bedcosmo.artifacts import (
     load_eig_data_file,
-    save_central_posterior_from_nf_entries,
+    make_posterior_samples_path,
+    save_posterior_samples,
     _eig_data_has_variable_eigs,
     _eig_data_has_marginal_eigs,
 )
@@ -1151,15 +1152,72 @@ class BasePlotter:
             if step_for_save is None:
                 step_for_save = getattr(self, "eval_step", None)
             try:
-                out_path = save_central_posterior_from_nf_entries(
-                    posterior_samples_dir,
-                    nf_entries,
-                    experiment=experiment,
-                    step=step_for_save,
-                    meta=posterior_samples_meta,
-                    eig_values=eig_values,
-                )
-                if out_path is not None:
+                by_name = {
+                    e["name"]: e
+                    for e in nf_entries
+                    if isinstance(e, dict) and e.get("name") in ("optimal", "nominal")
+                }
+                series_order = [n for n in ("optimal", "nominal") if n in by_name]
+                if series_order:
+                    central = experiment.central_val
+                    if hasattr(central, "detach"):
+                        central = central.detach().cpu().numpy().reshape(-1)
+                    else:
+                        central = np.asarray(central).reshape(-1)
+
+                    thetas, ys, designs, series_meta = [], [], [], []
+                    param_names = None
+                    for name in series_order:
+                        entry = by_name[name]
+                        theta = np.asarray(entry["samples"].samples, dtype=np.float64)
+                        if param_names is None:
+                            param_names = list(entry["samples"].paramNames.list())
+                        thetas.append(theta[np.newaxis, ...])  # (1, n_guide, n_params)
+                        ys.append(central.reshape(1, -1))
+                        design = entry["design"]
+                        if hasattr(design, "detach"):
+                            design = design.detach().cpu().numpy().reshape(-1)
+                        else:
+                            design = np.asarray(design).reshape(-1)
+                        designs.append(design)
+                        series_meta.append({"name": name, "color": entry.get("color")})
+
+                    out_meta = {
+                        "status": "complete",
+                        "step": (
+                            int(step_for_save)
+                            if step_for_save is not None and str(step_for_save).isdigit()
+                            else step_for_save
+                        ),
+                        "central": True,
+                        "conditioning": "central_val",
+                        "num_data_samples": 1,
+                        "series": series_meta,
+                        "generated_by": "generate_posterior",
+                    }
+                    if eig_values is not None:
+                        eigs_1d = np.atleast_1d(np.asarray(eig_values))
+                        if eigs_1d.size > 0:
+                            out_meta["optimal_design_index"] = int(np.argmax(eigs_1d))
+                    if posterior_samples_meta:
+                        out_meta.update(posterior_samples_meta)
+                        out_meta["central"] = True
+                        out_meta["conditioning"] = "central_val"
+                        out_meta["num_data_samples"] = 1
+                        out_meta.setdefault("series", series_meta)
+
+                    out_path = make_posterior_samples_path(
+                        posterior_samples_dir, step=step_for_save
+                    )
+                    save_posterior_samples(
+                        out_path,
+                        theta=np.stack(thetas, axis=0),
+                        y=np.stack(ys, axis=0),
+                        design=np.stack(designs, axis=0),
+                        series_names=series_order,
+                        param_names=param_names,
+                        meta=out_meta,
+                    )
                     print(
                         f"  Saved central-context posterior plot samples "
                         f"(n_data=1) to {out_path}"
