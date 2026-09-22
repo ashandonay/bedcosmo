@@ -8,11 +8,7 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import torch
 
-from bedcosmo.artifacts import (
-    load_posterior_samples,
-    load_posterior_samples_file,
-    save_central_posterior_from_nf_entries,
-)
+from bedcosmo.artifacts import load_posterior_samples_file
 from bedcosmo.evaluate import Evaluator
 from bedcosmo.plotting import BasePlotter
 
@@ -27,56 +23,8 @@ def _make_mcsamples(theta: np.ndarray, names: list[str]):
     )
 
 
-def test_save_central_posterior_from_nf_entries_packs_schema(tmp_path):
-    n_guide, n_params, n_obs = 40, 2, 4
-    rng = np.random.default_rng(0)
-    theta_opt = rng.normal(size=(n_guide, n_params))
-    theta_nom = rng.normal(size=(n_guide, n_params))
-    design_opt = rng.normal(size=3)
-    design_nom = rng.normal(size=3)
-    central = torch.randn(n_obs, dtype=torch.float64)
-    experiment = SimpleNamespace(central_val=central)
-
-    # Plotter order is nominal then optimal; saver reorders to optimal, nominal.
-    entries = [
-        {
-            "name": "nominal",
-            "color": "tab:blue",
-            "design": design_nom,
-            "samples": _make_mcsamples(theta_nom, ["p0", "p1"]),
-        },
-        {
-            "name": "optimal",
-            "color": "tab:orange",
-            "design": design_opt,
-            "samples": _make_mcsamples(theta_opt, ["p0", "p1"]),
-        },
-    ]
-    out = save_central_posterior_from_nf_entries(
-        str(tmp_path / "artifacts"),
-        entries,
-        experiment=experiment,
-        step=100,
-        meta={"run_id": "run123", "generated_by": "Evaluator.run", "seed": 7},
-        eig_values=[0.1, 0.9, 0.2],
-    )
-    assert out is not None
-    bundle = load_posterior_samples(out)
-    assert list(bundle["series_names"]) == ["optimal", "nominal"]
-    assert bundle["meta"]["num_data_samples"] == 1
-    assert bundle["meta"]["conditioning"] == "central_val"
-    assert bundle["meta"]["generated_by"] == "Evaluator.run"
-    assert bundle["meta"]["optimal_design_index"] == 1
-    assert bundle["theta"].shape == (2, 1, n_guide, n_params)
-    np.testing.assert_allclose(bundle["theta"][0, 0], theta_opt)
-    np.testing.assert_allclose(bundle["theta"][1, 0], theta_nom)
-    np.testing.assert_allclose(bundle["y"][0, 0], central.numpy().reshape(-1))
-    discovered = load_posterior_samples_file(str(tmp_path / "artifacts"), step=100)
-    assert discovered["path"] == out
-
-
-def test_generate_posterior_persists_nf_display_samples(tmp_path, monkeypatch):
-    """generate_posterior saves the same entries produced by _nf_display_samples."""
+def test_generate_posterior_persists_via_save_posterior_samples(tmp_path, monkeypatch):
+    """generate_posterior packs nf entries and calls existing save_posterior_samples."""
     monkeypatch.setenv("SCRATCH", str(tmp_path))
     monkeypatch.setenv("HOME", str(tmp_path))
 
@@ -115,7 +63,10 @@ def test_generate_posterior_persists_nf_display_samples(tmp_path, monkeypatch):
     plotter = BasePlotter(cosmo_exp="num_visits")
     with patch.object(plotter, "plot_posterior", return_value=fake_g), \
          patch.object(plotter, "save_figure"), \
-         patch("bedcosmo.plotting.Line2D"):
+         patch("bedcosmo.plotting.Line2D"), \
+         patch("bedcosmo.plotting.save_posterior_samples", wraps=__import__(
+             "bedcosmo.artifacts", fromlist=["save_posterior_samples"]
+         ).save_posterior_samples) as save_spy:
         plotter.generate_posterior(
             experiment=experiment,
             posterior_flow=MagicMock(),
@@ -132,12 +83,17 @@ def test_generate_posterior_persists_nf_display_samples(tmp_path, monkeypatch):
         )
 
     assert experiment.get_guide_samples.call_count == 2  # sampled once, not twice
+    assert save_spy.called
     bundle = load_posterior_samples_file(str(artifacts), step=50)
+    assert list(bundle["series_names"]) == ["optimal", "nominal"]
     assert bundle["meta"]["generated_by"] == "Evaluator.run"
     assert bundle["meta"]["num_data_samples"] == 1
+    assert bundle["meta"]["conditioning"] == "central_val"
+    assert bundle["meta"]["optimal_design_index"] == 1
     assert bundle["theta"].shape == (2, 1, n_guide, n_params)
     np.testing.assert_allclose(bundle["theta"][0, 0], theta_opt)
     np.testing.assert_allclose(bundle["theta"][1, 0], theta_nom)
+    np.testing.assert_allclose(bundle["y"][0, 0], central.numpy().reshape(-1))
 
 
 def test_run_passes_persist_flags_to_generate_posterior(tmp_path):
@@ -183,7 +139,4 @@ def test_run_passes_persist_flags_to_generate_posterior(tmp_path):
     assert kwargs["posterior_samples_step"] == 100
     assert kwargs["posterior_samples_meta"]["generated_by"] == "Evaluator.run"
     assert kwargs["posterior_samples_meta"]["run_id"] == "run123"
-    # No parallel Evaluator sampling wrapper
-    assert not hasattr(ev, "_save_run_posterior_samples") or not callable(
-        getattr(Evaluator, "_save_run_posterior_samples", None)
-    )
+    assert not hasattr(Evaluator, "_save_run_posterior_samples")
