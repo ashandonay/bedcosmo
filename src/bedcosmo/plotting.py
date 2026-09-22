@@ -17,6 +17,7 @@ from bedcosmo.util import (
 )
 from bedcosmo.artifacts import (
     load_eig_data_file,
+    save_central_posterior_from_nf_entries,
     _eig_data_has_variable_eigs,
     _eig_data_has_marginal_eigs,
 )
@@ -886,8 +887,9 @@ class BasePlotter:
 
         Returns:
             (entries, selected_step) where entries is a list of dicts with keys
-            samples, label, color, line_style, alpha; selected_step is set when
-            loading from a run, else None.
+            samples, label, color, line_style, alpha, and for NF designs also
+            name ('nominal'/'optimal') and design (1-D array); selected_step is
+            set when loading from a run, else None.
         """
         display = self._normalize_display(display)
         selected_step = None
@@ -973,8 +975,15 @@ class BasePlotter:
                 nominal_posterior_entropy,
                 include_prior=include_prior_in_legend,
             )
+            nominal_design = experiment.nominal_design
+            if hasattr(nominal_design, "detach"):
+                nominal_design_np = nominal_design.detach().cpu().numpy().reshape(-1)
+            else:
+                nominal_design_np = np.asarray(nominal_design).reshape(-1)
             entries.append({
                 'samples': nominal_samples_gd,
+                'name': 'nominal',
+                'design': nominal_design_np,
                 'label': f'Nominal Design (NF){eig_str}',
                 'color': 'tab:blue',
                 'line_style': '-',
@@ -1026,6 +1035,8 @@ class BasePlotter:
             )
             entries.append({
                 'samples': optimal_samples_gd,
+                'name': 'optimal',
+                'design': np.asarray(optimal_design, dtype=np.float64).reshape(-1),
                 'label': label,
                 'color': 'tab:orange',
                 'line_style': '-',
@@ -1063,6 +1074,10 @@ class BasePlotter:
         save_dir=None,
         dpi=400,
         marginal_eig=False,
+        persist_posterior_samples=False,
+        posterior_samples_dir=None,
+        posterior_samples_meta=None,
+        posterior_samples_step=None,
     ):
         """
         Generates posterior plots for nominal and/or optimal designs.
@@ -1086,6 +1101,12 @@ class BasePlotter:
             title (str, optional): Title of the plot.
             grid_samples (np.ndarray, optional): Grid-based posterior parameter samples.
             nominal_grid_eig (float, optional): Nominal grid EIG value.
+            persist_posterior_samples (bool): If True, write the NF display samples
+                (central-context, n_data=1) to an NPZ under ``posterior_samples_dir``
+                before plotting — same arrays used for the contours.
+            posterior_samples_dir (str, optional): Artifacts directory for the NPZ.
+            posterior_samples_meta (dict, optional): Extra meta fields for the NPZ.
+            posterior_samples_step: Step used in the NPZ filename / meta.
 
         Returns:
             GetDist plotter object.
@@ -1120,6 +1141,33 @@ class BasePlotter:
             marginal_eig=marginal_eig,
             plot_prior=plot_prior,
         )
+
+        if persist_posterior_samples:
+            if not posterior_samples_dir:
+                raise ValueError(
+                    "posterior_samples_dir is required when persist_posterior_samples=True"
+                )
+            step_for_save = posterior_samples_step
+            if step_for_save is None:
+                step_for_save = getattr(self, "eval_step", None)
+            try:
+                out_path = save_central_posterior_from_nf_entries(
+                    posterior_samples_dir,
+                    nf_entries,
+                    experiment=experiment,
+                    step=step_for_save,
+                    meta=posterior_samples_meta,
+                    eig_values=eig_values,
+                )
+                if out_path is not None:
+                    print(
+                        f"  Saved central-context posterior plot samples "
+                        f"(n_data=1) to {out_path}"
+                    )
+            except Exception as e:
+                print(f"Warning: saving run posterior samples failed: {e}")
+                traceback.print_exc()
+
         for entry in nf_entries:
             all_samples.append(entry['samples'])
             all_colors.append(entry['color'])
@@ -2016,6 +2064,8 @@ class RunPlotter(BasePlotter):
         device = kwargs.get("device", "cuda:0" if torch.cuda.is_available() else "cpu")
         kwargs['device'] = device
         eval_step = kwargs.get('eval_step', None)
+        if kwargs.get("persist_posterior_samples") and kwargs.get("posterior_samples_step") is None:
+            kwargs["posterior_samples_step"] = eval_step
         eig_data_override = kwargs.pop('eig_data', None)
         explicit_grid_samples = kwargs.pop('grid_samples', None) if eig_data_override is not None else None
         data = self._extract_run_posterior_data(
