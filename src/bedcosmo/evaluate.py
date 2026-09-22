@@ -2068,37 +2068,103 @@ class Evaluator:
                 json.dump(self.eig_data, f, indent=2)
             print(f"Saved EIG data to {eig_data_save_path}")
 
-        # Main posterior plot: generate_posterior samples once via _nf_display_samples,
-        # persists those central-context arrays (n_data=1), then plots them.
+        # Main posterior: sample → save NPZ → plot from the same samples.
         # Multi-y bundles still require --sample-posterior.
         eig_file = self.eig_file_path or self.output_path
         if eig_file is not None:
             eig_file = os.path.basename(str(eig_file))
         try:
-            self.plotter.generate_posterior(
+            nf_entries, data = self.plotter.sample_nf_posterior(
                 eval_step=eval_step,
                 display=['nominal', 'optimal'],
                 guide_samples=self.guide_samples,
-                levels=self.levels,
-                plot_prior=self.plot_prior,
                 transform_output=self.nf_transform_output,
-                persist_posterior_samples=True,
-                posterior_samples_dir=self.save_path,
-                posterior_samples_step=eval_step,
-                posterior_samples_meta={
+                seed=self.seed,
+                plot_prior=self.plot_prior,
+            )
+            # Pack central-context entries into the existing NPZ schema (n_data=1).
+            by_name = {
+                e["name"]: e
+                for e in nf_entries
+                if isinstance(e, dict) and e.get("name") in ("optimal", "nominal")
+            }
+            series_order = [n for n in ("optimal", "nominal") if n in by_name]
+            if series_order:
+                experiment = data["experiment"]
+                central = experiment.central_val
+                if hasattr(central, "detach"):
+                    central = central.detach().cpu().numpy().reshape(-1)
+                else:
+                    central = np.asarray(central).reshape(-1)
+                thetas, ys, designs, series_meta = [], [], [], []
+                param_names = None
+                for name in series_order:
+                    entry = by_name[name]
+                    theta = np.asarray(entry["samples"].samples, dtype=np.float64)
+                    if param_names is None:
+                        param_names = list(entry["samples"].paramNames.list())
+                    thetas.append(theta[np.newaxis, ...])
+                    ys.append(central.reshape(1, -1))
+                    design = entry["design"]
+                    if hasattr(design, "detach"):
+                        design = design.detach().cpu().numpy().reshape(-1)
+                    else:
+                        design = np.asarray(design).reshape(-1)
+                    designs.append(design)
+                    series_meta.append({"name": name, "color": entry.get("color")})
+
+                out_meta = {
+                    "status": "complete",
                     "run_id": self.run_id,
+                    "step": int(eval_step) if str(eval_step).isdigit() else eval_step,
                     "eig_file": eig_file,
+                    "central": True,
+                    "conditioning": "central_val",
                     "seed": int(self.seed),
                     "guide_samples": int(self.guide_samples),
+                    "num_data_samples": 1,
                     "transform_output": bool(self.nf_transform_output),
                     "param_space": self.param_space,
                     "cosmo_exp": self.cosmo_exp,
+                    "series": series_meta,
                     "generated_by": "Evaluator.run",
-                },
+                }
+                eig_values = data.get("eig_values")
+                if eig_values is not None:
+                    eigs_1d = np.atleast_1d(np.asarray(eig_values))
+                    if eigs_1d.size > 0:
+                        out_meta["optimal_design_index"] = int(np.argmax(eigs_1d))
+
+                out_path = make_posterior_samples_path(self.save_path, step=eval_step)
+                save_posterior_samples(
+                    out_path,
+                    theta=np.stack(thetas, axis=0),
+                    y=np.stack(ys, axis=0),
+                    design=np.stack(designs, axis=0),
+                    series_names=series_order,
+                    param_names=param_names,
+                    meta=out_meta,
+                )
+                print(
+                    f"  Saved central-context posterior plot samples "
+                    f"(n_data=1) to {out_path}"
+                )
+
+            self.plotter.plot_posterior_display(
+                nf_entries,
+                experiment=data["experiment"],
+                levels=self.levels,
+                guide_samples=self.guide_samples,
+                plot_prior=self.plot_prior,
+                transform_output=self.nf_transform_output,
+                title=data.get("title"),
+                nominal_grid_eig=data.get("nominal_grid_eig"),
+                nominal_prior_entropy=data.get("nominal_prior_entropy"),
+                seed=self.seed,
             )
             self._update_runtime()
         except Exception as e:
-            print(f"Warning: generate_posterior failed: {e}")
+            print(f"Warning: main posterior sample/save/plot failed: {e}")
             traceback.print_exc()
 
         # Marginal posterior triangles + marginal EIG-vs-design plots per subset.
