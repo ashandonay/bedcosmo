@@ -31,7 +31,7 @@ black . && ruff check --fix .         # format + lint
 
 | Read | For |
 |---|---|
-| `README.md` | Install, quick start, `submit.sh` usage (train/eval/resume/restart, auto-eval, `--train-`/`--eval-` prefixes), MLflow, grid EIG |
+| `README.md` | Install, and everything about `submit.sh`: job types, what happens at submission (argv freeze, config snapshot), resume vs. restart, auto-eval, argument prefixes. Also MLflow and grid EIG |
 | `experiments/num_tracers/README.md` | DESI tracer allocation: BAO likelihood, emulator vs. scaling modes, YAML fields |
 | `experiments/num_visits/README.md` | LSST visits per filter: photometric forward model, SED priors, YAML fields |
 | `src/bedcosmo/num_visits/empirical/README.md` | Empirical SED prior build: DESI + EAZY fits, ILR coordinates, KDE / prior flow, provenance |
@@ -49,16 +49,6 @@ black . && ruff check --fix .         # format + lint
 - **`transform.py` (`Bijector`)**: Gaussianizes flow inputs. Its state is stored in checkpoints.
 - **`plotting.py`, `profiling.py`**: figures, and timing instrumentation that only runs with `--profile`.
 - **Config** (`experiments/{cosmo_exp}/`): `train_args.yaml` and `eval_args.yaml` are keyed by cosmology model, and they name a `prior_args*.yaml` and a `design_args*.yaml`. Precedence: code defaults < YAML < CLI.
-
-## How jobs behave (beyond the README)
-
-- `submit.sh` flattens the model's YAML block into `--kebab-case` flags at submission time, and CLI flags replace them. The argv is frozen from then on.
-- **train** runs `scripts/create_run.py` first. It pre-creates the MLflow run and snapshots the referenced prior/design YAMLs and data files (emulators, SED KDE, prior flow) into the run's artifacts. The job attaches with `--attach-run-id`. This protects config and data, **not code**.
-- **resume** continues the same run and calls `scripts/truncate_metrics.py` to drop metrics logged after the resume step.
-- **restart** creates a new run from the old weights and copies the old run's prior/design args. The optimizer starts fresh, and `--restart-optimizer` loads the checkpoint's optimizer state instead, with the learning rate reset to `initial_lr`.
-- **Auto-eval** on SLURM is a job that depends on the training job (`afterany`). `scripts/slurm/eval.sh` checks the training log for a line ending in `completed.` and reads the run_id from `MLFlow Run Info:`. Don't change those log lines without updating `eval.sh`.
-- `--prior-<field> <v>` overrides one field of the prior YAML before the snapshot. `eval --grid` also launches a sibling grid job, and `--grid-<arg>` sends args to that job only. `eval --marginal` runs only the marginal EIG.
-- Logs: `$SCRATCH/bedcosmo/{cosmo_exp}/logs/{jobid}_{jobname}.log`.
 
 ## Code practices
 
