@@ -187,6 +187,29 @@ CLI arguments override YAML defaults. Unprefixed args are assumed to be for trai
 | `n_particles_per_device` | Batch size per GPU | 30-100 |
 | `checkpoint_step_freq` | Steps between checkpoints | 2000 |
 
+## Storage (`$SCRATCH`)
+
+All runs, logs, outputs and large input data live under `$SCRATCH/bedcosmo/`, outside the repository. `submit.sh` sets `SCRATCH=$HOME/scratch` if it is unset. Python entry points read `$SCRATCH` directly, so export it before running them without `submit.sh`:
+
+```bash
+export SCRATCH=${SCRATCH:-$HOME/scratch}
+```
+
+Layout:
+
+```
+$SCRATCH/bedcosmo/
+  {cosmo_exp}/           # num_tracers, num_visits, variable_redshift
+    mlruns/              # MLflow runs; checkpoints and config snapshots are in each run's artifacts/
+    logs/                # job logs: {jobid}_{jobname}.log
+    grid_calc/           # grid EIG outputs, one directory per timestamp
+  num_tracers/emulator/  # BAO emulator checkpoints
+  num_visits/empirical_prior/  # empirical SED prior builds (see src/bedcosmo/num_visits/empirical/README.md)
+  desi/, eazy/           # shared DESI spectra and EAZY templates for the SED prior
+```
+
+Runs and prior builds can take hours to regenerate, so don't delete or change them by hand.
+
 ## MLflow Tracking
 
 All experiments are tracked with MLflow. Runs are stored at:

@@ -13,6 +13,7 @@ bedcosmo is a Bayesian Experimental Design framework for cosmology and astronomi
 **Ask first**
 - Before submitting, cancelling, resuming or restarting jobs. They use GPU time or SLURM allocation and write to MLflow state. For quick checks, use `--debug` or `--local`.
 - Before editing `src/` while jobs are queued or running. Jobs import the package from disk when the process starts, so a queued job picks up whatever is there at that moment. A half-finished edit can silently corrupt results.
+- Before deleting or changing anything under `$SCRATCH/bedcosmo/`. It holds MLflow runs and prior builds that take hours to regenerate.
 
 ## Commands
 
@@ -20,6 +21,7 @@ bedcosmo is a Bayesian Experimental Design framework for cosmology and astronomi
 conda activate bedcosmo && pip install -e ".[dev]"
 pytest -m "not slow"                  # quick suite; `pytest tests/test_x.py -k name` for one test
 black . && ruff check --fix .         # format + lint
+export SCRATCH=${SCRATCH:-$HOME/scratch}  # needed when running python directly; submit.sh sets it
 ./submit.sh                           # prints full job usage (submit.sh is the source of truth for flags)
 ./submit.sh train num_visits empirical --debug --local
 ```
@@ -28,7 +30,7 @@ black . && ruff check --fix .         # format + lint
 
 | Read | For |
 |---|---|
-| `README.md` | Install, and everything about `submit.sh`: job types, what happens at submission (argv freeze, config snapshot), resume vs. restart, auto-eval, argument prefixes. Also MLflow and grid EIG |
+| `README.md` | Install, and everything about `submit.sh`: job types, what happens at submission (argv freeze, config snapshot), resume vs. restart, auto-eval, argument prefixes. Also `$SCRATCH` storage layout, MLflow and grid EIG |
 | `experiments/num_tracers/README.md` | DESI tracer allocation: BAO likelihood, emulator vs. scaling modes, YAML fields |
 | `experiments/num_visits/README.md` | LSST visits per filter: photometric forward model, SED priors, YAML fields |
 | `src/bedcosmo/num_visits/empirical/README.md` | Empirical SED prior build: DESI + EAZY fits, ILR coordinates, KDE / prior flow, provenance |
