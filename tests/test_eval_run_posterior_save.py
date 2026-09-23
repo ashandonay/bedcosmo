@@ -186,11 +186,10 @@ def test_plot_posterior_requires_artifact_when_no_entries(tmp_path, monkeypatch)
         assert "artifacts_dir" in str(e) or "posterior_samples_path" in str(e)
 
 
-def test_extract_run_posterior_data_without_flow():
-    """extract_run_posterior_data builds EIG context without a plotter or flow."""
-    from bedcosmo.util import extract_run_posterior_data
+def test_parse_eig_for_posterior_joint():
+    """parse_eig_for_posterior returns designs, EIGs, and entropy from eig_data."""
+    from bedcosmo.util import parse_eig_for_posterior
 
-    experiment = SimpleNamespace(device="cpu")
     eig_data = {
         "input_designs": [[0.0, 0.0], [1.0, 1.0]],
         "step_10": {
@@ -199,23 +198,21 @@ def test_extract_run_posterior_data_without_flow():
                 "prior_entropy_avg": [1.0, 1.1],
                 "posterior_entropy_avg": [0.5, 0.4],
             },
-            "nominal": {"eigs_avg": 0.3, "prior_entropy_avg": 1.0, "posterior_entropy_avg": 0.6},
+            "nominal": {
+                "eigs_avg": 0.3,
+                "prior_entropy_avg": 1.0,
+                "posterior_entropy_avg": 0.6,
+            },
         },
     }
-    data = extract_run_posterior_data(
-        experiment,
-        eig_data,
-        MagicMock(),
-        {},
-        eval_step=10,
-        run_id="abcdefghij",
-        load_flow=False,
+    input_designs, eig_values, nominal_eig, entropy = parse_eig_for_posterior(
+        eig_data, eval_step=10
     )
-    assert data["posterior_flow"] is None
-    assert data["experiment"] is experiment
-    np.testing.assert_allclose(data["eig_values"], [0.2, 0.8])
-    assert data["nominal_eig"] == 0.3
-    assert data["title"].startswith("Posterior Evaluation - Run: abcdefgh")
+    np.testing.assert_allclose(input_designs, [[0.0, 0.0], [1.0, 1.0]])
+    np.testing.assert_allclose(eig_values, [0.2, 0.8])
+    assert nominal_eig == 0.3
+    assert entropy["nominal_prior_entropy"] == 1.0
+    assert entropy["nominal_posterior_entropy"] == 0.6
 
 
 def test_run_sample_save_then_plot(tmp_path):
@@ -232,20 +229,6 @@ def test_run_sample_save_then_plot(tmp_path):
         nominal_design=design_nom,
         device="cpu",
     )
-    extract_data = {
-        "experiment": experiment,
-        "posterior_flow": MagicMock(name="flow"),
-        "input_designs": np.array([[0.0, 0.0], [1.0, 1.0]]),
-        "eig_values": np.array([0.1, 0.9]),
-        "nominal_eig": 0.5,
-        "nominal_prior_entropy": None,
-        "nominal_posterior_entropy": None,
-        "prior_entropy_by_design": None,
-        "posterior_entropy_by_design": None,
-        "title": "Posterior Evaluation",
-        "nominal_grid_eig": None,
-        "marginal_eig": False,
-    }
 
     ev = Evaluator.__new__(Evaluator)
     ev.save_path = str(tmp_path / "artifacts")
@@ -293,13 +276,12 @@ def test_run_sample_save_then_plot(tmp_path):
         _make_mcsamples(theta_opt, ["p0", "p1"]),
     ]
     with patch("bedcosmo.evaluate.render_overlay"), \
-         patch("bedcosmo.evaluate.extract_run_posterior_data", return_value=dict(extract_data)) as mock_extract, \
+         patch("bedcosmo.evaluate.load_model", return_value=(MagicMock(name="flow"), 100)) as mock_load, \
          patch("bedcosmo.evaluate.sample_nf", side_effect=mcsamples) as mock_sample, \
          patch("bedcosmo.evaluate.save_posterior_samples", wraps=save_posterior_samples) as save_spy:
         ev.run(eval_step=100)
 
-    mock_extract.assert_called_once()
-    assert mock_extract.call_args.args[0] is experiment
+    mock_load.assert_called_once()
     assert mock_sample.call_count == 2
     assert save_spy.called
     ev.plotter.plot_posterior.assert_called_once()

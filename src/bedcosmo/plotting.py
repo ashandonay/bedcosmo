@@ -14,7 +14,7 @@ from bedcosmo.util import (
     get_runs_data, init_experiment, load_model, auto_seed, convert_color,
     load_nominal_samples, get_contour_area, parse_mlflow_params, sort_key_for_group_tuple,
     GETDIST_SETTINGS, restrict_mcsamples, sample_nf,
-    resolve_eig_step, parse_eig_for_posterior, extract_run_posterior_data,
+    resolve_eig_step, parse_eig_for_posterior,
 )
 from bedcosmo.artifacts import (
     load_eig_data_file,
@@ -1777,21 +1777,43 @@ class RunPlotter(BasePlotter):
             if eig_data is None:
                 eig_data = self._get_eig_data(eval_step=eval_step)
             experiment = self.get_experiment(device=device)
-            data = extract_run_posterior_data(
-                experiment,
-                eig_data,
-                self.run_data["run_obj"],
-                self.run_data["params"],
-                eval_step=eval_step,
-                device=device,
-                params=kwargs.get("params"),
-                run_id=self.run_id,
-                load_flow=False,
+            params = kwargs.get("params")
+            _, _, _, entropy_info = parse_eig_for_posterior(
+                eig_data, eval_step, params=params
             )
-            kwargs.setdefault("nominal_grid_eig", data.get("nominal_grid_eig"))
-            kwargs.setdefault("nominal_prior_entropy", data.get("nominal_prior_entropy"))
+            kwargs.setdefault(
+                "nominal_prior_entropy", entropy_info.get("nominal_prior_entropy")
+            )
+
+            _, step_str = resolve_eig_step(eig_data, eval_step)
+            step_data = eig_data[step_str]
             if title is None:
-                title = data.get("title")
+                if params is not None:
+                    subset_id = "+".join(list(params))
+                    marginal = step_data.get("marginal", {}).get(subset_id)
+                    if marginal is not None:
+                        param_labels = ", ".join(marginal.get("params", params))
+                        title = (
+                            f"Marginal Posterior ({param_labels}) - "
+                            f"Run: {self.run_id[:8]}"
+                        )
+                if title is None:
+                    title = f"Posterior Evaluation - Run: {self.run_id[:8]}"
+
+            if "nominal_grid_eig" not in kwargs:
+                nominal_data = step_data.get("nominal", {})
+                nominal_grid_data = nominal_data.get("grid", {})
+                nominal_grid_eig = None
+                if isinstance(nominal_grid_data, dict) and "eigs_avg" in nominal_grid_data:
+                    nominal_grid_eig = nominal_grid_data.get("eigs_avg")
+                    if isinstance(nominal_grid_eig, list):
+                        nominal_grid_eig = (
+                            nominal_grid_eig[0] if len(nominal_grid_eig) > 0 else None
+                        )
+                    nominal_grid_eig = (
+                        float(nominal_grid_eig) if nominal_grid_eig is not None else None
+                    )
+                kwargs["nominal_grid_eig"] = nominal_grid_eig
 
         if nf_entries is None and artifacts_dir is None and posterior_samples_path is None:
             artifacts_dir = self._get_artifacts_dir()

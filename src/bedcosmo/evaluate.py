@@ -38,7 +38,7 @@ from bedcosmo.util import (
     get_rng_state, parse_extra_args, render_overlay,
     get_checkpoint, get_contour_area,
     sample_nf,
-    extract_run_posterior_data,
+    parse_eig_for_posterior, resolve_eig_step,
 )
 from bedcosmo.artifacts import (
     load_eig_data_file,
@@ -2076,21 +2076,45 @@ class Evaluator:
         if eig_file is not None:
             eig_file = os.path.basename(str(eig_file))
         try:
-            data = extract_run_posterior_data(
-                self.experiment,
-                self.eig_data,
+            experiment = self.experiment
+            input_designs, eig_values, nominal_eig, entropy_info = parse_eig_for_posterior(
+                self.eig_data, eval_step
+            )
+            if isinstance(eval_step, str) and eval_step.startswith("step_"):
+                step_for_model = int(eval_step.split("_")[1])
+            elif eval_step is None:
+                step_for_model = "last"
+            else:
+                step_for_model = int(eval_step) if str(eval_step).isdigit() else eval_step
+            posterior_flow, _ = load_model(
+                experiment,
+                step_for_model,
                 self.run_obj,
                 self.run_args,
-                eval_step=eval_step,
-                device=self.device,
-                run_id=self.run_id,
+                self.device,
+                global_rank=0,
             )
-            experiment = self.experiment
+
+            _, step_str = resolve_eig_step(self.eig_data, eval_step)
+            step_data = self.eig_data[step_str]
+            nominal_data = step_data.get("nominal", {})
+            nominal_grid_eig = None
+            nominal_grid_data = nominal_data.get("grid", {})
+            if isinstance(nominal_grid_data, dict) and "eigs_avg" in nominal_grid_data:
+                nominal_grid_eig = nominal_grid_data.get("eigs_avg")
+                if isinstance(nominal_grid_eig, list):
+                    nominal_grid_eig = (
+                        nominal_grid_eig[0] if len(nominal_grid_eig) > 0 else None
+                    )
+                nominal_grid_eig = (
+                    float(nominal_grid_eig) if nominal_grid_eig is not None else None
+                )
+            title = f"Posterior Evaluation - Run: {self.run_id[:8]}"
+
             auto_seed(self.seed)
 
-            posterior_flow = data["posterior_flow"]
             y = experiment.central_val
-            eig_label = "Marginal EIG" if data.get("marginal_eig", False) else "EIG"
+            eig_label = "EIG"
             include_prior_in_legend = not self.plot_prior
             nf_entries = []
 
@@ -2105,15 +2129,14 @@ class Evaluator:
                 transform_output=self.nf_transform_output,
                 device=self.device,
             )
-            nominal_eig = data.get("nominal_eig")
             eig_str = (
                 f", {eig_label}: {nominal_eig:.3f} bits"
                 if nominal_eig is not None
                 else ""
             )
             eig_str += self.plotter._entropy_legend_suffix(
-                data.get("nominal_prior_entropy"),
-                data.get("nominal_posterior_entropy"),
+                entropy_info.get("nominal_prior_entropy"),
+                entropy_info.get("nominal_posterior_entropy"),
                 include_prior=include_prior_in_legend,
             )
             if hasattr(nominal_design, "detach"):
@@ -2131,13 +2154,11 @@ class Evaluator:
             })
 
             # Optimal (EIG-argmax) design + central y
-            input_designs = data.get("input_designs")
-            eig_values = data.get("eig_values")
             if input_designs is None:
                 raise ValueError("input_designs required for optimal posterior")
             input_designs_arr = np.asarray(input_designs)
-            prior_h = data.get("prior_entropy_by_design")
-            post_h = data.get("posterior_entropy_by_design")
+            prior_h = entropy_info.get("prior_entropy_by_design")
+            post_h = entropy_info.get("posterior_entropy_by_design")
             if len(input_designs_arr) > 1 and eig_values is not None:
                 eig_values_arr = np.asarray(eig_values)
                 optimal_idx = int(np.argmax(eig_values_arr))
@@ -2252,9 +2273,9 @@ class Evaluator:
                 guide_samples=self.guide_samples,
                 plot_prior=self.plot_prior,
                 transform_output=self.nf_transform_output,
-                title=data.get("title"),
-                nominal_grid_eig=data.get("nominal_grid_eig"),
-                nominal_prior_entropy=data.get("nominal_prior_entropy"),
+                title=title,
+                nominal_grid_eig=nominal_grid_eig,
+                nominal_prior_entropy=entropy_info.get("nominal_prior_entropy"),
                 seed=self.seed,
             )
             self._update_runtime()
