@@ -394,8 +394,13 @@ class VariableRedshift(BaseExperiment, CosmologyMixin):
             
             if 'multiplier' in param_config.keys():
                 setattr(self, f'{param_name}_multiplier', float(param_config['multiplier']))
+        # Distance parameters the model doesn't sample are held at the fiducial.
+        # Ok/w0/wa already default inside CosmologyMixin; hrdrag has no default,
+        # and PLANCK18_FIDUCIAL['hrdrag'] is in units of the 100 multiplier.
+        self.fixed_params = {}
         if 'hrdrag' not in model_parameters:
-            setattr(self, 'hrdrag_multiplier', 100.0)
+            self.hrdrag_multiplier = 100.0
+            self.fixed_params['hrdrag'] = PLANCK18_FIDUCIAL['hrdrag']
 
         # Load prior flow if specified (absolute path required).
         if prior_flow:
@@ -466,12 +471,12 @@ class VariableRedshift(BaseExperiment, CosmologyMixin):
         }
         
         # Compute D_H at nominal redshift
-        D_H_central = self.D_H_func(z_nominal, **params)
+        D_H_central = self.D_H_func(z_nominal, **params, **self.fixed_params)
         D_H_val = D_H_central.reshape(-1)
         
         if self.include_D_M:
             # Compute D_M at nominal redshift
-            D_M_central = self.D_M_func(z_nominal, **params)
+            D_M_central = self.D_M_func(z_nominal, **params, **self.fixed_params)
             D_M_val = D_M_central.reshape(-1)
             # Interleave [D_H(z_i), D_M(z_i)] for each redshift
             central_vals = torch.stack([D_H_val, D_M_val], dim=-1).reshape(-1)
@@ -556,9 +561,9 @@ class VariableRedshift(BaseExperiment, CosmologyMixin):
             parameters = self.sample_parameters(z.shape[:-1])
             
             # Compute mean predictions for all observations
-            D_H_mean = self.D_H_func(z, **parameters)
+            D_H_mean = self.D_H_func(z, **parameters, **self.fixed_params)
             if self.include_D_M:
-                D_M_mean = self.D_M_func(z, **parameters)
+                D_M_mean = self.D_M_func(z, **parameters, **self.fixed_params)
                 D_H_error, D_M_error = self.error_func(z, D_H_mean, D_M_mean)
                 means_per_z = torch.cat([D_H_mean.unsqueeze(-1), D_M_mean.unsqueeze(-1)], dim=-1)
                 sigmas_per_z = torch.cat([D_H_error.unsqueeze(-1), D_M_error.unsqueeze(-1)], dim=-1)
@@ -768,7 +773,7 @@ class VariableRedshift(BaseExperiment, CosmologyMixin):
         z = z_array.unsqueeze(-1)
 
         # Compute D_H mean and likelihood
-        D_H_mean = self.D_H_func(z, **parameters)
+        D_H_mean = self.D_H_func(z, **parameters, **self.fixed_params)
 
         # Extract feature values (convert to jnp for comparison)
         D_H_obs = jnp.asarray(getattr(features, features.names[0]))
@@ -777,7 +782,7 @@ class VariableRedshift(BaseExperiment, CosmologyMixin):
 
         # If including D_M, add its contribution
         if self.include_D_M:
-            D_M_mean = self.D_M_func(z, **parameters)
+            D_M_mean = self.D_M_func(z, **parameters, **self.fixed_params)
             D_M_obs = jnp.asarray(getattr(features, features.names[1]))
             D_M_diff = D_M_obs - jnp.asarray(D_M_mean.cpu().numpy())
             D_M_likelihood = jnp.exp(-0.5 * (D_M_diff / self.sigma_D_M) ** 2)
