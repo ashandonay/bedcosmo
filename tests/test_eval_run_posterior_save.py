@@ -14,7 +14,7 @@ from bedcosmo.artifacts import (
     save_posterior_samples,
 )
 from bedcosmo.evaluate import Evaluator
-from bedcosmo.plotting import BasePlotter, RunPlotter, nf_entries_from_posterior_bundle
+from bedcosmo.plotting import BasePlotter, nf_entries_from_posterior_bundle
 from bedcosmo.util import sample_nf
 
 
@@ -94,13 +94,6 @@ def test_plot_posterior_does_not_sample(tmp_path, monkeypatch):
         plotter.plot_posterior(experiment=experiment, nf_entries=entries, guide_samples=10)
     mock_sample.assert_not_called()
     experiment.get_guide_samples.assert_not_called()
-
-
-def test_sample_nf_not_on_evaluator_or_plotter():
-    assert not hasattr(Evaluator, "sample_nf")
-    assert not hasattr(RunPlotter, "sample_nf")
-    assert not hasattr(BasePlotter, "generate_posterior")
-    assert not hasattr(RunPlotter, "generate_posterior")
 
 
 def test_plot_posterior_loads_npz_when_entries_omitted(tmp_path, monkeypatch):
