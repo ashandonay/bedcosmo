@@ -13,7 +13,7 @@ from getdist import plots
 from bedcosmo.util import (
     get_runs_data, init_experiment, load_model, auto_seed, convert_color,
     load_nominal_samples, get_contour_area, parse_mlflow_params, sort_key_for_group_tuple,
-    GETDIST_SETTINGS, restrict_mcsamples, sample_nf_display_posterior,
+    GETDIST_SETTINGS, restrict_mcsamples, sample_nf,
 )
 from bedcosmo.artifacts import (
     load_eig_data_file,
@@ -951,7 +951,7 @@ class BasePlotter:
         if posterior_flow is None:
             return [], selected_step
 
-        entries = sample_nf_display_posterior(
+        entries = sample_nf(
             experiment,
             posterior_flow,
             display=display,
@@ -998,8 +998,8 @@ class BasePlotter:
         Plot a posterior triangle from precomputed NF display entries.
 
         Does **not** sample from the flow. Pass ``nf_entries`` from
-        :func:`bedcosmo.util.sample_nf_display_posterior` (or
-        ``Evaluator.sample_nf_posterior``). Optional grid / MCMC / prior
+        :func:`bedcosmo.util.sample_nf` (or
+        ``Evaluator.sample_nf``). Optional grid / MCMC / prior
         overlays are assembled here for the figure.
         """
         if isinstance(levels, (int, float)):
@@ -1205,8 +1205,8 @@ class BasePlotter:
         """
         Convenience: sample NF display entries (if needed) then plot.
 
-        Prefer :func:`bedcosmo.util.sample_nf_display_posterior` (or
-        ``Evaluator.sample_nf_posterior``) and ``plot_posterior_display`` when
+        Prefer :func:`bedcosmo.util.sample_nf` (or
+        ``Evaluator.sample_nf``) and ``plot_posterior_display`` when
         persisting or reusing samples.
         """
         if nf_entries is None:
