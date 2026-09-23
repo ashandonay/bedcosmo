@@ -3466,7 +3466,6 @@ class ComparisonPlotter(BasePlotter):
         sort_reference=None,
         normalize=False,
         show_errorbars=True,
-        plot_input_design=False,
         design_labels=None,
         show_ratio_to_nominal=True,
         filename=None,
@@ -3499,7 +3498,6 @@ class ComparisonPlotter(BasePlotter):
             normalize (bool): If True, plot percent difference vs each run's nominal EIG:
                                     ``100 * (EIG - EIG_nominal) / EIG_nominal``.
             show_errorbars (bool): If True, draw the filled std bands for each run.
-            plot_input_design (bool): If True, plot scatter points for input_designs from MLflow params on the heatmap.
                                     Only plots if they match the evaluation designs. Default False.
             design_labels (list, optional): Custom labels for each design dimension. Must be the same length as the number of design dimensions.
                                     If omitted, tries eig_data metadata, then the sort-reference (or first) run's
@@ -3515,11 +3513,10 @@ class ComparisonPlotter(BasePlotter):
         var = self._resolve_var(var)
         storage_path = self.storage_path
 
-        # Parse params if we need them for var labels/sorting, plot_input_design,
+        # Parse params if we need them for var labels/sorting,
         # or experiment init (design_labels / nominal_design fallback).
         need_params = (
-            plot_input_design
-            or var is not None
+            var is not None
             or design_labels is None
             or show_ratio_to_nominal
         )
@@ -3654,26 +3651,6 @@ class ComparisonPlotter(BasePlotter):
             optimal_eig = variable_data.get('optimal_eig')
             optimal_design = variable_data.get('optimal_design')
 
-            # Get input_designs from MLflow params if requested
-            input_designs_from_params = None
-            if plot_input_design:
-                # Find the corresponding run_data to get run_obj
-                run_data_item = next((r for r in run_data_list if r['run_id'] == run_id), None)
-                if run_data_item and run_data_item.get('run_obj') is not None:
-                    try:
-                        input_designs_param = run_data_item['run_obj'].data.params.get('input_designs')
-                        if input_designs_param is not None:
-                            input_designs_list = json.loads(input_designs_param)
-                            input_designs_from_params = np.array(input_designs_list)
-                            if input_designs_from_params.ndim == 1:
-                                input_designs_from_params = input_designs_from_params.reshape(-1, 1)
-                            # Check if design dimensionality matches (allow different number of designs)
-                            if input_designs_from_params.shape[1] != designs_arr.shape[1]:
-                                print(f"Warning: input_designs from params for run {run_id} has {input_designs_from_params.shape[1]} dimensions, but evaluation designs have {designs_arr.shape[1]} dimensions. Skipping.")
-                                input_designs_from_params = None
-                    except Exception as e:
-                        print(f"Warning: Error loading input_designs from params for run {run_id}: {e}")
-
             run_records.append({
                 'run_id': run_id,
                 'run_label': run_label,
@@ -3684,7 +3661,6 @@ class ComparisonPlotter(BasePlotter):
                 'nominal_eig': nominal_eig,
                 'optimal_eig': optimal_eig,
                 'optimal_design': np.array(optimal_design) if optimal_design is not None else None,
-                'input_designs_from_params': input_designs_from_params
             })
 
         if not run_records:
@@ -3948,40 +3924,6 @@ class ComparisonPlotter(BasePlotter):
                         edgecolor='black',
                         zorder=5,
                         s=60
-                    )
-            
-            # Plot input_designs from MLflow params if requested
-            if plot_input_design and record.get('input_designs_from_params') is not None:
-                input_designs = record['input_designs_from_params']
-                # Match each input_design to the corresponding evaluation design
-                scatter_x = []
-                scatter_y = []
-                
-                for input_design in input_designs:
-                    # Find the index in the original (unsorted) designs array
-                    match_idx = None
-                    for idx, eval_design in enumerate(record['designs']):
-                        if np.allclose(eval_design, input_design, rtol=1e-5, atol=1e-8):
-                            match_idx = idx
-                            break
-                    
-                    if match_idx is not None:
-                        # Find the position in the sorted array
-                        sorted_pos = np.where(sort_idx == match_idx)[0][0]
-                        scatter_x.append(x_vals[sorted_pos])
-                        scatter_y.append(eig_vals_plot[sorted_pos])
-                
-                if scatter_x:
-                    # Plot scatter points for this run with its color (no label to exclude from legend)
-                    ax_line.scatter(
-                        scatter_x,
-                        scatter_y,
-                        marker='x',
-                        s=100,
-                        color=color,
-                        linewidths=2.5,
-                        zorder=6,
-                        alpha=0.9
                     )
 
         y_label = 'Expected Information Gain [bits]'

@@ -162,8 +162,7 @@ class Evaluator:
                     f"trained against -- retrain on current HEAD."
                 )
 
-        # Initialize experiment - it will handle input_design and generate designs accordingly
-        # (single design, multiple designs, or grid)
+        # Designs come from design_args (explicit .npy, nominal, or generated grid)
         self.experiment = init_experiment(
             self.run_obj, self.run_args, device=self.device,
             design_args=self.design_args, global_rank=self.global_rank,
