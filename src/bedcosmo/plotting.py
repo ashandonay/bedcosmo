@@ -851,216 +851,6 @@ class BasePlotter:
         except ValueError:
             return None
 
-    def _sample_nf_entries(
-        self,
-        display,
-        guide_samples,
-        transform_output=True,
-        *,
-        experiment=None,
-        posterior_flow=None,
-        input_designs=None,
-        eig_values=None,
-        nominal_eig=None,
-        nominal_prior_entropy=None,
-        nominal_posterior_entropy=None,
-        prior_entropy_by_design=None,
-        posterior_entropy_by_design=None,
-        device=None,
-        run_obj=None,
-        run_args=None,
-        exp_id=None,
-        step=None,
-        seed=1,
-        global_rank=0,
-        eval_step=None,
-        params=None,
-        marginal_eig=False,
-        plot_prior=False,
-    ):
-        """
-        Sample NF at nominal and/or optimal designs; return labeled plot entries.
-
-        Resolves design + central ``y``, calls :func:`bedcosmo.util.sample_nf`
-        per design, and attaches legend label/color metadata. Pass experiment +
-        posterior_flow directly, or ``run_obj`` + run_args + exp_id + step to
-        load from MLflow.
-
-        Returns:
-            (entries, selected_step) — entries have samples, label, color,
-            line_style, alpha, name, design; selected_step set when loading
-            from a run, else None.
-        """
-        display = self._normalize_display(display)
-        selected_step = None
-
-        if run_obj is not None:
-            if run_args is None or exp_id is None or step is None:
-                raise ValueError("run_args, exp_id, and step required when run_obj is provided")
-            if str(device).startswith("cuda") and not torch.cuda.is_available():
-                device = "cpu"
-            experiment = init_experiment(
-                run_obj, run_args, device=device, global_rank=global_rank, verbose=False
-            )
-            posterior_flow, selected_step = load_model(
-                experiment, step, run_obj, run_args, device, global_rank=global_rank
-            )
-            auto_seed(seed)
-            if 'optimal' in display or 'nominal' in display:
-                run_id = run_obj.info.run_id
-                artifacts_dir = f"{self.storage_path}/mlruns/{exp_id}/{run_id}/artifacts"
-                try:
-                    _, eig_data = self.load_eig_data_file(
-                        artifacts_dir, eval_step=eval_step, eig_kind='variable'
-                    )
-                    if 'optimal' in display:
-                        input_designs, eig_values, nominal_eig, entropy_info = self._parse_eig_for_posterior(
-                            eig_data, eval_step
-                        )
-                    else:
-                        _, step_str = self._resolve_step(eig_data, eval_step)
-                        nominal_data = eig_data.get(step_str, {}).get('nominal', {})
-                        nominal_eig_val = nominal_data.get('eigs_avg')
-                        if isinstance(nominal_eig_val, list):
-                            nominal_eig_val = nominal_eig_val[0] if nominal_eig_val else None
-                        nominal_eig = float(nominal_eig_val) if nominal_eig_val is not None else None
-
-                        def _scalar_entropy(block, key):
-                            val = block.get(key)
-                            if val is None:
-                                return None
-                            if isinstance(val, list):
-                                val = val[0] if len(val) > 0 else None
-                            return float(val) if val is not None else None
-
-                        entropy_info = {
-                            "nominal_prior_entropy": _scalar_entropy(nominal_data, "prior_entropy_avg"),
-                            "nominal_posterior_entropy": _scalar_entropy(nominal_data, "posterior_entropy_avg"),
-                            "prior_entropy_by_design": None,
-                            "posterior_entropy_by_design": None,
-                        }
-                    nominal_prior_entropy = entropy_info.get("nominal_prior_entropy")
-                    nominal_posterior_entropy = entropy_info.get("nominal_posterior_entropy")
-                    prior_entropy_by_design = entropy_info.get("prior_entropy_by_design")
-                    posterior_entropy_by_design = entropy_info.get("posterior_entropy_by_design")
-                except ValueError:
-                    if 'optimal' in display:
-                        raise
-        elif experiment is None:
-            raise ValueError("Either experiment or run_obj must be provided")
-
-        if posterior_flow is None:
-            return [], selected_step
-
-        if device is None:
-            device = experiment.device
-
-        y = experiment.central_val
-        eig_label = "Marginal EIG" if marginal_eig else "EIG"
-        include_prior_in_legend = not plot_prior
-        entries = []
-
-        if "nominal" in display:
-            nominal_design = experiment.nominal_design
-            samples = sample_nf(
-                experiment,
-                posterior_flow,
-                nominal_design,
-                y,
-                num_samples=guide_samples,
-                transform_output=transform_output,
-                params=params,
-                device=device,
-            )
-            eig_str = (
-                f", {eig_label}: {nominal_eig:.3f} bits"
-                if nominal_eig is not None
-                else ""
-            )
-            eig_str += self._entropy_legend_suffix(
-                nominal_prior_entropy,
-                nominal_posterior_entropy,
-                include_prior=include_prior_in_legend,
-            )
-            if hasattr(nominal_design, "detach"):
-                nominal_design_np = nominal_design.detach().cpu().numpy().reshape(-1)
-            else:
-                nominal_design_np = np.asarray(nominal_design).reshape(-1)
-            entries.append({
-                "samples": samples,
-                "name": "nominal",
-                "design": nominal_design_np,
-                "label": f"Nominal Design (NF){eig_str}",
-                "color": "tab:blue",
-                "line_style": "-",
-                "alpha": 1.0,
-            })
-
-        if "optimal" in display:
-            if input_designs is None:
-                raise ValueError("input_designs required when display includes 'optimal'")
-            input_designs = np.asarray(input_designs)
-            has_multiple_designs = len(input_designs) > 1
-
-            if has_multiple_designs and eig_values is not None:
-                eig_values = np.asarray(eig_values)
-                optimal_idx = int(np.argmax(eig_values))
-                optimal_design = input_designs[optimal_idx]
-                optimal_eig = float(eig_values[optimal_idx])
-                eig_str = f", {eig_label}: {optimal_eig:.3f} bits"
-                opt_prior_h = None
-                opt_post_h = None
-                if (
-                    prior_entropy_by_design is not None
-                    and len(prior_entropy_by_design) > optimal_idx
-                ):
-                    opt_prior_h = float(prior_entropy_by_design[optimal_idx])
-                if (
-                    posterior_entropy_by_design is not None
-                    and len(posterior_entropy_by_design) > optimal_idx
-                ):
-                    opt_post_h = float(posterior_entropy_by_design[optimal_idx])
-                eig_str += self._entropy_legend_suffix(
-                    opt_prior_h, opt_post_h, include_prior=include_prior_in_legend
-                )
-                label = f"Optimal Design (NF){eig_str}"
-            elif len(input_designs) >= 1:
-                optimal_design = input_designs[0]
-                optimal_eig = (
-                    float(np.asarray(eig_values)[0]) if eig_values is not None else None
-                )
-                eig_str = (
-                    f", {eig_label}: {optimal_eig:.3f} bits"
-                    if optimal_eig is not None
-                    else ""
-                )
-                label = f"Input Design (NF){eig_str}"
-            else:
-                raise ValueError("No input designs available for optimal posterior")
-
-            samples = sample_nf(
-                experiment,
-                posterior_flow,
-                optimal_design,
-                y,
-                num_samples=guide_samples,
-                transform_output=transform_output,
-                params=params,
-                device=device,
-            )
-            entries.append({
-                "samples": samples,
-                "name": "optimal",
-                "design": np.asarray(optimal_design, dtype=np.float64).reshape(-1),
-                "label": label,
-                "color": "tab:orange",
-                "line_style": "-",
-                "alpha": 1.0,
-            })
-
-        return entries, selected_step
-
-
     def plot_posterior(
         self,
         experiment,
@@ -1291,34 +1081,121 @@ class BasePlotter:
         nf_entries=None,
     ):
         """
-        Convenience: sample NF entries (if needed) then :meth:`plot_posterior`.
-
-        Prefer resolving designs/``y`` then :func:`bedcosmo.util.sample_nf`
-        (and ``plot_posterior``) when persisting or reusing samples.
+        Convenience: resolve designs/``y``, call :func:`bedcosmo.util.sample_nf`,
+        build labeled entries, then :meth:`plot_posterior`.
         """
         if nf_entries is None:
             auto_seed(seed)
-            nf_entries, _ = self._sample_nf_entries(
-                display,
-                guide_samples,
-                transform_output=transform_output,
-                experiment=experiment,
-                posterior_flow=posterior_flow,
-                input_designs=input_designs,
-                eig_values=eig_values,
-                nominal_eig=nominal_eig,
-                nominal_prior_entropy=nominal_prior_entropy,
-                nominal_posterior_entropy=nominal_posterior_entropy,
-                prior_entropy_by_design=prior_entropy_by_design,
-                posterior_entropy_by_design=posterior_entropy_by_design,
-                device=device,
-                params=params,
-                marginal_eig=marginal_eig,
-                plot_prior=plot_prior,
-            )
+
+            display = self._normalize_display(display)
+            if device is None:
+                device = experiment.device
+            if posterior_flow is None:
+                nf_entries = []
+            else:
+                y = experiment.central_val
+                eig_label = "Marginal EIG" if marginal_eig else "EIG"
+                include_prior_in_legend = not plot_prior
+                nf_entries = []
+
+                if "nominal" in display:
+                    nominal_design = experiment.nominal_design
+                    samples = sample_nf(
+                        experiment,
+                        posterior_flow,
+                        nominal_design,
+                        y,
+                        num_samples=guide_samples,
+                        transform_output=transform_output,
+                        params=params,
+                        device=device,
+                    )
+                    eig_str = (
+                        f", {eig_label}: {nominal_eig:.3f} bits"
+                        if nominal_eig is not None
+                        else ""
+                    )
+                    eig_str += self._entropy_legend_suffix(
+                        nominal_prior_entropy,
+                        nominal_posterior_entropy,
+                        include_prior=include_prior_in_legend,
+                    )
+                    if hasattr(nominal_design, "detach"):
+                        nominal_design_np = nominal_design.detach().cpu().numpy().reshape(-1)
+                    else:
+                        nominal_design_np = np.asarray(nominal_design).reshape(-1)
+                    nf_entries.append({
+                        "samples": samples,
+                        "name": "nominal",
+                        "design": nominal_design_np,
+                        "label": f"Nominal Design (NF){eig_str}",
+                        "color": "tab:blue",
+                        "line_style": "-",
+                        "alpha": 1.0,
+                    })
+
+                if "optimal" in display:
+                    if input_designs is None:
+                        raise ValueError("input_designs required when display includes 'optimal'")
+                    input_designs_arr = np.asarray(input_designs)
+                    if len(input_designs_arr) > 1 and eig_values is not None:
+                        eig_values_arr = np.asarray(eig_values)
+                        optimal_idx = int(np.argmax(eig_values_arr))
+                        optimal_design = input_designs_arr[optimal_idx]
+                        optimal_eig = float(eig_values_arr[optimal_idx])
+                        eig_str = f", {eig_label}: {optimal_eig:.3f} bits"
+                        opt_prior_h = None
+                        opt_post_h = None
+                        if (
+                            prior_entropy_by_design is not None
+                            and len(prior_entropy_by_design) > optimal_idx
+                        ):
+                            opt_prior_h = float(prior_entropy_by_design[optimal_idx])
+                        if (
+                            posterior_entropy_by_design is not None
+                            and len(posterior_entropy_by_design) > optimal_idx
+                        ):
+                            opt_post_h = float(posterior_entropy_by_design[optimal_idx])
+                        eig_str += self._entropy_legend_suffix(
+                            opt_prior_h, opt_post_h, include_prior=include_prior_in_legend
+                        )
+                        label = f"Optimal Design (NF){eig_str}"
+                    elif len(input_designs_arr) >= 1:
+                        optimal_design = input_designs_arr[0]
+                        optimal_eig = (
+                            float(np.asarray(eig_values)[0]) if eig_values is not None else None
+                        )
+                        eig_str = (
+                            f", {eig_label}: {optimal_eig:.3f} bits"
+                            if optimal_eig is not None
+                            else ""
+                        )
+                        label = f"Input Design (NF){eig_str}"
+                    else:
+                        raise ValueError("No input designs available for optimal posterior")
+
+                    samples = sample_nf(
+                        experiment,
+                        posterior_flow,
+                        optimal_design,
+                        y,
+                        num_samples=guide_samples,
+                        transform_output=transform_output,
+                        params=params,
+                        device=device,
+                    )
+                    nf_entries.append({
+                        "samples": samples,
+                        "name": "optimal",
+                        "design": np.asarray(optimal_design, dtype=np.float64).reshape(-1),
+                        "label": label,
+                        "color": "tab:orange",
+                        "line_style": "-",
+                        "alpha": 1.0,
+                    })
         return self.plot_posterior(
-            experiment,
-            nf_entries,
+            experiment=experiment,
+            nf_entries=nf_entries,
             levels=levels,
             guide_samples=guide_samples,
             params=params,
@@ -2112,7 +1989,7 @@ class RunPlotter(BasePlotter):
         )
 
     def generate_posterior(self, **kwargs):
-        """Convenience: load run data, sample via ``_sample_nf_entries``, then plot."""
+        """Load run data, then sample + plot via :meth:`BasePlotter.generate_posterior`."""
         levels = kwargs.get("levels", [0.68])
         if isinstance(levels, (int, float)):
             levels = [levels]
@@ -2127,8 +2004,6 @@ class RunPlotter(BasePlotter):
             kwargs.pop("grid_samples", None) if eig_data_override is not None else None
         )
         title_override = kwargs.pop("title", None)
-        nf_entries = kwargs.pop("nf_entries", None)
-        display = kwargs.pop("display", ("nominal", "optimal"))
 
         data = self._extract_run_posterior_data(
             eval_step,
@@ -2136,49 +2011,27 @@ class RunPlotter(BasePlotter):
             eig_data=eig_data_override,
             params=kwargs.get("params"),
         )
-        if nf_entries is None:
-            auto_seed(kwargs.get("seed", 1))
-            nf_entries, _ = self._sample_nf_entries(
-                display,
-                kwargs.get("guide_samples", 1000),
-                transform_output=kwargs.get("transform_output", True),
-                experiment=data["experiment"],
-                posterior_flow=data["posterior_flow"],
-                input_designs=data.get("input_designs"),
-                eig_values=data.get("eig_values"),
-                nominal_eig=data.get("nominal_eig"),
-                nominal_prior_entropy=data.get("nominal_prior_entropy"),
-                nominal_posterior_entropy=data.get("nominal_posterior_entropy"),
-                prior_entropy_by_design=data.get("prior_entropy_by_design"),
-                posterior_entropy_by_design=data.get("posterior_entropy_by_design"),
-                device=device,
-                params=kwargs.get("params"),
-                marginal_eig=data.get("marginal_eig", False),
-                plot_prior=kwargs.get("plot_prior", False),
-            )
-
         title = title_override if title_override is not None else data.get("title")
         if explicit_grid_samples is not None:
             kwargs["grid_samples"] = explicit_grid_samples
         kwargs.setdefault("nominal_grid_eig", data.get("nominal_grid_eig"))
         kwargs.setdefault("nominal_prior_entropy", data.get("nominal_prior_entropy"))
+        kwargs.setdefault("experiment_id", self.experiment_id)
+        kwargs.setdefault("run_id", self.run_id)
 
-        for key in (
-            "posterior_flow",
-            "input_designs",
-            "eig_values",
-            "nominal_eig",
-            "nominal_posterior_entropy",
-            "prior_entropy_by_design",
-            "posterior_entropy_by_design",
-            "marginal_eig",
-        ):
-            kwargs.pop(key, None)
-
-        return self.plot_posterior(
-            nf_entries,
+        return super().generate_posterior(
             experiment=data["experiment"],
+            posterior_flow=data.get("posterior_flow"),
+            input_designs=data.get("input_designs"),
+            eig_values=data.get("eig_values"),
+            nominal_eig=data.get("nominal_eig"),
+            nominal_prior_entropy=data.get("nominal_prior_entropy"),
+            nominal_posterior_entropy=data.get("nominal_posterior_entropy"),
+            prior_entropy_by_design=data.get("prior_entropy_by_design"),
+            posterior_entropy_by_design=data.get("posterior_entropy_by_design"),
+            device=device,
             title=title,
+            marginal_eig=data.get("marginal_eig", False),
             **kwargs,
         )
 
@@ -3228,8 +3081,8 @@ class ComparisonPlotter(BasePlotter):
         """
         Compare posterior distributions across multiple runs in a triangle plot.
 
-        For each run, loads the posterior flow and samples via experiment.get_guide_samples
-        using the same display options as generate_posterior.
+        For each run, loads the posterior flow, resolves designs/``y``, and samples via
+        :func:`bedcosmo.util.sample_nf` using the same display options as generate_posterior.
 
         Args:
             var (str or list, optional): Parameter(s) to group runs by.
@@ -3371,20 +3224,204 @@ class ComparisonPlotter(BasePlotter):
                     continue
                 for rank_idx, rank in enumerate(global_ranks):
                     try:
-                        nf_entries, _ = self._sample_nf_entries(
-                            display,
-                            guide_samples,
-                            transform_output=transform_output,
-                            run_obj=run_data_item['run_obj'],
-                            run_args=run_data_item['params'],
-                            exp_id=exp_id,
-                            step=step,
-                            seed=seed,
-                            device=device,
+                        use_device = device
+                        if str(use_device).startswith("cuda") and not torch.cuda.is_available():
+                            use_device = "cpu"
+                        experiment = init_experiment(
+                            run_data_item['run_obj'],
+                            run_data_item['params'],
+                            device=use_device,
                             global_rank=rank,
-                            eval_step=eval_step,
-                            plot_prior=plot_prior,
+                            verbose=False,
                         )
+                        posterior_flow, _ = load_model(
+                            experiment,
+                            step,
+                            run_data_item['run_obj'],
+                            run_data_item['params'],
+                            use_device,
+                            global_rank=rank,
+                        )
+                        auto_seed(seed)
+
+                        input_designs = None
+                        eig_values = None
+                        nominal_eig = None
+                        nominal_prior_entropy = None
+                        nominal_posterior_entropy = None
+                        prior_entropy_by_design = None
+                        posterior_entropy_by_design = None
+                        if 'optimal' in display or 'nominal' in display:
+                            artifacts_dir = (
+                                f"{self.storage_path}/mlruns/{exp_id}/"
+                                f"{run_data_item['run_obj'].info.run_id}/artifacts"
+                            )
+                            try:
+                                _, eig_data = self.load_eig_data_file(
+                                    artifacts_dir, eval_step=eval_step, eig_kind='variable'
+                                )
+                                if 'optimal' in display:
+                                    (
+                                        input_designs,
+                                        eig_values,
+                                        nominal_eig,
+                                        entropy_info,
+                                    ) = self._parse_eig_for_posterior(eig_data, eval_step)
+                                else:
+                                    _, step_str = self._resolve_step(eig_data, eval_step)
+                                    nominal_data = eig_data.get(step_str, {}).get('nominal', {})
+                                    nominal_eig_val = nominal_data.get('eigs_avg')
+                                    if isinstance(nominal_eig_val, list):
+                                        nominal_eig_val = (
+                                            nominal_eig_val[0] if nominal_eig_val else None
+                                        )
+                                    nominal_eig = (
+                                        float(nominal_eig_val)
+                                        if nominal_eig_val is not None
+                                        else None
+                                    )
+
+                                    def _scalar_entropy(block, key):
+                                        val = block.get(key)
+                                        if val is None:
+                                            return None
+                                        if isinstance(val, list):
+                                            val = val[0] if len(val) > 0 else None
+                                        return float(val) if val is not None else None
+
+                                    entropy_info = {
+                                        "nominal_prior_entropy": _scalar_entropy(
+                                            nominal_data, "prior_entropy_avg"
+                                        ),
+                                        "nominal_posterior_entropy": _scalar_entropy(
+                                            nominal_data, "posterior_entropy_avg"
+                                        ),
+                                        "prior_entropy_by_design": None,
+                                        "posterior_entropy_by_design": None,
+                                    }
+                                nominal_prior_entropy = entropy_info.get(
+                                    "nominal_prior_entropy"
+                                )
+                                nominal_posterior_entropy = entropy_info.get(
+                                    "nominal_posterior_entropy"
+                                )
+                                prior_entropy_by_design = entropy_info.get(
+                                    "prior_entropy_by_design"
+                                )
+                                posterior_entropy_by_design = entropy_info.get(
+                                    "posterior_entropy_by_design"
+                                )
+                            except ValueError:
+                                if 'optimal' in display:
+                                    raise
+
+                        y = experiment.central_val
+                        eig_label = "EIG"
+                        include_prior_in_legend = not plot_prior
+                        nf_entries = []
+                        if "nominal" in display:
+                            nominal_design = experiment.nominal_design
+                            samples = sample_nf(
+                                experiment,
+                                posterior_flow,
+                                nominal_design,
+                                y,
+                                num_samples=guide_samples,
+                                transform_output=transform_output,
+                                device=use_device,
+                            )
+                            eig_str = (
+                                f", {eig_label}: {nominal_eig:.3f} bits"
+                                if nominal_eig is not None
+                                else ""
+                            )
+                            eig_str += self._entropy_legend_suffix(
+                                nominal_prior_entropy,
+                                nominal_posterior_entropy,
+                                include_prior=include_prior_in_legend,
+                            )
+                            if hasattr(nominal_design, "detach"):
+                                design_np = nominal_design.detach().cpu().numpy().reshape(-1)
+                            else:
+                                design_np = np.asarray(nominal_design).reshape(-1)
+                            nf_entries.append({
+                                "samples": samples,
+                                "name": "nominal",
+                                "design": design_np,
+                                "label": f"Nominal Design (NF){eig_str}",
+                                "color": "tab:blue",
+                                "line_style": "-",
+                                "alpha": 1.0,
+                            })
+                        if "optimal" in display:
+                            if input_designs is None:
+                                raise ValueError(
+                                    "input_designs required when display includes 'optimal'"
+                                )
+                            input_designs_arr = np.asarray(input_designs)
+                            if len(input_designs_arr) > 1 and eig_values is not None:
+                                eig_values_arr = np.asarray(eig_values)
+                                optimal_idx = int(np.argmax(eig_values_arr))
+                                optimal_design = input_designs_arr[optimal_idx]
+                                optimal_eig = float(eig_values_arr[optimal_idx])
+                                eig_str = f", {eig_label}: {optimal_eig:.3f} bits"
+                                opt_prior_h = None
+                                opt_post_h = None
+                                if (
+                                    prior_entropy_by_design is not None
+                                    and len(prior_entropy_by_design) > optimal_idx
+                                ):
+                                    opt_prior_h = float(prior_entropy_by_design[optimal_idx])
+                                if (
+                                    posterior_entropy_by_design is not None
+                                    and len(posterior_entropy_by_design) > optimal_idx
+                                ):
+                                    opt_post_h = float(
+                                        posterior_entropy_by_design[optimal_idx]
+                                    )
+                                eig_str += self._entropy_legend_suffix(
+                                    opt_prior_h,
+                                    opt_post_h,
+                                    include_prior=include_prior_in_legend,
+                                )
+                                entry_label = f"Optimal Design (NF){eig_str}"
+                            elif len(input_designs_arr) >= 1:
+                                optimal_design = input_designs_arr[0]
+                                optimal_eig = (
+                                    float(np.asarray(eig_values)[0])
+                                    if eig_values is not None
+                                    else None
+                                )
+                                eig_str = (
+                                    f", {eig_label}: {optimal_eig:.3f} bits"
+                                    if optimal_eig is not None
+                                    else ""
+                                )
+                                entry_label = f"Input Design (NF){eig_str}"
+                            else:
+                                raise ValueError(
+                                    "No input designs available for optimal posterior"
+                                )
+                            samples = sample_nf(
+                                experiment,
+                                posterior_flow,
+                                optimal_design,
+                                y,
+                                num_samples=guide_samples,
+                                transform_output=transform_output,
+                                device=use_device,
+                            )
+                            nf_entries.append({
+                                "samples": samples,
+                                "name": "optimal",
+                                "design": np.asarray(
+                                    optimal_design, dtype=np.float64
+                                ).reshape(-1),
+                                "label": entry_label,
+                                "color": "tab:orange",
+                                "line_style": "-",
+                                "alpha": 1.0,
+                            })
                     except Exception as e:
                         print(
                             f"Warning: Could not get guide samples for run "
@@ -6606,19 +6643,26 @@ def compare_contours(
         run_args = parse_mlflow_params(run_obj.data.params)
         exp_id = run_obj.info.experiment_id
         for step in steps:
-            nf_entries, _ = plotter._sample_nf_entries(
-                'nominal',
-                guide_samples,
-                run_obj=run_obj,
-                run_args=run_args,
-                exp_id=exp_id,
-                step=step,
-                seed=seed,
-                device=device,
-                global_rank=global_rank,
+            use_device = device
+            if str(use_device).startswith("cuda") and not torch.cuda.is_available():
+                use_device = "cpu"
+            experiment = init_experiment(
+                run_obj, run_args, device=use_device, global_rank=global_rank, verbose=False
             )
-            if nf_entries:
-                samples.append(nf_entries[0]['samples'])
+            posterior_flow, _ = load_model(
+                experiment, step, run_obj, run_args, use_device, global_rank=global_rank
+            )
+            auto_seed(seed)
+            samples.append(
+                sample_nf(
+                    experiment,
+                    posterior_flow,
+                    experiment.nominal_design,
+                    experiment.central_val,
+                    num_samples=guide_samples,
+                    device=use_device,
+                )
+            )
     
     areas_shoelace = []
     areas_grid = []

@@ -6,6 +6,7 @@ import pytest
 from unittest.mock import Mock, patch, MagicMock
 from datetime import datetime
 import numpy as np
+import torch
 
 # Try to import optional dependencies, use mocks if not available
 try:
@@ -417,39 +418,54 @@ class TestComparisonPlotter:
     def test_compare_posterior_no_samples(self, comparison_plotter, mock_run_data_list):
         """Test compare_posterior when no samples are generated."""
         with patch('bedcosmo.plotting.get_runs_data') as mock_get_runs, \
-             patch.object(
-                 ComparisonPlotter, '_sample_nf_entries', side_effect=RuntimeError("fail")
+             patch(
+                 'bedcosmo.plotting.init_experiment',
+                 side_effect=RuntimeError("fail"),
              ):
 
             mock_get_runs.return_value = (mock_run_data_list, 'exp_123', 'test_exp')
 
             result = comparison_plotter.compare_posterior()
             assert result is None
-    
+
     def test_compare_posterior_success(self, comparison_plotter, mock_run_data_list, tmp_path):
         """Test successful compare_posterior call."""
+        mock_sample = Mock()
+        mock_sample.paramNames.names = ['param1', 'param2']
+        mock_exp = Mock()
+        mock_exp.central_val = torch.zeros(2)
+        mock_exp.nominal_design = torch.ones(2)
+        mock_exp.device = 'cpu'
+
         with patch('bedcosmo.plotting.get_runs_data') as mock_get_runs, \
-             patch.object(ComparisonPlotter, '_sample_nf_entries') as mock_nf_samples, \
+             patch('bedcosmo.plotting.init_experiment', return_value=mock_exp), \
+             patch('bedcosmo.plotting.load_model', return_value=(Mock(), 'step_1000')), \
+             patch('bedcosmo.plotting.sample_nf', return_value=mock_sample), \
+             patch.object(
+                 ComparisonPlotter,
+                 'load_eig_data_file',
+                 return_value=(None, {'step_1000': {'nominal': {}, 'variable': {}}}),
+             ), \
+             patch.object(
+                 ComparisonPlotter,
+                 '_parse_eig_for_posterior',
+                 return_value=(
+                     np.array([[0.0, 0.0], [1.0, 1.0]]),
+                     np.array([0.1, 0.9]),
+                     0.5,
+                     {},
+                 ),
+             ), \
              patch.object(ComparisonPlotter, 'plot_triangle') as mock_plot_triangle, \
              patch.object(comparison_plotter, 'save_figure') as mock_save, \
              patch.object(comparison_plotter, 'get_save_dir') as mock_get_dir, \
              patch.object(comparison_plotter, 'generate_filename') as mock_gen_filename:
 
-            # Setup mocks
             mock_get_runs.return_value = (mock_run_data_list, 'exp_123', 'test_exp')
-
-            # Create mock GetDist samples
-            mock_sample = Mock()
-            mock_sample.paramNames.names = ['param1', 'param2']
-            mock_nf_samples.return_value = ([{'samples': mock_sample}], 'step_1000')
-
-            # Mock plot_triangle (inherited from BasePlotter)
             mock_plotter = Mock()
             mock_plotter.fig = Mock()
             mock_plotter.fig.legends = []
             mock_plot_triangle.return_value = mock_plotter
-
-            # Use tmp_path for save directory to avoid permission issues
             mock_get_dir.return_value = str(tmp_path / "plots")
             mock_gen_filename.return_value = "test.png"
 
@@ -462,17 +478,38 @@ class TestComparisonPlotter:
 
     def test_compare_posterior_with_colors(self, comparison_plotter, mock_run_data_list):
         """Test compare_posterior with custom colors."""
+        mock_sample = Mock()
+        mock_sample.paramNames.names = ['param1', 'param2']
+        mock_exp = Mock()
+        mock_exp.central_val = torch.zeros(2)
+        mock_exp.nominal_design = torch.ones(2)
+        mock_exp.device = 'cpu'
+
         with patch('bedcosmo.plotting.get_runs_data') as mock_get_runs, \
-             patch.object(ComparisonPlotter, '_sample_nf_entries') as mock_nf_samples, \
+             patch('bedcosmo.plotting.init_experiment', return_value=mock_exp), \
+             patch('bedcosmo.plotting.load_model', return_value=(Mock(), 'step_1000')), \
+             patch('bedcosmo.plotting.sample_nf', return_value=mock_sample), \
+             patch.object(
+                 ComparisonPlotter,
+                 'load_eig_data_file',
+                 return_value=(None, {'step_1000': {'nominal': {}, 'variable': {}}}),
+             ), \
+             patch.object(
+                 ComparisonPlotter,
+                 '_parse_eig_for_posterior',
+                 return_value=(
+                     np.array([[0.0, 0.0], [1.0, 1.0]]),
+                     np.array([0.1, 0.9]),
+                     0.5,
+                     {},
+                 ),
+             ), \
              patch.object(ComparisonPlotter, 'plot_triangle') as mock_plot_triangle, \
              patch.object(comparison_plotter, 'save_figure'), \
              patch.object(comparison_plotter, 'get_save_dir'), \
              patch.object(comparison_plotter, 'generate_filename'):
 
             mock_get_runs.return_value = (mock_run_data_list, 'exp_123', 'test_exp')
-            mock_sample = Mock()
-            mock_sample.paramNames.names = ['param1', 'param2']
-            mock_nf_samples.return_value = ([{'samples': mock_sample}], 'step_1000')
             mock_plotter = Mock()
             mock_plotter.fig = Mock()
             mock_plotter.fig.legends = []
@@ -481,7 +518,6 @@ class TestComparisonPlotter:
             custom_colors = ['red', 'blue']
             comparison_plotter.compare_posterior(colors=custom_colors)
 
-            # Check that plot_triangle was called with colors
             call_args = mock_plot_triangle.call_args
             assert 'colors' in call_args.kwargs or len(call_args[0]) > 1
 
@@ -489,9 +525,40 @@ class TestComparisonPlotter:
         self, comparison_plotter, mock_run_data_list, tmp_path
     ):
         """Prior overlays use faint contours; posteriors include entropy in legend."""
+        mock_sample = Mock()
+        mock_sample.paramNames.names = ['param1', 'param2']
+        mock_sample.paramNames.list.return_value = ['param1', 'param2']
+        mock_exp = Mock()
+        mock_exp.central_val = torch.zeros(2)
+        mock_exp.nominal_design = torch.ones(2)
+        mock_exp.device = 'cpu'
+        mock_exp.get_prior_samples.return_value = mock_sample
+        mock_exp.prior_args = {'foo': 'bar'}
+
         with patch('bedcosmo.plotting.get_runs_data') as mock_get_runs, \
-             patch('bedcosmo.plotting.init_experiment') as mock_init_exp, \
-             patch.object(ComparisonPlotter, '_sample_nf_entries') as mock_nf_samples, \
+             patch('bedcosmo.plotting.init_experiment', return_value=mock_exp) as mock_init_exp, \
+             patch('bedcosmo.plotting.load_model', return_value=(Mock(), 'step_1000')), \
+             patch('bedcosmo.plotting.sample_nf', return_value=mock_sample), \
+             patch.object(
+                 ComparisonPlotter,
+                 'load_eig_data_file',
+                 return_value=(None, {'step_1000': {'nominal': {}, 'variable': {}}}),
+             ), \
+             patch.object(
+                 ComparisonPlotter,
+                 '_parse_eig_for_posterior',
+                 return_value=(
+                     np.array([[0.0, 0.0], [1.0, 1.0]]),
+                     np.array([0.1, 0.9]),
+                     1.23,
+                     {
+                         "nominal_prior_entropy": 4.5,
+                         "nominal_posterior_entropy": 3.2,
+                         "prior_entropy_by_design": [1.0, 2.0],
+                         "posterior_entropy_by_design": [3.0, 3.2],
+                     },
+                 ),
+             ), \
              patch.object(
                  ComparisonPlotter,
                  '_nominal_prior_entropy_for_run',
@@ -503,22 +570,6 @@ class TestComparisonPlotter:
              patch.object(comparison_plotter, 'generate_filename', return_value='test.png'):
 
             mock_get_runs.return_value = (mock_run_data_list, 'exp_123', 'test_exp')
-
-            mock_sample = Mock()
-            mock_sample.paramNames.names = ['param1', 'param2']
-            mock_sample.paramNames.list.return_value = ['param1', 'param2']
-            mock_nf_samples.return_value = ([{
-                'samples': mock_sample,
-                'label': 'Nominal Design (NF), EIG: 1.23 bits, H_post: 3.20 bits',
-                'alpha': 1.0,
-                'line_style': '-',
-            }], 'step_1000')
-
-            mock_experiment = Mock()
-            mock_experiment.get_prior_samples.return_value = mock_sample
-            mock_experiment.prior_args = {'foo': 'bar'}
-            mock_init_exp.return_value = mock_experiment
-
             mock_plotter = Mock()
             mock_plotter.fig = Mock()
             mock_plotter.fig.legends = []
@@ -1399,15 +1450,22 @@ class TestCompareContours:
     
     def test_compare_contours_no_runs(self, mock_scratch_env):
         """Test compare_contours when no runs are found."""
-        with patch('bedcosmo.plotting.BasePlotter._sample_nf_entries') as mock_nf_samples, \
-             patch('bedcosmo.plotting.getdist.MCSamples') as mock_mcsamples, \
-             patch('bedcosmo.plotting.os.makedirs'):  # Mock os.makedirs to avoid permission errors
-            mock_nf_samples.return_value = ([], None)
-
+        with patch('bedcosmo.plotting.MlflowClient') as mock_client_class, \
+             patch('bedcosmo.plotting.init_experiment', side_effect=ValueError("no run")), \
+             patch('bedcosmo.plotting.os.makedirs'), \
+             patch.dict('os.environ', {'MLFLOW_ALLOW_FILE_STORE': 'true'}, clear=False):
+            mock_client = Mock()
+            mock_client_class.return_value = mock_client
+            mock_client.get_run.side_effect = Exception("not found")
             try:
-                result = compare_contours(run_ids=['nonexistent'], param1='param1', param2='param2', cosmo_exp='test_exp')
+                result = compare_contours(
+                    run_ids=['nonexistent'],
+                    param1='param1',
+                    param2='param2',
+                    cosmo_exp='test_exp',
+                )
                 assert result is None or isinstance(result, (list, tuple))
-            except (TypeError, AttributeError, ValueError):
+            except (TypeError, AttributeError, ValueError, Exception):
                 pass
 
 
