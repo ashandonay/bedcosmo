@@ -1543,12 +1543,8 @@ if __name__ == '__main__':
             continue
             
         arg_type = type(value)
-        # Special handling for input_designs to allow --input_designs [list]
         cli_key = key.replace("_", "-")
-        if key == 'input_designs':
-            parser.add_argument(f'--{cli_key}', type=str, default=None,
-                              help=f'Specify input design(s) as JSON. Can be single design [x1,...,xn] or multiple [[x1,...,xn], [y1,...,yn], ...] (default: {value})')
-        elif isinstance(value, bool):
+        if isinstance(value, bool):
             parser.add_argument(f'--{cli_key}', action='store_true', help=f'Enable {key}')
             # Set default explicitly for bools, action handles the logic
             parser.set_defaults(**{key: value})
@@ -1600,9 +1596,8 @@ if __name__ == '__main__':
     if args.add_steps > 0 and args.resume_id is None:
         raise ValueError("--add-steps can only be used with --resume-id")
 
-    project_root = str(get_experiments_dir().parent)
     run_args = finalize_train_run_args(
-        vars(args), run_args_dict, unknown_argv=unknown, project_root=project_root
+        vars(args), run_args_dict, unknown_argv=unknown
     )
 
     trainer = Trainer(

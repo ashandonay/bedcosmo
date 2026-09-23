@@ -1552,30 +1552,8 @@ def apply_prior_cli_overrides(prior_args: dict | None, overrides: dict | None) -
     return out
 
 
-def _coerce_train_arg_override(key, value, yaml_default, project_root):
+def _coerce_train_arg_override(key, value, yaml_default):
     """Coerce a single train CLI override according to the YAML default type."""
-    if key == "input_designs":
-        if isinstance(value, str):
-            input_design_str = value.strip()
-            if input_design_str.lower() == "nominal":
-                return "nominal"
-            if input_design_str.endswith(".json") or input_design_str.endswith(".JSON"):
-                file_path = input_design_str
-                if not os.path.isfile(file_path) and not os.path.isabs(file_path):
-                    file_path = os.path.join(project_root, input_design_str)
-                if os.path.isfile(file_path):
-                    with open(file_path, "r") as f:
-                        return json.load(f)
-                try:
-                    return json.loads(input_design_str)
-                except json.JSONDecodeError:
-                    return value
-            try:
-                return json.loads(input_design_str)
-            except json.JSONDecodeError:
-                return value
-        return value
-
     if isinstance(yaml_default, bool) and isinstance(value, bool):
         return value
     if isinstance(yaml_default, list):
@@ -1597,7 +1575,7 @@ def _coerce_train_arg_override(key, value, yaml_default, project_root):
     return value
 
 
-def finalize_train_run_args(parsed_args, yaml_config, unknown_argv=None, project_root="."):
+def finalize_train_run_args(parsed_args, yaml_config, unknown_argv=None):
     """
     Merge argparse output, train_args.yaml defaults, and extension CLI flags.
 
@@ -1611,7 +1589,7 @@ def finalize_train_run_args(parsed_args, yaml_config, unknown_argv=None, project
     for key, default in yaml_config.items():
         cli_value = run_args.get(key)
         if cli_value is not None:
-            run_args[key] = _coerce_train_arg_override(key, cli_value, default, project_root)
+            run_args[key] = _coerce_train_arg_override(key, cli_value, default)
         else:
             run_args[key] = default
 

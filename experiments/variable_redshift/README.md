@@ -25,7 +25,7 @@ The code is `src/bedcosmo/variable_redshift/experiment.py` (`VariableRedshift`).
 
 With more than one redshift, the grid is the Cartesian product over labels, **deduplicated by permutation**. `(z_1, z_2) = (0.5, 1.5)` and `(1.5, 0.5)` are the same design, so each design is stored sorted.
 
-The **nominal design** is the midpoint of `[lower, upper]` for one redshift, or `n_redshifts` evenly spaced points from `lower` to `upper` otherwise. Posterior plots and `central=True` data use it, with distances evaluated at the Planck18 fiducial (`PLANCK18_FIDUCIAL`, overridable with `central_params`).
+The **nominal design** is the midpoint of `[lower, upper]` for one redshift, or `n_redshifts` evenly spaced points from `lower` to `upper` otherwise. Posterior plots and `central=True` data use it, with distances evaluated at the Planck18 fiducial (`PLANCK18_FIDUCIAL`, overridable with `central_params`). Central values, including overrides such as `--central-param-hrdrag`, are in reported units with the multiplier applied, like posterior samples. For example, `hrdrag` is `H_0 r_d` in km/s (Planck18: 9907.9), whichever prior file is used.
 
 ## Parameters (`prior_args*.yaml`)
 
