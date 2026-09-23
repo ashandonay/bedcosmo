@@ -438,7 +438,7 @@ class Trainer:
                         ranges = {param: (self.experiment.prior_args['parameters'][param]['plot']['lower'], self.experiment.prior_args['parameters'][param]['plot']['upper']) for param in self.experiment.cosmo_params}
                         plt.figure()
                         plotter = RunPlotter(run_id=self.run_obj.info.run_id, cosmo_exp=self.cosmo_exp)
-                        plotter.plot_posterior(
+                        plotter.plot_triangle(
                             plot_samples, 
                             plot_colors, 
                             legend_labels=plot_labels, 

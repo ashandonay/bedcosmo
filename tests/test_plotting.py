@@ -418,7 +418,7 @@ class TestComparisonPlotter:
         """Test compare_posterior when no samples are generated."""
         with patch('bedcosmo.plotting.get_runs_data') as mock_get_runs, \
              patch.object(
-                 ComparisonPlotter, '_nf_display_samples', side_effect=RuntimeError("fail")
+                 ComparisonPlotter, '_sample_nf_entries', side_effect=RuntimeError("fail")
              ):
 
             mock_get_runs.return_value = (mock_run_data_list, 'exp_123', 'test_exp')
@@ -429,8 +429,8 @@ class TestComparisonPlotter:
     def test_compare_posterior_success(self, comparison_plotter, mock_run_data_list, tmp_path):
         """Test successful compare_posterior call."""
         with patch('bedcosmo.plotting.get_runs_data') as mock_get_runs, \
-             patch.object(ComparisonPlotter, '_nf_display_samples') as mock_nf_samples, \
-             patch.object(ComparisonPlotter, 'plot_posterior') as mock_plot_posterior, \
+             patch.object(ComparisonPlotter, '_sample_nf_entries') as mock_nf_samples, \
+             patch.object(ComparisonPlotter, 'plot_triangle') as mock_plot_triangle, \
              patch.object(comparison_plotter, 'save_figure') as mock_save, \
              patch.object(comparison_plotter, 'get_save_dir') as mock_get_dir, \
              patch.object(comparison_plotter, 'generate_filename') as mock_gen_filename:
@@ -443,11 +443,11 @@ class TestComparisonPlotter:
             mock_sample.paramNames.names = ['param1', 'param2']
             mock_nf_samples.return_value = ([{'samples': mock_sample}], 'step_1000')
 
-            # Mock plot_posterior (inherited from BasePlotter)
+            # Mock plot_triangle (inherited from BasePlotter)
             mock_plotter = Mock()
             mock_plotter.fig = Mock()
             mock_plotter.fig.legends = []
-            mock_plot_posterior.return_value = mock_plotter
+            mock_plot_triangle.return_value = mock_plotter
 
             # Use tmp_path for save directory to avoid permission issues
             mock_get_dir.return_value = str(tmp_path / "plots")
@@ -457,14 +457,14 @@ class TestComparisonPlotter:
                 result = comparison_plotter.compare_posterior(var='pyro_seed')
 
                 assert result == mock_plotter
-                mock_plot_posterior.assert_called_once()
+                mock_plot_triangle.assert_called_once()
                 mock_save.assert_called_once()
 
     def test_compare_posterior_with_colors(self, comparison_plotter, mock_run_data_list):
         """Test compare_posterior with custom colors."""
         with patch('bedcosmo.plotting.get_runs_data') as mock_get_runs, \
-             patch.object(ComparisonPlotter, '_nf_display_samples') as mock_nf_samples, \
-             patch.object(ComparisonPlotter, 'plot_posterior') as mock_plot_posterior, \
+             patch.object(ComparisonPlotter, '_sample_nf_entries') as mock_nf_samples, \
+             patch.object(ComparisonPlotter, 'plot_triangle') as mock_plot_triangle, \
              patch.object(comparison_plotter, 'save_figure'), \
              patch.object(comparison_plotter, 'get_save_dir'), \
              patch.object(comparison_plotter, 'generate_filename'):
@@ -476,13 +476,13 @@ class TestComparisonPlotter:
             mock_plotter = Mock()
             mock_plotter.fig = Mock()
             mock_plotter.fig.legends = []
-            mock_plot_posterior.return_value = mock_plotter
+            mock_plot_triangle.return_value = mock_plotter
 
             custom_colors = ['red', 'blue']
             comparison_plotter.compare_posterior(colors=custom_colors)
 
-            # Check that plot_posterior was called with colors
-            call_args = mock_plot_posterior.call_args
+            # Check that plot_triangle was called with colors
+            call_args = mock_plot_triangle.call_args
             assert 'colors' in call_args.kwargs or len(call_args[0]) > 1
 
     def test_compare_posterior_prior_alpha_and_entropy_legend(
@@ -491,13 +491,13 @@ class TestComparisonPlotter:
         """Prior overlays use faint contours; posteriors include entropy in legend."""
         with patch('bedcosmo.plotting.get_runs_data') as mock_get_runs, \
              patch('bedcosmo.plotting.init_experiment') as mock_init_exp, \
-             patch.object(ComparisonPlotter, '_nf_display_samples') as mock_nf_samples, \
+             patch.object(ComparisonPlotter, '_sample_nf_entries') as mock_nf_samples, \
              patch.object(
                  ComparisonPlotter,
                  '_nominal_prior_entropy_for_run',
                  return_value=4.5,
              ), \
-             patch.object(ComparisonPlotter, 'plot_posterior') as mock_plot_posterior, \
+             patch.object(ComparisonPlotter, 'plot_triangle') as mock_plot_triangle, \
              patch.object(comparison_plotter, 'save_figure'), \
              patch.object(comparison_plotter, 'get_save_dir', return_value=str(tmp_path)), \
              patch.object(comparison_plotter, 'generate_filename', return_value='test.png'):
@@ -522,11 +522,11 @@ class TestComparisonPlotter:
             mock_plotter = Mock()
             mock_plotter.fig = Mock()
             mock_plotter.fig.legends = []
-            mock_plot_posterior.return_value = mock_plotter
+            mock_plot_triangle.return_value = mock_plotter
 
             comparison_plotter.compare_posterior(var='pyro_seed', plot_prior=True)
 
-            kwargs = mock_plot_posterior.call_args.kwargs
+            kwargs = mock_plot_triangle.call_args.kwargs
             assert kwargs['alpha'][-1] == 0.4
             assert 'H_prior' not in kwargs['legend_labels'][0]
             assert 'H_post' in kwargs['legend_labels'][0]
@@ -537,8 +537,8 @@ class TestComparisonPlotter:
 # Standalone Plotting Functions Tests
 # ============================================================================
 
-class TestPlotPosterior:
-    """Test cases for plot_posterior function."""
+class TestPlotTriangle:
+    """Test cases for plot_triangle function."""
     
     @pytest.fixture
     def mock_samples(self):
@@ -558,8 +558,8 @@ class TestPlotPosterior:
         """Mock SCRATCH environment variable."""
         monkeypatch.setenv("SCRATCH", "/mock/scratch")
 
-    def test_plot_posterior_single_sample(self, mock_samples, mock_scratch_env):
-        """Test plot_posterior with a single sample."""
+    def test_plot_triangle_single_sample(self, mock_samples, mock_scratch_env):
+        """Test plot_triangle with a single sample."""
         plotter = BasePlotter(cosmo_exp='test_exp')
         with patch('bedcosmo.plotting.plots.get_single_plotter') as mock_get_plotter:
             mock_plotter = Mock()
@@ -573,7 +573,7 @@ class TestPlotPosterior:
             mock_plotter.triangle_plot = Mock()
             mock_get_plotter.return_value = mock_plotter
 
-            result = plotter.plot_posterior(
+            result = plotter.plot_triangle(
                 samples=mock_samples[0],
                 colors='blue',
                 show_scatter=False
@@ -582,8 +582,8 @@ class TestPlotPosterior:
             assert result == mock_plotter
             mock_plotter.triangle_plot.assert_called_once()
     
-    def test_plot_posterior_multiple_samples(self, mock_samples, mock_scratch_env):
-        """Test plot_posterior with multiple samples."""
+    def test_plot_triangle_multiple_samples(self, mock_samples, mock_scratch_env):
+        """Test plot_triangle with multiple samples."""
         plotter = BasePlotter(cosmo_exp='test_exp')
         with patch('bedcosmo.plotting.plots.get_single_plotter') as mock_get_plotter:
             mock_plotter = Mock()
@@ -597,7 +597,7 @@ class TestPlotPosterior:
             mock_plotter.triangle_plot = Mock()
             mock_get_plotter.return_value = mock_plotter
 
-            result = plotter.plot_posterior(
+            result = plotter.plot_triangle(
                 samples=mock_samples,
                 colors=['blue', 'red'],
                 show_scatter=False
@@ -605,8 +605,8 @@ class TestPlotPosterior:
 
             assert result == mock_plotter
     
-    def test_plot_posterior_with_scatter(self, mock_samples, mock_scratch_env):
-        """Test plot_posterior with scatter points enabled."""
+    def test_plot_triangle_with_scatter(self, mock_samples, mock_scratch_env):
+        """Test plot_triangle with scatter points enabled."""
         plotter = BasePlotter(cosmo_exp='test_exp')
         with patch('bedcosmo.plotting.plots.get_single_plotter') as mock_get_plotter:
             mock_plotter = Mock()
@@ -636,7 +636,7 @@ class TestPlotPosterior:
             mock_samples[0].paramNames.list.return_value = ['param1', 'param2']
             mock_samples[0].paramNames.list.index.return_value = 0  # Mock index method
             
-            result = plotter.plot_posterior(
+            result = plotter.plot_triangle(
                 samples=mock_samples[0],
                 colors='blue',
                 show_scatter=True
@@ -644,8 +644,8 @@ class TestPlotPosterior:
 
             assert result == mock_plotter
 
-    def test_plot_posterior_with_ranges(self, mock_samples, mock_scratch_env):
-        """Test plot_posterior with ranges parameter."""
+    def test_plot_triangle_with_ranges(self, mock_samples, mock_scratch_env):
+        """Test plot_triangle with ranges parameter."""
         plotter = BasePlotter(cosmo_exp='test_exp')
         with patch('bedcosmo.plotting.plots.get_single_plotter') as mock_get_plotter:
             mock_plotter = Mock()
@@ -661,7 +661,7 @@ class TestPlotPosterior:
             mock_plotter.triangle_plot = Mock()
             mock_get_plotter.return_value = mock_plotter
 
-            result = plotter.plot_posterior(
+            result = plotter.plot_triangle(
                 samples=mock_samples[0],
                 colors='blue',
                 show_scatter=False,
@@ -669,8 +669,8 @@ class TestPlotPosterior:
             )
             assert result == mock_plotter
 
-    def test_plot_posterior_with_scatter_alpha_contour_alpha(self, mock_samples, mock_scratch_env):
-        """Test plot_posterior with scatter_alpha and contour_alpha_factor."""
+    def test_plot_triangle_with_scatter_alpha_contour_alpha(self, mock_samples, mock_scratch_env):
+        """Test plot_triangle with scatter_alpha and contour_alpha_factor."""
         plotter = BasePlotter(cosmo_exp='test_exp')
         with patch('bedcosmo.plotting.plots.get_single_plotter') as mock_get_plotter:
             mock_plotter = Mock()
@@ -684,7 +684,7 @@ class TestPlotPosterior:
             mock_plotter.triangle_plot = Mock()
             mock_get_plotter.return_value = mock_plotter
 
-            result = plotter.plot_posterior(
+            result = plotter.plot_triangle(
                 samples=mock_samples[0],
                 colors='blue',
                 show_scatter=False,
@@ -693,8 +693,8 @@ class TestPlotPosterior:
             )
             assert result == mock_plotter
 
-    def test_plot_posterior_with_levels_and_alpha_list(self, mock_samples, mock_scratch_env):
-        """Test plot_posterior with levels and alpha as list."""
+    def test_plot_triangle_with_levels_and_alpha_list(self, mock_samples, mock_scratch_env):
+        """Test plot_triangle with levels and alpha as list."""
         plotter = BasePlotter(cosmo_exp='test_exp')
         with patch('bedcosmo.plotting.plots.get_single_plotter') as mock_get_plotter:
             mock_plotter = Mock()
@@ -714,7 +714,7 @@ class TestPlotPosterior:
             mock_plotter.triangle_plot = Mock()
             mock_get_plotter.return_value = mock_plotter
 
-            result = plotter.plot_posterior(
+            result = plotter.plot_triangle(
                 samples=mock_samples,
                 colors=['blue', 'red'],
                 show_scatter=[True, False],
@@ -1399,7 +1399,7 @@ class TestCompareContours:
     
     def test_compare_contours_no_runs(self, mock_scratch_env):
         """Test compare_contours when no runs are found."""
-        with patch('bedcosmo.plotting.BasePlotter._nf_display_samples') as mock_nf_samples, \
+        with patch('bedcosmo.plotting.BasePlotter._sample_nf_entries') as mock_nf_samples, \
              patch('bedcosmo.plotting.getdist.MCSamples') as mock_mcsamples, \
              patch('bedcosmo.plotting.os.makedirs'):  # Mock os.makedirs to avoid permission errors
             mock_nf_samples.return_value = ([], None)
