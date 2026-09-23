@@ -58,6 +58,8 @@ Use `bedcosmo.num_tracers.design` (the num_tracers counterpart of `bedcosmo.num_
 - `design_args_*.yaml` → this directory (`--out-dir`), where `--design-args-path` resolves
 - `.png` → beside the `.npy` (`--plot` to relocate, `--no-plot` to skip)
 
+The YAML header records the command that regenerates it.
+
 Global flags (`--dataset`, `--out-dir`, `--designs-dir`, `--plot`, `--no-plot`) go **before** the subcommand; mode flags go after.
 
 ### `pool` — one multi-design pool (preferred)
