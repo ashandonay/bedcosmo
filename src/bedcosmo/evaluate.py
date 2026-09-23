@@ -2241,8 +2241,9 @@ class Evaluator:
             )
 
             self.plotter.plot_posterior(
-                nf_entries,
                 experiment=experiment,
+                eval_step=eval_step,
+                artifacts_dir=self.save_path,
                 levels=self.levels,
                 guide_samples=self.guide_samples,
                 plot_prior=self.plot_prior,
@@ -2261,14 +2262,13 @@ class Evaluator:
         for subset in self.marginal_eig_subsets:
             subset_id = self._subset_id(subset)
             try:
-                self.plotter.generate_posterior(
+                self.plotter.plot_posterior(
                     eval_step=eval_step,
-                    display=['nominal', 'optimal'],
+                    params=subset,
                     guide_samples=self.guide_samples,
                     levels=self.levels,
                     plot_prior=self.plot_prior,
                     transform_output=self.nf_transform_output,
-                    params=subset,
                     filename=f"posterior_marginal_{subset_id}",
                 )
                 self._update_runtime()
@@ -2402,14 +2402,13 @@ class Evaluator:
         for subset in self.marginal_eig_subsets:
             subset_id = self._subset_id(subset)
             try:
-                self.plotter.generate_posterior(
+                self.plotter.plot_posterior(
                     eval_step=eval_step,
-                    display=['nominal', 'optimal'],
+                    params=subset,
                     guide_samples=self.guide_samples,
                     levels=self.levels,
                     plot_prior=self.plot_prior,
                     transform_output=self.nf_transform_output,
-                    params=subset,
                     filename=f"posterior_marginal_{subset_id}",
                 )
                 self._update_runtime()

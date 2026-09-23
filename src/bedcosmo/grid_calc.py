@@ -1938,8 +1938,9 @@ def main():
         if experiment.name == "num_visits":
             posterior_title = f"Grid Posterior (nominal), T = {experiment.temperature:.0f} K"
 
-        plotter.generate_posterior(
+        plotter.plot_posterior(
             experiment=experiment,
+            nf_entries=[],
             grid_samples=gc_samples,
             title=posterior_title,
             plot_size_ratio=0.8,

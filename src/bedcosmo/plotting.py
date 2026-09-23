@@ -17,6 +17,7 @@ from bedcosmo.util import (
 )
 from bedcosmo.artifacts import (
     load_eig_data_file,
+    load_posterior_samples_file,
     _eig_data_has_variable_eigs,
     _eig_data_has_marginal_eigs,
 )
@@ -54,6 +55,77 @@ plt.rcParams['font.serif'] = ['DejaVu Serif', 'Times New Roman', 'Times', 'serif
 
 # Contour alpha for prior overlays in posterior triangle plots.
 PRIOR_CONTOUR_ALPHA = 0.4
+
+
+
+_DEFAULT_NF_SERIES_COLORS = {
+    "nominal": "tab:blue",
+    "optimal": "tab:orange",
+}
+_DEFAULT_NF_SERIES_LABELS = {
+    "nominal": "Nominal Design (NF)",
+    "optimal": "Optimal Design (NF)",
+}
+
+
+def nf_entries_from_posterior_bundle(
+    bundle,
+    experiment,
+    *,
+    data_index: int = 0,
+):
+    """
+    Convert a saved posterior-sample NPZ bundle into plot ``nf_entries``.
+
+    Uses ``theta[series, data_index]`` (central-context eval uses ``data_index=0``).
+    """
+    theta = np.asarray(bundle["theta"])
+    design = np.asarray(bundle["design"])
+    series_names = [str(n) for n in bundle["series_names"]]
+    param_names = [str(n) for n in bundle["param_names"]]
+    meta = bundle.get("meta") or {}
+    color_map = {
+        s.get("name"): s.get("color")
+        for s in meta.get("series", [])
+        if isinstance(s, dict)
+    }
+
+    # Prefer experiment latex labels aligned to param_names when possible.
+    latex = list(getattr(experiment, "latex_labels", []) or [])
+    cosmo = list(getattr(experiment, "cosmo_params", []) or [])
+    if cosmo and latex and list(param_names) == list(cosmo):
+        labels = latex
+    else:
+        labels = list(param_names)
+
+    if theta.ndim != 4:
+        raise ValueError(f"bundle theta must be 4-D, got {theta.shape}")
+    if not (0 <= data_index < theta.shape[1]):
+        raise ValueError(
+            f"data_index={data_index} out of range for theta shape {theta.shape}"
+        )
+
+    entries = []
+    for i, name in enumerate(series_names):
+        with contextlib.redirect_stdout(io.StringIO()):
+            gd = getdist.MCSamples(
+                samples=np.asarray(theta[i, data_index], dtype=np.float64),
+                names=param_names,
+                labels=labels,
+                settings=GETDIST_SETTINGS,
+            )
+        color = color_map.get(name) or _DEFAULT_NF_SERIES_COLORS.get(name, f"C{i}")
+        label = _DEFAULT_NF_SERIES_LABELS.get(name, f"{name} (NF)")
+        entries.append({
+            "samples": gd,
+            "name": name,
+            "design": np.asarray(design[i], dtype=np.float64).reshape(-1),
+            "label": label,
+            "color": color,
+            "line_style": "-",
+            "alpha": 1.0,
+        })
+    return entries
 
 
 def _normalize_marginal_subset_id(subset):
@@ -853,8 +925,8 @@ class BasePlotter:
 
     def plot_posterior(
         self,
-        experiment,
-        nf_entries,
+        experiment=None,
+        nf_entries=None,
         *,
         levels=(0.68,),
         guide_samples=1000,
@@ -872,16 +944,51 @@ class BasePlotter:
         save_dir=None,
         dpi=400,
         seed=1,
+        artifacts_dir=None,
+        eval_step=None,
+        posterior_samples_path=None,
+        data_index=0,
     ):
         """
-        Plot a posterior triangle from precomputed NF entries.
+        Plot a posterior triangle from NF entries or a saved posterior NPZ.
 
-        Does **not** sample from the flow. Pass ``nf_entries`` built by the
-        caller (e.g. after :func:`bedcosmo.util.sample_nf`). Optional grid /
-        MCMC / prior overlays are assembled here for the figure.
+        Does **not** sample from the flow.
+
+        * ``nf_entries`` provided — plot those entries.
+        * ``nf_entries is None`` — load from ``posterior_samples_path`` or
+          ``artifacts_dir`` via :func:`load_posterior_samples_file`.
+        * ``nf_entries == []`` — no NF series (grid / prior / MCMC overlays only).
+
+        Raises if ``nf_entries is None`` and no matching artifact is found.
         """
         if isinstance(levels, (int, float)):
             levels = [levels]
+
+        if nf_entries is None:
+            if artifacts_dir is None and posterior_samples_path is None:
+                raise ValueError(
+                    "nf_entries not provided; pass artifacts_dir or "
+                    "posterior_samples_path to load saved posterior samples, "
+                    "or pass nf_entries=[] for overlay-only plots."
+                )
+            if experiment is None:
+                raise ValueError(
+                    "experiment is required when loading posterior samples for plotting"
+                )
+            bundle = load_posterior_samples_file(
+                artifacts_dir or "",
+                step=eval_step,
+                path=posterior_samples_path,
+            )
+            nf_entries = nf_entries_from_posterior_bundle(
+                bundle,
+                experiment,
+                data_index=data_index,
+            )
+            print(f"  Loaded posterior samples from {bundle['path']}")
+
+        if experiment is None:
+            raise ValueError("experiment is required for plot_posterior")
 
         auto_seed(seed)
 
@@ -891,11 +998,14 @@ class BasePlotter:
         all_line_styles = []
         legend_labels = []
 
-        for entry in nf_entries or []:
-            all_samples.append(entry['samples'])
+        for entry in nf_entries:
+            samples = entry['samples']
+            if params is not None:
+                samples = restrict_mcsamples(samples, params)
+            all_samples.append(samples)
             all_colors.append(entry['color'])
-            all_alphas.append(entry['alpha'])
-            all_line_styles.append(entry['line_style'])
+            all_alphas.append(entry.get('alpha', 1.0))
+            all_line_styles.append(entry.get('line_style', '-'))
             legend_labels.append(entry['label'])
 
         if grid_samples is not None:
@@ -1048,171 +1158,6 @@ class BasePlotter:
         )
 
         return g
-
-    def generate_posterior(
-        self,
-        experiment,
-        posterior_flow=None,
-        input_designs=None,
-        eig_values=None,
-        nominal_eig=None,
-        nominal_prior_entropy=None,
-        nominal_posterior_entropy=None,
-        prior_entropy_by_design=None,
-        posterior_entropy_by_design=None,
-        display=('nominal', 'optimal'),
-        levels=(0.68,),
-        guide_samples=1000,
-        device="cuda:0",
-        seed=1,
-        params=None,
-        plot_prior=False,
-        transform_output=True,
-        plot_size_ratio=1.0,
-        title=None,
-        grid_samples=None,
-        nominal_grid_eig=None,
-        experiment_id=None,
-        run_id=None,
-        filename=None,
-        save_dir=None,
-        dpi=400,
-        marginal_eig=False,
-        nf_entries=None,
-    ):
-        """
-        Convenience: resolve designs/``y``, call :func:`bedcosmo.util.sample_nf`,
-        build labeled entries, then :meth:`plot_posterior`.
-        """
-        if nf_entries is None:
-            auto_seed(seed)
-
-            display = self._normalize_display(display)
-            if device is None:
-                device = experiment.device
-            if posterior_flow is None:
-                nf_entries = []
-            else:
-                y = experiment.central_val
-                eig_label = "Marginal EIG" if marginal_eig else "EIG"
-                include_prior_in_legend = not plot_prior
-                nf_entries = []
-
-                if "nominal" in display:
-                    nominal_design = experiment.nominal_design
-                    samples = sample_nf(
-                        experiment,
-                        posterior_flow,
-                        nominal_design,
-                        y,
-                        num_samples=guide_samples,
-                        transform_output=transform_output,
-                        params=params,
-                        device=device,
-                    )
-                    eig_str = (
-                        f", {eig_label}: {nominal_eig:.3f} bits"
-                        if nominal_eig is not None
-                        else ""
-                    )
-                    eig_str += self._entropy_legend_suffix(
-                        nominal_prior_entropy,
-                        nominal_posterior_entropy,
-                        include_prior=include_prior_in_legend,
-                    )
-                    if hasattr(nominal_design, "detach"):
-                        nominal_design_np = nominal_design.detach().cpu().numpy().reshape(-1)
-                    else:
-                        nominal_design_np = np.asarray(nominal_design).reshape(-1)
-                    nf_entries.append({
-                        "samples": samples,
-                        "name": "nominal",
-                        "design": nominal_design_np,
-                        "label": f"Nominal Design (NF){eig_str}",
-                        "color": "tab:blue",
-                        "line_style": "-",
-                        "alpha": 1.0,
-                    })
-
-                if "optimal" in display:
-                    if input_designs is None:
-                        raise ValueError("input_designs required when display includes 'optimal'")
-                    input_designs_arr = np.asarray(input_designs)
-                    if len(input_designs_arr) > 1 and eig_values is not None:
-                        eig_values_arr = np.asarray(eig_values)
-                        optimal_idx = int(np.argmax(eig_values_arr))
-                        optimal_design = input_designs_arr[optimal_idx]
-                        optimal_eig = float(eig_values_arr[optimal_idx])
-                        eig_str = f", {eig_label}: {optimal_eig:.3f} bits"
-                        opt_prior_h = None
-                        opt_post_h = None
-                        if (
-                            prior_entropy_by_design is not None
-                            and len(prior_entropy_by_design) > optimal_idx
-                        ):
-                            opt_prior_h = float(prior_entropy_by_design[optimal_idx])
-                        if (
-                            posterior_entropy_by_design is not None
-                            and len(posterior_entropy_by_design) > optimal_idx
-                        ):
-                            opt_post_h = float(posterior_entropy_by_design[optimal_idx])
-                        eig_str += self._entropy_legend_suffix(
-                            opt_prior_h, opt_post_h, include_prior=include_prior_in_legend
-                        )
-                        label = f"Optimal Design (NF){eig_str}"
-                    elif len(input_designs_arr) >= 1:
-                        optimal_design = input_designs_arr[0]
-                        optimal_eig = (
-                            float(np.asarray(eig_values)[0]) if eig_values is not None else None
-                        )
-                        eig_str = (
-                            f", {eig_label}: {optimal_eig:.3f} bits"
-                            if optimal_eig is not None
-                            else ""
-                        )
-                        label = f"Input Design (NF){eig_str}"
-                    else:
-                        raise ValueError("No input designs available for optimal posterior")
-
-                    samples = sample_nf(
-                        experiment,
-                        posterior_flow,
-                        optimal_design,
-                        y,
-                        num_samples=guide_samples,
-                        transform_output=transform_output,
-                        params=params,
-                        device=device,
-                    )
-                    nf_entries.append({
-                        "samples": samples,
-                        "name": "optimal",
-                        "design": np.asarray(optimal_design, dtype=np.float64).reshape(-1),
-                        "label": label,
-                        "color": "tab:orange",
-                        "line_style": "-",
-                        "alpha": 1.0,
-                    })
-        return self.plot_posterior(
-            experiment=experiment,
-            nf_entries=nf_entries,
-            levels=levels,
-            guide_samples=guide_samples,
-            params=params,
-            plot_prior=plot_prior,
-            transform_output=transform_output,
-            plot_size_ratio=plot_size_ratio,
-            title=title,
-            grid_samples=grid_samples,
-            nominal_grid_eig=nominal_grid_eig,
-            nominal_prior_entropy=nominal_prior_entropy,
-            experiment_id=experiment_id,
-            run_id=run_id,
-            filename=filename,
-            save_dir=save_dir,
-            dpi=dpi,
-            seed=seed,
-        )
 
 
     def load_eig_data_file(self, artifacts_dir, eval_step=None, eig_kind='any'):
@@ -1890,7 +1835,7 @@ class RunPlotter(BasePlotter):
         eig_data=None,
         params=None,
         ):
-        """Extract posterior plotting data from run's MLflow artifacts into a kwargs dict for generate_posterior()."""
+        """Extract posterior plotting data from run's MLflow artifacts (eig / flow context)."""
         if eig_data is None:
             eig_data = self._get_eig_data(eval_step=eval_step)
         input_designs, eig_values, nominal_eig, entropy_info = self._parse_eig_for_posterior(eig_data, eval_step, params=params)
@@ -1953,16 +1898,24 @@ class RunPlotter(BasePlotter):
 
     def plot_posterior(
         self,
-        nf_entries,
+        nf_entries=None,
         *,
         experiment=None,
         eval_step=None,
         eig_data=None,
         device=None,
         title=None,
+        artifacts_dir=None,
+        posterior_samples_path=None,
         **kwargs,
     ):
-        """Plot precomputed NF entries for this run (no sampling)."""
+        """
+        Plot NF posterior for this run (no sampling).
+
+        If ``nf_entries`` is omitted, load central-context samples from the run's
+        saved posterior NPZ under artifacts. Pass ``nf_entries=[]`` for
+        overlay-only figures (grid / prior / MCMC).
+        """
         if device is None:
             device = "cuda:0" if torch.cuda.is_available() else "cpu"
         levels = kwargs.get("levels", [0.68])
@@ -1979,59 +1932,18 @@ class RunPlotter(BasePlotter):
             if title is None:
                 title = data.get("title")
 
+        if nf_entries is None and artifacts_dir is None and posterior_samples_path is None:
+            artifacts_dir = self._get_artifacts_dir()
+
         return super().plot_posterior(
-            experiment,
-            nf_entries,
+            experiment=experiment,
+            nf_entries=nf_entries,
             title=title,
             experiment_id=self.experiment_id,
             run_id=self.run_id,
-            **kwargs,
-        )
-
-    def generate_posterior(self, **kwargs):
-        """Load run data, then sample + plot via :meth:`BasePlotter.generate_posterior`."""
-        levels = kwargs.get("levels", [0.68])
-        if isinstance(levels, (int, float)):
-            levels = [levels]
-        kwargs["levels"] = levels
-
-        device = kwargs.pop("device", None) or (
-            "cuda:0" if torch.cuda.is_available() else "cpu"
-        )
-        eval_step = kwargs.pop("eval_step", None)
-        eig_data_override = kwargs.pop("eig_data", None)
-        explicit_grid_samples = (
-            kwargs.pop("grid_samples", None) if eig_data_override is not None else None
-        )
-        title_override = kwargs.pop("title", None)
-
-        data = self._extract_run_posterior_data(
-            eval_step,
-            device=device,
-            eig_data=eig_data_override,
-            params=kwargs.get("params"),
-        )
-        title = title_override if title_override is not None else data.get("title")
-        if explicit_grid_samples is not None:
-            kwargs["grid_samples"] = explicit_grid_samples
-        kwargs.setdefault("nominal_grid_eig", data.get("nominal_grid_eig"))
-        kwargs.setdefault("nominal_prior_entropy", data.get("nominal_prior_entropy"))
-        kwargs.setdefault("experiment_id", self.experiment_id)
-        kwargs.setdefault("run_id", self.run_id)
-
-        return super().generate_posterior(
-            experiment=data["experiment"],
-            posterior_flow=data.get("posterior_flow"),
-            input_designs=data.get("input_designs"),
-            eig_values=data.get("eig_values"),
-            nominal_eig=data.get("nominal_eig"),
-            nominal_prior_entropy=data.get("nominal_prior_entropy"),
-            nominal_posterior_entropy=data.get("nominal_posterior_entropy"),
-            prior_entropy_by_design=data.get("prior_entropy_by_design"),
-            posterior_entropy_by_design=data.get("posterior_entropy_by_design"),
-            device=device,
-            title=title,
-            marginal_eig=data.get("marginal_eig", False),
+            artifacts_dir=artifacts_dir,
+            eval_step=eval_step,
+            posterior_samples_path=posterior_samples_path,
             **kwargs,
         )
 
@@ -2496,7 +2408,7 @@ class RunPlotter(BasePlotter):
             levels (float or list): Contour level(s) to plot (default: [0.68]).
             transform_output (bool, optional): Transform NF samples to physical space when
                 transform_input is enabled. Defaults to True for param_space=physical (same as
-                generate_posterior / Evaluator nf_transform_output).
+                plot_posterior / Evaluator nf_transform_output).
             eval_step (str or int, optional): If provided, used to load EIG data for reference.
             
         Returns:
@@ -3082,7 +2994,7 @@ class ComparisonPlotter(BasePlotter):
         Compare posterior distributions across multiple runs in a triangle plot.
 
         For each run, loads the posterior flow, resolves designs/``y``, and samples via
-        :func:`bedcosmo.util.sample_nf` using the same display options as generate_posterior.
+        :func:`bedcosmo.util.sample_nf`.
 
         Args:
             var (str or list, optional): Parameter(s) to group runs by.

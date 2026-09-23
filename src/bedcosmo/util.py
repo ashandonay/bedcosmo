@@ -1189,7 +1189,7 @@ def load_posterior_flow_from_checkpoint_file(
 
 
 def _posterior_kwds_from_merged_eig(combined: dict, step_key: str) -> dict:
-    """Build ``generate_posterior`` kwargs from merged NF+grid eig_data (no MLflow read)."""
+    """Build ``plot_posterior`` / sampling kwargs from merged NF+grid eig_data (no MLflow read)."""
     step_data = combined[step_key]
     variable_data = step_data.get("variable", {})
     nominal_data = step_data.get("nominal", {})
@@ -2423,7 +2423,7 @@ def render_overlay(
         transform_output: Whether to transform samples to physical space.
         include_nominal: Passed to eig_designs.
         sort: Passed to eig_designs.
-        plot_prior: Passed to generate_posterior overlay figures.
+        plot_prior: Passed to plot_posterior overlay figures.
         overlay_save_dir: If set, figures are written here instead of the default
             MLflow artifacts path (used by standalone ``grid_calc`` overlays).
         device: Torch device string for loading the NF checkpoint (default: cuda if
@@ -2503,24 +2503,65 @@ def render_overlay(
                 experiment_pf, nf_checkpoint_path, run_params, device, global_rank=0
             )
             pk = _posterior_kwds_from_merged_eig(combined, step_key)
+            auto_seed(1)
+            y = experiment_pf.central_val
+            input_designs = np.asarray(pk["input_designs"])
+            eig_values = np.asarray(pk["eig_values"])
+            optimal_idx = int(np.argmax(eig_values))
+            optimal_design = input_designs[optimal_idx]
+            nf_entries = []
+            for name, design, color in (
+                ("nominal", experiment_pf.nominal_design, "tab:blue"),
+                ("optimal", optimal_design, "tab:orange"),
+            ):
+                samples = sample_nf(
+                    experiment_pf,
+                    post_flow,
+                    design,
+                    y,
+                    num_samples=50000,
+                    transform_output=transform_output,
+                    device=device,
+                )
+                if hasattr(design, "detach"):
+                    design_np = design.detach().cpu().numpy().reshape(-1)
+                else:
+                    design_np = np.asarray(design, dtype=np.float64).reshape(-1)
+                label = (
+                    "Nominal Design (NF)"
+                    if name == "nominal"
+                    else "Optimal Design (NF)"
+                )
+                eig_val = pk.get("nominal_eig") if name == "nominal" else float(eig_values[optimal_idx])
+                if eig_val is not None:
+                    label = f"{label}, EIG: {float(eig_val):.3f} bits"
+                nf_entries.append({
+                    "samples": samples,
+                    "name": name,
+                    "design": design_np,
+                    "label": label,
+                    "color": color,
+                    "line_style": "-",
+                    "alpha": 1.0,
+                })
             bp = BasePlotter(cosmo_exp=cosmo_exp)
-            bp.generate_posterior(
+            bp.plot_posterior(
                 experiment=experiment_pf,
-                posterior_flow=post_flow,
-                display=['nominal', 'optimal'],
-                guide_samples=50000,
+                nf_entries=nf_entries,
                 levels=list(levels),
                 plot_prior=plot_prior,
                 transform_output=transform_output,
                 grid_samples=grid_samples,
                 filename='posterior_samples_overlay',
+                guide_samples=50000,
                 **posterior_kwargs,
-                **pk,
+                nominal_grid_eig=pk.get("nominal_grid_eig"),
+                title=pk.get("title"),
             )
         elif isinstance(plotter, RunPlotter) and nf_checkpoint_path is None:
-            plotter.generate_posterior(
+            # Replot from saved NPZ when available; overlay grid samples.
+            plotter.plot_posterior(
                 eval_step=eval_step,
-                display=['nominal', 'optimal'],
                 guide_samples=50000,
                 levels=list(levels),
                 plot_prior=plot_prior,
@@ -2534,16 +2575,14 @@ def render_overlay(
             if grid_samples is None:
                 print("No grid_samples available; skipping posterior overlay figure.")
             else:
-                plotter.generate_posterior(
+                plotter.plot_posterior(
                     experiment=grid_experiment,
-                    posterior_flow=None,
-                    display=(),
+                    nf_entries=[],
                     guide_samples=50000,
                     levels=list(levels),
                     plot_prior=plot_prior,
                     transform_output=transform_output,
                     grid_samples=grid_samples,
-                    device=device,
                     filename='posterior_samples_overlay',
                     title="Posterior (grid nominal + prior)",
                     **eig_kwargs,
@@ -2554,7 +2593,7 @@ def render_overlay(
                 "BasePlotter + grid_experiment for grid-only)."
             )
     except Exception as e:
-        print(f"Warning: overlay generate_posterior failed: {e}")
+        print(f"Warning: overlay plot_posterior failed: {e}")
         traceback.print_exc()
 
     # --- EIG designs ---
