@@ -8,9 +8,13 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import torch
 
-from bedcosmo.artifacts import load_posterior_samples_file, save_posterior_samples
+from bedcosmo.artifacts import (
+    load_posterior_samples_file,
+    make_posterior_samples_path,
+    save_posterior_samples,
+)
 from bedcosmo.evaluate import Evaluator
-from bedcosmo.plotting import BasePlotter, RunPlotter
+from bedcosmo.plotting import BasePlotter, RunPlotter, nf_entries_from_posterior_bundle
 from bedcosmo.util import sample_nf
 
 
@@ -95,63 +99,102 @@ def test_plot_posterior_does_not_sample(tmp_path, monkeypatch):
 def test_sample_nf_not_on_evaluator_or_plotter():
     assert not hasattr(Evaluator, "sample_nf")
     assert not hasattr(RunPlotter, "sample_nf")
-    assert not hasattr(BasePlotter, "_sample_nf_entries")
+    assert not hasattr(BasePlotter, "generate_posterior")
+    assert not hasattr(RunPlotter, "generate_posterior")
 
 
-def test_generate_posterior_selects_then_calls_sample_nf():
-    """generate_posterior owns nominal/optimal selection; sample_nf only samples."""
+def test_plot_posterior_loads_npz_when_entries_omitted(tmp_path, monkeypatch):
+    monkeypatch.setenv("SCRATCH", str(tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path))
+
     n_guide, n_params = 12, 2
-    rng = np.random.default_rng(3)
-    theta_nom = rng.normal(size=(n_guide, n_params))
-    theta_opt = rng.normal(size=(n_guide, n_params))
-    central = torch.zeros(3, dtype=torch.float64)
-    nominal_design = torch.ones(2, dtype=torch.float64)
+    rng = np.random.default_rng(4)
+    theta = np.stack(
+        [
+            rng.normal(size=(1, n_guide, n_params)),
+            rng.normal(size=(1, n_guide, n_params)),
+        ],
+        axis=0,
+    )
+    y = np.zeros((2, 1, 3))
+    design = np.array([[1.0, 0.0], [0.0, 1.0]])
+    artifacts = tmp_path / "artifacts"
+    out = make_posterior_samples_path(str(artifacts), step=50)
+    save_posterior_samples(
+        out,
+        theta=theta,
+        y=y,
+        design=design,
+        series_names=["optimal", "nominal"],
+        param_names=["p0", "p1"],
+        meta={
+            "status": "complete",
+            "step": 50,
+            "series": [
+                {"name": "optimal", "color": "tab:orange"},
+                {"name": "nominal", "color": "tab:blue"},
+            ],
+        },
+    )
     experiment = SimpleNamespace(
-        central_val=central,
-        nominal_design=nominal_design,
-        device="cpu",
         cosmo_params=["p0", "p1"],
         latex_labels=["p0", "p1"],
+        device="cpu",
         central_params=None,
     )
-    plotter = BasePlotter(cosmo_exp="num_visits")
-    input_designs = np.array([[0.0, 0.0], [1.0, 1.0], [0.5, 0.5]])
     fake_g = MagicMock()
     fake_g.fig.legends = []
     fake_g.subplots = [[MagicMock()]]
     fake_g.param_names_for_root.return_value = SimpleNamespace(
         names=[SimpleNamespace(name="p0"), SimpleNamespace(name="p1")]
     )
-    with patch(
-        "bedcosmo.plotting.sample_nf",
-        side_effect=[
-            _make_mcsamples(theta_nom, ["p0", "p1"]),
-            _make_mcsamples(theta_opt, ["p0", "p1"]),
-        ],
-    ) as mock_sample, \
-         patch.object(plotter, "plot_triangle", return_value=fake_g), \
+    plotter = BasePlotter(cosmo_exp="num_visits")
+    with patch.object(plotter, "plot_triangle", return_value=fake_g) as mock_tri, \
          patch.object(plotter, "save_figure"), \
          patch("bedcosmo.plotting.Line2D"):
-        plotter.generate_posterior(
-            experiment,
-            posterior_flow=MagicMock(),
-            input_designs=input_designs,
-            eig_values=np.array([0.1, 0.9, 0.2]),
-            guide_samples=n_guide,
-            device="cpu",
+        plotter.plot_posterior(
+            experiment=experiment,
+            artifacts_dir=str(artifacts),
+            eval_step=50,
         )
-    assert mock_sample.call_count == 2
-    nom_call, opt_call = mock_sample.call_args_list
-    np.testing.assert_allclose(
-        nom_call.args[2].detach().cpu().numpy(), nominal_design.numpy()
-    )
-    np.testing.assert_allclose(nom_call.args[3].detach().cpu().numpy(), central.numpy())
-    np.testing.assert_allclose(opt_call.args[2], input_designs[1])
-    np.testing.assert_allclose(opt_call.args[3].detach().cpu().numpy(), central.numpy())
+    mock_tri.assert_called_once()
+    plotted = mock_tri.call_args.args[0]
+    assert len(plotted) == 2
+    np.testing.assert_allclose(plotted[0].samples, theta[0, 0])
+
+
+def test_nf_entries_from_posterior_bundle_roundtrip(tmp_path):
+    rng = np.random.default_rng(5)
+    theta = rng.normal(size=(2, 1, 8, 2))
+    bundle = {
+        "theta": theta,
+        "design": np.array([[1.0, 0.0], [0.5, 0.5]]),
+        "series_names": ["optimal", "nominal"],
+        "param_names": ["a", "b"],
+        "meta": {"series": [{"name": "optimal", "color": "tab:orange"}]},
+    }
+    experiment = SimpleNamespace(cosmo_params=["a", "b"], latex_labels=["a", "b"])
+    entries = nf_entries_from_posterior_bundle(bundle, experiment)
+    assert [e["name"] for e in entries] == ["optimal", "nominal"]
+    assert entries[0]["color"] == "tab:orange"
+    assert entries[1]["color"] == "tab:blue"
+    np.testing.assert_allclose(entries[0]["samples"].samples, theta[0, 0])
+
+
+def test_plot_posterior_requires_artifact_when_no_entries(tmp_path, monkeypatch):
+    monkeypatch.setenv("SCRATCH", str(tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    plotter = BasePlotter(cosmo_exp="num_visits")
+    experiment = SimpleNamespace(cosmo_params=["p0"], latex_labels=["p0"], device="cpu")
+    try:
+        plotter.plot_posterior(experiment=experiment)
+        assert False, "expected ValueError"
+    except ValueError as e:
+        assert "artifacts_dir" in str(e) or "posterior_samples_path" in str(e)
 
 
 def test_run_sample_save_then_plot(tmp_path):
-    """Evaluator.run calls sample_nf twice, saves, then plots."""
+    """Evaluator.run samples, saves NPZ, then plot_posterior loads that NPZ."""
     n_guide, n_params, n_obs = 20, 2, 3
     rng = np.random.default_rng(1)
     theta_nom = rng.normal(size=(n_guide, n_params))
@@ -222,17 +265,14 @@ def test_run_sample_save_then_plot(tmp_path):
         ev.run(eval_step=100)
 
     assert mock_sample.call_count == 2
-    nom_args = mock_sample.call_args_list[0].args
-    np.testing.assert_allclose(nom_args[2].detach().cpu().numpy(), design_nom.numpy())
-    np.testing.assert_allclose(nom_args[3].detach().cpu().numpy(), central.numpy())
-    opt_args = mock_sample.call_args_list[1].args
-    np.testing.assert_allclose(opt_args[2], np.array([1.0, 1.0]))
-    np.testing.assert_allclose(opt_args[3].detach().cpu().numpy(), central.numpy())
-
     assert save_spy.called
     ev.plotter.plot_posterior.assert_called_once()
-    plotted_entries = ev.plotter.plot_posterior.call_args.args[0]
-    assert [e["name"] for e in plotted_entries] == ["nominal", "optimal"]
+    plot_kwargs = ev.plotter.plot_posterior.call_args.kwargs
+    assert plot_kwargs.get("artifacts_dir") == ev.save_path
+    assert plot_kwargs.get("eval_step") == 100
+    # No in-memory nf_entries — plot loads from the just-saved NPZ.
+    assert plot_kwargs.get("nf_entries") is None
+    assert len(ev.plotter.plot_posterior.call_args.args) == 0
 
     bundle = load_posterior_samples_file(ev.save_path, step=100)
     assert list(bundle["series_names"]) == ["optimal", "nominal"]
