@@ -28,7 +28,11 @@ features: one shape coordinate, scale, and redshift.
 | `plot_template_subset_examples` | Plot observed DESI spectra, full fits, reduced fits, and individual template contributions. |
 | `summarize_template_composition` | Summarize integrated flux shares and template-dominance fractions within fixed-`N` cohorts. |
 | `discover_eazy_spectral_families` | Transform full-fit weights to ILR space, apply PCA, cluster with HDBSCAN, and decode families back to sparse original-template subsets. |
+| `plot_family_subset_tradeoffs` | Compare the top subsets of one family when ranked separately by completeness and purity. |
 | `compare_eazy_family_embeddings` | Test PCA variance cutoffs and standardized versus raw PC scores. |
+| `scan_hdbscan_family_hyperparameters` | Independently scan retained PC count, HDBSCAN minimum cluster size, minimum samples, and EOM/leaf selection. |
+| `bootstrap_hdbscan_family_stability` | Refit PCA and HDBSCAN on repeated DESI subsamples to test family reproducibility, splits, and merges. |
+| `compare_family_reduced_basis_utility` | Rank family solutions by the completeness, purity, and total DESI coverage of their selected reduced-template bases. |
 | `plot_family_spectral_features` | Compare reconstructed family spectra, continua, absorption indices, emission EWs, and the Balmer decrement. |
 | `plot_eazy_basis_representativeness` | Diagnose full-bank template usage, omission losses, and PCA reconstruction fidelity. |
 | `plot_eazy_dominant_cohort_traits` | Older exploratory T1/T7 majority-cohort diagnostic; not part of the recommended discovery workflow. |
@@ -104,10 +108,90 @@ standardizes the retained PC scores, and applies HDBSCAN. The saved fixed-`N`
 quality matrices then identify the smallest original-template subset that
 accurately represents most members of each family.
 
+The family outputs distinguish two directions that should not be conflated:
+
+- **completeness** is the fraction of a family's members that pass a subset,
+  `P(subset passes | family)`;
+- **purity** is the fraction of all DESI spectra passing that subset that belong
+  to the family, `P(family | subset passes)`.
+
+`family_basis_candidates.csv` records both values for every tested
+family-subset pair. The overview annotates both for each family's displayed
+subset; a highly complete decoder is not necessarily a family-specific prior.
+The overview selects the family-supported subset maximizing their harmonic
+mean, `F1 = 2 * completeness * purity / (completeness + purity)`, and shows
+its completeness, purity, and F1 together.
+
+To inspect the best combinations for one family, generate two paired-bar
+rankings—one sorted by completeness and one by purity. Both panels show both
+metrics, while the companion CSV retains every tested combination and records
+both ranks:
+
+```bash
+python -m bedcosmo.num_visits.empirical.reduced.plot_family_subset_tradeoffs \
+  --build-name empirical_prior/eazy12 \
+  --family F01
+```
+
+The default is the top 15 in each panel. Use `--top`, `--min-completeness`,
+`--min-purity`, and `--max-templates` to adjust the view without changing the
+original candidate table. By default, the rankings only admit combinations
+drawn from the smallest mean-weight-ranked template pool that contains 99% of
+the family's mean full-fit mixture. Use `--family-weight-coverage` to change
+that definition or `--unrestricted` to recover the exhaustive ranking.
+
 In the current EAZY12/DESI run, the 90% setting retained eight PCs and found
 thirteen dense families. This result motivated compact candidates including
 `T1+T7`, `T7+T10`, and `T1+T8`; the PC vectors themselves are not passed to
 EAZY or BED.
+
+The original local sensitivity check varied minimum cluster size and minimum
+samples together. For a proper independent scan of the primary clustering
+choices, run:
+
+```bash
+python -m bedcosmo.num_visits.empirical.reduced.scan_hdbscan_family_hyperparameters \
+  --build-name empirical_prior/eazy12
+```
+
+The default grid covers 6–11 retained PCs, five minimum-cluster sizes, five
+minimum-samples values, and both EOM and leaf selection (300 configurations).
+It saves the complete result table, a component-level sensitivity summary,
+metric heatmaps, and exact scan provenance.
+
+After identifying plausible configurations, test whether their families survive
+population perturbations with:
+
+```bash
+python -m bedcosmo.num_visits.empirical.reduced.bootstrap_hdbscan_family_stability \
+  --build-name empirical_prior/eazy12
+```
+
+The default comparison refits 6-, 7-, 8-, and 9-PC solutions with
+`min_cluster_size=300` and `min_samples=30` on fifty random 80% subsamples.
+It reports assignment stability, adjusted Rand agreement, same-family pair
+precision/recall/F1, and the best matching resampled cluster for every
+full-data family. Sampling is without replacement so duplicated spectra do not
+artificially change HDBSCAN densities. The two density-count thresholds are
+scaled by the sampled fraction (300/30 becomes 240/24 at 80%) so their
+population meaning remains comparable; use `--no-scale-density-counts` to test
+fixed absolute thresholds instead.
+
+Clustering stability is a guardrail rather than the final selection objective.
+Compare candidate family solutions by their downstream reduced-template bases:
+
+```bash
+python -m bedcosmo.num_visits.empirical.reduced.compare_family_reduced_basis_utility \
+  --build-name empirical_prior/eazy12 \
+  --cohort-root experiments/num_visits/plots/reduced_template_cohorts/eazy12
+```
+
+The default proposal views use 6, 8, and 9 PCs while holding HDBSCAN fixed at
+300/30 EOM. For every family, this applies the same 99%-supported template pool
+used by the discovery overview and retains every supported family/template-set
+pairing. It writes a candidate catalog with completeness, purity, passing count,
+basis dimension, Pareto flags, and (when available) bootstrap stability. PC count
+is retained as provenance rather than treated as the optimization target.
 
 ## 3. Build reduced empirical priors
 
