@@ -186,6 +186,38 @@ def test_plot_posterior_requires_artifact_when_no_entries(tmp_path, monkeypatch)
         assert "artifacts_dir" in str(e) or "posterior_samples_path" in str(e)
 
 
+def test_extract_run_posterior_data_without_flow():
+    """extract_run_posterior_data builds EIG context without a plotter or flow."""
+    from bedcosmo.util import extract_run_posterior_data
+
+    experiment = SimpleNamespace(device="cpu")
+    eig_data = {
+        "input_designs": [[0.0, 0.0], [1.0, 1.0]],
+        "step_10": {
+            "variable": {
+                "eigs_avg": [0.2, 0.8],
+                "prior_entropy_avg": [1.0, 1.1],
+                "posterior_entropy_avg": [0.5, 0.4],
+            },
+            "nominal": {"eigs_avg": 0.3, "prior_entropy_avg": 1.0, "posterior_entropy_avg": 0.6},
+        },
+    }
+    data = extract_run_posterior_data(
+        experiment,
+        eig_data,
+        MagicMock(),
+        {},
+        eval_step=10,
+        run_id="abcdefghij",
+        load_flow=False,
+    )
+    assert data["posterior_flow"] is None
+    assert data["experiment"] is experiment
+    np.testing.assert_allclose(data["eig_values"], [0.2, 0.8])
+    assert data["nominal_eig"] == 0.3
+    assert data["title"].startswith("Posterior Evaluation - Run: abcdefgh")
+
+
 def test_run_sample_save_then_plot(tmp_path):
     """Evaluator.run samples, saves NPZ, then plot_posterior loads that NPZ."""
     n_guide, n_params, n_obs = 20, 2, 3
@@ -237,11 +269,19 @@ def test_run_sample_save_then_plot(tmp_path):
     ev.marginal_eig_subsets = []
     ev.other_eig_data = None
     ev.timestamp = None
-    ev.eig_data = {}
+    ev.eig_data = {
+        "input_designs": [[0.0, 0.0], [1.0, 1.0]],
+        "step_100": {
+            "variable": {"eigs_avg": [0.1, 0.9]},
+            "nominal": {"eigs_avg": 0.5},
+        },
+    }
     ev.input_designs = torch.randn(2, 3, dtype=torch.float64)
     ev.experiment = experiment
+    ev.run_obj = MagicMock()
+    ev.run_obj.info.run_id = "run123"
+    ev.run_args = {"total_steps": 100}
     ev.plotter = MagicMock()
-    ev.plotter._extract_run_posterior_data.return_value = dict(extract_data)
     ev.plotter._entropy_legend_suffix = MagicMock(return_value="")
     ev.get_eig = MagicMock(side_effect=[(0.5, 0.01), (np.array([0.2, 0.8]), np.zeros(2))])
     ev._update_runtime = MagicMock()
@@ -253,10 +293,13 @@ def test_run_sample_save_then_plot(tmp_path):
         _make_mcsamples(theta_opt, ["p0", "p1"]),
     ]
     with patch("bedcosmo.evaluate.render_overlay"), \
+         patch("bedcosmo.evaluate.extract_run_posterior_data", return_value=dict(extract_data)) as mock_extract, \
          patch("bedcosmo.evaluate.sample_nf", side_effect=mcsamples) as mock_sample, \
          patch("bedcosmo.evaluate.save_posterior_samples", wraps=save_posterior_samples) as save_spy:
         ev.run(eval_step=100)
 
+    mock_extract.assert_called_once()
+    assert mock_extract.call_args.args[0] is experiment
     assert mock_sample.call_count == 2
     assert save_spy.called
     ev.plotter.plot_posterior.assert_called_once()

@@ -38,6 +38,7 @@ from bedcosmo.util import (
     get_rng_state, parse_extra_args, render_overlay,
     get_checkpoint, get_contour_area,
     sample_nf,
+    extract_run_posterior_data,
 )
 from bedcosmo.artifacts import (
     load_eig_data_file,
@@ -2075,12 +2076,15 @@ class Evaluator:
         if eig_file is not None:
             eig_file = os.path.basename(str(eig_file))
         try:
-            data = self.plotter._extract_run_posterior_data(
-                eval_step,
+            data = extract_run_posterior_data(
+                self.experiment,
+                self.eig_data,
+                self.run_obj,
+                self.run_args,
+                eval_step=eval_step,
                 device=self.device,
-                eig_data=self.eig_data,
+                run_id=self.run_id,
             )
-            data["experiment"] = self.experiment
             experiment = self.experiment
             auto_seed(self.seed)
 
