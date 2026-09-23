@@ -11,6 +11,7 @@ import torch
 from bedcosmo.artifacts import load_posterior_samples_file, save_posterior_samples
 from bedcosmo.evaluate import Evaluator
 from bedcosmo.plotting import BasePlotter, RunPlotter
+from bedcosmo.util import sample_nf_display_posterior
 
 
 def _make_mcsamples(theta: np.ndarray, names: list[str]):
@@ -21,6 +22,42 @@ def _make_mcsamples(theta: np.ndarray, names: list[str]):
             names=[SimpleNamespace(name=n) for n in names],
         ),
     )
+
+
+def test_sample_nf_display_posterior_is_free_function():
+    """Sampling needs experiment + flow + designs — not Evaluator."""
+    n_guide, n_params = 15, 2
+    rng = np.random.default_rng(2)
+    theta_nom = rng.normal(size=(n_guide, n_params))
+    theta_opt = rng.normal(size=(n_guide, n_params))
+    central = torch.zeros(3, dtype=torch.float64)
+    nominal_design = torch.ones(2, dtype=torch.float64)
+    experiment = SimpleNamespace(
+        central_val=central,
+        nominal_design=nominal_design,
+        nominal_context=torch.cat([nominal_design, central]),
+        device="cpu",
+        get_guide_samples=MagicMock(
+            side_effect=[
+                _make_mcsamples(theta_nom, ["p0", "p1"]),
+                _make_mcsamples(theta_opt, ["p0", "p1"]),
+            ]
+        ),
+    )
+    input_designs = np.array([[0.0, 0.0], [1.0, 1.0], [0.5, 0.5]])
+    entries = sample_nf_display_posterior(
+        experiment,
+        MagicMock(),
+        display=("nominal", "optimal"),
+        input_designs=input_designs,
+        eig_values=np.array([0.1, 0.9, 0.2]),
+        guide_samples=n_guide,
+        device="cpu",
+    )
+    assert [e["name"] for e in entries] == ["nominal", "optimal"]
+    np.testing.assert_allclose(entries[0]["samples"].samples, theta_nom)
+    np.testing.assert_allclose(entries[1]["design"], input_designs[1])
+    assert experiment.get_guide_samples.call_count == 2
 
 
 def test_plot_posterior_display_does_not_sample(tmp_path, monkeypatch):
