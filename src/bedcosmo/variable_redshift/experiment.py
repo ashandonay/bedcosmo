@@ -38,9 +38,11 @@ home_dir = os.environ["HOME"]
 mlflow.set_tracking_uri(storage_path + "/mlruns")
 
 # Planck18-style fiducial cosmology for central feature generation and plot markers.
+# Values are in reported units (multiplier applied), like posterior samples:
+# hrdrag is H0 * r_d in km/s.
 PLANCK18_FIDUCIAL = {
     "Om": 0.3152,
-    "hrdrag": 99.079,
+    "hrdrag": 9907.9,
     "Ok": 0.0,
     "w0": -1.0,
     "wa": 0.0,
@@ -395,12 +397,11 @@ class VariableRedshift(BaseExperiment, CosmologyMixin):
             if 'multiplier' in param_config.keys():
                 setattr(self, f'{param_name}_multiplier', float(param_config['multiplier']))
         # Distance parameters the model doesn't sample are held at the fiducial.
-        # Ok/w0/wa already default inside CosmologyMixin; hrdrag has no default,
-        # and PLANCK18_FIDUCIAL['hrdrag'] is in units of the 100 multiplier.
+        # Ok/w0/wa already default inside CosmologyMixin; hrdrag has no default.
         self.fixed_params = {}
         if 'hrdrag' not in model_parameters:
             self.hrdrag_multiplier = 100.0
-            self.fixed_params['hrdrag'] = PLANCK18_FIDUCIAL['hrdrag']
+            self.fixed_params['hrdrag'] = PLANCK18_FIDUCIAL['hrdrag'] / self.hrdrag_multiplier
 
         # Load prior flow if specified (absolute path required).
         if prior_flow:
@@ -464,8 +465,12 @@ class VariableRedshift(BaseExperiment, CosmologyMixin):
         # Use nominal design redshift (ensure it's properly shaped)
         z_nominal = self.nominal_design.flatten()
 
+        # central_params are in reported units; the distance functions take sampling units.
         params = {
-            name: torch.tensor(self.central_params[name], device=self.device, dtype=torch.float64).unsqueeze(-1)
+            name: torch.tensor(
+                self.central_params[name] / getattr(self, f"{name}_multiplier", 1.0),
+                device=self.device, dtype=torch.float64,
+            ).unsqueeze(-1)
             for name in self.cosmo_params
             if name in self.central_params
         }

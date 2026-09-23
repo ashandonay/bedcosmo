@@ -770,10 +770,13 @@ class BasePlotter:
 
         marker_values = dict(central_params)
         if getattr(experiment, "transform_input", False) and not transform_output:
+            # central_params are in reported units (multiplier applied); the
+            # bijector works in sampling units.
             phys = torch.tensor(
                 [
                     [
                         marker_values.get(p, experiment.get_central_param(p, 0.0))
+                        / getattr(experiment, f"{p}_multiplier", 1.0)
                         for p in experiment.cosmo_params
                     ]
                 ],
