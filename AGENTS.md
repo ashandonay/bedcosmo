@@ -1,6 +1,6 @@
 # AGENTS.md
 
-bedcosmo is a Bayesian Experimental Design framework for cosmology and astronomical surveys. A conditional normalizing flow `q(θ | y, d)` is trained across a pool of survey designs `d`. The trained flow then scores each design by its Expected Information Gain (EIG). Jobs run on NERSC through SLURM, and everything is tracked in MLflow under `$SCRATCH/bedcosmo/{cosmo_exp}/`.
+bedcosmo is a Bayesian Experimental Design framework for cosmology and astronomical surveys. A conditional normalizing flow `q(θ | y, d)` is trained across a pool of survey designs `d`. The trained flow then scores each design by its Expected Information Gain (EIG). Jobs run either locally on GPUs or queued through SLURM, and everything is tracked in MLflow under `$SCRATCH/bedcosmo/{cosmo_exp}/`.
 
 ## Rules
 
@@ -10,12 +10,8 @@ bedcosmo is a Bayesian Experimental Design framework for cosmology and astronomi
 - Update the matching README when you change YAML fields, CLI flags or documented behavior.
 
 **Ask first**
-- Before submitting, cancelling, resuming or restarting jobs. They cost allocation hours and write to shared MLflow state. For quick checks, use `--debug` or `--local`.
-- Before editing `src/` while jobs are queued or running. Jobs import the package from the shared filesystem when the process starts, so a queued job picks up whatever is on disk then. A half-finished edit can silently corrupt results.
-
-**Never**
-- Compare EIG values across different runs. Compare designs only within one trained flow.
-- Mix units. The loss path in `pyro_oed_src.py` works in nats. Estimators in `entropy.py` return bits. Convert once, at reporting, with `nats_to_bits` / `bits_to_nats`.
+- Before submitting, cancelling, resuming or restarting jobs. They use GPU time or SLURM allocation and write to MLflow state. For quick checks, use `--debug` or `--local`.
+- Before editing `src/` while jobs are queued or running. Jobs import the package from disk when the process starts, so a queued job picks up whatever is there at that moment. A half-finished edit can silently corrupt results.
 
 ## Commands
 
