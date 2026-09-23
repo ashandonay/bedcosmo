@@ -1,6 +1,6 @@
 """Generate explicit num_visits design points with a fixed total-visit budget.
 
-A Cartesian grid over six bands with an exact sum constraint is sparse or
+A Cartesian grid over the bands with an exact sum constraint is sparse or
 enormous depending on step size. This module builds explicit design arrays
 (``input_designs_path``) by combining:
 
@@ -8,52 +8,74 @@ enormous depending on step size. This module builds explicit design arrays
 2. Single-band floor/cap corners with proportional fill on the rest.
 3. Random compositions within per-band ratio bounds until ``n_target`` is reached.
 
-Every band uses the same fractional range relative to the LSST nominal visit
-counts, so all six filters appear on comparable footing in ratio-to-nominal plots.
+``--bands`` picks the filters (default all six). The budget is the nominal total
+of those bands, and every band uses the same fractional range relative to its
+LSST nominal visit count, so all filters appear on comparable footing in
+ratio-to-nominal plots.
 
 Example::
 
-    python -m bedcosmo.num_visits.design
+    python -m bedcosmo.num_visits.design --bands gri --n-target 100
 
-Writes ``$SCRATCH/bedcosmo/num_visits/designs/designs_<n>_<YYYYMMDD_HHMMSS>.npy``
-and prints the absolute path for ``input_designs_path``.
+Outputs land in two places: the design array (and its plot) goes to
+``$SCRATCH/bedcosmo/num_visits/designs/<name>.npy`` (``--designs-dir``), while the
+``design_args_<name>.yaml`` (or ``--yaml``) that points at it goes to the experiment
+config dir (``--out-dir``) so ``--design-args-path`` can find it. The YAML's ``labels`` list the
+bands in column order of the array.
 """
 from __future__ import annotations
 
 import argparse
 import os
+import shlex
+import sys
 from datetime import datetime
-from typing import Iterable
+from typing import Iterable, Sequence
 
 import numpy as np
+import yaml
 
-BANDS = ["u", "g", "r", "i", "z", "y"]
-# Keep in sync with bedcosmo.num_visits.experiment.fiducial_nvisits
-NOMINAL = np.array([70, 100, 230, 230, 200, 200], dtype=np.int64)
-BUDGET = int(NOMINAL.sum())
+from bedcosmo.num_visits.experiment import fiducial_nvisits
+
+BANDS = list(fiducial_nvisits)
 UNIT = 10
-T = BUDGET // UNIT
 
 
 def _round_to_unit(value: float) -> int:
     return int(max(UNIT, round(value / UNIT) * UNIT))
 
 
-def ratio_bounds(ratio_min: float, ratio_max: float) -> tuple[np.ndarray, np.ndarray]:
+def nominal_visits(bands: Sequence[str]) -> np.ndarray:
+    """LSST nominal visit counts for ``bands``, in the given order."""
+    unknown = [b for b in bands if b not in fiducial_nvisits]
+    if unknown:
+        raise ValueError(f"Unknown bands {unknown}; choose from {BANDS}")
+    if len(set(bands)) != len(bands):
+        raise ValueError(f"Duplicate bands in {list(bands)}")
+    if not bands:
+        raise ValueError("At least one band is required")
+    return np.array([fiducial_nvisits[b] for b in bands], dtype=np.int64)
+
+
+def ratio_bounds(
+    nominal: np.ndarray, ratio_min: float, ratio_max: float
+) -> tuple[np.ndarray, np.ndarray]:
     """Per-band visit floors and caps from uniform ratio limits."""
-    lower = np.array([_round_to_unit(n * ratio_min) for n in NOMINAL], dtype=np.int64)
-    upper = np.array([_round_to_unit(n * ratio_max) for n in NOMINAL], dtype=np.int64)
+    lower = np.array([_round_to_unit(n * ratio_min) for n in nominal], dtype=np.int64)
+    upper = np.array([_round_to_unit(n * ratio_max) for n in nominal], dtype=np.int64)
     return lower, upper
 
 
-def ratio_axes(ratio_min: float, ratio_max: float, n_levels: int = 3) -> list[np.ndarray]:
+def ratio_axes(
+    nominal: np.ndarray, ratio_min: float, ratio_max: float, n_levels: int = 3
+) -> list[np.ndarray]:
     """Discrete visit levels per band from a shared ratio grid."""
     if n_levels == 3:
         ratios = [ratio_min, 1.0, ratio_max]
     else:
         ratios = np.linspace(ratio_min, ratio_max, n_levels).tolist()
     axes = []
-    for nom in NOMINAL:
+    for nom in nominal:
         levels = sorted({max(UNIT, _round_to_unit(nom * ratio)) for ratio in ratios})
         axes.append(np.array(levels, dtype=np.int64))
     return axes
@@ -71,11 +93,12 @@ def proportional_fill(
     total_units: int,
     floor_u: np.ndarray,
     cap_u: np.ndarray,
+    weights: np.ndarray,
     exclude: int | None = None,
     exclude_mask: np.ndarray | None = None,
 ) -> np.ndarray | None:
-    """Distribute ``total_units`` across bands ~ nominal, honoring floors and caps."""
-    mask = np.ones(len(BANDS), dtype=bool)
+    """Distribute ``total_units`` across bands ~ ``weights``, honoring floors and caps."""
+    mask = np.ones(len(floor_u), dtype=bool)
     if exclude is not None:
         mask[exclude] = False
     if exclude_mask is not None:
@@ -91,8 +114,7 @@ def proportional_fill(
 
     out = floors.copy()
     remaining = total_units - int(out.sum())
-    weights = NOMINAL.astype(float) * mask
-    order = np.argsort(-weights)
+    order = np.argsort(-(weights.astype(float) * mask))
 
     while remaining > 0:
         progressed = False
@@ -109,43 +131,46 @@ def proportional_fill(
 
 
 def enumerate_ratio_grid(
+    nominal: np.ndarray,
     ratio_min: float,
     ratio_max: float,
     n_levels: int = 3,
 ) -> np.ndarray:
-    """All grid points whose visit counts sum exactly to ``BUDGET``."""
-    axes = ratio_axes(ratio_min, ratio_max, n_levels=n_levels)
+    """All grid points whose visit counts sum exactly to the nominal budget."""
+    axes = ratio_axes(nominal, ratio_min, ratio_max, n_levels=n_levels)
     mesh = np.meshgrid(*axes, indexing="ij")
     flat = np.stack([grid.ravel() for grid in mesh], axis=1)
-    keep = flat.sum(axis=1) == BUDGET
+    keep = flat.sum(axis=1) == nominal.sum()
     return flat[keep]
 
 
-def _check_bounds_feasible(floor_u: np.ndarray, cap_u: np.ndarray) -> None:
-    if int(floor_u.sum()) > T:
+def _check_bounds_feasible(floor_u: np.ndarray, cap_u: np.ndarray, t: int) -> None:
+    if int(floor_u.sum()) > t:
         raise ValueError(
             f"Per-band lower bounds sum to {int(floor_u.sum() * UNIT)} visits, "
-            f"above budget {BUDGET}."
+            f"above budget {t * UNIT}."
         )
-    if int(cap_u.sum()) < T:
+    if int(cap_u.sum()) < t:
         raise ValueError(
             f"Per-band upper bounds sum to {int(cap_u.sum() * UNIT)} visits, "
-            f"below budget {BUDGET}."
+            f"below budget {t * UNIT}."
         )
 
 
 def _random_feasible_units(
     floor_u: np.ndarray,
     cap_u: np.ndarray,
+    t: int,
+    weights: np.ndarray,
     rng: np.random.Generator,
 ) -> np.ndarray | None:
     """Sample one composition uniformly-ish over feasible integer allocations."""
     out = floor_u.copy()
-    remaining = T - int(out.sum())
+    remaining = t - int(out.sum())
     if remaining < 0 or remaining > int((cap_u - out).sum()):
         return None
 
-    weights = NOMINAL.astype(float)
+    weights = weights.astype(float)
     while remaining > 0:
         candidates = np.flatnonzero(out < cap_u)
         if candidates.size == 0:
@@ -159,6 +184,7 @@ def _random_feasible_units(
 
 
 def generate_designs(
+    bands: Sequence[str] = BANDS,
     n_target: int = 100,
     ratio_min: float = 0.75,
     ratio_max: float = 1.25,
@@ -166,41 +192,43 @@ def generate_designs(
     seed: int = 0,
     include_corners: bool = True,
 ) -> np.ndarray:
-    """Build ``(n_designs, 6)`` visit-count designs summing to the nominal budget."""
-    lower, upper = ratio_bounds(ratio_min, ratio_max)
+    """Build ``(n_designs, len(bands))`` visit-count designs summing to the nominal budget."""
+    nominal = nominal_visits(bands)
+    t = int(nominal.sum()) // UNIT
+    lower, upper = ratio_bounds(nominal, ratio_min, ratio_max)
     floor_u = to_units(lower)
     cap_u = to_units(upper)
-    _check_bounds_feasible(floor_u, cap_u)
+    _check_bounds_feasible(floor_u, cap_u, t)
     designs: set[tuple[int, ...]] = set()
 
     def add(units: np.ndarray | Iterable[int]) -> None:
         u = np.asarray(units, dtype=np.int64)
-        if u.shape != (len(BANDS),):
+        if u.shape != (len(bands),):
             return
-        if int(u.sum()) != T:
+        if int(u.sum()) != t:
             return
         if np.any(u < floor_u) or np.any(u > cap_u):
             return
         designs.add(tuple(int(x) for x in u))
 
-    add(to_units(NOMINAL))
+    add(to_units(nominal))
 
-    for row in enumerate_ratio_grid(ratio_min, ratio_max, n_levels=n_levels):
+    for row in enumerate_ratio_grid(nominal, ratio_min, ratio_max, n_levels=n_levels):
         add(to_units(row))
 
     if include_corners:
-        for band in range(len(BANDS)):
-            rest = T - int(floor_u[band])
+        for band in range(len(bands)):
+            rest = t - int(floor_u[band])
             if rest >= 0:
-                filled = proportional_fill(rest, floor_u, cap_u, exclude=band)
+                filled = proportional_fill(rest, floor_u, cap_u, nominal, exclude=band)
                 if filled is not None:
                     filled = filled.copy()
                     filled[band] = floor_u[band]
                     add(filled)
 
-            rest = T - int(cap_u[band])
+            rest = t - int(cap_u[band])
             if rest >= 0:
-                filled = proportional_fill(rest, floor_u, cap_u, exclude=band)
+                filled = proportional_fill(rest, floor_u, cap_u, nominal, exclude=band)
                 if filled is not None:
                     filled = filled.copy()
                     filled[band] = cap_u[band]
@@ -211,7 +239,7 @@ def generate_designs(
     tries = 0
     while len(designs) < n_target and tries < max_tries:
         tries += 1
-        draw = _random_feasible_units(floor_u, cap_u, rng)
+        draw = _random_feasible_units(floor_u, cap_u, t, nominal, rng)
         if draw is None:
             continue
         add(draw)
@@ -225,7 +253,7 @@ def generate_designs(
     arr = np.array(sorted(designs), dtype=np.int64)
     if arr.shape[0] > n_target:
         rng = np.random.default_rng(seed)
-        keep_nominal = np.all(to_visits(arr) == NOMINAL, axis=1)
+        keep_nominal = np.all(to_visits(arr) == nominal, axis=1)
         nominal_rows = arr[keep_nominal]
         other_rows = arr[~keep_nominal]
         n_other = n_target - nominal_rows.shape[0]
@@ -237,23 +265,66 @@ def generate_designs(
             arr = arr[np.lexsort(arr.T[::-1])]
 
     visits = to_visits(arr).astype(np.float64)
-    _validate_designs(visits, lower, upper)
+    _validate_designs(visits, nominal, lower, upper)
     return visits
 
 
-def _validate_designs(visits: np.ndarray, lower: np.ndarray, upper: np.ndarray) -> None:
-    if not np.all(visits.sum(axis=1) == BUDGET):
+def _validate_designs(
+    visits: np.ndarray, nominal: np.ndarray, lower: np.ndarray, upper: np.ndarray
+) -> None:
+    if not np.all(visits.sum(axis=1) == nominal.sum()):
         raise AssertionError("some designs do not sum to the nominal budget")
     if np.any(visits < lower[None, :]) or np.any(visits > upper[None, :]):
         raise AssertionError("design outside ratio bounds")
     if not np.all(visits % UNIT == 0):
         raise AssertionError("design visit counts are not multiples of 10")
-    if not any(np.all(visits == NOMINAL, axis=1)):
+    if not any(np.all(visits == nominal, axis=1)):
         raise AssertionError("nominal design missing from output")
+
+
+def write_design_args(
+    visits: np.ndarray,
+    bands: Sequence[str],
+    name: str,
+    yaml_file: str,
+    out_dir: str,
+    designs_dir: str,
+    header: str,
+    command: str,
+) -> tuple[str, str]:
+    """Write ``<name>.npy`` and the ``yaml_file`` that points at it; return both paths.
+
+    Refuses to overwrite an existing YAML. The YAML stores an absolute
+    ``input_designs_path``, so moving the ``.npy`` afterwards breaks the YAML unless
+    it is rewritten.
+    """
+    os.makedirs(out_dir, exist_ok=True)
+    os.makedirs(designs_dir, exist_ok=True)
+    npy_path = os.path.abspath(os.path.join(designs_dir, f"{name}.npy"))
+    yaml_path = os.path.abspath(os.path.join(out_dir, yaml_file))
+    if os.path.exists(yaml_path):
+        raise FileExistsError(
+            f"{yaml_path} already exists; pick another --yaml/--name or remove it first"
+        )
+
+    np.save(npy_path, visits)
+    design_args = {
+        "labels": list(bands),
+        # "variable" + an explicit path bypasses step/lower/upper/sum entirely;
+        # the file *is* the design pool.
+        "input_type": "variable",
+        "input_designs_path": npy_path,  # absolute path required by the loader
+    }
+    with open(yaml_path, "w") as f:
+        f.write(f"# {header}\n")
+        f.write(f"# Regenerate with:\n#   {command}\n")
+        yaml.safe_dump(design_args, f, sort_keys=False, default_flow_style=None)
+    return npy_path, yaml_path
 
 
 def plot_designs(
     visits: np.ndarray,
+    bands: Sequence[str],
     out_path: str,
     ratio_min: float = 0.75,
     ratio_max: float = 1.25,
@@ -268,7 +339,8 @@ def plot_designs(
 
     n_designs, n_dims = visits.shape
     x = np.arange(n_dims)
-    lower, cap = ratio_bounds(ratio_min, ratio_max)
+    nominal = nominal_visits(bands)
+    lower, cap = ratio_bounds(nominal, ratio_min, ratio_max)
     cap = cap.astype(float)
 
     fig, ax = plt.subplots(figsize=(10, 6))
@@ -282,11 +354,11 @@ def plot_designs(
     for i in range(n_designs):
         ax.plot(x, norm[i], color=colors[i], alpha=0.45, linewidth=0.8, zorder=1)
 
-    ax.plot(x, NOMINAL / cap, color="black", linewidth=2.5, marker="o", label="Nominal", zorder=3)
+    ax.plot(x, nominal / cap, color="black", linewidth=2.5, marker="o", label="Nominal", zorder=3)
     ax.plot(x, np.ones(n_dims), color="0.6", linewidth=1.0, linestyle="--", label=f"{ratio_max:.2f}x nominal", zorder=2)
 
     ax.set_xticks(x)
-    ax.set_xticklabels([f"${b}$" for b in BANDS], fontsize=13)
+    ax.set_xticklabels([f"${b}$" for b in bands], fontsize=13)
     ax.set_ylim(-0.03, 1.08)
     ax.set_ylabel(f"visits / ({ratio_max:.2f}x nominal)", fontsize=12)
     for xi in range(n_dims):
@@ -295,18 +367,25 @@ def plot_designs(
         ax.text(xi, -0.055, f"{int(lower[xi])}", ha="center", va="top", fontsize=8, color="0.4")
 
     ax.set_title(
-        f"NumVisits design space: {n_designs} designs, all summing to {BUDGET} visits",
+        f"NumVisits design space: {n_designs} designs, all summing to {int(nominal.sum())} visits",
         fontsize=13,
     )
     ax.legend(loc="upper right", fontsize=10)
 
     sm = plt.cm.ScalarMappable(cmap=colormap, norm=plt.Normalize(vmin=cmin, vmax=cmax))
     cbar = fig.colorbar(sm, ax=ax, pad=0.01)
-    cbar.set_label(f"${BANDS[color_dim]}$ visits", fontsize=11)
+    cbar.set_label(f"${bands[color_dim]}$ visits", fontsize=11)
 
     fig.tight_layout()
     fig.savefig(out_path, dpi=300)
     plt.close(fig)
+
+
+def _default_out_dir() -> str:
+    """Experiment config dir, so generated design_args sit beside the hand-written ones."""
+    from bedcosmo.util import get_experiment_config_path
+
+    return os.path.dirname(str(get_experiment_config_path("num_visits", "train_args.yaml")))
 
 
 def _designs_dir() -> str:
@@ -314,32 +393,50 @@ def _designs_dir() -> str:
     return os.path.join(scratch, "bedcosmo", "num_visits", "designs")
 
 
-def _dated_output_path(n_target: int, when: datetime | None = None) -> str:
-    stamp = (when or datetime.now()).strftime("%Y%m%d_%H%M%S")
-    filename = f"designs_{n_target}_{stamp}.npy"
-    return os.path.join(_designs_dir(), filename)
-
-
 def main(argv: list[str] | None = None) -> np.ndarray:
     parser = argparse.ArgumentParser(description="Generate num_visits design arrays.")
     parser.add_argument(
-        "--output",
-        default=None,
-        help="Output .npy path (default: $SCRATCH/bedcosmo/num_visits/designs/designs_<n>_<date>.npy)",
+        "--bands", default="".join(BANDS),
+        help=f"Filters to vary, in design-column order (default: {''.join(BANDS)}; e.g. gri)",
     )
-    parser.add_argument("--plot", default=None, help="Optional parallel-coordinates .png path")
+    parser.add_argument(
+        "--name", default=None,
+        help="Names <name>.npy and, unless --yaml is given, design_args_<name>.yaml "
+             "(default: <bands>_<n>_<YYYYMMDD_HHMMSS>)",
+    )
+    parser.add_argument(
+        "--yaml", default=None,
+        help="File name for the design_args YAML in --out-dir, e.g. design_args_extreme.yaml "
+             "(default: design_args_<name>.yaml). Must not already exist",
+    )
+    parser.add_argument(
+        "--out-dir", default=None,
+        help="Dir for the design_args_*.yaml (default: experiment config dir)",
+    )
+    parser.add_argument(
+        "--designs-dir", default=None,
+        help="Dir for the design .npy (default: $SCRATCH/bedcosmo/num_visits/designs)",
+    )
+    parser.add_argument("--plot", default=None, help="Parallel-coordinates .png path (default: beside the .npy)")
     parser.add_argument("--n-target", type=int, default=100, help="Target number of designs")
     parser.add_argument("--ratio-min", type=float, default=0.75, help="Lower ratio limit (all bands)")
     parser.add_argument("--ratio-max", type=float, default=1.25, help="Upper ratio limit (all bands)")
     parser.add_argument("--n-levels", type=int, default=3, help="Ratio grid levels per band")
     parser.add_argument("--seed", type=int, default=0, help="RNG seed for random fill / subsample")
     parser.add_argument("--no-corners", action="store_true", help="Skip single-band floor/cap corners")
+    argv = sys.argv[1:] if argv is None else argv
     args = parser.parse_args(argv)
+    if args.yaml is not None and (
+        os.path.basename(args.yaml) != args.yaml or not args.yaml.endswith(".yaml")
+    ):
+        parser.error(f"--yaml must be a bare *.yaml file name (use --out-dir for the dir), got {args.yaml}")
 
-    out_path = os.path.abspath(args.output or _dated_output_path(args.n_target))
-    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    bands = list(args.bands)
+    nominal = nominal_visits(bands)
+    budget = int(nominal.sum())
 
     visits = generate_designs(
+        bands=bands,
         n_target=args.n_target,
         ratio_min=args.ratio_min,
         ratio_max=args.ratio_max,
@@ -348,26 +445,39 @@ def main(argv: list[str] | None = None) -> np.ndarray:
         include_corners=not args.no_corners,
     )
 
-    np.save(out_path, visits)
+    name = args.name or (
+        f"{''.join(bands)}_{visits.shape[0]}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    )
+    npy_path, yaml_path = write_design_args(
+        visits,
+        bands,
+        name,
+        yaml_file=args.yaml or f"design_args_{name}.yaml",
+        out_dir=args.out_dir or _default_out_dir(),
+        designs_dir=args.designs_dir or _designs_dir(),
+        header=(
+            f"{visits.shape[0]} designs over {bands}, each summing to exactly {budget} "
+            f"visits, every band within {args.ratio_min:g}-{args.ratio_max:g}x nominal."
+        ),
+        command=f"python -m bedcosmo.num_visits.design {shlex.join(argv)}".rstrip(),
+    )
 
-    lower, upper = ratio_bounds(args.ratio_min, args.ratio_max)
-    print(f"wrote {visits.shape[0]} designs -> {out_path}")
-    print(f"all sum to {BUDGET}: {bool(np.all(visits.sum(1) == BUDGET))}")
+    lower, upper = ratio_bounds(nominal, args.ratio_min, args.ratio_max)
+    print(f"bands: {bands}  nominal: {nominal.tolist()}")
+    print(f"wrote {visits.shape[0]} designs -> {npy_path}")
+    print(f"all sum to {budget}: {bool(np.all(visits.sum(1) == budget))}")
     print(f"ratio range [{args.ratio_min}, {args.ratio_max}]")
     print("per-band min:", visits.min(0).astype(int).tolist())
     print("per-band max:", visits.max(0).astype(int).tolist())
     print("per-band lower bound:", lower.astype(int).tolist())
     print("per-band upper bound:", upper.astype(int).tolist())
-    print("nominal present:", any(np.all(visits == NOMINAL, axis=1)))
+    print("nominal present:", any(np.all(visits == nominal, axis=1)))
 
-    plot_path = args.plot
-    if plot_path is None:
-        root, _ = os.path.splitext(out_path)
-        plot_path = root + ".png"
-    plot_designs(visits, plot_path, ratio_min=args.ratio_min, ratio_max=args.ratio_max)
+    plot_path = os.path.abspath(args.plot or os.path.splitext(npy_path)[0] + ".png")
+    plot_designs(visits, bands, plot_path, ratio_min=args.ratio_min, ratio_max=args.ratio_max)
     print(f"wrote design-space plot -> {plot_path}")
-    print(f"shape: {visits.shape}")
-    print(f"\ninput_designs_path: {out_path}")
+    print(f"\nwrote design_args -> {yaml_path}")
+    print(f"train with: --design-args-path {os.path.basename(yaml_path)}")
     return visits
 
 

@@ -1,0 +1,4 @@
+# Single nominal design (fiducial LSST visits per filter)
+labels: ["u", "g", "r", "i", "z", "y"]
+input_type: nominal
+input_designs_path: null
