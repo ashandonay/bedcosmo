@@ -37,6 +37,7 @@ from bedcosmo.util import (
     parse_param_subsets,
     get_rng_state, parse_extra_args, render_overlay,
     get_checkpoint, get_contour_area,
+    sample_nf,
 )
 from bedcosmo.artifacts import (
     load_eig_data_file,
@@ -2068,7 +2069,7 @@ class Evaluator:
                 json.dump(self.eig_data, f, indent=2)
             print(f"Saved EIG data to {eig_data_save_path}")
 
-        # Main posterior: sample (via _sample_nf_entries → sample_nf) → save → plot.
+        # Main posterior: resolve designs/y → sample_nf → save NPZ → plot.
         # Multi-y bundles still require --sample-posterior.
         eig_file = self.eig_file_path or self.output_path
         if eig_file is not None:
@@ -2083,92 +2084,161 @@ class Evaluator:
             experiment = self.experiment
             auto_seed(self.seed)
 
-            # Caller-side selection of nominal/optimal + central y lives in
-            # _sample_nf_entries; sample_nf itself only conditions on design+y.
-            nf_entries, _ = self.plotter._sample_nf_entries(
-                ("nominal", "optimal"),
-                self.guide_samples,
+            posterior_flow = data["posterior_flow"]
+            y = experiment.central_val
+            eig_label = "Marginal EIG" if data.get("marginal_eig", False) else "EIG"
+            include_prior_in_legend = not self.plot_prior
+            nf_entries = []
+
+            # Nominal design + central y
+            nominal_design = experiment.nominal_design
+            nominal_samples = sample_nf(
+                experiment,
+                posterior_flow,
+                nominal_design,
+                y,
+                num_samples=self.guide_samples,
                 transform_output=self.nf_transform_output,
-                experiment=experiment,
-                posterior_flow=data["posterior_flow"],
-                input_designs=data.get("input_designs"),
-                eig_values=data.get("eig_values"),
-                nominal_eig=data.get("nominal_eig"),
-                nominal_prior_entropy=data.get("nominal_prior_entropy"),
-                nominal_posterior_entropy=data.get("nominal_posterior_entropy"),
-                prior_entropy_by_design=data.get("prior_entropy_by_design"),
-                posterior_entropy_by_design=data.get("posterior_entropy_by_design"),
                 device=self.device,
-                marginal_eig=data.get("marginal_eig", False),
-                plot_prior=self.plot_prior,
             )
+            nominal_eig = data.get("nominal_eig")
+            eig_str = (
+                f", {eig_label}: {nominal_eig:.3f} bits"
+                if nominal_eig is not None
+                else ""
+            )
+            eig_str += self.plotter._entropy_legend_suffix(
+                data.get("nominal_prior_entropy"),
+                data.get("nominal_posterior_entropy"),
+                include_prior=include_prior_in_legend,
+            )
+            if hasattr(nominal_design, "detach"):
+                nominal_design_np = nominal_design.detach().cpu().numpy().reshape(-1)
+            else:
+                nominal_design_np = np.asarray(nominal_design).reshape(-1)
+            nf_entries.append({
+                "samples": nominal_samples,
+                "name": "nominal",
+                "design": nominal_design_np,
+                "label": f"Nominal Design (NF){eig_str}",
+                "color": "tab:blue",
+                "line_style": "-",
+                "alpha": 1.0,
+            })
+
+            # Optimal (EIG-argmax) design + central y
+            input_designs = data.get("input_designs")
+            eig_values = data.get("eig_values")
+            if input_designs is None:
+                raise ValueError("input_designs required for optimal posterior")
+            input_designs_arr = np.asarray(input_designs)
+            prior_h = data.get("prior_entropy_by_design")
+            post_h = data.get("posterior_entropy_by_design")
+            if len(input_designs_arr) > 1 and eig_values is not None:
+                eig_values_arr = np.asarray(eig_values)
+                optimal_idx = int(np.argmax(eig_values_arr))
+                optimal_design = input_designs_arr[optimal_idx]
+                optimal_eig = float(eig_values_arr[optimal_idx])
+                eig_str = f", {eig_label}: {optimal_eig:.3f} bits"
+                opt_prior_h = (
+                    float(prior_h[optimal_idx])
+                    if prior_h is not None and len(prior_h) > optimal_idx
+                    else None
+                )
+                opt_post_h = (
+                    float(post_h[optimal_idx])
+                    if post_h is not None and len(post_h) > optimal_idx
+                    else None
+                )
+                eig_str += self.plotter._entropy_legend_suffix(
+                    opt_prior_h, opt_post_h, include_prior=include_prior_in_legend
+                )
+                opt_label = f"Optimal Design (NF){eig_str}"
+            elif len(input_designs_arr) >= 1:
+                optimal_idx = 0
+                optimal_design = input_designs_arr[0]
+                optimal_eig = (
+                    float(np.asarray(eig_values)[0]) if eig_values is not None else None
+                )
+                eig_str = (
+                    f", {eig_label}: {optimal_eig:.3f} bits"
+                    if optimal_eig is not None
+                    else ""
+                )
+                opt_label = f"Input Design (NF){eig_str}"
+            else:
+                raise ValueError("No input designs available for optimal posterior")
+
+            optimal_samples = sample_nf(
+                experiment,
+                posterior_flow,
+                optimal_design,
+                y,
+                num_samples=self.guide_samples,
+                transform_output=self.nf_transform_output,
+                device=self.device,
+            )
+            nf_entries.append({
+                "samples": optimal_samples,
+                "name": "optimal",
+                "design": np.asarray(optimal_design, dtype=np.float64).reshape(-1),
+                "label": opt_label,
+                "color": "tab:orange",
+                "line_style": "-",
+                "alpha": 1.0,
+            })
 
             # Pack central-context entries into the existing NPZ schema (n_data=1).
-            by_name = {
-                e["name"]: e
-                for e in nf_entries
-                if isinstance(e, dict) and e.get("name") in ("optimal", "nominal")
+            by_name = {e["name"]: e for e in nf_entries}
+            series_order = ["optimal", "nominal"]
+            if hasattr(y, "detach"):
+                y_np = y.detach().cpu().numpy().reshape(-1)
+            else:
+                y_np = np.asarray(y).reshape(-1)
+            thetas, ys, designs, series_meta = [], [], [], []
+            param_names = None
+            for name in series_order:
+                entry = by_name[name]
+                theta = np.asarray(entry["samples"].samples, dtype=np.float64)
+                if param_names is None:
+                    param_names = list(entry["samples"].paramNames.list())
+                thetas.append(theta[np.newaxis, ...])
+                ys.append(y_np.reshape(1, -1))
+                designs.append(np.asarray(entry["design"], dtype=np.float64).reshape(-1))
+                series_meta.append({"name": name, "color": entry.get("color")})
+
+            out_meta = {
+                "status": "complete",
+                "run_id": self.run_id,
+                "step": int(eval_step) if str(eval_step).isdigit() else eval_step,
+                "eig_file": eig_file,
+                "central": True,
+                "conditioning": "central_val",
+                "seed": int(self.seed),
+                "guide_samples": int(self.guide_samples),
+                "num_data_samples": 1,
+                "transform_output": bool(self.nf_transform_output),
+                "param_space": self.param_space,
+                "cosmo_exp": self.cosmo_exp,
+                "series": series_meta,
+                "generated_by": "Evaluator.run",
+                "optimal_design_index": int(optimal_idx),
             }
-            series_order = [n for n in ("optimal", "nominal") if n in by_name]
-            if series_order:
-                central = experiment.central_val
-                if hasattr(central, "detach"):
-                    central = central.detach().cpu().numpy().reshape(-1)
-                else:
-                    central = np.asarray(central).reshape(-1)
-                thetas, ys, designs, series_meta = [], [], [], []
-                param_names = None
-                for name in series_order:
-                    entry = by_name[name]
-                    theta = np.asarray(entry["samples"].samples, dtype=np.float64)
-                    if param_names is None:
-                        param_names = list(entry["samples"].paramNames.list())
-                    thetas.append(theta[np.newaxis, ...])
-                    ys.append(central.reshape(1, -1))
-                    design = entry["design"]
-                    if hasattr(design, "detach"):
-                        design = design.detach().cpu().numpy().reshape(-1)
-                    else:
-                        design = np.asarray(design).reshape(-1)
-                    designs.append(design)
-                    series_meta.append({"name": name, "color": entry.get("color")})
 
-                out_meta = {
-                    "status": "complete",
-                    "run_id": self.run_id,
-                    "step": int(eval_step) if str(eval_step).isdigit() else eval_step,
-                    "eig_file": eig_file,
-                    "central": True,
-                    "conditioning": "central_val",
-                    "seed": int(self.seed),
-                    "guide_samples": int(self.guide_samples),
-                    "num_data_samples": 1,
-                    "transform_output": bool(self.nf_transform_output),
-                    "param_space": self.param_space,
-                    "cosmo_exp": self.cosmo_exp,
-                    "series": series_meta,
-                    "generated_by": "Evaluator.run",
-                }
-                eig_values = data.get("eig_values")
-                if eig_values is not None:
-                    eigs_1d = np.atleast_1d(np.asarray(eig_values))
-                    if eigs_1d.size > 0:
-                        out_meta["optimal_design_index"] = int(np.argmax(eigs_1d))
-
-                out_path = make_posterior_samples_path(self.save_path, step=eval_step)
-                save_posterior_samples(
-                    out_path,
-                    theta=np.stack(thetas, axis=0),
-                    y=np.stack(ys, axis=0),
-                    design=np.stack(designs, axis=0),
-                    series_names=series_order,
-                    param_names=param_names,
-                    meta=out_meta,
-                )
-                print(
-                    f"  Saved central-context posterior plot samples "
-                    f"(n_data=1) to {out_path}"
-                )
+            out_path = make_posterior_samples_path(self.save_path, step=eval_step)
+            save_posterior_samples(
+                out_path,
+                theta=np.stack(thetas, axis=0),
+                y=np.stack(ys, axis=0),
+                design=np.stack(designs, axis=0),
+                series_names=series_order,
+                param_names=param_names,
+                meta=out_meta,
+            )
+            print(
+                f"  Saved central-context posterior plot samples "
+                f"(n_data=1) to {out_path}"
+            )
 
             self.plotter.plot_posterior(
                 nf_entries,
