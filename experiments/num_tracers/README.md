@@ -81,6 +81,7 @@ python -m bedcosmo.num_tracers.design pool \
 | `--include-scales` | Force-add uniformly scaled nominal designs as within-pool reference points (they fall between grid nodes) |
 | `--n-target`, `--seed` | Cap pool size by seeded random subsample; pinned rows always survive |
 | `--name` | Filename for the `.npy` (`.npy` suffix optional). Omit for a date-stamped default |
+| `--yaml` | YAML file name in `--out-dir`, e.g. `design_args_budget.yaml` (default `design_args_<name>.yaml`); refuses to overwrite an existing file |
 
 The generator reproduces the experiment's own grid exactly: the defaults give **287** designs at sum 1.0 and **2447** over [1.0, 1.2], matching `design_args_dr1.yaml` and `design_args_dr1_budget.yaml`.
 

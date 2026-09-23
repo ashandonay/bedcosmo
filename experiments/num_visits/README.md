@@ -66,6 +66,7 @@ Every design sums to exactly the nominal total of the chosen bands, uses multipl
 | `--seed` | 0 | RNG seed for random fill / subsample |
 | `--no-corners` | off | Skip single-band floor/cap corner designs |
 | `--name` | `<bands>_<n>_<YYYYMMDD_HHMMSS>` | Names `<name>.npy` and `design_args_<name>.yaml` |
+| `--yaml` | `design_args_<name>.yaml` | YAML file name in `--out-dir`, e.g. `design_args_extreme.yaml`; refuses to overwrite an existing file |
 | `--out-dir` / `--designs-dir` / `--plot` | this dir / `$SCRATCH/...` / beside `.npy` | Output locations |
 
 ## Parameters (`prior_args.yaml`)

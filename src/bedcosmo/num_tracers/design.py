@@ -200,7 +200,7 @@ def write_design_args(
     out_dir: str,
     header: str,
     command: str,
-    yaml_name: str | None = None,
+    yaml_file: str | None = None,
     designs_dir: str | None = None,
 ) -> tuple[str, str]:
     """Write the design ``.npy`` and its ``design_args_*.yaml``; return both paths.
@@ -213,7 +213,8 @@ def write_design_args(
     but moving the ``.npy`` afterwards breaks the YAML unless it is rewritten.
 
     ``name`` names the ``.npy`` (an explicit ``.npy`` suffix is accepted and stripped);
-    ``yaml_name`` names the YAML when it should differ from ``name``.
+    ``yaml_file`` is the YAML file name (default ``design_args_<name>.yaml``). An
+    existing YAML is never overwritten.
     """
     designs_dir = designs_dir or _designs_dir()
     os.makedirs(out_dir, exist_ok=True)
@@ -221,8 +222,12 @@ def write_design_args(
     stem = name[:-4] if name.endswith(".npy") else name
     npy_path = os.path.abspath(os.path.join(designs_dir, f"{stem}.npy"))
     yaml_path = os.path.abspath(
-        os.path.join(out_dir, f"design_args_{yaml_name or stem}.yaml")
+        os.path.join(out_dir, yaml_file or f"design_args_{stem}.yaml")
     )
+    if os.path.exists(yaml_path):
+        raise FileExistsError(
+            f"{yaml_path} already exists; pick another --yaml/--name or remove it first"
+        )
 
     np.save(npy_path, designs)
     design_args = {
@@ -376,7 +381,7 @@ def _cmd_scaled(args: argparse.Namespace) -> np.ndarray:
             header=f"Uniform nominal scaling x{s:g} (design sum == {s:g})",
             # Existing convention: nominal_scaled_pNN.npy <-> design_args_nominal_pNN.yaml
             command=args._command,
-            yaml_name=f"nominal_p{tag}",
+            yaml_file=f"design_args_nominal_p{tag}.yaml",
             designs_dir=args.designs_dir,
         )
         print(f"s={s:<5g} tag={tag}  sum={design.sum():.4f}  "
@@ -391,6 +396,12 @@ def _cmd_scaled(args: argparse.Namespace) -> np.ndarray:
 
 
 def _cmd_pool(args: argparse.Namespace) -> np.ndarray:
+    if args.yaml is not None and (
+        os.path.basename(args.yaml) != args.yaml or not args.yaml.endswith(".yaml")
+    ):
+        raise ValueError(
+            f"--yaml must be a bare *.yaml file name (use --out-dir for the dir), got {args.yaml}"
+        )
     scales = args.include_scales if args.include_scales else None
     pool = budget_pool(
         sum_lower=args.sum_lower,
@@ -419,6 +430,7 @@ def _cmd_pool(args: argparse.Namespace) -> np.ndarray:
             f"{pool.shape[0]} designs"
         ),
         command=args._command,
+        yaml_file=args.yaml,
         designs_dir=args.designs_dir,
     )
     total = pool.sum(axis=1)
@@ -480,7 +492,12 @@ def main(argv: list[str] | None = None) -> np.ndarray:
         help="Filename for the .npy, with or without the .npy suffix; also names the "
              "design_args_<name>.yaml. Default is date-stamped "
              "(pool_sum<lo>_<hi>_<n>_<YYYYMMDD_HHMMSS>) so builds accumulate; "
-             "pass --name for a stable, overwritable filename",
+             "pass --name for a stable filename",
+    )
+    p_pool.add_argument(
+        "--yaml", default=None,
+        help="File name for the design_args YAML in --out-dir, e.g. design_args_budget.yaml "
+             "(default: design_args_<name>.yaml). Must not already exist",
     )
     p_pool.add_argument(
         "--include-scales", type=float, nargs="*", default=None,

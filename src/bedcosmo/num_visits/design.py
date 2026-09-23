@@ -19,8 +19,8 @@ Example::
 
 Outputs land in two places: the design array (and its plot) goes to
 ``$SCRATCH/bedcosmo/num_visits/designs/<name>.npy`` (``--designs-dir``), while the
-``design_args_<name>.yaml`` that points at it goes to the experiment config dir
-(``--out-dir``) so ``--design-args-path`` can find it. The YAML's ``labels`` list the
+``design_args_<name>.yaml`` (or ``--yaml``) that points at it goes to the experiment
+config dir (``--out-dir``) so ``--design-args-path`` can find it. The YAML's ``labels`` list the
 bands in column order of the array.
 """
 from __future__ import annotations
@@ -286,20 +286,26 @@ def write_design_args(
     visits: np.ndarray,
     bands: Sequence[str],
     name: str,
+    yaml_file: str,
     out_dir: str,
     designs_dir: str,
     header: str,
     command: str,
 ) -> tuple[str, str]:
-    """Write the design ``.npy`` and its ``design_args_<name>.yaml``; return both paths.
+    """Write ``<name>.npy`` and the ``yaml_file`` that points at it; return both paths.
 
-    The YAML stores an absolute ``input_designs_path``, so moving the ``.npy``
-    afterwards breaks the YAML unless it is rewritten.
+    Refuses to overwrite an existing YAML. The YAML stores an absolute
+    ``input_designs_path``, so moving the ``.npy`` afterwards breaks the YAML unless
+    it is rewritten.
     """
     os.makedirs(out_dir, exist_ok=True)
     os.makedirs(designs_dir, exist_ok=True)
     npy_path = os.path.abspath(os.path.join(designs_dir, f"{name}.npy"))
-    yaml_path = os.path.abspath(os.path.join(out_dir, f"design_args_{name}.yaml"))
+    yaml_path = os.path.abspath(os.path.join(out_dir, yaml_file))
+    if os.path.exists(yaml_path):
+        raise FileExistsError(
+            f"{yaml_path} already exists; pick another --yaml/--name or remove it first"
+        )
 
     np.save(npy_path, visits)
     design_args = {
@@ -395,8 +401,13 @@ def main(argv: list[str] | None = None) -> np.ndarray:
     )
     parser.add_argument(
         "--name", default=None,
-        help="Names <name>.npy and design_args_<name>.yaml "
+        help="Names <name>.npy and, unless --yaml is given, design_args_<name>.yaml "
              "(default: <bands>_<n>_<YYYYMMDD_HHMMSS>)",
+    )
+    parser.add_argument(
+        "--yaml", default=None,
+        help="File name for the design_args YAML in --out-dir, e.g. design_args_extreme.yaml "
+             "(default: design_args_<name>.yaml). Must not already exist",
     )
     parser.add_argument(
         "--out-dir", default=None,
@@ -415,6 +426,10 @@ def main(argv: list[str] | None = None) -> np.ndarray:
     parser.add_argument("--no-corners", action="store_true", help="Skip single-band floor/cap corners")
     argv = sys.argv[1:] if argv is None else argv
     args = parser.parse_args(argv)
+    if args.yaml is not None and (
+        os.path.basename(args.yaml) != args.yaml or not args.yaml.endswith(".yaml")
+    ):
+        parser.error(f"--yaml must be a bare *.yaml file name (use --out-dir for the dir), got {args.yaml}")
 
     bands = list(args.bands)
     nominal = nominal_visits(bands)
@@ -437,6 +452,7 @@ def main(argv: list[str] | None = None) -> np.ndarray:
         visits,
         bands,
         name,
+        yaml_file=args.yaml or f"design_args_{name}.yaml",
         out_dir=args.out_dir or _default_out_dir(),
         designs_dir=args.designs_dir or _designs_dir(),
         header=(
