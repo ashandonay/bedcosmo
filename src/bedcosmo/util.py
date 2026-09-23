@@ -1138,6 +1138,184 @@ def sample_nf(
     )
 
 
+
+def resolve_eig_step(eig_data, eval_step):
+    """Resolve ``eval_step`` to ``(step_int, 'step_N')`` from eig_data keys."""
+    step_keys = [k for k in eig_data.keys() if k.startswith('step_')]
+    if not step_keys:
+        print("Warning: No step keys found in EIG data.")
+        return None, None
+    step_ints = sorted([int(k.split('_')[1]) for k in step_keys])
+
+    if eval_step is None:
+        nearest = step_ints[-1]
+        return nearest, f"step_{nearest}"
+
+    if isinstance(eval_step, str) and eval_step.startswith('step_'):
+        eval_step_int = int(eval_step.split('_')[1])
+    else:
+        try:
+            eval_step_int = int(eval_step)
+        except Exception:
+            print(f"Warning: Could not interpret eval_step '{eval_step}' as an integer step.")
+            return None, None
+
+    available = [s for s in step_ints if s <= eval_step_int]
+    if not available:
+        print(
+            f"Warning: No steps found in EIG data below or equal to requested "
+            f"step {eval_step_int}."
+        )
+        return None, None
+    nearest = max(available)
+    return nearest, f"step_{nearest}"
+
+
+def parse_eig_for_posterior(eig_data, eval_step=None, params=None):
+    """Extract EIG and entropy summaries from eig_data for posterior sampling/plots."""
+    _, step_str = resolve_eig_step(eig_data, eval_step)
+    if step_str is None:
+        raise ValueError("Could not resolve eval step in EIG data")
+    step_data = eig_data[step_str]
+    variable_data = step_data.get('variable', {})
+    nominal_data = step_data.get('nominal', {})
+
+    input_designs = np.array(eig_data.get('input_designs', []))
+    if input_designs.size == 0:
+        raise ValueError("No input designs found in EIG data")
+
+    eig_values = np.array(variable_data.get('eigs_avg', []))
+    nominal_eig = nominal_data.get('eigs_avg')
+    if isinstance(nominal_eig, list):
+        nominal_eig = nominal_eig[0] if len(nominal_eig) > 0 else None
+    nominal_eig = float(nominal_eig) if nominal_eig is not None else None
+
+    def _scalar_entropy(block, key):
+        val = block.get(key)
+        if val is None:
+            return None
+        if isinstance(val, list):
+            val = val[0] if len(val) > 0 else None
+        return float(val) if val is not None else None
+
+    nominal_prior_entropy = _scalar_entropy(nominal_data, "prior_entropy_avg")
+    nominal_posterior_entropy = _scalar_entropy(nominal_data, "posterior_entropy_avg")
+    prior_entropy_by_design = variable_data.get("prior_entropy_avg")
+    posterior_entropy_by_design = variable_data.get("posterior_entropy_avg")
+    if prior_entropy_by_design is not None:
+        prior_entropy_by_design = np.asarray(prior_entropy_by_design, dtype=float)
+    if posterior_entropy_by_design is not None:
+        posterior_entropy_by_design = np.asarray(posterior_entropy_by_design, dtype=float)
+
+    # Fall back to the marginal block when joint (variable) EIG was not computed.
+    if eig_values.size == 0 and params is not None:
+        subset_id = "+".join(list(params))
+        marginal = step_data.get("marginal", {}).get(subset_id)
+        if marginal is not None:
+            eig_values = np.array(marginal.get("eigs_avg", []), dtype=float)
+            nominal_eig = float(marginal["nominal"]["eigs_avg"])
+            nominal_prior_entropy = None
+            nominal_posterior_entropy = None
+            prior_entropy_by_design = None
+            posterior_entropy_by_design = None
+
+    if eig_values.size == 0:
+        raise ValueError("No EIG values found in EIG data")
+
+    entropy_info = {
+        "nominal_prior_entropy": nominal_prior_entropy,
+        "nominal_posterior_entropy": nominal_posterior_entropy,
+        "prior_entropy_by_design": prior_entropy_by_design,
+        "posterior_entropy_by_design": posterior_entropy_by_design,
+    }
+    return input_designs, eig_values, nominal_eig, entropy_info
+
+
+def extract_run_posterior_data(
+    experiment,
+    eig_data,
+    run_obj,
+    run_args,
+    *,
+    eval_step=None,
+    device="cpu",
+    params=None,
+    run_id=None,
+    load_flow=True,
+):
+    """
+    Build posterior sampling/plotting context from ``eig_data`` and an experiment.
+
+    Does not require a plotter. Callers that already have an experiment and
+    eig_data (e.g. ``Evaluator``) pass them directly; a plotter may load those
+    first and then call this.
+
+    Returns a dict with ``experiment``, ``input_designs``, ``eig_values``,
+    ``nominal_eig``, entropy fields, ``nominal_grid_eig``, ``title``,
+    ``marginal_eig``, and ``posterior_flow`` when ``load_flow`` is True.
+    """
+    input_designs, eig_values, nominal_eig, entropy_info = parse_eig_for_posterior(
+        eig_data, eval_step, params=params
+    )
+    _, step_str = resolve_eig_step(eig_data, eval_step)
+    step_data = eig_data[step_str]
+
+    run_id_short = (run_id or getattr(getattr(run_obj, "info", None), "run_id", "") or "")[:8]
+    marginal_eig = False
+    title = f"Posterior Evaluation - Run: {run_id_short}" if run_id_short else "Posterior Evaluation"
+    if params is not None:
+        subset_id = "+".join(list(params))
+        marginal_block = step_data.get("marginal", {})
+        if subset_id in marginal_block:
+            marginal = marginal_block[subset_id]
+            eig_values = np.array(marginal.get("eigs_avg", []), dtype=float)
+            nominal_eig = float(marginal["nominal"]["eigs_avg"])
+            marginal_eig = True
+            param_labels = ", ".join(marginal.get("params", params))
+            title = (
+                f"Marginal Posterior ({param_labels}) - Run: {run_id_short}"
+                if run_id_short
+                else f"Marginal Posterior ({param_labels})"
+            )
+
+    nominal_data = step_data.get('nominal', {})
+    nominal_grid_eig = None
+    nominal_grid_data = nominal_data.get('grid', {})
+    if isinstance(nominal_grid_data, dict) and 'eigs_avg' in nominal_grid_data:
+        nominal_grid_eig = nominal_grid_data.get('eigs_avg')
+        if isinstance(nominal_grid_eig, list):
+            nominal_grid_eig = nominal_grid_eig[0] if len(nominal_grid_eig) > 0 else None
+        nominal_grid_eig = float(nominal_grid_eig) if nominal_grid_eig is not None else None
+
+    posterior_flow = None
+    if load_flow:
+        if isinstance(eval_step, str) and eval_step.startswith('step_'):
+            step_num = int(eval_step.split('_')[1])
+        elif isinstance(eval_step, str):
+            step_num = int(eval_step)
+        else:
+            step_num = eval_step
+        step_for_model = 'last' if eval_step is None else step_num
+        posterior_flow, _ = load_model(
+            experiment, step_for_model, run_obj, run_args, device, global_rank=0
+        )
+
+    return dict(
+        experiment=experiment,
+        posterior_flow=posterior_flow,
+        input_designs=input_designs,
+        eig_values=eig_values,
+        nominal_eig=nominal_eig,
+        nominal_prior_entropy=entropy_info.get("nominal_prior_entropy"),
+        nominal_posterior_entropy=entropy_info.get("nominal_posterior_entropy"),
+        prior_entropy_by_design=entropy_info.get("prior_entropy_by_design"),
+        posterior_entropy_by_design=entropy_info.get("posterior_entropy_by_design"),
+        nominal_grid_eig=nominal_grid_eig,
+        title=title,
+        marginal_eig=marginal_eig,
+    )
+
+
 def load_posterior_flow_from_checkpoint_file(
     experiment,
     checkpoint_path: str,

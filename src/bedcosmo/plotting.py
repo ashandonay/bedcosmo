@@ -14,6 +14,7 @@ from bedcosmo.util import (
     get_runs_data, init_experiment, load_model, auto_seed, convert_color,
     load_nominal_samples, get_contour_area, parse_mlflow_params, sort_key_for_group_tuple,
     GETDIST_SETTINGS, restrict_mcsamples, sample_nf,
+    resolve_eig_step, parse_eig_for_posterior, extract_run_posterior_data,
 )
 from bedcosmo.artifacts import (
     load_eig_data_file,
@@ -1165,95 +1166,13 @@ class BasePlotter:
         return load_eig_data_file(artifacts_dir, eval_step=eval_step, eig_kind=eig_kind)
 
     def _resolve_step(self, eig_data, eval_step):
-        """Resolve eval_step to a step string key in eig_data (see RunPlotter usage)."""
-        step_keys = [k for k in eig_data.keys() if k.startswith('step_')]
-        if not step_keys:
-            print("Warning: No step keys found in EIG data.")
-            return None, None
-        step_ints = sorted([int(k.split('_')[1]) for k in step_keys])
-
-        if eval_step is None:
-            nearest = step_ints[-1]
-            return nearest, f"step_{nearest}"
-
-        if isinstance(eval_step, str) and eval_step.startswith('step_'):
-            eval_step_int = int(eval_step.split('_')[1])
-        else:
-            try:
-                eval_step_int = int(eval_step)
-            except Exception:
-                print(f"Warning: Could not interpret eval_step '{eval_step}' as an integer step.")
-                return None, None
-
-        available = [s for s in step_ints if s <= eval_step_int]
-        if not available:
-            print(f"Warning: No steps found in EIG data below or equal to requested step {eval_step_int}.")
-            return None, None
-        nearest = max(available)
-        return nearest, f"step_{nearest}"
+        """Resolve eval_step to a step string key in eig_data."""
+        return resolve_eig_step(eig_data, eval_step)
 
     def _parse_eig_for_posterior(self, eig_data, eval_step=None, params=None):
         """Extract EIG and entropy summaries from eig_data for posterior plots."""
-        _, step_str = self._resolve_step(eig_data, eval_step)
-        if step_str is None:
-            raise ValueError("Could not resolve eval step in EIG data")
-        step_data = eig_data[step_str]
-        variable_data = step_data.get('variable', {})
-        nominal_data = step_data.get('nominal', {})
+        return parse_eig_for_posterior(eig_data, eval_step=eval_step, params=params)
 
-        input_designs = np.array(eig_data.get('input_designs', []))
-        if input_designs.size == 0:
-            raise ValueError("No input designs found in EIG data")
-
-        eig_values = np.array(variable_data.get('eigs_avg', []))
-        nominal_eig = nominal_data.get('eigs_avg')
-        if isinstance(nominal_eig, list):
-            nominal_eig = nominal_eig[0] if len(nominal_eig) > 0 else None
-        nominal_eig = float(nominal_eig) if nominal_eig is not None else None
-
-        def _scalar_entropy(block, key):
-            val = block.get(key)
-            if val is None:
-                return None
-            if isinstance(val, list):
-                val = val[0] if len(val) > 0 else None
-            return float(val) if val is not None else None
-
-        nominal_prior_entropy = _scalar_entropy(nominal_data, "prior_entropy_avg")
-        nominal_posterior_entropy = _scalar_entropy(nominal_data, "posterior_entropy_avg")
-        prior_entropy_by_design = variable_data.get("prior_entropy_avg")
-        posterior_entropy_by_design = variable_data.get("posterior_entropy_avg")
-        if prior_entropy_by_design is not None:
-            prior_entropy_by_design = np.asarray(prior_entropy_by_design, dtype=float)
-        if posterior_entropy_by_design is not None:
-            posterior_entropy_by_design = np.asarray(posterior_entropy_by_design, dtype=float)
-
-        # Fall back to the marginal block for the requested subset when the joint
-        # (variable) EIG was not computed -- e.g. a standalone --marginal run.
-        # The marginal branch in _extract_run_posterior_data re-applies these,
-        # but locating the optimal design here lets the plot proceed.
-        if eig_values.size == 0 and params is not None:
-            subset_id = "+".join(list(params))
-            marginal = step_data.get("marginal", {}).get(subset_id)
-            if marginal is not None:
-                eig_values = np.array(marginal.get("eigs_avg", []), dtype=float)
-                nominal_eig = float(marginal["nominal"]["eigs_avg"])
-                nominal_prior_entropy = None
-                nominal_posterior_entropy = None
-                prior_entropy_by_design = None
-                posterior_entropy_by_design = None
-
-        if eig_values.size == 0:
-            raise ValueError("No EIG values found in EIG data")
-
-        entropy_info = {
-            "nominal_prior_entropy": nominal_prior_entropy,
-            "nominal_posterior_entropy": nominal_posterior_entropy,
-            "prior_entropy_by_design": prior_entropy_by_design,
-            "posterior_entropy_by_design": posterior_entropy_by_design,
-        }
-        return input_designs, eig_values, nominal_eig, entropy_info
-    
     def plot_triangle(
         self,
         samples, 
@@ -1828,74 +1747,6 @@ class RunPlotter(BasePlotter):
         
         return fig, axes
     
-    def _extract_run_posterior_data(
-        self,
-        eval_step=None,
-        device="cuda:0",
-        eig_data=None,
-        params=None,
-        ):
-        """Extract posterior plotting data from run's MLflow artifacts (eig / flow context)."""
-        if eig_data is None:
-            eig_data = self._get_eig_data(eval_step=eval_step)
-        input_designs, eig_values, nominal_eig, entropy_info = self._parse_eig_for_posterior(eig_data, eval_step, params=params)
-        _, step_str = self._resolve_step(eig_data, eval_step)
-        step_data = eig_data[step_str]
-        marginal_eig = False
-        title = f"Posterior Evaluation - Run: {self.run_id[:8]}"
-        if params is not None:
-            subset_id = "+".join(list(params))
-            marginal_block = step_data.get("marginal", {})
-            if subset_id in marginal_block:
-                marginal = marginal_block[subset_id]
-                eig_values = np.array(marginal.get("eigs_avg", []), dtype=float)
-                nominal_eig = float(marginal["nominal"]["eigs_avg"])
-                marginal_eig = True
-                param_labels = ", ".join(marginal.get("params", params))
-                title = f"Marginal Posterior ({param_labels}) - Run: {self.run_id[:8]}"
-        nominal_data = step_data.get('nominal', {})
-        nominal_grid_eig = None
-        nominal_grid_data = nominal_data.get('grid', {})
-        if isinstance(nominal_grid_data, dict) and 'eigs_avg' in nominal_grid_data:
-            nominal_grid_eig = nominal_grid_data.get('eigs_avg')
-            if isinstance(nominal_grid_eig, list):
-                nominal_grid_eig = nominal_grid_eig[0] if len(nominal_grid_eig) > 0 else None
-            nominal_grid_eig = float(nominal_grid_eig) if nominal_grid_eig is not None else None
-
-        run_obj = self.run_data['run_obj']
-        run_args = self.run_data['params'].copy()
-
-        # Extract step number for model loading
-        if isinstance(eval_step, str) and eval_step.startswith('step_'):
-            step_num = int(eval_step.split('_')[1])
-        elif isinstance(eval_step, str):
-            step_num = int(eval_step)
-        else:
-            step_num = eval_step
-
-        step_for_model = 'last' if eval_step is None else step_num
-
-        experiment = self.get_experiment(device=device)
-        run_obj = self.run_data['run_obj']
-        run_args = self.run_data['params'].copy()
-        posterior_flow, selected_step = load_model(experiment, step_for_model, run_obj, run_args, device, global_rank=0)
-
-        return dict(
-            experiment=experiment,
-            posterior_flow=posterior_flow,
-            input_designs=input_designs,
-            eig_values=eig_values,
-            nominal_eig=nominal_eig,
-            nominal_prior_entropy=entropy_info.get("nominal_prior_entropy"),
-            nominal_posterior_entropy=entropy_info.get("nominal_posterior_entropy"),
-            prior_entropy_by_design=entropy_info.get("prior_entropy_by_design"),
-            posterior_entropy_by_design=entropy_info.get("posterior_entropy_by_design"),
-            nominal_grid_eig=nominal_grid_eig,
-            title=title,
-            marginal_eig=marginal_eig,
-        )
-
-
     def plot_posterior(
         self,
         nf_entries=None,
@@ -1923,10 +1774,20 @@ class RunPlotter(BasePlotter):
             kwargs["levels"] = [levels]
 
         if experiment is None:
-            data = self._extract_run_posterior_data(
-                eval_step, device=device, eig_data=eig_data, params=kwargs.get("params")
+            if eig_data is None:
+                eig_data = self._get_eig_data(eval_step=eval_step)
+            experiment = self.get_experiment(device=device)
+            data = extract_run_posterior_data(
+                experiment,
+                eig_data,
+                self.run_data["run_obj"],
+                self.run_data["params"],
+                eval_step=eval_step,
+                device=device,
+                params=kwargs.get("params"),
+                run_id=self.run_id,
+                load_flow=False,
             )
-            experiment = data["experiment"]
             kwargs.setdefault("nominal_grid_eig", data.get("nominal_grid_eig"))
             kwargs.setdefault("nominal_prior_entropy", data.get("nominal_prior_entropy"))
             if title is None:
