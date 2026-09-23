@@ -32,11 +32,10 @@ export SCRATCH=${SCRATCH:-$HOME/scratch}  # needed when running python directly;
 |---|---|
 | `README.md` | Install, and everything about `submit.sh`: job types, what happens at submission (argv freeze, config snapshot), resume vs. restart, auto-eval, argument prefixes. Also `$SCRATCH` storage layout, MLflow and grid EIG |
 | `experiments/num_tracers/README.md` | DESI tracer allocation: BAO likelihood, emulator vs. scaling modes, YAML fields |
+| `experiments/variable_redshift/README.md` | Redshift-choice toy problem: D_H/D_M likelihood, the error-table switch, grid limits, YAML fields |
 | `experiments/num_visits/README.md` | LSST visits per filter: photometric forward model, SED priors, YAML fields |
 | `src/bedcosmo/num_visits/empirical/README.md` | Empirical SED prior build: DESI + EAZY fits, ILR coordinates, KDE / prior flow, provenance |
 | `src/bedcosmo/num_visits/empirical/reduced/README.md` | Reduced EAZY template bases |
-
-`variable_redshift` has no README. Read its YAMLs and `experiment.py` directly.
 
 ## Architecture
 
