@@ -19,7 +19,6 @@ base_om:
   mnn_signal: 32
   nf_transform: affine
   spline_bins: 16
-  input_design: false
   design_args_path: design_args.yaml
   sigma_D_H: 0.2
   sigma_D_M: 0.2
@@ -57,7 +56,6 @@ base:
   mnn_signal: 32
   nf_transform: affine
   spline_bins: 16
-  input_designs: null
   design_args_path: design_args.yaml
   sigma_D_H: 0.2
   sigma_D_M: 0.2
@@ -95,7 +93,6 @@ base_omegak:
   mnn_signal: 32
   nf_transform: affine
   spline_bins: 16
-  input_designs: null
   design_args_path: design_args.yaml
   sigma_D_H: 0.2
   sigma_D_M: 0.2
@@ -133,7 +130,6 @@ base_w:
   mnn_signal: 32
   nf_transform: affine
   spline_bins: 16
-  input_designs: null
   design_args_path: design_args.yaml
   sigma_D_H: 0.2
   sigma_D_M: 0.2
@@ -171,7 +167,6 @@ base_w_wa:
   mnn_signal: 32
   nf_transform: affine
   spline_bins: 16
-  input_designs: null
   design_args_path: design_args.yaml
   sigma_D_H: 0.2
   sigma_D_M: 0.2
@@ -196,7 +191,7 @@ base_omegak_w_wa:
   mlflow_exp: base_omegak_w_wa
   pyro_seed: 1
   nf_seed: 1
-  prior_path: prior_args_hrdrag.yaml
+  prior_args_path: prior_args_hrdrag.yaml
   flow_type: MAF
   transform_input: true
   input_transform_type: marginal
@@ -209,7 +204,6 @@ base_omegak_w_wa:
   mnn_signal: 32
   nf_transform: affine
   spline_bins: 16
-  input_designs: null
   design_args_path: design_args.yaml
   sigma_D_H: 0.2
   sigma_D_M: 0.2
