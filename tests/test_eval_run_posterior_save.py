@@ -1,4 +1,4 @@
-"""Tests for default-eval: sample_nf → save_posterior_samples → plot_posterior_display."""
+"""Tests for default-eval: sample_nf → save_posterior_samples → plot_posterior."""
 
 from __future__ import annotations
 
@@ -54,7 +54,7 @@ def test_sample_nf_conditions_on_design_and_y():
     assert kwargs["num_samples"] == n_guide
 
 
-def test_plot_posterior_display_does_not_sample(tmp_path, monkeypatch):
+def test_plot_posterior_does_not_sample(tmp_path, monkeypatch):
     monkeypatch.setenv("SCRATCH", str(tmp_path))
     monkeypatch.setenv("HOME", str(tmp_path))
 
@@ -83,11 +83,11 @@ def test_plot_posterior_display_does_not_sample(tmp_path, monkeypatch):
         names=[SimpleNamespace(name="p0"), SimpleNamespace(name="p1")]
     )
     plotter = BasePlotter(cosmo_exp="num_visits")
-    with patch.object(plotter, "plot_posterior", return_value=fake_g), \
+    with patch.object(plotter, "plot_triangle", return_value=fake_g), \
          patch.object(plotter, "save_figure"), \
          patch("bedcosmo.plotting.Line2D"), \
-         patch.object(plotter, "_nf_display_samples") as mock_nf:
-        plotter.plot_posterior_display(experiment, entries, guide_samples=10)
+         patch.object(plotter, "_sample_nf_entries") as mock_nf:
+        plotter.plot_posterior(experiment, entries, guide_samples=10)
     mock_nf.assert_not_called()
     experiment.get_guide_samples.assert_not_called()
 
@@ -97,8 +97,8 @@ def test_sample_nf_not_on_evaluator_or_plotter():
     assert not hasattr(RunPlotter, "sample_nf")
 
 
-def test_nf_display_samples_selects_then_calls_sample_nf():
-    """_nf_display_samples owns nominal/optimal selection; sample_nf only samples."""
+def test_sample_nf_entries_selects_then_calls_sample_nf():
+    """_sample_nf_entries owns nominal/optimal selection; sample_nf only samples."""
     n_guide, n_params = 12, 2
     rng = np.random.default_rng(3)
     theta_nom = rng.normal(size=(n_guide, n_params))
@@ -119,7 +119,7 @@ def test_nf_display_samples_selects_then_calls_sample_nf():
             _make_mcsamples(theta_opt, ["p0", "p1"]),
         ],
     ) as mock_sample:
-        entries, _ = plotter._nf_display_samples(
+        entries, _ = plotter._sample_nf_entries(
             ("nominal", "optimal"),
             n_guide,
             experiment=experiment,
@@ -142,7 +142,7 @@ def test_nf_display_samples_selects_then_calls_sample_nf():
 
 
 def test_run_sample_save_then_plot(tmp_path):
-    """Evaluator.run samples via _nf_display_samples, saves, then plots."""
+    """Evaluator.run samples via _sample_nf_entries, saves, then plots."""
     n_guide, n_params, n_obs = 20, 2, 3
     rng = np.random.default_rng(1)
     theta_nom = rng.normal(size=(n_guide, n_params))
@@ -217,7 +217,7 @@ def test_run_sample_save_then_plot(tmp_path):
     ev.experiment = experiment
     ev.plotter = MagicMock()
     ev.plotter._extract_run_posterior_data.return_value = dict(extract_data)
-    ev.plotter._nf_display_samples.return_value = (nf_entries, None)
+    ev.plotter._sample_nf_entries.return_value = (nf_entries, None)
     ev.get_eig = MagicMock(side_effect=[(0.5, 0.01), (np.array([0.2, 0.8]), np.zeros(2))])
     ev._update_runtime = MagicMock()
     ev._eig_data_save_path = MagicMock(return_value=str(tmp_path / "eig.json"))
@@ -227,10 +227,10 @@ def test_run_sample_save_then_plot(tmp_path):
          patch("bedcosmo.evaluate.save_posterior_samples", wraps=save_posterior_samples) as save_spy:
         ev.run(eval_step=100)
 
-    ev.plotter._nf_display_samples.assert_called_once()
+    ev.plotter._sample_nf_entries.assert_called_once()
     assert save_spy.called
-    ev.plotter.plot_posterior_display.assert_called_once()
-    plotted_entries = ev.plotter.plot_posterior_display.call_args.args[0]
+    ev.plotter.plot_posterior.assert_called_once()
+    plotted_entries = ev.plotter.plot_posterior.call_args.args[0]
     assert plotted_entries is nf_entries
 
     bundle = load_posterior_samples_file(ev.save_path, step=100)

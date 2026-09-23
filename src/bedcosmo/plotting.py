@@ -851,7 +851,7 @@ class BasePlotter:
         except ValueError:
             return None
 
-    def _nf_display_samples(
+    def _sample_nf_entries(
         self,
         display,
         guide_samples,
@@ -879,17 +879,17 @@ class BasePlotter:
         plot_prior=False,
     ):
         """
-        Resolve designs/``y`` for each entry in ``display``, sample via
-        :func:`bedcosmo.util.sample_nf`, and build labeled plot entries.
+        Sample NF at nominal and/or optimal designs; return labeled plot entries.
 
-        Pass experiment + posterior_flow directly (generate_posterior), or pass
-        run_obj + run_args + exp_id + step to load them from MLflow (compare_posterior).
+        Resolves design + central ``y``, calls :func:`bedcosmo.util.sample_nf`
+        per design, and attaches legend label/color metadata. Pass experiment +
+        posterior_flow directly, or ``run_obj`` + run_args + exp_id + step to
+        load from MLflow.
 
         Returns:
-            (entries, selected_step) where entries is a list of dicts with keys
-            samples, label, color, line_style, alpha, and for NF designs also
-            name ('nominal'/'optimal') and design (1-D array); selected_step is
-            set when loading from a run, else None.
+            (entries, selected_step) — entries have samples, label, color,
+            line_style, alpha, name, design; selected_step set when loading
+            from a run, else None.
         """
         display = self._normalize_display(display)
         selected_step = None
@@ -1061,7 +1061,7 @@ class BasePlotter:
         return entries, selected_step
 
 
-    def plot_posterior_display(
+    def plot_posterior(
         self,
         experiment,
         nf_entries,
@@ -1084,7 +1084,7 @@ class BasePlotter:
         seed=1,
     ):
         """
-        Plot a posterior triangle from precomputed NF display entries.
+        Plot a posterior triangle from precomputed NF entries.
 
         Does **not** sample from the flow. Pass ``nf_entries`` built by the
         caller (e.g. after :func:`bedcosmo.util.sample_nf`). Optional grid /
@@ -1186,7 +1186,7 @@ class BasePlotter:
             sample.label = label
 
         plot_width = 10
-        g = self.plot_posterior(
+        g = self.plot_triangle(
             all_samples,
             all_colors,
             legend_labels=legend_labels,
@@ -1291,14 +1291,14 @@ class BasePlotter:
         nf_entries=None,
     ):
         """
-        Convenience: sample NF display entries (if needed) then plot.
+        Convenience: sample NF entries (if needed) then :meth:`plot_posterior`.
 
         Prefer resolving designs/``y`` then :func:`bedcosmo.util.sample_nf`
-        (and ``plot_posterior_display``) when persisting or reusing samples.
+        (and ``plot_posterior``) when persisting or reusing samples.
         """
         if nf_entries is None:
             auto_seed(seed)
-            nf_entries, _ = self._nf_display_samples(
+            nf_entries, _ = self._sample_nf_entries(
                 display,
                 guide_samples,
                 transform_output=transform_output,
@@ -1316,7 +1316,7 @@ class BasePlotter:
                 marginal_eig=marginal_eig,
                 plot_prior=plot_prior,
             )
-        return self.plot_posterior_display(
+        return self.plot_posterior(
             experiment,
             nf_entries,
             levels=levels,
@@ -1432,7 +1432,7 @@ class BasePlotter:
         }
         return input_designs, eig_values, nominal_eig, entropy_info
     
-    def plot_posterior(
+    def plot_triangle(
         self,
         samples, 
         colors, 
@@ -1449,8 +1449,8 @@ class BasePlotter:
         style=style,
     ):
         """
-        Plots posterior distributions using GetDist triangle plots.
-        Shared method available to all plotter classes.
+        Low-level GetDist triangle plot from MCSamples lists.
+        Shared helper available to all plotter classes.
 
         Args:
             samples (list): List of GetDist MCSamples objects.
@@ -2074,7 +2074,7 @@ class RunPlotter(BasePlotter):
         )
 
 
-    def plot_posterior_display(
+    def plot_posterior(
         self,
         nf_entries,
         *,
@@ -2102,7 +2102,7 @@ class RunPlotter(BasePlotter):
             if title is None:
                 title = data.get("title")
 
-        return super().plot_posterior_display(
+        return super().plot_posterior(
             experiment,
             nf_entries,
             title=title,
@@ -2112,7 +2112,7 @@ class RunPlotter(BasePlotter):
         )
 
     def generate_posterior(self, **kwargs):
-        """Convenience: load run data, sample via ``_nf_display_samples``, then plot."""
+        """Convenience: load run data, sample via ``_sample_nf_entries``, then plot."""
         levels = kwargs.get("levels", [0.68])
         if isinstance(levels, (int, float)):
             levels = [levels]
@@ -2138,7 +2138,7 @@ class RunPlotter(BasePlotter):
         )
         if nf_entries is None:
             auto_seed(kwargs.get("seed", 1))
-            nf_entries, _ = self._nf_display_samples(
+            nf_entries, _ = self._sample_nf_entries(
                 display,
                 kwargs.get("guide_samples", 1000),
                 transform_output=kwargs.get("transform_output", True),
@@ -2175,7 +2175,7 @@ class RunPlotter(BasePlotter):
         ):
             kwargs.pop(key, None)
 
-        return self.plot_posterior_display(
+        return self.plot_posterior(
             nf_entries,
             experiment=data["experiment"],
             title=title,
@@ -2714,7 +2714,7 @@ class RunPlotter(BasePlotter):
             )
         
         plot_width = 12
-        g = self.plot_posterior(all_samples, all_colors, levels=levels, width_inch=plot_width)
+        g = self.plot_triangle(all_samples, all_colors, levels=levels, width_inch=plot_width)
         
         if getattr(experiment, "central_params", None):
             plotted_params = all_samples[0].paramNames.list()
@@ -3371,7 +3371,7 @@ class ComparisonPlotter(BasePlotter):
                     continue
                 for rank_idx, rank in enumerate(global_ranks):
                     try:
-                        nf_entries, _ = self._nf_display_samples(
+                        nf_entries, _ = self._sample_nf_entries(
                             display,
                             guide_samples,
                             transform_output=transform_output,
@@ -3501,7 +3501,7 @@ class ComparisonPlotter(BasePlotter):
                             f"{self._prior_entropy_legend_suffix(prior_h)}"
                         )
         
-        g = self.plot_posterior(
+        g = self.plot_triangle(
             all_samples,
             all_colors,
             legend_labels=legend_labels,
@@ -6606,7 +6606,7 @@ def compare_contours(
         run_args = parse_mlflow_params(run_obj.data.params)
         exp_id = run_obj.info.experiment_id
         for step in steps:
-            nf_entries, _ = plotter._nf_display_samples(
+            nf_entries, _ = plotter._sample_nf_entries(
                 'nominal',
                 guide_samples,
                 run_obj=run_obj,

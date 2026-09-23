@@ -597,7 +597,7 @@ class Evaluator:
                 colors.extend([color] * len(data_idxs))
 
         plot_width = 10
-        g = self.plotter.plot_posterior(all_samples, colors, levels=levels, alpha=0.4, width_inch=plot_width)
+        g = self.plotter.plot_triangle(all_samples, colors, levels=levels, alpha=0.4, width_inch=plot_width)
 
         n_params = len(all_samples[0].paramNames.names)
         base_fontsize = max(6, min(18, plot_width * (0.2 + 0.42 * np.sqrt(n_params))))
@@ -2068,7 +2068,7 @@ class Evaluator:
                 json.dump(self.eig_data, f, indent=2)
             print(f"Saved EIG data to {eig_data_save_path}")
 
-        # Main posterior: sample (via _nf_display_samples → sample_nf) → save → plot.
+        # Main posterior: sample (via _sample_nf_entries → sample_nf) → save → plot.
         # Multi-y bundles still require --sample-posterior.
         eig_file = self.eig_file_path or self.output_path
         if eig_file is not None:
@@ -2084,8 +2084,8 @@ class Evaluator:
             auto_seed(self.seed)
 
             # Caller-side selection of nominal/optimal + central y lives in
-            # _nf_display_samples; sample_nf itself only conditions on design+y.
-            nf_entries, _ = self.plotter._nf_display_samples(
+            # _sample_nf_entries; sample_nf itself only conditions on design+y.
+            nf_entries, _ = self.plotter._sample_nf_entries(
                 ("nominal", "optimal"),
                 self.guide_samples,
                 transform_output=self.nf_transform_output,
@@ -2170,7 +2170,7 @@ class Evaluator:
                     f"(n_data=1) to {out_path}"
                 )
 
-            self.plotter.plot_posterior_display(
+            self.plotter.plot_posterior(
                 nf_entries,
                 experiment=experiment,
                 levels=self.levels,
