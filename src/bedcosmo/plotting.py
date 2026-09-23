@@ -998,8 +998,7 @@ class BasePlotter:
         Plot a posterior triangle from precomputed NF display entries.
 
         Does **not** sample from the flow. Pass ``nf_entries`` from
-        :func:`bedcosmo.util.sample_nf` (or
-        ``Evaluator.sample_nf``). Optional grid / MCMC / prior
+        :func:`bedcosmo.util.sample_nf`. Optional grid / MCMC / prior
         overlays are assembled here for the figure.
         """
         if isinstance(levels, (int, float)):
@@ -1205,9 +1204,8 @@ class BasePlotter:
         """
         Convenience: sample NF display entries (if needed) then plot.
 
-        Prefer :func:`bedcosmo.util.sample_nf` (or
-        ``Evaluator.sample_nf``) and ``plot_posterior_display`` when
-        persisting or reusing samples.
+        Prefer :func:`bedcosmo.util.sample_nf` and ``plot_posterior_display``
+        when persisting or reusing samples.
         """
         if nf_entries is None:
             auto_seed(seed)

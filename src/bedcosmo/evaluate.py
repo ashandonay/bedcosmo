@@ -37,7 +37,7 @@ from bedcosmo.util import (
     parse_param_subsets,
     get_rng_state, parse_extra_args, render_overlay,
     get_checkpoint, get_contour_area,
-    sample_nf as _sample_nf,
+    sample_nf,
 )
 from bedcosmo.artifacts import (
     load_eig_data_file,
@@ -1978,65 +1978,6 @@ class Evaluator:
             json.dump(self.eig_data, f, indent=2)
         print(f"Saved EIG steps data to {eig_data_save_path}")
 
-    def sample_nf(
-        self,
-        eval_step=None,
-        display=('nominal', 'optimal'),
-        guide_samples=None,
-        params=None,
-        plot_prior=None,
-        seed=None,
-    ):
-        """
-        Thin Evaluator wrapper around :func:`sample_nf`.
-
-        Resolves this run's live EIG/design context and prefers
-        ``self.experiment`` (checkpoint-matched bijector), then delegates
-        sampling to the util free function. Returns ``(nf_entries, data)``.
-        """
-        if eval_step is None or eval_step == "last":
-            eval_step = self.total_steps
-        else:
-            try:
-                eval_step = int(eval_step)
-            except (TypeError, ValueError):
-                pass
-        if guide_samples is None:
-            guide_samples = self.guide_samples
-        if plot_prior is None:
-            plot_prior = self.plot_prior
-        if seed is None:
-            seed = self.seed
-
-        data = self.plotter._extract_run_posterior_data(
-            eval_step,
-            device=self.device,
-            eig_data=self.eig_data,
-            params=params,
-        )
-        # Prefer the Evaluator's experiment (checkpoint bijector / design state).
-        data["experiment"] = self.experiment
-        auto_seed(seed)
-        nf_entries = _sample_nf(
-            self.experiment,
-            data["posterior_flow"],
-            display=display,
-            input_designs=data.get("input_designs"),
-            eig_values=data.get("eig_values"),
-            nominal_eig=data.get("nominal_eig"),
-            nominal_prior_entropy=data.get("nominal_prior_entropy"),
-            nominal_posterior_entropy=data.get("nominal_posterior_entropy"),
-            prior_entropy_by_design=data.get("prior_entropy_by_design"),
-            posterior_entropy_by_design=data.get("posterior_entropy_by_design"),
-            guide_samples=guide_samples,
-            transform_output=self.nf_transform_output,
-            device=self.device,
-            params=params,
-            marginal_eig=data.get("marginal_eig", False),
-            plot_prior=plot_prior,
-        )
-        return nf_entries, data
-
     def run(self, eval_step=None):
         # Determine eval_step
         if eval_step is None or eval_step == 'last':
@@ -2134,9 +2075,30 @@ class Evaluator:
         if eig_file is not None:
             eig_file = os.path.basename(str(eig_file))
         try:
-            nf_entries, data = self.sample_nf(
-                eval_step=eval_step,
-                display=['nominal', 'optimal'],
+            # Resolve flow/EIG context, then sample via util.sample_nf (no Evaluator wrapper).
+            data = self.plotter._extract_run_posterior_data(
+                eval_step,
+                device=self.device,
+                eig_data=self.eig_data,
+            )
+            data["experiment"] = self.experiment
+            auto_seed(self.seed)
+            nf_entries = sample_nf(
+                self.experiment,
+                data["posterior_flow"],
+                display=["nominal", "optimal"],
+                input_designs=data.get("input_designs"),
+                eig_values=data.get("eig_values"),
+                nominal_eig=data.get("nominal_eig"),
+                nominal_prior_entropy=data.get("nominal_prior_entropy"),
+                nominal_posterior_entropy=data.get("nominal_posterior_entropy"),
+                prior_entropy_by_design=data.get("prior_entropy_by_design"),
+                posterior_entropy_by_design=data.get("posterior_entropy_by_design"),
+                guide_samples=self.guide_samples,
+                transform_output=self.nf_transform_output,
+                device=self.device,
+                marginal_eig=data.get("marginal_eig", False),
+                plot_prior=self.plot_prior,
             )
             # Pack central-context entries into the existing NPZ schema (n_data=1).
             by_name = {

@@ -1,4 +1,4 @@
-"""Tests for default-eval: sample → save_posterior_samples → plot_posterior_display."""
+"""Tests for default-eval: sample_nf → save_posterior_samples → plot_posterior_display."""
 
 from __future__ import annotations
 
@@ -98,13 +98,13 @@ def test_plot_posterior_display_does_not_sample(tmp_path, monkeypatch):
     experiment.get_guide_samples.assert_not_called()
 
 
-def test_sample_nf_lives_on_evaluator_not_plotter():
-    assert hasattr(Evaluator, "sample_nf")
+def test_sample_nf_not_on_evaluator_or_plotter():
+    assert not hasattr(Evaluator, "sample_nf")
     assert not hasattr(RunPlotter, "sample_nf")
 
 
 def test_run_sample_save_then_plot(tmp_path):
-    """Evaluator.run samples on Evaluator, saves, then plots via plotter."""
+    """Evaluator.run calls util.sample_nf, saves, then plots those entries."""
     n_guide, n_params, n_obs = 20, 2, 3
     rng = np.random.default_rng(1)
     theta_nom = rng.normal(size=(n_guide, n_params))
@@ -137,12 +137,19 @@ def test_run_sample_save_then_plot(tmp_path):
         central_val=central,
         nominal_design=torch.zeros(3, dtype=torch.float64),
     )
-    data = {
+    extract_data = {
         "experiment": experiment,
-        "eig_values": np.array([0.1, 0.9, 0.2]),
+        "posterior_flow": MagicMock(),
+        "input_designs": np.array([[0.0, 0.0], [1.0, 1.0]]),
+        "eig_values": np.array([0.1, 0.9]),
+        "nominal_eig": 0.5,
+        "nominal_prior_entropy": None,
+        "nominal_posterior_entropy": None,
+        "prior_entropy_by_design": None,
+        "posterior_entropy_by_design": None,
         "title": "Posterior Evaluation",
         "nominal_grid_eig": None,
-        "nominal_prior_entropy": None,
+        "marginal_eig": False,
     }
 
     ev = Evaluator.__new__(Evaluator)
@@ -171,18 +178,18 @@ def test_run_sample_save_then_plot(tmp_path):
     ev.input_designs = torch.randn(2, 3, dtype=torch.float64)
     ev.experiment = experiment
     ev.plotter = MagicMock()
-    ev.sample_nf = MagicMock(return_value=(nf_entries, data))
+    ev.plotter._extract_run_posterior_data.return_value = dict(extract_data)
     ev.get_eig = MagicMock(side_effect=[(0.5, 0.01), (np.array([0.2, 0.8]), np.zeros(2))])
     ev._update_runtime = MagicMock()
     ev._eig_data_save_path = MagicMock(return_value=str(tmp_path / "eig.json"))
     ev._target_prior_entropy = MagicMock(return_value=None)
 
     with patch("bedcosmo.evaluate.render_overlay"), \
+         patch("bedcosmo.evaluate.sample_nf", return_value=nf_entries) as mock_sample, \
          patch("bedcosmo.evaluate.save_posterior_samples", wraps=save_posterior_samples) as save_spy:
         ev.run(eval_step=100)
 
-    ev.sample_nf.assert_called_once()
-    assert not hasattr(ev.plotter, "sample_nf") or not ev.plotter.sample_nf.called
+    mock_sample.assert_called_once()
     assert save_spy.called
     ev.plotter.plot_posterior_display.assert_called_once()
     plotted_entries = ev.plotter.plot_posterior_display.call_args.args[0]
