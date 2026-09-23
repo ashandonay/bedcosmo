@@ -6,7 +6,8 @@ bedcosmo is a Bayesian Experimental Design framework for cosmology and astronomi
 
 **Always**
 - Read the README for the area you're touching before changing it (see [Where details live](#where-details-live)).
-- Run the relevant tests before calling work done.
+- Run the relevant tests before calling work done, and add a test in `tests/` for new behavior.
+- Report anything you couldn't verify, such as a job you didn't run, and say why.
 - Update the matching README when you change YAML fields, CLI flags or documented behavior.
 
 **Ask first**
@@ -63,10 +64,3 @@ Aim for the simplest, most elegant implementation that stays readable.
 - **Fail loudly.** Don't use broad `try/except`, silent defaults, or `getattr(..., None)` guards for states that shouldn't happen. Raise a clear error instead. Validate at boundaries (CLI, YAML, file loading) and trust internal invariants.
 - **Match the file you're in**: naming, idioms, comment density. Comments should explain why, units and shapes, not narrate the code.
 - **Keep changes focused.** If you notice unrelated cleanup, mention it instead of doing it in the same change.
-
-## Definition of done
-
-- Relevant tests pass, and new behavior has a test in `tests/`.
-- The READMEs and this file match the new behavior.
-- No dead code, compatibility shims or debug prints remain.
-- Report anything you couldn't verify, such as a job you didn't run, and say why.
