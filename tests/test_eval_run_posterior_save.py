@@ -8,9 +8,9 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import torch
 
-from bedcosmo.artifacts import load_posterior_samples_file, save_posterior_samples, make_posterior_samples_path
+from bedcosmo.artifacts import load_posterior_samples_file, save_posterior_samples
 from bedcosmo.evaluate import Evaluator
-from bedcosmo.plotting import BasePlotter
+from bedcosmo.plotting import BasePlotter, RunPlotter
 
 
 def _make_mcsamples(theta: np.ndarray, names: list[str]):
@@ -61,8 +61,13 @@ def test_plot_posterior_display_does_not_sample(tmp_path, monkeypatch):
     experiment.get_guide_samples.assert_not_called()
 
 
+def test_sample_nf_posterior_lives_on_evaluator_not_plotter():
+    assert hasattr(Evaluator, "sample_nf_posterior")
+    assert not hasattr(RunPlotter, "sample_nf_posterior")
+
+
 def test_run_sample_save_then_plot(tmp_path):
-    """Evaluator.run samples once, saves via save_posterior_samples, then plots those entries."""
+    """Evaluator.run samples on Evaluator, saves, then plots via plotter."""
     n_guide, n_params, n_obs = 20, 2, 3
     rng = np.random.default_rng(1)
     theta_nom = rng.normal(size=(n_guide, n_params))
@@ -129,7 +134,7 @@ def test_run_sample_save_then_plot(tmp_path):
     ev.input_designs = torch.randn(2, 3, dtype=torch.float64)
     ev.experiment = experiment
     ev.plotter = MagicMock()
-    ev.plotter.sample_nf_posterior.return_value = (nf_entries, data)
+    ev.sample_nf_posterior = MagicMock(return_value=(nf_entries, data))
     ev.get_eig = MagicMock(side_effect=[(0.5, 0.01), (np.array([0.2, 0.8]), np.zeros(2))])
     ev._update_runtime = MagicMock()
     ev._eig_data_save_path = MagicMock(return_value=str(tmp_path / "eig.json"))
@@ -139,7 +144,8 @@ def test_run_sample_save_then_plot(tmp_path):
          patch("bedcosmo.evaluate.save_posterior_samples", wraps=save_posterior_samples) as save_spy:
         ev.run(eval_step=100)
 
-    ev.plotter.sample_nf_posterior.assert_called_once()
+    ev.sample_nf_posterior.assert_called_once()
+    assert not hasattr(ev.plotter, "sample_nf_posterior") or not ev.plotter.sample_nf_posterior.called
     assert save_spy.called
     ev.plotter.plot_posterior_display.assert_called_once()
     plotted_entries = ev.plotter.plot_posterior_display.call_args.args[0]
@@ -152,9 +158,3 @@ def test_run_sample_save_then_plot(tmp_path):
     assert bundle["theta"].shape == (2, 1, n_guide, n_params)
     np.testing.assert_allclose(bundle["theta"][0, 0], theta_opt)
     np.testing.assert_allclose(bundle["theta"][1, 0], theta_nom)
-
-    # Convenience generate_posterior still exists; default run does not use persist flags
-    assert "persist_posterior_samples" not in (
-        ev.plotter.plot_posterior_display.call_args.kwargs
-        | (ev.plotter.generate_posterior.call_args.kwargs if ev.plotter.generate_posterior.called else {})
-    )
