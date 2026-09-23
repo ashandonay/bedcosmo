@@ -1109,7 +1109,7 @@ def _nf_entropy_legend_suffix(prior_entropy=None, posterior_entropy=None, *, inc
     return ", " + ", ".join(parts)
 
 
-def sample_nf_display_posterior(
+def sample_nf(
     experiment,
     posterior_flow,
     *,
@@ -1129,10 +1129,10 @@ def sample_nf_display_posterior(
     plot_prior=False,
 ):
     """
-    Draw central-context NF posterior samples for nominal and/or optimal designs.
+    Sample a normalizing flow at central-context nominal and/or optimal designs.
 
-    Free function: needs an initialized ``experiment`` and a loaded
-    ``posterior_flow`` (e.g. from :func:`load_model` or
+    Needs an initialized ``experiment`` and a loaded ``posterior_flow``
+    (e.g. from :func:`load_model` or
     :func:`load_posterior_flow_from_checkpoint_file`), plus design/EIG arrays to
     pick the optimal design. Does not require ``Evaluator`` or a plotter.
 

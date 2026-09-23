@@ -37,7 +37,7 @@ from bedcosmo.util import (
     parse_param_subsets,
     get_rng_state, parse_extra_args, render_overlay,
     get_checkpoint, get_contour_area,
-    sample_nf_display_posterior,
+    sample_nf as _sample_nf,
 )
 from bedcosmo.artifacts import (
     load_eig_data_file,
@@ -1978,7 +1978,7 @@ class Evaluator:
             json.dump(self.eig_data, f, indent=2)
         print(f"Saved EIG steps data to {eig_data_save_path}")
 
-    def sample_nf_posterior(
+    def sample_nf(
         self,
         eval_step=None,
         display=('nominal', 'optimal'),
@@ -1988,7 +1988,7 @@ class Evaluator:
         seed=None,
     ):
         """
-        Thin Evaluator wrapper around :func:`sample_nf_display_posterior`.
+        Thin Evaluator wrapper around :func:`sample_nf`.
 
         Resolves this run's live EIG/design context and prefers
         ``self.experiment`` (checkpoint-matched bijector), then delegates
@@ -2017,7 +2017,7 @@ class Evaluator:
         # Prefer the Evaluator's experiment (checkpoint bijector / design state).
         data["experiment"] = self.experiment
         auto_seed(seed)
-        nf_entries = sample_nf_display_posterior(
+        nf_entries = _sample_nf(
             self.experiment,
             data["posterior_flow"],
             display=display,
@@ -2134,7 +2134,7 @@ class Evaluator:
         if eig_file is not None:
             eig_file = os.path.basename(str(eig_file))
         try:
-            nf_entries, data = self.sample_nf_posterior(
+            nf_entries, data = self.sample_nf(
                 eval_step=eval_step,
                 display=['nominal', 'optimal'],
             )

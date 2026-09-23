@@ -11,7 +11,7 @@ import torch
 from bedcosmo.artifacts import load_posterior_samples_file, save_posterior_samples
 from bedcosmo.evaluate import Evaluator
 from bedcosmo.plotting import BasePlotter, RunPlotter
-from bedcosmo.util import sample_nf_display_posterior
+from bedcosmo.util import sample_nf
 
 
 def _make_mcsamples(theta: np.ndarray, names: list[str]):
@@ -24,7 +24,7 @@ def _make_mcsamples(theta: np.ndarray, names: list[str]):
     )
 
 
-def test_sample_nf_display_posterior_is_free_function():
+def test_sample_nf_is_free_function():
     """Sampling needs experiment + flow + designs — not Evaluator."""
     n_guide, n_params = 15, 2
     rng = np.random.default_rng(2)
@@ -45,7 +45,7 @@ def test_sample_nf_display_posterior_is_free_function():
         ),
     )
     input_designs = np.array([[0.0, 0.0], [1.0, 1.0], [0.5, 0.5]])
-    entries = sample_nf_display_posterior(
+    entries = sample_nf(
         experiment,
         MagicMock(),
         display=("nominal", "optimal"),
@@ -98,9 +98,9 @@ def test_plot_posterior_display_does_not_sample(tmp_path, monkeypatch):
     experiment.get_guide_samples.assert_not_called()
 
 
-def test_sample_nf_posterior_lives_on_evaluator_not_plotter():
-    assert hasattr(Evaluator, "sample_nf_posterior")
-    assert not hasattr(RunPlotter, "sample_nf_posterior")
+def test_sample_nf_lives_on_evaluator_not_plotter():
+    assert hasattr(Evaluator, "sample_nf")
+    assert not hasattr(RunPlotter, "sample_nf")
 
 
 def test_run_sample_save_then_plot(tmp_path):
@@ -171,7 +171,7 @@ def test_run_sample_save_then_plot(tmp_path):
     ev.input_designs = torch.randn(2, 3, dtype=torch.float64)
     ev.experiment = experiment
     ev.plotter = MagicMock()
-    ev.sample_nf_posterior = MagicMock(return_value=(nf_entries, data))
+    ev.sample_nf = MagicMock(return_value=(nf_entries, data))
     ev.get_eig = MagicMock(side_effect=[(0.5, 0.01), (np.array([0.2, 0.8]), np.zeros(2))])
     ev._update_runtime = MagicMock()
     ev._eig_data_save_path = MagicMock(return_value=str(tmp_path / "eig.json"))
@@ -181,8 +181,8 @@ def test_run_sample_save_then_plot(tmp_path):
          patch("bedcosmo.evaluate.save_posterior_samples", wraps=save_posterior_samples) as save_spy:
         ev.run(eval_step=100)
 
-    ev.sample_nf_posterior.assert_called_once()
-    assert not hasattr(ev.plotter, "sample_nf_posterior") or not ev.plotter.sample_nf_posterior.called
+    ev.sample_nf.assert_called_once()
+    assert not hasattr(ev.plotter, "sample_nf") or not ev.plotter.sample_nf.called
     assert save_spy.called
     ev.plotter.plot_posterior_display.assert_called_once()
     plotted_entries = ev.plotter.plot_posterior_display.call_args.args[0]
