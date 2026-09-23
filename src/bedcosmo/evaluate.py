@@ -37,7 +37,6 @@ from bedcosmo.util import (
     parse_param_subsets,
     get_rng_state, parse_extra_args, render_overlay,
     get_checkpoint, get_contour_area,
-    sample_nf,
 )
 from bedcosmo.artifacts import (
     load_eig_data_file,
@@ -2069,24 +2068,29 @@ class Evaluator:
                 json.dump(self.eig_data, f, indent=2)
             print(f"Saved EIG data to {eig_data_save_path}")
 
-        # Main posterior: sample → save NPZ → plot from the same samples.
+        # Main posterior: sample (via _nf_display_samples → sample_nf) → save → plot.
         # Multi-y bundles still require --sample-posterior.
         eig_file = self.eig_file_path or self.output_path
         if eig_file is not None:
             eig_file = os.path.basename(str(eig_file))
         try:
-            # Resolve flow/EIG context, then sample via util.sample_nf (no Evaluator wrapper).
             data = self.plotter._extract_run_posterior_data(
                 eval_step,
                 device=self.device,
                 eig_data=self.eig_data,
             )
             data["experiment"] = self.experiment
+            experiment = self.experiment
             auto_seed(self.seed)
-            nf_entries = sample_nf(
-                self.experiment,
-                data["posterior_flow"],
-                display=["nominal", "optimal"],
+
+            # Caller-side selection of nominal/optimal + central y lives in
+            # _nf_display_samples; sample_nf itself only conditions on design+y.
+            nf_entries, _ = self.plotter._nf_display_samples(
+                ("nominal", "optimal"),
+                self.guide_samples,
+                transform_output=self.nf_transform_output,
+                experiment=experiment,
+                posterior_flow=data["posterior_flow"],
                 input_designs=data.get("input_designs"),
                 eig_values=data.get("eig_values"),
                 nominal_eig=data.get("nominal_eig"),
@@ -2094,12 +2098,11 @@ class Evaluator:
                 nominal_posterior_entropy=data.get("nominal_posterior_entropy"),
                 prior_entropy_by_design=data.get("prior_entropy_by_design"),
                 posterior_entropy_by_design=data.get("posterior_entropy_by_design"),
-                guide_samples=self.guide_samples,
-                transform_output=self.nf_transform_output,
                 device=self.device,
                 marginal_eig=data.get("marginal_eig", False),
                 plot_prior=self.plot_prior,
             )
+
             # Pack central-context entries into the existing NPZ schema (n_data=1).
             by_name = {
                 e["name"]: e
@@ -2108,7 +2111,6 @@ class Evaluator:
             }
             series_order = [n for n in ("optimal", "nominal") if n in by_name]
             if series_order:
-                experiment = data["experiment"]
                 central = experiment.central_val
                 if hasattr(central, "detach"):
                     central = central.detach().cpu().numpy().reshape(-1)
@@ -2170,7 +2172,7 @@ class Evaluator:
 
             self.plotter.plot_posterior_display(
                 nf_entries,
-                experiment=data["experiment"],
+                experiment=experiment,
                 levels=self.levels,
                 guide_samples=self.guide_samples,
                 plot_prior=self.plot_prior,

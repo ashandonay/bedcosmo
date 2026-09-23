@@ -24,40 +24,34 @@ def _make_mcsamples(theta: np.ndarray, names: list[str]):
     )
 
 
-def test_sample_nf_is_free_function():
-    """Sampling needs experiment + flow + designs — not Evaluator."""
+def test_sample_nf_conditions_on_design_and_y():
+    """sample_nf takes design + y only; returns MCSamples (no display labels)."""
     n_guide, n_params = 15, 2
     rng = np.random.default_rng(2)
-    theta_nom = rng.normal(size=(n_guide, n_params))
-    theta_opt = rng.normal(size=(n_guide, n_params))
-    central = torch.zeros(3, dtype=torch.float64)
-    nominal_design = torch.ones(2, dtype=torch.float64)
+    theta = rng.normal(size=(n_guide, n_params))
+    design = torch.tensor([1.0, 1.0], dtype=torch.float64)
+    y = torch.zeros(3, dtype=torch.float64)
     experiment = SimpleNamespace(
-        central_val=central,
-        nominal_design=nominal_design,
-        nominal_context=torch.cat([nominal_design, central]),
         device="cpu",
-        get_guide_samples=MagicMock(
-            side_effect=[
-                _make_mcsamples(theta_nom, ["p0", "p1"]),
-                _make_mcsamples(theta_opt, ["p0", "p1"]),
-            ]
-        ),
+        get_guide_samples=MagicMock(return_value=_make_mcsamples(theta, ["p0", "p1"])),
     )
-    input_designs = np.array([[0.0, 0.0], [1.0, 1.0], [0.5, 0.5]])
-    entries = sample_nf(
+    samples = sample_nf(
         experiment,
-        MagicMock(),
-        display=("nominal", "optimal"),
-        input_designs=input_designs,
-        eig_values=np.array([0.1, 0.9, 0.2]),
-        guide_samples=n_guide,
+        MagicMock(name="flow"),
+        design,
+        y,
+        num_samples=n_guide,
         device="cpu",
     )
-    assert [e["name"] for e in entries] == ["nominal", "optimal"]
-    np.testing.assert_allclose(entries[0]["samples"].samples, theta_nom)
-    np.testing.assert_allclose(entries[1]["design"], input_designs[1])
-    assert experiment.get_guide_samples.call_count == 2
+    np.testing.assert_allclose(samples.samples, theta)
+    experiment.get_guide_samples.assert_called_once()
+    args, kwargs = experiment.get_guide_samples.call_args
+    context = args[1]
+    np.testing.assert_allclose(
+        context.detach().cpu().numpy(),
+        np.concatenate([design.numpy(), y.numpy()]),
+    )
+    assert kwargs["num_samples"] == n_guide
 
 
 def test_plot_posterior_display_does_not_sample(tmp_path, monkeypatch):
@@ -103,8 +97,52 @@ def test_sample_nf_not_on_evaluator_or_plotter():
     assert not hasattr(RunPlotter, "sample_nf")
 
 
+def test_nf_display_samples_selects_then_calls_sample_nf():
+    """_nf_display_samples owns nominal/optimal selection; sample_nf only samples."""
+    n_guide, n_params = 12, 2
+    rng = np.random.default_rng(3)
+    theta_nom = rng.normal(size=(n_guide, n_params))
+    theta_opt = rng.normal(size=(n_guide, n_params))
+    central = torch.zeros(3, dtype=torch.float64)
+    nominal_design = torch.ones(2, dtype=torch.float64)
+    experiment = SimpleNamespace(
+        central_val=central,
+        nominal_design=nominal_design,
+        device="cpu",
+    )
+    plotter = BasePlotter(cosmo_exp="num_visits")
+    input_designs = np.array([[0.0, 0.0], [1.0, 1.0], [0.5, 0.5]])
+    with patch(
+        "bedcosmo.plotting.sample_nf",
+        side_effect=[
+            _make_mcsamples(theta_nom, ["p0", "p1"]),
+            _make_mcsamples(theta_opt, ["p0", "p1"]),
+        ],
+    ) as mock_sample:
+        entries, _ = plotter._nf_display_samples(
+            ("nominal", "optimal"),
+            n_guide,
+            experiment=experiment,
+            posterior_flow=MagicMock(),
+            input_designs=input_designs,
+            eig_values=np.array([0.1, 0.9, 0.2]),
+            device="cpu",
+        )
+    assert mock_sample.call_count == 2
+    nom_call, opt_call = mock_sample.call_args_list
+    np.testing.assert_allclose(
+        nom_call.args[2].detach().cpu().numpy(), nominal_design.numpy()
+    )
+    np.testing.assert_allclose(nom_call.args[3].detach().cpu().numpy(), central.numpy())
+    np.testing.assert_allclose(opt_call.args[2], input_designs[1])
+    np.testing.assert_allclose(opt_call.args[3].detach().cpu().numpy(), central.numpy())
+    assert [e["name"] for e in entries] == ["nominal", "optimal"]
+    assert entries[0]["color"] == "tab:blue"
+    assert entries[1]["color"] == "tab:orange"
+
+
 def test_run_sample_save_then_plot(tmp_path):
-    """Evaluator.run calls util.sample_nf, saves, then plots those entries."""
+    """Evaluator.run samples via _nf_display_samples, saves, then plots."""
     n_guide, n_params, n_obs = 20, 2, 3
     rng = np.random.default_rng(1)
     theta_nom = rng.normal(size=(n_guide, n_params))
@@ -179,17 +217,17 @@ def test_run_sample_save_then_plot(tmp_path):
     ev.experiment = experiment
     ev.plotter = MagicMock()
     ev.plotter._extract_run_posterior_data.return_value = dict(extract_data)
+    ev.plotter._nf_display_samples.return_value = (nf_entries, None)
     ev.get_eig = MagicMock(side_effect=[(0.5, 0.01), (np.array([0.2, 0.8]), np.zeros(2))])
     ev._update_runtime = MagicMock()
     ev._eig_data_save_path = MagicMock(return_value=str(tmp_path / "eig.json"))
     ev._target_prior_entropy = MagicMock(return_value=None)
 
     with patch("bedcosmo.evaluate.render_overlay"), \
-         patch("bedcosmo.evaluate.sample_nf", return_value=nf_entries) as mock_sample, \
          patch("bedcosmo.evaluate.save_posterior_samples", wraps=save_posterior_samples) as save_spy:
         ev.run(eval_step=100)
 
-    mock_sample.assert_called_once()
+    ev.plotter._nf_display_samples.assert_called_once()
     assert save_spy.called
     ev.plotter.plot_posterior_display.assert_called_once()
     plotted_entries = ev.plotter.plot_posterior_display.call_args.args[0]
