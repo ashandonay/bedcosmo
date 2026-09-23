@@ -1388,7 +1388,8 @@ class NumTracers(BaseExperiment, CosmologyMixin):
         ``self._emulator_fallback_bins``; their covariance blocks fall back to the
         fixed DESI nominal covariance in ``_build_emulator_covariance``.
         """
-        from desilike_emulator.util import build_model, DEFAULT_SIGMA_FLOOR
+        from desilike_emulator.util import (
+            DEFAULT_SIGMA_FLOOR, load_model, model_label)
 
         # Sigma clamps passed to decode_and_unscale. The floor is the
         # emulator's own convention (single-sourced from util, so it can't drift
@@ -1406,18 +1407,7 @@ class NumTracers(BaseExperiment, CosmologyMixin):
                 self._emulator_fallback_bins.append(tracer_bin)
                 continue
             ckpt = torch.load(ckpt_path, map_location=self.device, weights_only=False)
-            model = build_model(
-                analysis=ckpt.get("analysis", "bao"),
-                architecture=ckpt.get("architecture", "resnet"),
-                in_dim=len(ckpt["param_names"]),
-                out_dim=len(ckpt["target_names"]),
-                hidden_dim=ckpt["hidden_dim"],
-                n_hidden=ckpt["n_hidden"],
-                dropout=ckpt.get("dropout", 0.0),
-                expand=ckpt.get("expand", 4),
-            ).to(self.device)
-            model.load_state_dict(ckpt["state_dict"])
-            model.eval()
+            model = load_model(ckpt).to(self.device)
             model.requires_grad_(False)
 
             # Recover the trained N_tracers box from the input standardization
@@ -1460,8 +1450,7 @@ class NumTracers(BaseExperiment, CosmologyMixin):
                 # as good as the emulator behind it, and the run log is the only
                 # place that pairing is recorded.
                 "ckpt_path": str(ckpt_path),
-                "arch": (f"{ckpt['hidden_dim']},{ckpt['n_hidden']},"
-                         f"{ckpt.get('expand', 4)}"),
+                "arch": model_label(ckpt.get("architecture", "resnet"), ckpt["model_kwargs"]),
                 "n_params": sum(p_.numel() for p_ in model.parameters()),
                 "git_commit": str(ckpt.get("git_commit", "") or ""),
             }
@@ -1493,7 +1482,7 @@ class NumTracers(BaseExperiment, CosmologyMixin):
         for tb, emu in self._emulators.items():
             n_lo, n_hi = emu.get("n_train_lo"), emu.get("n_train_hi")
             nbox = (f"N[{n_lo:.3g}, {n_hi:.3g}]" if n_lo is not None else "N box unknown")
-            print(f"  {tb:<{w}}  {emu['arch']:>9} ({emu['n_params']:,} params)  "
+            print(f"  {tb:<{w}}  {emu['arch']} ({emu['n_params']:,} params)  "
                   f"{'symlog' if emu['log_normalize'] else 'raw'}  {nbox}")
             print(f"  {'':<{w}}  {emu['ckpt_path']}")
             # An empty recipe is meaningful, not missing: it says the targets are
