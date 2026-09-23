@@ -1977,6 +1977,66 @@ class Evaluator:
             json.dump(self.eig_data, f, indent=2)
         print(f"Saved EIG steps data to {eig_data_save_path}")
 
+    def sample_nf_posterior(
+        self,
+        eval_step=None,
+        display=('nominal', 'optimal'),
+        guide_samples=None,
+        params=None,
+        plot_prior=None,
+        seed=None,
+    ):
+        """
+        Sample central-context NF display entries for this eval run.
+
+        Reuses ``BasePlotter._nf_display_samples`` / ``get_guide_samples`` (no
+        parallel sampler). Returns ``(nf_entries, data)`` where ``data`` is the
+        dict from ``RunPlotter._extract_run_posterior_data`` (with this
+        Evaluator's ``experiment`` preferred when present).
+        """
+        if eval_step is None or eval_step == "last":
+            eval_step = self.total_steps
+        else:
+            try:
+                eval_step = int(eval_step)
+            except (TypeError, ValueError):
+                pass
+        if guide_samples is None:
+            guide_samples = self.guide_samples
+        if plot_prior is None:
+            plot_prior = self.plot_prior
+        if seed is None:
+            seed = self.seed
+
+        data = self.plotter._extract_run_posterior_data(
+            eval_step,
+            device=self.device,
+            eig_data=self.eig_data,
+            params=params,
+        )
+        # Prefer the Evaluator's experiment (checkpoint bijector / design state).
+        data["experiment"] = self.experiment
+        auto_seed(seed)
+        nf_entries, _ = self.plotter._nf_display_samples(
+            display,
+            guide_samples,
+            transform_output=self.nf_transform_output,
+            experiment=self.experiment,
+            posterior_flow=data["posterior_flow"],
+            input_designs=data.get("input_designs"),
+            eig_values=data.get("eig_values"),
+            nominal_eig=data.get("nominal_eig"),
+            nominal_prior_entropy=data.get("nominal_prior_entropy"),
+            nominal_posterior_entropy=data.get("nominal_posterior_entropy"),
+            prior_entropy_by_design=data.get("prior_entropy_by_design"),
+            posterior_entropy_by_design=data.get("posterior_entropy_by_design"),
+            device=self.device,
+            params=params,
+            marginal_eig=data.get("marginal_eig", False),
+            plot_prior=plot_prior,
+        )
+        return nf_entries, data
+
     def run(self, eval_step=None):
         # Determine eval_step
         if eval_step is None or eval_step == 'last':
@@ -2074,13 +2134,9 @@ class Evaluator:
         if eig_file is not None:
             eig_file = os.path.basename(str(eig_file))
         try:
-            nf_entries, data = self.plotter.sample_nf_posterior(
+            nf_entries, data = self.sample_nf_posterior(
                 eval_step=eval_step,
                 display=['nominal', 'optimal'],
-                guide_samples=self.guide_samples,
-                transform_output=self.nf_transform_output,
-                seed=self.seed,
-                plot_prior=self.plot_prior,
             )
             # Pack central-context entries into the existing NPZ schema (n_data=1).
             by_name = {
