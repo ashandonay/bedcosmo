@@ -37,6 +37,7 @@ from bedcosmo.util import (
     parse_param_subsets,
     get_rng_state, parse_extra_args, render_overlay,
     get_checkpoint, get_contour_area,
+    sample_nf_display_posterior,
 )
 from bedcosmo.artifacts import (
     load_eig_data_file,
@@ -1987,12 +1988,11 @@ class Evaluator:
         seed=None,
     ):
         """
-        Sample central-context NF display entries for this eval run.
+        Thin Evaluator wrapper around :func:`sample_nf_display_posterior`.
 
-        Reuses ``BasePlotter._nf_display_samples`` / ``get_guide_samples`` (no
-        parallel sampler). Returns ``(nf_entries, data)`` where ``data`` is the
-        dict from ``RunPlotter._extract_run_posterior_data`` (with this
-        Evaluator's ``experiment`` preferred when present).
+        Resolves this run's live EIG/design context and prefers
+        ``self.experiment`` (checkpoint-matched bijector), then delegates
+        sampling to the util free function. Returns ``(nf_entries, data)``.
         """
         if eval_step is None or eval_step == "last":
             eval_step = self.total_steps
@@ -2017,12 +2017,10 @@ class Evaluator:
         # Prefer the Evaluator's experiment (checkpoint bijector / design state).
         data["experiment"] = self.experiment
         auto_seed(seed)
-        nf_entries, _ = self.plotter._nf_display_samples(
-            display,
-            guide_samples,
-            transform_output=self.nf_transform_output,
-            experiment=self.experiment,
-            posterior_flow=data["posterior_flow"],
+        nf_entries = sample_nf_display_posterior(
+            self.experiment,
+            data["posterior_flow"],
+            display=display,
             input_designs=data.get("input_designs"),
             eig_values=data.get("eig_values"),
             nominal_eig=data.get("nominal_eig"),
@@ -2030,6 +2028,8 @@ class Evaluator:
             nominal_posterior_entropy=data.get("nominal_posterior_entropy"),
             prior_entropy_by_design=data.get("prior_entropy_by_design"),
             posterior_entropy_by_design=data.get("posterior_entropy_by_design"),
+            guide_samples=guide_samples,
+            transform_output=self.nf_transform_output,
             device=self.device,
             params=params,
             marginal_eig=data.get("marginal_eig", False),
