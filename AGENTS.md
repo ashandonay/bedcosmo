@@ -7,7 +7,7 @@ bedcosmo is a Bayesian Experimental Design framework for cosmology and astronomi
 **Always**
 - Read the README for the area you're touching before changing it (see [Where details live](#where-details-live)).
 - Run the relevant tests before calling work done, and add a test in `tests/` for new behavior.
-- Don't add tests whose only job is to assert that removed APIs are gone (e.g. `assert not hasattr(...)`). Cover the remaining behavior instead.
+- Don't add tests whose only job is to assert that removed functionality is gone (e.g. `assert not hasattr(...)`). Cover the remaining behavior instead.
 - Report anything you couldn't verify, such as a job you didn't run, and say why.
 - Update the matching README when you change YAML fields, CLI flags or documented behavior.
 
