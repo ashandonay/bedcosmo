@@ -1098,148 +1098,44 @@ def load_model(experiment, step, run_obj, run_args, device, global_rank=0):
     return posterior_flow, selected_step
 
 
-def _nf_entropy_legend_suffix(prior_entropy=None, posterior_entropy=None, *, include_prior=True):
-    parts = []
-    if include_prior and prior_entropy is not None:
-        parts.append(f"H_prior: {float(prior_entropy):.2f} bits")
-    if posterior_entropy is not None:
-        parts.append(f"H_post: {float(posterior_entropy):.2f} bits")
-    if not parts:
-        return ""
-    return ", " + ", ".join(parts)
-
-
 def sample_nf(
     experiment,
     posterior_flow,
+    design,
+    y,
     *,
-    display=("nominal", "optimal"),
-    input_designs=None,
-    eig_values=None,
-    nominal_eig=None,
-    nominal_prior_entropy=None,
-    nominal_posterior_entropy=None,
-    prior_entropy_by_design=None,
-    posterior_entropy_by_design=None,
-    guide_samples=1000,
+    num_samples=1000,
     transform_output=True,
-    device=None,
     params=None,
-    marginal_eig=False,
-    plot_prior=False,
+    device=None,
 ):
     """
-    Sample a normalizing flow at central-context nominal and/or optimal designs.
+    Sample a normalizing flow conditioned on ``design`` and observation ``y``.
 
-    Needs an initialized ``experiment`` and a loaded ``posterior_flow``
-    (e.g. from :func:`load_model` or
-    :func:`load_posterior_flow_from_checkpoint_file`), plus design/EIG arrays to
-    pick the optimal design. Does not require ``Evaluator`` or a plotter.
-
-    Each entry is a dict with ``samples`` (GetDist MCSamples), ``name``,
-    ``design``, ``label``, ``color``, ``line_style``, ``alpha``.
+    Builds context ``[design, y]`` and returns a GetDist ``MCSamples`` object
+    via ``experiment.get_guide_samples``. Callers choose which design/``y`` to
+    use (e.g. nominal vs optimal, central vs sampled data).
     """
-    if isinstance(display, str):
-        display = (display,)
-    display = tuple(display)
-
-    if posterior_flow is None:
-        return []
-
     if device is None:
         device = experiment.device
 
-    entries = []
-    eig_label = "Marginal EIG" if marginal_eig else "EIG"
-    include_prior_in_legend = not plot_prior
+    def _as_1d(value):
+        if isinstance(value, torch.Tensor):
+            return value.detach().to(device=device, dtype=torch.float64).reshape(-1)
+        return torch.as_tensor(
+            np.asarray(value, dtype=np.float64).reshape(-1),
+            device=device,
+            dtype=torch.float64,
+        )
 
-    if "nominal" in display:
-        nominal_samples_gd = experiment.get_guide_samples(
-            posterior_flow,
-            experiment.nominal_context,
-            num_samples=guide_samples,
-            params=params,
-            transform_output=transform_output,
-        )
-        eig_str = (
-            f", {eig_label}: {nominal_eig:.3f} bits" if nominal_eig is not None else ""
-        )
-        eig_str += _nf_entropy_legend_suffix(
-            nominal_prior_entropy,
-            nominal_posterior_entropy,
-            include_prior=include_prior_in_legend,
-        )
-        nominal_design = experiment.nominal_design
-        if hasattr(nominal_design, "detach"):
-            nominal_design_np = nominal_design.detach().cpu().numpy().reshape(-1)
-        else:
-            nominal_design_np = np.asarray(nominal_design).reshape(-1)
-        entries.append({
-            "samples": nominal_samples_gd,
-            "name": "nominal",
-            "design": nominal_design_np,
-            "label": f"Nominal Design (NF){eig_str}",
-            "color": "tab:blue",
-            "line_style": "-",
-            "alpha": 1.0,
-        })
-
-    if "optimal" in display:
-        if input_designs is None:
-            raise ValueError("input_designs required when display includes 'optimal'")
-        input_designs = np.asarray(input_designs)
-        has_multiple_designs = len(input_designs) > 1
-
-        if has_multiple_designs and eig_values is not None:
-            eig_values = np.asarray(eig_values)
-            optimal_idx = int(np.argmax(eig_values))
-            optimal_design = input_designs[optimal_idx]
-            optimal_eig = float(eig_values[optimal_idx])
-            eig_str = f", {eig_label}: {optimal_eig:.3f} bits"
-            opt_prior_h = None
-            opt_post_h = None
-            if prior_entropy_by_design is not None and len(prior_entropy_by_design) > optimal_idx:
-                opt_prior_h = float(prior_entropy_by_design[optimal_idx])
-            if posterior_entropy_by_design is not None and len(posterior_entropy_by_design) > optimal_idx:
-                opt_post_h = float(posterior_entropy_by_design[optimal_idx])
-            eig_str += _nf_entropy_legend_suffix(
-                opt_prior_h, opt_post_h, include_prior=include_prior_in_legend
-            )
-            label = f"Optimal Design (NF){eig_str}"
-        elif len(input_designs) >= 1:
-            optimal_design = input_designs[0]
-            optimal_eig = float(np.asarray(eig_values)[0]) if eig_values is not None else None
-            eig_str = (
-                f", {eig_label}: {optimal_eig:.3f} bits" if optimal_eig is not None else ""
-            )
-            label = f"Input Design (NF){eig_str}"
-        else:
-            raise ValueError("No input designs available for optimal posterior")
-
-        optimal_design_tensor = torch.tensor(
-            optimal_design, device=device, dtype=torch.float64
-        )
-        optimal_context = torch.cat(
-            [optimal_design_tensor, experiment.central_val], dim=-1
-        )
-        optimal_samples_gd = experiment.get_guide_samples(
-            posterior_flow,
-            optimal_context,
-            num_samples=guide_samples,
-            params=params,
-            transform_output=transform_output,
-        )
-        entries.append({
-            "samples": optimal_samples_gd,
-            "name": "optimal",
-            "design": np.asarray(optimal_design, dtype=np.float64).reshape(-1),
-            "label": label,
-            "color": "tab:orange",
-            "line_style": "-",
-            "alpha": 1.0,
-        })
-
-    return entries
+    context = torch.cat([_as_1d(design), _as_1d(y)], dim=-1)
+    return experiment.get_guide_samples(
+        posterior_flow,
+        context,
+        num_samples=num_samples,
+        params=params,
+        transform_output=transform_output,
+    )
 
 
 def load_posterior_flow_from_checkpoint_file(

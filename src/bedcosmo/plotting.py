@@ -879,7 +879,8 @@ class BasePlotter:
         plot_prior=False,
     ):
         """
-        NF guide samples for each entry in display ('nominal' and/or 'optimal').
+        Resolve designs/``y`` for each entry in ``display``, sample via
+        :func:`bedcosmo.util.sample_nf`, and build labeled plot entries.
 
         Pass experiment + posterior_flow directly (generate_posterior), or pass
         run_obj + run_args + exp_id + step to load them from MLflow (compare_posterior).
@@ -951,24 +952,112 @@ class BasePlotter:
         if posterior_flow is None:
             return [], selected_step
 
-        entries = sample_nf(
-            experiment,
-            posterior_flow,
-            display=display,
-            input_designs=input_designs,
-            eig_values=eig_values,
-            nominal_eig=nominal_eig,
-            nominal_prior_entropy=nominal_prior_entropy,
-            nominal_posterior_entropy=nominal_posterior_entropy,
-            prior_entropy_by_design=prior_entropy_by_design,
-            posterior_entropy_by_design=posterior_entropy_by_design,
-            guide_samples=guide_samples,
-            transform_output=transform_output,
-            device=device,
-            params=params,
-            marginal_eig=marginal_eig,
-            plot_prior=plot_prior,
-        )
+        if device is None:
+            device = experiment.device
+
+        y = experiment.central_val
+        eig_label = "Marginal EIG" if marginal_eig else "EIG"
+        include_prior_in_legend = not plot_prior
+        entries = []
+
+        if "nominal" in display:
+            nominal_design = experiment.nominal_design
+            samples = sample_nf(
+                experiment,
+                posterior_flow,
+                nominal_design,
+                y,
+                num_samples=guide_samples,
+                transform_output=transform_output,
+                params=params,
+                device=device,
+            )
+            eig_str = (
+                f", {eig_label}: {nominal_eig:.3f} bits"
+                if nominal_eig is not None
+                else ""
+            )
+            eig_str += self._entropy_legend_suffix(
+                nominal_prior_entropy,
+                nominal_posterior_entropy,
+                include_prior=include_prior_in_legend,
+            )
+            if hasattr(nominal_design, "detach"):
+                nominal_design_np = nominal_design.detach().cpu().numpy().reshape(-1)
+            else:
+                nominal_design_np = np.asarray(nominal_design).reshape(-1)
+            entries.append({
+                "samples": samples,
+                "name": "nominal",
+                "design": nominal_design_np,
+                "label": f"Nominal Design (NF){eig_str}",
+                "color": "tab:blue",
+                "line_style": "-",
+                "alpha": 1.0,
+            })
+
+        if "optimal" in display:
+            if input_designs is None:
+                raise ValueError("input_designs required when display includes 'optimal'")
+            input_designs = np.asarray(input_designs)
+            has_multiple_designs = len(input_designs) > 1
+
+            if has_multiple_designs and eig_values is not None:
+                eig_values = np.asarray(eig_values)
+                optimal_idx = int(np.argmax(eig_values))
+                optimal_design = input_designs[optimal_idx]
+                optimal_eig = float(eig_values[optimal_idx])
+                eig_str = f", {eig_label}: {optimal_eig:.3f} bits"
+                opt_prior_h = None
+                opt_post_h = None
+                if (
+                    prior_entropy_by_design is not None
+                    and len(prior_entropy_by_design) > optimal_idx
+                ):
+                    opt_prior_h = float(prior_entropy_by_design[optimal_idx])
+                if (
+                    posterior_entropy_by_design is not None
+                    and len(posterior_entropy_by_design) > optimal_idx
+                ):
+                    opt_post_h = float(posterior_entropy_by_design[optimal_idx])
+                eig_str += self._entropy_legend_suffix(
+                    opt_prior_h, opt_post_h, include_prior=include_prior_in_legend
+                )
+                label = f"Optimal Design (NF){eig_str}"
+            elif len(input_designs) >= 1:
+                optimal_design = input_designs[0]
+                optimal_eig = (
+                    float(np.asarray(eig_values)[0]) if eig_values is not None else None
+                )
+                eig_str = (
+                    f", {eig_label}: {optimal_eig:.3f} bits"
+                    if optimal_eig is not None
+                    else ""
+                )
+                label = f"Input Design (NF){eig_str}"
+            else:
+                raise ValueError("No input designs available for optimal posterior")
+
+            samples = sample_nf(
+                experiment,
+                posterior_flow,
+                optimal_design,
+                y,
+                num_samples=guide_samples,
+                transform_output=transform_output,
+                params=params,
+                device=device,
+            )
+            entries.append({
+                "samples": samples,
+                "name": "optimal",
+                "design": np.asarray(optimal_design, dtype=np.float64).reshape(-1),
+                "label": label,
+                "color": "tab:orange",
+                "line_style": "-",
+                "alpha": 1.0,
+            })
+
         return entries, selected_step
 
 
@@ -997,9 +1086,9 @@ class BasePlotter:
         """
         Plot a posterior triangle from precomputed NF display entries.
 
-        Does **not** sample from the flow. Pass ``nf_entries`` from
-        :func:`bedcosmo.util.sample_nf`. Optional grid / MCMC / prior
-        overlays are assembled here for the figure.
+        Does **not** sample from the flow. Pass ``nf_entries`` built by the
+        caller (e.g. after :func:`bedcosmo.util.sample_nf`). Optional grid /
+        MCMC / prior overlays are assembled here for the figure.
         """
         if isinstance(levels, (int, float)):
             levels = [levels]
@@ -1204,8 +1293,8 @@ class BasePlotter:
         """
         Convenience: sample NF display entries (if needed) then plot.
 
-        Prefer :func:`bedcosmo.util.sample_nf` and ``plot_posterior_display``
-        when persisting or reusing samples.
+        Prefer resolving designs/``y`` then :func:`bedcosmo.util.sample_nf`
+        (and ``plot_posterior_display``) when persisting or reusing samples.
         """
         if nf_entries is None:
             auto_seed(seed)
