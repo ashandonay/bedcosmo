@@ -264,7 +264,7 @@ def evaluate_basis(
 def make_summary_plot(metrics: pd.DataFrame, output: Path) -> None:
     fig, axes = plt.subplots(1, 2, figsize=(14, 5.4), constrained_layout=True)
     colors = {"anls": "#4C78A8", "nearly_nmf": "#E45756"}
-    labels = {"anls": "Alternating NNLS", "nearly_nmf": "Nearly-NMF"}
+    labels = {"anls": "Weighted ANLS", "nearly_nmf": "Nearly-NMF"}
     ranks = np.array(sorted(metrics["rank"].unique()))
     for method, group in metrics.groupby("method"):
         summary = group.groupby("rank")
@@ -318,7 +318,7 @@ def make_residual_plot(
     rank = int(selected["rank"].max())
     selected = selected[selected["rank"] == rank]
     colors = {"anls": "#4C78A8", "nearly_nmf": "#E45756"}
-    labels = {"anls": "Alternating NNLS", "nearly_nmf": "Nearly-NMF"}
+    labels = {"anls": "Weighted ANLS", "nearly_nmf": "Nearly-NMF"}
     fig, axes = plt.subplots(2, 2, figsize=(14, 9), constrained_layout=True)
     for _, item in selected.iterrows():
         method = str(item["method"])
