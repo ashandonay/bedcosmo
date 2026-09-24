@@ -1978,7 +1978,7 @@ class Evaluator:
             json.dump(self.eig_data, f, indent=2)
         print(f"Saved EIG steps data to {eig_data_save_path}")
 
-    def _plot_posterior(self, posterior_flow, eval_step, params=None, filename=None):
+    def _generate_posterior(self, posterior_flow, eval_step, params=None, filename=None):
         """Sample nominal/optimal posteriors at central y, plot them, and return the entries."""
         auto_seed(self.seed)
         nf_entries = nf_posterior_entries(
@@ -2104,7 +2104,7 @@ class Evaluator:
             self.experiment, eval_step, self.run_obj, self.run_args, self.device, global_rank=0
         )
         try:
-            nf_entries = self._plot_posterior(posterior_flow, eval_step)
+            nf_entries = self._generate_posterior(posterior_flow, eval_step)
             eig_file = self.eig_file_path or self.output_path
             y = self.experiment.central_val.detach().cpu().numpy().reshape(1, 1, -1)
             out_path = save_posterior_samples(
@@ -2143,7 +2143,7 @@ class Evaluator:
         for subset in self.marginal_eig_subsets:
             subset_id = self._subset_id(subset)
             try:
-                self._plot_posterior(
+                self._generate_posterior(
                     posterior_flow,
                     eval_step,
                     params=subset,
@@ -2284,7 +2284,7 @@ class Evaluator:
         for subset in self.marginal_eig_subsets:
             subset_id = self._subset_id(subset)
             try:
-                self._plot_posterior(
+                self._generate_posterior(
                     posterior_flow,
                     eval_step,
                     params=subset,
