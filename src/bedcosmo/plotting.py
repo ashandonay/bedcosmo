@@ -909,6 +909,7 @@ class BasePlotter:
         guide_samples=1000,
         params=None,
         plot_prior=False,
+        plot_mcmc=True,
         transform_output=True,
         plot_size_ratio=1.0,
         title=None,
@@ -926,6 +927,10 @@ class BasePlotter:
         posterior_samples_path=None,
         data_index=0,
         log_density=False,
+        show_scatter=False,
+        ranges=None,
+        hist_1d=False,
+        hist_bins=40,
     ):
         """
         Plot a posterior triangle from NF entries or a saved posterior NPZ.
@@ -942,8 +947,17 @@ class BasePlotter:
         ``display`` selects which named series to show (``'nominal'`` and/or
         ``'optimal'``). Order follows ``display``.
 
-        ``log_density``: if True, use a log scale on the 1D histogram density
-        (diagonal y-axes only); parameter axes stay linear.
+        ``plot_mcmc``: if True (default) and ``cosmo_exp == 'num_tracers'``, overlay
+        the DESI/MCMC nominal reference. Set False for NF-only figures.
+
+        ``log_density``: if True, use a log scale on the 1D density/count y-axes
+        (diagonal only); parameter axes stay linear. Applies to GetDist curves
+        and to raw ``hist_1d`` bars.
+
+        ``hist_1d``: if True, replace GetDist smoothed 1D densities with raw
+        matplotlib histograms (full sample range; no fencing). ``show_scatter``
+        still controls 2D scatter overlays. ``ranges`` is forwarded to
+        ``plot_triangle`` (``None`` = no axis clipping).
 
         Raises if ``nf_entries is None`` and no matching artifact is found.
         """
@@ -1038,7 +1052,7 @@ class BasePlotter:
             )
             legend_labels.append(f'Nominal Design (Grid){eig_str}')
 
-        if self.cosmo_exp == 'num_tracers':
+        if plot_mcmc and self.cosmo_exp == 'num_tracers':
             try:
                 nominal_samples_mcmc = experiment.get_nominal_samples(
                     transform_output=not transform_output
@@ -1084,6 +1098,10 @@ class BasePlotter:
             line_style=all_line_styles,
             plot_size_ratio=plot_size_ratio,
             log_density=log_density,
+            show_scatter=show_scatter,
+            ranges=ranges,
+            hist_1d=hist_1d,
+            hist_bins=hist_bins,
         )
 
         if getattr(experiment, "central_params", None):
@@ -1169,6 +1187,8 @@ class BasePlotter:
         contour_alpha_factor=0.8,
         style=style,
         log_density=False,
+        hist_1d=False,
+        hist_bins=40,
     ):
         """
         Low-level GetDist triangle plot from MCSamples lists.
@@ -1180,6 +1200,8 @@ class BasePlotter:
             legend_labels (list, optional): List of legend labels for each sample.
             show_scatter (bool or list): If True, show scatter/histograms on the 1D/2D plots for all samples.
                 If a list, specifies whether to show scatter for each sample individually.
+                When ``hist_1d`` is True, diagonal histograms come from ``hist_1d`` and
+                ``show_scatter`` only controls 2D scatter overlays.
             line_style (str or list): Line style for contours. Can be a single string or a list of strings corresponding to each sample.
             alpha (float or list): Alpha value for the contours. Can be a single float or a list of floats corresponding to each sample.
             levels (float or list, optional): Contour levels to use (e.g., 0.68 or [0.68, 0.95]).
@@ -1188,12 +1210,18 @@ class BasePlotter:
             width_inch (float): Width of the plot in inches. Higher values increase resolution.
             ranges (dict, optional): Dictionary specifying fixed ranges for parameters.
                 Keys should be parameter names, values should be tuples of (min, max).
+                Omit (``None``) to leave GetDist autoscaling to the full sample span.
             scatter_alpha (float): Alpha value for scatter points. Default 0.6 for better distinguishability.
             contour_alpha_factor (float): Factor to adjust contour alpha for distinguishability. Default 0.8.
             style (object, optional): Style object (like KP7StylePaper) to apply to the plotter settings.
             log_density (bool): If True, use a log scale on the 1D density/count y-axes
                 (diagonal panels only). Parameter (x) axes stay linear. Nonpositive
                 density values are floored so matplotlib's log scale does not fail.
+            hist_1d (bool): If True, clear GetDist smoothed 1D densities on the
+                diagonal and replace them with raw matplotlib histograms over the
+                full sample range (no fencing).
+            hist_bins (int): Number of bins for ``hist_1d`` (and for legacy
+                ``show_scatter`` diagonal hists when ``hist_1d`` is False).
         Returns:
             g: GetDist plotter object with the generated triangle plot.
         """
@@ -1369,19 +1397,60 @@ class BasePlotter:
                                 g.subplots[i, j].set_xlim(ranges[param_name_list[j]][0], ranges[param_name_list[j]][1])
                                 g.subplots[i, j].set_ylim(min_val, max_val)
 
-        if any(show_scatter):
+        if hist_1d:
             for i, param in enumerate(param_name_list):
-                if i < len(g.subplots) and i < len(g.subplots[i]):
-                    ax = g.subplots[i][i]
-                    current_ylim = ax.get_ylim()
-                    for k, sample in enumerate(samples):
-                        if show_scatter[k]:  # Only show scatter for this sample if enabled
-                            param_index = sample.paramNames.list().index(param)
-                            if param_index is not None:
-                                values = sample.samples[:, param_index]
-                                ax.hist(values, bins=30, alpha=scatter_alpha, color=scatter_colors[k],
-                                        density=True, histtype='stepfilled', zorder=1)
-                    ax.set_ylim(current_ylim)
+                ax = g.subplots[i, i]
+                if ax is None:
+                    continue
+                # Drop GetDist KDE/smooth 1D artists so only raw hists remain.
+                for line in list(ax.get_lines()):
+                    line.remove()
+                for patch in list(getattr(ax, "patches", [])):
+                    patch.remove()
+                for k, sample in enumerate(samples):
+                    param_names_k = sample.paramNames.list()
+                    if param not in param_names_k:
+                        continue
+                    param_index = param_names_k.index(param)
+                    values = np.asarray(sample.samples[:, param_index], dtype=float)
+                    values = values[np.isfinite(values)]
+                    if values.size == 0:
+                        continue
+                    ax.hist(
+                        values,
+                        bins=hist_bins,
+                        alpha=scatter_alpha,
+                        color=scatter_colors[k],
+                        density=True,
+                        histtype="stepfilled",
+                        zorder=1,
+                    )
+                # Autoscale to the raw hist (full sample span on x; hist heights on y).
+                ax.relim()
+                ax.autoscale_view()
+
+        if any(show_scatter):
+            # Legacy path: overlay hists under GetDist 1D curves when hist_1d is off.
+            if not hist_1d:
+                for i, param in enumerate(param_name_list):
+                    if i < len(g.subplots) and i < len(g.subplots[i]):
+                        ax = g.subplots[i][i]
+                        current_ylim = ax.get_ylim()
+                        for k, sample in enumerate(samples):
+                            if show_scatter[k]:  # Only show scatter for this sample if enabled
+                                param_index = sample.paramNames.list().index(param)
+                                if param_index is not None:
+                                    values = sample.samples[:, param_index]
+                                    ax.hist(
+                                        values,
+                                        bins=hist_bins,
+                                        alpha=scatter_alpha,
+                                        color=scatter_colors[k],
+                                        density=True,
+                                        histtype="stepfilled",
+                                        zorder=1,
+                                    )
+                        ax.set_ylim(current_ylim)
 
             param_combinations = [
                 (param_name_list[i], param_name_list[j])
@@ -1807,7 +1876,8 @@ class RunPlotter(BasePlotter):
         ``display`` series. Pass ``nf_entries=[]`` for overlay-only figures.
 
         Extra keyword arguments are forwarded to ``BasePlotter.plot_posterior``
-        (e.g. ``log_density=True`` for a log-scaled 1D density on diagonal panels).
+        (e.g. ``log_density=True``, ``plot_mcmc=False``, ``hist_1d=True``,
+        ``show_scatter=True`` for NF-only raw-hist triangles).
         """
         if device is None:
             device = "cuda:0" if torch.cuda.is_available() else "cpu"

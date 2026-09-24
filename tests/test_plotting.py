@@ -833,6 +833,60 @@ class TestPlotTriangle:
             y1 = diag_line1.set_ydata.call_args[0][0]
             assert np.all(y1 > 0)
 
+    def test_plot_triangle_hist_1d_replaces_smooth_density(self, mock_samples, mock_scratch_env):
+        """hist_1d=True clears GetDist 1D artists and draws raw matplotlib hists."""
+        plotter = BasePlotter(cosmo_exp='test_exp')
+        with patch('bedcosmo.plotting.plots.get_single_plotter') as mock_get_plotter:
+            mock_plotter = Mock()
+            mock_plotter.settings = Mock()
+
+            smooth_line = Mock()
+            smooth_line.remove = Mock()
+            diag_ax0 = Mock()
+            diag_ax0.get_lines.return_value = [smooth_line]
+            diag_ax0.patches = []
+            diag_ax0.hist = Mock()
+            diag_ax0.relim = Mock()
+            diag_ax0.autoscale_view = Mock()
+
+            off_ax = Mock()
+            off_ax.collections = []
+            diag_ax1 = Mock()
+            diag_ax1.get_lines.return_value = []
+            diag_ax1.patches = []
+            diag_ax1.hist = Mock()
+            diag_ax1.relim = Mock()
+            diag_ax1.autoscale_view = Mock()
+
+            mock_plotter.subplots = np.array([[diag_ax0, None], [off_ax, diag_ax1]])
+            param1_mock = Mock()
+            param1_mock.name = 'param1'
+            param2_mock = Mock()
+            param2_mock.name = 'param2'
+            mock_param_names = Mock()
+            mock_param_names.names = [param1_mock, param2_mock]
+            mock_plotter.param_names_for_root.return_value = mock_param_names
+            mock_plotter.triangle_plot = Mock()
+            mock_get_plotter.return_value = mock_plotter
+
+            mock_samples[0].paramNames.list.return_value = ['param1', 'param2']
+            mock_samples[0].samples = np.random.randn(50, 2)
+
+            result = plotter.plot_triangle(
+                samples=mock_samples[0],
+                colors='blue',
+                show_scatter=False,
+                hist_1d=True,
+                hist_bins=20,
+                levels=[0.68],
+            )
+
+            assert result == mock_plotter
+            smooth_line.remove.assert_called()
+            assert diag_ax0.hist.called
+            assert diag_ax1.hist.called
+            diag_ax0.autoscale_view.assert_called()
+
 
 class TestLoadEigDataFile:
     """Test cases for BasePlotter.load_eig_data_file method."""
