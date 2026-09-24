@@ -241,3 +241,16 @@ def test_load_posterior_samples_file_generated_by(tmp_path):
     assert central["meta"]["tag"] == "central"
     with pytest.raises(FileNotFoundError):
         load_posterior_samples_file(str(artifacts), step=4, generated_by="other")
+
+
+def test_resolve_eig_step_latest_at_or_below_and_raises():
+    from bedcosmo.artifacts import resolve_eig_step
+
+    eig_data = {"step_100": {}, "step_300": {}, "input_designs": []}
+    assert resolve_eig_step(eig_data, None) == (300, "step_300")
+    assert resolve_eig_step(eig_data, 250) == (100, "step_100")
+    assert resolve_eig_step(eig_data, "step_300") == (300, "step_300")
+    with pytest.raises(ValueError, match="<= requested step 50"):
+        resolve_eig_step(eig_data, 50)
+    with pytest.raises(ValueError, match="No step_"):
+        resolve_eig_step({"input_designs": []}, None)
