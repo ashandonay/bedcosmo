@@ -15,12 +15,8 @@ from bedcosmo.artifacts import (
     save_posterior_samples,
 )
 from bedcosmo.evaluate import Evaluator
-from bedcosmo.plotting import (
-    BasePlotter,
-    nf_entries_from_posterior_bundle,
-    nf_posterior_entries,
-)
-from bedcosmo.util import sample_nf
+from bedcosmo.plotting import BasePlotter, nf_entries_from_posterior_bundle
+from bedcosmo.util import nf_posterior_entries, sample_nf
 
 
 def _make_mcsamples(theta: np.ndarray, names: list[str]):
@@ -95,7 +91,7 @@ def test_plot_posterior_does_not_sample(tmp_path, monkeypatch):
     with patch.object(plotter, "plot_triangle", return_value=fake_g), \
          patch.object(plotter, "save_figure"), \
          patch("bedcosmo.plotting.Line2D"), \
-         patch("bedcosmo.plotting.sample_nf") as mock_sample:
+         patch("bedcosmo.util.sample_nf") as mock_sample:
         plotter.plot_posterior(
             experiment=experiment,
             nf_entries=entries,
@@ -272,7 +268,7 @@ def test_plot_posterior_requires_artifact_when_no_entries(tmp_path, monkeypatch)
 
 def test_parse_eig_for_posterior_joint():
     """parse_eig_for_posterior returns designs, EIGs, and entropy from eig_data."""
-    from bedcosmo.util import parse_eig_for_posterior
+    from bedcosmo.artifacts import parse_eig_for_posterior
 
     eig_data = {
         "input_designs": [[0.0, 0.0], [1.0, 1.0]],
@@ -331,7 +327,7 @@ def _entries_experiment():
 def test_nf_posterior_entries_joint_labels_and_optimal():
     """Optimal = joint EIG argmax; legends carry EIG and entropy."""
     eig_data = _eig_data_with_marginal()
-    with patch("bedcosmo.plotting.sample_nf", return_value="samples") as mock_sample:
+    with patch("bedcosmo.util.sample_nf", return_value="samples") as mock_sample:
         entries = nf_posterior_entries(_entries_experiment(), "flow", eig_data, 100)
     assert [e["name"] for e in entries] == ["nominal", "optimal"]
     nominal, optimal = entries
@@ -349,7 +345,7 @@ def test_nf_posterior_entries_joint_labels_and_optimal():
 def test_nf_posterior_entries_marginal_uses_marginal_optimal():
     """With params, optimal comes from the marginal EIG, not the joint EIG."""
     eig_data = _eig_data_with_marginal()
-    with patch("bedcosmo.plotting.sample_nf", return_value="samples") as mock_sample:
+    with patch("bedcosmo.util.sample_nf", return_value="samples") as mock_sample:
         entries = nf_posterior_entries(
             _entries_experiment(), "flow", eig_data, 100, params=["p0"]
         )
@@ -361,7 +357,7 @@ def test_nf_posterior_entries_marginal_uses_marginal_optimal():
 
 
 def test_nf_posterior_entries_nominal_only_without_eig_data():
-    with patch("bedcosmo.plotting.sample_nf", return_value="samples"):
+    with patch("bedcosmo.util.sample_nf", return_value="samples"):
         entries = nf_posterior_entries(
             _entries_experiment(), "flow", None, display=("nominal",)
         )
@@ -423,7 +419,7 @@ def test_run_plots_sampled_entries_and_saves_npz(tmp_path):
     ]
     with patch("bedcosmo.evaluate.render_overlay"), \
          patch("bedcosmo.evaluate.load_model", return_value=(MagicMock(name="flow"), 100)), \
-         patch("bedcosmo.plotting.sample_nf", side_effect=mcsamples):
+         patch("bedcosmo.util.sample_nf", side_effect=mcsamples):
         ev.run(eval_step=100)
 
     ev.plotter.plot_posterior.assert_called_once()
@@ -456,7 +452,7 @@ def test_run_marginal_samples_without_saved_npz(tmp_path):
     ev._subset_id = lambda subset: "+".join(subset)
     ev.get_marginal_eig = MagicMock()
     with patch("bedcosmo.evaluate.load_model", return_value=(MagicMock(name="flow"), 100)), \
-         patch("bedcosmo.plotting.sample_nf", return_value="samples"):
+         patch("bedcosmo.util.sample_nf", return_value="samples"):
         ev.run_marginal(eval_step=100)
 
     ev.plotter.plot_posterior.assert_called_once()
@@ -482,7 +478,7 @@ def test_render_overlay_checkpoint_branch_plots_nf_and_grid(tmp_path):
     grid_experiment = _entries_experiment()
     grid_experiment.name = "num_visits"
     with patch("bedcosmo.util.load_posterior_flow_from_checkpoint_file", return_value="flow"), \
-         patch("bedcosmo.plotting.sample_nf", return_value="samples"), \
+         patch("bedcosmo.util.sample_nf", return_value="samples"), \
          patch.object(BasePlotter, "plot_posterior", autospec=True) as mock_plot, \
          patch.object(BasePlotter, "eig_designs", autospec=True, create=True):
         render_overlay(

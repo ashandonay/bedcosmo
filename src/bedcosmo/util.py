@@ -77,6 +77,7 @@ from bedcosmo.artifacts import (  # noqa: F401 — public re-exports for star-im
     resolve_design_args_input_path,
     snapshot_design_args_config,
 )
+from bedcosmo.artifacts import resolve_eig_step, parse_eig_for_posterior, nominal_grid_eig
 
 
 def get_experiments_dir() -> Path:
@@ -1138,96 +1139,118 @@ def sample_nf(
     )
 
 
-def resolve_eig_step(eig_data, eval_step):
-    """Resolve ``eval_step`` to ``(step_int, 'step_N')`` from eig_data keys."""
-    step_keys = [k for k in eig_data.keys() if k.startswith('step_')]
-    if not step_keys:
-        print("Warning: No step keys found in EIG data.")
-        return None, None
-    step_ints = sorted([int(k.split('_')[1]) for k in step_keys])
+def validate_display(display):
+    """Normalize ``display`` to a non-empty tuple of 'nominal' / 'optimal'."""
+    if isinstance(display, str):
+        display = (display,)
+    display = tuple(display)
+    if not display or set(display) - {"nominal", "optimal"}:
+        raise ValueError(f"display must contain 'nominal' and/or 'optimal', got {display}")
+    return display
 
-    if eval_step is None:
-        nearest = step_ints[-1]
-        return nearest, f"step_{nearest}"
 
-    if isinstance(eval_step, str) and eval_step.startswith('step_'):
-        eval_step_int = int(eval_step.split('_')[1])
-    else:
-        try:
-            eval_step_int = int(eval_step)
-        except Exception:
-            print(f"Warning: Could not interpret eval_step '{eval_step}' as an integer step.")
-            return None, None
+NF_SERIES_COLORS = {
+    "nominal": "tab:blue",
+    "optimal": "tab:orange",
+}
+NF_SERIES_LABELS = {
+    "nominal": "Nominal Design (NF)",
+    "optimal": "Optimal Design (NF)",
+}
 
-    available = [s for s in step_ints if s <= eval_step_int]
-    if not available:
-        print(
-            f"Warning: No steps found in EIG data below or equal to requested "
-            f"step {eval_step_int}."
+
+def entropy_legend_suffix(prior_entropy=None, posterior_entropy=None, *, include_prior=True):
+    parts = []
+    if include_prior and prior_entropy is not None:
+        parts.append(f"H_prior: {float(prior_entropy):.2f} bits")
+    if posterior_entropy is not None:
+        parts.append(f"H_post: {float(posterior_entropy):.2f} bits")
+    if not parts:
+        return ""
+    return ", " + ", ".join(parts)
+
+
+def nf_posterior_entries(
+    experiment,
+    posterior_flow,
+    eig_data=None,
+    eval_step=None,
+    *,
+    display=("nominal", "optimal"),
+    guide_samples=1000,
+    transform_output=True,
+    params=None,
+    plot_prior=False,
+    device=None,
+):
+    """
+    Sample the flow at central ``y`` for each ``display`` design and build plot entries.
+
+    ``eig_data`` picks the optimal design (EIG argmax) and supplies legend EIG /
+    entropy values; it may be None only for ``display=('nominal',)``. With
+    ``params`` and a matching ``marginal`` block, samples are restricted to the
+    subset and the optimal design / legend EIG come from the marginal EIG.
+    """
+    display = validate_display(display)
+    nominal_eig = None
+    entropy_info = dict.fromkeys((
+        "nominal_prior_entropy", "nominal_posterior_entropy",
+        "prior_entropy_by_design", "posterior_entropy_by_design",
+    ))
+    eig_label = "EIG"
+    if eig_data is not None:
+        input_designs, eig_values, nominal_eig, entropy_info = parse_eig_for_posterior(
+            eig_data, eval_step, params=params
         )
-        return None, None
-    nearest = max(available)
-    return nearest, f"step_{nearest}"
+        if params is not None:
+            _, step_str = resolve_eig_step(eig_data, eval_step)
+            marginal = eig_data[step_str].get("marginal", {}).get("+".join(params))
+            if marginal is not None:
+                eig_values = np.asarray(marginal["eigs_avg"], dtype=float)
+                nominal_eig = float(marginal["nominal"]["eigs_avg"])
+                eig_label = "Marginal EIG"
+    elif "optimal" in display:
+        raise ValueError("eig_data is required to pick the optimal design")
 
-
-def parse_eig_for_posterior(eig_data, eval_step=None, params=None):
-    """Extract EIG and entropy summaries from eig_data for posterior sampling/plots."""
-    _, step_str = resolve_eig_step(eig_data, eval_step)
-    if step_str is None:
-        raise ValueError("Could not resolve eval step in EIG data")
-    step_data = eig_data[step_str]
-    variable_data = step_data.get('variable', {})
-    nominal_data = step_data.get('nominal', {})
-
-    input_designs = np.array(eig_data.get('input_designs', []))
-    if input_designs.size == 0:
-        raise ValueError("No input designs found in EIG data")
-
-    eig_values = np.array(variable_data.get('eigs_avg', []))
-    nominal_eig = nominal_data.get('eigs_avg')
-    if isinstance(nominal_eig, list):
-        nominal_eig = nominal_eig[0] if len(nominal_eig) > 0 else None
-    nominal_eig = float(nominal_eig) if nominal_eig is not None else None
-
-    def _scalar_entropy(block, key):
-        val = block.get(key)
-        if val is None:
-            return None
-        if isinstance(val, list):
-            val = val[0] if len(val) > 0 else None
-        return float(val) if val is not None else None
-
-    nominal_prior_entropy = _scalar_entropy(nominal_data, "prior_entropy_avg")
-    nominal_posterior_entropy = _scalar_entropy(nominal_data, "posterior_entropy_avg")
-    prior_entropy_by_design = variable_data.get("prior_entropy_avg")
-    posterior_entropy_by_design = variable_data.get("posterior_entropy_avg")
-    if prior_entropy_by_design is not None:
-        prior_entropy_by_design = np.asarray(prior_entropy_by_design, dtype=float)
-    if posterior_entropy_by_design is not None:
-        posterior_entropy_by_design = np.asarray(posterior_entropy_by_design, dtype=float)
-
-    # Fall back to the marginal block when joint (variable) EIG was not computed.
-    if eig_values.size == 0 and params is not None:
-        subset_id = "+".join(list(params))
-        marginal = step_data.get("marginal", {}).get(subset_id)
-        if marginal is not None:
-            eig_values = np.array(marginal.get("eigs_avg", []), dtype=float)
-            nominal_eig = float(marginal["nominal"]["eigs_avg"])
-            nominal_prior_entropy = None
-            nominal_posterior_entropy = None
-            prior_entropy_by_design = None
-            posterior_entropy_by_design = None
-
-    if eig_values.size == 0:
-        raise ValueError("No EIG values found in EIG data")
-
-    entropy_info = {
-        "nominal_prior_entropy": nominal_prior_entropy,
-        "nominal_posterior_entropy": nominal_posterior_entropy,
-        "prior_entropy_by_design": prior_entropy_by_design,
-        "posterior_entropy_by_design": posterior_entropy_by_design,
-    }
-    return input_designs, eig_values, nominal_eig, entropy_info
+    include_prior = not plot_prior
+    entries = []
+    for name in display:
+        if name == "nominal":
+            design = experiment.nominal_design
+            eig = nominal_eig
+            prior_h = entropy_info["nominal_prior_entropy"]
+            post_h = entropy_info["nominal_posterior_entropy"]
+            label = NF_SERIES_LABELS["nominal"]
+        else:
+            # A single-design pool has no argmax to speak of.
+            idx = int(np.argmax(eig_values)) if len(input_designs) > 1 else 0
+            design = input_designs[idx]
+            eig = float(eig_values[idx])
+            by_design = (entropy_info["prior_entropy_by_design"], entropy_info["posterior_entropy_by_design"])
+            prior_h, post_h = (None if h is None else h[idx] for h in by_design)
+            label = NF_SERIES_LABELS["optimal"] if len(input_designs) > 1 else "Input Design (NF)"
+        if eig is not None:
+            label += f", {eig_label}: {eig:.3f} bits"
+        label += entropy_legend_suffix(prior_h, post_h, include_prior=include_prior)
+        entries.append({
+            "samples": sample_nf(
+                experiment,
+                posterior_flow,
+                design,
+                experiment.central_val,
+                num_samples=guide_samples,
+                transform_output=transform_output,
+                params=params,
+                device=device,
+            ),
+            "name": name,
+            "design": torch.as_tensor(design, dtype=torch.float64).reshape(-1).cpu().numpy(),
+            "label": label,
+            "color": NF_SERIES_COLORS[name],
+            "line_style": "-",
+            "alpha": 1.0,
+        })
+    return entries
 
 
 def load_posterior_flow_from_checkpoint_file(
@@ -1278,14 +1301,6 @@ def load_posterior_flow_from_checkpoint_file(
     posterior_flow.eval()
     _ = global_rank
     return posterior_flow
-
-
-def nominal_grid_eig(eig_data: dict, step_key: str):
-    """Nominal-design grid EIG from eig_data (e.g. merged NF+grid), or None if absent."""
-    nominal_grid_eig = eig_data[step_key].get("nominal", {}).get("grid", {}).get("eigs_avg")
-    if isinstance(nominal_grid_eig, list):
-        nominal_grid_eig = nominal_grid_eig[0] if nominal_grid_eig else None
-    return float(nominal_grid_eig) if nominal_grid_eig is not None else None
 
 
 def _eig_design_kwds_from_merged_eig(
@@ -2506,7 +2521,7 @@ def render_overlay(
     Returns True if overlay plots were rendered, False otherwise.
     """
     # Local import avoids circular dependency (plotting imports util at module load).
-    from bedcosmo.plotting import BasePlotter, RunPlotter, nf_posterior_entries
+    from bedcosmo.plotting import BasePlotter, RunPlotter
 
     if own_role not in ('nf', 'grid'):
         raise ValueError(f"own_role must be 'nf' or 'grid', got {own_role!r}")

@@ -15,7 +15,7 @@ import numpy as np
 import torch
 import getdist
 import argparse
-from bedcosmo.plotting import RunPlotter, nf_posterior_entries
+from bedcosmo.plotting import RunPlotter
 import traceback
 from bedcosmo.pyro_oed_src import nf_loss, LikelihoodDataset
 from bedcosmo.entropy import (
@@ -36,7 +36,7 @@ from bedcosmo.util import (
     parse_float_or_list,
     parse_param_subsets,
     get_rng_state, parse_extra_args, render_overlay,
-    get_checkpoint, get_contour_area,
+    get_checkpoint, get_contour_area, nf_posterior_entries,
 )
 from bedcosmo.artifacts import (
     load_eig_data_file,

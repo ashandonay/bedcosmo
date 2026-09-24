@@ -440,14 +440,14 @@ class TestComparisonPlotter:
         with patch('bedcosmo.plotting.get_runs_data') as mock_get_runs, \
              patch('bedcosmo.plotting.init_experiment', return_value=mock_exp), \
              patch('bedcosmo.plotting.load_model', return_value=(Mock(), 'step_1000')), \
-             patch('bedcosmo.plotting.sample_nf', return_value=mock_sample), \
+             patch('bedcosmo.util.sample_nf', return_value=mock_sample), \
              patch.object(
                  ComparisonPlotter,
                  'load_eig_data_file',
                  return_value=(None, {'step_1000': {'nominal': {}, 'variable': {}}}),
              ), \
              patch(
-                 'bedcosmo.plotting.parse_eig_for_posterior',
+                 'bedcosmo.util.parse_eig_for_posterior',
                  return_value=(
                      np.array([[0.0, 0.0], [1.0, 1.0]]),
                      np.array([0.1, 0.9]),
@@ -490,14 +490,14 @@ class TestComparisonPlotter:
         with patch('bedcosmo.plotting.get_runs_data') as mock_get_runs, \
              patch('bedcosmo.plotting.init_experiment', return_value=mock_exp), \
              patch('bedcosmo.plotting.load_model', return_value=(Mock(), 'step_1000')), \
-             patch('bedcosmo.plotting.sample_nf', return_value=mock_sample), \
+             patch('bedcosmo.util.sample_nf', return_value=mock_sample), \
              patch.object(
                  ComparisonPlotter,
                  'load_eig_data_file',
                  return_value=(None, {'step_1000': {'nominal': {}, 'variable': {}}}),
              ), \
              patch(
-                 'bedcosmo.plotting.parse_eig_for_posterior',
+                 'bedcosmo.util.parse_eig_for_posterior',
                  return_value=(
                      np.array([[0.0, 0.0], [1.0, 1.0]]),
                      np.array([0.1, 0.9]),
@@ -542,14 +542,14 @@ class TestComparisonPlotter:
         with patch('bedcosmo.plotting.get_runs_data') as mock_get_runs, \
              patch('bedcosmo.plotting.init_experiment', return_value=mock_exp) as mock_init_exp, \
              patch('bedcosmo.plotting.load_model', return_value=(Mock(), 'step_1000')), \
-             patch('bedcosmo.plotting.sample_nf', return_value=mock_sample), \
+             patch('bedcosmo.util.sample_nf', return_value=mock_sample), \
              patch.object(
                  ComparisonPlotter,
                  'load_eig_data_file',
                  return_value=(None, {'step_1000': {'nominal': {}, 'variable': {}}}),
              ), \
              patch(
-                 'bedcosmo.plotting.parse_eig_for_posterior',
+                 'bedcosmo.util.parse_eig_for_posterior',
                  return_value=(
                      np.array([[0.0, 0.0], [1.0, 1.0]]),
                      np.array([0.1, 0.9]),
@@ -987,7 +987,7 @@ class TestHelperFunctions:
 
     def test_entropy_legend_suffix(self, mock_scratch_env):
         """Posterior legend omits H_prior when the prior contour is plotted separately."""
-        from bedcosmo.plotting import entropy_legend_suffix
+        from bedcosmo.util import entropy_legend_suffix
         both = entropy_legend_suffix(4.5, 3.2, include_prior=True)
         post_only = entropy_legend_suffix(4.5, 3.2, include_prior=False)
         assert both == ", H_prior: 4.50 bits, H_post: 3.20 bits"
