@@ -445,6 +445,24 @@ def test_run_plots_sampled_entries_and_saves_npz(tmp_path):
     assert [e["label"] for e in entries] == [e["label"] for e in plotted]
 
 
+def test_run_saves_npz_before_plotting(tmp_path):
+    """A failing posterior plot must not lose the sampled NPZ."""
+    ev = _make_evaluator(tmp_path, _entries_experiment(), _eig_data_with_marginal())
+    ev.get_eig = MagicMock(
+        side_effect=[(0.5, 0.01), (np.array([0.1, 0.9, 0.5]), np.zeros(3))]
+    )
+    ev.plotter.plot_posterior.side_effect = RuntimeError("plot failed")
+    samples = _make_mcsamples(np.zeros((20, 2)), ["p0", "p1"])
+    with patch("bedcosmo.evaluate.render_overlay"), \
+         patch("bedcosmo.evaluate.load_model", return_value=(MagicMock(name="flow"), 100)), \
+         patch("bedcosmo.util.sample_nf", return_value=samples):
+        ev.run(eval_step=100)
+
+    ev.plotter.plot_posterior.assert_called_once()
+    bundle = load_posterior_samples_file(ev.save_path, step=100, generated_by="Evaluator.run")
+    assert list(bundle["series_names"]) == ["nominal", "optimal"]
+
+
 def test_run_marginal_samples_without_saved_npz(tmp_path):
     """--marginal plots sample fresh at the marginal-optimal design (no NPZ needed)."""
     ev = _make_evaluator(tmp_path, _entries_experiment(), _eig_data_with_marginal())

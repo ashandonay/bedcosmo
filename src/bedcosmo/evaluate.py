@@ -1978,8 +1978,14 @@ class Evaluator:
             json.dump(self.eig_data, f, indent=2)
         print(f"Saved EIG steps data to {eig_data_save_path}")
 
-    def _generate_posterior(self, posterior_flow, eval_step, params=None, filename=None):
-        """Sample nominal/optimal posteriors at central y, plot them, and return the entries."""
+    def _generate_posterior(
+        self, posterior_flow, eval_step, params=None, filename=None, save_samples=False
+    ):
+        """Sample nominal/optimal posteriors at central y and plot them.
+
+        With ``save_samples``, the samples are written as an n_data=1 NPZ before
+        plotting, so a plotting failure does not lose them.
+        """
         auto_seed(self.seed)
         nf_entries = nf_posterior_entries(
             self.experiment,
@@ -1992,6 +1998,36 @@ class Evaluator:
             plot_prior=self.plot_prior,
             device=self.device,
         )
+        if save_samples:
+            eig_file = self.eig_file_path or self.output_path
+            y = self.experiment.central_val.detach().cpu().numpy().reshape(1, 1, -1)
+            out_path = save_posterior_samples(
+                make_posterior_samples_path(self.save_path, step=eval_step),
+                theta=np.stack([e["samples"].samples[np.newaxis] for e in nf_entries]),
+                y=np.repeat(y, len(nf_entries), axis=0),
+                design=np.stack([e["design"] for e in nf_entries]),
+                series_names=[e["name"] for e in nf_entries],
+                param_names=nf_entries[0]["samples"].paramNames.list(),
+                meta={
+                    "status": "complete",
+                    "run_id": self.run_id,
+                    "step": int(eval_step),
+                    "eig_file": os.path.basename(str(eig_file)) if eig_file is not None else None,
+                    "conditioning": "central_val",
+                    "seed": int(self.seed),
+                    "guide_samples": int(self.guide_samples),
+                    "num_data_samples": 1,
+                    "transform_output": bool(self.nf_transform_output),
+                    "param_space": self.param_space,
+                    "cosmo_exp": self.cosmo_exp,
+                    "series": [
+                        {"name": e["name"], "color": e["color"], "label": e["label"]}
+                        for e in nf_entries
+                    ],
+                    "generated_by": "Evaluator.run",
+                },
+            )
+            print(f"  Saved central-context posterior samples to {out_path}")
         self.plotter.plot_posterior(
             self.experiment,
             nf_entries,
@@ -2005,7 +2041,6 @@ class Evaluator:
             seed=self.seed,
             filename=filename,
         )
-        return nf_entries
 
     def run(self, eval_step=None):
         # Determine eval_step
@@ -2104,39 +2139,10 @@ class Evaluator:
             self.experiment, eval_step, self.run_obj, self.run_args, self.device, global_rank=0
         )
         try:
-            nf_entries = self._generate_posterior(posterior_flow, eval_step)
-            eig_file = self.eig_file_path or self.output_path
-            y = self.experiment.central_val.detach().cpu().numpy().reshape(1, 1, -1)
-            out_path = save_posterior_samples(
-                make_posterior_samples_path(self.save_path, step=eval_step),
-                theta=np.stack([e["samples"].samples[np.newaxis] for e in nf_entries]),
-                y=np.repeat(y, len(nf_entries), axis=0),
-                design=np.stack([e["design"] for e in nf_entries]),
-                series_names=[e["name"] for e in nf_entries],
-                param_names=nf_entries[0]["samples"].paramNames.list(),
-                meta={
-                    "status": "complete",
-                    "run_id": self.run_id,
-                    "step": int(eval_step),
-                    "eig_file": os.path.basename(str(eig_file)) if eig_file is not None else None,
-                    "conditioning": "central_val",
-                    "seed": int(self.seed),
-                    "guide_samples": int(self.guide_samples),
-                    "num_data_samples": 1,
-                    "transform_output": bool(self.nf_transform_output),
-                    "param_space": self.param_space,
-                    "cosmo_exp": self.cosmo_exp,
-                    "series": [
-                        {"name": e["name"], "color": e["color"], "label": e["label"]}
-                        for e in nf_entries
-                    ],
-                    "generated_by": "Evaluator.run",
-                },
-            )
-            print(f"  Saved central-context posterior samples to {out_path}")
+            self._generate_posterior(posterior_flow, eval_step, save_samples=True)
             self._update_runtime()
         except Exception as e:
-            print(f"Warning: main posterior plot/save failed: {e}")
+            print(f"Warning: main posterior sample/save/plot failed: {e}")
             traceback.print_exc()
 
         # Marginal posterior triangles + marginal EIG-vs-design plots per subset.
