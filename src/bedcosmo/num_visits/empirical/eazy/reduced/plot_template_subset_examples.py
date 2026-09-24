@@ -19,13 +19,8 @@ from astropy.io import fits
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 
-from ..desi_data import get_local_desi_paths
-from ..fit_eazy_weights_to_desi import (
-    _divide_by_continuum,
-    _gaussian_smooth_segments,
-    build_template_matrix_on_observed_grid,
-)
-from ..paths import (
+from ...desi_data import get_local_desi_paths
+from ...paths import (
     DEFAULT_EMPIRICAL_PRIOR_DIR,
     DEFAULT_PROGRAM,
     DEFAULT_SPECPROD,
@@ -34,11 +29,16 @@ from ..paths import (
     get_prior_build_dir,
     get_template_dir,
 )
-from ..templates import (
+from ...templates import (
     DEFAULT_TEMPLATE_NORM_MAX_AA,
     DEFAULT_TEMPLATE_NORM_MIN_AA,
     DEFAULT_TEMPLATE_PARAM_12D,
     load_eazy_templates,
+)
+from ..fit_eazy_weights_to_desi import (
+    _divide_by_continuum,
+    _gaussian_smooth_segments,
+    build_template_matrix_on_observed_grid,
 )
 from .discover_template_cohorts import (
     _coefficient_columns,
@@ -611,7 +611,7 @@ def main() -> None:
     full_table = load_quality_fit_table(weights_csv)
     template_waves, template_fluxes, _ = load_eazy_templates(
         args.template_param,
-        template_dir=args.template_dir or get_template_dir(),
+        template_dir=args.template_dir or get_template_dir(args.build_name),
         norm_min=args.norm_min,
         norm_max=args.norm_max,
     )

@@ -40,7 +40,10 @@ from bedcosmo.num_visits.empirical.simplex import (
     PARAMETERIZATION_ILR,
     ilr_to_weights_torch,
 )
-from bedcosmo.num_visits.empirical.templates import load_eazy_template_bank
+from bedcosmo.num_visits.empirical.templates import (
+    DEFAULT_TEMPLATE_PARAM_12D,
+    load_eazy_template_bank,
+)
 from bedcosmo.cosmology import CosmologyMixin, _cumsimpson
 
 # LSST photometric zeropoints (AB magnitudes that produce 1 count per second)
@@ -73,6 +76,62 @@ _AB_ZEROPOINT = 48.6  # AB magnitude zeropoint: m_AB = -2.5 log10(f_nu) - 48.6
 _C_ANGSTROM_S = 2.99792458e18  # speed of light in Angstrom / s (for L_nu -> L_lambda)
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def _required_template_rest_range(
+    observed_wave_aa,
+    transmission,
+    z_min,
+    z_max,
+    *,
+    response_floor=1e-3,
+):
+    """Rest-frame interval needed by active filters over a redshift range."""
+    observed_wave_aa = np.asarray(observed_wave_aa, dtype=float)
+    transmission = np.asarray(transmission, dtype=float)
+    if transmission.ndim != 2 or transmission.shape[1] != len(observed_wave_aa):
+        raise ValueError("transmission must have shape (n_filters, n_wavelengths)")
+    peaks = np.max(transmission, axis=1)
+    nonempty = peaks > 0
+    active = np.any(
+        transmission[nonempty] >= response_floor * peaks[nonempty, None], axis=0
+    )
+    if not np.any(active):
+        raise ValueError("filter transmission has no active wavelengths")
+    if z_min < 0 or z_max < z_min:
+        raise ValueError("template wavelength validation requires 0 <= z_min <= z_max")
+    return (
+        float(np.min(observed_wave_aa[active]) / (1.0 + z_max)),
+        float(np.max(observed_wave_aa[active]) / (1.0 + z_min)),
+    )
+
+
+def _required_template_rest_range(
+    observed_wave_aa,
+    transmission,
+    z_min,
+    z_max,
+    *,
+    response_floor=1e-3,
+):
+    """Rest-frame interval needed by active filters over a redshift range."""
+    observed_wave_aa = np.asarray(observed_wave_aa, dtype=float)
+    transmission = np.asarray(transmission, dtype=float)
+    if transmission.ndim != 2 or transmission.shape[1] != len(observed_wave_aa):
+        raise ValueError("transmission must have shape (n_filters, n_wavelengths)")
+    peaks = np.max(transmission, axis=1)
+    nonempty = peaks > 0
+    active = np.any(
+        transmission[nonempty] >= response_floor * peaks[nonempty, None], axis=0
+    )
+    if not np.any(active):
+        raise ValueError("filter transmission has no active wavelengths")
+    if z_min < 0 or z_max < z_min:
+        raise ValueError("template wavelength validation requires 0 <= z_min <= z_max")
+    return (
+        float(np.min(observed_wave_aa[active]) / (1.0 + z_max)),
+        float(np.max(observed_wave_aa[active]) / (1.0 + z_min)),
+    )
 
 
 class NumVisits(BaseExperiment, CosmologyMixin):
@@ -313,6 +372,30 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         self._wlen_over_hc_tensor = torch.tensor(
             wlen_over_hc_common, device=self.device, dtype=torch.float64
         )  # (n_wlen,)
+
+        # Empirical template coverage can only be checked after both the prior/template
+        # bank and the common observed-frame filter grid have been initialized.
+        if self.cosmo_model == "empirical" and "z" in self.prior_feature_names:
+            z_index = self.prior_feature_names.index("z")
+            z_min = max(0.0, float(self.prior_pool.bounds_min[z_index].cpu()))
+            z_max = float(self.prior_pool.bounds_max[z_index].cpu())
+            required_min, required_max = _required_template_rest_range(
+                wlen_common_aa,
+                transmission_array,
+                z_min,
+                z_max,
+            )
+            available_min = float(self._template_wave_rest[0].cpu())
+            available_max = float(self._template_wave_rest[-1].cpu())
+            if available_min > required_min or available_max < required_max:
+                raise ValueError(
+                    "Template wavelength range does not cover the active LSST filters over "
+                    f"the empirical redshift prior: need [{required_min:.1f}, "
+                    f"{required_max:.1f}] Angstrom, have [{available_min:.1f}, "
+                    f"{available_max:.1f}]. Extend the template explicitly; endpoint "
+                    "clamping is not allowed."
+                )
+
         defaults = {"z": 1.0}
         if self.cosmo_model == "empirical":
             defaults = mode_central_params_from_artifact(self.sed_prior_artifact)
@@ -427,7 +510,7 @@ class NumVisits(BaseExperiment, CosmologyMixin):
             raise RuntimeError(
                 "empirical NumVisits with transform_input=True requires "
                 "gaussianizer_state in the KDE artifact. Rebuild with "
-                "`python -m bedcosmo.num_visits.empirical.build_prior` "
+                "`python -m bedcosmo.num_visits.empirical.eazy.build_prior` "
                 "(do not pass --no-gaussianizer)."
             )
 
@@ -491,8 +574,7 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         cosmo_model=None,
         prior_pool_size=65536,
         prior_pool_seed=7,
-        template_dir=None,
-        template_param="templates/fsps_full/fsps_QSF_12_v3.param",
+        template_param=DEFAULT_TEMPLATE_PARAM_12D,
         template_norm_min=None,
         template_norm_max=None,
         flux_unit_scale=None,
@@ -534,7 +616,7 @@ class NumVisits(BaseExperiment, CosmologyMixin):
                 prior_dir=prior_dir,
             )
             if not template_param:
-                template_param = "templates/fsps_full/fsps_QSF_12_v3.param"
+                template_param = DEFAULT_TEMPLATE_PARAM_12D
             # ``density_type`` is current; ``source`` / ``prior_source`` are legacy.
             resolved_density = density_type
             if resolved_density is None:
@@ -544,7 +626,6 @@ class NumVisits(BaseExperiment, CosmologyMixin):
                 prior_root=prior_root,
                 prior_pool_size=int(prior_pool_size),
                 prior_pool_seed=int(prior_pool_seed),
-                template_dir=template_dir,
                 template_param=template_param,
                 template_norm_min=template_norm_min,
                 template_norm_max=template_norm_max,
@@ -649,7 +730,6 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         prior_root: Path,
         prior_pool_size: int,
         prior_pool_seed: int,
-        template_dir: str | None,
         template_param: str,
         template_norm_min: float | None,
         template_norm_max: float | None,
@@ -671,12 +751,8 @@ class NumVisits(BaseExperiment, CosmologyMixin):
                 f"got {flux_unit_scale!r}"
             )
 
-        if not template_dir:
-            from bedcosmo.num_visits.empirical.paths import get_template_dir
-
-            template_dir = str(get_template_dir())
-
         prior_root = Path(prior_root)
+        template_dir = prior_root / "templates"
         kde_path = prior_root / SED_PRIOR_KDE_NATIVE_FILENAME
         if self.global_rank == 0 and self.verbose:
             print(f"Loading empirical prior from {prior_root}")
@@ -772,7 +848,7 @@ class NumVisits(BaseExperiment, CosmologyMixin):
 
         if self.global_rank == 0 and self.verbose:
             print(
-                f"  EAZY templates: {self._n_eazy_templates} on "
+                f"  Spectral template bank: {self._n_eazy_templates} components on "
                 f"{self._template_wave_rest.shape[0]} rest-frame grid points; "
                 f"normalization=[{norm_min:g}, {norm_max:g}] Angstrom; "
                 f"flux unit scale={self.flux_unit_scale:g} cgs"

@@ -11,9 +11,9 @@ SEED="${SEED:-7}"
 PLOT_N_EXAMPLES="${PLOT_N_EXAMPLES:-8}"
 PLOT_TOP_OUTLIERS="${PLOT_TOP_OUTLIERS:-5}"
 # Template-bank .param; set for non-default banks, e.g.
-# TEMPLATE_PARAM=templates/eazy_v1.0.spectra.param
+# TEMPLATE_PARAM=eazy6/eazy6.param
 TEMPLATE_PARAM="${TEMPLATE_PARAM:-}"
-PY="conda run -n bedcosmo python -m bedcosmo.num_visits.empirical"
+PY="conda run -n bedcosmo python -m bedcosmo.num_visits.empirical.eazy"
 
 # Optional override; omit to use Python default ($SCRATCH/bedcosmo/desi/tiny_dr1).
 DESI_DIR_ARGS=()

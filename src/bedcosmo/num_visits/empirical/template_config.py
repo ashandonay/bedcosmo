@@ -2,23 +2,40 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any
 
-from .paths import EMPIRICAL_PRIOR_ROOT_DIR, get_prior_build_dir
+from .paths import (
+    EMPIRICAL_PRIOR_ROOT_DIR,
+    get_prior_build_dir,
+)
 from .simplex import prior_ilr_feature_names
-from .templates import DEFAULT_TEMPLATE_PARAM_6D, DEFAULT_TEMPLATE_PARAM_12D
+from .templates import (
+    DEFAULT_TEMPLATE_NORM_MAX_AA,
+    DEFAULT_TEMPLATE_NORM_MIN_AA,
+    DEFAULT_TEMPLATE_PARAM_6D,
+    DEFAULT_TEMPLATE_PARAM_12D,
+)
 
-TEMPLATE_SOURCES = ("eazy12", "eazy6")
+TEMPLATE_SOURCES = ("eazy12", "eazy6", "desi8")
 
 _SOURCE_CONFIG: dict[str, dict[str, Any]] = {
     "eazy12": {
         "n_templates": 12,
         "template_param": DEFAULT_TEMPLATE_PARAM_12D,
+        "template_norm_min": DEFAULT_TEMPLATE_NORM_MIN_AA,
+        "template_norm_max": DEFAULT_TEMPLATE_NORM_MAX_AA,
     },
     "eazy6": {
         "n_templates": 6,
         "template_param": DEFAULT_TEMPLATE_PARAM_6D,
+        "template_norm_min": DEFAULT_TEMPLATE_NORM_MIN_AA,
+        "template_norm_max": DEFAULT_TEMPLATE_NORM_MAX_AA,
+    },
+    "desi8": {
+        "n_templates": 8,
+        "template_param": "desi8.param",
+        "template_norm_min": 3600.0,
+        "template_norm_max": 4200.0,
     },
 }
 
@@ -28,9 +45,9 @@ _DEFAULT_Z_PLOT = {"lower": 0.0, "upper": 1.75}
 
 
 def normalize_template_source(value: str | None) -> str:
-    """Return a validated ``eazy12`` / ``eazy6`` source name."""
+    """Return a validated empirical spectral-template source name."""
     if value is None:
-        raise ValueError("template_source is required (eazy12 or eazy6)")
+        raise ValueError(f"template_source is required ({', '.join(TEMPLATE_SOURCES)})")
     source = str(value).strip().lower()
     if source not in _SOURCE_CONFIG:
         raise ValueError(
@@ -85,6 +102,8 @@ def empirical_prior_variant(
     """Scratch subdirectory under ``empirical_prior/``, e.g. ``eazy12-t7-t10``."""
     source = normalize_template_source(template_source)
     subset = parse_reduced_templates(reduced_templates)
+    if source == "desi8" and subset is not None:
+        raise ValueError("reduced_templates is not supported for template_source='desi8'")
     if subset is None:
         return source
     return f"{source}-{reduced_template_slug(subset)}"
@@ -102,15 +121,16 @@ def resolve_template_param(
     template_source: str,
     reduced_templates: Any = None,
 ) -> str:
-    """EAZY ``.param`` path relative to the template cache directory."""
+    """Template-bank filename relative to ``<prior_dir>/templates``."""
     source = normalize_template_source(template_source)
     full_param = str(_SOURCE_CONFIG[source]["template_param"])
     subset = parse_reduced_templates(reduced_templates)
+    if source == "desi8" and subset is not None:
+        raise ValueError("reduced_templates is not supported for template_source='desi8'")
     if subset is None:
         return full_param
-    stem = Path(full_param).stem
     slug = reduced_template_slug(subset)
-    return f"templates/reduced/{stem}_{slug}.param"
+    return f"{source}_{slug}.param"
 
 
 def n_templates_for(
@@ -119,6 +139,8 @@ def n_templates_for(
 ) -> int:
     source = normalize_template_source(template_source)
     subset = parse_reduced_templates(reduced_templates)
+    if source == "desi8" and subset is not None:
+        raise ValueError("reduced_templates is not supported for template_source='desi8'")
     if subset is None:
         return int(_SOURCE_CONFIG[source]["n_templates"])
     return len(subset)
@@ -188,6 +210,10 @@ def materialize_empirical_prior_args(
     out["reduced_templates"] = format_reduced_templates(subset)
     out["prior_dir"] = str(prior_dir)
     out["template_param"] = template_param
+    source_config = _SOURCE_CONFIG[source]
+    out.pop("template_dir", None)
+    out["template_norm_min"] = float(source_config["template_norm_min"])
+    out["template_norm_max"] = float(source_config["template_norm_max"])
     out["parameters"] = default_empirical_parameters(
         n_templates,
         existing=out.get("parameters") if isinstance(out.get("parameters"), dict) else None,

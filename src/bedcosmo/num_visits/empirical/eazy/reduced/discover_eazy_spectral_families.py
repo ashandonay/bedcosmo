@@ -32,17 +32,17 @@ except ImportError as error:  # pragma: no cover - depends on the local analysis
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 
-from ..paths import (  # noqa: E402
+from ...paths import (  # noqa: E402
     DEFAULT_EMPIRICAL_PRIOR_DIR,
     get_prior_build_dir,
     get_template_dir,
 )
-from ..simplex import (  # noqa: E402
+from ...simplex import (  # noqa: E402
     DEFAULT_CLR_EPS,
     ilr_basis,
     weights_to_ilr,
 )
-from ..templates import (  # noqa: E402
+from ...templates import (  # noqa: E402
     DEFAULT_TEMPLATE_NORM_MAX_AA,
     DEFAULT_TEMPLATE_NORM_MIN_AA,
     DEFAULT_TEMPLATE_PARAM_12D,
@@ -804,7 +804,7 @@ def main() -> None:
     weights_csv = args.weights_csv or prior_dir / "desi_eazy_empirical_weights.csv"
     cohort_root = args.cohort_root or prior_dir / "reduced_template_cohorts"
     output_dir = args.output_dir or cohort_root / "spectral_families"
-    template_dir = args.template_dir or get_template_dir()
+    template_dir = args.template_dir or get_template_dir(args.build_name)
     if not 0 < args.variance_threshold <= 1:
         raise ValueError("--variance-threshold must be in (0, 1]")
     if not 0 < args.required_family_coverage <= 1:
