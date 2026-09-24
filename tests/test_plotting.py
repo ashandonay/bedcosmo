@@ -446,9 +446,8 @@ class TestComparisonPlotter:
                  'load_eig_data_file',
                  return_value=(None, {'step_1000': {'nominal': {}, 'variable': {}}}),
              ), \
-             patch.object(
-                 ComparisonPlotter,
-                 '_parse_eig_for_posterior',
+             patch(
+                 'bedcosmo.plotting.parse_eig_for_posterior',
                  return_value=(
                      np.array([[0.0, 0.0], [1.0, 1.0]]),
                      np.array([0.1, 0.9]),
@@ -494,9 +493,8 @@ class TestComparisonPlotter:
                  'load_eig_data_file',
                  return_value=(None, {'step_1000': {'nominal': {}, 'variable': {}}}),
              ), \
-             patch.object(
-                 ComparisonPlotter,
-                 '_parse_eig_for_posterior',
+             patch(
+                 'bedcosmo.plotting.parse_eig_for_posterior',
                  return_value=(
                      np.array([[0.0, 0.0], [1.0, 1.0]]),
                      np.array([0.1, 0.9]),
@@ -544,9 +542,8 @@ class TestComparisonPlotter:
                  'load_eig_data_file',
                  return_value=(None, {'step_1000': {'nominal': {}, 'variable': {}}}),
              ), \
-             patch.object(
-                 ComparisonPlotter,
-                 '_parse_eig_for_posterior',
+             patch(
+                 'bedcosmo.plotting.parse_eig_for_posterior',
                  return_value=(
                      np.array([[0.0, 0.0], [1.0, 1.0]]),
                      np.array([0.1, 0.9]),
