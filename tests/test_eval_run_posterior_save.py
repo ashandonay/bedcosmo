@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import numpy as np
+import pytest
 import torch
 
 from bedcosmo.artifacts import (
@@ -14,7 +15,11 @@ from bedcosmo.artifacts import (
     save_posterior_samples,
 )
 from bedcosmo.evaluate import Evaluator
-from bedcosmo.plotting import BasePlotter, nf_entries_from_posterior_bundle
+from bedcosmo.plotting import (
+    BasePlotter,
+    nf_entries_from_posterior_bundle,
+    nf_posterior_entries,
+)
 from bedcosmo.util import sample_nf
 
 
@@ -128,6 +133,7 @@ def test_plot_posterior_loads_npz_when_entries_omitted(tmp_path, monkeypatch):
         meta={
             "status": "complete",
             "step": 50,
+            "generated_by": "Evaluator.run",
             "series": [
                 {"name": "optimal", "color": "tab:orange"},
                 {"name": "nominal", "color": "tab:blue"},
@@ -185,7 +191,7 @@ def test_plot_posterior_display_filters_loaded_and_provided(tmp_path, monkeypatc
         design=np.array([[1.0], [2.0]]),
         series_names=["optimal", "nominal"],
         param_names=["p0", "p1"],
-        meta={"status": "complete", "step": 7, "series_names": ["optimal", "nominal"]},
+        meta={"status": "complete", "step": 7, "generated_by": "Evaluator.run"},
     )
     experiment = SimpleNamespace(
         cosmo_params=["p0", "p1"],
@@ -217,7 +223,7 @@ def test_plot_posterior_display_filters_loaded_and_provided(tmp_path, monkeypatc
             "design": np.array([[1.0], [2.0]]),
             "series_names": ["optimal", "nominal"],
             "param_names": ["p0", "p1"],
-            "meta": {},
+            "meta": {"series": []},
         },
         experiment,
     )
@@ -293,26 +299,83 @@ def test_parse_eig_for_posterior_joint():
     assert entropy["nominal_posterior_entropy"] == 0.6
 
 
-def test_run_sample_save_then_plot(tmp_path):
-    """Evaluator.run samples, saves NPZ, then plot_posterior loads that NPZ."""
-    n_guide, n_params, n_obs = 20, 2, 3
-    rng = np.random.default_rng(1)
-    theta_nom = rng.normal(size=(n_guide, n_params))
-    theta_opt = rng.normal(size=(n_guide, n_params))
-    central = torch.zeros(n_obs, dtype=torch.float64)
-    design_nom = torch.ones(2, dtype=torch.float64)
+def _eig_data_with_marginal():
+    return {
+        "input_designs": [[0.0, 0.0], [1.0, 1.0], [2.0, 2.0]],
+        "step_100": {
+            "variable": {
+                "eigs_avg": [0.1, 0.9, 0.5],
+                "prior_entropy_avg": [3.0, 3.0, 3.0],
+                "posterior_entropy_avg": [2.9, 2.1, 2.5],
+            },
+            "nominal": {
+                "eigs_avg": 0.5,
+                "prior_entropy_avg": 3.0,
+                "posterior_entropy_avg": 2.5,
+            },
+            "marginal": {
+                "p0": {"eigs_avg": [0.7, 0.2, 0.3], "nominal": {"eigs_avg": 0.4}},
+            },
+        },
+    }
 
-    experiment = SimpleNamespace(
-        central_val=central,
-        nominal_design=design_nom,
+
+def _entries_experiment():
+    return SimpleNamespace(
+        central_val=torch.zeros(3, dtype=torch.float64),
+        nominal_design=torch.tensor([9.0, 9.0], dtype=torch.float64),
         device="cpu",
     )
 
+
+def test_nf_posterior_entries_joint_labels_and_optimal():
+    """Optimal = joint EIG argmax; legends carry EIG and entropy."""
+    eig_data = _eig_data_with_marginal()
+    with patch("bedcosmo.plotting.sample_nf", return_value="samples") as mock_sample:
+        entries = nf_posterior_entries(_entries_experiment(), "flow", eig_data, 100)
+    assert [e["name"] for e in entries] == ["nominal", "optimal"]
+    nominal, optimal = entries
+    np.testing.assert_allclose(optimal["design"], [1.0, 1.0])
+    np.testing.assert_allclose(nominal["design"], [9.0, 9.0])
+    assert nominal["label"] == (
+        "Nominal Design (NF), EIG: 0.500 bits, H_prior: 3.00 bits, H_post: 2.50 bits"
+    )
+    assert optimal["label"] == (
+        "Optimal Design (NF), EIG: 0.900 bits, H_prior: 3.00 bits, H_post: 2.10 bits"
+    )
+    np.testing.assert_allclose(mock_sample.call_args_list[1].args[2], [1.0, 1.0])
+
+
+def test_nf_posterior_entries_marginal_uses_marginal_optimal():
+    """With params, optimal comes from the marginal EIG, not the joint EIG."""
+    eig_data = _eig_data_with_marginal()
+    with patch("bedcosmo.plotting.sample_nf", return_value="samples") as mock_sample:
+        entries = nf_posterior_entries(
+            _entries_experiment(), "flow", eig_data, 100, params=["p0"]
+        )
+    nominal, optimal = entries
+    np.testing.assert_allclose(optimal["design"], [0.0, 0.0])
+    assert optimal["label"].startswith("Optimal Design (NF), Marginal EIG: 0.700 bits")
+    assert nominal["label"].startswith("Nominal Design (NF), Marginal EIG: 0.400 bits")
+    assert all(c.kwargs["params"] == ["p0"] for c in mock_sample.call_args_list)
+
+
+def test_nf_posterior_entries_nominal_only_without_eig_data():
+    with patch("bedcosmo.plotting.sample_nf", return_value="samples"):
+        entries = nf_posterior_entries(
+            _entries_experiment(), "flow", None, display=("nominal",)
+        )
+    assert [e["label"] for e in entries] == ["Nominal Design (NF)"]
+    with pytest.raises(ValueError, match="eig_data"):
+        nf_posterior_entries(_entries_experiment(), "flow", None)
+
+
+def _make_evaluator(tmp_path, experiment, eig_data):
     ev = Evaluator.__new__(Evaluator)
     ev.save_path = str(tmp_path / "artifacts")
     ev.run_id = "run123"
     ev.seed = 7
-    ev.guide_samples = n_guide
+    ev.guide_samples = 20
     ev.nf_transform_output = True
     ev.param_space = "physical"
     ev.cosmo_exp = "num_visits"
@@ -330,51 +393,111 @@ def test_run_sample_save_then_plot(tmp_path):
     ev.marginal_eig_subsets = []
     ev.other_eig_data = None
     ev.timestamp = None
-    ev.eig_data = {
-        "input_designs": [[0.0, 0.0], [1.0, 1.0]],
-        "step_100": {
-            "variable": {"eigs_avg": [0.1, 0.9]},
-            "nominal": {"eigs_avg": 0.5},
-        },
-    }
-    ev.input_designs = torch.randn(2, 3, dtype=torch.float64)
+    ev.eig_data = eig_data
+    ev.input_designs = torch.randn(3, 2, dtype=torch.float64)
     ev.experiment = experiment
     ev.run_obj = MagicMock()
     ev.run_obj.info.run_id = "run123"
     ev.run_args = {"total_steps": 100}
     ev.plotter = MagicMock()
-    ev.plotter._entropy_legend_suffix = MagicMock(return_value="")
-    ev.get_eig = MagicMock(side_effect=[(0.5, 0.01), (np.array([0.2, 0.8]), np.zeros(2))])
     ev._update_runtime = MagicMock()
     ev._eig_data_save_path = MagicMock(return_value=str(tmp_path / "eig.json"))
     ev._target_prior_entropy = MagicMock(return_value=None)
+    return ev
+
+
+def test_run_plots_sampled_entries_and_saves_npz(tmp_path):
+    """Evaluator.run plots the entries it sampled (EIG legends) and saves them as NPZ."""
+    n_guide, n_params = 20, 2
+    rng = np.random.default_rng(1)
+    theta_nom = rng.normal(size=(n_guide, n_params))
+    theta_opt = rng.normal(size=(n_guide, n_params))
+    ev = _make_evaluator(tmp_path, _entries_experiment(), _eig_data_with_marginal())
+    ev.get_eig = MagicMock(
+        side_effect=[(0.5, 0.01), (np.array([0.1, 0.9, 0.5]), np.zeros(3))]
+    )
 
     mcsamples = [
         _make_mcsamples(theta_nom, ["p0", "p1"]),
         _make_mcsamples(theta_opt, ["p0", "p1"]),
     ]
     with patch("bedcosmo.evaluate.render_overlay"), \
-         patch("bedcosmo.evaluate.load_model", return_value=(MagicMock(name="flow"), 100)) as mock_load, \
-         patch("bedcosmo.evaluate.sample_nf", side_effect=mcsamples) as mock_sample, \
-         patch("bedcosmo.evaluate.save_posterior_samples", wraps=save_posterior_samples) as save_spy:
+         patch("bedcosmo.evaluate.load_model", return_value=(MagicMock(name="flow"), 100)), \
+         patch("bedcosmo.plotting.sample_nf", side_effect=mcsamples):
         ev.run(eval_step=100)
 
-    mock_load.assert_called_once()
-    assert mock_sample.call_count == 2
-    assert save_spy.called
     ev.plotter.plot_posterior.assert_called_once()
-    plot_kwargs = ev.plotter.plot_posterior.call_args.kwargs
-    assert plot_kwargs.get("artifacts_dir") == ev.save_path
-    assert plot_kwargs.get("eval_step") == 100
-    # No in-memory nf_entries — plot loads from the just-saved NPZ.
-    assert plot_kwargs.get("nf_entries") is None
-    assert len(ev.plotter.plot_posterior.call_args.args) == 0
+    args = ev.plotter.plot_posterior.call_args.args
+    assert args[0] is ev.experiment
+    plotted = args[1]
+    assert [e["name"] for e in plotted] == ["nominal", "optimal"]
+    assert "EIG: 0.900 bits" in plotted[1]["label"]
 
-    bundle = load_posterior_samples_file(ev.save_path, step=100)
-    assert list(bundle["series_names"]) == ["optimal", "nominal"]
-    assert bundle["meta"]["generated_by"] == "Evaluator.run"
+    bundle = load_posterior_samples_file(ev.save_path, step=100, generated_by="Evaluator.run")
+    assert list(bundle["series_names"]) == ["nominal", "optimal"]
     assert bundle["meta"]["num_data_samples"] == 1
-    assert bundle["meta"]["optimal_design_index"] == 1
+    assert [s["label"] for s in bundle["meta"]["series"]] == [e["label"] for e in plotted]
     assert bundle["theta"].shape == (2, 1, n_guide, n_params)
-    np.testing.assert_allclose(bundle["theta"][0, 0], theta_opt)
-    np.testing.assert_allclose(bundle["theta"][1, 0], theta_nom)
+    np.testing.assert_allclose(bundle["theta"][0, 0], theta_nom)
+    np.testing.assert_allclose(bundle["theta"][1, 0], theta_opt)
+    np.testing.assert_allclose(bundle["design"][1], [1.0, 1.0])
+
+    # Replot from the NPZ keeps the saved legend labels.
+    entries = nf_entries_from_posterior_bundle(
+        bundle, SimpleNamespace(cosmo_params=["p0", "p1"], latex_labels=["a", "b"])
+    )
+    assert [e["label"] for e in entries] == [e["label"] for e in plotted]
+
+
+def test_run_marginal_samples_without_saved_npz(tmp_path):
+    """--marginal plots sample fresh at the marginal-optimal design (no NPZ needed)."""
+    ev = _make_evaluator(tmp_path, _entries_experiment(), _eig_data_with_marginal())
+    ev.marginal_eig_subsets = [["p0"]]
+    ev._subset_id = lambda subset: "+".join(subset)
+    ev.get_marginal_eig = MagicMock()
+    with patch("bedcosmo.evaluate.load_model", return_value=(MagicMock(name="flow"), 100)), \
+         patch("bedcosmo.plotting.sample_nf", return_value="samples"):
+        ev.run_marginal(eval_step=100)
+
+    ev.plotter.plot_posterior.assert_called_once()
+    call = ev.plotter.plot_posterior.call_args
+    assert call.kwargs["params"] == ["p0"]
+    assert call.kwargs["filename"] == "posterior_marginal_p0"
+    optimal = call.args[1][1]
+    np.testing.assert_allclose(optimal["design"], [0.0, 0.0])
+
+
+def test_render_overlay_checkpoint_branch_plots_nf_and_grid(tmp_path):
+    """The explicit-checkpoint overlay samples NF entries and reaches plot_posterior."""
+    import json
+
+    from bedcosmo.util import render_overlay
+
+    own = _eig_data_with_marginal()
+    sibling = tmp_path / "grid_eig.json"
+    sibling.write_text(json.dumps({
+        "status": "complete",
+        "step_100": {"nominal": {"grid": {"eigs_avg": 0.45}}},
+    }))
+    grid_experiment = _entries_experiment()
+    grid_experiment.name = "num_visits"
+    with patch("bedcosmo.util.load_posterior_flow_from_checkpoint_file", return_value="flow"), \
+         patch("bedcosmo.plotting.sample_nf", return_value="samples"), \
+         patch.object(BasePlotter, "plot_posterior", autospec=True) as mock_plot, \
+         patch.object(BasePlotter, "eig_designs", autospec=True, create=True):
+        render_overlay(
+            own,
+            "nf",
+            str(sibling),
+            BasePlotter(cosmo_exp="num_visits"),
+            100,
+            device="cpu",
+            nf_checkpoint_path="ckpt.pt",
+            grid_experiment=grid_experiment,
+            overlay_save_dir=str(tmp_path),
+        )
+    mock_plot.assert_called_once()
+    kwargs = mock_plot.call_args.kwargs
+    assert [e["name"] for e in kwargs["nf_entries"]] == ["nominal", "optimal"]
+    assert kwargs["nominal_grid_eig"] == 0.45
+    assert kwargs["save_dir"] == str(tmp_path)

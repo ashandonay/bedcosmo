@@ -332,57 +332,22 @@ def load_posterior_samples(path: str) -> dict[str, Any]:
         }
 
 
-def normalize_posterior_step(step):
-    """Normalize eval/checkpoint step for meta comparison (``'step_10'`` → ``10``)."""
-    if step is None:
-        return None
-    if isinstance(step, str):
-        s = step.strip()
-        if s.startswith("step_"):
-            s = s[len("step_") :]
-        if s.isdigit() or (s.startswith("-") and s[1:].isdigit()):
-            return int(s)
-        return s
-    try:
-        return int(step)
-    except (TypeError, ValueError):
-        return step
-
-
 def _step_matches(meta: dict, step) -> bool:
     if step is None:
         return True
     meta_step = meta.get("step")
     if meta_step is None:
         return False
-    want = normalize_posterior_step(step)
-    have = normalize_posterior_step(meta_step)
     try:
-        return int(have) == int(want)
+        return int(meta_step) == int(step)
     except (TypeError, ValueError):
-        return str(have) == str(want)
+        return str(meta_step) == str(step)
 
 
-def series_names_from_meta(meta: dict) -> list[str]:
-    """Return series names recorded on a posterior-sample bundle meta dict."""
-    names = meta.get("series_names")
-    if names is not None:
-        return [str(n) for n in names]
-    series = meta.get("series") or []
-    out = []
-    for item in series:
-        if isinstance(item, dict) and "name" in item:
-            out.append(str(item["name"]))
-        elif isinstance(item, str):
-            out.append(item)
-    return out
-
-
-def _meta_has_series(meta: dict, require_series: Sequence[str] | None) -> bool:
+def _meta_has_series(meta: dict, require_series: Optional[Sequence[str]]) -> bool:
     if not require_series:
         return True
-    have = set(series_names_from_meta(meta))
-    return all(str(name) in have for name in require_series)
+    return set(require_series) <= set(meta["series_names"])
 
 
 def load_posterior_samples_file(
@@ -393,6 +358,7 @@ def load_posterior_samples_file(
     subdir: str = DEFAULT_SUBDIR,
     path: Optional[str] = None,
     require_series: Optional[Sequence[str]] = None,
+    generated_by: Optional[str] = None,
 ) -> dict[str, Any]:
     """
     Load the newest matching posterior-sample bundle under an artifacts dir.
@@ -400,13 +366,10 @@ def load_posterior_samples_file(
     If ``path`` is given, load that file directly (still validates ``status``,
     ``step``, and ``require_series`` when set).
     Otherwise scan ``artifacts_dir/subdir/posterior*.npz``, prefer files whose meta
-    matches ``step``, ``status``, and (when given) contains every name in
-    ``require_series``, newest by mtime.
+    matches ``step``, ``status``, ``generated_by`` (``Evaluator.run`` central
+    bundles vs ``Evaluator.sample_posterior`` multi-y bundles), and contains every
+    name in ``require_series``, newest by mtime.
     """
-    require_series = (
-        tuple(str(n) for n in require_series) if require_series is not None else None
-    )
-
     if path is not None:
         bundle = load_posterior_samples(path)
         if status is not None and bundle["meta"].get("status") != status:
@@ -420,9 +383,8 @@ def load_posterior_samples_file(
                 f"expected {step!r}"
             )
         if not _meta_has_series(bundle["meta"], require_series):
-            have = series_names_from_meta(bundle["meta"])
             raise ValueError(
-                f"Posterior samples at {path} have series {have}, "
+                f"Posterior samples at {path} have series {bundle['meta']['series_names']}, "
                 f"expected to include {list(require_series)}"
             )
         return bundle
@@ -458,6 +420,8 @@ def load_posterior_samples_file(
             continue
         if not _meta_has_series(meta, require_series):
             continue
+        if generated_by is not None and meta.get("generated_by") != generated_by:
+            continue
         matches.append((os.path.getmtime(p), p, meta))
 
     if not matches:
@@ -465,8 +429,10 @@ def load_posterior_samples_file(
         series_msg = (
             f" containing series {list(require_series)}" if require_series else ""
         )
+        source_msg = f" from {generated_by}" if generated_by is not None else ""
         raise FileNotFoundError(
-            f"No {status!r} posterior sample files{step_msg}{series_msg} under {search_dir}"
+            f"No {status!r} posterior sample files{source_msg}{step_msg}{series_msg} "
+            f"under {search_dir}"
         )
 
     matches.sort(key=lambda t: t[0], reverse=True)

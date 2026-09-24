@@ -1280,35 +1280,12 @@ def load_posterior_flow_from_checkpoint_file(
     return posterior_flow
 
 
-def _posterior_kwds_from_merged_eig(combined: dict, step_key: str) -> dict:
-    """Build ``plot_posterior`` / sampling kwargs from merged NF+grid eig_data (no MLflow read)."""
-    step_data = combined[step_key]
-    variable_data = step_data.get("variable", {})
-    nominal_data = step_data.get("nominal", {})
-    input_designs = np.asarray(combined.get("input_designs", []))
-    if input_designs.size == 0:
-        raise ValueError("No input designs in merged eig_data")
-    eig_values = np.asarray(variable_data.get("eigs_avg", []))
-    if eig_values.size == 0:
-        raise ValueError("No NF EIG values (variable/eigs_avg) in merged eig_data")
-    nominal_eig = nominal_data.get("eigs_avg")
-    if isinstance(nominal_eig, list):
-        nominal_eig = nominal_eig[0] if len(nominal_eig) > 0 else None
-    nominal_eig = float(nominal_eig) if nominal_eig is not None else None
-    nominal_grid_eig = None
-    nominal_grid_data = nominal_data.get("grid", {})
-    if isinstance(nominal_grid_data, dict) and "eigs_avg" in nominal_grid_data:
-        nominal_grid_eig = nominal_grid_data.get("eigs_avg")
-        if isinstance(nominal_grid_eig, list):
-            nominal_grid_eig = nominal_grid_eig[0] if len(nominal_grid_eig) > 0 else None
-        nominal_grid_eig = float(nominal_grid_eig) if nominal_grid_eig is not None else None
-    return dict(
-        input_designs=input_designs,
-        eig_values=eig_values,
-        nominal_eig=nominal_eig,
-        nominal_grid_eig=nominal_grid_eig,
-        title="Posterior (NF + grid)",
-    )
+def nominal_grid_eig(eig_data: dict, step_key: str):
+    """Nominal-design grid EIG from eig_data (e.g. merged NF+grid), or None if absent."""
+    nominal_grid_eig = eig_data[step_key].get("nominal", {}).get("grid", {}).get("eigs_avg")
+    if isinstance(nominal_grid_eig, list):
+        nominal_grid_eig = nominal_grid_eig[0] if nominal_grid_eig else None
+    return float(nominal_grid_eig) if nominal_grid_eig is not None else None
 
 
 def _eig_design_kwds_from_merged_eig(
@@ -2529,7 +2506,7 @@ def render_overlay(
     Returns True if overlay plots were rendered, False otherwise.
     """
     # Local import avoids circular dependency (plotting imports util at module load).
-    from bedcosmo.plotting import BasePlotter, RunPlotter
+    from bedcosmo.plotting import BasePlotter, RunPlotter, nf_posterior_entries
 
     if own_role not in ('nf', 'grid'):
         raise ValueError(f"own_role must be 'nf' or 'grid', got {own_role!r}")
@@ -2568,7 +2545,7 @@ def render_overlay(
     if device is None:
         device = "cuda:0" if torch.cuda.is_available() else "cpu"
 
-    posterior_kwargs = {"device": device}
+    posterior_kwargs = {}
     eig_kwargs = {}
     if overlay_save_dir is not None:
         posterior_kwargs["save_dir"] = overlay_save_dir
@@ -2594,48 +2571,17 @@ def render_overlay(
             post_flow = load_posterior_flow_from_checkpoint_file(
                 experiment_pf, nf_checkpoint_path, run_params, device, global_rank=0
             )
-            pk = _posterior_kwds_from_merged_eig(combined, step_key)
             auto_seed(1)
-            y = experiment_pf.central_val
-            input_designs = np.asarray(pk["input_designs"])
-            eig_values = np.asarray(pk["eig_values"])
-            optimal_idx = int(np.argmax(eig_values))
-            optimal_design = input_designs[optimal_idx]
-            nf_entries = []
-            for name, design, color in (
-                ("nominal", experiment_pf.nominal_design, "tab:blue"),
-                ("optimal", optimal_design, "tab:orange"),
-            ):
-                samples = sample_nf(
-                    experiment_pf,
-                    post_flow,
-                    design,
-                    y,
-                    num_samples=50000,
-                    transform_output=transform_output,
-                    device=device,
-                )
-                if hasattr(design, "detach"):
-                    design_np = design.detach().cpu().numpy().reshape(-1)
-                else:
-                    design_np = np.asarray(design, dtype=np.float64).reshape(-1)
-                label = (
-                    "Nominal Design (NF)"
-                    if name == "nominal"
-                    else "Optimal Design (NF)"
-                )
-                eig_val = pk.get("nominal_eig") if name == "nominal" else float(eig_values[optimal_idx])
-                if eig_val is not None:
-                    label = f"{label}, EIG: {float(eig_val):.3f} bits"
-                nf_entries.append({
-                    "samples": samples,
-                    "name": name,
-                    "design": design_np,
-                    "label": label,
-                    "color": color,
-                    "line_style": "-",
-                    "alpha": 1.0,
-                })
+            nf_entries = nf_posterior_entries(
+                experiment_pf,
+                post_flow,
+                combined,
+                step_key,
+                guide_samples=50000,
+                transform_output=transform_output,
+                plot_prior=plot_prior,
+                device=device,
+            )
             bp = BasePlotter(cosmo_exp=cosmo_exp)
             bp.plot_posterior(
                 experiment=experiment_pf,
@@ -2646,14 +2592,16 @@ def render_overlay(
                 grid_samples=grid_samples,
                 filename='posterior_samples_overlay',
                 guide_samples=50000,
+                title="Posterior (NF + grid)",
+                nominal_grid_eig=nominal_grid_eig(combined, step_key),
                 **posterior_kwargs,
-                nominal_grid_eig=pk.get("nominal_grid_eig"),
-                title=pk.get("title"),
             )
         elif isinstance(plotter, RunPlotter) and nf_checkpoint_path is None:
-            # Replot from saved NPZ when available; overlay grid samples.
+            # NF series come from the run's saved default-eval NPZ;
+            # guide_samples only sets the prior-contour sample count.
             plotter.plot_posterior(
                 eval_step=eval_step,
+                device=device,
                 guide_samples=50000,
                 levels=list(levels),
                 plot_prior=plot_prior,
