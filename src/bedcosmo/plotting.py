@@ -883,6 +883,36 @@ class BasePlotter:
             display = (display,)
         return tuple(display)
 
+    @classmethod
+    def _validate_display(cls, display):
+        display = cls._normalize_display(display)
+        invalid = set(display) - {"nominal", "optimal"}
+        if invalid:
+            raise ValueError(
+                f"display must contain 'nominal' and/or 'optimal', got {display}"
+            )
+        if not display:
+            raise ValueError("display must not be empty")
+        return display
+
+    @classmethod
+    def _filter_nf_entries_by_display(cls, nf_entries, display):
+        """Reorder/select NF entries to match ``display`` series names."""
+        display = cls._validate_display(display)
+        by_name = {}
+        for entry in nf_entries:
+            name = entry.get("name")
+            if name is None:
+                continue
+            by_name[str(name)] = entry
+        missing = [name for name in display if name not in by_name]
+        if missing:
+            raise ValueError(
+                f"display={display} requested series missing from nf_entries: {missing} "
+                f"(available: {sorted(by_name)})"
+            )
+        return [by_name[name] for name in display]
+
     def _entropy_legend_suffix(
         self, prior_entropy=None, posterior_entropy=None, *, include_prior=True
     ):
@@ -929,6 +959,7 @@ class BasePlotter:
         experiment=None,
         nf_entries=None,
         *,
+        display=("nominal", "optimal"),
         levels=(0.68,),
         guide_samples=1000,
         params=None,
@@ -955,15 +986,22 @@ class BasePlotter:
 
         Does **not** sample from the flow.
 
-        * ``nf_entries`` provided — plot those entries.
-        * ``nf_entries is None`` — load from ``posterior_samples_path`` or
-          ``artifacts_dir`` via :func:`load_posterior_samples_file`.
-        * ``nf_entries == []`` — no NF series (grid / prior / MCMC overlays only).
+        * ``nf_entries`` provided — plot those entries (filtered by ``display``).
+        * ``nf_entries is None`` — load newest matching NPZ from
+          ``posterior_samples_path`` or ``artifacts_dir`` that contains the
+          requested ``display`` series, then plot those series.
+        * ``nf_entries == []`` — no NF series (grid / prior / MCMC overlays only);
+          ``display`` is ignored.
+
+        ``display`` selects which named series to show (``'nominal'`` and/or
+        ``'optimal'``). Order follows ``display``.
 
         Raises if ``nf_entries is None`` and no matching artifact is found.
         """
         if isinstance(levels, (int, float)):
             levels = [levels]
+
+        display = self._validate_display(display)
 
         if nf_entries is None:
             if artifacts_dir is None and posterior_samples_path is None:
@@ -980,6 +1018,7 @@ class BasePlotter:
                 artifacts_dir or "",
                 step=eval_step,
                 path=posterior_samples_path,
+                require_series=display,
             )
             nf_entries = nf_entries_from_posterior_bundle(
                 bundle,
@@ -987,6 +1026,9 @@ class BasePlotter:
                 data_index=data_index,
             )
             print(f"  Loaded posterior samples from {bundle['path']}")
+
+        if nf_entries:
+            nf_entries = self._filter_nf_entries_by_display(nf_entries, display)
 
         if experiment is None:
             raise ValueError("experiment is required for plot_posterior")
@@ -1758,14 +1800,18 @@ class RunPlotter(BasePlotter):
         title=None,
         artifacts_dir=None,
         posterior_samples_path=None,
+        display=("nominal", "optimal"),
         **kwargs,
     ):
         """
         Plot NF posterior for this run (no sampling).
 
-        If ``nf_entries`` is omitted, load central-context samples from the run's
-        saved posterior NPZ under artifacts. Pass ``nf_entries=[]`` for
-        overlay-only figures (grid / prior / MCMC).
+        ``display`` selects which saved/provided series to show
+        (``'nominal'`` and/or ``'optimal'``; default both).
+
+        If ``nf_entries`` is omitted, load the newest central-context NPZ under
+        artifacts that contains the requested ``display`` series. Pass
+        ``nf_entries=[]`` for overlay-only figures (grid / prior / MCMC).
         """
         if device is None:
             device = "cuda:0" if torch.cuda.is_available() else "cpu"
@@ -1827,6 +1873,7 @@ class RunPlotter(BasePlotter):
             artifacts_dir=artifacts_dir,
             eval_step=eval_step,
             posterior_samples_path=posterior_samples_path,
+            display=display,
             **kwargs,
         )
 

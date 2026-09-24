@@ -91,7 +91,12 @@ def test_plot_posterior_does_not_sample(tmp_path, monkeypatch):
          patch.object(plotter, "save_figure"), \
          patch("bedcosmo.plotting.Line2D"), \
          patch("bedcosmo.plotting.sample_nf") as mock_sample:
-        plotter.plot_posterior(experiment=experiment, nf_entries=entries, guide_samples=10)
+        plotter.plot_posterior(
+            experiment=experiment,
+            nf_entries=entries,
+            display="nominal",
+            guide_samples=10,
+        )
     mock_sample.assert_not_called()
     experiment.get_guide_samples.assert_not_called()
 
@@ -152,7 +157,80 @@ def test_plot_posterior_loads_npz_when_entries_omitted(tmp_path, monkeypatch):
         )
     mock_tri.assert_called_once()
     plotted = mock_tri.call_args.args[0]
+    # Default display=('nominal','optimal') reorders relative to NPZ series order.
     assert len(plotted) == 2
+    np.testing.assert_allclose(plotted[0].samples, theta[1, 0])  # nominal
+    np.testing.assert_allclose(plotted[1].samples, theta[0, 0])  # optimal
+
+
+def test_plot_posterior_display_filters_loaded_and_provided(tmp_path, monkeypatch):
+    monkeypatch.setenv("SCRATCH", str(tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    n_guide, n_params = 10, 2
+    rng = np.random.default_rng(6)
+    theta = np.stack(
+        [
+            rng.normal(size=(1, n_guide, n_params)),
+            rng.normal(size=(1, n_guide, n_params)),
+        ],
+        axis=0,
+    )
+    artifacts = tmp_path / "artifacts"
+    out = make_posterior_samples_path(str(artifacts), step=7)
+    save_posterior_samples(
+        out,
+        theta=theta,
+        y=np.zeros((2, 1, 2)),
+        design=np.array([[1.0], [2.0]]),
+        series_names=["optimal", "nominal"],
+        param_names=["p0", "p1"],
+        meta={"status": "complete", "step": 7, "series_names": ["optimal", "nominal"]},
+    )
+    experiment = SimpleNamespace(
+        cosmo_params=["p0", "p1"],
+        latex_labels=["p0", "p1"],
+        device="cpu",
+        central_params=None,
+    )
+    fake_g = MagicMock()
+    fake_g.fig.legends = []
+    fake_g.subplots = [[MagicMock()]]
+    plotter = BasePlotter(cosmo_exp="num_visits")
+
+    with patch.object(plotter, "plot_triangle", return_value=fake_g) as mock_tri, \
+         patch.object(plotter, "save_figure"), \
+         patch("bedcosmo.plotting.Line2D"):
+        plotter.plot_posterior(
+            experiment=experiment,
+            artifacts_dir=str(artifacts),
+            eval_step=7,
+            display="nominal",
+        )
+    plotted = mock_tri.call_args.args[0]
+    assert len(plotted) == 1
+    np.testing.assert_allclose(plotted[0].samples, theta[1, 0])
+
+    entries = nf_entries_from_posterior_bundle(
+        {
+            "theta": theta,
+            "design": np.array([[1.0], [2.0]]),
+            "series_names": ["optimal", "nominal"],
+            "param_names": ["p0", "p1"],
+            "meta": {},
+        },
+        experiment,
+    )
+    with patch.object(plotter, "plot_triangle", return_value=fake_g) as mock_tri, \
+         patch.object(plotter, "save_figure"), \
+         patch("bedcosmo.plotting.Line2D"):
+        plotter.plot_posterior(
+            experiment=experiment,
+            nf_entries=entries,
+            display=("optimal",),
+        )
+    plotted = mock_tri.call_args.args[0]
+    assert len(plotted) == 1
     np.testing.assert_allclose(plotted[0].samples, theta[0, 0])
 
 

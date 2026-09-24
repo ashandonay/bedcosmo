@@ -135,3 +135,86 @@ def test_incomplete_status_skipped(tmp_path):
     )
     with pytest.raises(FileNotFoundError):
         load_posterior_samples_file(str(artifacts), step=5)
+
+
+def test_load_posterior_samples_file_require_series(tmp_path):
+    artifacts = tmp_path / "artifacts"
+    theta1, y1, design1, _, param_names = _bundle_arrays(n_series=1)
+    # Older file has only "nominal"
+    p_old = make_posterior_samples_path(str(artifacts), step=10, timestamp="20200101_000000")
+    save_posterior_samples(
+        p_old,
+        theta=theta1,
+        y=y1,
+        design=design1,
+        series_names=["nominal"],
+        param_names=param_names,
+        meta={"status": "complete", "step": 10, "tag": "nominal_only"},
+    )
+    time.sleep(0.05)
+    # Newer file has both series — should win when require_series asks for both
+    theta2, y2, design2, _, _ = _bundle_arrays(n_series=2)
+    p_new = make_posterior_samples_path(str(artifacts), step=10, timestamp="20200101_000100")
+    save_posterior_samples(
+        p_new,
+        theta=theta2,
+        y=y2,
+        design=design2,
+        series_names=["optimal", "nominal"],
+        param_names=param_names,
+        meta={"status": "complete", "step": 10, "tag": "both"},
+    )
+
+    bundle = load_posterior_samples_file(
+        str(artifacts), step=10, require_series=("nominal", "optimal")
+    )
+    assert bundle["meta"]["tag"] == "both"
+    assert set(bundle["series_names"]) == {"optimal", "nominal"}
+
+    # step_N string normalization still matches
+    bundle2 = load_posterior_samples_file(
+        str(artifacts), step="step_10", require_series=["nominal"]
+    )
+    assert bundle2["meta"]["tag"] == "both"
+
+    with pytest.raises(FileNotFoundError):
+        load_posterior_samples_file(
+            str(artifacts), step=10, require_series=("missing",)
+        )
+
+
+def test_load_posterior_samples_file_skips_newer_without_required_series(tmp_path):
+    artifacts = tmp_path / "artifacts"
+    param_names = ["p0", "p1"]
+    theta2, y2, design2, _, _ = _bundle_arrays(n_series=2)
+    p_both = make_posterior_samples_path(str(artifacts), step=3, timestamp="20200101_000000")
+    save_posterior_samples(
+        p_both,
+        theta=theta2,
+        y=y2,
+        design=design2,
+        series_names=["optimal", "nominal"],
+        param_names=param_names,
+        meta={"status": "complete", "step": 3, "tag": "both_older"},
+    )
+    time.sleep(0.05)
+    theta1, y1, design1, _, _ = _bundle_arrays(n_series=1)
+    p_nom = make_posterior_samples_path(str(artifacts), step=3, timestamp="20200101_000100")
+    save_posterior_samples(
+        p_nom,
+        theta=theta1,
+        y=y1,
+        design=design1,
+        series_names=["nominal"],
+        param_names=param_names,
+        meta={"status": "complete", "step": 3, "tag": "nominal_newer"},
+    )
+
+    bundle = load_posterior_samples_file(
+        str(artifacts), step=3, require_series=("nominal", "optimal")
+    )
+    assert bundle["meta"]["tag"] == "both_older"
+
+    # Without require_series, newest wins regardless of series.
+    newest = load_posterior_samples_file(str(artifacts), step=3)
+    assert newest["meta"]["tag"] == "nominal_newer"
