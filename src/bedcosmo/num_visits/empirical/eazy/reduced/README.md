@@ -24,7 +24,6 @@ features: one shape coordinate, scale, and redshift.
 |---|---|
 | `discover_template_cohorts` | Exhaustively refit the DESI sample with every exact-`N` subset and save fit/color quality matrices. |
 | `build_template_prior` | Build the reduced coefficient table, EAZY `.param` file, provenance, KDE, and diagnostic samples for one subset. |
-| `build_reduced_template_prior` | Historical alias for `build_template_prior`. |
 | `plot_template_subset_examples` | Plot observed DESI spectra, full fits, reduced fits, and individual template contributions. |
 | `summarize_template_composition` | Summarize integrated flux shares and template-dominance fractions within fixed-`N` cohorts. |
 | `discover_eazy_spectral_families` | Transform full-fit weights to ILR space, apply PCA, cluster with HDBSCAN, and decode families back to sparse original-template subsets. |
@@ -163,8 +162,10 @@ Select a built prior without maintaining a separate YAML file:
 ```
 
 `density_type: flow` requires the corresponding trained prior-flow artifacts in
-the selected build. Use `--prior-density-type kde` for a KDE-backed test or
-train the prior flow following the parent empirical-prior README.
+the selected build: the native flow supplies prior samples, and the
+gaussianized flow supplies the prior density when BED uses
+`transform_input: true`. Use `--prior-density-type kde` for a KDE-backed test
+or train both flow spaces following the parent empirical-prior README.
 
 ## Interpretation and recommended comparisons
 

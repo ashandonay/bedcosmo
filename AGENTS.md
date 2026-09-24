@@ -35,7 +35,7 @@ export SCRATCH=${SCRATCH:-$HOME/scratch}  # needed when running python directly;
 | `experiments/variable_redshift/README.md` | Redshift-choice toy problem: D_H/D_M likelihood, the error-table switch, grid limits, YAML fields |
 | `experiments/num_visits/README.md` | LSST visits per filter: photometric forward model, SED priors, YAML fields |
 | `src/bedcosmo/num_visits/empirical/README.md` | Empirical SED prior build: DESI + EAZY fits, ILR coordinates, KDE / prior flow, provenance |
-| `src/bedcosmo/num_visits/empirical/reduced/README.md` | Reduced EAZY template bases |
+| `src/bedcosmo/num_visits/empirical/eazy/reduced/README.md` | Reduced EAZY template bases |
 
 ## Architecture
 

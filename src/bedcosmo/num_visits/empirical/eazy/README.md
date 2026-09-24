@@ -4,7 +4,7 @@ This package builds the NumVisits empirical SED prior by fitting nonnegative
 mixtures of EAZY templates to DESI galaxy spectra. It is the EAZY-template
 counterpart to the directly learned [DESI basis](../desi/README.md).
 
-The production workflow:
+The EAZY workflow:
 
 1. downloads the requested EAZY template bank when it is first needed;
 2. loads DESI B/R/Z coadd spectra and their inverse variances and masks;
@@ -13,8 +13,9 @@ The production workflow:
 5. separates the normalized template mixture from its overall flux scale;
 6. applies the configured spectrum-quality cuts across the selected HEALPix
    patches; and
-7. trains native and gaussianized empirical priors over the ILR mixture
-   coordinates, `log_c_scale`, and redshift.
+7. trains native and gaussianized KDE artifacts over the ILR mixture
+   coordinates, `log_c_scale`, and redshift. Prior normalizing flows are a
+   separate shared step described in the parent README.
 
 ## Spectral-template layout
 

@@ -67,8 +67,10 @@ The saved `rest_wavelength_coverage.csv` reports contributor counts, the
 catalog-wide observed fraction, and an LSST-demand-weighted conditional
 coverage evaluated at each object's redshift. Missing pixels always retain zero
 weight during factorization. These components must not be extrapolated by
-silently clamping their endpoint values; the portions of LSST `u` and `y`
-outside DESI's observed-frame range still require an explicit external anchor.
+silently clamping their endpoint values. The production prior therefore
+excludes redshifts for which its learned rest-frame support cannot cover the
+full tabulated LSST `ugrizy` bandpasses; extending to those redshifts would
+require an explicit external spectral anchor.
 
 ## Build a rank-K NumVisits prior
 
@@ -79,6 +81,13 @@ The basis is learned from the full quality-selected DESI population. Only the
 coefficient/redshift rows used to train the prior are restricted to the default
 `0.21 <= z <= 1.28`, where the learned rest-frame support covers the full
 tabulated LSST `ugrizy` bandpasses without endpoint extrapolation.
+
+Install the shared empirical-prior and pinned Nearly-NMF dependencies before
+building:
+
+```bash
+pip install -e '.[sed-prior,desi-basis]'
+```
 
 ```bash
 python -m bedcosmo.num_visits.empirical.desi.build_prior \
@@ -118,11 +127,14 @@ NumVisits applies `1 / (1 + z)` during redshifting, stored coefficient scales
 also include `(1 + z)`. NumVisits should use `flux_unit_scale: 1.0e-17` to apply
 the DESI coadd FLUX unit conversion.
 
-The build also writes an explicit `prior_args.yaml` beside the KDE. It contains
-the resolved prior/template directories, seven ILR shape parameters for K=8,
-`log_c_scale`, `z`, and `flux_unit_scale: 1.0e-17`. Because these paths are
-machine-specific, run the builder on the machine that will execute NumVisits
-and pass that generated file as the empirical prior configuration.
+The build also writes an explicit KDE-backed `prior_args.yaml` beside the KDE.
+It contains the resolved prior/template directories, seven ILR shape parameters
+for K=8, `log_c_scale`, `z`, and `flux_unit_scale: 1.0e-17`. This is useful for
+custom output paths and immediate KDE tests. The standard DESI8 runtime instead
+uses `template_source: desi8` in
+`experiments/num_visits/prior_args_empirical.yaml`, which resolves the standard
+scratch paths and currently selects `density_type: flow`. Train both prior-flow
+spaces after the KDE build before using that default.
 
 ## Signed-data factorization evaluation
 
@@ -133,8 +145,8 @@ and tests two optimizers for the same inverse-variance-weighted objective:
 - alternating exact nonnegative least squares (ANLS); and
 - Green & Bailey's Nearly-NMF multiplicative updates.
 
-Install the pinned implementation in the bedcosmo environment before fitting a
-basis:
+If it was not installed for the production build above, install the pinned
+Nearly-NMF implementation before running this comparison:
 
 ```bash
 pip install -e '.[desi-basis]'
