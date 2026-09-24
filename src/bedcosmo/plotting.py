@@ -925,6 +925,7 @@ class BasePlotter:
         eval_step=None,
         posterior_samples_path=None,
         data_index=0,
+        log_density=False,
     ):
         """
         Plot a posterior triangle from NF entries or a saved posterior NPZ.
@@ -940,6 +941,9 @@ class BasePlotter:
 
         ``display`` selects which named series to show (``'nominal'`` and/or
         ``'optimal'``). Order follows ``display``.
+
+        ``log_density``: if True, use a log scale on the 1D histogram density
+        (diagonal y-axes only); parameter axes stay linear.
 
         Raises if ``nf_entries is None`` and no matching artifact is found.
         """
@@ -1079,6 +1083,7 @@ class BasePlotter:
             alpha=all_alphas,
             line_style=all_line_styles,
             plot_size_ratio=plot_size_ratio,
+            log_density=log_density,
         )
 
         if getattr(experiment, "central_params", None):
@@ -1163,6 +1168,7 @@ class BasePlotter:
         scatter_alpha=0.6,
         contour_alpha_factor=0.8,
         style=style,
+        log_density=False,
     ):
         """
         Low-level GetDist triangle plot from MCSamples lists.
@@ -1185,6 +1191,9 @@ class BasePlotter:
             scatter_alpha (float): Alpha value for scatter points. Default 0.6 for better distinguishability.
             contour_alpha_factor (float): Factor to adjust contour alpha for distinguishability. Default 0.8.
             style (object, optional): Style object (like KP7StylePaper) to apply to the plotter settings.
+            log_density (bool): If True, use a log scale on the 1D density/count y-axes
+                (diagonal panels only). Parameter (x) axes stay linear. Nonpositive
+                density values are floored so matplotlib's log scale does not fail.
         Returns:
             g: GetDist plotter object with the generated triangle plot.
         """
@@ -1397,7 +1406,59 @@ class BasePlotter:
                                         alpha=scatter_alpha,
                                     )
 
+        if log_density:
+            self._set_diagonal_log_density(g, len(param_name_list))
+
         return g
+
+    @staticmethod
+    def _set_diagonal_log_density(g, n_params, floor_frac=1e-3):
+        """Set log y-scale on triangle diagonal (1D density) axes only.
+
+        Floors nonpositive line/patch y-values to a fraction of the smallest
+        positive density so matplotlib's log scale does not fail on zeros.
+        Parameter (x) axes are left linear.
+        """
+        if not hasattr(g, "subplots") or g.subplots is None:
+            return
+        for i in range(n_params):
+            ax = g.subplots[i, i]
+            if ax is None:
+                continue
+
+            positives = []
+            for line in ax.get_lines():
+                y = np.asarray(line.get_ydata(), dtype=float)
+                positives.append(y[np.isfinite(y) & (y > 0)])
+            for patch in getattr(ax, "patches", []):
+                height = getattr(patch, "get_height", None)
+                if height is None:
+                    continue
+                h = float(height())
+                if np.isfinite(h) and h > 0:
+                    positives.append(np.array([h]))
+
+            pos_arrays = [p for p in positives if p.size > 0]
+            if not pos_arrays:
+                continue
+            y_min = min(float(p.min()) for p in pos_arrays)
+            floor = max(y_min * floor_frac, np.finfo(float).tiny)
+
+            for line in ax.get_lines():
+                y = np.asarray(line.get_ydata(), dtype=float)
+                line.set_ydata(np.maximum(y, floor))
+            for patch in getattr(ax, "patches", []):
+                height = getattr(patch, "get_height", None)
+                set_height = getattr(patch, "set_height", None)
+                if height is None or set_height is None:
+                    continue
+                h = float(height())
+                if not np.isfinite(h) or h <= 0:
+                    set_height(floor)
+
+            ax.set_yscale("log")
+            ymin, ymax = ax.get_ylim()
+            ax.set_ylim(max(ymin, floor), ymax)
 
 
 # ============================================================================
@@ -1744,6 +1805,9 @@ class RunPlotter(BasePlotter):
         run's experiment. If ``nf_entries`` is omitted, load the newest
         default-eval NPZ under the run's artifacts that contains the requested
         ``display`` series. Pass ``nf_entries=[]`` for overlay-only figures.
+
+        Extra keyword arguments are forwarded to ``BasePlotter.plot_posterior``
+        (e.g. ``log_density=True`` for a log-scaled 1D density on diagonal panels).
         """
         if device is None:
             device = "cuda:0" if torch.cuda.is_available() else "cpu"

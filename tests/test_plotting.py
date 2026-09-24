@@ -778,6 +778,61 @@ class TestPlotTriangle:
             )
             assert result == mock_plotter
 
+    def test_plot_triangle_log_density_sets_diagonal_log_y(self, mock_samples, mock_scratch_env):
+        """log_density=True puts log y-scale on diagonal axes only; floors nonpositive y."""
+        plotter = BasePlotter(cosmo_exp='test_exp')
+        with patch('bedcosmo.plotting.plots.get_single_plotter') as mock_get_plotter:
+            mock_plotter = Mock()
+            mock_plotter.settings = Mock()
+
+            diag_ax0 = Mock()
+            diag_line0 = Mock()
+            diag_line0.get_ydata.return_value = np.array([0.0, 0.5, 1.0, 0.0])
+            diag_ax0.get_lines.return_value = [diag_line0]
+            diag_ax0.patches = []
+            diag_ax0.get_ylim.return_value = (1e-4, 1.0)
+
+            off_ax = Mock()
+            off_ax.get_lines.return_value = []
+            off_ax.collections = []
+
+            diag_ax1 = Mock()
+            diag_line1 = Mock()
+            diag_line1.get_ydata.return_value = np.array([0.2, 0.8, 0.0])
+            diag_ax1.get_lines.return_value = [diag_line1]
+            diag_ax1.patches = []
+            diag_ax1.get_ylim.return_value = (1e-4, 1.0)
+
+            mock_plotter.subplots = np.array([[diag_ax0, None], [off_ax, diag_ax1]])
+
+            param1_mock = Mock()
+            param1_mock.name = 'param1'
+            param2_mock = Mock()
+            param2_mock.name = 'param2'
+            mock_param_names = Mock()
+            mock_param_names.names = [param1_mock, param2_mock]
+            mock_plotter.param_names_for_root.return_value = mock_param_names
+            mock_plotter.triangle_plot = Mock()
+            mock_get_plotter.return_value = mock_plotter
+
+            result = plotter.plot_triangle(
+                samples=mock_samples[0],
+                colors='blue',
+                show_scatter=False,
+                log_density=True,
+            )
+
+            assert result == mock_plotter
+            diag_ax0.set_yscale.assert_called_once_with('log')
+            diag_ax1.set_yscale.assert_called_once_with('log')
+            off_ax.set_yscale.assert_not_called()
+
+            y0 = diag_line0.set_ydata.call_args[0][0]
+            assert np.all(y0 > 0)
+            assert y0[0] == y0.min()  # former zero floored
+            y1 = diag_line1.set_ydata.call_args[0][0]
+            assert np.all(y1 > 0)
+
 
 class TestLoadEigDataFile:
     """Test cases for BasePlotter.load_eig_data_file method."""
