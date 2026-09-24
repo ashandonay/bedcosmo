@@ -29,7 +29,7 @@ The design configuration controls which filters are varied and how the grid of c
 
 | Field                | Type              | Description |
 |----------------------|-------------------|-------------|
-| `labels`             | list of strings   | Filter bands included in the design (e.g. `["u","g","r","i","z","y"]`). Filters not listed are held at their nominal values. |
+| `labels`             | list of strings   | Filter bands in the experiment (e.g. `["u","g","r","i","z","y"]`), in design-column order. Filters not listed are not observed at all: the forward model, nominal design and flow context only cover the listed bands. |
 | `input_type`         | string            | `"variable"` builds a grid over the bands; `"nominal"` uses a single fixed design equal to the fiducial visit counts. |
 | `input_designs_path` | string or null    | Absolute path to a `.npy` file of explicit design points (shape `(n_designs, n_filters)`). When set, the grid parameters below are ignored. |
 | `step`               | float or list     | Grid spacing for each filter. A scalar applies to all filters; a list sets per-filter spacing. |
@@ -46,6 +46,28 @@ The `sum_lower` / `sum_upper` constraint prunes the Cartesian grid so that only 
 - **`design_args_3d.yaml`** -- varies `u`, `g`, and `r` (3 filters), with `sum_lower = sum_upper = 400`.
 
 These are useful for low-dimensional visualization or faster exploratory runs.
+
+### Generating explicit design pools (`bedcosmo.num_visits.design`)
+
+For a fixed-budget pool too sparse or too large for a Cartesian grid, generate explicit designs. The generator writes the `.npy` (plus a parallel-coordinates `.png`) to `$SCRATCH/bedcosmo/num_visits/designs/` and a matching `design_args_<name>.yaml` to this directory, ready for `--design-args-path`:
+
+```bash
+python -m bedcosmo.num_visits.design --bands gri --n-target 100 --ratio-min 0.7 --ratio-max 1.3
+```
+
+Every design sums to exactly the nominal total of the chosen bands, uses multiples of 10 visits, keeps each band within `[ratio_min, ratio_max] x nominal`, and includes the nominal design. The YAML's `labels` are the bands in array-column order, and its header records the command that regenerates it.
+
+| Flag | Default | Effect |
+|------|---------|--------|
+| `--bands` | `ugrizy` | Filters to vary, in column order |
+| `--n-target` | 100 | Number of designs |
+| `--ratio-min` / `--ratio-max` | 0.75 / 1.25 | Per-band bounds as a fraction of nominal |
+| `--n-levels` | 3 | Levels per band in the ratio grid |
+| `--seed` | 0 | RNG seed for random fill / subsample |
+| `--no-corners` | off | Skip single-band floor/cap corner designs |
+| `--name` | `<bands>_<n>_<YYYYMMDD_HHMMSS>` | Names `<name>.npy` and `design_args_<name>.yaml` |
+| `--yaml` | `design_args_<name>.yaml` | YAML file name in `--out-dir`, e.g. `design_args_extreme.yaml`; refuses to overwrite an existing file |
+| `--out-dir` / `--designs-dir` / `--plot` | this dir / `$SCRATCH/...` / beside `.npy` | Output locations |
 
 ## Parameters (`prior_args.yaml`)
 

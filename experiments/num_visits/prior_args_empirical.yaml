@@ -1,10 +1,10 @@
 # Empirical SED prior from fitted DESI spectra (ILR parameterization).
 #
 # Select the template bank with the two fields below (or CLI overrides):
-#   template_source: desi8 | eazy12 | eazy6
+#   template_source: desi8 | desi8 | eazy12 | eazy6
 #   reduced_templates: null (full bank) or "t7,t10" (comma-separated, case-insensitive)
 #
-# These resolve prior_dir, template_param, and the parameters: block automatically
+# These resolve prior_dir, its templates/ bank, template_param, and the parameters block
 # at submit/snapshot time (written into the run's artifacts/prior_args.yaml).
 # Examples:
 #   ./submit.sh train num_visits empirical
@@ -25,8 +25,7 @@ reduced_templates: null
 #   "flow" (default) -- draw the prior pool from the trained native normalizing flow and
 #           use it as the prior density for entropy (native for transform_input=False;
 #           gaussianized flow for transform_input=True).
-#           Validated against the KDE: flow-vs-KDE A/B PASS, and H_prior=35.0 bits (24.3 nats)
-#           confirmed to match in the eval pipeline.
+#           Validate both flow spaces against the selected KDE artifact before use.
 #   "kde"  -- draw the pool from the frozen KDE plug-in instead (the pre-flow baseline; set
 #           this for a KDE A/B comparison).
 # The flow(s) (sed_prior_flow_native.pt / _gaussianized.pt) must exist in the resolved

@@ -38,15 +38,13 @@ def test_materialize_eazy_bank_uses_source_directory(
         template_dir=tmp_path,
     )
 
-    assert param_path == tmp_path / source / f"{source}.param"
+    assert param_path == tmp_path / f"{source}.param"
     component_paths = [
-        tmp_path / source / f"component_{index:02d}.dat"
-        for index in range(1, n_components + 1)
+        tmp_path / f"component_{index:02d}.dat" for index in range(1, n_components + 1)
     ]
     assert [path for _, path in downloaded] == component_paths
     assert param_path.read_text().splitlines()[1:] == [
-        f"{index} {source}/component_{index:02d}.dat 1.0"
-        for index in range(1, n_components + 1)
+        f"{index} component_{index:02d}.dat 1.0" for index in range(1, n_components + 1)
     ]
 
     waves, fluxes, relative_paths = templates.load_eazy_templates(
@@ -54,6 +52,4 @@ def test_materialize_eazy_bank_uses_source_directory(
         template_dir=tmp_path,
     )
     assert len(waves) == len(fluxes) == n_components
-    assert relative_paths == [
-        f"{source}/component_{index:02d}.dat" for index in range(1, n_components + 1)
-    ]
+    assert relative_paths == [f"component_{index:02d}.dat" for index in range(1, n_components + 1)]

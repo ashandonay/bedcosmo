@@ -4,7 +4,7 @@ This package builds the NumVisits empirical SED prior by fitting nonnegative
 mixtures of EAZY templates to DESI galaxy spectra. It is the EAZY-template
 counterpart to the directly learned [DESI basis](../desi/README.md).
 
-The production workflow:
+The EAZY workflow:
 
 1. downloads the requested EAZY template bank when it is first needed;
 2. loads DESI B/R/Z coadd spectra and their inverse variances and masks;
@@ -13,36 +13,32 @@ The production workflow:
 5. separates the normalized template mixture from its overall flux scale;
 6. applies the configured spectrum-quality cuts across the selected HEALPix
    patches; and
-7. trains native and gaussianized empirical priors over the ILR mixture
-   coordinates, `log_c_scale`, and redshift.
+7. trains native and gaussianized KDE artifacts over the ILR mixture
+   coordinates, `log_c_scale`, and redshift. Prior normalizing flows are a
+   separate shared step described in the parent README.
 
-## Spectral-template layout
+## Self-contained prior layout
 
-Downloaded EAZY banks and learned DESI banks share one root:
+Every empirical-prior build owns the exact template bank used by its
+coefficient distribution:
 
 ```text
-$SCRATCH/bedcosmo/num_visits/spectral_templates/
-├── eazy6/
-│   ├── eazy6.param
-│   └── component_01.dat ... component_06.dat
-├── eazy12/
+$SCRATCH/bedcosmo/num_visits/empirical_prior/eazy12/
+├── templates/
 │   ├── eazy12.param
-│   ├── component_01.dat ... component_12.dat
-│   └── reduced/
-└── desiK/
-    ├── desiK.param
-    └── component_*.dat
+│   └── component_01.dat ... component_12.dat
+├── desi_eazy_empirical_weights.csv
+└── sed_prior_kde_native.joblib
 ```
 
 The upstream EAZY repository uses several nested template directories. The
-loader downloads those spectra and materializes them into the flat
-component-bank layout above. Parameter-file paths are relative to the shared
-`spectral_templates/` root:
+loader downloads those spectra and materializes them into the build's flat
+`templates/` directory:
 
 | Source | Parameter file | Components |
 |---|---|---:|
-| EAZY12 | `eazy12/eazy12.param` | 12 |
-| EAZY6 | `eazy6/eazy6.param` | 6 |
+| EAZY12 | `eazy12.param` | 12 |
+| EAZY6 | `eazy6.param` | 6 |
 
 No separate download command is required. Calling the full builder or loading
 one of these banks downloads any missing files. Use `overwrite=True` in the
@@ -67,6 +63,8 @@ Its principal outputs are written under:
 
 ```text
 $SCRATCH/bedcosmo/num_visits/empirical_prior/eazy12/
+├── templates/eazy12.param
+├── templates/component_*.dat
 ├── healpix/hp*/desi_eazy_empirical_weights.csv
 ├── desi_eazy_empirical_weights.csv
 ├── build_provenance.json
@@ -125,14 +123,14 @@ for a reproducible full build.
 
 Subset searches, family discovery, spectral-feature diagnostics, and reduced
 prior construction live under [`reduced/`](reduced/README.md). A generated bank
-is stored beside its parent source, for example:
+is copied into its reduced prior build, for example:
 
 ```text
-spectral_templates/eazy12/reduced/eazy12_t1-t7.param
+empirical_prior/eazy12-t1-t7/templates/eazy12_t1-t7.param
 ```
 
-The reduced parameter file references the existing EAZY12 component files, so
-the spectra themselves are not duplicated.
+The selected component files are copied too, so the reduced build remains
+self-contained and cannot silently pick up a different parent bank.
 
 For shared KDE/flow runtime details, artifact snapshotting, and the broader
 NumVisits empirical-prior architecture, see the parent

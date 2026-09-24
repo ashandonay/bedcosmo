@@ -11,8 +11,9 @@ DEFAULT_SURVEY = "main"
 DEFAULT_PROGRAM = "dark"
 NUM_VISITS_EXPERIMENT = "num_visits"
 EMPIRICAL_PRIOR_ROOT_DIR = "empirical_prior"
-NUM_VISITS_SPECTRAL_TEMPLATE_ROOT_DIR = "spectral_templates"
-DESI_SAMPLES_DIR = "desi_samples"
+TEMPLATE_BANK_SUBDIR = "templates"
+DESI_TRAINING_DATA_DIR = "desi_training_data"
+DESI_CANDIDATE_MANIFEST_FILENAME = "desi_candidate_manifest.csv"
 DEFAULT_EMPIRICAL_PRIOR_VARIANT = "eazy12"
 # Build names are paths relative to the num_visits scratch root. Keeping the
 # variant in the build name lets existing --build-name callers work with the
@@ -57,14 +58,14 @@ def get_num_visits_scratch() -> Path:
     return get_bedcosmo_scratch() / NUM_VISITS_EXPERIMENT
 
 
-def get_num_visits_spectral_template_dir() -> Path:
-    """Shared downloaded and learned template banks for NumVisits experiments."""
-    return get_num_visits_scratch() / NUM_VISITS_SPECTRAL_TEMPLATE_ROOT_DIR
+def get_desi_training_data_dir() -> Path:
+    """Shared DESI manifests, matrices, and basis-training diagnostics."""
+    return get_num_visits_scratch() / DESI_TRAINING_DATA_DIR
 
 
-def get_desi_samples_dir() -> Path:
-    """Direct-DESI sample manifests and rest-frame training matrices."""
-    return get_num_visits_scratch() / DESI_SAMPLES_DIR
+def get_desi_candidate_manifest_path() -> Path:
+    """Shared catalog-level DESI population used by empirical prior sources."""
+    return get_desi_training_data_dir() / DESI_CANDIDATE_MANIFEST_FILENAME
 
 
 def get_desi_data_dir(*, dr: str = DEFAULT_DR) -> Path:
@@ -95,18 +96,14 @@ def add_desi_dir_argument(parser) -> None:
     )
 
 
-def get_template_dir() -> Path:
-    """Shared NumVisits spectral-template root.
-
-    EAZY and directly learned DESI banks live side by side beneath this root,
-    for example ``eazy12/eazy12.param`` and ``desi8/desi8.param``.
-    """
-    return get_num_visits_spectral_template_dir()
-
-
 def get_prior_build_dir(name: str = DEFAULT_EMPIRICAL_PRIOR_DIR) -> Path:
     """Prior build root, including its variant below ``empirical_prior/``."""
     return get_num_visits_scratch() / name
+
+
+def get_template_dir(name: str = DEFAULT_EMPIRICAL_PRIOR_DIR) -> Path:
+    """Template bank owned by one empirical-prior build."""
+    return get_prior_build_dir(name) / TEMPLATE_BANK_SUBDIR
 
 
 def healpix_dir_name(healpix: int) -> str:

@@ -5,6 +5,8 @@ End-to-end empirical SED prior build: DESI download → NNLS fits → combine �
 Default output tree (``--build-name empirical_prior/eazy12``)::
 
     $SCRATCH/bedcosmo/num_visits/empirical_prior/eazy12/
+      templates/eazy12.param
+      templates/component_*.dat
       healpix/hp23040/desi_eazy_empirical_weights.csv
       healpix/hp27257/...
       desi_eazy_empirical_weights.csv   # combined
@@ -14,10 +16,9 @@ Default output tree (``--build-name empirical_prior/eazy12``)::
       sed_prior_kde_native.json
       build.log
 
-Shared inputs (downloaded once, reused across builds)::
+Shared inputs::
 
     $SCRATCH/bedcosmo/desi/tiny_dr1/
-    $SCRATCH/bedcosmo/num_visits/spectral_templates/eazy12/
 
 Example::
 
@@ -37,6 +38,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+from ..desi.training_matrix import discover_desi_manifest
 from ..desi_data import ensure_desi_healpix
 from ..paths import (
     BUILD_PROVENANCE_FILENAME,
@@ -45,10 +47,12 @@ from ..paths import (
     SED_PRIOR_KDE_GAUSSIANIZED_FILENAME,
     ZWARN_UNSTABLE_BIT,
     add_desi_dir_argument,
+    get_desi_candidate_manifest_path,
     get_healpix_fit_dir,
     get_prior_build_dir,
     get_prior_kde_path,
     get_prior_weights_csv,
+    get_template_dir,
     resolve_desi_dir,
 )
 from ..provenance import write_provenance
@@ -60,7 +64,9 @@ from ..template_config import (
 from ..templates import (
     DEFAULT_TEMPLATE_NORM_MAX_AA,
     DEFAULT_TEMPLATE_NORM_MIN_AA,
+    DEFAULT_TEMPLATE_PARAM_6D,
     DEFAULT_TEMPLATE_PARAM_12D,
+    materialize_eazy_template_bank,
 )
 from .combine_healpix_weights import combine_healpix_weights
 
@@ -202,11 +208,20 @@ def build_prior(
     desi_dir = resolve_desi_dir(desi_dir)
     prior_dir = get_prior_build_dir(build_name)
     prior_dir.mkdir(parents=True, exist_ok=True)
+    template_dir = get_template_dir(build_name)
+    if template_param in {DEFAULT_TEMPLATE_PARAM_6D, DEFAULT_TEMPLATE_PARAM_12D}:
+        materialize_eazy_template_bank(template_param, template_dir=template_dir)
+    elif not (template_dir / template_param).is_file():
+        raise FileNotFoundError(
+            f"Custom template bank must already exist inside this build: "
+            f"{template_dir / template_param}"
+        )
     weights_csv = get_prior_weights_csv(build_name)
     kde_path = get_prior_kde_path(build_name)
     log_path = prior_dir / "build.log"
     fit_python = sys.executable
     kde_py = resolve_kde_python(kde_python)
+    candidate_manifest_path = get_desi_candidate_manifest_path()
 
     provenance_path = prior_dir / BUILD_PROVENANCE_FILENAME
     write_provenance(
@@ -216,6 +231,7 @@ def build_prior(
             "build_name": build_name,
             "template": {
                 "template_param": template_param,
+                "template_dir": template_dir,
                 "normalization": {
                     "method": "integral",
                     "wave_min_aa": float(norm_min),
@@ -240,7 +256,10 @@ def build_prior(
                 "seed": int(seed),
             },
             "quality": {"max_chi2_dof": max_chi2_dof},
-            "inputs": {"desi_dir": desi_dir},
+            "inputs": {
+                "desi_dir": desi_dir,
+                "candidate_manifest": candidate_manifest_path,
+            },
             "kde_request": {
                 "sample": int(kde_sample),
                 "requested_python": kde_python,
@@ -272,6 +291,7 @@ def build_prior(
                 fit_method=fit_method,
                 coeff_norm=coeff_norm,
                 template_param=template_param,
+                template_dir=template_dir,
                 norm_min=norm_min,
                 norm_max=norm_max,
                 wave_obs_min=wave_obs_min,
@@ -288,6 +308,7 @@ def build_prior(
                 kde_py=kde_py,
                 allow_nonzero_zwarn=allow_nonzero_zwarn,
                 zwarn_forbid_mask=zwarn_forbid_mask,
+                candidate_manifest_path=candidate_manifest_path,
             )
         finally:
             sys.stdout = orig_out
@@ -299,6 +320,8 @@ def build_prior(
         "kde_path": kde_path,
         "build_log": log_path,
         "build_provenance": provenance_path,
+        "candidate_manifest": candidate_manifest_path,
+        "template_dir": template_dir,
     }
 
 
@@ -319,6 +342,7 @@ def _build_prior_body(
     fit_method: str,
     coeff_norm: str,
     template_param: str,
+    template_dir: Path,
     norm_min: float,
     norm_max: float,
     wave_obs_min: float | None,
@@ -335,6 +359,7 @@ def _build_prior_body(
     kde_py: str,
     allow_nonzero_zwarn: bool,
     zwarn_forbid_mask: int | None,
+    candidate_manifest_path: Path,
 ) -> None:
     if not skip_desi:
         print(f"\nStep 1/4: ensure DESI coadd + redrock under {desi_dir}")
@@ -348,9 +373,26 @@ def _build_prior_body(
     else:
         print("\nStep 1/4: skipped (--skip-desi)")
 
+    print(f"\nShared DESI population → {candidate_manifest_path}")
+    candidate_manifest = discover_desi_manifest(
+        healpix,
+        desi_dir=desi_dir,
+        target_spectype=target_spectype,
+        z_min=z_min,
+        z_max=z_max,
+        allow_nonzero_zwarn=allow_nonzero_zwarn,
+        zwarn_forbid_mask=zwarn_forbid_mask,
+    )
+    if candidate_manifest.empty:
+        raise ValueError("No DESI spectra passed the shared candidate selection")
+    candidate_manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    candidate_manifest.to_csv(candidate_manifest_path, index=False)
+    print(f"  wrote {len(candidate_manifest):,} shared candidates")
+
     if not skip_fit:
         print(f"\nStep 2/4: fit EAZY template weights → {prior_dir}/healpix/hp*/")
         print(f"  template_param={template_param}")
+        print(f"  template_dir={template_dir}")
         for hp in healpix:
             outdir = get_healpix_fit_dir(hp, build_name=build_name)
             csv_path = outdir / "desi_eazy_empirical_weights.csv"
@@ -370,6 +412,8 @@ def _build_prior_body(
                 str(outdir),
                 "--template-param",
                 str(template_param),
+                "--template-dir",
+                str(template_dir),
                 "--fit-method",
                 fit_method,
                 "--coeff-norm",
@@ -382,6 +426,8 @@ def _build_prior_body(
                 str(min_good_pixels),
                 "--target-spectype",
                 target_spectype,
+                "--target-manifest",
+                str(candidate_manifest_path),
                 "--z-min",
                 str(z_min),
                 "--seed",
@@ -504,7 +550,7 @@ def main() -> None:
         "--template-param",
         default=None,
         help=(
-            "Advanced template-bank .param override relative to spectral_templates/ "
+            "Advanced template-bank filename relative to this build's templates/ "
             "(default: derived from --template-source)."
         ),
     )

@@ -5,7 +5,7 @@ from pathlib import Path
 import numpy as np
 import yaml
 
-from bedcosmo.util import resolve_design_args_input_path, snapshot_design_args_config
+from bedcosmo.artifacts import resolve_design_args_input_path, snapshot_design_args_config
 
 
 def test_resolve_design_input_path_expands_environment(monkeypatch, tmp_path):

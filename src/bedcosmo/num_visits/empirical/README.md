@@ -1,24 +1,44 @@
 # Empirical galaxy SED prior (`empirical`)
 
-Build and sample an empirical prior over galaxy SEDs for the `num_visits` BED experiment: fit EAZY templates to DESI spectra (NNLS), pool HEALPix patches, train a **smooth ILR KDE**, and sample through a GPU prior pool in `NumVisits` (`cosmo_model: empirical`).
+Build and sample empirical galaxy-SED priors for the `num_visits` BED
+experiment. Both supported sources are trained on DESI galaxy spectra:
+
+- `eazy12` / `eazy6` fit nonnegative mixtures of fixed EAZY templates; and
+- `desi8` learns eight nonnegative component spectra directly from DESI before
+  fitting the population coefficients.
+
+Each source produces the same runtime interface: an ILR coefficient prior, an
+overall flux scale, redshift, a spectral-template bank, and optional prior
+normalizing flows consumed by `NumVisits` (`cosmo_model: empirical`).
 
 Source-specific build tools are organized under [`eazy/`](eazy/) for EAZY
 template fits and [`desi/`](desi/) for bases learned directly from DESI spectra.
 KDE, flow, simplex, template-loading, and runtime code remains shared here.
 
-**Production parameterization:** isometric log-ratios (ILR) — the centered log-ratios \(f_k^{\mathrm{clr}} = \log a_k - \mathrm{mean}_j\log a_j\) expressed in an orthonormal basis of their sum-zero hyperplane, giving \(K-1\) full-rank coordinates for \(K=12\) templates, plus \(\log s\) and \(z\) — **13 features** (`f1`…`f11`, `log_c_scale`, `z`). ILR removes the exact CLR sum-zero constraint (which made the 14D differential entropy ill-posed); CLR remains the internal intermediate (`ilr = clr·V`, `a = softmax(clr)`) and a readable legacy stored format. Legacy artifacts used raw weights, logits, masked support projection, or 14D CLR.
+**Production parameterization:** isometric log-ratios (ILR) — the centered
+log-ratios \(f_k^{\mathrm{clr}} = \log a_k -
+\mathrm{mean}_j\log a_j\) expressed in an orthonormal basis of their sum-zero
+hyperplane. A bank of \(K\) components gives \(K-1\) full-rank shape
+coordinates plus \(\log s\) and \(z\), or \(K+1\) features total. The current
+`desi8` configuration therefore has nine features (`f1`…`f7`,
+`log_c_scale`, `z`); EAZY12 has thirteen. ILR removes the exact CLR sum-zero
+constraint. CLR remains the internal intermediate (`ilr = clr·V`,
+`a = softmax(clr)`).
 
 ---
 
 ### Prerequisites
 
 - `conda activate bedcosmo` with editable install: `pip install -e ".[sed-prior]"`
+- To learn a direct DESI basis, install both relevant extras instead:
+  `pip install -e ".[sed-prior,desi-basis]"`
 - DESI HTTP credentials in `~/.desi_http_user` (`username:password`) for first-time DESI download
 - `$SCRATCH` set or writes under `~/scratch/bedcosmo/`
 
-### Data build
+### Build the source data and KDE
 
-To generate the empirical prior data for BED training:
+For an EAZY12 prior:
+
 ```bash
 python -m bedcosmo.num_visits.empirical.eazy.build_prior
 ```
@@ -27,6 +47,8 @@ Default `--build-name empirical_prior/eazy12` writes:
 
 ```text
 $SCRATCH/bedcosmo/num_visits/empirical_prior/eazy12/
+  templates/eazy12.param
+  templates/component_*.dat
   healpix/hp23040/desi_eazy_empirical_weights.csv
   healpix/hp27257/...
   desi_eazy_empirical_weights.csv
@@ -35,9 +57,9 @@ $SCRATCH/bedcosmo/num_visits/empirical_prior/eazy12/
   sed_prior_kde_native.json
 ```
 
-Shared inputs (reused across builds): `$SCRATCH/bedcosmo/desi/tiny_dr1/` and
-`$SCRATCH/bedcosmo/num_visits/spectral_templates/`. EAZY and directly learned
-DESI banks use the same `<source>/component_*.dat` plus `<source>.param` layout.
+The shared DESI input is `$SCRATCH/bedcosmo/desi/tiny_dr1/`. Every prior build
+owns its exact EAZY-compatible bank under `templates/`; the KDE/flow and its
+component spectra therefore move and snapshot as one unit.
 
 `build_prior` also writes ``build.log`` and ``build_provenance.json`` into that
 directory. The provenance records the template bank, template normalization
@@ -48,6 +70,23 @@ provenance is embedded in the KDE artifact so NumVisits can validate and reuse
 the exact normalization at runtime.
 
 Default HEALPix patches: `23040 27257 27245 27259 27247 27256 27258 27344 26282`.
+
+For the configured `desi8` source, first build the shared full-population
+rest-frame matrix, then learn the production basis and coefficient prior:
+
+```bash
+python -m bedcosmo.num_visits.empirical.desi.fit_basis \
+  --max-spectra 0 \
+  --ranks 8
+
+python -m bedcosmo.num_visits.empirical.desi.build_prior --rank 8
+```
+
+This writes the prior to `num_visits/empirical_prior/desi8/` and its template
+bank to `num_visits/empirical_prior/desi8/templates/`. See
+[`desi/README.md`](desi/README.md) for the split, support, factorization, and
+held-out evaluation details. Neither source builder trains the prior flow;
+that is the separate [prior-flow step](#step-3-prior-normalizing-flow-prior_flowpy).
 
 ### Resume / partial runs
 
@@ -77,10 +116,10 @@ template bank via CLI (or the matching fields in `prior_args_empirical.yaml`):
 ./submit.sh train num_visits empirical --prior-template-source eazy6
 ```
 
-Production default is `template_source: eazy12` with `reduced_templates: null`
-(full twelve-template bank).
+The checked-in BED configuration uses `template_source: desi8` with
+`reduced_templates: null`. The EAZY builder itself still defaults to EAZY12.
 
-### Key flags
+### Key EAZY-build flags
 
 | Flag | Default | Notes |
 |------|---------|--------|
@@ -110,7 +149,7 @@ Production default is `template_source: eazy12` with `reduced_templates: null`
 | `eazy/fit_eazy_weights_to_desi.py` | Per-galaxy NNLS template fit → weights CSV + fit diagnostics |
 | `eazy/combine_healpix_weights.py` | Concatenate per-patch CSVs into one training table |
 | `fit_sed_prior_kde.py` | Train KDE + gaussianizer (+ offline y-KDE diagnostic) → `sed_prior_kde_native.joblib` |
-| `prior_flow.py` | Train normalizing flow(s) over the prior (native + gaussianized) → `sed_prior_flow_*.pt` (the default `prior_source`) |
+| `prior_flow.py` | Train native and gaussianized normalizing flows over the prior → `sed_prior_flow_*.pt` (used by configured `density_type: flow`) |
 | `validate_prior_flow.py` | A/B the trained flow(s) against the KDE (panels + getdist triangles, both spaces) |
 | `eazy/run_healpix_fits.sh` | Batch EAZY fits only (no combine/KDE) |
 | `eazy/run_healpix_diagnostic_plots.sh` | Per-patch `--plot-only` triangles + cross-patch comparison |
@@ -118,24 +157,29 @@ Production default is `template_source: eazy12` with `reduced_templates: null`
 | `eazy/reduced/` | EAZY reduced-template search, family discovery, diagnostics, and prior construction; see [`eazy/reduced/README.md`](eazy/reduced/README.md) |
 | `diagnostic_plots.py` | Post-build KDE/NumVisits diagnostics |
 | `diagnose_transform_input.py` | NumVisits `transform_input` triangle diagnostics |
-| `sed_prior.py` | Empirical prior: GPU pool, sampling, log-density scoring, and flow attachment (`prior_source` {kde, flow}) |
+| `sed_prior.py` | Empirical prior: GPU pool, sampling, log-density scoring, artifact snapshotting, and `density_type` selection (`kde` / `flow`) |
 | `simplex.py` | Weight ↔ CLR ↔ ILR maps + parameterization dispatch (numpy + torch) |
-| `templates.py` | Load EAZY template bank |
+| `templates.py` | Materialize EAZY banks and load any EAZY-compatible component bank |
 
 **Typical paths** (under `$SCRATCH/bedcosmo`, or `~/scratch/bedcosmo` when `SCRATCH` is unset)
 
 | What | Path |
 |------|------|
-| EAZY templates | `eazy/` (auto-downloaded on first fit) |
+| Spectral template banks | `num_visits/empirical_prior/<source>/templates/` |
 | DESI tiny DR1 | `desi/tiny_dr1/` |
-| Empirical-prior variants | `num_visits/empirical_prior/{eazy12,eazy6,allow_zwarn,no_unstable}/` |
-| Direct DESI samples and matrix | `num_visits/desi_samples/` |
-| **Production prior build** | `num_visits/empirical_prior/eazy12/` |
+| Empirical-prior variants | `num_visits/empirical_prior/{desi8,eazy12,eazy6,eazy12-t1-t7,...}/` |
+| Shared DESI training data | `num_visits/desi_training_data/` |
+| **Configured prior build** | `num_visits/empirical_prior/desi8/` |
 | Per-patch fits | `num_visits/empirical_prior/eazy12/healpix/hp{HEALPIX}/` |
 | Combined weights | `num_visits/empirical_prior/eazy12/desi_eazy_empirical_weights.csv` |
-| KDE artifact | `num_visits/empirical_prior/eazy12/sed_prior_kde_native.joblib` |
-| gaussianized KDE (diagnostic) | `num_visits/empirical_prior/eazy12/sed_prior_kde_gaussianized.joblib` |
-| Training config | [`prior_args_empirical.yaml`](../../../../experiments/num_visits/prior_args_empirical.yaml) (`prior_dir: null` → default scratch build at snapshot) |
+| KDE artifact | `num_visits/empirical_prior/<source>/sed_prior_kde_native.joblib` |
+| gaussianized KDE (offline diagnostic) | `num_visits/empirical_prior/<source>/sed_prior_kde_gaussianized.joblib` |
+| Training config | [`prior_args_empirical.yaml`](../../../../experiments/num_visits/prior_args_empirical.yaml) (`prior_dir: null` resolves from `template_source` at snapshot) |
+
+`num_visits/desi_training_data/desi_candidate_manifest.csv` is the shared
+catalog-level DESI population for both EAZY and directly learned DESI bases.
+EAZY continues fitting the native coadd pixels for those targets; direct-DESI
+basis learning additionally uses the rest-frame matrix stored beside it.
 
 **Notebook:** `experiments/num_visits/notebooks/empircal_prior.ipynb`
 
@@ -156,17 +200,21 @@ The KDE is trained on **ILR** features after a small simplex floor:
 3. Project CLR onto an orthonormal basis \(V\) of its sum-zero hyperplane: \(\mathbf{f} = \mathbf{f}^{\mathrm{clr}} V\), giving \(K-1\) full-rank ILR coords
 4. KDE in \((f_1,\ldots,f_{K-1}, \log s, z)\); decode weights via \(\mathbf{f}^{\mathrm{clr}} = \mathbf{f} V^\top\), \(a = \mathrm{softmax}(\mathbf{f}^{\mathrm{clr}})\)
 
-For \(K=12\):
+For any \(K\)-component bank:
 
 | Feature | Meaning |
 |---------|---------|
-| `f1`…`f11` | Isometric log-ratios (\(K{-}1\) orthonormal coords; no sum constraint) |
+| `f1`…`f{K-1}` | Isometric log-ratios (\(K{-}1\) orthonormal coords; no sum constraint) |
 | `log_c_scale` | \(\log s = \log\sum_k \|c_k\|\) |
 | `z` | DESI redrock redshift |
 
 Rest-frame SED: \(c_k = e^{\log s}\, a_k\), \(f_\mathrm{rest}(\lambda) \propto \sum_k c_k T_k(\lambda)\).
 
-**Why ILR over CLR:** the 12 CLR coords sum to exactly zero, so the physical prior lives on a 13-manifold and its 14D differential entropy is ill-posed. ILR is CLR in an orthonormal basis of that hyperplane — 11 full-rank coords, `|det|=1`, so entropy is well-posed and basis-independent. The likelihood is unchanged (it only ever sees the reconstructed template weights). CLR remains the internal intermediate and a readable legacy stored format.
+**Why ILR over CLR:** the \(K\) CLR coordinates sum to exactly zero, so treating
+all of them as independent makes differential entropy ill-posed. ILR expresses
+the same composition using \(K-1\) full-rank orthonormal coordinates. The
+likelihood is unchanged because it only sees the reconstructed template
+weights.
 
 **NNLS** (\(c_k \ge 0\)): many training \(a_k\) are **exactly zero** (inactive templates). The smooth prior keeps tiny positive KDE mass on inactive directions instead of hard support masks.
 
@@ -342,7 +390,7 @@ Paths default from `paths.py` (`desi_eazy_empirical_weights.csv` and `sed_prior_
 |------|----------|
 | `sed_prior_kde_native.joblib` | KDE, scaler, `training_x`, **NF gaussianizer** (`gaussianizer_state`), bounds, metadata |
 | `sed_prior_kde_gaussianized.joblib` | Offline diagnostic KDE in gaussianized coords (auto-fit at build; not snapshotted / not used at runtime — EIG uses `sed_prior_flow_gaussianized.pt` or the N(0,I) shortcut) |
-| `sed_prior_kde.json` | Metadata summary |
+| `sed_prior_kde_native.json` | Metadata summary |
 | `kde_samples_*.png` | Diagnostic triangles when `--sample > 0` |
 | `training_gaussianized_triangle.png` | Gaussianized training/coords |
 
@@ -367,45 +415,53 @@ a, log_s, z = samples_to_coeffs(x, n, parameterization="ilr")
 
 ## Step 3: Prior normalizing flow (`prior_flow.py`)
 
-The **default `prior_source` is `flow`**: the empirical prior is drawn from a trained
-normalizing flow (zuko NSF) rather than the KDE plug-in. One flow is trained per space,
-both fit to KDE draws and saved beside the KDE artifact:
+The checked-in configuration uses `density_type: flow`: the empirical prior
+pool is drawn from a trained zuko NSF rather than directly from the KDE. Train
+both spaces from the same native KDE artifact and save them beside it:
 
-- **`native`** — trained on native/ILR rows. Does two jobs at runtime: the prior-pool
-  **sampler** and the prior **entropy** density (`H = -E[log p_flow]`, the flow's exact
-  entropy — the same NF plug-in used for the posterior `H_post`, so `EIG = H_prior - H_post`
-  uses one coherent estimator). For `transform_input: true` the entropy is the **Jacobian
-  bridge** `H_y = H_native + E[log|det dT/dx|]` (native flow + the analytic gaussianizer
-  Jacobian; no inverse needed).
-- **`gaussianized`** — trained on KDE draws pushed through the production gaussianizer
-  (`y = T(x)`). Currently a **density-only diagnostic** (validated by the A/B below); it is
-  not consumed by the runtime entropy path.
+- **`native`** models the native ILR/scale/redshift rows. It supplies the GPU
+  prior-pool samples and scores the prior when `transform_input: false`.
+- **`gaussianized`** models those same rows after the production joint
+  Gaussianizer, `y = T(x)`. It supplies the prior density used by BED when
+  `transform_input: true`, which is the current empirical training default.
 
-Why a flow and not the KDE/`N(0,I)` shortcut: at 13D the KDE plug-in and kNN entropy are
-biased, and the `N(0,I)` gaussianized shortcut overestimates `H_y` by ~13 nats. The flow's
-plug-in entropy is exact up to MC error.
+The gaussianized KDE joblib is only an offline diagnostic; it is not the
+gaussianized prior flow. With the current default (`density_type: flow` and
+`transform_input: true`), both `.pt` files are required: native for sampling,
+gaussianized for density scoring. Entropy is the Monte Carlo expectation
+`H = -E[log p_flow]`; the flow supplies a directly evaluable log density rather
+than a high-dimensional KDE or kNN entropy estimate.
 
 ### Train
 
-CPU-heavy (NSF). Trains `--space both` concurrently on one node (native + gaussianized,
-half the cores each), ~10 min at production size.
+CPU-heavy (NSF). Trains `--space both` concurrently on one node (native +
+gaussianized, half the cores each).
 
 ```bash
-# auto SLURM/local launcher (run from this dir)
-./train_prior_flow.sh --space both
+# auto SLURM/local launcher (run from this directory)
+./train_prior_flow.sh --space both \
+  --kde-path "$SCRATCH/bedcosmo/num_visits/empirical_prior/desi8/sed_prior_kde_native.joblib" \
+  --out-dir "$SCRATCH/bedcosmo/num_visits/empirical_prior/desi8"
 
 # or submit the SLURM job directly (CPU node, account desi)
-sbatch scripts/slurm/train_prior_flow.sh --space both --n 100000 --epochs 400
+sbatch scripts/slurm/train_prior_flow.sh \
+  --space both \
+  --kde-path "$SCRATCH/bedcosmo/num_visits/empirical_prior/desi8/sed_prior_kde_native.joblib" \
+  --out-dir "$SCRATCH/bedcosmo/num_visits/empirical_prior/desi8" \
+  --n 100000 --epochs 400
 
 # or run the module directly (cap threads on a login node)
-python -m bedcosmo.num_visits.empirical.prior_flow --space both --threads 8
+python -m bedcosmo.num_visits.empirical.prior_flow \
+  --kde-path "$SCRATCH/bedcosmo/num_visits/empirical_prior/desi8/sed_prior_kde_native.joblib" \
+  --out-dir "$SCRATCH/bedcosmo/num_visits/empirical_prior/desi8" \
+  --space both --threads 8
 ```
 
 Reads the KDE from `get_prior_kde_path()` (override `--kde-path`) and writes beside it
 (override `--out-dir`):
 
 ```text
-$SCRATCH/bedcosmo/num_visits/empirical_prior/eazy12/
+$SCRATCH/bedcosmo/num_visits/empirical_prior/desi8/
   sed_prior_flow_native.pt              sed_prior_flow_native_train.log
   sed_prior_flow_gaussianized.pt        sed_prior_flow_gaussianized_train.log
   prior_flow_training_native.png        prior_flow_training_gaussianized.png
@@ -425,9 +481,10 @@ The gate before trusting `density_type: flow`: the flow must reproduce the KDE. 
 and read-only. Two axes — `--space {native,gaussianized,both}` and `--plot {panel,triangle,both}`.
 
 ```bash
-# everything (both spaces, panels + triangles), threads capped for a login node
-# default: production eazy12 KDE + flows beside it
-python -m bedcosmo.num_visits.empirical.validate_prior_flow --threads 8
+# Everything for the configured DESI8 source (both spaces, panels + triangles).
+python -m bedcosmo.num_visits.empirical.validate_prior_flow \
+  --artifact "$SCRATCH/bedcosmo/num_visits/empirical_prior/desi8/sed_prior_kde_native.joblib" \
+  --threads 8
 
 # alternate prior build (eazy6, eazy12-t1-t7, …): point at its native KDE joblib;
 # flow .pt files are resolved automatically from the same directory
@@ -451,8 +508,11 @@ Writes `validate_prior_flow_{native,gaussianized}{,_triangle}.png` beside the KD
 `transform_input: false` path is validated end-to-end (A/B PASS; eval `H_prior` matches the
 offline flow entropy).
 
-The flows must exist beside the KDE artifact (train them first with `--kde-path` /
-`--out-dir`). Runtime loads the frozen copies from `artifacts/empirical/` after snapshot.
+The flows must exist beside the KDE artifact (train them first with
+`--kde-path` / `--out-dir`). Runtime loads the frozen copies from
+`artifacts/empirical/` after snapshot. Standalone prior-flow and validation
+commands still fall back to the EAZY12 path when no artifact is supplied, so
+pass the path explicitly for DESI8 or a reduced EAZY build.
 
 ---
 
@@ -488,13 +548,12 @@ python -m bedcosmo.num_visits.empirical.diagnostic_plots clr-triangle \
 
 ### Config
 
-- **Parameters:** taken at runtime from the KDE artifact’s `feature_names` (not hardcoded from `models.yaml`). Production 12-template builds use `f1`…`f11`, `log_c_scale`, `z`; a 6-template prior gets `f1`…`f5`, `log_c_scale`, `z` automatically.
-- **Prior build dir:** [`prior_args_empirical.yaml`](../../../../experiments/num_visits/prior_args_empirical.yaml). Set `template_source` (`eazy12` / `eazy6`) and optional `reduced_templates` (`null` or `"t7,t10"`). These resolve `prior_dir` to `$SCRATCH/bedcosmo/num_visits/empirical_prior/<variant>` and fill `template_param` / `parameters`. Trained runs load the frozen copies from `artifacts/empirical/`.
+- **Parameters:** taken at runtime from the KDE artifact’s `feature_names` (not hardcoded from `models.yaml`). DESI8 uses `f1`…`f7`, `log_c_scale`, `z`; EAZY12 uses `f1`…`f11`, `log_c_scale`, `z`; EAZY6 uses `f1`…`f5`, `log_c_scale`, `z`.
+- **Prior build dir:** [`prior_args_empirical.yaml`](../../../../experiments/num_visits/prior_args_empirical.yaml). Set `template_source` (`desi8`, `eazy12`, or `eazy6`) and, for EAZY only, optional `reduced_templates` (`null` or `"t7,t10"`). These resolve `prior_dir` to `$SCRATCH/bedcosmo/num_visits/empirical_prior/<variant>` and fill `template_param` / `parameters`. Trained runs load the frozen copies from `artifacts/empirical/`.
 
 ```yaml
-template_source: eazy12      # or eazy6
-reduced_templates: null      # or "t7,t10"
-template_dir: null           # defaults to $SCRATCH/bedcosmo/num_visits/spectral_templates/
+template_source: desi8       # or eazy12 / eazy6
+reduced_templates: null      # EAZY only: e.g. "t7,t10"
 density_type: flow           # {flow (default), kde}; flow needs sed_prior_flow_*.pt in prior_dir
 ```
 
@@ -510,10 +569,13 @@ Any `prior_args.yaml` field can be overridden with `--prior-<field>` (dashes for
 underscores). Reserved top-level flags: `--prior-args-path`, `--prior-flow-path`.
 Fields that already start with `prior_` accept a short form (`--prior-pool-size` →
 `prior_pool_size`).
-With `density_type: flow` (the default), the trained flows are snapshotted into the run's
-`artifacts/empirical/` alongside the KDE and drive the prior pool + entropy; set
-`density_type: kde` for the pre-flow KDE baseline (e.g. a flow-vs-KDE A/B). See
-[Step 3](#step-3-prior-normalizing-flow-prior_flowpy) to train and validate the flows.
+With `density_type: flow` (the configured default), the trained flows are
+snapshotted into the run's `artifacts/empirical/` alongside the KDE. The native
+flow drives the prior pool; the density is scored by the native flow without
+input transformation or by the gaussianized flow with `transform_input: true`.
+Set `density_type: kde` for the pre-flow KDE baseline. See [Step
+3](#step-3-prior-normalizing-flow-prior_flowpy) to train and validate both flow
+spaces.
 
 - **Training:** [`train_args.yaml`](../../../../experiments/num_visits/train_args.yaml) `empirical` block:
 
@@ -622,7 +684,7 @@ Each gallery includes a representative member and one member rich in each
 selected template. It overlays the observed DESI coadd, full-basis fit,
 reduced fit, and each reduced template contribution; the side bars show the
 normalized reduced coefficients. For EAZY6, also pass
-`--build-name empirical_prior/eazy6 --template-param eazy6/eazy6.param`.
+`--build-name empirical_prior/eazy6 --template-param eazy6.param`.
 By default, every trace is divided by the same continuum estimated from the
 DESI coadd with a 250-rest-Angstrom Gaussian and then smoothed by 8 observed
 Angstroms for display. Defining the broad continuum scale in the rest frame
@@ -648,7 +710,7 @@ Turn the passing members of any discovered subset into a standalone empirical
 prior with:
 
 ```bash
-python -m bedcosmo.num_visits.empirical.eazy.reduced.build_reduced_template_prior \
+python -m bedcosmo.num_visits.empirical.eazy.reduced.build_template_prior \
   --templates T1+T7
 ```
 
@@ -676,13 +738,14 @@ Legacy layouts (`desi_eazy_hp*` at scratch root, `desi_eazy_empirical_prior_full
 
 | Step | Command / setting |
 |------|-------------------|
-| **Full build** | `python -m bedcosmo.num_visits.empirical.eazy.build_prior` |
-| Build name | `empirical_prior/eazy12` (under `num_visits/`) |
-| Fit | **NNLS**, **L1** norm, **`z_min=0.01`**, all candidates (no `--n-max`) |
+| **Configured source** | `desi8` (`empirical_prior/desi8`, including `templates/`) |
+| **DESI8 build** | `desi.fit_basis --max-spectra 0 --ranks 8`, then `desi.build_prior --rank 8` |
+| **EAZY12 build** | `python -m bedcosmo.num_visits.empirical.eazy.build_prior` |
+| EAZY fit | **NNLS**, **L1** norm, **`z_min=0.01`**, all candidates (no `--n-max`) |
 | KDE | **ILR**, **smooth**, \(\varepsilon=10^{-5}\), bandwidth **0.3** |
 | NF bijector | **`gaussianizer_state` in KDE artifact** (not rebuilt at train/eval) |
 | y-KDE (offline) | **`sed_prior_kde_gaussianized.joblib`** beside KDE (diagnostic only; runtime uses prior flows) |
-| **Prior flow** | `./train_prior_flow.sh --space both` → `sed_prior_flow_*.pt` beside KDE (default `density_type: flow`) |
+| **Prior flow** | `prior_flow --kde-path <source>/sed_prior_kde_native.joblib --out-dir <source> --space both` → both `sed_prior_flow_*.pt` files |
 | Validate flow | `validate_prior_flow --threads 8` (non-default build: `--artifact …/sed_prior_kde_native.joblib`) |
 | Training | `template_source` / `reduced_templates` at snapshot; runtime uses `artifacts/empirical/` |
 | Fit diagnostics | `./eazy/run_healpix_diagnostic_plots.sh` |
@@ -693,5 +756,5 @@ Legacy layouts (`desi_eazy_hp*` at scratch root, `desi_eazy_empirical_prior_full
 ## References
 
 - EAZY: [gbrammer/eazy-photoz](https://github.com/gbrammer/eazy-photoz),
-  materialized by default as `spectral_templates/eazy12/eazy12.param`
+  materialized by default as `empirical_prior/eazy12/templates/eazy12.param`
 - DESI DR1 coadd + redrock under `$SCRATCH/bedcosmo/desi/tiny_dr1`

@@ -7,20 +7,20 @@ bao:
       # bao has TWO forecast spaces and both have trained emulators, so this entry carries a space level (config | fourier)
       # Select with `emulator_space` in train_args.yaml or --emulator-space on the command line.
       config:
-        BGS: config/v5/BGS.pt
-        LRG1: config/v5/LRG1.pt
-        LRG2: config/v5/LRG2.pt
-        LRG3_ELG1: config/v5/LRG3_ELG1.pt
-        ELG2: config/v5/ELG2.pt
-        QSO: config/v5/QSO.pt
+        BGS: config/v6_sigma_hrdrag_scaled/BGS.pt
+        LRG1: config/v6_sigma_hrdrag_scaled/LRG1.pt
+        LRG2: config/v6_sigma_hrdrag_scaled/LRG2.pt
+        LRG3_ELG1: config/v6_sigma_hrdrag_scaled/LRG3_ELG1.pt
+        ELG2: config/v6_sigma_hrdrag_scaled/ELG2.pt
+        QSO: config/v6_sigma_hrdrag_scaled/QSO.pt
         Lya_QSO: null
       fourier:
-        BGS: fourier/v2/BGS.pt
-        LRG1: fourier/v2/LRG1.pt
-        LRG2: fourier/v2/LRG2.pt
-        LRG3_ELG1: fourier/v2/LRG3_ELG1.pt
-        ELG2: fourier/v2/ELG2.pt
-        QSO: fourier/v2/QSO.pt
+        BGS: fourier/v3_sigma_hrdrag_scaled/BGS.pt
+        LRG1: fourier/v3_sigma_hrdrag_scaled/LRG1.pt
+        LRG2: fourier/v3_sigma_hrdrag_scaled/LRG2.pt
+        LRG3_ELG1: fourier/v3_sigma_hrdrag_scaled/LRG3_ELG1.pt
+        ELG2: fourier/v3_sigma_hrdrag_scaled/ELG2.pt
+        QSO: fourier/v3_sigma_hrdrag_scaled/QSO.pt
         Lya_QSO: null
     base_omegak:
       config:

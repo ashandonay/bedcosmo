@@ -15,6 +15,11 @@ from bedcosmo.util import (
     load_nominal_samples, get_contour_area, parse_mlflow_params, sort_key_for_group_tuple,
     GETDIST_SETTINGS, restrict_mcsamples,
 )
+from bedcosmo.artifacts import (
+    load_eig_data_file,
+    _eig_data_has_variable_eigs,
+    _eig_data_has_marginal_eigs,
+)
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 from matplotlib.lines import Line2D
@@ -49,107 +54,6 @@ plt.rcParams['font.serif'] = ['DejaVu Serif', 'Times New Roman', 'Times', 'serif
 
 # Contour alpha for prior overlays in posterior triangle plots.
 PRIOR_CONTOUR_ALPHA = 0.4
-
-
-def _step_keys_for_eval(data, eval_step=None):
-    """Return step_* keys to inspect, optionally restricted to eval_step."""
-    if eval_step is not None:
-        step_str = f"step_{eval_step}" if not str(eval_step).startswith('step_') else str(eval_step)
-        return [step_str] if step_str in data else []
-    return [k for k in data.keys() if k.startswith('step_')]
-
-
-def _eig_data_has_variable_eigs(data, eval_step=None):
-    """True when eig_data contains joint (variable) EIG averages."""
-    for step_key in _step_keys_for_eval(data, eval_step):
-        variable = data.get(step_key, {}).get('variable', {})
-        if variable.get('eigs_avg') is not None:
-            return True
-    return False
-
-
-def _eig_data_has_marginal_eigs(data, eval_step=None):
-    """True when eig_data contains marginal EIG blocks."""
-    for step_key in _step_keys_for_eval(data, eval_step):
-        marginal = data.get(step_key, {}).get('marginal', {})
-        if marginal:
-            return True
-    return False
-
-
-def load_eig_data_file(artifacts_dir, eval_step=None, eig_kind='any'):
-    """
-    Load the most recent completed eig_data JSON file from the artifacts directory.
-
-    Args:
-        artifacts_dir (str): Path to the artifacts directory containing eig_data files
-        eval_step (str or int, optional): If provided, verify that the loaded file contains this step
-        eig_kind (str): Which EIG content the file must contain: ``'any'`` (default),
-            ``'variable'`` (joint EIG under ``step_*/variable``), or ``'marginal'``
-            (marginal EIG under ``step_*/marginal``). Use ``'variable'`` when comparing
-            joint EIGs so a newer marginal-only eval file is skipped.
-
-    Returns:
-        tuple: (json_path, data) where json_path is the path to the file and data is the loaded JSON.
-               Returns (None, None) if no valid file is found.
-
-    Raises:
-        ValueError: If no completed eig_data files are found, if file cannot be loaded, or if eval_step is not found in the data.
-    """
-    if eig_kind not in ('any', 'variable', 'marginal'):
-        raise ValueError(f"eig_kind must be 'any', 'variable', or 'marginal', got {eig_kind!r}")
-
-    if not os.path.exists(artifacts_dir):
-        raise ValueError(f"Artifacts directory not found: {artifacts_dir}")
-
-    # Find all eig_data JSON files
-    eig_files = glob_module.glob(f"{artifacts_dir}/eig_data_*.json")
-
-    if len(eig_files) == 0:
-        raise ValueError(f"No eig_data JSON files found in {artifacts_dir}")
-
-    # Sort by filename (most recent first)
-    eig_files.sort(key=lambda x: os.path.basename(x), reverse=True)
-
-    # Check each file for completion status (most recent first)
-    for json_path in eig_files:
-        try:
-            with open(json_path, 'r') as f:
-                data = json.load(f)
-
-            # Check if evaluation is completed using status field
-            status = data.get('status')
-            if status != 'complete':
-                # Skip incomplete files
-                continue
-
-            # If eval_step is provided, verify it exists in the data
-            if eval_step is not None:
-                step_str = f"step_{eval_step}" if not str(eval_step).startswith('step_') else str(eval_step)
-                if step_str not in data:
-                    # This file doesn't have the requested step, try next file
-                    continue
-
-            if eig_kind == 'variable' and not _eig_data_has_variable_eigs(data, eval_step):
-                continue
-            if eig_kind == 'marginal' and not _eig_data_has_marginal_eigs(data, eval_step):
-                continue
-
-            # Found a complete file (and it has the requested step if eval_step was provided)
-            return json_path, data
-
-        except Exception as e:
-            # Skip files that can't be loaded and continue to next
-            print(f"Warning: Error loading {json_path}: {e}, skipping...")
-            continue
-
-    # No completed files found (or no file with the requested eval_step)
-    kind_suffix = f" with {eig_kind} EIG data" if eig_kind != 'any' else ""
-    if eval_step is not None:
-        raise ValueError(
-            f"No completed eig_data files with step {eval_step}{kind_suffix} found in {artifacts_dir}"
-        )
-    raise ValueError(f"No completed eig_data files{kind_suffix} found in {artifacts_dir}")
 
 
 def _normalize_marginal_subset_id(subset):
@@ -866,10 +770,13 @@ class BasePlotter:
 
         marker_values = dict(central_params)
         if getattr(experiment, "transform_input", False) and not transform_output:
+            # central_params are in reported units (multiplier applied); the
+            # bijector works in sampling units.
             phys = torch.tensor(
                 [
                     [
                         marker_values.get(p, experiment.get_central_param(p, 0.0))
+                        / getattr(experiment, f"{p}_multiplier", 1.0)
                         for p in experiment.cosmo_params
                     ]
                 ],
@@ -3562,7 +3469,6 @@ class ComparisonPlotter(BasePlotter):
         sort_reference=None,
         normalize=False,
         show_errorbars=True,
-        plot_input_design=False,
         design_labels=None,
         show_ratio_to_nominal=True,
         filename=None,
@@ -3588,12 +3494,13 @@ class ComparisonPlotter(BasePlotter):
             show_optimal (bool): If True, highlight each run's optimal EIG point when available.
             show_nominal (bool): If True, draw horizontal lines for nominal EIGs when available.
             title (str, optional): Custom figure title.
-            sort (bool): Whether to reorder designs by descending EIG using the reference run.
-            sort_reference (str, optional): Run ID or label that defines the sorting EIG. Required when `sort=True`.
+            sort (bool): Whether to reorder designs by descending EIG. Default True sorts by the
+                mean EIG across runs (symmetric). Pass ``sort_reference`` to sort by one run instead.
+            sort_reference (str, optional): Run ID or label whose EIG defines the sort order.
+                When omitted and ``sort=True``, designs are sorted by the cross-run mean EIG.
             normalize (bool): If True, plot percent difference vs each run's nominal EIG:
                                     ``100 * (EIG - EIG_nominal) / EIG_nominal``.
             show_errorbars (bool): If True, draw the filled std bands for each run.
-            plot_input_design (bool): If True, plot scatter points for input_designs from MLflow params on the heatmap.
                                     Only plots if they match the evaluation designs. Default False.
             design_labels (list, optional): Custom labels for each design dimension. Must be the same length as the number of design dimensions.
                                     If omitted, tries eig_data metadata, then the sort-reference (or first) run's
@@ -3609,11 +3516,10 @@ class ComparisonPlotter(BasePlotter):
         var = self._resolve_var(var)
         storage_path = self.storage_path
 
-        # Parse params if we need them for var labels/sorting, plot_input_design,
+        # Parse params if we need them for var labels/sorting,
         # or experiment init (design_labels / nominal_design fallback).
         need_params = (
-            plot_input_design
-            or var is not None
+            var is not None
             or design_labels is None
             or show_ratio_to_nominal
         )
@@ -3748,26 +3654,6 @@ class ComparisonPlotter(BasePlotter):
             optimal_eig = variable_data.get('optimal_eig')
             optimal_design = variable_data.get('optimal_design')
 
-            # Get input_designs from MLflow params if requested
-            input_designs_from_params = None
-            if plot_input_design:
-                # Find the corresponding run_data to get run_obj
-                run_data_item = next((r for r in run_data_list if r['run_id'] == run_id), None)
-                if run_data_item and run_data_item.get('run_obj') is not None:
-                    try:
-                        input_designs_param = run_data_item['run_obj'].data.params.get('input_designs')
-                        if input_designs_param is not None:
-                            input_designs_list = json.loads(input_designs_param)
-                            input_designs_from_params = np.array(input_designs_list)
-                            if input_designs_from_params.ndim == 1:
-                                input_designs_from_params = input_designs_from_params.reshape(-1, 1)
-                            # Check if design dimensionality matches (allow different number of designs)
-                            if input_designs_from_params.shape[1] != designs_arr.shape[1]:
-                                print(f"Warning: input_designs from params for run {run_id} has {input_designs_from_params.shape[1]} dimensions, but evaluation designs have {designs_arr.shape[1]} dimensions. Skipping.")
-                                input_designs_from_params = None
-                    except Exception as e:
-                        print(f"Warning: Error loading input_designs from params for run {run_id}: {e}")
-
             run_records.append({
                 'run_id': run_id,
                 'run_label': run_label,
@@ -3778,7 +3664,6 @@ class ComparisonPlotter(BasePlotter):
                 'nominal_eig': nominal_eig,
                 'optimal_eig': optimal_eig,
                 'optimal_design': np.array(optimal_design) if optimal_design is not None else None,
-                'input_designs_from_params': input_designs_from_params
             })
 
         if not run_records:
@@ -3789,9 +3674,26 @@ class ComparisonPlotter(BasePlotter):
         # Check if designs are 1D or multi-dimensional
         is_1d_design = (num_dims == 1)
 
+        # Per-run plot values (normalized or raw) for the average line and optional mean sort.
+        plot_eigs_per_run = []
+        for record in run_records:
+            if normalize:
+                nominal_eig = record['nominal_eig']
+                if nominal_eig is None:
+                    raise ValueError(f"normalize=True requires nominal_eig for run {record['run_id']}")
+                if nominal_eig == 0:
+                    raise ValueError(
+                        f"normalize=True cannot divide by nominal_eig=0 for run {record['run_id']}"
+                    )
+                plot_eigs_per_run.append(
+                    100.0 * (record['eigs_avg'] - nominal_eig) / nominal_eig
+                )
+            else:
+                plot_eigs_per_run.append(np.asarray(record['eigs_avg'], dtype=float))
+        mean_eigs_plot = np.mean(np.stack(plot_eigs_per_run, axis=0), axis=0)
+
         reference_record = None
         global_sort_idx = None
-        per_run_sort = False  # Flag to indicate per-run sorting (no sort_reference)
 
         if sort:
             if sort_reference is not None:
@@ -3801,21 +3703,18 @@ class ComparisonPlotter(BasePlotter):
                 )
                 if reference_record is None:
                     raise ValueError(f"sort_reference '{sort_reference}' not found among provided run_ids or labels.")
-                global_sort_idx = np.argsort(reference_record['eigs_avg'])[::-1]
+                # Sort by the same units shown on the y-axis for that reference run.
+                ref_idx = next(
+                    i for i, rec in enumerate(run_records) if rec is reference_record
+                )
+                global_sort_idx = np.argsort(plot_eigs_per_run[ref_idx])[::-1]
             else:
-                # Sort each run independently from highest to lowest
-                per_run_sort = True
-                # Store per-run sort indices in each record
-                for record in run_records:
-                    record['sort_idx'] = np.argsort(record['eigs_avg'])[::-1]
+                # Symmetric default: order designs by cross-run mean EIG (highest first).
+                global_sort_idx = np.argsort(mean_eigs_plot)[::-1]
         else:
             global_sort_idx = np.arange(num_designs)
 
-        # Get sorted designs for heatmap (only if not per-run sorting)
-        if per_run_sort:
-            sorted_designs = None  # No heatmap when sorting per-run
-            run_for_nominal = run_records[0]  # Use first run for nominal design
-        elif reference_record is not None:
+        if reference_record is not None:
             sorted_designs = reference_record['designs'][global_sort_idx]
             run_for_nominal = reference_record
         else:
@@ -3892,22 +3791,12 @@ class ComparisonPlotter(BasePlotter):
                 print(f"Warning: Could not initialize experiment to get nominal_design: {e}")
                 print("Will display designs as absolute values instead of ratios.")
 
-        # Determine if we should show heatmap (only if not per-run sorting)
-        show_heatmap = not per_run_sort and (not is_1d_design or sort)
-        
-        if is_1d_design and not sort and not per_run_sort:
+        if is_1d_design and not sort:
             fig, ax_line = plt.subplots(figsize=figsize)
             ax_heat = None
             cbar_ax = None
             x_vals = sorted_designs[:, 0]
             x_label = design_labels[0]
-        elif per_run_sort:
-            # Per-run sorting: no heatmap, just line plot
-            fig, ax_line = plt.subplots(figsize=figsize)
-            ax_heat = None
-            cbar_ax = None
-            x_vals = np.arange(num_designs)
-            x_label = "Design Index (sorted per run, highest to lowest)"
         else:
             # For sorted 1D or multi-dimensional designs, align heatmap beneath line plot and add a vertical colorbar
             if is_1d_design and sort:
@@ -3940,8 +3829,7 @@ class ComparisonPlotter(BasePlotter):
             if sort_reference is not None:
                 x_label_suffix = f" (sorted by {reference_record['run_label']})"
             elif sort:
-                # Use first run as reference when sort_reference is not specified
-                x_label_suffix = f" (sorted by {run_records[0]['run_label']})"
+                x_label_suffix = " (sorted by mean EIG)"
             else:
                 x_label_suffix = ""
             x_label = f"Design Index{x_label_suffix}"
@@ -3952,30 +3840,32 @@ class ComparisonPlotter(BasePlotter):
 
         handles_for_legend = []
         nominal_handle = None
+        average_handle = None
 
-        for record in run_records:
-            # Use per-run sort_idx if per_run_sort, otherwise use global_sort_idx
-            if per_run_sort:
-                sort_idx = record['sort_idx']
+        # Cross-run average as a neutral gray line (symmetric reference for all runs).
+        mean_eigs_sorted = mean_eigs_plot[global_sort_idx]
+        if len(run_records) > 1:
+            if len(mean_eigs_sorted) == 1:
+                average_handle = ax_line.scatter(
+                    x_vals, mean_eigs_sorted, color='gray', zorder=3, label='Average'
+                )
             else:
-                sort_idx = global_sort_idx
+                average_handle = ax_line.plot(
+                    x_vals, mean_eigs_sorted, color='gray', linewidth=2.5,
+                    label='Average', zorder=3,
+                )[0]
 
-            eig_vals = record['eigs_avg'][sort_idx]
+        for record, plot_eigs in zip(run_records, plot_eigs_per_run):
+            sort_idx = global_sort_idx
+
             eig_std_vals = record['eigs_std'][sort_idx]
             color = record['color']
+            eig_vals_plot = plot_eigs[sort_idx]
 
             if normalize:
                 nominal_eig = record['nominal_eig']
-                if nominal_eig is None:
-                    raise ValueError(f"normalize=True requires nominal_eig for run {record['run_id']}")
-                if nominal_eig == 0:
-                    raise ValueError(
-                        f"normalize=True cannot divide by nominal_eig=0 for run {record['run_id']}"
-                    )
-                eig_vals_plot = 100.0 * (eig_vals - nominal_eig) / nominal_eig
                 eig_std_vals_plot = 100.0 * eig_std_vals / abs(nominal_eig)
             else:
-                eig_vals_plot = eig_vals
                 eig_std_vals_plot = eig_std_vals
 
             # Determine if single point or line
@@ -4038,40 +3928,6 @@ class ComparisonPlotter(BasePlotter):
                         zorder=5,
                         s=60
                     )
-            
-            # Plot input_designs from MLflow params if requested
-            if plot_input_design and record.get('input_designs_from_params') is not None:
-                input_designs = record['input_designs_from_params']
-                # Match each input_design to the corresponding evaluation design
-                scatter_x = []
-                scatter_y = []
-                
-                for input_design in input_designs:
-                    # Find the index in the original (unsorted) designs array
-                    match_idx = None
-                    for idx, eval_design in enumerate(record['designs']):
-                        if np.allclose(eval_design, input_design, rtol=1e-5, atol=1e-8):
-                            match_idx = idx
-                            break
-                    
-                    if match_idx is not None:
-                        # Find the position in the sorted array
-                        sorted_pos = np.where(sort_idx == match_idx)[0][0]
-                        scatter_x.append(x_vals[sorted_pos])
-                        scatter_y.append(eig_vals_plot[sorted_pos])
-                
-                if scatter_x:
-                    # Plot scatter points for this run with its color (no label to exclude from legend)
-                    ax_line.scatter(
-                        scatter_x,
-                        scatter_y,
-                        marker='x',
-                        s=100,
-                        color=color,
-                        linewidths=2.5,
-                        zorder=6,
-                        alpha=0.9
-                    )
 
         y_label = 'Expected Information Gain [bits]'
         if normalize:
@@ -4080,6 +3936,9 @@ class ComparisonPlotter(BasePlotter):
         ax_line.grid(True, alpha=0.3)
         legend_handles = []
         legend_labels = []
+        if average_handle is not None:
+            legend_handles.append(average_handle)
+            legend_labels.append(average_handle.get_label())
         if nominal_handle is not None:
             legend_handles.append(nominal_handle)
             legend_labels.append(nominal_handle.get_label())
@@ -4087,8 +3946,8 @@ class ComparisonPlotter(BasePlotter):
         legend_labels.extend([h.get_label() for h in handles_for_legend])
         self._set_legend(ax_line, len(legend_labels), handles=legend_handles, labels=legend_labels)
         
-        # Plot sorted designs (heatmap) if ax_heat exists and we're not doing per-run sorting
-        if ax_heat is not None and not per_run_sort:
+        # Plot sorted designs (heatmap) if ax_heat exists
+        if ax_heat is not None:
             if is_1d_design and not sort:
                 extent = [x_vals.min(), x_vals.max(), -0.5, 0.5]
                 im = ax_heat.imshow(

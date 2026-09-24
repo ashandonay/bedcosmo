@@ -59,6 +59,14 @@ This trains a neural flow for the `base` cosmology model (Omega_m, H_0rd paramet
 ./submit.sh train num_tracers base --debug
 ```
 
+Run `./submit.sh` with no arguments for the full list of job types and flags.
+
+#### What happens at submission
+
+- `submit.sh` reads the `cosmo_model` block of `train_args.yaml` (or `eval_args.yaml` for eval) and turns each key into a `--kebab-case` flag. CLI flags replace the YAML values. The resulting argv is fixed when you submit.
+- For train jobs, `scripts/create_run.py` runs before submission. It pre-creates the MLflow run, tags it `queued`, and copies the referenced prior/design YAMLs and data files (emulator checkpoints, SED KDE, prior flow) into the run's artifacts. The job attaches to that run with `--attach-run-id`. Edits to those files while the job waits in the queue therefore don't affect it.
+- The snapshot covers config and data only, **not code**. Jobs import `bedcosmo` from disk when the process starts, so editing `src/` while a job is queued or running changes what that job runs.
+
 ### Resuming/Restarting Training
 
 ```bash
@@ -68,6 +76,10 @@ This trains a neural flow for the `base` cosmology model (Omega_m, H_0rd paramet
 # Restart from a checkpoint (creates a new run)
 ./submit.sh restart num_tracers <run_id> <step>
 ```
+
+- **Resume** restores the model, optimizer, scheduler and RNG state from the checkpoint. It first runs `scripts/truncate_metrics.py`, which drops any MLflow metrics logged after `<step>`.
+- **Restart** loads only the model weights into a new run, and copies the old run's prior/design args. Use it to branch off with changed hyperparameters. The optimizer starts fresh. `--restart-optimizer` loads the checkpoint's optimizer state instead, with the learning rate reset to `initial_lr`.
+- For both, `cosmo_model` is inferred from the MLflow run.
 
 ### Auto-Evaluation
 
@@ -88,7 +100,7 @@ Pass eval-specific arguments with the `--eval-` prefix:
 
 Auto-eval is disabled by default in `--debug` mode. Use `--auto-eval` to force it on.
 
-For SLURM, the eval job is submitted as a dependent job (`afterany`) and checks if training completed successfully before running.
+For SLURM, the eval job is submitted as a dependent job (`afterany`) and checks if training completed successfully before running. `scripts/slurm/eval.sh` looks for a line ending in `completed.` in the training log, then reads the run ID from the `MLFlow Run Info: <exp_id>/<run_id>` line. Update `eval.sh` if you change either line in `train.py`.
 
 ### Manual Evaluation
 
@@ -99,6 +111,14 @@ To evaluate a specific run manually:
 ```
 
 The `run_id` is the MLflow run ID printed when training starts (or find it in the MLflow UI).
+
+```bash
+# Also launch a sibling grid job; --grid-<arg> goes to the grid job only
+./submit.sh eval num_visits <run_id> --grid --grid-param-pts 2000 --grid-feature-pts 800
+
+# Run only the marginal EIG over parameter subsets
+./submit.sh eval num_visits <run_id> --marginal --marginal-eig-subsets '[["log_c_scale","z"]]'
+```
 
 ## Experiments
 
@@ -148,6 +168,9 @@ CLI arguments override YAML defaults. Unprefixed args are assumed to be for trai
 ./submit.sh train num_tracers base --initial-lr 0.0001 --total-steps 300000
 ./submit.sh train num_tracers base --train-initial-lr 0.0001 --train-total-steps 300000
 
+# Override a single prior_args YAML field (applied before the config snapshot)
+./submit.sh train num_visits empirical --prior-template-source eazy6 --prior-density-type kde
+
 # Mix train and eval args
 ./submit.sh train num_tracers base --train-initial-lr 0.0001 --eval-grid --eval-param-pts 2000
 ```
@@ -163,6 +186,29 @@ CLI arguments override YAML defaults. Unprefixed args are assumed to be for trai
 | `cond_hidden_size` | Conditioning network hidden size | 128-512 |
 | `n_particles_per_device` | Batch size per GPU | 30-100 |
 | `checkpoint_step_freq` | Steps between checkpoints | 2000 |
+
+## Storage (`$SCRATCH`)
+
+All runs, logs, outputs and large input data live under `$SCRATCH/bedcosmo/`, outside the repository. `submit.sh` sets `SCRATCH=$HOME/scratch` if it is unset. Python entry points read `$SCRATCH` directly, so export it before running them without `submit.sh`:
+
+```bash
+export SCRATCH=${SCRATCH:-$HOME/scratch}
+```
+
+Layout:
+
+```
+$SCRATCH/bedcosmo/
+  {cosmo_exp}/           # num_tracers, num_visits, variable_redshift
+    mlruns/              # MLflow runs; checkpoints and config snapshots are in each run's artifacts/
+    logs/                # job logs: {jobid}_{jobname}.log
+    grid_calc/           # grid EIG outputs, one directory per timestamp
+  num_tracers/emulator/  # BAO emulator checkpoints
+  num_visits/empirical_prior/  # empirical SED prior builds (see src/bedcosmo/num_visits/empirical/README.md)
+  desi/, eazy/           # shared DESI spectra and EAZY templates for the SED prior
+```
+
+Runs and prior builds can take hours to regenerate, so don't delete or change them by hand.
 
 ## MLflow Tracking
 

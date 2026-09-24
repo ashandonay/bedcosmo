@@ -36,7 +36,13 @@ from bedcosmo.util import (
     parse_float_or_list,
     parse_param_subsets,
     get_rng_state, parse_extra_args, render_overlay,
-    get_checkpoint,
+    get_checkpoint, get_contour_area,
+)
+from bedcosmo.artifacts import (
+    load_eig_data_file,
+    load_posterior_samples_file,
+    make_posterior_samples_path,
+    save_posterior_samples,
 )
 import mlflow
 import inspect
@@ -56,6 +62,8 @@ class Evaluator:
             experiment_args=None, nf_eig_data=None, grid_eig_data=None,
             marginal_eig_subsets=None, marginal_outer_y=8, marginal_inner_samples=200,
             marginal_knn_k=3, step_diagnostics=False,
+            sample_posterior_only=False, num_data_samples=10,
+            reuse_posterior_samples=False, posterior_samples_path=None,
             ):
         self.cosmo_exp = cosmo_exp
         
@@ -77,6 +85,10 @@ class Evaluator:
         self.n_particles = n_particles
         self.particle_batch_size = particle_batch_size
         self.seed = seed
+        self.sample_posterior_only = bool(sample_posterior_only)
+        self.num_data_samples = int(num_data_samples)
+        self.reuse_posterior_samples = bool(reuse_posterior_samples)
+        self.posterior_samples_path = posterior_samples_path
         # --nf-eig-data is the unified own-role path: write target, and also load
         # target if the file already exists (resume-from-file behavior).
         self.output_path = nf_eig_data
@@ -150,8 +162,7 @@ class Evaluator:
                     f"trained against -- retrain on current HEAD."
                 )
 
-        # Initialize experiment - it will handle input_design and generate designs accordingly
-        # (single design, multiple designs, or grid)
+        # Designs come from design_args (explicit .npy, nominal, or generated grid)
         self.experiment = init_experiment(
             self.run_obj, self.run_args, device=self.device,
             design_args=self.design_args, global_rank=self.global_rank,
@@ -335,101 +346,265 @@ class Evaluator:
         return samples
 
     
+    def _ensure_eig_data_for_step(self, step):
+        """Load a completed eig_data file from artifacts if this step is missing."""
+        step_key = f"step_{step}" if not str(step).startswith("step_") else str(step)
+        step_dict = self.eig_data.get(step_key, {})
+        if "eigs_avg" in step_dict.get("variable", {}):
+            return
+        try:
+            json_path, data = load_eig_data_file(
+                self.save_path, eval_step=step, eig_kind="variable"
+            )
+        except ValueError as e:
+            print(f"  No completed eig_data on disk for step {step}: {e}")
+            return
+        print(f"  Loaded EIG cache from {json_path} for posterior sampling")
+        self.eig_data = data
+        self.eig_file_path = json_path
+        self.plotter._eig_data_override = self.eig_data
+        if "input_designs" in data:
+            self.input_designs = torch.tensor(
+                data["input_designs"], device=self.device, dtype=torch.float64
+            )
+
     @profile_method
-    def sample_posterior(self, step, levels, num_data_samples=10, global_rank=0, central=True, batch_size=1):
+    def sample_posterior(
+        self,
+        step,
+        levels,
+        num_data_samples=10,
+        global_rank=0,
+        central=True,
+        batch_size=1,
+        reuse_posterior_samples=None,
+        posterior_samples_path=None,
+    ):
         # Normalize levels to always be a list
         if isinstance(levels, (int, float)):
             levels = [levels]
-        
-        print(f"Running sample posterior evaluation...")
-        posterior_flow, _ = load_model(
-            self.experiment, step, 
-            self.run_obj, self.run_args, 
-            device=self.device, global_rank=global_rank
-            )
-        posterior_flow = posterior_flow.to(self.device)
 
-        # Get optimal design based on EIGs across ranks
-        eigs, _ = self.get_eig(step, nominal_design=False)
-        optimal_design = self.input_designs[np.argmax(eigs)]
-        
-        # Generate all unique parameter pairs
+        if reuse_posterior_samples is None:
+            reuse_posterior_samples = self.reuse_posterior_samples
+        if posterior_samples_path is None:
+            posterior_samples_path = self.posterior_samples_path
+
+        print(f"Running sample posterior evaluation...")
+
+        # Resolve step / optional cache reuse before loading the flow.
+        if step is None or step == "last":
+            step = self.total_steps
+        else:
+            try:
+                step = int(step)
+            except (TypeError, ValueError):
+                pass
+
+        if reuse_posterior_samples or posterior_samples_path:
+            bundle = load_posterior_samples_file(
+                self.save_path,
+                step=step if posterior_samples_path is None else None,
+                path=posterior_samples_path,
+            )
+            print(f"  Reusing posterior samples from {bundle['path']}")
+            selected_step = bundle["meta"].get("step", step)
+            series_names = list(bundle["series_names"])
+            theta_all = bundle["theta"]
+            design_all = bundle["design"]
+            num_data_samples = int(theta_all.shape[1])
+            color_map = {
+                s.get("name"): s.get("color")
+                for s in bundle["meta"].get("series", [])
+                if isinstance(s, dict)
+            }
+            default_colors = {"optimal": "tab:orange", "nominal": "tab:blue"}
+            inputs = []
+            for i, name in enumerate(series_names):
+                color = color_map.get(name) or default_colors.get(name, f"C{i}")
+                design = torch.tensor(design_all[i], device=self.device, dtype=torch.float64)
+                inputs.append((name, color, design, theta_all[i]))
+            samples_by_series = {name: theta for name, _, _, theta in inputs}
+        else:
+            self._ensure_eig_data_for_step(step)
+            posterior_flow, selected_step = load_model(
+                self.experiment,
+                step,
+                self.run_obj,
+                self.run_args,
+                device=self.device,
+                global_rank=global_rank,
+            )
+            posterior_flow = posterior_flow.to(self.device)
+            step = selected_step
+
+            # Get optimal design based on EIGs
+            eigs, _ = self.get_eig(step, nominal_design=False)
+            optimal_idx = int(np.argmax(eigs))
+            optimal_design = self.input_designs[optimal_idx]
+
+            inputs_spec = (
+                ("optimal", "tab:orange", optimal_design),
+                ("nominal", "tab:blue", self.experiment.nominal_design),
+            )
+            samples_by_series = {}
+            y_by_series = {}
+            design_by_series = {}
+            series_meta = []
+
+            for design_type, color, design in inputs_spec:
+                design_in = design.unsqueeze(0) if design.dim() == 1 else design
+                all_batch_theta = []
+                all_batch_y = []
+                num_batches = (num_data_samples + batch_size - 1) // batch_size
+
+                print(
+                    f"  [{design_type}] Processing {num_data_samples} data samples "
+                    f"in {num_batches} batch(es) of size {batch_size}..."
+                )
+                for batch_idx in range(num_batches):
+                    batch_start = batch_idx * batch_size
+                    batch_end = min(batch_start + batch_size, num_data_samples)
+                    batch_size_actual = batch_end - batch_start
+
+                    print(
+                        f"    Batch {batch_idx + 1}/{num_batches}: "
+                        f"processing samples {batch_start} to {batch_end - 1}"
+                    )
+
+                    batch_theta, batch_y = self.experiment.sample_params_from_data_samples(
+                        design_in,
+                        posterior_flow,
+                        num_data_samples=batch_size_actual,
+                        num_param_samples=self.guide_samples,
+                        central=central,
+                        transform_output=self.nf_transform_output,
+                    )
+                    if isinstance(batch_theta, torch.Tensor):
+                        batch_theta = batch_theta.cpu().numpy()
+                    if isinstance(batch_y, torch.Tensor):
+                        batch_y = batch_y.cpu().numpy()
+                    all_batch_theta.append(batch_theta)
+                    all_batch_y.append(batch_y)
+
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+
+                samples_by_series[design_type] = np.concatenate(all_batch_theta, axis=0)
+                y_by_series[design_type] = np.concatenate(all_batch_y, axis=0)
+                design_by_series[design_type] = (
+                    design.detach().cpu().numpy().reshape(-1)
+                    if isinstance(design, torch.Tensor)
+                    else np.asarray(design).reshape(-1)
+                )
+                series_meta.append({"name": design_type, "color": color})
+
+            series_names = [s["name"] for s in series_meta]
+            theta_all = np.stack([samples_by_series[n] for n in series_names], axis=0)
+            y_all = np.stack([y_by_series[n] for n in series_names], axis=0)
+            design_all = np.stack([design_by_series[n] for n in series_names], axis=0)
+
+            eig_file = self.eig_file_path or self.output_path
+            if eig_file is not None:
+                eig_file = os.path.basename(str(eig_file))
+
+            meta = {
+                "status": "complete",
+                "schema_version": 1,
+                "run_id": self.run_id,
+                "step": int(selected_step) if str(selected_step).isdigit() else selected_step,
+                "eig_file": eig_file,
+                "optimal_design_index": int(optimal_idx),
+                "central": bool(central),
+                "seed": int(self.seed),
+                "guide_samples": int(self.guide_samples),
+                "num_data_samples": int(num_data_samples),
+                "transform_output": bool(self.nf_transform_output),
+                "param_space": self.param_space,
+                "cosmo_exp": self.cosmo_exp,
+                "series": series_meta,
+                "generated_by": "Evaluator.sample_posterior",
+            }
+
+            out_path = make_posterior_samples_path(self.save_path, step=selected_step)
+            save_posterior_samples(
+                out_path,
+                theta=theta_all,
+                y=y_all,
+                design=design_all,
+                series_names=series_names,
+                param_names=list(self.experiment.cosmo_params),
+                meta=meta,
+            )
+            print(f"  Saved posterior sample bundle to {out_path}")
+
+            inputs = [
+                (
+                    name,
+                    next(s["color"] for s in series_meta if s["name"] == name),
+                    torch.tensor(design_all[i], device=self.device, dtype=torch.float64),
+                    samples_by_series[name],
+                )
+                for i, name in enumerate(series_names)
+            ]
+
+        # Align step used for optional DESI reference contour with the resolved NF state.
+        step = selected_step
         params = self.experiment.cosmo_params
-        pair_names = [f"{params[i]}_{params[j]}" for i in range(len(params)) for j in range(i+1, len(params))]
-        design_areas = {'nominal': {p: [] for p in pair_names}, 'optimal': {p: [] for p in pair_names}}
+        pair_names = [
+            f"{params[i]}_{params[j]}"
+            for i in range(len(params))
+            for j in range(i + 1, len(params))
+        ]
+        design_areas = {name: {p: [] for p in pair_names} for name, *_ in inputs}
         all_samples = []
         colors = []
-        inputs = (('optimal', 'tab:orange', optimal_design), ('nominal', 'tab:blue', self.experiment.nominal_design))
-        for design_type, color, design in inputs:
-            data_idxs = np.arange(1, num_data_samples) # sample N data points
-            
-            # Process in batches to reduce memory usage
-            all_batch_samples = []
-            num_batches = (num_data_samples + batch_size - 1) // batch_size
-            
-            print(f"  Processing {num_data_samples} data samples in {num_batches} batch(es) of size {batch_size}...")
-            for batch_idx in range(num_batches):
-                batch_start = batch_idx * batch_size
-                batch_end = min(batch_start + batch_size, num_data_samples)
-                batch_size_actual = batch_end - batch_start
-                
-                print(f"    Batch {batch_idx + 1}/{num_batches}: processing samples {batch_start} to {batch_end - 1}")
-                
-                # Sample for this batch
-                batch_samples_array = self.experiment.sample_params_from_data_samples(
-                    design.unsqueeze(0), 
-                    posterior_flow, 
-                    num_data_samples=batch_size_actual, 
-                    num_param_samples=self.guide_samples,
-                    central=central,
-                    transform_output=self.nf_transform_output
-                )
-                
-                # Convert to numpy if it's a torch tensor
-                if isinstance(batch_samples_array, torch.Tensor):
-                    batch_samples_array = batch_samples_array.cpu().numpy()
-                all_batch_samples.append(batch_samples_array)
-                
-                # Clear GPU cache after each batch
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-            
-            # Concatenate all batches
-            samples_array = np.concatenate(all_batch_samples, axis=0)  # Shape: [num_data_samples, num_param_samples, num_params]
+        data_idxs = np.arange(num_data_samples)
 
-            pair_avg_areas = []
-            pair_avg_areas_std = []
+        for design_type, color, design, samples_array in inputs:
             for d in data_idxs:
-                # Extract the numpy array from MCSamples and select the d-th data sample
                 with contextlib.redirect_stdout(io.StringIO()):
                     samples_gd = getdist.MCSamples(
                         samples=samples_array[d, :, :],
                         names=self.experiment.cosmo_params,
-                        labels=self.experiment.latex_labels
+                        labels=self.experiment.latex_labels,
                     )
                 all_samples.append(samples_gd)
                 for p in pair_names:
-                    param1, param2 = p.split('_')
-                    design_areas[design_type][p].append(get_contour_area(
-                        [samples_gd], levels, param1, param2, design_type=design_type)[0][f'{design_type}_area_{p}']
-                        )
-            # Get the central samples with the nominal design indexed by the input global rank
-            central_samples_gd = self._eval_step(step, nominal_design=True)
-            all_samples.append(central_samples_gd)
-            colors.extend([color]*len(data_idxs) + ['black'])
+                    param1, param2 = None, None
+                    for i in range(len(params)):
+                        for j in range(i + 1, len(params)):
+                            if p == f"{params[i]}_{params[j]}":
+                                param1, param2 = params[i], params[j]
+                                break
+                        if param1 is not None:
+                            break
+                    design_areas[design_type][p].append(
+                        get_contour_area(
+                            [samples_gd],
+                            levels,
+                            param1,
+                            param2,
+                            design_type=design_type,
+                        )[0][f"{design_type}_area_{p}"]
+                    )
+            # Reference DESI / central-context contour (live, not part of the npz series)
+            try:
+                central_samples_gd = self._eval_step(step, nominal_design=True)
+                all_samples.append(central_samples_gd)
+                colors.extend([color] * len(data_idxs) + ["black"])
+            except Exception as e:
+                print(f"  Warning: could not add central DESI reference contour: {e}")
+                colors.extend([color] * len(data_idxs))
 
         plot_width = 10
         g = self.plotter.plot_posterior(all_samples, colors, levels=levels, alpha=0.4, width_inch=plot_width)
-        
-        # Calculate dynamic font sizes based on plot dimensions and number of parameters
+
         n_params = len(all_samples[0].paramNames.names)
-        # Scale fonts up with more parameters since triangle plot grows
-        # Use additive sqrt scaling with reduced coefficients for better balance
         base_fontsize = max(6, min(18, plot_width * (0.2 + 0.42 * np.sqrt(n_params))))
         title_fontsize = base_fontsize * 1.15
         legend_fontsize = base_fontsize * 0.80
-        text_fontsize = base_fontsize * 0.75  # For area annotations
-        
+        text_fontsize = base_fontsize * 0.75
+
         if g.fig.legends:
             for legend in g.fig.legends:
                 legend.remove()
@@ -447,47 +622,76 @@ class Evaluator:
 
         param_names = g.param_names_for_root(all_samples[0])
         param_name_list = [p.name for p in param_names.names]
-        for design_idx, (design_type, color, design) in enumerate(inputs):
+        for design_idx, (design_type, color, design, _) in enumerate(inputs):
             for p in pair_names:
-                param1, param2 = p.split('_')
-                pair_avg_areas = np.mean(design_areas[design_type][p])
-                pair_avg_areas_std = np.std(design_areas[design_type][p])
-                # find parameter indices and map to lower triangle
-                if param1 in param_name_list and param2 in param_name_list:
-                    j = param_name_list.index(param1)  # x-axis
-                    i_idx = param_name_list.index(param2)  # y-axis
-                    r, c = (max(i_idx, j), min(i_idx, j))
-                    ax = g.subplots[r][c]
+                areas = design_areas[design_type][p]
+                if not areas:
+                    continue
+                pair_avg_areas = np.mean(areas)
+                pair_avg_areas_std = np.std(areas)
+                matched = False
+                param1 = param2 = None
+                for i in range(len(params)):
+                    for j in range(i + 1, len(params)):
+                        if p == f"{params[i]}_{params[j]}":
+                            param1, param2 = params[i], params[j]
+                            matched = True
+                            break
+                    if matched:
+                        break
+                if not matched or param1 not in param_name_list or param2 not in param_name_list:
+                    continue
+                j = param_name_list.index(param1)
+                i_idx = param_name_list.index(param2)
+                r, c = (max(i_idx, j), min(i_idx, j))
+                ax = g.subplots[r][c]
+                avg_str = _format_area(pair_avg_areas)
+                std_str = _format_area(pair_avg_areas_std)
+                title = f"Avg Area: {avg_str} +/- {std_str}"
+                y_pos = 0.95 - 0.08 * design_idx
+                ax.text(
+                    0.05,
+                    y_pos,
+                    title,
+                    transform=ax.transAxes,
+                    fontsize=text_fontsize,
+                    va="top",
+                    color=color,
+                )
 
-                    avg_str = _format_area(pair_avg_areas)
-                    std_str = _format_area(pair_avg_areas_std)
-                    title = f"Avg Area: {avg_str} +/- {std_str}"
-                    y_pos = 0.95 - 0.08 * design_idx
-                    ax.text(0.05, y_pos, title, transform=ax.transAxes, fontsize=text_fontsize, va='top', color=color)
-        
         g.fig.set_constrained_layout(True)
-        # Set title with proper positioning
-        # add labels for Nominal and Optimal to total legend
-        custom_legend = []
-        custom_legend.append(
-            Line2D([0], [0], color='tab:orange', label=f'Optimal Design', linewidth=1.2)
+        custom_legend = [
+            Line2D([0], [0], color="tab:orange", label="Optimal Design", linewidth=1.2),
+            Line2D([0], [0], color="tab:blue", label="Nominal Design", linewidth=1.2),
+            Line2D([0], [0], color="black", label="Nominal DESI Result", linewidth=1.2),
+        ]
+        leg = g.fig.legend(
+            handles=custom_legend,
+            loc="upper right",
+            bbox_to_anchor=(0.99, 0.96),
+            fontsize=legend_fontsize,
         )
-        custom_legend.append(
-            Line2D([0], [0], color='tab:blue', label=f'Nominal Design', linewidth=1.2)
-        )
-        custom_legend.append(
-            Line2D([0], [0], color='black', label=f'Nominal DESI Result', linewidth=1.2)
-        )
-        g.fig.set_constrained_layout(True)
-        leg = g.fig.legend(handles=custom_legend, loc='upper right', bbox_to_anchor=(0.99, 0.96), fontsize=legend_fontsize)
         leg.set_in_layout(False)
-        levels_str = ', '.join([f"{int(level*100)}%" for level in levels])
         if self.display_run:
-            title = f"Posterior Evaluations for {num_data_samples} Likelihood Samples - Run: {self.run_id[:8]}"
+            title = (
+                f"Posterior Evaluations for {num_data_samples} Likelihood Samples "
+                f"- Run: {self.run_id[:8]}"
+            )
         else:
             title = f"Posterior Evaluations for {num_data_samples} Likelihood Samples"
-        g.fig.suptitle(title, fontsize=title_fontsize, weight='bold')
-        self.plotter.save_figure(g.fig, filename="posterior_samples", dpi=400, run_id=self.run_id, experiment_id=self.exp_id)
+        g.fig.suptitle(title, fontsize=title_fontsize, weight="bold")
+        self.plotter.save_figure(
+            g.fig,
+            filename="posterior_samples",
+            dpi=400,
+            run_id=self.run_id,
+            experiment_id=self.exp_id,
+        )
+        return {
+            "step": selected_step,
+            "series": [name for name, *_ in inputs],
+            "num_data_samples": num_data_samples,
+        }
 
     def _compute_eig(self, flow_model, nominal_design=False, designs=None, timers=None):
         """
@@ -2083,6 +2287,10 @@ if __name__ == "__main__":
     parser.add_argument('--marginal-knn-k', type=int, default=3, help='Neighbor rank k for the k-NN entropy estimator (default: 3)')
     parser.add_argument('--marginal', action='store_true', help='Run only the marginal EIG evaluation loop (and its per-subset plots), skipping the full joint EIG pipeline. Requires --marginal-eig-subsets (or marginal_eig_subsets in eval_args.yaml).')
     parser.add_argument('--step-diagnostics', action='store_true', help='Run intermediate-step diagnostics (posterior_steps and eig_designs_steps). Disabled by default.')
+    parser.add_argument('--sample-posterior', dest='sample_posterior_only', action='store_true', help='Only run sample_posterior (multi-y conditioned posteriors) and save an npz bundle; skip the full EIG pipeline.')
+    parser.add_argument('--num-data-samples', type=int, default=10, help='Number of likelihood data realizations for sample_posterior (default: 10)')
+    parser.add_argument('--reuse-posterior-samples', action='store_true', help='Replot from the newest cached posterior_*.npz for the eval step instead of resampling.')
+    parser.add_argument('--posterior-samples-path', type=str, default=None, help='Explicit path to a posterior_*.npz bundle (implies reuse).')
 
     args, extra_args = parser.parse_known_args()
 
@@ -2094,11 +2302,21 @@ if __name__ == "__main__":
     valid_params = [k for k in valid_params if k != 'self']
     eval_args = {k: v for k, v in vars(args).items() if k in valid_params}
     eval_args['experiment_args'] = experiment_args
+    if args.posterior_samples_path:
+        eval_args['reuse_posterior_samples'] = True
 
     print(f"Evaluating with parameters:")
     print(json.dumps(eval_args, indent=2))
     evaluator = Evaluator(**eval_args)
-    if args.marginal:
+    if args.sample_posterior_only or args.reuse_posterior_samples or args.posterior_samples_path:
+        evaluator.sample_posterior(
+            step=args.eval_step,
+            levels=evaluator.levels,
+            num_data_samples=evaluator.num_data_samples,
+            global_rank=evaluator.global_rank,
+            batch_size=evaluator.batch_size,
+        )
+    elif args.marginal:
         evaluator.run_marginal(eval_step=args.eval_step)
     else:
         evaluator.run(eval_step=args.eval_step)

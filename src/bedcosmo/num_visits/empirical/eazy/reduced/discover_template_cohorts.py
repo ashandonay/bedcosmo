@@ -718,7 +718,7 @@ def main() -> None:
     prior_dir = get_prior_build_dir(args.build_name)
     weights_csv = args.weights_csv or prior_dir / "desi_eazy_empirical_weights.csv"
     desi_dir = args.desi_dir or get_desi_data_dir()
-    template_dir = args.template_dir or get_template_dir()
+    template_dir = args.template_dir or get_template_dir(args.build_name)
     output_dir = args.output_dir or prior_dir / "reduced_template_cohorts" / f"n{args.n_templates}"
     cache_path = args.statistics_cache or output_dir.parent / "sufficient_statistics.npz"
     output_dir.mkdir(parents=True, exist_ok=True)

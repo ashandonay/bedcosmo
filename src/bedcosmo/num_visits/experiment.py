@@ -106,6 +106,34 @@ def _required_template_rest_range(
     )
 
 
+def _required_template_rest_range(
+    observed_wave_aa,
+    transmission,
+    z_min,
+    z_max,
+    *,
+    response_floor=1e-3,
+):
+    """Rest-frame interval needed by active filters over a redshift range."""
+    observed_wave_aa = np.asarray(observed_wave_aa, dtype=float)
+    transmission = np.asarray(transmission, dtype=float)
+    if transmission.ndim != 2 or transmission.shape[1] != len(observed_wave_aa):
+        raise ValueError("transmission must have shape (n_filters, n_wavelengths)")
+    peaks = np.max(transmission, axis=1)
+    nonempty = peaks > 0
+    active = np.any(
+        transmission[nonempty] >= response_floor * peaks[nonempty, None], axis=0
+    )
+    if not np.any(active):
+        raise ValueError("filter transmission has no active wavelengths")
+    if z_min < 0 or z_max < z_min:
+        raise ValueError("template wavelength validation requires 0 <= z_min <= z_max")
+    return (
+        float(np.min(observed_wave_aa[active]) / (1.0 + z_max)),
+        float(np.max(observed_wave_aa[active]) / (1.0 + z_min)),
+    )
+
+
 class NumVisits(BaseExperiment, CosmologyMixin):
     """
     Experiment that models LSST magnitude measurements as a function of redshift
@@ -546,7 +574,6 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         cosmo_model=None,
         prior_pool_size=65536,
         prior_pool_seed=7,
-        template_dir=None,
         template_param=DEFAULT_TEMPLATE_PARAM_12D,
         template_norm_min=None,
         template_norm_max=None,
@@ -599,7 +626,6 @@ class NumVisits(BaseExperiment, CosmologyMixin):
                 prior_root=prior_root,
                 prior_pool_size=int(prior_pool_size),
                 prior_pool_seed=int(prior_pool_seed),
-                template_dir=template_dir,
                 template_param=template_param,
                 template_norm_min=template_norm_min,
                 template_norm_max=template_norm_max,
@@ -704,7 +730,6 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         prior_root: Path,
         prior_pool_size: int,
         prior_pool_seed: int,
-        template_dir: str | None,
         template_param: str,
         template_norm_min: float | None,
         template_norm_max: float | None,
@@ -726,12 +751,8 @@ class NumVisits(BaseExperiment, CosmologyMixin):
                 f"got {flux_unit_scale!r}"
             )
 
-        if not template_dir:
-            from bedcosmo.num_visits.empirical.paths import get_template_dir
-
-            template_dir = str(get_template_dir())
-
         prior_root = Path(prior_root)
+        template_dir = prior_root / "templates"
         kde_path = prior_root / SED_PRIOR_KDE_NATIVE_FILENAME
         if self.global_rank == 0 and self.verbose:
             print(f"Loading empirical prior from {prior_root}")
@@ -827,7 +848,7 @@ class NumVisits(BaseExperiment, CosmologyMixin):
 
         if self.global_rank == 0 and self.verbose:
             print(
-                f"  EAZY templates: {self._n_eazy_templates} on "
+                f"  Spectral template bank: {self._n_eazy_templates} components on "
                 f"{self._template_wave_rest.shape[0]} rest-frame grid points; "
                 f"normalization=[{norm_min:g}, {norm_max:g}] Angstrom; "
                 f"flux unit scale={self.flux_unit_scale:g} cgs"
@@ -1616,7 +1637,10 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         central=False,
         transform_output=True,
     ):
+        from bedcosmo.artifacts import observations_to_numpy
+
         data_samples = self.sample_data(designs, num_data_samples, central)
+        y_np = observations_to_numpy(data_samples, num_data_samples)
         context = torch.cat(
             [designs.expand(num_data_samples, -1), data_samples],
             dim=-1,
@@ -1631,8 +1655,7 @@ class NumVisits(BaseExperiment, CosmologyMixin):
                 transform_output=transform_output,
             )
             param_samples_list.append(param_samples_i.samples)
-        return np.stack(param_samples_list, axis=0)
-
+        return np.stack(param_samples_list, axis=0), y_np
     @profile_method
     def unnorm_lfunc(self, params, features, designs):
         """

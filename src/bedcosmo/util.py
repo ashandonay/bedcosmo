@@ -73,6 +73,10 @@ torch.set_default_dtype(torch.float64)
 from pathlib import Path
 
 from bedcosmo.transform import Bijector  # public re-export (implementation in transform.py)
+from bedcosmo.artifacts import (  # noqa: F401 — public re-exports for star-imports / callers
+    resolve_design_args_input_path,
+    snapshot_design_args_config,
+)
 
 
 def get_experiments_dir() -> Path:
@@ -92,63 +96,6 @@ def get_experiments_dir() -> Path:
 def get_experiment_config_path(cosmo_exp: str, config_name: str) -> Path:
     """Get full path to experiment config file."""
     return get_experiments_dir() / cosmo_exp / config_name
-
-
-def resolve_design_args_input_path(
-    design_args: dict | None,
-    config_path: str | Path | None = None,
-) -> dict | None:
-    """Resolve ``input_designs_path`` from a design-arguments document.
-
-    Environment variables and ``~`` are expanded. Relative paths are anchored
-    to the directory containing the YAML file, or to the current directory when
-    the arguments were supplied directly as a dictionary.
-    """
-    if design_args is None:
-        return None
-    resolved = dict(design_args)
-    raw = resolved.get("input_designs_path")
-    if raw in (None, ""):
-        return resolved
-    expanded = os.path.expandvars(os.path.expanduser(os.fspath(raw)))
-    if "$" in expanded:
-        raise ValueError(
-            f"input_designs_path contains an undefined environment variable: {raw}"
-        )
-    path = Path(expanded)
-    if not path.is_absolute():
-        base = Path(config_path).expanduser().resolve().parent if config_path else Path.cwd()
-        path = base / path
-    resolved["input_designs_path"] = str(path.resolve())
-    return resolved
-
-
-def snapshot_design_args_config(
-    source_path: str | Path,
-    destination_path: str | Path,
-) -> dict:
-    """Freeze a design YAML and its referenced array into an artifact directory."""
-    source_path = Path(source_path).expanduser().resolve()
-    destination_path = Path(destination_path).expanduser().resolve()
-    with source_path.open() as stream:
-        design_args = yaml.safe_load(stream) or {}
-    design_args = resolve_design_args_input_path(design_args, source_path)
-
-    input_path = design_args.get("input_designs_path")
-    if input_path is not None:
-        input_path = Path(input_path)
-        if not input_path.is_file():
-            raise FileNotFoundError(f"input_designs_path not found: {input_path}")
-        frozen_path = destination_path.parent / "designs.npy"
-        destination_path.parent.mkdir(parents=True, exist_ok=True)
-        if input_path.resolve() != frozen_path.resolve():
-            shutil.copy2(input_path, frozen_path)
-        design_args["input_designs_path"] = str(frozen_path.resolve())
-
-    destination_path.parent.mkdir(parents=True, exist_ok=True)
-    with destination_path.open("w") as stream:
-        yaml.safe_dump(design_args, stream, default_flow_style=False, sort_keys=False)
-    return design_args
 
 
 def extract_run_info_from_checkpoint_path(checkpoint_path: str) -> tuple[str, str, str]:
@@ -1605,30 +1552,8 @@ def apply_prior_cli_overrides(prior_args: dict | None, overrides: dict | None) -
     return out
 
 
-def _coerce_train_arg_override(key, value, yaml_default, project_root):
+def _coerce_train_arg_override(key, value, yaml_default):
     """Coerce a single train CLI override according to the YAML default type."""
-    if key == "input_designs":
-        if isinstance(value, str):
-            input_design_str = value.strip()
-            if input_design_str.lower() == "nominal":
-                return "nominal"
-            if input_design_str.endswith(".json") or input_design_str.endswith(".JSON"):
-                file_path = input_design_str
-                if not os.path.isfile(file_path) and not os.path.isabs(file_path):
-                    file_path = os.path.join(project_root, input_design_str)
-                if os.path.isfile(file_path):
-                    with open(file_path, "r") as f:
-                        return json.load(f)
-                try:
-                    return json.loads(input_design_str)
-                except json.JSONDecodeError:
-                    return value
-            try:
-                return json.loads(input_design_str)
-            except json.JSONDecodeError:
-                return value
-        return value
-
     if isinstance(yaml_default, bool) and isinstance(value, bool):
         return value
     if isinstance(yaml_default, list):
@@ -1650,7 +1575,7 @@ def _coerce_train_arg_override(key, value, yaml_default, project_root):
     return value
 
 
-def finalize_train_run_args(parsed_args, yaml_config, unknown_argv=None, project_root="."):
+def finalize_train_run_args(parsed_args, yaml_config, unknown_argv=None):
     """
     Merge argparse output, train_args.yaml defaults, and extension CLI flags.
 
@@ -1664,7 +1589,7 @@ def finalize_train_run_args(parsed_args, yaml_config, unknown_argv=None, project
     for key, default in yaml_config.items():
         cli_value = run_args.get(key)
         if cli_value is not None:
-            run_args[key] = _coerce_train_arg_override(key, cli_value, default, project_root)
+            run_args[key] = _coerce_train_arg_override(key, cli_value, default)
         else:
             run_args[key] = default
 

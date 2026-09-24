@@ -11,9 +11,9 @@ base:
   analysis: bao
   # bao's emulators.yaml entry is keyed by forecast space; pick one.
   # config = config-space xi (Grieb), fourier = windowed P(k) (thecov).
-  emulator_space: config
+  emulator_space: fourier
   flow_type: NAF
-  transform_input: false
+  transform_input: true
   input_transform_type: marginal
   activation: elu
   n_transforms: 4
@@ -25,7 +25,7 @@ base:
   nf_transform: affine
   spline_bins: 20
   design_args_path: design_args_dr1.yaml
-  total_steps: 200000
+  total_steps: 50000
   optimizer: Adam
   initial_lr: 0.0005
   final_lr: 0.00001
@@ -67,7 +67,7 @@ base_omegak:
   nf_transform: affine
   spline_bins: 20
   design_args_path: design_args_dr1.yaml
-  total_steps: 200000
+  total_steps: 50000
   optimizer: Adam
   initial_lr: 0.0005
   final_lr: 0.00001
@@ -109,7 +109,7 @@ base_w:
   nf_transform: affine
   spline_bins: 20
   design_args_path: design_args_dr1.yaml
-  total_steps: 200000
+  total_steps: 50000
   optimizer: Adam
   initial_lr: 0.0005
   final_lr: 0.00001
@@ -151,7 +151,7 @@ base_w_wa:
   nf_transform: affine
   spline_bins: 20
   design_args_path: design_args_dr1.yaml
-  total_steps: 200000
+  total_steps: 50000
   optimizer: Adam
   initial_lr: 0.0005
   final_lr: 0.00001
@@ -194,7 +194,7 @@ base_omegak_w_wa:
   nf_transform: affine
   spline_bins: 20
   design_args_path: design_args_dr1.yaml
-  total_steps: 200000
+  total_steps: 50000
   optimizer: Adam
   initial_lr: 0.0005
   final_lr: 0.00001

@@ -201,6 +201,10 @@ def test_snapshot_copies_flows_into_artifacts(tmp_path):
     src_dir = tmp_path / "empirical_prior"
     src_dir.mkdir()
     (src_dir / "sed_prior_kde_native.joblib").write_bytes(b"kde")  # snapshot only copies bytes
+    templates = src_dir / "templates"
+    templates.mkdir()
+    (templates / "test.param").write_text("1 component.dat 1.0\n")
+    (templates / "component.dat").write_text("1000 1\n")
     (src_dir / SED_PRIOR_FLOW_FILENAMES[SPACE_NATIVE]).write_bytes(b"native-flow")
     (src_dir / SED_PRIOR_FLOW_FILENAMES[SPACE_GAUSSIANIZED]).write_bytes(b"gauss-flow")
 
@@ -208,6 +212,7 @@ def test_snapshot_copies_flows_into_artifacts(tmp_path):
     prior_args = {
         "density_type": "flow",
         "prior_dir": str(src_dir),
+        "template_param": "test.param",
     }
     out = snapshot_sed_prior(prior_args, artifacts_dir)
 
@@ -226,10 +231,15 @@ def test_snapshot_flow_missing_native_raises(tmp_path):
     src_dir = tmp_path / "empirical_prior"
     src_dir.mkdir()
     (src_dir / "sed_prior_kde_native.joblib").write_bytes(b"kde")  # KDE present, flow absent
+    templates = src_dir / "templates"
+    templates.mkdir()
+    (templates / "test.param").write_text("1 component.dat 1.0\n")
+    (templates / "component.dat").write_text("1000 1\n")
 
     prior_args = {
         "density_type": "flow",
         "prior_dir": str(src_dir),
+        "template_param": "test.param",
     }
     with pytest.raises(FileNotFoundError, match="native flow not found"):
         snapshot_sed_prior(prior_args, tmp_path / "artifacts")

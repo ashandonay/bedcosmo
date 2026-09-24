@@ -28,9 +28,7 @@ def test_zeropoint_magnitude_is_count_rate_of_one():
     exp._wlen_over_hc_tensor = torch.ones(2, dtype=torch.float64)
 
     collecting_area_cm2 = (319 / 9.6) * 1e4
-    unit_count_rate_flux = torch.full(
-        (1, 2), 1.0 / collecting_area_cm2, dtype=torch.float64
-    )
+    unit_count_rate_flux = torch.full((1, 2), 1.0 / collecting_area_cm2, dtype=torch.float64)
     magnitudes = exp._calculate_magnitudes(unit_count_rate_flux)
 
     expected = torch.tensor([[s0["u"], s0["g"]]], dtype=torch.float64)
@@ -40,9 +38,7 @@ def test_zeropoint_magnitude_is_count_rate_of_one():
 def test_required_template_range_redshifts_active_filter_support():
     observed_wave = np.array([3000.0, 4000.0, 5000.0, 6000.0])
     transmission = np.array([[0.0, 0.5, 1.0, 0.0]])
-    required = _required_template_rest_range(
-        observed_wave, transmission, z_min=0.0, z_max=1.0
-    )
+    required = _required_template_rest_range(observed_wave, transmission, z_min=0.0, z_max=1.0)
     assert required == (2000.0, 5000.0)
 
 
@@ -89,7 +85,6 @@ def test_empirical_prior_requires_explicit_flux_unit_scale():
             prior_root=Path("unused"),
             prior_pool_size=1,
             prior_pool_seed=0,
-            template_dir=None,
             template_param="unused.param",
             template_norm_min=None,
             template_norm_max=None,
