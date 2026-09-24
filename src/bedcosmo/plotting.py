@@ -941,7 +941,7 @@ class BasePlotter:
             _, eig_data = self.load_eig_data_file(
                 artifacts_dir, eval_step=eval_step, eig_kind='variable'
             )
-            _, step_str = self._resolve_step(eig_data, eval_step)
+            _, step_str = resolve_eig_step(eig_data, eval_step)
             if step_str is None:
                 return None
             nominal_data = eig_data.get(step_str, {}).get('nominal', {})
@@ -1206,14 +1206,6 @@ class BasePlotter:
     def load_eig_data_file(self, artifacts_dir, eval_step=None, eig_kind='any'):
         """Load the most recent completed eig_data JSON file (see module-level ``load_eig_data_file``)."""
         return load_eig_data_file(artifacts_dir, eval_step=eval_step, eig_kind=eig_kind)
-
-    def _resolve_step(self, eig_data, eval_step):
-        """Resolve eval_step to a step string key in eig_data."""
-        return resolve_eig_step(eig_data, eval_step)
-
-    def _parse_eig_for_posterior(self, eig_data, eval_step=None, params=None):
-        """Extract EIG and entropy summaries from eig_data for posterior plots."""
-        return parse_eig_for_posterior(eig_data, eval_step=eval_step, params=params)
 
     def plot_triangle(
         self,
@@ -2461,7 +2453,7 @@ class RunPlotter(BasePlotter):
         """
         if eig_data is None:
             eig_data = self._get_eig_data(eval_step=eval_step)
-        eval_step, step_str = self._resolve_step(eig_data, eval_step)
+        eval_step, step_str = resolve_eig_step(eig_data, eval_step)
 
         step_data = eig_data[step_str]
         variable_data = step_data.get('variable', {})
@@ -2535,7 +2527,7 @@ class RunPlotter(BasePlotter):
             eig_std_list = []
             eig_labels_list = []
             for s in eval_step:
-                _, sk = self._resolve_step(eig_data, s)
+                _, sk = resolve_eig_step(eig_data, s)
                 if sk is None:
                     print(f"Warning: Step {s} not found in EIG data, skipping...")
                     continue
@@ -2576,7 +2568,7 @@ class RunPlotter(BasePlotter):
         """
         if eig_data is None:
             eig_data = self._get_eig_data(eval_step=eval_step, eig_kind='marginal')
-        eval_step, step_str = self._resolve_step(eig_data, eval_step)
+        eval_step, step_str = resolve_eig_step(eig_data, eval_step)
         if step_str is None:
             raise ValueError("No step data found for marginal EIG plot")
 
@@ -2952,13 +2944,8 @@ class ComparisonPlotter(BasePlotter):
         var = self._resolve_var(var)
         global_ranks = global_rank if isinstance(global_rank, list) else [global_rank]
 
-        display = self._normalize_display(display)
-        invalid = set(display) - {'nominal', 'optimal'}
-        if invalid:
-            raise ValueError(f"display must contain 'nominal' and/or 'optimal', got {display}")
-        if not display:
-            raise ValueError("display must not be empty")
-        
+        display = self._validate_display(display)
+
         if not isinstance(levels, list):
             levels = [levels]
         
@@ -3108,9 +3095,9 @@ class ComparisonPlotter(BasePlotter):
                                         eig_values,
                                         nominal_eig,
                                         entropy_info,
-                                    ) = self._parse_eig_for_posterior(eig_data, eval_step)
+                                    ) = parse_eig_for_posterior(eig_data, eval_step)
                                 else:
-                                    _, step_str = self._resolve_step(eig_data, eval_step)
+                                    _, step_str = resolve_eig_step(eig_data, eval_step)
                                     nominal_data = eig_data.get(step_str, {}).get('nominal', {})
                                     nominal_eig_val = nominal_data.get('eigs_avg')
                                     if isinstance(nominal_eig_val, list):
@@ -3158,7 +3145,6 @@ class ComparisonPlotter(BasePlotter):
                                     raise
 
                         y = experiment.central_val
-                        eig_label = "EIG"
                         include_prior_in_legend = not plot_prior
                         nf_entries = []
                         if "nominal" in display:
@@ -3173,7 +3159,7 @@ class ComparisonPlotter(BasePlotter):
                                 device=use_device,
                             )
                             eig_str = (
-                                f", {eig_label}: {nominal_eig:.3f} bits"
+                                f", EIG: {nominal_eig:.3f} bits"
                                 if nominal_eig is not None
                                 else ""
                             )
@@ -3206,7 +3192,7 @@ class ComparisonPlotter(BasePlotter):
                                 optimal_idx = int(np.argmax(eig_values_arr))
                                 optimal_design = input_designs_arr[optimal_idx]
                                 optimal_eig = float(eig_values_arr[optimal_idx])
-                                eig_str = f", {eig_label}: {optimal_eig:.3f} bits"
+                                eig_str = f", EIG: {optimal_eig:.3f} bits"
                                 opt_prior_h = None
                                 opt_post_h = None
                                 if (
@@ -3235,7 +3221,7 @@ class ComparisonPlotter(BasePlotter):
                                     else None
                                 )
                                 eig_str = (
-                                    f", {eig_label}: {optimal_eig:.3f} bits"
+                                    f", EIG: {optimal_eig:.3f} bits"
                                     if optimal_eig is not None
                                     else ""
                                 )
@@ -4120,7 +4106,7 @@ class ComparisonPlotter(BasePlotter):
                 artifacts_dir, eval_step=eval_step, eig_kind=eig_kind
             )
 
-        _, step_str = self._resolve_step(eig_data, eval_step)
+        _, step_str = resolve_eig_step(eig_data, eval_step)
         if step_str is None:
             raise ValueError(f"{axis_name}: could not resolve eval step in eig_data")
 

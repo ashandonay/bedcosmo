@@ -2076,7 +2076,6 @@ class Evaluator:
         if eig_file is not None:
             eig_file = os.path.basename(str(eig_file))
         try:
-            experiment = self.experiment
             input_designs, eig_values, nominal_eig, entropy_info = parse_eig_for_posterior(
                 self.eig_data, eval_step
             )
@@ -2087,7 +2086,7 @@ class Evaluator:
             else:
                 step_for_model = int(eval_step) if str(eval_step).isdigit() else eval_step
             posterior_flow, _ = load_model(
-                experiment,
+                self.experiment,
                 step_for_model,
                 self.run_obj,
                 self.run_args,
@@ -2113,15 +2112,14 @@ class Evaluator:
 
             auto_seed(self.seed)
 
-            y = experiment.central_val
-            eig_label = "EIG"
+            y = self.experiment.central_val
             include_prior_in_legend = not self.plot_prior
             nf_entries = []
 
             # Nominal design + central y
-            nominal_design = experiment.nominal_design
+            nominal_design = self.experiment.nominal_design
             nominal_samples = sample_nf(
-                experiment,
+                self.experiment,
                 posterior_flow,
                 nominal_design,
                 y,
@@ -2130,7 +2128,7 @@ class Evaluator:
                 device=self.device,
             )
             eig_str = (
-                f", {eig_label}: {nominal_eig:.3f} bits"
+                f", EIG: {nominal_eig:.3f} bits"
                 if nominal_eig is not None
                 else ""
             )
@@ -2154,8 +2152,6 @@ class Evaluator:
             })
 
             # Optimal (EIG-argmax) design + central y
-            if input_designs is None:
-                raise ValueError("input_designs required for optimal posterior")
             input_designs_arr = np.asarray(input_designs)
             prior_h = entropy_info.get("prior_entropy_by_design")
             post_h = entropy_info.get("posterior_entropy_by_design")
@@ -2164,7 +2160,7 @@ class Evaluator:
                 optimal_idx = int(np.argmax(eig_values_arr))
                 optimal_design = input_designs_arr[optimal_idx]
                 optimal_eig = float(eig_values_arr[optimal_idx])
-                eig_str = f", {eig_label}: {optimal_eig:.3f} bits"
+                eig_str = f", EIG: {optimal_eig:.3f} bits"
                 opt_prior_h = (
                     float(prior_h[optimal_idx])
                     if prior_h is not None and len(prior_h) > optimal_idx
@@ -2186,7 +2182,7 @@ class Evaluator:
                     float(np.asarray(eig_values)[0]) if eig_values is not None else None
                 )
                 eig_str = (
-                    f", {eig_label}: {optimal_eig:.3f} bits"
+                    f", EIG: {optimal_eig:.3f} bits"
                     if optimal_eig is not None
                     else ""
                 )
@@ -2195,7 +2191,7 @@ class Evaluator:
                 raise ValueError("No input designs available for optimal posterior")
 
             optimal_samples = sample_nf(
-                experiment,
+                self.experiment,
                 posterior_flow,
                 optimal_design,
                 y,
@@ -2266,7 +2262,7 @@ class Evaluator:
             )
 
             self.plotter.plot_posterior(
-                experiment=experiment,
+                experiment=self.experiment,
                 eval_step=eval_step,
                 artifacts_dir=self.save_path,
                 levels=self.levels,

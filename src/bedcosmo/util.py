@@ -1138,7 +1138,6 @@ def sample_nf(
     )
 
 
-
 def resolve_eig_step(eig_data, eval_step):
     """Resolve ``eval_step`` to ``(step_int, 'step_N')`` from eig_data keys."""
     step_keys = [k for k in eig_data.keys() if k.startswith('step_')]
@@ -1229,7 +1228,6 @@ def parse_eig_for_posterior(eig_data, eval_step=None, params=None):
         "posterior_entropy_by_design": posterior_entropy_by_design,
     }
     return input_designs, eig_values, nominal_eig, entropy_info
-
 
 
 def load_posterior_flow_from_checkpoint_file(
