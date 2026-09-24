@@ -107,15 +107,14 @@ python -m bedcosmo.num_visits.empirical.desi.build_prior \
   --build-name empirical_prior/desi4
 ```
 
-That command writes the prior artifacts under
-`$SCRATCH/bedcosmo/num_visits/empirical_prior/desi4/` and the four-component
-template bank under `$SCRATCH/bedcosmo/num_visits/spectral_templates/desi4/`.
+That command writes the prior artifacts and four-component template bank under
+`$SCRATCH/bedcosmo/num_visits/empirical_prior/desi4/`, with the components in
+its `templates/` subdirectory.
 
 With no path overrides, the prior artifacts are written to
 `$SCRATCH/bedcosmo/num_visits/empirical_prior/desi8/` and the learned template
-bank to `$SCRATCH/bedcosmo/num_visits/spectral_templates/desi8/`. EAZY banks
-use the parallel `spectral_templates/eazy6/` and `spectral_templates/eazy12/`
-directories with the same flat component-plus-parameter-file layout.
+bank to its `templates/` subdirectory. EAZY builds use the same self-contained
+component-plus-parameter-file layout.
 
 The command writes an EAZY-compatible component bank, the standard
 `desi_eazy_empirical_weights.csv`, build provenance, native and gaussianized KDE

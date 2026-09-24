@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 
 from bedcosmo.num_visits.empirical.desi.build_prior import (
     normalize_basis_for_export,
     physical_prior_coefficients,
+    write_template_bank,
 )
 from bedcosmo.num_visits.empirical.desi.evaluate_factorization_methods import (
     fit_anls,
@@ -38,9 +41,7 @@ def test_rest_frame_binning_combines_pixels_and_masks_bad_data():
     flux = np.array([2.0, 4.0, 6.0, 8.0])
     ivar = np.ones(4)
     mask = np.array([0, 0, 1, 0])
-    values, weights, scale = bin_rest_frame_spectrum(
-        wave, flux, ivar, mask, 1.0, grid
-    )
+    values, weights, scale = bin_rest_frame_spectrum(wave, flux, ivar, mask, 1.0, grid)
     assert np.isfinite(scale)
     assert weights[0] > 0
     assert values[0] == 3.0 / scale
@@ -81,9 +82,7 @@ def test_direct_manifest_selects_quality_redrock_galaxies(
         fake_getdata,
     )
     manifest = discover_desi_manifest([23040], desi_dir=tmp_path)
-    assert manifest.to_dict("records") == [
-        {"targetid": 1, "healpix": 23040, "z": 0.4}
-    ]
+    assert manifest.to_dict("records") == [{"targetid": 1, "healpix": 23040, "z": 0.4}]
 
 
 def test_weighted_nmf_recovers_nonnegative_low_rank_data_with_missing_pixels():
@@ -169,9 +168,7 @@ def test_wavelength_support_scales_contributors_with_largest_rank():
     )
     assert required == 20
     assert np.array_equal(measured, contributors)
-    assert np.array_equal(
-        selected, np.array([False, True, True, True, True, False, False])
-    )
+    assert np.array_equal(selected, np.array([False, True, True, True, True, False, False]))
 
 
 def test_lsst_demand_coverage_is_unity_when_every_pixel_is_observed():
@@ -192,9 +189,7 @@ def test_export_normalization_preserves_factorized_spectra():
     assert np.all(integrals > 0)
     assert np.allclose(coefficients @ basis, adjusted_coefficients @ normalized_basis)
     selected = (wave >= 3600.0) & (wave <= 4200.0)
-    assert np.allclose(
-        np.trapz(normalized_basis[:, selected], wave[selected], axis=1), 1.0
-    )
+    assert np.allclose(np.trapz(normalized_basis[:, selected], wave[selected], axis=1), 1.0)
 
 
 def test_physical_coefficients_round_trip_numvisits_redshifting():
@@ -204,3 +199,24 @@ def test_physical_coefficients_round_trip_numvisits_redshifting():
     physical = physical_prior_coefficients(coefficients, scale, redshift)
     runtime_reconstruction = physical / (1.0 + redshift)[:, None]
     assert np.allclose(runtime_reconstruction, coefficients * scale[:, None])
+
+
+def test_write_template_bank_is_self_contained(tmp_path):
+    wave = np.array([1400.0, 1410.0, 1420.0])
+    basis = np.array([[1.0, 2.0, 1.0], [0.5, 1.0, 0.5]])
+    template_dir = tmp_path / "empirical_prior" / "desi2" / "templates"
+
+    param, component_paths = write_template_bank(
+        template_dir,
+        Path("desi2.param"),
+        wave,
+        basis,
+    )
+
+    assert param == template_dir / "desi2.param"
+    assert component_paths == ["component_01.dat", "component_02.dat"]
+    assert param.read_text().splitlines()[1:] == [
+        "1 component_01.dat 1.0",
+        "2 component_02.dat 1.0",
+    ]
+    assert all((template_dir / path).is_file() for path in component_paths)

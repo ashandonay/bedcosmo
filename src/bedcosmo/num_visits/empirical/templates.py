@@ -1,4 +1,4 @@
-"""Materialize and load EAZY SED banks from the shared template directory."""
+"""Materialize and load EAZY-compatible SED banks owned by prior builds."""
 
 from __future__ import annotations
 
@@ -12,8 +12,8 @@ from .paths import get_template_dir
 
 EAZY_RAW_BASE = "https://raw.githubusercontent.com/gbrammer/eazy-photoz/master/"
 DEFAULT_TEMPLATE_DIR = get_template_dir()
-DEFAULT_TEMPLATE_PARAM_12D = "eazy12/eazy12.param"
-DEFAULT_TEMPLATE_PARAM_6D = "eazy6/eazy6.param"
+DEFAULT_TEMPLATE_PARAM_12D = "eazy12.param"
+DEFAULT_TEMPLATE_PARAM_6D = "eazy6.param"
 
 _EAZY_BANK_COMPONENTS: dict[str, tuple[str, ...]] = {
     DEFAULT_TEMPLATE_PARAM_12D: tuple(
@@ -45,22 +45,21 @@ def materialize_eazy_template_bank(
     template_dir: Path | str = DEFAULT_TEMPLATE_DIR,
     overwrite: bool = False,
 ) -> Path:
-    """Download a standard EAZY bank into ``spectral_templates/<source>``.
+    """Download a standard EAZY bank into one prior build's ``templates/``.
 
     The upstream repository nests its template files below several different
-    directories. NumVisits instead exports the same simple layout as a learned
-    DESI bank: one source directory containing ``component_*.dat`` and a local
-    ``<source>.param`` file whose paths are relative to the shared template root.
+    directories. NumVisits instead exports a flat component bank whose paths
+    are relative to the owning prior build's template directory.
     """
     if template_param not in _EAZY_BANK_COMPONENTS:
         raise ValueError(f"Unknown standard EAZY template bank: {template_param!r}")
 
     root = Path(os.path.expanduser(template_dir))
     param_path = root / template_param
-    source = Path(template_param).parent.as_posix()
+    source = Path(template_param).stem
     component_paths: list[str] = []
     for index, upstream_path in enumerate(_EAZY_BANK_COMPONENTS[template_param], start=1):
-        relative_path = f"{source}/component_{index:02d}.dat"
+        relative_path = f"component_{index:02d}.dat"
         download(
             EAZY_RAW_BASE + upstream_path,
             root / relative_path,

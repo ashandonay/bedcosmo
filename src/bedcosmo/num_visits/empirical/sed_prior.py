@@ -15,6 +15,7 @@ from .fit_sed_prior_kde import load_sed_prior_kde, sample_sed_prior
 from .paths import (
     SED_PRIOR_KDE_GAUSSIANIZED_FILENAME,
     SED_PRIOR_KDE_NATIVE_FILENAME,
+    TEMPLATE_BANK_SUBDIR,
     get_prior_build_dir,
 )
 
@@ -159,7 +160,8 @@ def snapshot_sed_prior(
 ) -> dict[str, Any]:
     """Freeze the empirical prior into ``artifacts/empirical/``.
 
-    Always copies ``sed_prior_kde_native.joblib`` from ``prior_dir``. When
+    Always copies ``sed_prior_kde_native.joblib`` and ``templates/`` from
+    ``prior_dir``. When
     ``density_type == 'flow'`` also copies ``sed_prior_flow_*.pt`` from the same
     directory. Resolves ``template_source`` / ``reduced_templates`` into
     ``prior_dir`` / ``template_param`` / ``parameters`` before copying.
@@ -175,13 +177,26 @@ def snapshot_sed_prior(
             reduced_templates=reduced_templates,
         )
     )
-    src = resolve_prior_dir(out) / SED_PRIOR_KDE_NATIVE_FILENAME
+    prior_root = resolve_prior_dir(out)
+    src = prior_root / SED_PRIOR_KDE_NATIVE_FILENAME
     if not src.is_file():
         raise FileNotFoundError(f"prior KDE not found: {src}")
 
     dest = sed_prior_kde_artifact_path(artifacts_dir, space="native")
     dest.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(src, dest)
+
+    template_src = prior_root / TEMPLATE_BANK_SUBDIR
+    if not template_src.is_dir():
+        raise FileNotFoundError(f"prior template bank not found: {template_src}")
+    template_param = template_src / str(out["template_param"])
+    if not template_param.is_file():
+        raise FileNotFoundError(f"prior template parameter file not found: {template_param}")
+    shutil.copytree(
+        template_src,
+        dest.parent / TEMPLATE_BANK_SUBDIR,
+        dirs_exist_ok=True,
+    )
 
     # NOTE: sed_prior_kde_gaussianized.joblib is intentionally NOT snapshotted.
     # Runtime empirical entropy uses the trained native/gaussianized PriorFlows

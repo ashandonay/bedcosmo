@@ -546,7 +546,6 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         cosmo_model=None,
         prior_pool_size=65536,
         prior_pool_seed=7,
-        template_dir=None,
         template_param=DEFAULT_TEMPLATE_PARAM_12D,
         template_norm_min=None,
         template_norm_max=None,
@@ -599,7 +598,6 @@ class NumVisits(BaseExperiment, CosmologyMixin):
                 prior_root=prior_root,
                 prior_pool_size=int(prior_pool_size),
                 prior_pool_seed=int(prior_pool_seed),
-                template_dir=template_dir,
                 template_param=template_param,
                 template_norm_min=template_norm_min,
                 template_norm_max=template_norm_max,
@@ -704,7 +702,6 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         prior_root: Path,
         prior_pool_size: int,
         prior_pool_seed: int,
-        template_dir: str | None,
         template_param: str,
         template_norm_min: float | None,
         template_norm_max: float | None,
@@ -726,12 +723,8 @@ class NumVisits(BaseExperiment, CosmologyMixin):
                 f"got {flux_unit_scale!r}"
             )
 
-        if not template_dir:
-            from bedcosmo.num_visits.empirical.paths import get_template_dir
-
-            template_dir = str(get_template_dir())
-
         prior_root = Path(prior_root)
+        template_dir = prior_root / "templates"
         kde_path = prior_root / SED_PRIOR_KDE_NATIVE_FILENAME
         if self.global_rank == 0 and self.verbose:
             print(f"Loading empirical prior from {prior_root}")

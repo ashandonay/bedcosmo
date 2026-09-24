@@ -47,6 +47,8 @@ Default `--build-name empirical_prior/eazy12` writes:
 
 ```text
 $SCRATCH/bedcosmo/num_visits/empirical_prior/eazy12/
+  templates/eazy12.param
+  templates/component_*.dat
   healpix/hp23040/desi_eazy_empirical_weights.csv
   healpix/hp27257/...
   desi_eazy_empirical_weights.csv
@@ -55,9 +57,9 @@ $SCRATCH/bedcosmo/num_visits/empirical_prior/eazy12/
   sed_prior_kde_native.json
 ```
 
-Shared inputs (reused across builds): `$SCRATCH/bedcosmo/desi/tiny_dr1/` and
-`$SCRATCH/bedcosmo/num_visits/spectral_templates/`. EAZY and directly learned
-DESI banks use the same `<source>/component_*.dat` plus `<source>.param` layout.
+The shared DESI input is `$SCRATCH/bedcosmo/desi/tiny_dr1/`. Every prior build
+owns its exact EAZY-compatible bank under `templates/`; the KDE/flow and its
+component spectra therefore move and snapshot as one unit.
 
 `build_prior` also writes ``build.log`` and ``build_provenance.json`` into that
 directory. The provenance records the template bank, template normalization
@@ -81,7 +83,7 @@ python -m bedcosmo.num_visits.empirical.desi.build_prior --rank 8
 ```
 
 This writes the prior to `num_visits/empirical_prior/desi8/` and its template
-bank to `num_visits/spectral_templates/desi8/`. See
+bank to `num_visits/empirical_prior/desi8/templates/`. See
 [`desi/README.md`](desi/README.md) for the split, support, factorization, and
 held-out evaluation details. Neither source builder trains the prior flow;
 that is the separate [prior-flow step](#step-3-prior-normalizing-flow-prior_flowpy).
@@ -163,7 +165,7 @@ The checked-in BED configuration uses `template_source: desi8` with
 
 | What | Path |
 |------|------|
-| Spectral template banks | `num_visits/spectral_templates/{desi8,eazy12,eazy6}/` |
+| Spectral template banks | `num_visits/empirical_prior/<source>/templates/` |
 | DESI tiny DR1 | `desi/tiny_dr1/` |
 | Empirical-prior variants | `num_visits/empirical_prior/{desi8,eazy12,eazy6,eazy12-t1-t7,...}/` |
 | Shared DESI training data | `num_visits/desi_training_data/` |
@@ -552,7 +554,6 @@ python -m bedcosmo.num_visits.empirical.diagnostic_plots clr-triangle \
 ```yaml
 template_source: desi8       # or eazy12 / eazy6
 reduced_templates: null      # EAZY only: e.g. "t7,t10"
-template_dir: null           # defaults to $SCRATCH/bedcosmo/num_visits/spectral_templates/
 density_type: flow           # {flow (default), kde}; flow needs sed_prior_flow_*.pt in prior_dir
 ```
 
@@ -683,7 +684,7 @@ Each gallery includes a representative member and one member rich in each
 selected template. It overlays the observed DESI coadd, full-basis fit,
 reduced fit, and each reduced template contribution; the side bars show the
 normalized reduced coefficients. For EAZY6, also pass
-`--build-name empirical_prior/eazy6 --template-param eazy6/eazy6.param`.
+`--build-name empirical_prior/eazy6 --template-param eazy6.param`.
 By default, every trace is divided by the same continuum estimated from the
 DESI coadd with a 250-rest-Angstrom Gaussian and then smoothed by 8 observed
 Angstroms for display. Defining the broad continuum scale in the rest frame
@@ -737,7 +738,7 @@ Legacy layouts (`desi_eazy_hp*` at scratch root, `desi_eazy_empirical_prior_full
 
 | Step | Command / setting |
 |------|-------------------|
-| **Configured source** | `desi8` (`empirical_prior/desi8`, `spectral_templates/desi8`) |
+| **Configured source** | `desi8` (`empirical_prior/desi8`, including `templates/`) |
 | **DESI8 build** | `desi.fit_basis --max-spectra 0 --ranks 8`, then `desi.build_prior --rank 8` |
 | **EAZY12 build** | `python -m bedcosmo.num_visits.empirical.eazy.build_prior` |
 | EAZY fit | **NNLS**, **L1** norm, **`z_min=0.01`**, all candidates (no `--n-max`) |
@@ -755,5 +756,5 @@ Legacy layouts (`desi_eazy_hp*` at scratch root, `desi_eazy_empirical_prior_full
 ## References
 
 - EAZY: [gbrammer/eazy-photoz](https://github.com/gbrammer/eazy-photoz),
-  materialized by default as `spectral_templates/eazy12/eazy12.param`
+  materialized by default as `empirical_prior/eazy12/templates/eazy12.param`
 - DESI DR1 coadd + redrock under `$SCRATCH/bedcosmo/desi/tiny_dr1`

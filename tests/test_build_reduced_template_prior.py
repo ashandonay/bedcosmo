@@ -51,13 +51,20 @@ def test_reduced_weights_table_maps_membership_schema():
 
 
 def test_write_reduced_template_param(tmp_path):
+    source = tmp_path / "source"
+    source.mkdir()
+    for index in range(1, 4):
+        (source / f"t{index}.dat").write_text(f"{index}\n")
     path = write_reduced_template_param(
-        tmp_path / "reduced.param",
-        ["templates/t1.dat", "templates/t2.dat", "templates/t3.dat"],
+        tmp_path / "output" / "reduced.param",
+        source,
+        ["t1.dat", "t2.dat", "t3.dat"],
         (1, 3),
     )
 
     assert path.read_text().splitlines()[1:] == [
-        "1 templates/t1.dat 1.0",
-        "2 templates/t3.dat 1.0",
+        "1 component_01.dat 1.0",
+        "2 component_02.dat 1.0",
     ]
+    assert (path.parent / "component_01.dat").read_text() == "1\n"
+    assert (path.parent / "component_02.dat").read_text() == "3\n"

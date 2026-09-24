@@ -34,23 +34,13 @@ def test_scratch_paths_use_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) 
         scratch / "bedcosmo" / "num_visits" / "desi_training_data"
     )
     assert get_desi_candidate_manifest_path() == (
-        scratch
-        / "bedcosmo"
-        / "num_visits"
-        / "desi_training_data"
-        / "desi_candidate_manifest.csv"
+        scratch / "bedcosmo" / "num_visits" / "desi_training_data" / "desi_candidate_manifest.csv"
     )
     assert get_template_dir() == (
-        scratch / "bedcosmo" / "num_visits" / "spectral_templates"
+        scratch / "bedcosmo" / "num_visits" / "empirical_prior" / "eazy12" / "templates"
     )
     assert get_healpix_fit_dir(23040) == (
-        scratch
-        / "bedcosmo"
-        / "num_visits"
-        / "empirical_prior"
-        / "eazy12"
-        / "healpix"
-        / "hp23040"
+        scratch / "bedcosmo" / "num_visits" / "empirical_prior" / "eazy12" / "healpix" / "hp23040"
     )
     assert get_prior_build_dir() == (
         scratch / "bedcosmo" / "num_visits" / "empirical_prior" / "eazy12"

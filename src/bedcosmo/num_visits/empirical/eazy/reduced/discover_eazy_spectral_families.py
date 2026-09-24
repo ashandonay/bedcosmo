@@ -804,7 +804,7 @@ def main() -> None:
     weights_csv = args.weights_csv or prior_dir / "desi_eazy_empirical_weights.csv"
     cohort_root = args.cohort_root or prior_dir / "reduced_template_cohorts"
     output_dir = args.output_dir or cohort_root / "spectral_families"
-    template_dir = args.template_dir or get_template_dir()
+    template_dir = args.template_dir or get_template_dir(args.build_name)
     if not 0 < args.variance_threshold <= 1:
         raise ValueError("--variance-threshold must be in (0, 1]")
     if not 0 < args.required_family_coverage <= 1:

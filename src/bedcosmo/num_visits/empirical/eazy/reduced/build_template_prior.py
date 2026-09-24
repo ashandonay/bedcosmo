@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -116,20 +117,26 @@ def reduced_weights_table(
 
 def write_reduced_template_param(
     path: Path,
+    source_template_dir: Path,
     template_paths: list[str],
     subset: tuple[int, ...],
 ) -> Path:
-    """Write an EAZY parameter file containing only the selected templates."""
+    """Copy selected components and write a self-contained parameter file."""
     if any(index > len(template_paths) for index in subset):
         raise ValueError(f"Subset {subset} exceeds the {len(template_paths)}-template source bank")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    local_paths: list[str] = []
+    for position, index in enumerate(subset, 1):
+        source = source_template_dir / template_paths[index - 1]
+        if not source.is_file():
+            raise FileNotFoundError(f"Source template not found: {source}")
+        relative = f"component_{position:02d}.dat"
+        shutil.copy2(source, path.parent / relative)
+        local_paths.append(relative)
     lines = [
         "# Reduced template bank generated from cohort discovery.",
-        *(
-            f"{position} {template_paths[index - 1]} 1.0"
-            for position, index in enumerate(subset, 1)
-        ),
+        *(f"{position} {relative} 1.0" for position, relative in enumerate(local_paths, 1)),
     ]
-    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines) + "\n")
     return path
 
@@ -151,7 +158,6 @@ def main() -> None:
     )
     parser.add_argument("--templates", required=True, help="Subset label, e.g. T1+T7")
     parser.add_argument("--build-name", default=None)
-    parser.add_argument("--template-dir", type=Path, default=None)
     parser.add_argument("--z-min", type=float, default=0.01)
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--kde-sample", type=int, default=2000)
@@ -166,7 +172,8 @@ def main() -> None:
         source_variant = "eazy12"
     build_name = args.build_name or f"empirical_prior/{source_variant}-{slug}"
     prior_dir = get_prior_build_dir(build_name)
-    template_dir = (args.template_dir or get_template_dir()).expanduser().resolve()
+    source_template_dir = get_template_dir(args.source_build_name).expanduser().resolve()
+    template_dir = get_template_dir(build_name).expanduser().resolve()
     cohort_dir = (
         args.cohort_dir
         if args.cohort_dir is not None
@@ -189,11 +196,12 @@ def main() -> None:
         max_chi2_dof=max_chi2_dof,
     )
 
-    reduced_param_rel = (
-        Path(source_variant) / "reduced" / f"{source_variant}_{slug}.param"
-    )
+    reduced_param_rel = Path(f"{source_variant}_{slug}.param")
     reduced_param_path = write_reduced_template_param(
-        template_dir / reduced_param_rel, template_paths, subset
+        template_dir / reduced_param_rel,
+        source_template_dir,
+        template_paths,
+        subset,
     )
     prior_dir.mkdir(parents=True, exist_ok=True)
     weights_path = prior_dir / "desi_eazy_empirical_weights.csv"
@@ -238,7 +246,7 @@ def main() -> None:
             "inputs": {
                 "discovery_parameters": discovery_path,
                 "subset_memberships": memberships_path,
-                "template_dir": template_dir,
+                "source_template_dir": source_template_dir,
             },
             "kde_request": {"sample": int(args.kde_sample), "seed": int(args.seed)},
         },

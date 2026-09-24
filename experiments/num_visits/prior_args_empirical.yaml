@@ -4,7 +4,7 @@
 #   template_source: desi8 | eazy12 | eazy6
 #   reduced_templates: null (full bank) or "t7,t10" (comma-separated, case-insensitive)
 #
-# These resolve prior_dir, template_param, and the parameters: block automatically
+# These resolve prior_dir, its templates/ bank, template_param, and the parameters block
 # at submit/snapshot time (written into the run's artifacts/prior_args.yaml).
 # Examples:
 #   ./submit.sh train num_visits empirical
@@ -35,7 +35,6 @@ reduced_templates: null
 # CLI: --prior-density-type flow|kde
 density_type: flow
 
-template_dir: null
 template_norm_min: 3600.0
 template_norm_max: 4200.0
 # Input fitted-spectrum flux-unit conversion to erg / (s cm^2 Angstrom).

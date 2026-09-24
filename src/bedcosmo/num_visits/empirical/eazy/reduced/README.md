@@ -37,15 +37,15 @@ without depending on the repository's `experiments/` directory.
 
 ## Paths and inputs
 
-The path helpers default to:
+The path helpers default to the self-contained EAZY12 build:
 
 ```text
-$SCRATCH/bedcosmo/num_visits/spectral_templates/
 $SCRATCH/bedcosmo/num_visits/empirical_prior/eazy12/
+$SCRATCH/bedcosmo/num_visits/empirical_prior/eazy12/templates/
 ```
 
 The full EAZY12 build must contain `desi_eazy_empirical_weights.csv`. The shared
-template root contains `eazy12/eazy12.param` and its referenced components;
+build contains `templates/eazy12.param` and its referenced components;
 these are downloaded automatically when first loaded.
 
 ## 1. Search all fixed-size subsets
@@ -130,7 +130,7 @@ $SCRATCH/bedcosmo/num_visits/empirical_prior/eazy12-t1-t7/
 $SCRATCH/bedcosmo/num_visits/empirical_prior/eazy12-t7-t10/
 ```
 
-Use `--source-build-name`, `--cohort-dir`, `--template-dir`, or `--build-name`
+Use `--source-build-name`, `--cohort-dir`, or `--build-name`
 only for a nonstandard layout. A custom `--build-name` controls the output
 directory and must match the intended subset to avoid misleading paths.
 
@@ -141,7 +141,7 @@ Each build writes:
 - `sed_prior_kde_native.joblib`
 - `sed_prior_kde_gaussianized.joblib`
 - KDE diagnostic triangle plots
-- `<source>/reduced/<source>_<subset>.param` under `spectral_templates/`
+- `templates/<source>_<subset>.param` and copied selected components
 
 The coefficient scale and KDE `log_c_scale` inherit the full-fit template
 normalization recorded in `discovery_parameters.json`. DESI coadd fluxes are

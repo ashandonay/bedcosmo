@@ -611,7 +611,7 @@ def main() -> None:
     full_table = load_quality_fit_table(weights_csv)
     template_waves, template_fluxes, _ = load_eazy_templates(
         args.template_param,
-        template_dir=args.template_dir or get_template_dir(),
+        template_dir=args.template_dir or get_template_dir(args.build_name),
         norm_min=args.norm_min,
         norm_max=args.norm_max,
     )

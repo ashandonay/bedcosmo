@@ -44,19 +44,17 @@ from ..paths import (
     DEFAULT_EMPIRICAL_PRIOR_DIR,
     add_desi_dir_argument,
     get_healpix_fit_dir,
+    get_template_dir,
     resolve_desi_dir,
 )
 from ..provenance import fit_provenance_path, write_provenance
 from ..templates import (
-    DEFAULT_TEMPLATE_DIR,
     DEFAULT_TEMPLATE_NORM_MAX_AA,
     DEFAULT_TEMPLATE_NORM_MIN_AA,
     DEFAULT_TEMPLATE_PARAM_6D,
     DEFAULT_TEMPLATE_PARAM_12D,
     load_eazy_templates,
 )
-
-EAZY_TEMPLATES_DIR = DEFAULT_TEMPLATE_DIR
 
 
 def read_redrock(redrock_path: Path):
@@ -1190,6 +1188,12 @@ def main() -> None:
             f"{DEFAULT_TEMPLATE_PARAM_6D} for the classic 6-template set."
         ),
     )
+    parser.add_argument(
+        "--template-dir",
+        type=Path,
+        default=None,
+        help="Template bank owned by this prior build (default: <prior-dir>/templates).",
+    )
     parser.add_argument("--overwrite-templates", action="store_true")
 
     parser.add_argument(
@@ -1366,6 +1370,11 @@ def main() -> None:
         else get_healpix_fit_dir(args.healpix, build_name=args.build_name)
     )
     outdir.mkdir(parents=True, exist_ok=True)
+    template_dir = (
+        args.template_dir.expanduser().resolve()
+        if args.template_dir is not None
+        else get_template_dir(args.build_name)
+    )
 
     if args.auto_download_desi:
         coadd_path, redrock_path = ensure_desi_healpix(
@@ -1404,7 +1413,7 @@ def main() -> None:
                 "parameters": vars(args),
                 "template": {
                     "template_param": args.template_param,
-                    "template_dir": EAZY_TEMPLATES_DIR,
+                    "template_dir": template_dir,
                     "normalization": {
                         "method": "integral",
                         "wave_min_aa": float(args.norm_min),
@@ -1430,9 +1439,10 @@ def main() -> None:
     else:
         print("ZWARN filter:  none")
 
-    print(f"\nLoading EAZY templates from {EAZY_TEMPLATES_DIR}...")
+    print(f"\nLoading EAZY templates from {template_dir}...")
     template_waves, template_fluxes, template_files = load_eazy_templates(
         template_param=args.template_param,
+        template_dir=template_dir,
         overwrite=args.overwrite_templates,
         norm_min=args.norm_min,
         norm_max=args.norm_max,

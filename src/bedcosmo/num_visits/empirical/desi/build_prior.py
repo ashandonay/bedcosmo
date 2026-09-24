@@ -17,7 +17,6 @@ from ..paths import (
     BUILD_PROVENANCE_FILENAME,
     SED_PRIOR_KDE_NATIVE_FILENAME,
     get_desi_training_data_dir,
-    get_num_visits_spectral_template_dir,
     get_prior_build_dir,
 )
 from ..provenance import write_provenance
@@ -162,7 +161,6 @@ def write_prior_args(
     path: Path,
     *,
     prior_dir: Path,
-    template_dir: Path,
     template_param: Path,
     rank: int,
     norm_min: float,
@@ -183,7 +181,6 @@ def write_prior_args(
     config = {
         "density_type": "kde",
         "prior_dir": str(prior_dir),
-        "template_dir": str(template_dir),
         "template_param": str(template_param),
         "template_norm_min": float(norm_min),
         "template_norm_max": float(norm_max),
@@ -213,7 +210,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--rank", type=int, default=8)
     parser.add_argument("--build-name", default="empirical_prior/desi8")
     parser.add_argument("--output-dir", type=Path, default=None)
-    parser.add_argument("--template-dir", type=Path, default=None)
     parser.add_argument("--template-param", type=Path, default=None)
     parser.add_argument("--prior-z-min", type=float, default=0.21)
     parser.add_argument("--prior-z-max", type=float, default=1.28)
@@ -291,16 +287,10 @@ def main() -> None:
         if args.output_dir is not None
         else get_prior_build_dir(args.build_name)
     )
-    template_dir = (
-        args.template_dir.expanduser().resolve()
-        if args.template_dir is not None
-        else get_num_visits_spectral_template_dir()
-    )
-    relative_param = args.template_param or Path(
-        f"desi{args.rank}/desi{args.rank}.param"
-    )
+    template_dir = output_dir / "templates"
+    relative_param = args.template_param or Path(f"desi{args.rank}.param")
     if relative_param.is_absolute():
-        raise ValueError("--template-param must be relative to --template-dir")
+        raise ValueError("--template-param must be relative to <prior-dir>/templates")
     output_dir.mkdir(parents=True, exist_ok=True)
 
     data = np.load(args.training_matrix)
@@ -557,7 +547,6 @@ def main() -> None:
     prior_args_path = write_prior_args(
         output_dir / "prior_args.yaml",
         prior_dir=output_dir,
-        template_dir=template_dir,
         template_param=relative_param,
         rank=args.rank,
         norm_min=args.norm_min,

@@ -46,15 +46,15 @@ PC_COLOR = "#3366CC"
 ILR_COLOR = "#DC3912"
 
 BUILD_CONFIG = {
-    "eazy6": "eazy6/eazy6.param",
-    "eazy12": "eazy12/eazy12.param",
+    "eazy6": "eazy6.param",
+    "eazy12": "eazy12.param",
 }
 
 
 def default_scratch() -> Path:
     scratch = os.environ.get("SCRATCH")
     if not scratch:
-        raise RuntimeError("$SCRATCH is not set; pass --prior-dir and --template-dir")
+        raise RuntimeError("$SCRATCH is not set; pass --prior-dir")
     return Path(scratch).expanduser()
 
 
@@ -477,7 +477,7 @@ def parse_args() -> argparse.Namespace:
         "--template-dir",
         type=Path,
         default=None,
-        help="EAZY download root containing the selected template parameter file",
+        help="Override the prior build's templates/ directory",
     )
     parser.add_argument(
         "--output",
@@ -490,13 +490,13 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    scratch = default_scratch() if args.prior_dir is None or args.template_dir is None else None
+    scratch = default_scratch() if args.prior_dir is None else None
     prior_dir = (
         args.prior_dir
         if args.prior_dir is not None
         else scratch / "bedcosmo/num_visits/empirical_prior" / args.build
     )
-    template_dir = args.template_dir if args.template_dir is not None else scratch / "bedcosmo/eazy"
+    template_dir = args.template_dir if args.template_dir is not None else prior_dir / "templates"
     template_param = BUILD_CONFIG[args.build]
     wave, templates = read_templates(template_dir, template_param)
     weights, redshift = read_fit_table(

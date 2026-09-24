@@ -6,7 +6,6 @@ from typing import Any
 
 from .paths import (
     EMPIRICAL_PRIOR_ROOT_DIR,
-    get_num_visits_spectral_template_dir,
     get_prior_build_dir,
 )
 from .simplex import prior_ilr_feature_names
@@ -34,7 +33,7 @@ _SOURCE_CONFIG: dict[str, dict[str, Any]] = {
     },
     "desi8": {
         "n_templates": 8,
-        "template_param": "desi8/desi8.param",
+        "template_param": "desi8.param",
         "template_norm_min": 3600.0,
         "template_norm_max": 4200.0,
     },
@@ -122,7 +121,7 @@ def resolve_template_param(
     template_source: str,
     reduced_templates: Any = None,
 ) -> str:
-    """EAZY ``.param`` path relative to the template cache directory."""
+    """Template-bank filename relative to ``<prior_dir>/templates``."""
     source = normalize_template_source(template_source)
     full_param = str(_SOURCE_CONFIG[source]["template_param"])
     subset = parse_reduced_templates(reduced_templates)
@@ -131,7 +130,7 @@ def resolve_template_param(
     if subset is None:
         return full_param
     slug = reduced_template_slug(subset)
-    return f"{source}/reduced/{source}_{slug}.param"
+    return f"{source}_{slug}.param"
 
 
 def n_templates_for(
@@ -212,7 +211,7 @@ def materialize_empirical_prior_args(
     out["prior_dir"] = str(prior_dir)
     out["template_param"] = template_param
     source_config = _SOURCE_CONFIG[source]
-    out["template_dir"] = str(get_num_visits_spectral_template_dir())
+    out.pop("template_dir", None)
     out["template_norm_min"] = float(source_config["template_norm_min"])
     out["template_norm_max"] = float(source_config["template_norm_max"])
     out["parameters"] = default_empirical_parameters(
