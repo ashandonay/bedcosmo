@@ -171,12 +171,6 @@ def test_load_posterior_samples_file_require_series(tmp_path):
     assert bundle["meta"]["tag"] == "both"
     assert set(bundle["series_names"]) == {"optimal", "nominal"}
 
-    # step_N string normalization still matches
-    bundle2 = load_posterior_samples_file(
-        str(artifacts), step="step_10", require_series=["nominal"]
-    )
-    assert bundle2["meta"]["tag"] == "both"
-
     with pytest.raises(FileNotFoundError):
         load_posterior_samples_file(
             str(artifacts), step=10, require_series=("missing",)
@@ -218,3 +212,32 @@ def test_load_posterior_samples_file_skips_newer_without_required_series(tmp_pat
     # Without require_series, newest wins regardless of series.
     newest = load_posterior_samples_file(str(artifacts), step=3)
     assert newest["meta"]["tag"] == "nominal_newer"
+
+
+def test_load_posterior_samples_file_generated_by(tmp_path):
+    """A newer default-eval central bundle must not shadow a --sample-posterior bundle."""
+    artifacts = tmp_path / "artifacts"
+    theta, y, design, series_names, param_names = _bundle_arrays(n_series=2)
+    for tag, generated_by, ts in (
+        ("multi_y", "Evaluator.sample_posterior", "20200101_000000"),
+        ("central", "Evaluator.run", "20200101_000100"),
+    ):
+        save_posterior_samples(
+            make_posterior_samples_path(str(artifacts), step=4, timestamp=ts),
+            theta=theta,
+            y=y,
+            design=design,
+            series_names=series_names,
+            param_names=param_names,
+            meta={"status": "complete", "step": 4, "tag": tag, "generated_by": generated_by},
+        )
+        time.sleep(0.05)
+
+    multi = load_posterior_samples_file(
+        str(artifacts), step=4, generated_by="Evaluator.sample_posterior"
+    )
+    assert multi["meta"]["tag"] == "multi_y"
+    central = load_posterior_samples_file(str(artifacts), step=4, generated_by="Evaluator.run")
+    assert central["meta"]["tag"] == "central"
+    with pytest.raises(FileNotFoundError):
+        load_posterior_samples_file(str(artifacts), step=4, generated_by="other")

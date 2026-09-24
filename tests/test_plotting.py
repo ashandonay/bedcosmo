@@ -452,7 +452,10 @@ class TestComparisonPlotter:
                      np.array([[0.0, 0.0], [1.0, 1.0]]),
                      np.array([0.1, 0.9]),
                      0.5,
-                     {},
+                     dict.fromkeys((
+                         "nominal_prior_entropy", "nominal_posterior_entropy",
+                         "prior_entropy_by_design", "posterior_entropy_by_design",
+                     )),
                  ),
              ), \
              patch.object(ComparisonPlotter, 'plot_triangle') as mock_plot_triangle, \
@@ -499,7 +502,10 @@ class TestComparisonPlotter:
                      np.array([[0.0, 0.0], [1.0, 1.0]]),
                      np.array([0.1, 0.9]),
                      0.5,
-                     {},
+                     dict.fromkeys((
+                         "nominal_prior_entropy", "nominal_posterior_entropy",
+                         "prior_entropy_by_design", "posterior_entropy_by_design",
+                     )),
                  ),
              ), \
              patch.object(ComparisonPlotter, 'plot_triangle') as mock_plot_triangle, \
@@ -981,12 +987,12 @@ class TestHelperFunctions:
 
     def test_entropy_legend_suffix(self, mock_scratch_env):
         """Posterior legend omits H_prior when the prior contour is plotted separately."""
-        plotter = BasePlotter(cosmo_exp='test_exp')
-        both = plotter._entropy_legend_suffix(4.5, 3.2, include_prior=True)
-        post_only = plotter._entropy_legend_suffix(4.5, 3.2, include_prior=False)
+        from bedcosmo.plotting import entropy_legend_suffix
+        both = entropy_legend_suffix(4.5, 3.2, include_prior=True)
+        post_only = entropy_legend_suffix(4.5, 3.2, include_prior=False)
         assert both == ", H_prior: 4.50 bits, H_post: 3.20 bits"
         assert post_only == ", H_post: 3.20 bits"
-        assert plotter._entropy_legend_suffix(4.5, None, include_prior=True) == ", H_prior: 4.50 bits"
+        assert entropy_legend_suffix(4.5, None, include_prior=True) == ", H_prior: 4.50 bits"
 
     def test_display_figure(self, mock_scratch_env):
         """Test _display_figure helper method."""

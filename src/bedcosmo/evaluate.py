@@ -15,7 +15,7 @@ import numpy as np
 import torch
 import getdist
 import argparse
-from bedcosmo.plotting import RunPlotter
+from bedcosmo.plotting import RunPlotter, nf_posterior_entries
 import traceback
 from bedcosmo.pyro_oed_src import nf_loss, LikelihoodDataset
 from bedcosmo.entropy import (
@@ -37,8 +37,6 @@ from bedcosmo.util import (
     parse_param_subsets,
     get_rng_state, parse_extra_args, render_overlay,
     get_checkpoint, get_contour_area,
-    sample_nf,
-    parse_eig_for_posterior, resolve_eig_step,
 )
 from bedcosmo.artifacts import (
     load_eig_data_file,
@@ -407,6 +405,7 @@ class Evaluator:
                 self.save_path,
                 step=step if posterior_samples_path is None else None,
                 path=posterior_samples_path,
+                generated_by="Evaluator.sample_posterior",
             )
             print(f"  Reusing posterior samples from {bundle['path']}")
             selected_step = bundle["meta"].get("step", step)
@@ -1979,6 +1978,35 @@ class Evaluator:
             json.dump(self.eig_data, f, indent=2)
         print(f"Saved EIG steps data to {eig_data_save_path}")
 
+    def _plot_posterior(self, posterior_flow, eval_step, params=None, filename=None):
+        """Sample nominal/optimal posteriors at central y, plot them, and return the entries."""
+        auto_seed(self.seed)
+        nf_entries = nf_posterior_entries(
+            self.experiment,
+            posterior_flow,
+            self.eig_data,
+            eval_step,
+            guide_samples=self.guide_samples,
+            transform_output=self.nf_transform_output,
+            params=params,
+            plot_prior=self.plot_prior,
+            device=self.device,
+        )
+        self.plotter.plot_posterior(
+            self.experiment,
+            nf_entries,
+            eval_step=eval_step,
+            eig_data=self.eig_data,
+            params=params,
+            levels=self.levels,
+            guide_samples=self.guide_samples,
+            plot_prior=self.plot_prior,
+            transform_output=self.nf_transform_output,
+            seed=self.seed,
+            filename=filename,
+        )
+        return nf_entries
+
     def run(self, eval_step=None):
         # Determine eval_step
         if eval_step is None or eval_step == 'last':
@@ -2070,226 +2098,55 @@ class Evaluator:
                 json.dump(self.eig_data, f, indent=2)
             print(f"Saved EIG data to {eig_data_save_path}")
 
-        # Main posterior: resolve designs/y → sample_nf → save NPZ → plot.
-        # Multi-y bundles still require --sample-posterior.
-        eig_file = self.eig_file_path or self.output_path
-        if eig_file is not None:
-            eig_file = os.path.basename(str(eig_file))
+        # Main posterior at central y. Its samples are also saved as an n_data=1
+        # NPZ for replotting; multi-y bundles come from --sample-posterior.
+        posterior_flow, _ = load_model(
+            self.experiment, eval_step, self.run_obj, self.run_args, self.device, global_rank=0
+        )
         try:
-            input_designs, eig_values, nominal_eig, entropy_info = parse_eig_for_posterior(
-                self.eig_data, eval_step
+            nf_entries = self._plot_posterior(posterior_flow, eval_step)
+            eig_file = self.eig_file_path or self.output_path
+            y = self.experiment.central_val.detach().cpu().numpy().reshape(1, 1, -1)
+            out_path = save_posterior_samples(
+                make_posterior_samples_path(self.save_path, step=eval_step),
+                theta=np.stack([e["samples"].samples[np.newaxis] for e in nf_entries]),
+                y=np.repeat(y, len(nf_entries), axis=0),
+                design=np.stack([e["design"] for e in nf_entries]),
+                series_names=[e["name"] for e in nf_entries],
+                param_names=nf_entries[0]["samples"].paramNames.list(),
+                meta={
+                    "status": "complete",
+                    "run_id": self.run_id,
+                    "step": int(eval_step),
+                    "eig_file": os.path.basename(str(eig_file)) if eig_file is not None else None,
+                    "conditioning": "central_val",
+                    "seed": int(self.seed),
+                    "guide_samples": int(self.guide_samples),
+                    "num_data_samples": 1,
+                    "transform_output": bool(self.nf_transform_output),
+                    "param_space": self.param_space,
+                    "cosmo_exp": self.cosmo_exp,
+                    "series": [
+                        {"name": e["name"], "color": e["color"], "label": e["label"]}
+                        for e in nf_entries
+                    ],
+                    "generated_by": "Evaluator.run",
+                },
             )
-            if isinstance(eval_step, str) and eval_step.startswith("step_"):
-                step_for_model = int(eval_step.split("_")[1])
-            elif eval_step is None:
-                step_for_model = "last"
-            else:
-                step_for_model = int(eval_step) if str(eval_step).isdigit() else eval_step
-            posterior_flow, _ = load_model(
-                self.experiment,
-                step_for_model,
-                self.run_obj,
-                self.run_args,
-                self.device,
-                global_rank=0,
-            )
-
-            _, step_str = resolve_eig_step(self.eig_data, eval_step)
-            step_data = self.eig_data[step_str]
-            nominal_data = step_data.get("nominal", {})
-            nominal_grid_eig = None
-            nominal_grid_data = nominal_data.get("grid", {})
-            if isinstance(nominal_grid_data, dict) and "eigs_avg" in nominal_grid_data:
-                nominal_grid_eig = nominal_grid_data.get("eigs_avg")
-                if isinstance(nominal_grid_eig, list):
-                    nominal_grid_eig = (
-                        nominal_grid_eig[0] if len(nominal_grid_eig) > 0 else None
-                    )
-                nominal_grid_eig = (
-                    float(nominal_grid_eig) if nominal_grid_eig is not None else None
-                )
-            title = f"Posterior Evaluation - Run: {self.run_id[:8]}"
-
-            auto_seed(self.seed)
-
-            y = self.experiment.central_val
-            include_prior_in_legend = not self.plot_prior
-            nf_entries = []
-
-            # Nominal design + central y
-            nominal_design = self.experiment.nominal_design
-            nominal_samples = sample_nf(
-                self.experiment,
-                posterior_flow,
-                nominal_design,
-                y,
-                num_samples=self.guide_samples,
-                transform_output=self.nf_transform_output,
-                device=self.device,
-            )
-            eig_str = (
-                f", EIG: {nominal_eig:.3f} bits"
-                if nominal_eig is not None
-                else ""
-            )
-            eig_str += self.plotter._entropy_legend_suffix(
-                entropy_info.get("nominal_prior_entropy"),
-                entropy_info.get("nominal_posterior_entropy"),
-                include_prior=include_prior_in_legend,
-            )
-            if hasattr(nominal_design, "detach"):
-                nominal_design_np = nominal_design.detach().cpu().numpy().reshape(-1)
-            else:
-                nominal_design_np = np.asarray(nominal_design).reshape(-1)
-            nf_entries.append({
-                "samples": nominal_samples,
-                "name": "nominal",
-                "design": nominal_design_np,
-                "label": f"Nominal Design (NF){eig_str}",
-                "color": "tab:blue",
-                "line_style": "-",
-                "alpha": 1.0,
-            })
-
-            # Optimal (EIG-argmax) design + central y
-            input_designs_arr = np.asarray(input_designs)
-            prior_h = entropy_info.get("prior_entropy_by_design")
-            post_h = entropy_info.get("posterior_entropy_by_design")
-            if len(input_designs_arr) > 1 and eig_values is not None:
-                eig_values_arr = np.asarray(eig_values)
-                optimal_idx = int(np.argmax(eig_values_arr))
-                optimal_design = input_designs_arr[optimal_idx]
-                optimal_eig = float(eig_values_arr[optimal_idx])
-                eig_str = f", EIG: {optimal_eig:.3f} bits"
-                opt_prior_h = (
-                    float(prior_h[optimal_idx])
-                    if prior_h is not None and len(prior_h) > optimal_idx
-                    else None
-                )
-                opt_post_h = (
-                    float(post_h[optimal_idx])
-                    if post_h is not None and len(post_h) > optimal_idx
-                    else None
-                )
-                eig_str += self.plotter._entropy_legend_suffix(
-                    opt_prior_h, opt_post_h, include_prior=include_prior_in_legend
-                )
-                opt_label = f"Optimal Design (NF){eig_str}"
-            elif len(input_designs_arr) >= 1:
-                optimal_idx = 0
-                optimal_design = input_designs_arr[0]
-                optimal_eig = (
-                    float(np.asarray(eig_values)[0]) if eig_values is not None else None
-                )
-                eig_str = (
-                    f", EIG: {optimal_eig:.3f} bits"
-                    if optimal_eig is not None
-                    else ""
-                )
-                opt_label = f"Input Design (NF){eig_str}"
-            else:
-                raise ValueError("No input designs available for optimal posterior")
-
-            optimal_samples = sample_nf(
-                self.experiment,
-                posterior_flow,
-                optimal_design,
-                y,
-                num_samples=self.guide_samples,
-                transform_output=self.nf_transform_output,
-                device=self.device,
-            )
-            nf_entries.append({
-                "samples": optimal_samples,
-                "name": "optimal",
-                "design": np.asarray(optimal_design, dtype=np.float64).reshape(-1),
-                "label": opt_label,
-                "color": "tab:orange",
-                "line_style": "-",
-                "alpha": 1.0,
-            })
-
-            # Pack central-context entries into the existing NPZ schema (n_data=1).
-            by_name = {e["name"]: e for e in nf_entries}
-            series_order = ["optimal", "nominal"]
-            if hasattr(y, "detach"):
-                y_np = y.detach().cpu().numpy().reshape(-1)
-            else:
-                y_np = np.asarray(y).reshape(-1)
-            thetas, ys, designs, series_meta = [], [], [], []
-            param_names = None
-            for name in series_order:
-                entry = by_name[name]
-                theta = np.asarray(entry["samples"].samples, dtype=np.float64)
-                if param_names is None:
-                    param_names = list(entry["samples"].paramNames.list())
-                thetas.append(theta[np.newaxis, ...])
-                ys.append(y_np.reshape(1, -1))
-                designs.append(np.asarray(entry["design"], dtype=np.float64).reshape(-1))
-                series_meta.append({"name": name, "color": entry.get("color")})
-
-            out_meta = {
-                "status": "complete",
-                "run_id": self.run_id,
-                "step": int(eval_step) if str(eval_step).isdigit() else eval_step,
-                "eig_file": eig_file,
-                "central": True,
-                "conditioning": "central_val",
-                "seed": int(self.seed),
-                "guide_samples": int(self.guide_samples),
-                "num_data_samples": 1,
-                "transform_output": bool(self.nf_transform_output),
-                "param_space": self.param_space,
-                "cosmo_exp": self.cosmo_exp,
-                "series": series_meta,
-                "generated_by": "Evaluator.run",
-                "optimal_design_index": int(optimal_idx),
-            }
-
-            out_path = make_posterior_samples_path(self.save_path, step=eval_step)
-            save_posterior_samples(
-                out_path,
-                theta=np.stack(thetas, axis=0),
-                y=np.stack(ys, axis=0),
-                design=np.stack(designs, axis=0),
-                series_names=series_order,
-                param_names=param_names,
-                meta=out_meta,
-            )
-            print(
-                f"  Saved central-context posterior plot samples "
-                f"(n_data=1) to {out_path}"
-            )
-
-            self.plotter.plot_posterior(
-                experiment=self.experiment,
-                eval_step=eval_step,
-                artifacts_dir=self.save_path,
-                levels=self.levels,
-                guide_samples=self.guide_samples,
-                plot_prior=self.plot_prior,
-                transform_output=self.nf_transform_output,
-                title=title,
-                nominal_grid_eig=nominal_grid_eig,
-                nominal_prior_entropy=entropy_info.get("nominal_prior_entropy"),
-                seed=self.seed,
-            )
+            print(f"  Saved central-context posterior samples to {out_path}")
             self._update_runtime()
         except Exception as e:
-            print(f"Warning: main posterior sample/save/plot failed: {e}")
+            print(f"Warning: main posterior plot/save failed: {e}")
             traceback.print_exc()
 
         # Marginal posterior triangles + marginal EIG-vs-design plots per subset.
         for subset in self.marginal_eig_subsets:
             subset_id = self._subset_id(subset)
             try:
-                self.plotter.plot_posterior(
-                    eval_step=eval_step,
+                self._plot_posterior(
+                    posterior_flow,
+                    eval_step,
                     params=subset,
-                    guide_samples=self.guide_samples,
-                    levels=self.levels,
-                    plot_prior=self.plot_prior,
-                    transform_output=self.nf_transform_output,
                     filename=f"posterior_marginal_{subset_id}",
                 )
                 self._update_runtime()
@@ -2419,17 +2276,18 @@ class Evaluator:
             json.dump(self.eig_data, f, indent=2)
         print(f"Saved marginal EIG data to {eig_data_save_path}")
 
+        posterior_flow, _ = load_model(
+            self.experiment, eval_step, self.run_obj, self.run_args, self.device, global_rank=0
+        )
+
         # Marginal posterior triangles + marginal EIG-vs-design plots per subset.
         for subset in self.marginal_eig_subsets:
             subset_id = self._subset_id(subset)
             try:
-                self.plotter.plot_posterior(
-                    eval_step=eval_step,
+                self._plot_posterior(
+                    posterior_flow,
+                    eval_step,
                     params=subset,
-                    guide_samples=self.guide_samples,
-                    levels=self.levels,
-                    plot_prior=self.plot_prior,
-                    transform_output=self.nf_transform_output,
                     filename=f"posterior_marginal_{subset_id}",
                 )
                 self._update_runtime()
@@ -2483,7 +2341,7 @@ if __name__ == "__main__":
     parser.add_argument('--step-diagnostics', action='store_true', help='Run intermediate-step diagnostics (posterior_steps and eig_designs_steps). Disabled by default.')
     parser.add_argument('--sample-posterior', dest='sample_posterior_only', action='store_true', help='Only run sample_posterior (multi-y conditioned posteriors) and save an npz bundle; skip the full EIG pipeline. Default eval (run) already saves central-context n_data=1 plot samples.')
     parser.add_argument('--num-data-samples', type=int, default=10, help='Number of likelihood data realizations for sample_posterior (default: 10)')
-    parser.add_argument('--reuse-posterior-samples', action='store_true', help='Replot from the newest cached posterior_*.npz for the eval step instead of resampling (works for run() central n_data=1 or sample_posterior multi-y bundles).')
+    parser.add_argument('--reuse-posterior-samples', action='store_true', help='Replot from the newest cached --sample-posterior bundle for the eval step instead of resampling.')
     parser.add_argument('--posterior-samples-path', type=str, default=None, help='Explicit path to a posterior_*.npz bundle (implies reuse).')
 
     args, extra_args = parser.parse_known_args()
