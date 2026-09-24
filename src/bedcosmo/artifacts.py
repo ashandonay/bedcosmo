@@ -8,7 +8,7 @@ import os
 import shutil
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, Sequence
 
 import numpy as np
 import yaml
@@ -332,16 +332,57 @@ def load_posterior_samples(path: str) -> dict[str, Any]:
         }
 
 
+def normalize_posterior_step(step):
+    """Normalize eval/checkpoint step for meta comparison (``'step_10'`` → ``10``)."""
+    if step is None:
+        return None
+    if isinstance(step, str):
+        s = step.strip()
+        if s.startswith("step_"):
+            s = s[len("step_") :]
+        if s.isdigit() or (s.startswith("-") and s[1:].isdigit()):
+            return int(s)
+        return s
+    try:
+        return int(step)
+    except (TypeError, ValueError):
+        return step
+
+
 def _step_matches(meta: dict, step) -> bool:
     if step is None:
         return True
     meta_step = meta.get("step")
     if meta_step is None:
         return False
+    want = normalize_posterior_step(step)
+    have = normalize_posterior_step(meta_step)
     try:
-        return int(meta_step) == int(step)
+        return int(have) == int(want)
     except (TypeError, ValueError):
-        return str(meta_step) == str(step)
+        return str(have) == str(want)
+
+
+def series_names_from_meta(meta: dict) -> list[str]:
+    """Return series names recorded on a posterior-sample bundle meta dict."""
+    names = meta.get("series_names")
+    if names is not None:
+        return [str(n) for n in names]
+    series = meta.get("series") or []
+    out = []
+    for item in series:
+        if isinstance(item, dict) and "name" in item:
+            out.append(str(item["name"]))
+        elif isinstance(item, str):
+            out.append(item)
+    return out
+
+
+def _meta_has_series(meta: dict, require_series: Sequence[str] | None) -> bool:
+    if not require_series:
+        return True
+    have = set(series_names_from_meta(meta))
+    return all(str(name) in have for name in require_series)
 
 
 def load_posterior_samples_file(
@@ -351,14 +392,21 @@ def load_posterior_samples_file(
     status: str = "complete",
     subdir: str = DEFAULT_SUBDIR,
     path: Optional[str] = None,
+    require_series: Optional[Sequence[str]] = None,
 ) -> dict[str, Any]:
     """
     Load the newest matching posterior-sample bundle under an artifacts dir.
 
-    If ``path`` is given, load that file directly (still validates ``status`` when set).
+    If ``path`` is given, load that file directly (still validates ``status``,
+    ``step``, and ``require_series`` when set).
     Otherwise scan ``artifacts_dir/subdir/posterior*.npz``, prefer files whose meta
-    matches ``step`` and ``status``, newest by mtime.
+    matches ``step``, ``status``, and (when given) contains every name in
+    ``require_series``, newest by mtime.
     """
+    require_series = (
+        tuple(str(n) for n in require_series) if require_series is not None else None
+    )
+
     if path is not None:
         bundle = load_posterior_samples(path)
         if status is not None and bundle["meta"].get("status") != status:
@@ -370,6 +418,12 @@ def load_posterior_samples_file(
             raise ValueError(
                 f"Posterior samples at {path} have step={bundle['meta'].get('step')!r}, "
                 f"expected {step!r}"
+            )
+        if not _meta_has_series(bundle["meta"], require_series):
+            have = series_names_from_meta(bundle["meta"])
+            raise ValueError(
+                f"Posterior samples at {path} have series {have}, "
+                f"expected to include {list(require_series)}"
             )
         return bundle
 
@@ -402,12 +456,17 @@ def load_posterior_samples_file(
             continue
         if not _step_matches(meta, step):
             continue
+        if not _meta_has_series(meta, require_series):
+            continue
         matches.append((os.path.getmtime(p), p, meta))
 
     if not matches:
         step_msg = f" for step={step}" if step is not None else ""
+        series_msg = (
+            f" containing series {list(require_series)}" if require_series else ""
+        )
         raise FileNotFoundError(
-            f"No {status!r} posterior sample files{step_msg} under {search_dir}"
+            f"No {status!r} posterior sample files{step_msg}{series_msg} under {search_dir}"
         )
 
     matches.sort(key=lambda t: t[0], reverse=True)
