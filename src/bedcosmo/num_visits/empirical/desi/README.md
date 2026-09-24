@@ -141,7 +141,7 @@ DESI coadds contain statistically valid negative flux measurements even though
 the latent spectra are nonnegative. The method comparison keeps those values
 and tests two optimizers for the same inverse-variance-weighted objective:
 
-- NNLS, meaning alternating exact inverse-variance-weighted NNLS block solves;
+- ANLS, meaning alternating exact inverse-variance-weighted NNLS block solves;
   and
 - Green & Bailey's Nearly-NMF multiplicative updates.
 
