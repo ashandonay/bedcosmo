@@ -1980,8 +1980,8 @@ class RunPlotter(BasePlotter):
         Uses the standard plot's window (GetDist's default axis range over the
         displayed series, ``getdist_view_ranges``). 2D panels show the same
         GetDist contours as ``plot_posterior`` (smoothed from the in-window
-        samples) and every out-of-window sample as an ``x`` at its true position;
-        axes span all samples. 1D panels are log-count histograms over the full
+        samples, ``levels``) drawn over every sample as a faint dot; axes span
+        all samples. 1D panels are log-count histograms over the full
         range, with the window edges dashed. Every axis is linear inside the
         window and log10 beyond it (``_window_log_scale``), so the contour stays
         readable while far outliers stay on-axis; axes span the samples and
@@ -2026,6 +2026,9 @@ class RunPlotter(BasePlotter):
         # (n_display, n_guide, n_params)
         theta = bundle["theta"][series_idx, data_index]
         colors = [series_meta.get(name, {}).get("color", NF_SERIES_COLORS[name]) for name in display]
+        contour_colors = [
+            matplotlib.colors.to_hex(0.6 * np.array(matplotlib.colors.to_rgb(c))) for c in colors
+        ]
         with contextlib.redirect_stdout(io.StringIO()):
             full = [
                 getdist.MCSamples(samples=theta[k], names=names, settings=GETDIST_SETTINGS)
@@ -2086,15 +2089,17 @@ class RunPlotter(BasePlotter):
                     ax.xaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:g}"))
                 else:
                     px, py = names[j], names[i]
+                    # Every sample as a faint dot, contours on top in a darker shade.
+                    for k in range(len(display)):
+                        ax.scatter(theta[k, :, j], theta[k, :, i], s=2, color=colors[k],
+                                   alpha=0.15, lw=0, rasterized=True, zorder=1)
                     for k, sample in enumerate(in_window):
                         density = sample.get2DDensityGridData(
                             px, py, num_plot_contours=len(levels), get_density=True
                         )
                         ax.contour(density.x, density.y, density.P,
-                                   sorted(density.getContourLevels(list(levels))), colors=colors[k])
-                        out = outside[k]
-                        ax.scatter(theta[k, out, j], theta[k, out, i], s=16, color=colors[k],
-                                   alpha=0.7, marker="x", lw=0.8)
+                                   sorted(density.getContourLevels(list(levels))),
+                                   colors=[contour_colors[k]], linewidths=1.8, zorder=3)
                     if px in prior_bounds and py in prior_bounds:
                         (xl, xh), (yl, yh) = prior_bounds[px], prior_bounds[py]
                         ax.add_patch(Rectangle((xl, yl), xh - xl, yh - yl, fill=False,
@@ -2114,9 +2119,13 @@ class RunPlotter(BasePlotter):
                 ax.tick_params(axis="x", labelrotation=30)
 
         handles, legend_labels = axes[0, 0].get_legend_handles_labels()
-        handles += [Line2D([0], [0], ls="", marker="x", color="k"),
+        level_str = "/".join(f"{100 * lev:.0f}%" for lev in levels)
+        for k, name in enumerate(display):
+            handles += [Line2D([0], [0], color=contour_colors[k], lw=1.8)]
+            legend_labels += [f"{name} {level_str} contour"]
+        handles += [Line2D([0], [0], ls="", marker="o", ms=3, color="0.4", alpha=0.5),
                     Line2D([0], [0], ls="--", lw=0.8, color="0.4")]
-        legend_labels += ["outside plot window", "plot window (GetDist)"]
+        legend_labels += ["samples", "plot window (GetDist)"]
         # The upper-right panel is empty for n > 1; keep the legend off the 1D notes.
         axes[0, -1].legend(handles, legend_labels,
                            loc="upper right" if n == 1 else "center", fontsize=9)
@@ -2124,7 +2133,7 @@ class RunPlotter(BasePlotter):
         step = bundle["meta"].get("step")
         fig.suptitle(
             f"Posterior, full sample range - Run: {self.run_id[:8]}, step {step}, "
-            f"{theta.shape[1]:,} samples/series\naxes linear inside the dashed "
+            f"{_fmt_sample_count(theta.shape[1])} samples/series\naxes linear inside the dashed "
             f"window, log beyond; dotted = prior bounds",
             fontsize=10,
         )

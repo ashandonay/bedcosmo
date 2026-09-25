@@ -289,8 +289,8 @@ class TestRunPlotter:
             plt.close(fig)
     
     def test_plot_posterior_full_range(self, run_plotter, tmp_path):
-        """Full range: GetDist contours from in-window samples, x's at the true
-        positions of out-of-window samples, log-count 1D panels."""
+        """Full range: GetDist contours from in-window samples over every sample as
+        a faint dot, log-count 1D panels."""
         import contextlib
         import io
 
@@ -359,18 +359,22 @@ class TestRunPlotter:
         notes = [t.get_text() for t in axes[0, 0].texts]
         assert f"nominal: 3 outside prior, {n_om_out} outside window" in notes
 
-        # 2D: one contour set per series, plus x's at the true out-of-window positions.
+        # 2D: every sample (in and out of the window) as dots, contours drawn on top.
         ax2d = axes[1, 0]
-        crosses = [c for c in ax2d.collections if isinstance(c, PathCollection)]
-        assert len(ax2d.collections) - len(crosses) >= 2  # contour sets
-        assert [len(c.get_offsets()) for c in crosses] == [int(o.sum()) for o in outside]
-        np.testing.assert_allclose(crosses[0].get_offsets(), theta[0, 0][outside[0]])
+        dots = [c for c in ax2d.collections if isinstance(c, PathCollection)]
+        contours = [c for c in ax2d.collections if not isinstance(c, PathCollection)]
+        assert [len(c.get_offsets()) for c in dots] == [5000, 5000]
+        np.testing.assert_allclose(dots[0].get_offsets(), theta[0, 0])
+        assert len(contours) >= 2
+        assert min(c.get_zorder() for c in contours) > max(d.get_zorder() for d in dots)
         # Dashed box = GetDist's window.
         box = [r for r in ax2d.patches if isinstance(r, Rectangle) and r.get_linestyle() == "--"]
         assert len(box) == 1 and box[0].get_xy() == pytest.approx((om_lo, h_lo))
 
         legend = [t.get_text() for t in axes[0, 1].get_legend().get_texts()]
-        assert legend == ["nominal", "optimal", "outside plot window", "plot window (GetDist)"]
+        assert legend == ["nominal", "optimal", "nominal 68% contour", "optimal 68% contour",
+                          "samples", "plot window (GetDist)"]
+        assert "5e3 samples/series" in fig._suptitle.get_text()
         assert len(list(tmp_path.glob("posterior_full_range_step100_*.png"))) == 1
         plt.close(fig)
 
