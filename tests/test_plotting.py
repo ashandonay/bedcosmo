@@ -348,30 +348,38 @@ class TestRunPlotter:
         # Axes follow the samples, not the (much wider) hrdrag prior box.
         assert axes[1, 1].get_xlim()[1] < theta[..., 1].max() + 0.1 * np.ptp(theta[..., 1])
         # Linear inside the window, log beyond: the window keeps a sizeable share
-        # of the Om axis even with an outlier ~1000 window half-widths away.
+        # of the Om axis even with an outlier ~300 window half-widths away.
         assert axes[1, 0].get_xscale() == "function"
         forward = axes[1, 0].xaxis.get_transform().transform
         x0, x1 = forward(np.array(axes[1, 0].get_xlim()))
         w0, w1 = forward(np.array(window["Om"]))
-        assert (w1 - w0) / (x1 - x0) > 0.3
+        assert (w1 - w0) / (x1 - x0) > 0.2
+        # The 3 samples at the Om minimum land in the first bin (not dropped by
+        # the scale's float round trip).
+        step = axes[0, 0].patches[0].get_path().vertices
+        assert step[1, 1] == 3
         n_om_out = int(((theta[0, 0, :, 0] < om_lo) | (theta[0, 0, :, 0] > om_hi)).sum())
         notes = [t.get_text() for t in axes[0, 0].texts]
         assert f"nominal: 3 outside prior, {n_om_out} outside window" in notes
 
-        # 2D: every sample (in and out of the window) as dots, contours drawn on top.
+        # 2D: in-window samples as faint dots under the contours; out-of-window
+        # samples drawn clearly so isolated extremes stay visible.
         ax2d = axes[1, 0]
         dots = [c for c in ax2d.collections if isinstance(c, PathCollection)]
         contours = [c for c in ax2d.collections if not isinstance(c, PathCollection)]
-        assert [len(c.get_offsets()) for c in dots] == [5000, 5000]
-        np.testing.assert_allclose(dots[0].get_offsets(), theta[0, 0])
-        assert all(c.get_alpha() == pytest.approx(0.035) for c in dots)
+        bulk = [c for c in dots if c.get_alpha() == pytest.approx(0.035)]
+        extremes = [c for c in dots if c.get_alpha() == pytest.approx(0.6)]
+        assert [len(c.get_offsets()) for c in bulk] == [int((~o).sum()) for o in outside]
+        assert [len(c.get_offsets()) for c in extremes] == [int(o.sum()) for o in outside]
+        np.testing.assert_allclose(extremes[0].get_offsets(), theta[0, 0][outside[0]])
+        assert (extremes[0].get_offsets()[:, 0] == -10.0).sum() == 3
         fills = [c for c in contours if len(c.get_facecolor()) == 2]
         assert len(fills) == 2
         for fill in fills:
             outer_rgb, inner_rgb = fill.get_facecolor()[:, :3]
             assert outer_rgb.mean() > inner_rgb.mean()
         assert len(contours) >= 4
-        assert min(c.get_zorder() for c in contours) > max(d.get_zorder() for d in dots)
+        assert min(c.get_zorder() for c in contours) > max(d.get_zorder() for d in bulk)
         # Dashed box = GetDist's window.
         box = [r for r in ax2d.patches if isinstance(r, Rectangle) and r.get_linestyle() == "--"]
         assert len(box) == 1 and box[0].get_xy() == pytest.approx((om_lo, h_lo))
@@ -840,8 +848,13 @@ def test_window_log_scale_linear_inside_log_outside():
 
     forward, inverse = _window_log_scale(9000.0, 11000.0)
     x = np.array([-1e5, 8000.0, 9000.0, 10000.0, 10500.0, 11000.0, 1.1e6])
-    np.testing.assert_allclose(forward(x), [-3.04139, -1.30103, -1, 0, 0.5, 1, 4.03743], rtol=1e-5)
+    np.testing.assert_allclose(forward(x), [-5.70048, -1.69315, -1, 0, 0.5, 1, 7.99393], rtol=1e-5)
     np.testing.assert_allclose(inverse(forward(x)), x)
+    # Same slope on both sides of the window edge, so even bins don't jump in width.
+    eps = 1e-3
+    inside = (forward(11000.0) - forward(11000.0 - eps)) / eps
+    outside = (forward(11000.0 + eps) - forward(11000.0)) / eps
+    assert outside == pytest.approx(inside, rel=1e-3)
 
 
 def test_window_log_ticks_spread_on_scaled_axis():
@@ -851,7 +864,8 @@ def test_window_log_ticks_spread_on_scaled_axis():
     forward, _ = _window_log_scale(9000.0, 11000.0)
     assert any(9000 <= t <= 11000 for t in ticks)  # ticks inside the window
     assert min(ticks) <= -5e4 and max(ticks) >= 1.5e4  # and out in the log tails
-    assert np.all(np.diff(forward(np.array(ticks))) >= 0.4)  # no overlapping labels
+    span = forward(2e4) - forward(-1.2e5)
+    assert np.all(np.diff(forward(np.array(ticks))) >= 0.12 * span)  # no overlapping labels
 
 
 class TestPlotTriangleFence:

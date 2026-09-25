@@ -81,20 +81,22 @@ def _window_log_scale(lo, hi):
     """``(forward, inverse)`` for a matplotlib ``"function"`` scale around a window.
 
     Coordinates are in window half-widths from its centre: linear inside
-    ``[lo, hi]`` (mapped to [-1, 1]) and log10 beyond, one unit per decade,
-    so far outliers stay on-axis without squashing the window.
+    ``[lo, hi]`` (mapped to [-1, 1]) and ``1 + ln|u|`` beyond, so far outliers
+    stay on-axis without squashing the window. The natural log matches the
+    linear part's slope at the window edge, so bins even on this scale do not
+    jump in width there; they widen smoothly (in proportion to |u|) outside.
     """
     centre, half = (lo + hi) / 2, (hi - lo) / 2
 
     def forward(x):
         u = (np.asarray(x, dtype=float) - centre) / half
         a = np.abs(u)
-        return np.where(a <= 1, u, np.sign(u) * (1 + np.log10(np.maximum(a, 1))))
+        return np.where(a <= 1, u, np.sign(u) * (1 + np.log(np.maximum(a, 1))))
 
     def inverse(y):
         y = np.asarray(y, dtype=float)
         a = np.abs(y)
-        return centre + half * np.where(a <= 1, y, np.sign(y) * 10 ** (np.maximum(a, 1) - 1))
+        return centre + half * np.where(a <= 1, y, np.sign(y) * np.exp(np.maximum(a, 1) - 1))
 
     return forward, inverse
 
@@ -103,16 +105,18 @@ def _window_log_ticks(lo, hi, vmin, vmax):
     """Ticks for ``_window_log_scale(lo, hi)`` within ``[vmin, vmax]``.
 
     Round values inside the window, then about one per decade outside (1
-    significant figure), dropping any within 0.4 scaled units of a kept tick.
+    significant figure), dropping any closer than 12% of the axis to a kept
+    tick so labels never overlap.
     """
     forward, _ = _window_log_scale(lo, hi)
     centre, half = (lo + hi) / 2, (hi - lo) / 2
+    min_gap = 0.12 * (forward(vmax) - forward(vmin))
     candidates = [t for t in MaxNLocator(nbins=3).tick_values(lo, hi) if lo <= t <= hi]
     for k in range(1, 12):
         candidates += [float(f"{centre + sign * half * 10**k:.1g}") for sign in (-1, 1)]
     ticks = []
     for t in candidates:
-        if vmin <= t <= vmax and all(abs(forward(t) - forward(u)) >= 0.4 for u in ticks):
+        if vmin <= t <= vmax and all(abs(forward(t) - forward(u)) >= min_gap for u in ticks):
             ticks.append(t)
     return sorted(ticks)
 
@@ -2041,7 +2045,7 @@ class RunPlotter(BasePlotter):
         ``levels`` contours from in-window samples over every sample as a faint,
         muted dot; axes span all samples. 1D panels are log-count histograms over
         the full range, with the window edges dashed. Every axis is linear inside the
-        window and log10 beyond it (``_window_log_scale``), so the contour stays
+        window and logarithmic beyond it (``_window_log_scale``), so the contour stays
         readable while far outliers stay on-axis; axes span the samples and
         prior bounds further out are clipped. Reads the newest default-eval NPZ
         under the run's artifacts (or ``posterior_samples_path``) and needs no
@@ -2130,10 +2134,13 @@ class RunPlotter(BasePlotter):
                 if i == j:
                     p = names[i]
                     forward, inverse = scales[p]
-                    lo, hi = forward([theta[..., i].min(), theta[..., i].max()])
+                    x_min, x_max = theta[..., i].min(), theta[..., i].max()
+                    lo, hi = forward([x_min, x_max])
                     # Shared edges, even on the window scale: fine inside the window,
-                    # wider in the tails.
+                    # wider in the tails. Pin the ends to the data: the exp/log round
+                    # trip can land just inside and drop samples sitting at the min/max.
                     edges = inverse(np.linspace(lo, hi, bins + 1))
+                    edges[0], edges[-1] = x_min, x_max
                     for k, name in enumerate(display):
                         x = theta[k, :, i]
                         ax.hist(x, bins=edges, histtype="step", color=colors[k], lw=1.3, label=name)
@@ -2162,10 +2169,15 @@ class RunPlotter(BasePlotter):
                     ax.xaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:g}"))
                 else:
                     px, py = names[j], names[i]
-                    # Keep every sample visible but subdued behind the contours.
+                    # Keep the in-window bulk subdued behind the contours, but draw
+                    # out-of-window samples clearly so isolated extremes stay visible.
                     for k in range(len(display)):
-                        ax.scatter(theta[k, :, j], theta[k, :, i], s=1.2, color=sample_colors[k],
-                                   alpha=0.035, lw=0, rasterized=True, zorder=1)
+                        out = outside[k]
+                        ax.scatter(theta[k, ~out, j], theta[k, ~out, i], s=1.2,
+                                   color=sample_colors[k], alpha=0.035, lw=0,
+                                   rasterized=True, zorder=1)
+                        ax.scatter(theta[k, out, j], theta[k, out, i], s=4, color=colors[k],
+                                   alpha=0.6, lw=0, rasterized=True, zorder=4)
                     for k, sample in enumerate(in_window):
                         density = sample.get2DDensityGridData(
                             px, py, num_plot_contours=len(levels), get_density=True
