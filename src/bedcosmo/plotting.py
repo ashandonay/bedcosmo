@@ -1272,9 +1272,10 @@ class BasePlotter:
             ranges (dict, optional): ``{param: (min, max)}`` display window, which is
                 also the outlier fence. Params not in ``ranges`` use GetDist's own
                 view range over the fenced series. Fenced series are smoothed by
-                GetDist from their in-window samples only; the rest are drawn as
-                ``x`` markers clamped to the window edge, counted per series in the
-                legend, and summed per parameter in the 1D panels' top-left corner.
+                GetDist from samples inside all parameter windows. Out-of-window
+                samples are marked with ``x`` in 2D panels only when either plotted
+                parameter is outside its window; counts are per series in the legend
+                and per parameter in the 1D panels' top-left corner.
             scatter_alpha (float): Alpha value for scatter points. Default 0.6 for better distinguishability.
             contour_alpha_factor (float): Factor to adjust contour alpha for distinguishability. Default 0.8.
             style (object, optional): Style object (like KP7StylePaper) to apply to the plotter settings.
@@ -1520,11 +1521,17 @@ class BasePlotter:
                 if px not in fence or py not in fence:
                     continue
                 for k, sample in enumerate(full_samples):
-                    out = ~in_window[k]
-                    if not out.any():
+                    if not fenced[k]:
                         continue
                     names = sample.paramNames.list()
-                    arr = np.asarray(sample.samples)[out]
+                    arr = np.asarray(sample.samples)
+                    x = arr[:, names.index(px)]
+                    y = arr[:, names.index(py)]
+                    out = (x < fence[px][0]) | (x > fence[px][1])
+                    out |= (y < fence[py][0]) | (y > fence[py][1])
+                    if not out.any():
+                        continue
+                    arr = arr[out]
                     g.subplots[i, j].scatter(
                         np.clip(arr[:, names.index(px)], *fence[px]),
                         np.clip(arr[:, names.index(py)], *fence[py]),

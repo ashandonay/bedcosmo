@@ -1006,6 +1006,38 @@ class TestPlotTriangleFence:
         assert [t.get_text() for t in g.subplots[0, 0].texts] == ["6 below / 4 above range"]
         plt.close(g.fig)
 
+    def test_outlier_marks_are_local_to_each_2d_panel(self):
+        from matplotlib.axes import Axes
+
+        rng = np.random.default_rng(4)
+        values = np.column_stack([
+            rng.normal(0.3, 0.01, 1000),
+            rng.normal(10000, 100, 1000),
+            rng.normal(1.0, 0.02, 1000),
+        ])
+        # This point is outside z's window, but inside the Om and hrdrag windows.
+        values = np.vstack([values, [0.3, 10000, 2.0]])
+        sample = _gd_samples(values, "Nominal", names=("Om", "hrdrag", "z"))
+        marked = []
+        scatter = Axes.scatter
+
+        def record_marks(ax, *args, **kwargs):
+            if kwargs.get("marker") == "x":
+                marked.append((np.asarray(args[0]), np.asarray(args[1])))
+            return scatter(ax, *args, **kwargs)
+
+        with patch.object(Axes, "scatter", record_marks):
+            g = BasePlotter(cosmo_exp="test_exp").plot_triangle(
+                [sample], ["tab:blue"], legend_labels=["Nominal"],
+                ranges={"Om": (0.2, 0.4), "hrdrag": (9000, 11000), "z": (0.8, 1.2)},
+            )
+
+        # No mark in Om-vs-hrdrag; the z outlier is marked in both panels that
+        # actually display z.
+        assert len(marked) == 2
+        assert all(len(x) == len(y) == 1 for x, y in marked)
+        plt.close(g.fig)
+
     def test_plot_posterior_panels_have_spacing(self):
         """Panels have a small gap, and the title sits clear of the top panel."""
         from types import SimpleNamespace
