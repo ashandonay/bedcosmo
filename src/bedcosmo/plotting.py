@@ -61,6 +61,21 @@ plt.rcParams['font.serif'] = ['DejaVu Serif', 'Times New Roman', 'Times', 'serif
 PRIOR_CONTOUR_ALPHA = 0.4
 
 
+def getdist_view_ranges(samples):
+    """``{param: (lo, hi)}``: GetDist's default axis range, unioned over ``samples``.
+
+    GetDist sets each range from the 0.1%/99.9% quantiles plus a smoothing pad,
+    so isolated outliers do not stretch it. ``samples`` share param names.
+    """
+    if not samples:
+        return {}
+    ranges = {}
+    for p in samples[0].paramNames.list():
+        bounds = [s.get1DDensity(p).bounds() for s in samples]
+        ranges[p] = (min(b[0] for b in bounds), max(b[1] for b in bounds))
+    return ranges
+
+
 def _fmt_sample_count(n):
     """Compact count for legends, e.g. 500000 -> 5e5, 30544 -> 3.1e4."""
     if n < 1000:
@@ -1252,14 +1267,9 @@ class BasePlotter:
         # over the fenced series.
         for sample in samples:
             sample.updateSettings(GETDIST_SETTINGS)
-        fence = {}
-        for p in samples[0].paramNames.list():
-            if ranges and p in ranges:
-                fence[p] = tuple(ranges[p])
-                continue
-            bounds = [s.get1DDensity(p).bounds() for s, f in zip(samples, fenced) if f]
-            if bounds:
-                fence[p] = (min(b[0] for b in bounds), max(b[1] for b in bounds))
+        fence = getdist_view_ranges([s for s, f in zip(samples, fenced) if f])
+        names = samples[0].paramNames.list()
+        fence.update({p: tuple(r) for p, r in (ranges or {}).items() if p in names})
         full_samples = samples
         in_window = []
         for sample, fence_sample in zip(full_samples, fenced):
@@ -1932,12 +1942,15 @@ class RunPlotter(BasePlotter):
         ``posterior_samples_path``); labels and bounds come from the run's
         ``prior_args.yaml`` artifact.
 
-        ``plot_ranges``: if False (default), axes span the full sample range and
-        samples outside the ``plot`` lower/upper box in ``prior_args.yaml`` get
-        enlarged markers so isolated outliers stay visible. If True, zoom the
-        axes to that ``plot`` box instead. Dotted lines mark uniform prior bounds
-        (times ``multiplier``, matching the saved physical-space samples). 1D
-        panels annotate per-series counts outside the prior and, when zoomed,
+        The plot window is GetDist's default axis range over the displayed series
+        (``getdist_view_ranges``), the same window ``plot_posterior`` fences at
+        (which also widens it for the MCMC reference when that is shown).
+        2D panels draw in-window samples as dots and the rest as ``x`` markers in
+        the series color. ``plot_ranges``: if False (default), axes span the full
+        sample range so every outlier is visible; if True, zoom the axes to the
+        plot window instead. Dotted lines mark uniform prior
+        bounds (times ``multiplier``, matching the saved physical-space samples).
+        1D panels annotate per-series counts outside the prior and, when zoomed,
         off-axis.
         """
         display = validate_display(display)
@@ -1960,7 +1973,7 @@ class RunPlotter(BasePlotter):
 
         names = [str(p) for p in bundle["param_names"]]
         n = len(names)
-        labels, prior_bounds, plot_box = {}, {}, {}
+        labels, prior_bounds = {}, {}
         for p in names:
             cfg = prior_params.get(p, {})
             labels[p] = f"${cfg['latex']}$" if "latex" in cfg else p
@@ -1968,16 +1981,19 @@ class RunPlotter(BasePlotter):
             dist = cfg.get("distribution", {})
             if dist.get("type") == "uniform":
                 prior_bounds[p] = (dist["lower"] * mult, dist["upper"] * mult)
-            if "plot" in cfg:
-                plot_box[p] = (cfg["plot"]["lower"], cfg["plot"]["upper"])
-        # Params without a ``plot`` entry stay at full range even when zoomed.
-        ranges = plot_box if plot_ranges else {}
 
         series_meta = {s["name"]: s for s in bundle["meta"].get("series", [])}
         series_idx = [list(bundle["series_names"]).index(name) for name in display]
         # (n_display, n_guide, n_params)
         theta = bundle["theta"][series_idx, data_index]
         colors = [series_meta.get(name, {}).get("color", NF_SERIES_COLORS[name]) for name in display]
+        with contextlib.redirect_stdout(io.StringIO()):
+            gd_samples = [
+                getdist.MCSamples(samples=theta[k], names=names, settings=GETDIST_SETTINGS)
+                for k in range(len(display))
+            ]
+        window = getdist_view_ranges(gd_samples)
+        ranges = window if plot_ranges else {}
 
         fig, axes = plt.subplots(n, n, figsize=(4.2 * n, 4.2 * n), squeeze=False)
         for i in range(n):
@@ -2013,15 +2029,14 @@ class RunPlotter(BasePlotter):
                 else:
                     px, py = names[j], names[i]
                     for k in range(len(display)):
-                        ax.scatter(theta[k, :, j], theta[k, :, i], s=1.5, color=colors[k],
+                        # In-window samples as dots, the rest as x's (off-axis when zoomed).
+                        out = np.zeros(theta.shape[1], dtype=bool)
+                        for c, p in ((j, px), (i, py)):
+                            out |= (theta[k, :, c] < window[p][0]) | (theta[k, :, c] > window[p][1])
+                        ax.scatter(theta[k, ~out, j], theta[k, ~out, i], s=1.5, color=colors[k],
                                    alpha=0.3, lw=0, rasterized=True)
-                        if not plot_ranges:
-                            out = np.zeros(theta.shape[1], dtype=bool)
-                            for c, p in ((j, px), (i, py)):
-                                if p in plot_box:
-                                    out |= (theta[k, :, c] < plot_box[p][0]) | (theta[k, :, c] > plot_box[p][1])
-                            ax.scatter(theta[k, out, j], theta[k, out, i], s=16, color=colors[k],
-                                       alpha=0.7, marker="ox"[k % 2], lw=0.8)
+                        ax.scatter(theta[k, out, j], theta[k, out, i], s=16, color=colors[k],
+                                   alpha=0.7, marker="x", lw=0.8)
                     if px in prior_bounds and py in prior_bounds:
                         (xl, xh), (yl, yh) = prior_bounds[px], prior_bounds[py]
                         ax.add_patch(Rectangle((xl, yl), xh - xl, yh - yl, fill=False,
@@ -2032,8 +2047,13 @@ class RunPlotter(BasePlotter):
                         ax.set_ylim(ranges[py])
                     ax.set_ylabel(labels[py])
                 ax.set_xlabel(labels[names[j]])
+        handles, legend_labels = axes[0, 0].get_legend_handles_labels()
+        # Zoomed, the x's are off-axis; the 1D panels count them instead.
+        if n > 1 and not plot_ranges:
+            handles.append(Line2D([0], [0], ls="", marker="x", color="k"))
+            legend_labels.append("outside plot window")
         # The upper-right panel is empty for n > 1; keep the legend off the 1D notes.
-        axes[0, -1].legend(*axes[0, 0].get_legend_handles_labels(),
+        axes[0, -1].legend(handles, legend_labels,
                            loc="upper right" if n == 1 else "center", fontsize=9)
 
         step = bundle["meta"].get("step")
