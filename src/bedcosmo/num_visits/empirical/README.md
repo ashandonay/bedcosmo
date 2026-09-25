@@ -208,6 +208,12 @@ The KDE is trained on **ILR** features after a small simplex floor:
 3. Project CLR onto an orthonormal basis \(V\) of its sum-zero hyperplane: \(\mathbf{f} = \mathbf{f}^{\mathrm{clr}} V\), giving \(K-1\) full-rank ILR coords
 4. KDE in \((f_1,\ldots,f_{K-1}, \log s, z)\); decode weights via \(\mathbf{f}^{\mathrm{clr}} = \mathbf{f} V^\top\), \(a = \mathrm{softmax}(\mathbf{f}^{\mathrm{clr}})\)
 
+Gaussian kernels have unbounded tails. Sampling therefore rejects and redraws
+rows outside the per-feature training bounds; it does not clamp outlying draws
+onto the bounds. This preserves the bounded empirical support without creating
+artificial point masses at the minimum and maximum redshifts (or other feature
+endpoints).
+
 For any \(K\)-component bank:
 
 | Feature | Meaning |
@@ -373,6 +379,7 @@ Or all patches: `./eazy/run_healpix_diagnostic_plots.sh`
 | `--simplex-smoothing-eps` | `1e-5` |
 | `--bandwidth` | `0.3` (scaled space) |
 | `--z-min` | `0.01` |
+| training-bound sampling | rejection/redraw (disable with `--no-restrict-to-training-bounds`) |
 | `--gaussianizer-fit-source` | `kde` (100k reference draws) |
 | `--gaussianizer-whitening` | `cholesky` |
 | `--sample` | `20000` (post-save diagnostic triangles) |

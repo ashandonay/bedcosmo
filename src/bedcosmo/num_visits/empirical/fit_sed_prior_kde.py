@@ -500,25 +500,19 @@ def postprocess_kde_samples(
     renormalize_a: bool = True,
     apply_support_mask: bool | None = None,
     seed: int | None = None,
-    clip_to_training_bounds: bool = True,
 ) -> np.ndarray:
     """
     Convert raw KDE draws into valid prior feature rows.
 
-    In recommended smooth mode, this does not mask or project the KDE samples.
-    It only clips features to training bounds, because ILR/CLR coordinates
-    already decode to valid positive simplex weights via softmax.
+    In recommended smooth mode, this does not mask or project the KDE samples,
+    because ILR/CLR coordinates already decode to valid positive simplex
+    weights via softmax. Training-bound enforcement happens before this step by
+    rejecting raw KDE draws outside the supported feature box.
     """
     n_templates = int(artifact["n_templates"])
     parameterization = get_parameterization(artifact)
     support_mode = get_support_mode(artifact)
     out = np.asarray(x, dtype=float)
-
-    if clip_to_training_bounds:
-        bounds_min = artifact.get("feature_bounds_min")
-        bounds_max = artifact.get("feature_bounds_max")
-        if bounds_min is not None and bounds_max is not None:
-            out = np.clip(out, bounds_min, bounds_max)
 
     if not renormalize_a:
         return np.asarray(out, dtype=float)
@@ -817,19 +811,57 @@ def sample_sed_prior_kde(
     seed: int | None = None,
     renormalize_a: bool = True,
     apply_support_mask: bool | None = None,
-    clip_to_training_bounds: bool = True,
+    restrict_to_training_bounds: bool = True,
 ) -> np.ndarray:
     kde = artifact["kde"]
     scaler = artifact["scaler"]
-    x_scaled = kde.sample(n_samples, random_state=seed)
-    x = scaler.inverse_transform(x_scaled)
+    if n_samples < 0:
+        raise ValueError("n_samples must be nonnegative")
+
+    rng = np.random.RandomState(seed)
+
+    def draw(count: int) -> np.ndarray:
+        return scaler.inverse_transform(kde.sample(count, random_state=rng))
+
+    bounds_min = artifact.get("feature_bounds_min")
+    bounds_max = artifact.get("feature_bounds_max")
+    if not restrict_to_training_bounds or bounds_min is None or bounds_max is None:
+        x = draw(n_samples)
+    else:
+        bounds_min = np.asarray(bounds_min, dtype=float)
+        bounds_max = np.asarray(bounds_max, dtype=float)
+        if bounds_min.shape != bounds_max.shape:
+            raise ValueError("KDE feature bound shapes do not match")
+        if np.any(~np.isfinite(bounds_min)) or np.any(~np.isfinite(bounds_max)):
+            raise ValueError("KDE feature bounds must be finite")
+        if np.any(bounds_min > bounds_max):
+            raise ValueError("KDE feature lower bounds exceed upper bounds")
+
+        accepted: list[np.ndarray] = []
+        n_accepted = 0
+        attempts = 0
+        while n_accepted < n_samples and attempts < 100:
+            remaining = n_samples - n_accepted
+            candidates = draw(max(1024, int(np.ceil(1.25 * remaining))))
+            inside = np.all((candidates >= bounds_min) & (candidates <= bounds_max), axis=1)
+            if np.any(inside):
+                kept = candidates[inside][:remaining]
+                accepted.append(kept)
+                n_accepted += len(kept)
+            attempts += 1
+        if n_accepted < n_samples:
+            raise RuntimeError(
+                "Could not draw enough KDE samples inside the empirical training "
+                f"support: accepted {n_accepted}/{n_samples} after {attempts} batches"
+            )
+        x = np.concatenate(accepted, axis=0) if accepted else draw(0)
+
     return postprocess_kde_samples(
         x,
         artifact,
         renormalize_a=renormalize_a,
         apply_support_mask=apply_support_mask,
         seed=seed,
-        clip_to_training_bounds=clip_to_training_bounds,
     )
 
 
@@ -840,7 +872,7 @@ def sample_sed_prior(
     *,
     apply_support_mask: bool | None = None,
     renormalize_a: bool = True,
-    clip_to_training_bounds: bool = True,
+    restrict_to_training_bounds: bool = True,
 ) -> np.ndarray:
     """Alias used by sed_prior.py and downstream code."""
     return sample_sed_prior_kde(
@@ -849,7 +881,7 @@ def sample_sed_prior(
         seed=seed,
         renormalize_a=renormalize_a,
         apply_support_mask=apply_support_mask,
-        clip_to_training_bounds=clip_to_training_bounds,
+        restrict_to_training_bounds=restrict_to_training_bounds,
     )
 
 
@@ -861,7 +893,7 @@ def sample_sed_prior_gaussianized(
     whitening: str | None = None,
     apply_support_mask: bool | None = None,
     renormalize_a: bool = True,
-    clip_to_training_bounds: bool = True,
+    restrict_to_training_bounds: bool = True,
 ) -> np.ndarray:
     """Draw from the KDE prior and return gaussianized feature rows.
 
@@ -877,7 +909,7 @@ def sample_sed_prior_gaussianized(
         seed=seed,
         apply_support_mask=apply_support_mask,
         renormalize_a=renormalize_a,
-        clip_to_training_bounds=clip_to_training_bounds,
+        restrict_to_training_bounds=restrict_to_training_bounds,
     )
     return gaussianize_sed_prior_features(artifact, x, whitening=whitening)
 
@@ -1008,9 +1040,12 @@ def main() -> None:
         help="Backward-compatible alias for --support-mode smooth.",
     )
     parser.add_argument(
-        "--no-clip-to-training-bounds",
+        "--no-restrict-to-training-bounds",
         action="store_true",
-        help="Do not clip raw KDE samples to per-feature training min/max before decoding.",
+        help=(
+            "Allow raw KDE samples outside per-feature training min/max instead of "
+            "rejecting and redrawing them."
+        ),
     )
     parser.add_argument(
         "--no-gaussianizer",
@@ -1217,7 +1252,7 @@ def main() -> None:
                 "parameterization": args.parameterization,
                 "support_mode": support_mode,
                 "simplex_smoothing_eps": float(args.simplex_smoothing_eps),
-                "clip_to_training_bounds_default": not args.no_clip_to_training_bounds,
+                "restrict_to_training_bounds_default": (not args.no_restrict_to_training_bounds),
                 "apply_support_mask_default": support_mode == "masked",
             }
             temp_artifact = pack_kde_artifact(
@@ -1236,7 +1271,7 @@ def main() -> None:
                 seed=gaussianizer_fit_seed,
                 renormalize_a=not args.no_renormalize_a,
                 apply_support_mask=True if support_mode == "masked" else False,
-                clip_to_training_bounds=not args.no_clip_to_training_bounds,
+                restrict_to_training_bounds=not args.no_restrict_to_training_bounds,
             )
         else:
             raise ValueError(f"Unknown gaussianizer fit source {args.gaussianizer_fit_source!r}")
@@ -1293,7 +1328,7 @@ def main() -> None:
         "bandwidth": kde.bandwidth,
         "bandwidth_rule": bandwidth if isinstance(bandwidth, str) else None,
         "kernel": args.kernel,
-        "clip_to_training_bounds_default": not args.no_clip_to_training_bounds,
+        "restrict_to_training_bounds_default": not args.no_restrict_to_training_bounds,
         "gaussianizer_enabled": gaussianizer is not None,
         "gaussianizer_shrinkage": (
             None if gaussianizer is None else float(args.gaussianizer_shrinkage)
@@ -1359,7 +1394,7 @@ def main() -> None:
             seed=args.seed,
             renormalize_a=not args.no_renormalize_a,
             apply_support_mask=mask_arg,
-            clip_to_training_bounds=not args.no_clip_to_training_bounds,
+            restrict_to_training_bounds=not args.no_restrict_to_training_bounds,
         )
         a, log_s, z = samples_to_coeffs(
             draws,
