@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+import yaml
 
 from bedcosmo.num_visits.empirical.eazy.build_prior import (
     resolve_eazy_build_selection,
@@ -18,6 +19,29 @@ from bedcosmo.num_visits.empirical.template_config import (
     parse_reduced_templates,
     resolve_template_param,
 )
+
+
+def _write_prior_build(root: Path, source: str, n_templates: int) -> None:
+    build = root / "bedcosmo/num_visits/empirical_prior" / source
+    template_param = f"{source}.param"
+    (build / "templates").mkdir(parents=True)
+    (build / "templates" / template_param).write_text(
+        "\n".join(f"{index} component_{index:02d}.dat 1.0" for index in range(1, n_templates + 1))
+        + "\n"
+    )
+    for index in range(1, n_templates + 1):
+        (build / "templates" / f"component_{index:02d}.dat").write_text("0 1")
+    names = [f"f{i}" for i in range(1, n_templates)] + ["log_c_scale", "z"]
+    (build / "prior_args.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "template_param": template_param,
+                "template_norm_min": 3600.0,
+                "template_norm_max": 4200.0,
+                "parameters": {name: {"distribution": {"type": "empirical"}} for name in names},
+            }
+        )
+    )
 
 
 def test_eazy_builder_source_defaults_and_overrides():
@@ -54,6 +78,7 @@ def test_parse_reduced_templates_rejects_singleton():
 
 def test_variant_and_paths(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     monkeypatch.setenv("SCRATCH", str(tmp_path))
+    _write_prior_build(tmp_path, "desi8", 8)
 
     assert empirical_prior_variant("eazy12") == "eazy12"
     assert empirical_prior_variant("eazy12", "t7,t10") == "eazy12-t7-t10"
@@ -73,6 +98,7 @@ def test_variant_and_paths(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
 
 def test_materialize_empirical_prior_args(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     monkeypatch.setenv("SCRATCH", str(tmp_path))
+    _write_prior_build(tmp_path, "desi8", 8)
 
     base = {
         "template_source": "eazy12",
@@ -126,9 +152,26 @@ def test_materialize_empirical_prior_args(monkeypatch: pytest.MonkeyPatch, tmp_p
     ]
 
 
-def test_desi8_rejects_eazy_template_reduction():
+def test_desi8_rejects_eazy_template_reduction(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    monkeypatch.setenv("SCRATCH", str(tmp_path))
+    _write_prior_build(tmp_path, "desi8", 8)
     with pytest.raises(ValueError, match="not supported"):
         empirical_prior_variant("desi8", "t1,t2")
+
+
+def test_discovers_desi_prior_build_from_scratch_config(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    monkeypatch.setenv("SCRATCH", str(tmp_path))
+    _write_prior_build(tmp_path, "desi6", 6)
+
+    assert empirical_prior_variant("desi6") == "desi6"
+    assert resolve_template_param("desi6") == "desi6.param"
+    assert n_templates_for("desi6") == 6
+    materialized = materialize_empirical_prior_args({}, template_source="desi6")
+    assert materialized["prior_dir"].endswith("empirical_prior/desi6")
+    assert materialized["template_norm_min"] == 3600.0
+    assert list(materialized["parameters"]) == ["f1", "f2", "f3", "f4", "f5", "log_c_scale", "z"]
 
 
 def test_materialize_legacy_without_template_source():

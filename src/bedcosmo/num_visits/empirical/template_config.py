@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import re
+from pathlib import Path
 from typing import Any
+
+import yaml
 
 from .paths import (
     EMPIRICAL_PRIOR_ROOT_DIR,
@@ -14,11 +18,10 @@ from .templates import (
     DEFAULT_TEMPLATE_NORM_MIN_AA,
     DEFAULT_TEMPLATE_PARAM_6D,
     DEFAULT_TEMPLATE_PARAM_12D,
+    read_template_param,
 )
 
-TEMPLATE_SOURCES = ("eazy12", "eazy6", "desi8")
-
-_SOURCE_CONFIG: dict[str, dict[str, Any]] = {
+_BUILTIN_SOURCE_CONFIG: dict[str, dict[str, Any]] = {
     "eazy12": {
         "n_templates": 12,
         "template_param": DEFAULT_TEMPLATE_PARAM_12D,
@@ -31,12 +34,6 @@ _SOURCE_CONFIG: dict[str, dict[str, Any]] = {
         "template_norm_min": DEFAULT_TEMPLATE_NORM_MIN_AA,
         "template_norm_max": DEFAULT_TEMPLATE_NORM_MAX_AA,
     },
-    "desi8": {
-        "n_templates": 8,
-        "template_param": "desi8.param",
-        "template_norm_min": 3600.0,
-        "template_norm_max": 4200.0,
-    },
 }
 
 _DEFAULT_F_PLOT = {"lower": -8.0, "upper": 8.0}
@@ -47,13 +44,70 @@ _DEFAULT_Z_PLOT = {"lower": 0.0, "upper": 1.75}
 def normalize_template_source(value: str | None) -> str:
     """Return a validated empirical spectral-template source name."""
     if value is None:
-        raise ValueError(f"template_source is required ({', '.join(TEMPLATE_SOURCES)})")
+        raise ValueError("template_source is required")
     source = str(value).strip().lower()
-    if source not in _SOURCE_CONFIG:
-        raise ValueError(
-            f"template_source must be one of {list(_SOURCE_CONFIG)}, got {value!r}"
-        )
+    if source not in _BUILTIN_SOURCE_CONFIG and not _prior_build_config(source):
+        available = sorted(set(_BUILTIN_SOURCE_CONFIG) | _discover_prior_sources())
+        raise ValueError(f"No empirical prior build found for {value!r}; available: {available}")
     return source
+
+
+def _discover_prior_sources() -> set[str]:
+    root = get_prior_build_dir(EMPIRICAL_PRIOR_ROOT_DIR)
+    if not root.is_dir():
+        return set()
+    return {
+        path.name for path in root.iterdir() if path.is_dir() and _prior_build_config(path.name)
+    }
+
+
+def _prior_build_config(source: str) -> dict[str, Any] | None:
+    path = get_prior_build_dir(f"{EMPIRICAL_PRIOR_ROOT_DIR}/{source}") / "prior_args.yaml"
+    if not path.is_file():
+        return None
+    config = yaml.safe_load(path.read_text())
+    if not isinstance(config, dict):
+        raise ValueError(f"Invalid empirical prior config: {path}")
+    template_param = config.get("template_param")
+    if not isinstance(template_param, str) or not template_param:
+        raise ValueError(f"{path} must define template_param")
+    template_dir = get_prior_build_dir(f"{EMPIRICAL_PRIOR_ROOT_DIR}/{source}") / "templates"
+    template_path = template_dir / template_param
+    if not template_path.is_file() and (template_dir / Path(template_param).name).is_file():
+        template_path = template_dir / Path(template_param).name
+        config["template_param"] = template_path.name
+    if not template_path.is_file():
+        raise FileNotFoundError(f"Template parameter file is missing: {template_path}")
+    missing_components = [
+        rel for rel in read_template_param(template_path) if not (template_dir / rel).is_file()
+    ]
+    if missing_components:
+        raise FileNotFoundError(
+            f"Template components referenced by {template_path} are missing: {missing_components}"
+        )
+    parameters = config.get("parameters")
+    if not isinstance(parameters, dict):
+        raise ValueError(f"{path} must define parameters")
+    n_templates = sum(bool(re.fullmatch(r"f\d+", name)) for name in parameters)
+    if n_templates < 2 or "log_c_scale" not in parameters or "z" not in parameters:
+        raise ValueError(f"{path} has an invalid empirical parameter set")
+    config["n_templates"] = n_templates + 1
+    return config
+
+
+def _source_config(source: str) -> dict[str, Any]:
+    if source in _BUILTIN_SOURCE_CONFIG:
+        return _BUILTIN_SOURCE_CONFIG[source]
+    config = _prior_build_config(source)
+    if config is None:
+        raise ValueError(f"No prior_args.yaml found for empirical prior source {source!r}")
+    return {
+        "n_templates": config["n_templates"],
+        "template_param": config["template_param"],
+        "template_norm_min": config["template_norm_min"],
+        "template_norm_max": config["template_norm_max"],
+        "parameters": config["parameters"],
+    }
 
 
 def parse_reduced_templates(value: Any) -> tuple[int, ...] | None:
@@ -102,8 +156,8 @@ def empirical_prior_variant(
     """Scratch subdirectory under ``empirical_prior/``, e.g. ``eazy12-t7-t10``."""
     source = normalize_template_source(template_source)
     subset = parse_reduced_templates(reduced_templates)
-    if source == "desi8" and subset is not None:
-        raise ValueError("reduced_templates is not supported for template_source='desi8'")
+    if source not in _BUILTIN_SOURCE_CONFIG and subset is not None:
+        raise ValueError(f"reduced_templates is not supported for template_source={source!r}")
     if subset is None:
         return source
     return f"{source}-{reduced_template_slug(subset)}"
@@ -114,7 +168,9 @@ def empirical_prior_build_name(
     reduced_templates: Any = None,
 ) -> str:
     """Build name relative to the num_visits scratch root."""
-    return f"{EMPIRICAL_PRIOR_ROOT_DIR}/{empirical_prior_variant(template_source, reduced_templates)}"
+    return (
+        f"{EMPIRICAL_PRIOR_ROOT_DIR}/{empirical_prior_variant(template_source, reduced_templates)}"
+    )
 
 
 def resolve_template_param(
@@ -123,10 +179,10 @@ def resolve_template_param(
 ) -> str:
     """Template-bank filename relative to ``<prior_dir>/templates``."""
     source = normalize_template_source(template_source)
-    full_param = str(_SOURCE_CONFIG[source]["template_param"])
+    full_param = str(_source_config(source)["template_param"])
     subset = parse_reduced_templates(reduced_templates)
-    if source == "desi8" and subset is not None:
-        raise ValueError("reduced_templates is not supported for template_source='desi8'")
+    if source not in _BUILTIN_SOURCE_CONFIG and subset is not None:
+        raise ValueError(f"reduced_templates is not supported for template_source={source!r}")
     if subset is None:
         return full_param
     slug = reduced_template_slug(subset)
@@ -139,10 +195,10 @@ def n_templates_for(
 ) -> int:
     source = normalize_template_source(template_source)
     subset = parse_reduced_templates(reduced_templates)
-    if source == "desi8" and subset is not None:
-        raise ValueError("reduced_templates is not supported for template_source='desi8'")
+    if source not in _BUILTIN_SOURCE_CONFIG and subset is not None:
+        raise ValueError(f"reduced_templates is not supported for template_source={source!r}")
     if subset is None:
-        return int(_SOURCE_CONFIG[source]["n_templates"])
+        return int(_source_config(source)["n_templates"])
     return len(subset)
 
 
@@ -201,6 +257,7 @@ def materialize_empirical_prior_args(
     else:
         subset = None
 
+    source_config = _source_config(source)
     n_templates = n_templates_for(source, subset)
     build_name = empirical_prior_build_name(source, subset)
     prior_dir = get_prior_build_dir(build_name)
@@ -210,14 +267,13 @@ def materialize_empirical_prior_args(
     out["reduced_templates"] = format_reduced_templates(subset)
     out["prior_dir"] = str(prior_dir)
     out["template_param"] = template_param
-    source_config = _SOURCE_CONFIG[source]
     out.pop("template_dir", None)
     out["template_norm_min"] = float(source_config["template_norm_min"])
     out["template_norm_max"] = float(source_config["template_norm_max"])
-    out["parameters"] = default_empirical_parameters(
-        n_templates,
-        existing=out.get("parameters") if isinstance(out.get("parameters"), dict) else None,
-    )
+    existing_parameters = dict(source_config.get("parameters", {}))
+    if isinstance(out.get("parameters"), dict):
+        existing_parameters.update(out["parameters"])
+    out["parameters"] = default_empirical_parameters(n_templates, existing=existing_parameters)
     return out
 
 

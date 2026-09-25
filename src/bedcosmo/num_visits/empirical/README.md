@@ -1,11 +1,11 @@
 # Empirical galaxy SED prior (`empirical`)
 
 Build and sample empirical galaxy-SED priors for the `num_visits` BED
-experiment. Both supported sources are trained on DESI galaxy spectra:
+experiment. The supported source families are trained on DESI galaxy spectra:
 
 - `eazy12` / `eazy6` fit nonnegative mixtures of fixed EAZY templates; and
-- `desi8` learns eight nonnegative component spectra directly from DESI before
-  fitting the population coefficients.
+- direct-DESI builds (`desi4`, `desi6`, `desi8`, and other configured ranks)
+  learn nonnegative component spectra before fitting the population coefficients.
 
 Each source produces the same runtime interface: an ILR coefficient prior, an
 overall flux scale, redshift, a spectral-template bank, and optional prior
@@ -13,14 +13,18 @@ normalizing flows consumed by `NumVisits` (`cosmo_model: empirical`).
 
 Source-specific build tools are organized under [`eazy/`](eazy/) for EAZY
 template fits and [`desi/`](desi/) for bases learned directly from DESI spectra.
+Runtime selection discovers direct-DESI builds from their
+`empirical_prior/<source>/prior_args.yaml` and referenced template files, so
+builds such as `desi4`, `desi6`, and `desi8` can be selected without adding
+their names to the package.
 KDE, flow, simplex, template-loading, and runtime code remains shared here.
 
 **Production parameterization:** isometric log-ratios (ILR) — the centered
 log-ratios \(f_k^{\mathrm{clr}} = \log a_k -
 \mathrm{mean}_j\log a_j\) expressed in an orthonormal basis of their sum-zero
 hyperplane. A bank of \(K\) components gives \(K-1\) full-rank shape
-coordinates plus \(\log s\) and \(z\), or \(K+1\) features total. The current
-`desi8` configuration therefore has nine features (`f1`…`f7`,
+coordinates plus \(\log s\) and \(z\), or \(K+1\) features total. The configured
+`desi8` build therefore has nine features (`f1`…`f7`,
 `log_c_scale`, `z`); EAZY12 has thirteen. ILR removes the exact CLR sum-zero
 constraint. CLR remains the internal intermediate (`ilr = clr·V`,
 `a = softmax(clr)`).
@@ -118,6 +122,10 @@ template bank via CLI (or the matching fields in `prior_args_empirical.yaml`):
 
 The checked-in BED configuration uses `template_source: desi8` with
 `reduced_templates: null`. The EAZY builder itself still defaults to EAZY12.
+For a direct-DESI build, use its directory name (for example
+`--prior-template-source desi6`). Its `prior_args.yaml` supplies the template
+parameter file, normalization bounds, and ILR dimensions. The resolver checks
+that the parameter file exists under that build's `templates/` directory.
 
 ### Key EAZY-build flags
 
@@ -167,7 +175,7 @@ The checked-in BED configuration uses `template_source: desi8` with
 |------|------|
 | Spectral template banks | `num_visits/empirical_prior/<source>/templates/` |
 | DESI tiny DR1 | `desi/tiny_dr1/` |
-| Empirical-prior variants | `num_visits/empirical_prior/{desi8,eazy12,eazy6,eazy12-t1-t7,...}/` |
+| Empirical-prior variants | `num_visits/empirical_prior/<source>/` (including `desi4`, `desi6`, `desi8`, EAZY, and reduced EAZY builds) |
 | Shared DESI training data | `num_visits/desi_training_data/` |
 | **Configured prior build** | `num_visits/empirical_prior/desi8/` |
 | Per-patch fits | `num_visits/empirical_prior/eazy12/healpix/hp{HEALPIX}/` |
@@ -549,7 +557,7 @@ python -m bedcosmo.num_visits.empirical.diagnostic_plots clr-triangle \
 ### Config
 
 - **Parameters:** taken at runtime from the KDE artifact’s `feature_names` (not hardcoded from `models.yaml`). DESI8 uses `f1`…`f7`, `log_c_scale`, `z`; EAZY12 uses `f1`…`f11`, `log_c_scale`, `z`; EAZY6 uses `f1`…`f5`, `log_c_scale`, `z`.
-- **Prior build dir:** [`prior_args_empirical.yaml`](../../../../experiments/num_visits/prior_args_empirical.yaml). Set `template_source` (`desi8`, `eazy12`, or `eazy6`) and, for EAZY only, optional `reduced_templates` (`null` or `"t7,t10"`). These resolve `prior_dir` to `$SCRATCH/bedcosmo/num_visits/empirical_prior/<variant>` and fill `template_param` / `parameters`. Trained runs load the frozen copies from `artifacts/empirical/`.
+- **Prior build dir:** [`prior_args_empirical.yaml`](../../../../experiments/num_visits/prior_args_empirical.yaml). Set `template_source` to an EAZY selector (`eazy12` or `eazy6`) or the name of a direct-DESI build with `prior_args.yaml` (such as `desi4`, `desi6`, or `desi8`). For EAZY only, optional `reduced_templates` accepts `null` or `"t7,t10"`. Direct-DESI metadata is read from the selected build directory and validated against its template files. Trained runs load the frozen copies from `artifacts/empirical/`.
 
 ```yaml
 template_source: desi8       # or eazy12 / eazy6
