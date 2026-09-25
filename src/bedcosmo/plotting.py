@@ -1209,7 +1209,11 @@ class BasePlotter:
         if title is None:
             title = "Posterior Evaluation"
         g.fig.suptitle(title, fontsize=title_fontsize, weight='bold')
-        g.fig.set_constrained_layout(True)
+        # Touching panels with room for the title, like plot_posterior_full_range
+        # (constrained layout pads between panels and couples that to the title gap).
+        g.subplots[0][0].get_subplotspec().get_gridspec().update(
+            left=0.09, right=0.985, bottom=0.06, top=0.95, wspace=0, hspace=0
+        )
 
         if filename is None:
             filename = 'posterior'
@@ -1271,7 +1275,7 @@ class BasePlotter:
                 view range over the fenced series. Fenced series are smoothed by
                 GetDist from their in-window samples only; the rest are drawn as
                 ``x`` markers clamped to the window edge, counted per series in the
-                legend, and summed per parameter above the 1D panels.
+                legend, and summed per parameter in the 1D panels' top-left corner.
             scatter_alpha (float): Alpha value for scatter points. Default 0.6 for better distinguishability.
             contour_alpha_factor (float): Factor to adjust contour alpha for distinguishability. Default 0.8.
             style (object, optional): Style object (like KP7StylePaper) to apply to the plotter settings.
@@ -1536,9 +1540,11 @@ class BasePlotter:
                 ]
                 n_lo = sum(int((c < lo).sum()) for c in cols)
                 n_hi = sum(int((c > hi).sum()) for c in cols)
+                # Inside the panel, not a title: titles make the layout open gaps.
                 if n_lo or n_hi:
-                    g.subplots[i, i].set_title(
-                        f"{n_lo} below / {n_hi} above range", fontsize=9, color="crimson", pad=3
+                    g.subplots[i, i].text(
+                        0.02, 0.97, f"{n_lo} below / {n_hi} above range", fontsize=9,
+                        color="crimson", transform=g.subplots[i, i].transAxes, va="top",
                     )
 
         if legend_labels is not None:
@@ -2154,7 +2160,7 @@ class RunPlotter(BasePlotter):
         step = bundle["meta"].get("step")
         fig.suptitle(f"Posterior Evaluation (full sample range) - Run: {self.run_id[:8]}, "
                      f"step {step}", fontsize=title_fs, weight="bold")
-        # Margins match the GetDist triangle; extra right margin for the 1D counts.
+        # Margins match plot_posterior; extra right margin for the 1D counts.
         fig.subplots_adjust(left=0.09, right=0.91, bottom=0.06, top=0.95)
         if filename is None:
             filename = f"posterior_full_range_step{step}"

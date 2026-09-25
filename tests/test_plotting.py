@@ -956,9 +956,9 @@ class TestPlotTriangleFence:
         texts = self._legend_texts(g)
         assert texts == ["Nominal", "  5/3.0e3 outside plot range (0.17%)", "Prior"]
         assert g.subplots[0, 0].get_xlim() == pytest.approx(self.RANGES["Om"])
-        assert g.subplots[0, 0].get_title() == "3 below / 2 above range"
+        assert [t.get_text() for t in g.subplots[0, 0].texts] == ["3 below / 2 above range"]
         # The Om=-10 outliers also sit above the H0rd window (13400 > 12000).
-        assert g.subplots[1, 1].get_title() == "0 below / 3 above range"
+        assert [t.get_text() for t in g.subplots[1, 1].texts] == ["0 below / 3 above range"]
 
         # All five outliers are drawn as x's clamped onto the window edge.
         offsets = np.vstack([c.get_offsets() for c in g.subplots[1, 0].collections
@@ -1003,7 +1003,28 @@ class TestPlotTriangleFence:
         )
         assert self._legend_texts(g) == ["Group", "  5/3.0e3 outside plot range (0.17%)"]
         # Both runs still count toward the per-parameter 1D totals.
-        assert g.subplots[0, 0].get_title() == "6 below / 4 above range"
+        assert [t.get_text() for t in g.subplots[0, 0].texts] == ["6 below / 4 above range"]
+        plt.close(g.fig)
+
+    def test_plot_posterior_panels_touch(self):
+        """Panels touch, and the title sits clear of the top panel."""
+        from types import SimpleNamespace
+
+        entry = {
+            "name": "nominal", "samples": _gd_samples(_bulk_with_outliers(), "Nominal"),
+            "label": "Nominal", "color": "tab:blue", "line_style": "-", "alpha": 1.0,
+        }
+        plotter = BasePlotter(cosmo_exp="test_exp")
+        with patch.object(plotter, "save_figure"):
+            g = plotter.plot_posterior(SimpleNamespace(central_params=None), [entry],
+                                       display="nominal", plot_mcmc=False)
+        g.fig.canvas.draw()
+        pos = {k: g.subplots[k].get_position() for k in ((0, 0), (1, 0), (1, 1))}
+        assert pos[(1, 1)].x0 == pytest.approx(pos[(1, 0)].x1, abs=1e-6)
+        assert pos[(0, 0)].y0 == pytest.approx(pos[(1, 0)].y1, abs=1e-6)
+        renderer = g.fig.canvas.get_renderer()
+        title = g.fig._suptitle.get_window_extent(renderer).transformed(g.fig.transFigure.inverted())
+        assert title.y0 > pos[(0, 0)].y1
         plt.close(g.fig)
 
     def test_plot_posterior_fences_posteriors_not_prior(self):
