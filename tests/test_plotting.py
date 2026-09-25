@@ -288,6 +288,57 @@ class TestRunPlotter:
             assert axes is not None
             plt.close(fig)
     
+    def test_plot_raw_posterior(self, run_plotter, tmp_path):
+        """Raw triangle: log-count diagonals, prior-bound annotations, plot_ranges zoom."""
+        from bedcosmo.artifacts import make_posterior_samples_path, save_posterior_samples
+
+        artifacts = tmp_path / "artifacts"
+        artifacts.mkdir()
+        (artifacts / "prior_args.yaml").write_text(
+            "parameters:\n"
+            "  Om:\n"
+            "    distribution: {type: uniform, lower: 0.01, upper: 0.99}\n"
+            "    plot: {lower: 0.2, upper: 0.45}\n"
+            "    latex: '\\Omega_m'\n"
+            "  hrdrag:\n"
+            "    distribution: {type: uniform, lower: 0.1, upper: 10.0}\n"
+            "    multiplier: 10000\n"
+            "    plot: {lower: 8000.0, upper: 12000.0}\n"
+        )
+        rng = np.random.default_rng(0)
+        theta = np.stack([rng.normal([0.3, 10000.0], [0.01, 100.0], size=(1, 500, 2))] * 2)
+        theta[0, 0, :3, 0] = -10.0  # nominal Om outliers outside the prior
+        save_posterior_samples(
+            make_posterior_samples_path(str(artifacts), step=100),
+            theta=theta,
+            y=np.zeros((2, 1, 3)),
+            design=np.zeros((2, 4)),
+            series_names=["nominal", "optimal"],
+            param_names=["Om", "hrdrag"],
+            meta={"step": 100, "param_space": "physical", "generated_by": "Evaluator.run"},
+        )
+
+        with patch.object(run_plotter, "_get_artifacts_dir", return_value=str(artifacts)):
+            fig = run_plotter.plot_raw_posterior(save_dir=str(tmp_path))
+            zoom = run_plotter.plot_raw_posterior(plot_ranges=True, save_dir=str(tmp_path))
+
+        axes = np.array(fig.axes).reshape(2, 2)
+        assert axes[0, 0].get_yscale() == "log" and axes[1, 1].get_yscale() == "log"
+        assert axes[1, 0].get_yscale() == "linear"
+        assert axes[0, 0].get_xlim()[0] <= -10.0  # full range keeps the outliers on-axis
+        assert axes[0, 0].get_xlabel() == "$\\Omega_m$"
+        notes = [t.get_text() for t in axes[0, 0].texts]
+        assert "nominal: 3 outside prior" in notes and "optimal: 0 outside prior" in notes
+
+        zaxes = np.array(zoom.axes).reshape(2, 2)
+        assert zaxes[0, 0].get_xlim() == pytest.approx((0.2, 0.45))
+        assert zaxes[1, 0].get_ylim() == pytest.approx((8000.0, 12000.0))
+        assert any("3 off-axis" in t.get_text() for t in zaxes[0, 0].texts)
+        assert len(list(tmp_path.glob("raw_posterior_step100_2*.png"))) == 1
+        assert len(list(tmp_path.glob("raw_posterior_step100_zoom_*.png"))) == 1
+        plt.close(fig)
+        plt.close(zoom)
+
     @pytest.mark.skip(reason="plot_evaluation method does not exist on RunPlotter")
     def test_plot_evaluation(self, run_plotter):
         """Test plot_evaluation method."""

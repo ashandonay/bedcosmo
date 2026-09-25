@@ -5,6 +5,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import matplotlib.pyplot as plt
 import numpy as np
 import pytest
 import torch
@@ -412,6 +413,7 @@ def test_run_plots_sampled_entries_and_saves_npz(tmp_path):
     ev.get_eig = MagicMock(
         side_effect=[(0.5, 0.01), (np.array([0.1, 0.9, 0.5]), np.zeros(3))]
     )
+    ev.plotter.plot_raw_posterior.side_effect = lambda **kw: plt.figure()
 
     mcsamples = [
         _make_mcsamples(theta_nom, ["p0", "p1"]),
@@ -437,6 +439,13 @@ def test_run_plots_sampled_entries_and_saves_npz(tmp_path):
     np.testing.assert_allclose(bundle["theta"][0, 0], theta_nom)
     np.testing.assert_allclose(bundle["theta"][1, 0], theta_opt)
     np.testing.assert_allclose(bundle["design"][1], [1.0, 1.0])
+
+    # Raw-sample triangles come from the saved NPZ: full range, then plot ranges.
+    raw_calls = ev.plotter.plot_raw_posterior.call_args_list
+    assert [c.kwargs for c in raw_calls] == [
+        {"posterior_samples_path": bundle["path"], "plot_ranges": False},
+        {"posterior_samples_path": bundle["path"], "plot_ranges": True},
+    ]
 
     # Replot from the NPZ keeps the saved legend labels.
     entries = nf_entries_from_posterior_bundle(
@@ -515,3 +524,20 @@ def test_render_overlay_checkpoint_branch_plots_nf_and_grid(tmp_path):
     assert [e["name"] for e in kwargs["nf_entries"]] == ["nominal", "optimal"]
     assert kwargs["nominal_grid_eig"] == 0.45
     assert kwargs["save_dir"] == str(tmp_path)
+
+
+def test_run_skips_raw_posterior_outside_physical_space(tmp_path):
+    """Prior bounds/plot windows are physical-space only, so no raw plots otherwise."""
+    ev = _make_evaluator(tmp_path, _entries_experiment(), _eig_data_with_marginal())
+    ev.param_space = "unconstrained"
+    ev.get_eig = MagicMock(
+        side_effect=[(0.5, 0.01), (np.array([0.1, 0.9, 0.5]), np.zeros(3))]
+    )
+    samples = _make_mcsamples(np.zeros((20, 2)), ["p0", "p1"])
+    with patch("bedcosmo.evaluate.render_overlay"), \
+         patch("bedcosmo.evaluate.load_model", return_value=(MagicMock(name="flow"), 100)), \
+         patch("bedcosmo.util.sample_nf", return_value=samples):
+        ev.run(eval_step=100)
+
+    ev.plotter.plot_posterior.assert_called_once()
+    ev.plotter.plot_raw_posterior.assert_not_called()

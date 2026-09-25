@@ -1923,6 +1923,154 @@ class RunPlotter(BasePlotter):
             **kwargs,
         )
 
+    def plot_raw_posterior(
+        self,
+        *,
+        eval_step=None,
+        posterior_samples_path=None,
+        display=("nominal", "optimal"),
+        data_index=0,
+        plot_ranges=False,
+        bins=200,
+        filename=None,
+        save_dir=None,
+        dpi=200,
+    ):
+        """
+        Triangle of the raw saved posterior samples, for spotting outliers.
+
+        No GetDist smoothing or fencing and no experiment/flow construction: 1D
+        panels are count histograms on a log y-axis, 2D panels scatter every
+        sample. Reads the newest default-eval NPZ under the run's artifacts (or
+        ``posterior_samples_path``); labels and bounds come from the run's
+        ``prior_args.yaml`` artifact.
+
+        ``plot_ranges``: if False (default), axes span the full sample range and
+        samples outside the ``plot`` lower/upper box in ``prior_args.yaml`` get
+        enlarged markers so isolated outliers stay visible. If True, zoom the
+        axes to that ``plot`` box instead. Dotted lines mark uniform prior bounds
+        (times ``multiplier``, matching the saved physical-space samples). 1D
+        panels annotate per-series counts outside the prior and, when zoomed,
+        off-axis.
+        """
+        display = validate_display(display)
+        artifacts_dir = self._get_artifacts_dir()
+        bundle = load_posterior_samples_file(
+            artifacts_dir,
+            step=eval_step,
+            path=posterior_samples_path,
+            require_series=display,
+            generated_by=None if posterior_samples_path else "Evaluator.run",
+        )
+        print(f"  Loaded posterior samples from {bundle['path']}")
+        if bundle["meta"]["param_space"] != "physical":
+            raise ValueError(
+                f"plot_raw_posterior expects physical-space samples, got "
+                f"param_space={bundle['meta']['param_space']!r} in {bundle['path']}"
+            )
+        with open(os.path.join(artifacts_dir, "prior_args.yaml")) as f:
+            prior_params = yaml.safe_load(f)["parameters"]
+
+        names = [str(p) for p in bundle["param_names"]]
+        n = len(names)
+        labels, prior_bounds, plot_box = {}, {}, {}
+        for p in names:
+            cfg = prior_params.get(p, {})
+            labels[p] = f"${cfg['latex']}$" if "latex" in cfg else p
+            mult = float(cfg.get("multiplier", 1.0))
+            dist = cfg.get("distribution", {})
+            if dist.get("type") == "uniform":
+                prior_bounds[p] = (dist["lower"] * mult, dist["upper"] * mult)
+            if "plot" in cfg:
+                plot_box[p] = (cfg["plot"]["lower"], cfg["plot"]["upper"])
+        # Params without a ``plot`` entry stay at full range even when zoomed.
+        ranges = plot_box if plot_ranges else {}
+
+        series_meta = {s["name"]: s for s in bundle["meta"].get("series", [])}
+        series_idx = [list(bundle["series_names"]).index(name) for name in display]
+        # (n_display, n_guide, n_params)
+        theta = bundle["theta"][series_idx, data_index]
+        colors = [series_meta.get(name, {}).get("color", NF_SERIES_COLORS[name]) for name in display]
+
+        fig, axes = plt.subplots(n, n, figsize=(4.2 * n, 4.2 * n), squeeze=False)
+        for i in range(n):
+            for j in range(n):
+                ax = axes[i, j]
+                if j > i:
+                    ax.axis("off")
+                    continue
+                if i == j:
+                    p = names[i]
+                    lo, hi = ranges[p] if p in ranges else (theta[..., i].min(), theta[..., i].max())
+                    # Shared edges so series counts are directly comparable.
+                    edges = np.linspace(lo, hi, bins + 1)
+                    for k, name in enumerate(display):
+                        x = theta[k, :, i]
+                        ax.hist(x, bins=edges, histtype="step", color=colors[k], lw=1.3, label=name)
+                        notes = []
+                        if p in prior_bounds:
+                            pl, ph = prior_bounds[p]
+                            notes.append(f"{int(((x < pl) | (x > ph)).sum())} outside prior")
+                        if p in ranges:
+                            notes.append(f"{int(((x < lo) | (x > hi)).sum())} off-axis")
+                        if notes:
+                            ax.text(0.02, 0.97 - 0.07 * k, f"{name}: " + ", ".join(notes),
+                                    color=colors[k], transform=ax.transAxes, va="top", fontsize=8)
+                    if p in prior_bounds:
+                        for v in prior_bounds[p]:
+                            ax.axvline(v, color="k", ls=":", lw=0.8)
+                    ax.set_yscale("log")
+                    ax.set_ylabel("counts")
+                    if p in ranges:
+                        ax.set_xlim(lo, hi)
+                else:
+                    px, py = names[j], names[i]
+                    for k in range(len(display)):
+                        ax.scatter(theta[k, :, j], theta[k, :, i], s=1.5, color=colors[k],
+                                   alpha=0.3, lw=0, rasterized=True)
+                        if not plot_ranges:
+                            out = np.zeros(theta.shape[1], dtype=bool)
+                            for c, p in ((j, px), (i, py)):
+                                if p in plot_box:
+                                    out |= (theta[k, :, c] < plot_box[p][0]) | (theta[k, :, c] > plot_box[p][1])
+                            ax.scatter(theta[k, out, j], theta[k, out, i], s=16, color=colors[k],
+                                       alpha=0.7, marker="ox"[k % 2], lw=0.8)
+                    if px in prior_bounds and py in prior_bounds:
+                        (xl, xh), (yl, yh) = prior_bounds[px], prior_bounds[py]
+                        ax.add_patch(Rectangle((xl, yl), xh - xl, yh - yl, fill=False,
+                                               ls=":", lw=0.8, color="k"))
+                    if px in ranges:
+                        ax.set_xlim(ranges[px])
+                    if py in ranges:
+                        ax.set_ylim(ranges[py])
+                    ax.set_ylabel(labels[py])
+                ax.set_xlabel(labels[names[j]])
+        # The upper-right panel is empty for n > 1; keep the legend off the 1D notes.
+        axes[0, -1].legend(*axes[0, 0].get_legend_handles_labels(),
+                           loc="upper right" if n == 1 else "center", fontsize=9)
+
+        step = bundle["meta"].get("step")
+        view = "plot ranges" if plot_ranges else "full range"
+        fig.suptitle(
+            f"Raw posterior samples - Run: {self.run_id[:8]}, step {step}, "
+            f"{theta.shape[1]:,} samples/series ({view}); dotted = prior bounds",
+            fontsize=10,
+        )
+        fig.tight_layout()
+        if filename is None:
+            filename = f"raw_posterior_step{step}" + ("_zoom" if plot_ranges else "")
+        self.save_figure(
+            fig,
+            filename=filename,
+            save_dir=save_dir,
+            dpi=dpi,
+            run_id=self.run_id,
+            experiment_id=self.experiment_id,
+            close_fig=False,
+            display_fig=False,
+        )
+        return fig
+
     def plot_designs(
         self,
         design_args=None,
