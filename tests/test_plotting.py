@@ -289,8 +289,14 @@ class TestRunPlotter:
             plt.close(fig)
     
     def test_plot_raw_posterior(self, run_plotter, tmp_path):
-        """Raw triangle: log-count diagonals, prior-bound annotations, plot_ranges zoom."""
+        """Raw triangle: log-count diagonals, prior-bound annotations, GetDist-window
+        outlier markers and plot_ranges zoom."""
+        import contextlib
+        import io
+
         from bedcosmo.artifacts import make_posterior_samples_path, save_posterior_samples
+        from bedcosmo.plotting import getdist_view_ranges
+        from bedcosmo.util import GETDIST_SETTINGS
 
         artifacts = tmp_path / "artifacts"
         artifacts.mkdir()
@@ -306,7 +312,8 @@ class TestRunPlotter:
             "    plot: {lower: 8000.0, upper: 12000.0}\n"
         )
         rng = np.random.default_rng(0)
-        theta = np.stack([rng.normal([0.3, 10000.0], [0.01, 100.0], size=(1, 500, 2))] * 2)
+        # 5000 samples so the 3 outliers (0.06%) sit past GetDist's 0.1% range cut.
+        theta = np.stack([rng.normal([0.3, 10000.0], [0.01, 100.0], size=(1, 5000, 2))] * 2)
         theta[0, 0, :3, 0] = -10.0  # nominal Om outliers outside the prior
         save_posterior_samples(
             make_posterior_samples_path(str(artifacts), step=100),
@@ -330,10 +337,31 @@ class TestRunPlotter:
         notes = [t.get_text() for t in axes[0, 0].texts]
         assert "nominal: 3 outside prior" in notes and "optimal: 0 outside prior" in notes
 
+        # The plot window is GetDist's default range over both series (the YAML
+        # `plot` box is not used); outliers don't stretch it.
+        with contextlib.redirect_stdout(io.StringIO()):
+            gd = [getdist.MCSamples(samples=theta[k, 0], names=["Om", "hrdrag"],
+                                    settings=GETDIST_SETTINGS) for k in range(2)]
+        window = getdist_view_ranges(gd)
+        assert 0.25 < window["Om"][0] and window["Om"][1] < 0.35
+        (om_lo, om_hi), (h_lo, h_hi) = window["Om"], window["hrdrag"]
+        outside = [
+            (t[0, :, 0] < om_lo) | (t[0, :, 0] > om_hi) | (t[0, :, 1] < h_lo) | (t[0, :, 1] > h_hi)
+            for t in theta
+        ]
+        # Per series: in-window samples as dots, out-of-window ones as x's.
+        dots, crosses = axes[1, 0].collections[0::2], axes[1, 0].collections[1::2]
+        assert [len(c.get_offsets()) for c in crosses] == [int(o.sum()) for o in outside]
+        assert [len(c.get_offsets()) for c in dots] == [int((~o).sum()) for o in outside]
+        assert outside[0].sum() >= 3
+        legend = [t.get_text() for t in axes[0, 1].get_legend().get_texts()]
+        assert legend == ["nominal", "optimal", "outside plot window"]
+
         zaxes = np.array(zoom.axes).reshape(2, 2)
-        assert zaxes[0, 0].get_xlim() == pytest.approx((0.2, 0.45))
-        assert zaxes[1, 0].get_ylim() == pytest.approx((8000.0, 12000.0))
-        assert any("3 off-axis" in t.get_text() for t in zaxes[0, 0].texts)
+        assert zaxes[0, 0].get_xlim() == pytest.approx(window["Om"])
+        assert zaxes[1, 0].get_ylim() == pytest.approx(window["hrdrag"])
+        n_off = int(((theta[0, 0, :, 0] < om_lo) | (theta[0, 0, :, 0] > om_hi)).sum())
+        assert any(f"{n_off} off-axis" in t.get_text() for t in zaxes[0, 0].texts)
         assert len(list(tmp_path.glob("raw_posterior_step100_2*.png"))) == 1
         assert len(list(tmp_path.glob("raw_posterior_step100_zoom_*.png"))) == 1
         plt.close(fig)
