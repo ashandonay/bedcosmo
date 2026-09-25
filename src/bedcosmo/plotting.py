@@ -117,6 +117,20 @@ def _window_log_ticks(lo, hi, vmin, vmax):
     return sorted(ticks)
 
 
+def triangle_font_sizes(width_inch, n_params):
+    """``(axis, title, legend)`` font sizes for an ``n_params`` triangle ``width_inch`` wide."""
+    axis = max(9, min(22, width_inch * (0.3 + 0.5 * np.sqrt(n_params))))
+    base = max(6, min(18, width_inch * (0.2 + 0.42 * np.sqrt(n_params))))
+    if n_params == 1:
+        base = max(base, 12)
+    legend = base * 0.65
+    if n_params == 1:
+        legend = max(legend, 10)
+    elif n_params == 2:
+        legend = max(legend * 1.25, 12)
+    return axis, base * 1.15, legend
+
+
 def _fmt_sample_count(n):
     """Compact count for legends, e.g. 500000 -> 5e5, 30544 -> 3.1e4."""
     if n < 1000:
@@ -1170,15 +1184,7 @@ class BasePlotter:
         plotted_params = all_samples[0].paramNames.list()
         plot_width = 10
         n_params = len(plotted_params)
-        base_fontsize = max(6, min(18, plot_width * (0.2 + 0.42 * np.sqrt(n_params))))
-        if n_params == 1:
-            base_fontsize = max(base_fontsize, 12)
-        title_fontsize = base_fontsize * 1.15
-        legend_fontsize = base_fontsize * 0.65
-        if n_params == 1:
-            legend_fontsize = max(legend_fontsize, 10)
-        elif n_params == 2:
-            legend_fontsize = max(legend_fontsize * 1.25, 12)
+        _, title_fontsize, legend_fontsize = triangle_font_sizes(plot_width, n_params)
 
         g = self.plot_triangle(
             all_samples,
@@ -1285,7 +1291,7 @@ class BasePlotter:
         # Calculate dynamic font sizes for axis labels based on plot width and number of parameters
         if isinstance(samples, list) and len(samples) > 0:
             n_params = len(samples[0].paramNames.names)
-            axis_label_fontsize = max(9, min(22, width_inch * (0.3 + 0.5 * np.sqrt(n_params))))
+            axis_label_fontsize, _, _ = triangle_font_sizes(width_inch, n_params)
             g.settings.axes_fontsize = axis_label_fontsize
             g.settings.axes_labelsize = axis_label_fontsize
             g.settings.lab_fontsize = axis_label_fontsize
@@ -2051,7 +2057,12 @@ class RunPlotter(BasePlotter):
             lims[p] = tuple(inverse([lo - 0.05 * (hi - lo), hi + 0.05 * (hi - lo)]))
         ticks = {p: _window_log_ticks(*window[p], *lims[p]) for p in names}
 
-        fig, axes = plt.subplots(n, n, figsize=(4.2 * n, 4.2 * n), squeeze=False)
+        # Same layout as plot_posterior's GetDist triangle: 10 in wide, touching
+        # panels, tick labels only on the outer edges, same font sizes.
+        width = 10
+        axis_fs, title_fs, legend_fs = triangle_font_sizes(width, n)
+        fig, axes = plt.subplots(n, n, figsize=(width, width), squeeze=False,
+                                 gridspec_kw=dict(wspace=0, hspace=0))
         for i in range(n):
             for j in range(n):
                 ax = axes[i, j]
@@ -2075,14 +2086,18 @@ class RunPlotter(BasePlotter):
                         wl, wh = window[p]
                         notes.append(f"{int(((x < wl) | (x > wh)).sum())} outside window")
                         ax.text(0.02, 0.97 - 0.07 * k, f"{name}: " + ", ".join(notes),
-                                color=colors[k], transform=ax.transAxes, va="top", fontsize=8)
+                                color=colors[k], transform=ax.transAxes, va="top",
+                                fontsize=0.8 * axis_fs)
                     if p in prior_bounds:
                         for v in prior_bounds[p]:
                             ax.axvline(v, color="k", ls=":", lw=0.8)
                     for v in window[p]:
                         ax.axvline(v, color="0.4", ls="--", lw=0.8)
+                    # Counts on the right: the panel to the right is empty.
                     ax.set_yscale("log")
-                    ax.set_ylabel("counts per bin")
+                    ax.yaxis.tick_right()
+                    ax.yaxis.set_label_position("right")
+                    ax.set_ylabel("counts per bin", fontsize=axis_fs)
                     ax.set_xscale("function", functions=scales[p])
                     ax.set_xlim(lims[p])
                     ax.xaxis.set_major_locator(FixedLocator(ticks[p]))
@@ -2114,9 +2129,13 @@ class RunPlotter(BasePlotter):
                     for axis, q in ((ax.xaxis, px), (ax.yaxis, py)):
                         axis.set_major_locator(FixedLocator(ticks[q]))
                         axis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:g}"))
-                    ax.set_ylabel(labels[py])
-                ax.set_xlabel(labels[names[j]])
-                ax.tick_params(axis="x", labelrotation=30)
+                    ax.tick_params(top=True, right=True, labelleft=j == 0)
+                    if j == 0:
+                        ax.set_ylabel(labels[py], fontsize=axis_fs)
+                ax.tick_params(which="both", direction="in", labelsize=axis_fs,
+                               labelbottom=i == n - 1)
+                if i == n - 1:
+                    ax.set_xlabel(labels[names[j]], fontsize=axis_fs)
 
         handles, legend_labels = axes[0, 0].get_legend_handles_labels()
         level_str = "/".join(f"{100 * lev:.0f}%" for lev in levels)
@@ -2124,20 +2143,19 @@ class RunPlotter(BasePlotter):
             handles += [Line2D([0], [0], color=contour_colors[k], lw=1.8)]
             legend_labels += [f"{name} {level_str} contour"]
         handles += [Line2D([0], [0], ls="", marker="o", ms=3, color="0.4", alpha=0.5),
-                    Line2D([0], [0], ls="--", lw=0.8, color="0.4")]
-        legend_labels += ["samples", "plot window (GetDist)"]
-        # The upper-right panel is empty for n > 1; keep the legend off the 1D notes.
-        axes[0, -1].legend(handles, legend_labels,
-                           loc="upper right" if n == 1 else "center", fontsize=9)
+                    Line2D([0], [0], ls="--", lw=0.8, color="0.4"),
+                    Line2D([0], [0], ls=":", lw=0.8, color="k")]
+        legend_labels += [f"samples ({_fmt_sample_count(theta.shape[1])}/series)",
+                          "plot window (GetDist); axes log beyond it",
+                          "prior bounds"]
+        fig.legend(handles, legend_labels, loc="upper right", bbox_to_anchor=(0.99, 0.96),
+                   fontsize=legend_fs)
 
         step = bundle["meta"].get("step")
-        fig.suptitle(
-            f"Posterior, full sample range - Run: {self.run_id[:8]}, step {step}, "
-            f"{_fmt_sample_count(theta.shape[1])} samples/series\naxes linear inside the dashed "
-            f"window, log beyond; dotted = prior bounds",
-            fontsize=10,
-        )
-        fig.tight_layout()
+        fig.suptitle(f"Posterior Evaluation (full sample range) - Run: {self.run_id[:8]}, "
+                     f"step {step}", fontsize=title_fs, weight="bold")
+        # Margins match the GetDist triangle; extra right margin for the 1D counts.
+        fig.subplots_adjust(left=0.09, right=0.91, bottom=0.06, top=0.95)
         if filename is None:
             filename = f"posterior_full_range_step{step}"
         self.save_figure(
@@ -2693,15 +2711,7 @@ class RunPlotter(BasePlotter):
 
         # Calculate dynamic font sizes
         n_params = len(all_samples[0].paramNames.names)
-        base_fontsize = max(6, min(18, plot_width * (0.2 + 0.42 * np.sqrt(n_params))))
-        if n_params == 1:
-            base_fontsize = max(base_fontsize, 12)
-        title_fontsize = base_fontsize * 1.15
-        legend_fontsize = base_fontsize * 0.65
-        if n_params == 1:
-            legend_fontsize = max(legend_fontsize, 10)
-        elif n_params == 2:
-            legend_fontsize = max(legend_fontsize * 1.25, 12)
+        _, title_fontsize, legend_fontsize = triangle_font_sizes(plot_width, n_params)
 
         if g.fig.legends:
             for legend in g.fig.legends:
