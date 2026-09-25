@@ -1025,11 +1025,13 @@ class TestPlotTriangleFence:
         values = np.vstack([values, [0.3, 10000, 2.0]])
         sample = _gd_samples(values, "Nominal", names=("Om", "hrdrag", "z"))
         marked = []
+        marker_sizes = []
         scatter = Axes.scatter
 
         def record_marks(ax, *args, **kwargs):
             if kwargs.get("marker") == "x":
                 marked.append((np.asarray(args[0]), np.asarray(args[1])))
+                marker_sizes.append(kwargs["s"])
             return scatter(ax, *args, **kwargs)
 
         with patch.object(Axes, "scatter", record_marks):
@@ -1042,6 +1044,7 @@ class TestPlotTriangleFence:
         # actually display z.
         assert len(marked) == 2
         assert all(len(x) == len(y) == 1 for x, y in marked)
+        assert marker_sizes == [12, 12]
         plt.close(g.fig)
 
     def test_outer_contour_is_dashed(self):
