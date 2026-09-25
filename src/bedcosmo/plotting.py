@@ -1474,7 +1474,7 @@ class BasePlotter:
         param_name_list = [p.name for p in param_names.names]
 
         if levels is not None:
-            fill_blends = np.linspace(0.68, 0.34, len(levels))
+            fill_blends = np.linspace(0.56, 0.24, len(levels))
             for i in range(1, len(param_name_list)):
                 for j in range(i):
                     ax = g.subplots[i, j]
@@ -1493,7 +1493,7 @@ class BasePlotter:
                                 blend_with_white(colors[sample_idx], blend)
                                 for blend in fill_blends
                             ],
-                            alpha=0.24,
+                            alpha=0.3,
                             zorder=0.5,
                         )
         
