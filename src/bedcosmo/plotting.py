@@ -2020,7 +2020,7 @@ class RunPlotter(BasePlotter):
         posterior_samples_path=None,
         display=("nominal", "optimal"),
         data_index=0,
-        levels=(0.68,),
+        levels=(0.68, 0.95),
         bins=200,
         filename=None,
         save_dir=None,
@@ -2030,11 +2030,10 @@ class RunPlotter(BasePlotter):
         Posterior triangle over the full sample range, for seeing where outliers sit.
 
         Uses the standard plot's window (GetDist's default axis range over the
-        displayed series, ``getdist_view_ranges``). 2D panels show the same
-        GetDist contours as ``plot_posterior`` (smoothed from the in-window
-        samples, ``levels``) drawn over every sample as a faint dot; axes span
-        all samples. 1D panels are log-count histograms over the full
-        range, with the window edges dashed. Every axis is linear inside the
+        displayed series, ``getdist_view_ranges``). 2D panels show filled
+        ``levels`` contours from in-window samples over every sample as a faint,
+        muted dot; axes span all samples. 1D panels are log-count histograms over
+        the full range, with the window edges dashed. Every axis is linear inside the
         window and log10 beyond it (``_window_log_scale``), so the contour stays
         readable while far outliers stay on-axis; axes span the samples and
         prior bounds further out are clipped. Reads the newest default-eval NPZ
@@ -2080,6 +2079,12 @@ class RunPlotter(BasePlotter):
         colors = [series_meta.get(name, {}).get("color", NF_SERIES_COLORS[name]) for name in display]
         contour_colors = [
             matplotlib.colors.to_hex(0.6 * np.array(matplotlib.colors.to_rgb(c))) for c in colors
+        ]
+        sample_colors = [
+            matplotlib.colors.to_hex(
+                0.45 * np.array(matplotlib.colors.to_rgb(c)) + 0.55
+            )
+            for c in colors
         ]
         with contextlib.redirect_stdout(io.StringIO()):
             full = [
@@ -2150,17 +2155,44 @@ class RunPlotter(BasePlotter):
                     ax.xaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:g}"))
                 else:
                     px, py = names[j], names[i]
-                    # Every sample as a faint dot, contours on top in a darker shade.
+                    # Keep every sample visible but subdued behind the contours.
                     for k in range(len(display)):
-                        ax.scatter(theta[k, :, j], theta[k, :, i], s=2, color=colors[k],
-                                   alpha=0.15, lw=0, rasterized=True, zorder=1)
+                        ax.scatter(theta[k, :, j], theta[k, :, i], s=1.2, color=sample_colors[k],
+                                   alpha=0.035, lw=0, rasterized=True, zorder=1)
                     for k, sample in enumerate(in_window):
                         density = sample.get2DDensityGridData(
                             px, py, num_plot_contours=len(levels), get_density=True
                         )
-                        ax.contour(density.x, density.y, density.P,
-                                   sorted(density.getContourLevels(list(levels))),
-                                   colors=[contour_colors[k]], linewidths=1.8, zorder=3)
+                        thresholds = sorted(density.getContourLevels(list(levels)))
+                        fill_colors = [
+                            matplotlib.colors.to_hex(
+                                (1 - blend) * np.array(matplotlib.colors.to_rgb(colors[k])) + blend
+                            )
+                            for blend in np.linspace(0.48, 0.18, len(levels))
+                        ]
+                        ax.contourf(
+                            density.x,
+                            density.y,
+                            density.P,
+                            [*thresholds, density.P.max() + 1],
+                            colors=fill_colors,
+                            alpha=0.38,
+                            zorder=2,
+                        )
+                        line_styles = [
+                            "--" if level > 0.68 else "-"
+                            for level in sorted(levels, reverse=True)
+                        ]
+                        ax.contour(
+                            density.x,
+                            density.y,
+                            density.P,
+                            thresholds,
+                            colors=[contour_colors[k]],
+                            linestyles=line_styles,
+                            linewidths=1.8,
+                            zorder=3,
+                        )
                     if px in prior_bounds and py in prior_bounds:
                         (xl, xh), (yl, yh) = prior_bounds[px], prior_bounds[py]
                         ax.add_patch(Rectangle((xl, yl), xh - xl, yh - yl, fill=False,
@@ -2184,10 +2216,11 @@ class RunPlotter(BasePlotter):
                     ax.set_xlabel(labels[names[j]], fontsize=axis_fs)
 
         handles, legend_labels = axes[0, 0].get_legend_handles_labels()
-        level_str = "/".join(f"{100 * lev:.0f}%" for lev in levels)
         for k, name in enumerate(display):
-            handles += [Line2D([0], [0], color=contour_colors[k], lw=1.8)]
-            legend_labels += [f"{name} {level_str} contour"]
+            for level in sorted(levels, reverse=True):
+                line_style = "--" if level > 0.68 else "-"
+                handles.append(Line2D([0], [0], color=contour_colors[k], lw=1.8, ls=line_style))
+                legend_labels.append(f"{name} {level:.0%} contour")
         handles += [Line2D([0], [0], ls="", marker="o", ms=3, color="0.4", alpha=0.5),
                     Line2D([0], [0], ls="--", lw=0.8, color="0.4"),
                     Line2D([0], [0], ls=":", lw=0.8, color="k")]
@@ -2198,8 +2231,9 @@ class RunPlotter(BasePlotter):
                    fontsize=legend_fs)
 
         step = bundle["meta"].get("step")
-        fig.suptitle(f"Posterior Evaluation (full sample range) - Run: {self.run_id[:8]}, "
-                     f"step {step}", fontsize=title_fs, weight="bold")
+        level_label = ", ".join(f"{level:.0%}" for level in levels)
+        fig.suptitle(f"Posterior Evaluation (full sample range; {level_label}) - "
+                     f"Run: {self.run_id[:8]}, step {step}", fontsize=title_fs, weight="bold")
         # Margins match plot_posterior; extra right margin for the 1D counts.
         fig.subplots_adjust(left=0.09, right=0.91, bottom=0.06, top=0.95)
         if filename is None:

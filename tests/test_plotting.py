@@ -364,16 +364,24 @@ class TestRunPlotter:
         contours = [c for c in ax2d.collections if not isinstance(c, PathCollection)]
         assert [len(c.get_offsets()) for c in dots] == [5000, 5000]
         np.testing.assert_allclose(dots[0].get_offsets(), theta[0, 0])
-        assert len(contours) >= 2
+        assert all(c.get_alpha() == pytest.approx(0.035) for c in dots)
+        fills = [c for c in contours if len(c.get_facecolor()) == 2]
+        assert len(fills) == 2
+        for fill in fills:
+            outer_rgb, inner_rgb = fill.get_facecolor()[:, :3]
+            assert outer_rgb.mean() > inner_rgb.mean()
+        assert len(contours) >= 4
         assert min(c.get_zorder() for c in contours) > max(d.get_zorder() for d in dots)
         # Dashed box = GetDist's window.
         box = [r for r in ax2d.patches if isinstance(r, Rectangle) and r.get_linestyle() == "--"]
         assert len(box) == 1 and box[0].get_xy() == pytest.approx((om_lo, h_lo))
 
         legend = [t.get_text() for t in fig.legends[0].get_texts()]
-        assert legend == ["nominal", "optimal", "nominal 68% contour", "optimal 68% contour",
+        assert legend == ["nominal", "optimal", "nominal 95% contour", "nominal 68% contour",
+                          "optimal 95% contour", "optimal 68% contour",
                           "samples (5e3/series)", "plot window (GetDist); axes log beyond it",
                           "prior bounds"]
+        assert "68%, 95%" in fig._suptitle.get_text()
 
         # Small gaps separate panels; labels stay on the outer edges.
         pos = {(i, j): axes[i, j].get_position() for i, j in ((0, 0), (1, 0), (1, 1))}
