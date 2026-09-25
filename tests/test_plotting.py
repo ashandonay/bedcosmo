@@ -354,7 +354,6 @@ class TestRunPlotter:
         x0, x1 = forward(np.array(axes[1, 0].get_xlim()))
         w0, w1 = forward(np.array(window["Om"]))
         assert (w1 - w0) / (x1 - x0) > 0.3
-        assert axes[0, 0].get_xlabel() == "$\\Omega_m$"
         n_om_out = int(((theta[0, 0, :, 0] < om_lo) | (theta[0, 0, :, 0] > om_hi)).sum())
         notes = [t.get_text() for t in axes[0, 0].texts]
         assert f"nominal: 3 outside prior, {n_om_out} outside window" in notes
@@ -371,10 +370,19 @@ class TestRunPlotter:
         box = [r for r in ax2d.patches if isinstance(r, Rectangle) and r.get_linestyle() == "--"]
         assert len(box) == 1 and box[0].get_xy() == pytest.approx((om_lo, h_lo))
 
-        legend = [t.get_text() for t in axes[0, 1].get_legend().get_texts()]
+        legend = [t.get_text() for t in fig.legends[0].get_texts()]
         assert legend == ["nominal", "optimal", "nominal 68% contour", "optimal 68% contour",
-                          "samples", "plot window (GetDist)"]
-        assert "5e3 samples/series" in fig._suptitle.get_text()
+                          "samples (5e3/series)", "plot window (GetDist); axes log beyond it",
+                          "prior bounds"]
+
+        # Same layout as the GetDist triangle: touching panels, labels on outer edges.
+        pos = {(i, j): axes[i, j].get_position() for i, j in ((0, 0), (1, 0), (1, 1))}
+        assert pos[(1, 0)].x1 == pytest.approx(pos[(1, 1)].x0)
+        assert pos[(1, 0)].y1 == pytest.approx(pos[(0, 0)].y0)
+        assert axes[0, 0].get_xlabel() == "" and axes[1, 0].get_xlabel() == "$\\Omega_m$"
+        assert axes[1, 1].get_ylabel() == "counts per bin"
+        assert axes[1, 1].yaxis.get_label_position() == "right"
+        assert axes[1, 0].get_ylabel() == "hrdrag"
         assert len(list(tmp_path.glob("posterior_full_range_step100_*.png"))) == 1
         plt.close(fig)
 
