@@ -1055,6 +1055,11 @@ class TestPlotTriangleFence:
         contours = g.subplots[1, 0].collections
         assert len(contours) >= 2
         assert contours[0].get_linestyle() != contours[1].get_linestyle()
+        fills = [c for c in contours if len(c.get_facecolor()) == 2]
+        assert len(fills) == 1
+        outer_rgb = fills[0].get_facecolor()[0, :3]
+        inner_rgb = fills[0].get_facecolor()[1, :3]
+        assert outer_rgb.mean() > inner_rgb.mean()
         plt.close(g.fig)
 
     def test_plot_posterior_panels_have_spacing(self):
@@ -1075,6 +1080,7 @@ class TestPlotTriangleFence:
         assert pos[(0, 0)].y0 > pos[(1, 0)].y1
         renderer = g.fig.canvas.get_renderer()
         title = g.fig._suptitle.get_window_extent(renderer).transformed(g.fig.transFigure.inverted())
+        assert "(68%, 95%)" in g.fig._suptitle.get_text()
         assert title.y0 > pos[(0, 0)].y1
         plt.close(g.fig)
 
