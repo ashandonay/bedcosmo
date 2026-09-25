@@ -377,9 +377,8 @@ class TestRunPlotter:
         assert len(box) == 1 and box[0].get_xy() == pytest.approx((om_lo, h_lo))
 
         legend = [t.get_text() for t in fig.legends[0].get_texts()]
-        assert legend == ["nominal", "optimal", "nominal 95% contour", "nominal 68% contour",
-                          "optimal 95% contour", "optimal 68% contour",
-                          "samples (5e3/series)", "plot window (GetDist); axes log beyond it",
+        assert legend == ["nominal", "optimal", "samples (5e3/series)",
+                          "plot window (GetDist); axes log beyond it",
                           "prior bounds"]
         assert "68%, 95%" in fig._suptitle.get_text()
 
@@ -1055,14 +1054,14 @@ class TestPlotTriangleFence:
         assert marker_sizes == [12, 12]
         plt.close(g.fig)
 
-    def test_outer_contour_is_dashed(self):
+    def test_contour_boundaries_are_solid(self):
         sample = _gd_samples(_bulk_with_outliers(), "Nominal")
         g = BasePlotter(cosmo_exp="test_exp").plot_triangle(
             [sample], ["tab:blue"], levels=[0.68, 0.95], ranges=self.RANGES,
         )
         contours = g.subplots[1, 0].collections
         assert len(contours) >= 2
-        assert contours[0].get_linestyle() != contours[1].get_linestyle()
+        assert all(style[1] is None for style in contours[0].get_linestyle())
         fills = [c for c in contours if len(c.get_facecolor()) == 2]
         assert len(fills) == 1
         outer_rgb = fills[0].get_facecolor()[0, :3]

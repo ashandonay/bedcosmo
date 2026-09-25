@@ -1419,8 +1419,7 @@ class BasePlotter:
             show=False
         )
         
-        # Keep color tied to the series; distinguish the 68% and 95% levels by
-        # line style and a lighter color for the outer contour.
+        # Keep color tied to the series; use a lighter fill for the outer contour.
         if levels is not None and len(levels) > 1:
             level_lighten = [0.0, 0.22]  # inner level keeps base color; outer is slightly lighter
             n_levels = len(levels)
@@ -1442,8 +1441,6 @@ class BasePlotter:
                                 continue
                             lighten = level_lighten[min(level_idx, len(level_lighten) - 1)]
                             collections[coll_idx].set_color(blend_with_white(base_color, lighten))
-                            if level_idx > 0:
-                                collections[coll_idx].set_linestyle("--")
         
         # If alpha is a list, manually set alpha for each sample's lines and contours
         if isinstance(alpha, list):
@@ -2024,7 +2021,7 @@ class RunPlotter(BasePlotter):
         bins=200,
         filename=None,
         save_dir=None,
-        dpi=200,
+        dpi=400,
     ):
         """
         Posterior triangle over the full sample range, for seeing where outliers sit.
@@ -2179,18 +2176,14 @@ class RunPlotter(BasePlotter):
                             alpha=0.38,
                             zorder=2,
                         )
-                        line_styles = [
-                            "--" if level > 0.68 else "-"
-                            for level in sorted(levels, reverse=True)
-                        ]
                         ax.contour(
                             density.x,
                             density.y,
                             density.P,
                             thresholds,
                             colors=[contour_colors[k]],
-                            linestyles=line_styles,
-                            linewidths=1.8,
+                            linestyles="-",
+                            linewidths=1.0,
                             zorder=3,
                         )
                     if px in prior_bounds and py in prior_bounds:
@@ -2216,11 +2209,6 @@ class RunPlotter(BasePlotter):
                     ax.set_xlabel(labels[names[j]], fontsize=axis_fs)
 
         handles, legend_labels = axes[0, 0].get_legend_handles_labels()
-        for k, name in enumerate(display):
-            for level in sorted(levels, reverse=True):
-                line_style = "--" if level > 0.68 else "-"
-                handles.append(Line2D([0], [0], color=contour_colors[k], lw=1.8, ls=line_style))
-                legend_labels.append(f"{name} {level:.0%} contour")
         handles += [Line2D([0], [0], ls="", marker="o", ms=3, color="0.4", alpha=0.5),
                     Line2D([0], [0], ls="--", lw=0.8, color="0.4"),
                     Line2D([0], [0], ls=":", lw=0.8, color="k")]
