@@ -1001,7 +1001,7 @@ class BasePlotter:
         nf_entries=None,
         *,
         display=("nominal", "optimal"),
-        levels=(0.68,),
+        levels=(0.68, 0.95),
         guide_samples=1000,
         params=None,
         plot_prior=False,
@@ -1416,8 +1416,8 @@ class BasePlotter:
             show=False
         )
         
-        # Slightly differentiate colors between contour levels (e.g., 68% vs 95%)
-        # so both confidence lines are easier to distinguish in 2D panels.
+        # Keep color tied to the series; distinguish the 68% and 95% levels by
+        # line style and a lighter color for the outer contour.
         if levels is not None and len(levels) > 1:
             level_lighten = [0.0, 0.22]  # inner level keeps base color; outer is slightly lighter
             n_levels = len(levels)
@@ -1439,6 +1439,8 @@ class BasePlotter:
                                 continue
                             lighten = level_lighten[min(level_idx, len(level_lighten) - 1)]
                             collections[coll_idx].set_color(blend_with_white(base_color, lighten))
+                            if level_idx > 0:
+                                collections[coll_idx].set_linestyle("--")
         
         # If alpha is a list, manually set alpha for each sample's lines and contours
         if isinstance(alpha, list):
@@ -1535,23 +1537,28 @@ class BasePlotter:
                     g.subplots[i, j].scatter(
                         np.clip(arr[:, names.index(px)], *fence[px]),
                         np.clip(arr[:, names.index(py)], *fence[py]),
-                        s=34, marker="x", color=colors[k], linewidths=1.3, zorder=6, clip_on=False,
+                        s=22, marker="x", color=colors[k], linewidths=1.2, zorder=6, clip_on=False,
                     )
             if py in fence:
                 lo, hi = fence[py]
-                cols = [
-                    np.asarray(sample.samples)[:, sample.paramNames.list().index(py)]
-                    for sample, fence_sample in zip(full_samples, fenced)
-                    if fence_sample
-                ]
-                n_lo = sum(int((c < lo).sum()) for c in cols)
-                n_hi = sum(int((c > hi).sum()) for c in cols)
-                # Inside the panel, not a title: titles make the layout open gaps.
-                if n_lo or n_hi:
+                annotation_idx = 0
+                for k, (sample, fence_sample) in enumerate(zip(full_samples, fenced)):
+                    if not fence_sample:
+                        continue
+                    values = np.asarray(sample.samples)[:, sample.paramNames.list().index(py)]
+                    n_lo, n_hi = int((values < lo).sum()), int((values > hi).sum())
+                    if not (n_lo or n_hi):
+                        continue
+                    label = legend_labels[k] if legend_labels else sample.label
+                    label = (label or f"Series {k + 1}").split(",")[0]
+                    label = label.replace(" Design (NF)", "")
+                    # Inside the panel, not a title: titles make the layout open gaps.
                     g.subplots[i, i].text(
-                        0.02, 0.97, f"{n_lo} below / {n_hi} above range", fontsize=9,
-                        color="crimson", transform=g.subplots[i, i].transAxes, va="top",
+                        0.02, 0.97 - 0.075 * annotation_idx,
+                        f"{label}: {n_lo} below / {n_hi} above", fontsize=8,
+                        color=colors[k], transform=g.subplots[i, i].transAxes, va="top",
                     )
+                    annotation_idx += 1
 
         if legend_labels is not None:
             alphas = alpha if isinstance(alpha, list) else [alpha] * len(samples)
@@ -1937,7 +1944,7 @@ class RunPlotter(BasePlotter):
         """
         if device is None:
             device = "cuda:0" if torch.cuda.is_available() else "cpu"
-        levels = kwargs.get("levels", [0.68])
+        levels = kwargs.get("levels", [0.68, 0.95])
         if isinstance(levels, (int, float)):
             kwargs["levels"] = [levels]
 

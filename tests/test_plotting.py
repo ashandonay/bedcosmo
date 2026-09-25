@@ -956,9 +956,13 @@ class TestPlotTriangleFence:
         texts = self._legend_texts(g)
         assert texts == ["Nominal", "  5/3.0e3 outside plot range (0.17%)", "Prior"]
         assert g.subplots[0, 0].get_xlim() == pytest.approx(self.RANGES["Om"])
-        assert [t.get_text() for t in g.subplots[0, 0].texts] == ["3 below / 2 above range"]
+        assert [t.get_text() for t in g.subplots[0, 0].texts] == [
+            "Nominal: 3 below / 2 above"
+        ]
         # The Om=-10 outliers also sit above the H0rd window (13400 > 12000).
-        assert [t.get_text() for t in g.subplots[1, 1].texts] == ["0 below / 3 above range"]
+        assert [t.get_text() for t in g.subplots[1, 1].texts] == [
+            "Nominal: 0 below / 3 above"
+        ]
 
         # All five outliers are drawn as x's clamped onto the window edge.
         offsets = np.vstack([c.get_offsets() for c in g.subplots[1, 0].collections
@@ -1002,8 +1006,10 @@ class TestPlotTriangleFence:
             levels=[0.68], ranges=self.RANGES,
         )
         assert self._legend_texts(g) == ["Group", "  5/3.0e3 outside plot range (0.17%)"]
-        # Both runs still count toward the per-parameter 1D totals.
-        assert [t.get_text() for t in g.subplots[0, 0].texts] == ["6 below / 4 above range"]
+        # Each fenced series gets its own per-parameter diagonal count.
+        assert [t.get_text() for t in g.subplots[0, 0].texts] == [
+            "Group: 3 below / 2 above", "Series 2: 3 below / 2 above"
+        ]
         plt.close(g.fig)
 
     def test_outlier_marks_are_local_to_each_2d_panel(self):
@@ -1036,6 +1042,16 @@ class TestPlotTriangleFence:
         # actually display z.
         assert len(marked) == 2
         assert all(len(x) == len(y) == 1 for x, y in marked)
+        plt.close(g.fig)
+
+    def test_outer_contour_is_dashed(self):
+        sample = _gd_samples(_bulk_with_outliers(), "Nominal")
+        g = BasePlotter(cosmo_exp="test_exp").plot_triangle(
+            [sample], ["tab:blue"], levels=[0.68, 0.95], ranges=self.RANGES,
+        )
+        contours = g.subplots[1, 0].collections
+        assert len(contours) >= 2
+        assert contours[0].get_linestyle() != contours[1].get_linestyle()
         plt.close(g.fig)
 
     def test_plot_posterior_panels_have_spacing(self):
@@ -1075,6 +1091,7 @@ class TestPlotTriangleFence:
                 experiment, [entry], display="nominal", plot_mcmc=False, plot_prior=True,
             )
         kwargs = tri.call_args.kwargs
+        assert kwargs["levels"] == (0.68, 0.95)
         assert kwargs["ranges"] is None  # GetDist picks the window
         assert kwargs["fenced"] == [True, False]
 
