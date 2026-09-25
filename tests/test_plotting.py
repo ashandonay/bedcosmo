@@ -393,6 +393,28 @@ class TestRunPlotter:
         assert len(list(tmp_path.glob("posterior_full_range_step100_*.png"))) == 1
         plt.close(fig)
 
+    def test_num_visits_posterior_hides_outliers_by_default(self):
+        from types import SimpleNamespace
+
+        plotter = RunPlotter(run_id="run", cosmo_exp="num_visits")
+        plotter._experiment_id = "1"
+        eig_data = {"step_100": {}}
+        entropy_info = {"nominal_prior_entropy": 0.0}
+        with patch(
+            "bedcosmo.plotting.parse_eig_for_posterior",
+            return_value=(None, None, None, entropy_info),
+        ), patch("bedcosmo.plotting.nominal_grid_eig", return_value=None), patch.object(
+            BasePlotter, "plot_posterior", autospec=True
+        ) as base_plot:
+            plotter.plot_posterior(
+                experiment=SimpleNamespace(central_params=None),
+                eig_data=eig_data,
+                eval_step=100,
+                nf_entries=[],
+            )
+
+        assert base_plot.call_args.kwargs["show_outliers"] is False
+
     @pytest.mark.skip(reason="plot_evaluation method does not exist on RunPlotter")
     def test_plot_evaluation(self, run_plotter):
         """Test plot_evaluation method."""
@@ -1017,6 +1039,29 @@ class TestPlotTriangleFence:
         assert [t.get_text() for t in g.subplots[0, 0].texts] == [
             "Group: 3 below / 2 above", "Series 2: 3 below / 2 above"
         ]
+        plt.close(g.fig)
+
+    def test_show_outliers_false_hides_markers_and_counts(self):
+        from matplotlib.axes import Axes
+
+        sample = _gd_samples(_bulk_with_outliers(), "Nominal")
+        scatter = Axes.scatter
+        marked = []
+
+        def record_marks(ax, *args, **kwargs):
+            if kwargs.get("marker") == "x":
+                marked.append(True)
+            return scatter(ax, *args, **kwargs)
+
+        with patch.object(Axes, "scatter", record_marks):
+            g = BasePlotter(cosmo_exp="test_exp").plot_triangle(
+                [sample], ["tab:blue"], legend_labels=["Nominal"],
+                ranges=self.RANGES, show_outliers=False,
+            )
+
+        assert marked == []
+        assert len(g.subplots[0, 0].texts) == 0
+        assert self._legend_texts(g) == ["Nominal"]
         plt.close(g.fig)
 
     def test_outlier_marks_are_local_to_each_2d_panel(self):

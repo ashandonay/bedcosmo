@@ -1023,6 +1023,7 @@ class BasePlotter:
         posterior_samples_path=None,
         data_index=0,
         show_scatter=False,
+        show_outliers=True,
         ranges=None,
     ):
         """
@@ -1199,6 +1200,7 @@ class BasePlotter:
             ranges=ranges,
             fenced=all_fenced,
             legend_fontsize=legend_fontsize,
+            show_outliers=show_outliers,
         )
 
         if getattr(experiment, "central_params", None):
@@ -1254,6 +1256,7 @@ class BasePlotter:
         style=style,
         fenced=None,
         legend_fontsize=None,
+        show_outliers=True,
     ):
         """
         Low-level GetDist triangle plot from MCSamples lists.
@@ -1278,7 +1281,8 @@ class BasePlotter:
                 GetDist from samples inside all parameter windows. Out-of-window
                 samples are marked with ``x`` in 2D panels only when either plotted
                 parameter is outside its window; counts are per series in the legend
-                and per parameter in the 1D panels' top-left corner.
+                and per parameter in the 1D panels' top-left corner. Set
+                ``show_outliers=False`` to hide those markers and counts.
             scatter_alpha (float): Alpha value for scatter points. Default 0.6 for better distinguishability.
             contour_alpha_factor (float): Factor to adjust contour alpha for distinguishability. Default 0.8.
             style (object, optional): Style object (like KP7StylePaper) to apply to the plotter settings.
@@ -1541,48 +1545,50 @@ class BasePlotter:
                                         alpha=scatter_alpha,
                                     )
 
-        # Out-of-window samples of fenced series, clamped onto the window edge.
-        for i, py in enumerate(param_name_list):
-            for j, px in enumerate(param_name_list[:i]):
-                if px not in fence or py not in fence:
-                    continue
-                for k, sample in enumerate(full_samples):
-                    if not fenced[k]:
+        if show_outliers:
+            # Out-of-window samples of fenced series, clamped onto the window edge.
+            for i, py in enumerate(param_name_list):
+                for j, px in enumerate(param_name_list[:i]):
+                    if px not in fence or py not in fence:
                         continue
-                    names = sample.paramNames.list()
-                    arr = np.asarray(sample.samples)
-                    x = arr[:, names.index(px)]
-                    y = arr[:, names.index(py)]
-                    out = (x < fence[px][0]) | (x > fence[px][1])
-                    out |= (y < fence[py][0]) | (y > fence[py][1])
-                    if not out.any():
-                        continue
-                    arr = arr[out]
-                    g.subplots[i, j].scatter(
-                        np.clip(arr[:, names.index(px)], *fence[px]),
-                        np.clip(arr[:, names.index(py)], *fence[py]),
-                        s=12, marker="x", color=colors[k], linewidths=1.2, zorder=6, clip_on=False,
-                    )
-            if py in fence:
-                lo, hi = fence[py]
-                annotation_idx = 0
-                for k, (sample, fence_sample) in enumerate(zip(full_samples, fenced)):
-                    if not fence_sample:
-                        continue
-                    values = np.asarray(sample.samples)[:, sample.paramNames.list().index(py)]
-                    n_lo, n_hi = int((values < lo).sum()), int((values > hi).sum())
-                    if not (n_lo or n_hi):
-                        continue
-                    label = legend_labels[k] if legend_labels else sample.label
-                    label = (label or f"Series {k + 1}").split(",")[0]
-                    label = label.replace(" Design (NF)", "")
-                    # Inside the panel, not a title: titles make the layout open gaps.
-                    g.subplots[i, i].text(
-                        0.02, 0.97 - 0.075 * annotation_idx,
-                        f"{label}: {n_lo} below / {n_hi} above", fontsize=8,
-                        color=colors[k], transform=g.subplots[i, i].transAxes, va="top",
-                    )
-                    annotation_idx += 1
+                    for k, sample in enumerate(full_samples):
+                        if not fenced[k]:
+                            continue
+                        names = sample.paramNames.list()
+                        arr = np.asarray(sample.samples)
+                        x = arr[:, names.index(px)]
+                        y = arr[:, names.index(py)]
+                        out = (x < fence[px][0]) | (x > fence[px][1])
+                        out |= (y < fence[py][0]) | (y > fence[py][1])
+                        if not out.any():
+                            continue
+                        arr = arr[out]
+                        g.subplots[i, j].scatter(
+                            np.clip(arr[:, names.index(px)], *fence[px]),
+                            np.clip(arr[:, names.index(py)], *fence[py]),
+                            s=12, marker="x", color=colors[k], linewidths=1.2,
+                            zorder=6, clip_on=False,
+                        )
+                if py in fence:
+                    lo, hi = fence[py]
+                    annotation_idx = 0
+                    for k, (sample, fence_sample) in enumerate(zip(full_samples, fenced)):
+                        if not fence_sample:
+                            continue
+                        values = np.asarray(sample.samples)[:, sample.paramNames.list().index(py)]
+                        n_lo, n_hi = int((values < lo).sum()), int((values > hi).sum())
+                        if not (n_lo or n_hi):
+                            continue
+                        label = legend_labels[k] if legend_labels else sample.label
+                        label = (label or f"Series {k + 1}").split(",")[0]
+                        label = label.replace(" Design (NF)", "")
+                        # Inside the panel, not a title: titles make the layout open gaps.
+                        g.subplots[i, i].text(
+                            0.02, 0.97 - 0.075 * annotation_idx,
+                            f"{label}: {n_lo} below / {n_hi} above", fontsize=8,
+                            color=colors[k], transform=g.subplots[i, i].transAxes, va="top",
+                        )
+                        annotation_idx += 1
 
         if legend_labels is not None:
             alphas = alpha if isinstance(alpha, list) else [alpha] * len(samples)
@@ -1595,7 +1601,7 @@ class BasePlotter:
                 labels.append(label)
                 outlier_colors.append(None)
                 n_out, n_tot = int((~in_window[k]).sum()), len(in_window[k])
-                if n_out:
+                if show_outliers and n_out:
                     # Second, handle-less line under the series: its outside-window count.
                     handles.append(Line2D([0], [0], color="none"))
                     labels.append(
@@ -1964,7 +1970,9 @@ class RunPlotter(BasePlotter):
 
         Extra keyword arguments are forwarded to ``BasePlotter.plot_posterior``
         (e.g. ``plot_mcmc=False``, ``ranges``). To see the out-of-window samples
-        where they actually lie, use ``plot_posterior_full_range``.
+        where they actually lie, use ``plot_posterior_full_range``. NumVisits
+        plots hide outlier markers and counts by default; pass
+        ``show_outliers=True`` to display them.
         """
         if device is None:
             device = "cuda:0" if torch.cuda.is_available() else "cpu"
@@ -1996,6 +2004,8 @@ class RunPlotter(BasePlotter):
 
         if nf_entries is None and artifacts_dir is None and posterior_samples_path is None:
             artifacts_dir = self._get_artifacts_dir()
+
+        kwargs.setdefault("show_outliers", self.cosmo_exp != "num_visits")
 
         return super().plot_posterior(
             experiment=experiment,
