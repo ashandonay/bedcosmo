@@ -13,10 +13,15 @@ from getdist import plots
 from bedcosmo.util import (
     get_runs_data, init_experiment, load_model, auto_seed, convert_color,
     load_nominal_samples, get_contour_area, parse_mlflow_params, sort_key_for_group_tuple,
-    GETDIST_SETTINGS, restrict_mcsamples,
+    GETDIST_SETTINGS, restrict_mcsamples, sample_nf,
+    nf_posterior_entries, validate_display, NF_SERIES_COLORS, NF_SERIES_LABELS,
 )
 from bedcosmo.artifacts import (
     load_eig_data_file,
+    load_posterior_samples_file,
+    resolve_eig_step,
+    parse_eig_for_posterior,
+    nominal_grid_eig,
     _eig_data_has_variable_eigs,
     _eig_data_has_marginal_eigs,
 )
@@ -39,351 +44,6 @@ import traceback
 
 
 home_dir = os.environ["HOME"]
-
-# Fallback color for aggregated 1D outlier titles (multi-series) and explicit overrides.
-# Per-series edge markers / legend second-lines default to that series' plot color.
-_OUTLIER_MARKER_COLOR = "crimson"
-
-
-def _series_outlier_color(series_color, outlier_color=None):
-    """Resolve marker/legend color for one series' out-of-fence points.
-
-    ``outlier_color=None`` (default) uses the series plot color; a non-None
-    value forces a single override color for all series.
-    """
-    if outlier_color is not None:
-        return convert_color(outlier_color)
-    return convert_color(series_color)
-
-
-def _series_label_base(label) -> str:
-    """Strip EIG/entropy suffixes from a legend / MCSamples label."""
-    s = str(label or "").strip()
-    for sep in (", EIG", ", H_prior", ", H_post", ", H_"):
-        if sep in s:
-            s = s.split(sep, 1)[0].strip()
-    return s
-
-
-def _compact_series_label(label, index: int = 0) -> str:
-    """Short legend/outlier tag: strip EIG/entropy suffixes; map common names."""
-    s = _series_label_base(label) or f"series {index}"
-    replacements = (
-        ("Nominal Design (NF)", "Nom NF"),
-        ("Optimal Design (NF)", "Opt NF"),
-        ("Nominal Design (MCMC)", "MCMC"),
-        ("Nominal Design", "Nom"),
-        ("Optimal Design", "Opt"),
-    )
-    for old, new in replacements:
-        if s == old or s.startswith(old):
-            return new
-    # Already short (e.g. train frames "NF" / "MCMC")
-    if len(s) <= 12:
-        return s
-    return s[:10] + "…"
-
-
-def _is_prior_series_label(label) -> bool:
-    """True for prior overlays: ``Prior``, ``Prior (...)``, entropy-suffixed forms."""
-    base = _series_label_base(label)
-    return base == "Prior" or base.startswith("Prior ")
-
-
-def _should_skip_fence(
-    sample,
-    label=None,
-    *,
-    no_fence_for_prior: bool = True,
-    fence_skip_labels=None,
-) -> bool:
-    """Whether a series should be exempt from Tukey fencing / outlier overlays.
-
-    Prefer explicit markers over string matching:
-    - ``sample._bedcosmo_no_fence`` / ``sample._bedcosmo_is_prior``
-    - ``fence_skip_labels`` (exact full label or suffix-stripped base)
-    - when ``no_fence_for_prior``, labels matching :func:`_is_prior_series_label`
-    """
-    if getattr(sample, "_bedcosmo_no_fence", False):
-        return True
-    resolved = label if label is not None else getattr(sample, "label", None)
-    if fence_skip_labels:
-        skip = {str(x) for x in fence_skip_labels}
-        if resolved is not None and (
-            str(resolved) in skip or _series_label_base(resolved) in skip
-        ):
-            return True
-    if no_fence_for_prior and (
-        getattr(sample, "_bedcosmo_is_prior", False) or _is_prior_series_label(resolved)
-    ):
-        return True
-    return False
-
-
-def _mark_prior_mcsamples(sample):
-    """Tag a prior MCSamples so fencing can skip it without relying on labels."""
-    sample._bedcosmo_is_prior = True
-    sample._bedcosmo_no_fence = True
-    return sample
-
-
-def _fmt_sample_count(n: int) -> str:
-    """Compact count for annotations, e.g. 500000 -> 5e5, 30544 -> 3.1e4."""
-    n = int(n)
-    if n < 1000:
-        return str(n)
-    exp = int(np.floor(np.log10(n)))
-    mant = n / (10 ** exp)
-    if abs(mant - round(mant)) < 1e-9:
-        return f"{int(round(mant))}e{exp}"
-    return f"{mant:.1f}e{exp}"
-
-
-def _outlier_second_line(stat) -> str | None:
-    """Compact second legend line, or None when there are no outliers."""
-    if not stat:
-        return None
-    n_out = int(stat.get("n_out", 0))
-    if n_out <= 0:
-        return None
-    n_tot = int(stat.get("n_tot", 0))
-    frac = 100.0 * n_out / max(n_tot, 1)
-    return f"  {n_out}/{_fmt_sample_count(n_tot)} outside ({frac:.2f}%)"
-
-
-def make_outlier_legend_entries(
-    colors,
-    legend_labels,
-    line_styles="-",
-    alphas=1.0,
-    outlier_stats=None,
-    outlier_color=None,
-):
-    """Build legend handles/labels with optional second lines per series.
-
-    Each series contributes its main label; if that series has ``n_out > 0``, a
-    second (invisible-handle) entry carries the compact outlier count, colored
-    like that series (or ``outlier_color`` when set). Call
-    ``style_outlier_legend`` after ``fig.legend`` to color those texts.
-    """
-    n = len(legend_labels)
-    if isinstance(line_styles, str):
-        line_styles = [line_styles] * n
-    if isinstance(alphas, (int, float)):
-        alphas = [alphas] * n
-    if isinstance(colors, str):
-        colors = [colors] * n
-    colors = [convert_color(c) for c in colors]
-
-    handles, labels = [], []
-    for i in range(n):
-        h = Line2D(
-            [0],
-            [0],
-            color=colors[i],
-            linestyle=line_styles[i],
-            linewidth=1.2,
-            alpha=float(alphas[i]),
-        )
-        h._bedcosmo_outlier_sub = False
-        handles.append(h)
-        labels.append(str(legend_labels[i]))
-
-        stat = None
-        if outlier_stats is not None and i < len(outlier_stats):
-            stat = outlier_stats[i]
-        second = _outlier_second_line(stat)
-        if second is not None:
-            sub = Line2D([0], [0], color="none", linewidth=0, markersize=0)
-            sub._bedcosmo_outlier_sub = True
-            sub._bedcosmo_outlier_color = _series_outlier_color(colors[i], outlier_color)
-            handles.append(sub)
-            labels.append(second)
-    return handles, labels
-
-
-def style_outlier_legend(leg, handles, fontsize: float | None = None):
-    """Color/shrink legend texts that are outlier second-lines."""
-    if leg is None:
-        return
-    texts = leg.get_texts()
-    for text, handle in zip(texts, handles):
-        if getattr(handle, "_bedcosmo_outlier_sub", False):
-            text.set_color(getattr(handle, "_bedcosmo_outlier_color", _OUTLIER_MARKER_COLOR))
-            if fontsize is not None:
-                text.set_fontsize(fontsize)
-            else:
-                try:
-                    text.set_fontsize(max(7, float(text.get_fontsize()) * 0.85))
-                except Exception:
-                    text.set_fontsize(8)
-
-
-def apply_outlier_legend(
-    g,
-    colors,
-    legend_labels,
-    line_styles="-",
-    alphas=1.0,
-    outlier_stats=None,
-    outlier_color=None,
-    loc="upper right",
-    bbox_to_anchor=(0.99, 0.96),
-    fontsize=None,
-    **legend_kwargs,
-):
-    """Replace figure legends with two-line outlier-aware entries; return Legend."""
-    if legend_labels is None:
-        return None
-    # Drop floating annotation from older plot_posterior revisions if present.
-    prev = getattr(g, "_outlier_annot_artist", None)
-    if prev is not None:
-        try:
-            prev.remove()
-        except Exception:
-            pass
-        g._outlier_annot_artist = None
-    if getattr(g, "fig", None) is not None and getattr(g.fig, "legends", None):
-        for leg in list(g.fig.legends):
-            try:
-                leg.remove()
-            except Exception:
-                pass
-    stats = outlier_stats if outlier_stats is not None else getattr(g, "_outlier_stats", None)
-    # Prefer explicit arg; else value stored by plot_posterior (may be None = series colors).
-    if outlier_color is None and hasattr(g, "_outlier_annot_color"):
-        color = g._outlier_annot_color
-    else:
-        color = outlier_color
-    handles, labels = make_outlier_legend_entries(
-        colors,
-        legend_labels,
-        line_styles=line_styles,
-        alphas=alphas,
-        outlier_stats=stats,
-        outlier_color=color,
-    )
-    kw = dict(loc=loc, bbox_to_anchor=bbox_to_anchor, **legend_kwargs)
-    if fontsize is not None:
-        kw["fontsize"] = fontsize
-    leg = g.fig.legend(handles=handles, labels=labels, **kw)
-    try:
-        leg.set_in_layout(False)
-    except Exception:
-        pass
-    style_outlier_legend(leg, handles)
-    g._outlier_legend_handles = handles
-    return leg
-
-
-def iqr_display_range(values, k: float = 3.0, pad: float = 0.04):
-    """Tukey fence (k*IQR past Q1/Q3) snugged to in-fence data, with edge pad.
-
-    Adapted from desilike-emulator ``plotting.visualize_training_data._display_range``
-    (linear axes). Returns ``(lo, hi)`` or ``None`` if fencing is disabled / impossible.
-    """
-    if k is None or k <= 0:
-        return None
-    v = np.asarray(values, dtype=np.float64)
-    v = v[np.isfinite(v)]
-    if v.size < 4:
-        return None
-    q1, q3 = np.quantile(v, [0.25, 0.75])
-    iqr = q3 - q1
-    if not np.isfinite(iqr) or iqr <= 0:
-        return None
-    lo_f, hi_f = q1 - k * iqr, q3 + k * iqr
-    w_in = v[(v >= lo_f) & (v <= hi_f)]
-    if w_in.size == 0:
-        return None
-    lo, hi = float(w_in.min()), float(w_in.max())
-    span = hi - lo
-    if span <= 0:
-        return None
-    if (v < lo_f).any():
-        lo -= pad * span
-    if (v > hi_f).any():
-        hi += pad * span
-    return lo, hi
-
-
-def resolve_fence_ranges(samples_list, param_names, ranges=None, fence_iqr: float = 3.0):
-    """Per-parameter display/GetDist fence limits.
-
-    Preference: explicit ``ranges`` (e.g. prior_args plot window) when provided;
-    otherwise joint Tukey fences across all series (``fence_iqr``). Returns ``None``
-    when fencing is disabled.
-    """
-    if ranges is not None:
-        out = {}
-        for p in param_names:
-            if p in ranges:
-                lo, hi = ranges[p]
-                out[p] = (float(lo), float(hi))
-        return out or None
-    if fence_iqr is None or fence_iqr <= 0:
-        return None
-    out = {}
-    for p in param_names:
-        cols = []
-        for s in samples_list:
-            names = list(s.paramNames.list())
-            if p not in names:
-                continue
-            cols.append(np.asarray(s.samples[:, names.index(p)], dtype=np.float64))
-        if not cols:
-            continue
-        fr = iqr_display_range(np.concatenate(cols), k=fence_iqr)
-        if fr is not None:
-            out[p] = fr
-    return out or None
-
-
-def fence_mask_for_samples(sample, fence_ranges):
-    """Boolean mask: True where *all* fenced parameters lie inside the fence."""
-    n = int(np.asarray(sample.samples).shape[0])
-    if not fence_ranges:
-        return np.ones(n, dtype=bool)
-    names = list(sample.paramNames.list())
-    ok = np.ones(n, dtype=bool)
-    arr = np.asarray(sample.samples, dtype=np.float64)
-    for p, (lo, hi) in fence_ranges.items():
-        if p not in names:
-            continue
-        col = arr[:, names.index(p)]
-        ok &= np.isfinite(col) & (col >= lo) & (col <= hi)
-    return ok
-
-
-def subset_mcsamples(sample, mask, min_keep: int = 16):
-    """Return an MCSamples restricted to ``mask``, or the original if too few remain."""
-    mask = np.asarray(mask, dtype=bool)
-    n_keep = int(mask.sum())
-    if n_keep == mask.size:
-        return sample, mask, 0
-    if n_keep < min_keep:
-        warnings.warn(
-            f"Fence would keep only {n_keep}/{mask.size} samples; skipping fence for this series.",
-            stacklevel=2,
-        )
-        return sample, np.ones(mask.size, dtype=bool), 0
-    names = list(sample.paramNames.list())
-    labels = []
-    for i, p in enumerate(sample.paramNames.names):
-        lab = getattr(p, "label", None)
-        labels.append(lab if isinstance(lab, str) else names[i])
-    with contextlib.redirect_stdout(io.StringIO()):
-        fenced = getdist.MCSamples(
-            samples=np.asarray(sample.samples)[mask],
-            names=names,
-            labels=labels,
-            settings=GETDIST_SETTINGS,
-        )
-    if getattr(sample, "label", None) is not None:
-        fenced.label = sample.label
-    return fenced, mask, int((~mask).sum())
-
-
 try:
     from desi_y1_plotting import KP7StylePaper
     style = KP7StylePaper()
@@ -399,6 +59,96 @@ plt.rcParams['font.serif'] = ['DejaVu Serif', 'Times New Roman', 'Times', 'serif
 
 # Contour alpha for prior overlays in posterior triangle plots.
 PRIOR_CONTOUR_ALPHA = 0.4
+
+
+def prior_plot_ranges(prior_args, params):
+    """``{param: (lower, upper)}`` from the ``plot`` windows in ``prior_args``.
+
+    Windows are in physical (reported) units. Params without a ``plot`` entry
+    are left out, so they autoscale and are not fenced.
+    """
+    parameters = prior_args["parameters"]
+    return {
+        p: (float(parameters[p]["plot"]["lower"]), float(parameters[p]["plot"]["upper"]))
+        for p in params
+        if "plot" in parameters.get(p, {})
+    }
+
+
+def _fmt_sample_count(n):
+    """Compact count for legends, e.g. 500000 -> 5e5, 30544 -> 3.1e4."""
+    if n < 1000:
+        return str(n)
+    exp = int(np.floor(np.log10(n)))
+    mant = n / 10**exp
+    return f"{mant:.0f}e{exp}" if mant == round(mant) else f"{mant:.1f}e{exp}"
+
+
+def _subset_mcsamples(sample, mask):
+    """Copy of ``sample`` keeping only the rows in ``mask`` (same names, labels, legend label)."""
+    if not mask.any():
+        raise ValueError(
+            f"No samples of {sample.label!r} fall inside the plot ranges; widen ``ranges``."
+        )
+    with contextlib.redirect_stdout(io.StringIO()):
+        subset = getdist.MCSamples(
+            samples=np.asarray(sample.samples)[mask],
+            names=sample.paramNames.list(),
+            labels=[p.label for p in sample.paramNames.names],
+            settings=GETDIST_SETTINGS,
+        )
+    subset.label = sample.label
+    return subset
+
+
+def nf_entries_from_posterior_bundle(
+    bundle,
+    experiment,
+    *,
+    data_index: int = 0,
+):
+    """
+    Convert a saved posterior-sample NPZ bundle into plot ``nf_entries``.
+
+    Uses ``theta[series, data_index]`` (central-context eval uses ``data_index=0``).
+    Series labels / colors come from ``meta['series']`` when recorded there.
+    """
+    theta = np.asarray(bundle["theta"])
+    design = np.asarray(bundle["design"])
+    series_names = [str(n) for n in bundle["series_names"]]
+    param_names = [str(n) for n in bundle["param_names"]]
+    series_meta = {s["name"]: s for s in bundle["meta"].get("series", [])}
+    labels = [experiment.latex_labels[experiment.cosmo_params.index(p)] for p in param_names]
+
+    if theta.ndim != 4:
+        raise ValueError(f"bundle theta must be 4-D, got {theta.shape}")
+    if not (0 <= data_index < theta.shape[1]):
+        raise ValueError(
+            f"data_index={data_index} out of range for theta shape {theta.shape}"
+        )
+
+    entries = []
+    for i, name in enumerate(series_names):
+        with contextlib.redirect_stdout(io.StringIO()):
+            gd = getdist.MCSamples(
+                samples=np.asarray(theta[i, data_index], dtype=np.float64),
+                names=param_names,
+                labels=labels,
+                settings=GETDIST_SETTINGS,
+            )
+        meta = series_meta.get(name, {})
+        color = meta.get("color", NF_SERIES_COLORS[name])
+        label = meta.get("label", NF_SERIES_LABELS[name])
+        entries.append({
+            "samples": gd,
+            "name": name,
+            "design": np.asarray(design[i], dtype=np.float64).reshape(-1),
+            "label": label,
+            "color": color,
+            "line_style": "-",
+            "alpha": 1.0,
+        })
+    return entries
 
 
 def _normalize_marginal_subset_id(subset):
@@ -1115,10 +865,13 @@ class BasePlotter:
 
         marker_values = dict(central_params)
         if getattr(experiment, "transform_input", False) and not transform_output:
+            # central_params are in reported units (multiplier applied); the
+            # bijector works in sampling units.
             phys = torch.tensor(
                 [
                     [
                         marker_values.get(p, experiment.get_central_param(p, 0.0))
+                        / getattr(experiment, f"{p}_multiplier", 1.0)
                         for p in experiment.cosmo_params
                     ]
                 ],
@@ -1146,23 +899,18 @@ class BasePlotter:
                     g.subplots[i, j].axvline(marker_values[pj], **line_kw)
                 g.subplots[i, j].axhline(marker_values[pi], **line_kw)
 
-    @staticmethod
-    def _normalize_display(display):
-        if isinstance(display, str):
-            display = (display,)
-        return tuple(display)
-
-    def _entropy_legend_suffix(
-        self, prior_entropy=None, posterior_entropy=None, *, include_prior=True
-    ):
-        parts = []
-        if include_prior and prior_entropy is not None:
-            parts.append(f"H_prior: {float(prior_entropy):.2f} bits")
-        if posterior_entropy is not None:
-            parts.append(f"H_post: {float(posterior_entropy):.2f} bits")
-        if not parts:
-            return ""
-        return ", " + ", ".join(parts)
+    @classmethod
+    def _filter_nf_entries_by_display(cls, nf_entries, display):
+        """Reorder/select NF entries to match ``display`` series names."""
+        display = validate_display(display)
+        by_name = {entry["name"]: entry for entry in nf_entries}
+        missing = [name for name in display if name not in by_name]
+        if missing:
+            raise ValueError(
+                f"display={display} requested series missing from nf_entries: {missing} "
+                f"(available: {sorted(by_name)})"
+            )
+        return [by_name[name] for name in display]
 
     def _prior_entropy_legend_suffix(self, prior_entropy=None):
         if prior_entropy is None:
@@ -1180,9 +928,7 @@ class BasePlotter:
             _, eig_data = self.load_eig_data_file(
                 artifacts_dir, eval_step=eval_step, eig_kind='variable'
             )
-            _, step_str = self._resolve_step(eig_data, eval_step)
-            if step_str is None:
-                return None
+            _, step_str = resolve_eig_step(eig_data, eval_step)
             nominal_data = eig_data.get(step_str, {}).get('nominal', {})
             val = nominal_data.get('prior_entropy_avg')
             if val is None:
@@ -1193,248 +939,91 @@ class BasePlotter:
         except ValueError:
             return None
 
-    def _nf_display_samples(
+    def plot_posterior(
         self,
-        display,
-        guide_samples,
-        transform_output=True,
-        *,
         experiment=None,
-        posterior_flow=None,
-        input_designs=None,
-        eig_values=None,
-        nominal_eig=None,
-        nominal_prior_entropy=None,
-        nominal_posterior_entropy=None,
-        prior_entropy_by_design=None,
-        posterior_entropy_by_design=None,
-        device=None,
-        run_obj=None,
-        run_args=None,
-        exp_id=None,
-        step=None,
-        seed=1,
-        global_rank=0,
-        eval_step=None,
-        params=None,
-        marginal_eig=False,
-        plot_prior=False,
-    ):
-        """
-        NF guide samples for each entry in display ('nominal' and/or 'optimal').
-
-        Pass experiment + posterior_flow directly (generate_posterior), or pass
-        run_obj + run_args + exp_id + step to load them from MLflow (compare_posterior).
-
-        Returns:
-            (entries, selected_step) where entries is a list of dicts with keys
-            samples, label, color, line_style, alpha; selected_step is set when
-            loading from a run, else None.
-        """
-        display = self._normalize_display(display)
-        selected_step = None
-
-        if run_obj is not None:
-            if run_args is None or exp_id is None or step is None:
-                raise ValueError("run_args, exp_id, and step required when run_obj is provided")
-            if str(device).startswith("cuda") and not torch.cuda.is_available():
-                device = "cpu"
-            experiment = init_experiment(
-                run_obj, run_args, device=device, global_rank=global_rank, verbose=False
-            )
-            posterior_flow, selected_step = load_model(
-                experiment, step, run_obj, run_args, device, global_rank=global_rank
-            )
-            auto_seed(seed)
-            if 'optimal' in display or 'nominal' in display:
-                run_id = run_obj.info.run_id
-                artifacts_dir = f"{self.storage_path}/mlruns/{exp_id}/{run_id}/artifacts"
-                try:
-                    _, eig_data = self.load_eig_data_file(
-                        artifacts_dir, eval_step=eval_step, eig_kind='variable'
-                    )
-                    if 'optimal' in display:
-                        input_designs, eig_values, nominal_eig, entropy_info = self._parse_eig_for_posterior(
-                            eig_data, eval_step
-                        )
-                    else:
-                        _, step_str = self._resolve_step(eig_data, eval_step)
-                        nominal_data = eig_data.get(step_str, {}).get('nominal', {})
-                        nominal_eig_val = nominal_data.get('eigs_avg')
-                        if isinstance(nominal_eig_val, list):
-                            nominal_eig_val = nominal_eig_val[0] if nominal_eig_val else None
-                        nominal_eig = float(nominal_eig_val) if nominal_eig_val is not None else None
-
-                        def _scalar_entropy(block, key):
-                            val = block.get(key)
-                            if val is None:
-                                return None
-                            if isinstance(val, list):
-                                val = val[0] if len(val) > 0 else None
-                            return float(val) if val is not None else None
-
-                        entropy_info = {
-                            "nominal_prior_entropy": _scalar_entropy(nominal_data, "prior_entropy_avg"),
-                            "nominal_posterior_entropy": _scalar_entropy(nominal_data, "posterior_entropy_avg"),
-                            "prior_entropy_by_design": None,
-                            "posterior_entropy_by_design": None,
-                        }
-                    nominal_prior_entropy = entropy_info.get("nominal_prior_entropy")
-                    nominal_posterior_entropy = entropy_info.get("nominal_posterior_entropy")
-                    prior_entropy_by_design = entropy_info.get("prior_entropy_by_design")
-                    posterior_entropy_by_design = entropy_info.get("posterior_entropy_by_design")
-                except ValueError:
-                    if 'optimal' in display:
-                        raise
-        elif experiment is None:
-            raise ValueError("Either experiment or run_obj must be provided")
-
-        if posterior_flow is None:
-            return [], selected_step
-
-        if device is None:
-            device = experiment.device
-
-        entries = []
-        eig_label = "Marginal EIG" if marginal_eig else "EIG"
-        include_prior_in_legend = not plot_prior
-
-        if 'nominal' in display:
-            nominal_samples_gd = experiment.get_guide_samples(
-                posterior_flow,
-                experiment.nominal_context,
-                num_samples=guide_samples,
-                params=params,
-                transform_output=transform_output,
-            )
-            eig_str = (
-                f", {eig_label}: {nominal_eig:.3f} bits" if nominal_eig is not None else ""
-            )
-            eig_str += self._entropy_legend_suffix(
-                nominal_prior_entropy,
-                nominal_posterior_entropy,
-                include_prior=include_prior_in_legend,
-            )
-            entries.append({
-                'samples': nominal_samples_gd,
-                'label': f'Nominal Design (NF){eig_str}',
-                'color': 'tab:blue',
-                'line_style': '-',
-                'alpha': 1.0,
-            })
-
-        if 'optimal' in display:
-            if input_designs is None:
-                raise ValueError("input_designs required when display includes 'optimal'")
-            input_designs = np.asarray(input_designs)
-            has_multiple_designs = len(input_designs) > 1
-
-            if has_multiple_designs and eig_values is not None:
-                eig_values = np.asarray(eig_values)
-                optimal_idx = int(np.argmax(eig_values))
-                optimal_design = input_designs[optimal_idx]
-                optimal_eig = float(eig_values[optimal_idx])
-                eig_str = f", {eig_label}: {optimal_eig:.3f} bits"
-                opt_prior_h = None
-                opt_post_h = None
-                if prior_entropy_by_design is not None and len(prior_entropy_by_design) > optimal_idx:
-                    opt_prior_h = float(prior_entropy_by_design[optimal_idx])
-                if posterior_entropy_by_design is not None and len(posterior_entropy_by_design) > optimal_idx:
-                    opt_post_h = float(posterior_entropy_by_design[optimal_idx])
-                eig_str += self._entropy_legend_suffix(
-                    opt_prior_h, opt_post_h, include_prior=include_prior_in_legend
-                )
-                label = f'Optimal Design (NF){eig_str}'
-            elif len(input_designs) >= 1:
-                optimal_design = input_designs[0]
-                optimal_eig = float(np.asarray(eig_values)[0]) if eig_values is not None else None
-                eig_str = (
-                    f", {eig_label}: {optimal_eig:.3f} bits" if optimal_eig is not None else ""
-                )
-                label = f'Input Design (NF){eig_str}'
-            else:
-                raise ValueError("No input designs available for optimal posterior")
-
-            optimal_design_tensor = torch.tensor(
-                optimal_design, device=device, dtype=torch.float64
-            )
-            optimal_context = torch.cat([optimal_design_tensor, experiment.central_val], dim=-1)
-            optimal_samples_gd = experiment.get_guide_samples(
-                posterior_flow,
-                optimal_context,
-                num_samples=guide_samples,
-                params=params,
-                transform_output=transform_output,
-            )
-            entries.append({
-                'samples': optimal_samples_gd,
-                'label': label,
-                'color': 'tab:orange',
-                'line_style': '-',
-                'alpha': 1.0,
-            })
-
-        return entries, selected_step
-
-    def generate_posterior(
-        self,
-        experiment,
-        posterior_flow=None,
-        input_designs=None,
-        eig_values=None,
-        nominal_eig=None,
-        nominal_prior_entropy=None,
-        nominal_posterior_entropy=None,
-        prior_entropy_by_design=None,
-        posterior_entropy_by_design=None,
-        display=('nominal', 'optimal'),
+        nf_entries=None,
+        *,
+        display=("nominal", "optimal"),
         levels=(0.68,),
         guide_samples=1000,
-        device="cuda:0",
-        seed=1,
         params=None,
         plot_prior=False,
+        plot_mcmc=True,
         transform_output=True,
         plot_size_ratio=1.0,
         title=None,
         grid_samples=None,
         nominal_grid_eig=None,
+        nominal_prior_entropy=None,
         experiment_id=None,
         run_id=None,
         filename=None,
         save_dir=None,
         dpi=400,
-        marginal_eig=False,
+        seed=1,
+        artifacts_dir=None,
+        eval_step=None,
+        posterior_samples_path=None,
+        data_index=0,
+        show_scatter=False,
+        ranges=None,
     ):
         """
-        Generates posterior plots for nominal and/or optimal designs.
+        Plot a posterior triangle from NF entries or a saved posterior NPZ.
 
-        This core method accepts data directly, enabling reuse from both
-        MLflow-based RunPlotter and standalone grid-based contexts.
+        Does **not** sample from the flow.
 
-        Args:
-            experiment: Experiment object (for cosmo_params, latex_labels, central_val, etc.)
-            posterior_flow: Optional normalizing flow model. If None, NF samples are not generated.
-            input_designs (np.ndarray, optional): All designs array.
-            eig_values (np.ndarray, optional): EIG values (to find optimal).
-            nominal_eig (float, optional): Nominal EIG value.
-            display (tuple/list): Designs to display. Can include 'nominal' and/or 'optimal'.
-            levels (tuple/list): Contour level(s) to plot.
-            guide_samples (int): Number of samples to generate.
-            device (str): Device to use.
-            seed (int): Random seed.
-            plot_prior (bool): If True, also plot the prior as a faint contour (alpha=0.4).
-            transform_output (bool): Whether to transform output to physical space.
-            title (str, optional): Title of the plot.
-            grid_samples (np.ndarray, optional): Grid-based posterior parameter samples.
-            nominal_grid_eig (float, optional): Nominal grid EIG value.
+        * ``nf_entries`` provided — plot those entries (filtered by ``display``).
+        * ``nf_entries is None`` — load ``posterior_samples_path``, or the newest
+          default-eval (``Evaluator.run``) NPZ under ``artifacts_dir`` that
+          contains the requested ``display`` series, then plot those series.
+        * ``nf_entries == []`` — no NF series (grid / prior / MCMC overlays only);
+          ``display`` is ignored.
 
-        Returns:
-            GetDist plotter object.
+        ``display`` selects which named series to show (``'nominal'`` and/or
+        ``'optimal'``). Order follows ``display``.
+
+        ``plot_mcmc``: if True (default) and ``cosmo_exp == 'num_tracers'``, overlay
+        the DESI/MCMC nominal reference. Set False for NF-only figures.
+
+        ``ranges`` (``{param: (lo, hi)}``) is the displayed window and the
+        outlier fence (see ``plot_triangle``). ``None`` uses the prior's ``plot``
+        windows when ``transform_output`` is True; unconstrained-space plots are
+        not fenced by default. Pass ``{}`` to autoscale without fencing.
+
+        Raises if ``nf_entries is None`` and no matching artifact is found.
         """
-        # Normalize levels to always be a list
         if isinstance(levels, (int, float)):
             levels = [levels]
+
+        display = validate_display(display)
+        if experiment is None:
+            raise ValueError("experiment is required for plot_posterior")
+
+        if nf_entries is None:
+            if artifacts_dir is None and posterior_samples_path is None:
+                raise ValueError(
+                    "nf_entries not provided; pass artifacts_dir or "
+                    "posterior_samples_path to load saved posterior samples, "
+                    "or pass nf_entries=[] for overlay-only plots."
+                )
+            bundle = load_posterior_samples_file(
+                artifacts_dir or "",
+                step=eval_step,
+                path=posterior_samples_path,
+                require_series=display,
+                generated_by="Evaluator.run",
+            )
+            nf_entries = nf_entries_from_posterior_bundle(
+                bundle,
+                experiment,
+                data_index=data_index,
+            )
+            print(f"  Loaded posterior samples from {bundle['path']}")
+
+        if nf_entries:
+            nf_entries = self._filter_nf_entries_by_display(nf_entries, display)
 
         auto_seed(seed)
 
@@ -1443,31 +1032,19 @@ class BasePlotter:
         all_alphas = []
         all_line_styles = []
         legend_labels = []
+        # Prior overlays are drawn in full; every posterior series is fenced.
+        all_fenced = []
 
-        nf_entries, _ = self._nf_display_samples(
-            display,
-            guide_samples,
-            transform_output=transform_output,
-            experiment=experiment,
-            posterior_flow=posterior_flow,
-            input_designs=input_designs,
-            eig_values=eig_values,
-            nominal_eig=nominal_eig,
-            nominal_prior_entropy=nominal_prior_entropy,
-            nominal_posterior_entropy=nominal_posterior_entropy,
-            prior_entropy_by_design=prior_entropy_by_design,
-            posterior_entropy_by_design=posterior_entropy_by_design,
-            device=device,
-            params=params,
-            marginal_eig=marginal_eig,
-            plot_prior=plot_prior,
-        )
         for entry in nf_entries:
-            all_samples.append(entry['samples'])
+            samples = entry['samples']
+            if params is not None:
+                samples = restrict_mcsamples(samples, params)
+            all_samples.append(samples)
             all_colors.append(entry['color'])
             all_alphas.append(entry['alpha'])
             all_line_styles.append(entry['line_style'])
             legend_labels.append(entry['label'])
+            all_fenced.append(True)
 
         if grid_samples is not None:
             grid_samples_np = np.asarray(grid_samples, dtype=np.float64)
@@ -1510,24 +1087,29 @@ class BasePlotter:
                 else ""
             )
             legend_labels.append(f'Nominal Design (Grid){eig_str}')
+            all_fenced.append(True)
 
-        # Get DESI MCMC samples for reference
-        if self.cosmo_exp == 'num_tracers':
+        if plot_mcmc and self.cosmo_exp == 'num_tracers':
             try:
-                nominal_samples_mcmc = experiment.get_nominal_samples(transform_output = not transform_output)
+                nominal_samples_mcmc = experiment.get_nominal_samples(
+                    transform_output=not transform_output
+                )
                 nominal_samples_mcmc = restrict_mcsamples(nominal_samples_mcmc, params)
                 all_samples.append(nominal_samples_mcmc)
                 all_colors.append('black')
                 all_alphas.append(1.0)
                 all_line_styles.append('--')
                 legend_labels.append('Nominal Design (MCMC)')
+                all_fenced.append(True)
             except NotImplementedError:
-                print(f"Warning: get_nominal_samples not implemented for {self.cosmo_exp}, skipping MCMC reference.")
+                print(
+                    f"Warning: get_nominal_samples not implemented for {self.cosmo_exp}, "
+                    "skipping MCMC reference."
+                )
 
         if plot_prior and hasattr(experiment, 'get_prior_samples'):
             prior_samples_gd = experiment.get_prior_samples(num_samples=guide_samples)
             prior_samples_gd = restrict_mcsamples(prior_samples_gd, params)
-            _mark_prior_mcsamples(prior_samples_gd)
             all_samples.append(prior_samples_gd)
             all_colors.append('black')
             all_alphas.append(PRIOR_CONTOUR_ALPHA)
@@ -1535,36 +1117,25 @@ class BasePlotter:
             legend_labels.append(
                 f'Prior{self._prior_entropy_legend_suffix(nominal_prior_entropy)}'
             )
+            all_fenced.append(False)
 
         if not all_samples:
             print("Warning: No samples to plot.")
             return None
 
-        # Set label attribute on each MCSamples object so GetDist uses correct labels
         for sample, label in zip(all_samples, legend_labels):
             sample.label = label
 
-        # Create plot
-        plot_width = 10
-        g = self.plot_posterior(
-            all_samples,
-            all_colors,
-            legend_labels=legend_labels,
-            levels=levels,
-            width_inch=plot_width,
-            alpha=all_alphas,
-            line_style=all_line_styles,
-            plot_size_ratio=plot_size_ratio,
-        )
-
-        if getattr(experiment, "central_params", None):
-            plotted_params = all_samples[0].paramNames.list()
-            self._mark_central_parameter_values(
-                g, experiment, transform_output=transform_output, plotted_params=plotted_params
+        plotted_params = all_samples[0].paramNames.list()
+        if ranges is None:
+            ranges = (
+                prior_plot_ranges(experiment.prior_args, plotted_params)
+                if transform_output
+                else {}
             )
 
-        # Calculate dynamic font sizes
-        n_params = len(all_samples[0].paramNames.names)
+        plot_width = 10
+        n_params = len(plotted_params)
         base_fontsize = max(6, min(18, plot_width * (0.2 + 0.42 * np.sqrt(n_params))))
         if n_params == 1:
             base_fontsize = max(base_fontsize, 12)
@@ -1575,125 +1146,52 @@ class BasePlotter:
         elif n_params == 2:
             legend_fontsize = max(legend_fontsize * 1.25, 12)
 
+        g = self.plot_triangle(
+            all_samples,
+            all_colors,
+            legend_labels=legend_labels,
+            levels=levels,
+            width_inch=plot_width,
+            alpha=all_alphas,
+            line_style=all_line_styles,
+            plot_size_ratio=plot_size_ratio,
+            show_scatter=show_scatter,
+            ranges=ranges,
+            fenced=all_fenced,
+            legend_fontsize=legend_fontsize,
+        )
+
+        if getattr(experiment, "central_params", None):
+            self._mark_central_parameter_values(
+                g, experiment, transform_output=transform_output, plotted_params=plotted_params
+            )
+
         if title is None:
             title = "Posterior Evaluation"
         g.fig.suptitle(title, fontsize=title_fontsize, weight='bold')
         g.fig.set_constrained_layout(True)
-        apply_outlier_legend(
-            g,
-            all_colors,
-            legend_labels,
-            line_styles=all_line_styles,
-            alphas=all_alphas,
-            outlier_stats=getattr(g, "_outlier_stats", None),
-            fontsize=legend_fontsize,
-        )
 
-        # Save figure
         if filename is None:
             filename = 'posterior'
         self.save_figure(
-            g.fig, filename=filename, save_dir=save_dir, dpi=dpi, 
-            experiment_id=experiment_id, run_id=run_id, close_fig=False, display_fig=False
-            )
+            g.fig,
+            filename=filename,
+            save_dir=save_dir,
+            dpi=dpi,
+            experiment_id=experiment_id,
+            run_id=run_id,
+            close_fig=False,
+            display_fig=False,
+        )
 
         return g
+
 
     def load_eig_data_file(self, artifacts_dir, eval_step=None, eig_kind='any'):
         """Load the most recent completed eig_data JSON file (see module-level ``load_eig_data_file``)."""
         return load_eig_data_file(artifacts_dir, eval_step=eval_step, eig_kind=eig_kind)
 
-    def _resolve_step(self, eig_data, eval_step):
-        """Resolve eval_step to a step string key in eig_data (see RunPlotter usage)."""
-        step_keys = [k for k in eig_data.keys() if k.startswith('step_')]
-        if not step_keys:
-            print("Warning: No step keys found in EIG data.")
-            return None, None
-        step_ints = sorted([int(k.split('_')[1]) for k in step_keys])
-
-        if eval_step is None:
-            nearest = step_ints[-1]
-            return nearest, f"step_{nearest}"
-
-        if isinstance(eval_step, str) and eval_step.startswith('step_'):
-            eval_step_int = int(eval_step.split('_')[1])
-        else:
-            try:
-                eval_step_int = int(eval_step)
-            except Exception:
-                print(f"Warning: Could not interpret eval_step '{eval_step}' as an integer step.")
-                return None, None
-
-        available = [s for s in step_ints if s <= eval_step_int]
-        if not available:
-            print(f"Warning: No steps found in EIG data below or equal to requested step {eval_step_int}.")
-            return None, None
-        nearest = max(available)
-        return nearest, f"step_{nearest}"
-
-    def _parse_eig_for_posterior(self, eig_data, eval_step=None, params=None):
-        """Extract EIG and entropy summaries from eig_data for posterior plots."""
-        _, step_str = self._resolve_step(eig_data, eval_step)
-        if step_str is None:
-            raise ValueError("Could not resolve eval step in EIG data")
-        step_data = eig_data[step_str]
-        variable_data = step_data.get('variable', {})
-        nominal_data = step_data.get('nominal', {})
-
-        input_designs = np.array(eig_data.get('input_designs', []))
-        if input_designs.size == 0:
-            raise ValueError("No input designs found in EIG data")
-
-        eig_values = np.array(variable_data.get('eigs_avg', []))
-        nominal_eig = nominal_data.get('eigs_avg')
-        if isinstance(nominal_eig, list):
-            nominal_eig = nominal_eig[0] if len(nominal_eig) > 0 else None
-        nominal_eig = float(nominal_eig) if nominal_eig is not None else None
-
-        def _scalar_entropy(block, key):
-            val = block.get(key)
-            if val is None:
-                return None
-            if isinstance(val, list):
-                val = val[0] if len(val) > 0 else None
-            return float(val) if val is not None else None
-
-        nominal_prior_entropy = _scalar_entropy(nominal_data, "prior_entropy_avg")
-        nominal_posterior_entropy = _scalar_entropy(nominal_data, "posterior_entropy_avg")
-        prior_entropy_by_design = variable_data.get("prior_entropy_avg")
-        posterior_entropy_by_design = variable_data.get("posterior_entropy_avg")
-        if prior_entropy_by_design is not None:
-            prior_entropy_by_design = np.asarray(prior_entropy_by_design, dtype=float)
-        if posterior_entropy_by_design is not None:
-            posterior_entropy_by_design = np.asarray(posterior_entropy_by_design, dtype=float)
-
-        # Fall back to the marginal block for the requested subset when the joint
-        # (variable) EIG was not computed -- e.g. a standalone --marginal run.
-        # The marginal branch in _extract_run_posterior_data re-applies these,
-        # but locating the optimal design here lets the plot proceed.
-        if eig_values.size == 0 and params is not None:
-            subset_id = "+".join(list(params))
-            marginal = step_data.get("marginal", {}).get(subset_id)
-            if marginal is not None:
-                eig_values = np.array(marginal.get("eigs_avg", []), dtype=float)
-                nominal_eig = float(marginal["nominal"]["eigs_avg"])
-                nominal_prior_entropy = None
-                nominal_posterior_entropy = None
-                prior_entropy_by_design = None
-                posterior_entropy_by_design = None
-
-        if eig_values.size == 0:
-            raise ValueError("No EIG values found in EIG data")
-
-        entropy_info = {
-            "nominal_prior_entropy": nominal_prior_entropy,
-            "nominal_posterior_entropy": nominal_posterior_entropy,
-            "prior_entropy_by_design": prior_entropy_by_design,
-            "posterior_entropy_by_design": posterior_entropy_by_design,
-        }
-        return input_designs, eig_values, nominal_eig, entropy_info
-    
-    def plot_posterior(
+    def plot_triangle(
         self,
         samples, 
         colors, 
@@ -1708,30 +1206,18 @@ class BasePlotter:
         scatter_alpha=0.6,
         contour_alpha_factor=0.8,
         style=style,
-        fence_iqr=3.0,
-        show_outliers=True,
-        outlier_annotate=True,
-        outlier_color=None,
-        outlier_min_keep=16,
-        no_fence_for_prior=True,
-        fence_skip_labels=None,
+        fenced=None,
+        legend_fontsize=None,
     ):
         """
-        Plots posterior distributions using GetDist triangle plots.
-        Shared method available to all plotter classes.
-
-        Extreme / NF-tail handling (desilike-emulator style; **not** a silent mask):
-        GetDist contours use in-fence samples only so KDE tracks the bulk, while
-        out-of-fence points from the full draw are overlaid as edge markers and
-        counted in an annotation. Fence limits come from ``ranges`` when provided
-        (e.g. prior_args plot windows in training frames), otherwise from joint
-        Tukey fences (``fence_iqr``) over **fenced** series only (prior overlays
-        are excluded by default).
+        Low-level GetDist triangle plot from MCSamples lists.
+        Shared helper available to all plotter classes.
 
         Args:
             samples (list): List of GetDist MCSamples objects.
             colors (list): List of colors for each sample.
-            legend_labels (list, optional): List of legend labels for each sample.
+            legend_labels (list, optional): One legend label per sample; ``None`` skips
+                that sample's legend entry.
             show_scatter (bool or list): If True, show scatter/histograms on the 1D/2D plots for all samples.
                 If a list, specifies whether to show scatter for each sample individually.
             line_style (str or list): Line style for contours. Can be a single string or a list of strings corresponding to each sample.
@@ -1740,36 +1226,21 @@ class BasePlotter:
                 If a single float is provided, it is converted to a list.
                 If None, the default GetDist settings are used.
             width_inch (float): Width of the plot in inches. Higher values increase resolution.
-            ranges (dict, optional): Dictionary specifying fixed ranges for parameters.
-                Keys should be parameter names, values should be tuples of (min, max).
-                When set, these limits are also used as the outlier fence.
+            ranges (dict, optional): ``{param: (min, max)}`` display window, which is
+                also the outlier fence. Fenced series are smoothed by GetDist from
+                their in-window samples only; the rest are drawn as ``x`` markers
+                clamped to the window edge, counted per series in the legend, and
+                summed per parameter above the 1D panels. Params not in ``ranges``
+                autoscale and are not fenced. ``None`` disables both.
             scatter_alpha (float): Alpha value for scatter points. Default 0.6 for better distinguishability.
             contour_alpha_factor (float): Factor to adjust contour alpha for distinguishability. Default 0.8.
             style (object, optional): Style object (like KP7StylePaper) to apply to the plotter settings.
-            fence_iqr (float, optional): Tukey fence multiplier for robust display/GetDist
-                ranges when ``ranges`` is not provided. Default 3.0. Set to 0/None to
-                disable IQR fencing (explicit ``ranges`` still apply as axis limits).
-            show_outliers (bool): If True (default), mark out-of-fence samples from the
-                full draw as ``x`` markers clamped to the frame edge (series plot color).
-            outlier_annotate (bool): If True (default), add compact second lines under
-                each legend entry with that series' outside-fence count (only when
-                ``n_out > 0``), plus 1D diagonal ``N below / M above`` titles.
-            outlier_color (str, optional): If set, force this color for all out-of-fence
-                markers and legend second-lines. Default ``None`` uses each series'
-                plot color. Aggregated 1D titles still use crimson for readability.
-            outlier_min_keep (int): Minimum in-fence samples required before replacing
-                a series for GetDist; otherwise fencing is skipped for that series.
-            no_fence_for_prior (bool): If True (default), prior overlays are not
-                Tukey-subsetted, do not get edge outlier markers, and do not get
-                "outside fence" legend second-lines. Detection uses
-                ``sample._bedcosmo_is_prior`` / ``_bedcosmo_no_fence`` when set,
-                else labels matching ``Prior`` / ``Prior (...)``.
-            fence_skip_labels (iterable, optional): Additional series labels (full
-                or suffix-stripped) to exempt from fencing.
+            fenced (list of bool, optional): Per-sample flag for applying the ``ranges``
+                fence; default all True. Pass False for prior overlays, which are
+                drawn from all their samples.
+            legend_fontsize (float, optional): Font size for the figure legend.
         Returns:
             g: GetDist plotter object with the generated triangle plot.
-              Stores ``g._outlier_stats`` for callers that rebuild the legend via
-              ``apply_outlier_legend``.
         """
         g = plots.get_single_plotter(width_inch=width_inch, ratio=plot_size_ratio, scaling=True)
         
@@ -1793,7 +1264,27 @@ class BasePlotter:
             legend_labels = [legend_labels]
 
         colors = [convert_color(c) for c in colors]
-        full_samples = list(samples)
+        if fenced is None:
+            fenced = [True] * len(samples)
+
+        # The displayed window is the outlier fence: GetDist smooths only the
+        # in-window samples, and the rest are marked and counted below.
+        fence = {p: ranges[p] for p in samples[0].paramNames.list() if ranges and p in ranges}
+        full_samples = samples
+        in_window = []
+        for sample, fence_sample in zip(full_samples, fenced):
+            arr = np.asarray(sample.samples)
+            names = sample.paramNames.list()
+            mask = np.ones(len(arr), dtype=bool)
+            if fence_sample:
+                for p, (lo, hi) in fence.items():
+                    col = arr[:, names.index(p)]
+                    mask &= (col >= lo) & (col <= hi)
+            in_window.append(mask)
+        samples = [
+            sample if mask.all() else _subset_mcsamples(sample, mask)
+            for sample, mask in zip(full_samples, in_window)
+        ]
 
         # Create adjusted colors for contours and scatter points
         def adjust_color_brightness(color, factor):
@@ -1853,94 +1344,19 @@ class BasePlotter:
         # Prepare contour_args with custom levels if provided
         # For GetDist, we don't pass line styles in contour_args when using multiple styles
 
-        param_name_list = list(full_samples[0].paramNames.list())
-
-        # Resolve per-series labels for fence-skip decisions (prior, explicit skips).
-        n_series = len(full_samples)
-        labels_aligned = (
-            legend_labels is not None
-            and isinstance(legend_labels, list)
-            and len(legend_labels) == n_series
-        )
-        series_labels = []
-        for i, sample in enumerate(full_samples):
-            if labels_aligned:
-                series_labels.append(legend_labels[i])
-            else:
-                series_labels.append(getattr(sample, "label", None))
-
-        skip_fence = [
-            _should_skip_fence(
-                sample,
-                series_labels[i],
-                no_fence_for_prior=no_fence_for_prior,
-                fence_skip_labels=fence_skip_labels,
-            )
-            for i, sample in enumerate(full_samples)
-        ]
-        # Joint Tukey fences from posteriors only so prior support does not
-        # inflate the window; skipped series still plot with full samples.
-        fence_source = [s for s, skip in zip(full_samples, skip_fence) if not skip]
-        fence_ranges = resolve_fence_ranges(
-            fence_source if fence_source else full_samples,
-            param_name_list,
-            ranges=ranges,
-            fence_iqr=fence_iqr,
-        )
-
-        # GetDist sees in-fence samples only; full draws kept for outlier overlay.
-        # Prior / fence_skip series keep full samples (no markers, no n_out counts).
-        contour_samples = []
-        in_fence_masks = []
-        outlier_stats = []
-        for i, sample in enumerate(full_samples):
-            n_tot = len(sample.samples)
-            empty_stats = {"n_out": 0, "n_tot": n_tot, "n_lo": {}, "n_hi": {}}
-            if fence_ranges is None or skip_fence[i]:
-                contour_samples.append(sample)
-                in_fence_masks.append(np.ones(n_tot, dtype=bool))
-                outlier_stats.append(empty_stats)
-                continue
-            mask = fence_mask_for_samples(sample, fence_ranges)
-            fenced, _, _ = subset_mcsamples(
-                sample, mask, min_keep=outlier_min_keep
-            )
-            # Overlay / counts always use the true fence mask (even if GetDist
-            # kept the full series because too few in-fence samples remained).
-            contour_samples.append(fenced)
-            in_fence_masks.append(mask)
-            names = list(sample.paramNames.list())
-            arr = np.asarray(sample.samples, dtype=np.float64)
-            n_lo, n_hi = {}, {}
-            for p, (lo, hi) in fence_ranges.items():
-                if p not in names:
-                    continue
-                col = arr[:, names.index(p)]
-                n_lo[p] = int(np.sum(np.isfinite(col) & (col < lo)))
-                n_hi[p] = int(np.sum(np.isfinite(col) & (col > hi)))
-            outlier_stats.append(
-                {
-                    "n_out": int((~mask).sum()),
-                    "n_tot": int(mask.size),
-                    "n_lo": n_lo,
-                    "n_hi": n_hi,
-                }
-            )
-
-        for sample in contour_samples:
+        for sample in samples:
             sample.updateSettings(GETDIST_SETTINGS)
 
         # Set contour levels if provided
         if levels is not None:
             if isinstance(levels, float):
                 levels = [levels]
-            for sample in contour_samples:
+            for sample in samples:
                 sample.updateSettings({'contours': levels})
 
-        # Create triangle plot from fenced (bulk) samples.
-        # Suppress GetDist's legend; we attach a two-line outlier-aware legend below.
+        # Create triangle plot
         g.triangle_plot(
-            contour_samples,
+            samples,
             colors=contour_colors,
             legend_labels=None,
             filled=False,
@@ -1957,17 +1373,17 @@ class BasePlotter:
         if levels is not None and len(levels) > 1:
             level_lighten = [0.0, 0.22]  # inner level keeps base color; outer is slightly lighter
             n_levels = len(levels)
-            n_params = len(contour_samples[0].paramNames.names)
+            n_params = len(samples[0].paramNames.names)
             for i in range(1, n_params):
                 for j in range(i):
                     ax = g.subplots[i, j]
                     if ax is None:
                         continue
                     collections = ax.collections
-                    expected = len(contour_samples) * n_levels
+                    expected = len(samples) * n_levels
                     if len(collections) < expected:
                         continue
-                    for sample_idx in range(len(contour_samples)):
+                    for sample_idx in range(len(samples)):
                         base_color = contour_colors[sample_idx]
                         for level_idx in range(n_levels):
                             coll_idx = sample_idx * n_levels + level_idx
@@ -1979,57 +1395,52 @@ class BasePlotter:
         # If alpha is a list, manually set alpha for each sample's lines and contours
         if isinstance(alpha, list):
             # Iterate through all subplots and set alpha for lines and collections
-            n_params = len(contour_samples[0].paramNames.names)
+            n_params = len(samples[0].paramNames.names)
             for i in range(n_params):
                 for j in range(i + 1):
                     ax = g.subplots[i, j]
                     if ax is not None:
                         if i == j:
                             lines = ax.get_lines()
-                            n_lines_per_sample = len(lines) // len(contour_samples) if len(contour_samples) > 0 else 0
-                            for sample_idx in range(len(contour_samples)):
+                            n_lines_per_sample = len(lines) // len(samples) if len(samples) > 0 else 0
+                            for sample_idx in range(len(samples)):
                                 start_idx = sample_idx * n_lines_per_sample
                                 end_idx = (sample_idx + 1) * n_lines_per_sample
                                 for line in lines[start_idx:end_idx]:
                                     line.set_alpha(adjusted_alpha[sample_idx])
                         else:
                             collections = ax.collections
-                            n_collections_per_sample = len(collections) // len(contour_samples) if len(contour_samples) > 0 else 0
-                            for sample_idx in range(len(contour_samples)):
+                            n_collections_per_sample = len(collections) // len(samples) if len(samples) > 0 else 0
+                            for sample_idx in range(len(samples)):
                                 start_idx = sample_idx * n_collections_per_sample
                                 end_idx = (sample_idx + 1) * n_collections_per_sample
                                 for collection in collections[start_idx:end_idx]:
                                     collection.set_alpha(adjusted_alpha[sample_idx])
 
-        param_names = g.param_names_for_root(contour_samples[0])
+        param_names = g.param_names_for_root(samples[0])
         param_name_list = [p.name for p in param_names.names]
-        # GetDist / Mock may yield non-str .name; fall back to list() order.
-        if not all(isinstance(p, str) for p in param_name_list):
-            param_name_list = list(contour_samples[0].paramNames.list())
-
-        # Axis limits: explicit ranges, else resolved fence window.
-        display_ranges = ranges if ranges is not None else fence_ranges
-        if display_ranges is not None and hasattr(g, "subplots") and g.subplots is not None:
+        
+        # Manual axis limits if ranges is provided and didn't work
+        if ranges is not None:
+            # Set axis limits manually for each parameter
             for i, param in enumerate(param_name_list):
-                if param not in display_ranges:
-                    continue
-                min_val, max_val = display_ranges[param]
-                ax_diag = g.subplots[i, i]
-                if ax_diag is not None:
-                    ax_diag.set_xlim(min_val, max_val)
-                for j in range(i):
-                    ax = g.subplots[i, j]
-                    if ax is None or param_name_list[j] not in display_ranges:
-                        continue
-                    ax.set_xlim(display_ranges[param_name_list[j]][0], display_ranges[param_name_list[j]][1])
-                    ax.set_ylim(min_val, max_val)
+                if param in ranges:
+                    min_val, max_val = ranges[param]
+                    # Set limits for diagonal (1D) plots
+                    if hasattr(g, 'subplots') and g.subplots is not None:
+                        g.subplots[i, i].set_xlim(min_val, max_val)
+                        # Set limits for off-diagonal (2D) plots
+                        for j in range(i):
+                            if param_name_list[j] in ranges:
+                                g.subplots[i, j].set_xlim(ranges[param_name_list[j]][0], ranges[param_name_list[j]][1])
+                                g.subplots[i, j].set_ylim(min_val, max_val)
 
         if any(show_scatter):
             for i, param in enumerate(param_name_list):
                 if i < len(g.subplots) and i < len(g.subplots[i]):
                     ax = g.subplots[i][i]
                     current_ylim = ax.get_ylim()
-                    for k, sample in enumerate(contour_samples):
+                    for k, sample in enumerate(samples):
                         if show_scatter[k]:  # Only show scatter for this sample if enabled
                             param_index = sample.paramNames.list().index(param)
                             if param_index is not None:
@@ -2049,7 +1460,7 @@ class BasePlotter:
                     for j in range(i):
                         if param_name_list[i] == param_y and param_name_list[j] == param_x:
                             ax = g.subplots[i][j]
-                            for k, sample in enumerate(contour_samples):
+                            for k, sample in enumerate(samples):
                                 if show_scatter[k]:  # Only show scatter for this sample if enabled
                                     g.add_2d_scatter(
                                         sample,
@@ -2061,74 +1472,65 @@ class BasePlotter:
                                         alpha=scatter_alpha,
                                     )
 
-        # Outlier overlay: clamp full-draw extremes to the frame as series-colored x's.
-        if show_outliers and fence_ranges is not None:
-            for i in range(len(param_name_list)):
-                for j in range(i):
-                    ax = g.subplots[i, j]
-                    if ax is None:
-                        continue
-                    py, px = param_name_list[i], param_name_list[j]
-                    if px not in fence_ranges or py not in fence_ranges:
-                        continue
-                    xr, yr = fence_ranges[px], fence_ranges[py]
-                    for k, sample in enumerate(full_samples):
-                        names = list(sample.paramNames.list())
-                        if px not in names or py not in names:
-                            continue
-                        mask = in_fence_masks[k]
-                        if mask.all():
-                            continue
-                        arr = np.asarray(sample.samples, dtype=np.float64)
-                        xv = arr[~mask, names.index(px)]
-                        yv = arr[~mask, names.index(py)]
-                        if xv.size == 0:
-                            continue
-                        ax.scatter(
-                            np.clip(xv, xr[0], xr[1]),
-                            np.clip(yv, yr[0], yr[1]),
-                            s=34,
-                            marker="x",
-                            color=_series_outlier_color(colors[k], outlier_color),
-                            linewidths=1.3,
-                            zorder=6,
-                            clip_on=False,
-                        )
-                # 1D: annotate below/above counts on the diagonal title when present
-                ax1 = g.subplots[i, i]
-                if ax1 is None:
+        # Out-of-window samples of fenced series, clamped onto the window edge.
+        for i, py in enumerate(param_name_list):
+            for j, px in enumerate(param_name_list[:i]):
+                if px not in fence or py not in fence:
                     continue
-                p = param_name_list[i]
-                n_lo = sum(stat["n_lo"].get(p, 0) for stat in outlier_stats)
-                n_hi = sum(stat["n_hi"].get(p, 0) for stat in outlier_stats)
-                if outlier_annotate and (n_lo or n_hi):
-                    # Aggregated across series — keep a fixed readable color.
-                    title_color = (
-                        convert_color(outlier_color)
-                        if outlier_color is not None
-                        else _OUTLIER_MARKER_COLOR
+                for k, sample in enumerate(full_samples):
+                    out = ~in_window[k]
+                    if not out.any():
+                        continue
+                    names = sample.paramNames.list()
+                    arr = np.asarray(sample.samples)[out]
+                    g.subplots[i, j].scatter(
+                        np.clip(arr[:, names.index(px)], *fence[px]),
+                        np.clip(arr[:, names.index(py)], *fence[py]),
+                        s=34, marker="x", color=colors[k], linewidths=1.3, zorder=6, clip_on=False,
                     )
-                    ax1.set_title(
-                        f"{n_lo} below / {n_hi} above range",
-                        fontsize=9,
-                        color=title_color,
-                        pad=3,
+            if py in fence:
+                lo, hi = fence[py]
+                cols = [
+                    np.asarray(sample.samples)[:, sample.paramNames.list().index(py)]
+                    for sample, fence_sample in zip(full_samples, fenced)
+                    if fence_sample
+                ]
+                n_lo = sum(int((c < lo).sum()) for c in cols)
+                n_hi = sum(int((c > hi).sum()) for c in cols)
+                if n_lo or n_hi:
+                    g.subplots[i, i].set_title(
+                        f"{n_lo} below / {n_hi} above range", fontsize=9, color="crimson", pad=3
                     )
 
-        # Store stats for callers that rebuild the legend; put counts in legend
-        # second-lines (series-colored) rather than a floating fig.text block.
-        g._outlier_stats = outlier_stats
-        g._outlier_annot_color = outlier_color
         if legend_labels is not None:
-            apply_outlier_legend(
-                g,
-                colors,
-                legend_labels,
-                line_styles=line_style,
-                alphas=alpha if not isinstance(alpha, list) else alpha,
-                outlier_stats=outlier_stats if outlier_annotate else None,
-                outlier_color=outlier_color,
-            )
+            alphas = alpha if isinstance(alpha, list) else [alpha] * len(samples)
+            handles, labels, outlier_colors = [], [], []
+            for k, label in enumerate(legend_labels):
+                if label is None:
+                    continue
+                handles.append(Line2D([0], [0], color=colors[k], linestyle=line_style[k],
+                                      linewidth=1.2, alpha=alphas[k]))
+                labels.append(label)
+                outlier_colors.append(None)
+                n_out, n_tot = int((~in_window[k]).sum()), len(in_window[k])
+                if n_out:
+                    # Second, handle-less line under the series: its outside-window count.
+                    handles.append(Line2D([0], [0], color="none"))
+                    labels.append(
+                        f"  {n_out}/{_fmt_sample_count(n_tot)} outside plot range "
+                        f"({100 * n_out / n_tot:.2f}%)"
+                    )
+                    outlier_colors.append(colors[k])
+            # Replace GetDist's auto legend (built from sample labels).
+            for leg in list(g.fig.legends):
+                leg.remove()
+            leg = g.fig.legend(handles=handles, labels=labels, loc='upper right',
+                               bbox_to_anchor=(0.99, 0.96), fontsize=legend_fontsize)
+            leg.set_in_layout(False)
+            for text, color in zip(leg.get_texts(), outlier_colors):
+                if color is not None:
+                    text.set_color(color)
+                    text.set_fontsize(0.85 * text.get_fontsize())
 
         return g
 
@@ -2455,108 +1857,225 @@ class RunPlotter(BasePlotter):
         
         return fig, axes
     
-    def _extract_run_posterior_data(
+    def plot_posterior(
         self,
+        experiment=None,
+        nf_entries=None,
+        *,
         eval_step=None,
-        device="cuda:0",
         eig_data=None,
-        params=None,
-        ):
-        """Extract posterior plotting data from run's MLflow artifacts into a kwargs dict for generate_posterior()."""
+        device=None,
+        title=None,
+        artifacts_dir=None,
+        posterior_samples_path=None,
+        display=("nominal", "optimal"),
+        **kwargs,
+    ):
+        """
+        Plot NF posterior for this run (no sampling).
+
+        Title, nominal grid EIG and prior entropy come from ``eig_data`` (loaded
+        from the run's artifacts when omitted). ``experiment`` defaults to the
+        run's experiment. If ``nf_entries`` is omitted, load the newest
+        default-eval NPZ under the run's artifacts that contains the requested
+        ``display`` series. Pass ``nf_entries=[]`` for overlay-only figures.
+
+        Extra keyword arguments are forwarded to ``BasePlotter.plot_posterior``
+        (e.g. ``plot_mcmc=False``, ``ranges``). For the unfenced raw samples use
+        ``plot_raw_posterior``.
+        """
+        if device is None:
+            device = "cuda:0" if torch.cuda.is_available() else "cpu"
+        levels = kwargs.get("levels", [0.68])
+        if isinstance(levels, (int, float)):
+            kwargs["levels"] = [levels]
+
+        if experiment is None:
+            experiment = self.get_experiment(device=device)
         if eig_data is None:
             eig_data = self._get_eig_data(eval_step=eval_step)
-        input_designs, eig_values, nominal_eig, entropy_info = self._parse_eig_for_posterior(eig_data, eval_step, params=params)
-        _, step_str = self._resolve_step(eig_data, eval_step)
+        params = kwargs.get("params")
+        _, _, _, entropy_info = parse_eig_for_posterior(eig_data, eval_step, params=params)
+        kwargs.setdefault("nominal_prior_entropy", entropy_info["nominal_prior_entropy"])
+
+        _, step_str = resolve_eig_step(eig_data, eval_step)
         step_data = eig_data[step_str]
-        marginal_eig = False
-        title = f"Posterior Evaluation - Run: {self.run_id[:8]}"
-        if params is not None:
-            subset_id = "+".join(list(params))
-            marginal_block = step_data.get("marginal", {})
-            if subset_id in marginal_block:
-                marginal = marginal_block[subset_id]
-                eig_values = np.array(marginal.get("eigs_avg", []), dtype=float)
-                nominal_eig = float(marginal["nominal"]["eigs_avg"])
-                marginal_eig = True
+        if title is None:
+            marginal = None
+            if params is not None:
+                marginal = step_data.get("marginal", {}).get("+".join(params))
+            if marginal is not None:
                 param_labels = ", ".join(marginal.get("params", params))
                 title = f"Marginal Posterior ({param_labels}) - Run: {self.run_id[:8]}"
-        nominal_data = step_data.get('nominal', {})
-        nominal_grid_eig = None
-        nominal_grid_data = nominal_data.get('grid', {})
-        if isinstance(nominal_grid_data, dict) and 'eigs_avg' in nominal_grid_data:
-            nominal_grid_eig = nominal_grid_data.get('eigs_avg')
-            if isinstance(nominal_grid_eig, list):
-                nominal_grid_eig = nominal_grid_eig[0] if len(nominal_grid_eig) > 0 else None
-            nominal_grid_eig = float(nominal_grid_eig) if nominal_grid_eig is not None else None
+            else:
+                title = f"Posterior Evaluation - Run: {self.run_id[:8]}"
 
-        run_obj = self.run_data['run_obj']
-        run_args = self.run_data['params'].copy()
+        kwargs.setdefault("nominal_grid_eig", nominal_grid_eig(eig_data, step_str))
 
-        # Extract step number for model loading
-        if isinstance(eval_step, str) and eval_step.startswith('step_'):
-            step_num = int(eval_step.split('_')[1])
-        elif isinstance(eval_step, str):
-            step_num = int(eval_step)
-        else:
-            step_num = eval_step
+        if nf_entries is None and artifacts_dir is None and posterior_samples_path is None:
+            artifacts_dir = self._get_artifacts_dir()
 
-        step_for_model = 'last' if eval_step is None else step_num
-
-        experiment = self.get_experiment(device=device)
-        run_obj = self.run_data['run_obj']
-        run_args = self.run_data['params'].copy()
-        posterior_flow, selected_step = load_model(experiment, step_for_model, run_obj, run_args, device, global_rank=0)
-
-        return dict(
+        return super().plot_posterior(
             experiment=experiment,
-            posterior_flow=posterior_flow,
-            input_designs=input_designs,
-            eig_values=eig_values,
-            nominal_eig=nominal_eig,
-            nominal_prior_entropy=entropy_info.get("nominal_prior_entropy"),
-            nominal_posterior_entropy=entropy_info.get("nominal_posterior_entropy"),
-            prior_entropy_by_design=entropy_info.get("prior_entropy_by_design"),
-            posterior_entropy_by_design=entropy_info.get("posterior_entropy_by_design"),
-            nominal_grid_eig=nominal_grid_eig,
+            nf_entries=nf_entries,
             title=title,
-            marginal_eig=marginal_eig,
+            experiment_id=self.experiment_id,
+            run_id=self.run_id,
+            artifacts_dir=artifacts_dir,
+            eval_step=eval_step,
+            posterior_samples_path=posterior_samples_path,
+            display=display,
+            **kwargs,
         )
 
-    def generate_posterior(self, **kwargs):
-        """Loads EIG data and model from MLflow artifacts and calls BasePlotter.generate_posterior()."""
-        # Extract levels if present (normalize to list)
-        levels = kwargs.get('levels', [0.68])
-        if isinstance(levels, (int, float)):
-            levels = [levels]
-        kwargs['levels'] = levels
+    def plot_raw_posterior(
+        self,
+        *,
+        eval_step=None,
+        posterior_samples_path=None,
+        display=("nominal", "optimal"),
+        data_index=0,
+        plot_ranges=False,
+        bins=200,
+        filename=None,
+        save_dir=None,
+        dpi=200,
+    ):
+        """
+        Triangle of the raw saved posterior samples, for spotting outliers.
 
-        # Pass eval_step and device to data extraction
-        device = kwargs.get("device", "cuda:0" if torch.cuda.is_available() else "cpu")
-        kwargs['device'] = device
-        eval_step = kwargs.get('eval_step', None)
-        eig_data_override = kwargs.pop('eig_data', None)
-        explicit_grid_samples = kwargs.pop('grid_samples', None) if eig_data_override is not None else None
-        data = self._extract_run_posterior_data(
-            eval_step, device=device, eig_data=eig_data_override, params=kwargs.get("params")
+        No GetDist smoothing or fencing and no experiment/flow construction: 1D
+        panels are count histograms on a log y-axis, 2D panels scatter every
+        sample. Reads the newest default-eval NPZ under the run's artifacts (or
+        ``posterior_samples_path``); labels and bounds come from the run's
+        ``prior_args.yaml`` artifact.
+
+        ``plot_ranges``: if False (default), axes span the full sample range and
+        samples outside the ``plot`` lower/upper box in ``prior_args.yaml`` get
+        enlarged markers so isolated outliers stay visible. If True, zoom the
+        axes to that ``plot`` box instead. Dotted lines mark uniform prior bounds
+        (times ``multiplier``, matching the saved physical-space samples). 1D
+        panels annotate per-series counts outside the prior and, when zoomed,
+        off-axis.
+        """
+        display = validate_display(display)
+        artifacts_dir = self._get_artifacts_dir()
+        bundle = load_posterior_samples_file(
+            artifacts_dir,
+            step=eval_step,
+            path=posterior_samples_path,
+            require_series=display,
+            generated_by=None if posterior_samples_path else "Evaluator.run",
         )
-        # Allow override of title
-        if 'title' in kwargs and kwargs['title'] is not None:
-            data['title'] = kwargs['title']
+        print(f"  Loaded posterior samples from {bundle['path']}")
+        if bundle["meta"]["param_space"] != "physical":
+            raise ValueError(
+                f"plot_raw_posterior expects physical-space samples, got "
+                f"param_space={bundle['meta']['param_space']!r} in {bundle['path']}"
+            )
+        with open(os.path.join(artifacts_dir, "prior_args.yaml")) as f:
+            prior_params = yaml.safe_load(f)["parameters"]
 
-        # Remove arguments that are only for this wrapper, not for BasePlotter
-        for skip in ['eval_step', 'title']:
-            if skip in kwargs:
-                kwargs.pop(skip)
+        names = [str(p) for p in bundle["param_names"]]
+        n = len(names)
+        labels, prior_bounds, plot_box = {}, {}, {}
+        for p in names:
+            cfg = prior_params.get(p, {})
+            labels[p] = f"${cfg['latex']}$" if "latex" in cfg else p
+            mult = float(cfg.get("multiplier", 1.0))
+            dist = cfg.get("distribution", {})
+            if dist.get("type") == "uniform":
+                prior_bounds[p] = (dist["lower"] * mult, dist["upper"] * mult)
+            if "plot" in cfg:
+                plot_box[p] = (cfg["plot"]["lower"], cfg["plot"]["upper"])
+        # Params without a ``plot`` entry stay at full range even when zoomed.
+        ranges = plot_box if plot_ranges else {}
 
-        # Update kwargs with extracted data
-        kwargs.update(**data)
-        # Explicit grid_samples (from sibling overlay) wins over anything in data
-        if explicit_grid_samples is not None:
-            kwargs['grid_samples'] = explicit_grid_samples
+        series_meta = {s["name"]: s for s in bundle["meta"].get("series", [])}
+        series_idx = [list(bundle["series_names"]).index(name) for name in display]
+        # (n_display, n_guide, n_params)
+        theta = bundle["theta"][series_idx, data_index]
+        colors = [series_meta.get(name, {}).get("color", NF_SERIES_COLORS[name]) for name in display]
 
-        # Merge and call
-        return super().generate_posterior(experiment_id=self.experiment_id, run_id=self.run_id, **kwargs)
-    
+        fig, axes = plt.subplots(n, n, figsize=(4.2 * n, 4.2 * n), squeeze=False)
+        for i in range(n):
+            for j in range(n):
+                ax = axes[i, j]
+                if j > i:
+                    ax.axis("off")
+                    continue
+                if i == j:
+                    p = names[i]
+                    lo, hi = ranges[p] if p in ranges else (theta[..., i].min(), theta[..., i].max())
+                    # Shared edges so series counts are directly comparable.
+                    edges = np.linspace(lo, hi, bins + 1)
+                    for k, name in enumerate(display):
+                        x = theta[k, :, i]
+                        ax.hist(x, bins=edges, histtype="step", color=colors[k], lw=1.3, label=name)
+                        notes = []
+                        if p in prior_bounds:
+                            pl, ph = prior_bounds[p]
+                            notes.append(f"{int(((x < pl) | (x > ph)).sum())} outside prior")
+                        if p in ranges:
+                            notes.append(f"{int(((x < lo) | (x > hi)).sum())} off-axis")
+                        if notes:
+                            ax.text(0.02, 0.97 - 0.07 * k, f"{name}: " + ", ".join(notes),
+                                    color=colors[k], transform=ax.transAxes, va="top", fontsize=8)
+                    if p in prior_bounds:
+                        for v in prior_bounds[p]:
+                            ax.axvline(v, color="k", ls=":", lw=0.8)
+                    ax.set_yscale("log")
+                    ax.set_ylabel("counts")
+                    if p in ranges:
+                        ax.set_xlim(lo, hi)
+                else:
+                    px, py = names[j], names[i]
+                    for k in range(len(display)):
+                        ax.scatter(theta[k, :, j], theta[k, :, i], s=1.5, color=colors[k],
+                                   alpha=0.3, lw=0, rasterized=True)
+                        if not plot_ranges:
+                            out = np.zeros(theta.shape[1], dtype=bool)
+                            for c, p in ((j, px), (i, py)):
+                                if p in plot_box:
+                                    out |= (theta[k, :, c] < plot_box[p][0]) | (theta[k, :, c] > plot_box[p][1])
+                            ax.scatter(theta[k, out, j], theta[k, out, i], s=16, color=colors[k],
+                                       alpha=0.7, marker="ox"[k % 2], lw=0.8)
+                    if px in prior_bounds and py in prior_bounds:
+                        (xl, xh), (yl, yh) = prior_bounds[px], prior_bounds[py]
+                        ax.add_patch(Rectangle((xl, yl), xh - xl, yh - yl, fill=False,
+                                               ls=":", lw=0.8, color="k"))
+                    if px in ranges:
+                        ax.set_xlim(ranges[px])
+                    if py in ranges:
+                        ax.set_ylim(ranges[py])
+                    ax.set_ylabel(labels[py])
+                ax.set_xlabel(labels[names[j]])
+        # The upper-right panel is empty for n > 1; keep the legend off the 1D notes.
+        axes[0, -1].legend(*axes[0, 0].get_legend_handles_labels(),
+                           loc="upper right" if n == 1 else "center", fontsize=9)
+
+        step = bundle["meta"].get("step")
+        view = "plot ranges" if plot_ranges else "full range"
+        fig.suptitle(
+            f"Raw posterior samples - Run: {self.run_id[:8]}, step {step}, "
+            f"{theta.shape[1]:,} samples/series ({view}); dotted = prior bounds",
+            fontsize=10,
+        )
+        fig.tight_layout()
+        if filename is None:
+            filename = f"raw_posterior_step{step}" + ("_zoom" if plot_ranges else "")
+        self.save_figure(
+            fig,
+            filename=filename,
+            save_dir=save_dir,
+            dpi=dpi,
+            run_id=self.run_id,
+            experiment_id=self.experiment_id,
+            close_fig=False,
+            display_fig=False,
+        )
+        return fig
+
     def plot_designs(
         self,
         design_args=None,
@@ -3017,7 +2536,7 @@ class RunPlotter(BasePlotter):
             levels (float or list): Contour level(s) to plot (default: [0.68]).
             transform_output (bool, optional): Transform NF samples to physical space when
                 transform_input is enabled. Defaults to True for param_space=physical (same as
-                generate_posterior / Evaluator nf_transform_output).
+                plot_posterior / Evaluator nf_transform_output).
             eval_step (str or int, optional): If provided, used to load EIG data for reference.
             
         Returns:
@@ -3032,7 +2551,7 @@ class RunPlotter(BasePlotter):
         
         all_samples = []
         all_colors = []
-        legend_labels_steps = []
+        custom_legend = []
         
         device = "cuda:0" if torch.cuda.is_available() else "cpu"
         run_obj = self.run_data['run_obj']
@@ -3067,7 +2586,10 @@ class RunPlotter(BasePlotter):
                 step_label = 'Best Loss'
             else:
                 step_label = step
-            legend_labels_steps.append(f'Step {step_label}')
+            custom_legend.append(
+                Line2D([0], [0], color=color_hex, 
+                        label=f'Step {step_label}', linewidth=1.2)
+            )
         
         # Get nominal samples using reference experiment (already initialized above)
         nominal_added = False
@@ -3085,7 +2607,7 @@ class RunPlotter(BasePlotter):
             )
         
         plot_width = 12
-        g = self.plot_posterior(all_samples, all_colors, levels=levels, width_inch=plot_width)
+        g = self.plot_triangle(all_samples, all_colors, levels=levels, width_inch=plot_width)
         
         if getattr(experiment, "central_params", None):
             plotted_params = all_samples[0].paramNames.list()
@@ -3105,17 +2627,18 @@ class RunPlotter(BasePlotter):
         elif n_params == 2:
             legend_fontsize = max(legend_fontsize * 1.25, 12)
 
+        if g.fig.legends:
+            for legend in g.fig.legends:
+                legend.remove()
+
         if nominal_added:
             nominal_label = 'DESI' if self.cosmo_exp == 'num_tracers' else 'Nominal Design'
-            legend_labels_steps.append(nominal_label)
+            custom_legend.append(
+                Line2D([0], [0], color='black', label=nominal_label, linewidth=1.2)
+            )
         g.fig.set_constrained_layout(True)
-        apply_outlier_legend(
-            g,
-            all_colors,
-            legend_labels_steps,
-            outlier_stats=getattr(g, "_outlier_stats", None),
-            fontsize=legend_fontsize,
-        )
+        leg = g.fig.legend(handles=custom_legend, loc='upper right', bbox_to_anchor=(0.99, 0.96), fontsize=legend_fontsize)
+        leg.set_in_layout(False)
         title = f"Posterior Steps - Run: {self.run_id[:8]}"
         g.fig.suptitle(title, fontsize=title_fontsize, weight='bold')
         
@@ -3136,7 +2659,7 @@ class RunPlotter(BasePlotter):
         """
         if eig_data is None:
             eig_data = self._get_eig_data(eval_step=eval_step)
-        eval_step, step_str = self._resolve_step(eig_data, eval_step)
+        eval_step, step_str = resolve_eig_step(eig_data, eval_step)
 
         step_data = eig_data[step_str]
         variable_data = step_data.get('variable', {})
@@ -3210,9 +2733,10 @@ class RunPlotter(BasePlotter):
             eig_std_list = []
             eig_labels_list = []
             for s in eval_step:
-                _, sk = self._resolve_step(eig_data, s)
-                if sk is None:
-                    print(f"Warning: Step {s} not found in EIG data, skipping...")
+                try:
+                    _, sk = resolve_eig_step(eig_data, s)
+                except ValueError as e:
+                    print(f"Warning: skipping step {s}: {e}")
                     continue
                 variable_data = eig_data[sk].get('variable', {})
                 eig_vals = variable_data.get('eigs_avg')
@@ -3251,9 +2775,7 @@ class RunPlotter(BasePlotter):
         """
         if eig_data is None:
             eig_data = self._get_eig_data(eval_step=eval_step, eig_kind='marginal')
-        eval_step, step_str = self._resolve_step(eig_data, eval_step)
-        if step_str is None:
-            raise ValueError("No step data found for marginal EIG plot")
+        eval_step, step_str = resolve_eig_step(eig_data, eval_step)
 
         subset_id = "+".join(subset)
         marginal_all = eig_data[step_str].get('marginal', {})
@@ -3598,17 +3120,8 @@ class ComparisonPlotter(BasePlotter):
         """
         Compare posterior distributions across multiple runs in a triangle plot.
 
-        For each run, loads the posterior flow and samples via experiment.get_guide_samples
-        using the same display options as generate_posterior.
-
-        Outlier fencing matches ``plot_posterior`` / eval defaults (Tukey
-        ``fence_iqr=3.0``, series-colored edge markers, 2-line legend counts).
-        Prior overlays are exempt by default (``no_fence_for_prior=True``):
-        full prior samples for GetDist, no edge markers, no outside-fence
-        legend counts. Pass any ``plot_posterior`` fencing kwargs via ``**kwargs``
-        (``fence_iqr``, ``ranges``, ``show_outliers``, ``outlier_annotate``,
-        ``outlier_color``, ``outlier_min_keep``, ``no_fence_for_prior``,
-        ``fence_skip_labels``, …).
+        For each run, loads the posterior flow and samples the ``display`` designs via
+        :func:`bedcosmo.util.nf_posterior_entries`.
 
         Args:
             var (str or list, optional): Parameter(s) to group runs by.
@@ -3629,7 +3142,6 @@ class ComparisonPlotter(BasePlotter):
             plot_prior (bool): If True, overlay each group's prior as a faint contour
                 (alpha=0.4). Uses black when all groups share the same prior_args,
                 otherwise matches group colors.
-            **kwargs: Forwarded to ``plot_posterior`` (fencing, style, alphas, …).
 
         Returns:
             GetDist plotter object.
@@ -3637,13 +3149,8 @@ class ComparisonPlotter(BasePlotter):
         var = self._resolve_var(var)
         global_ranks = global_rank if isinstance(global_rank, list) else [global_rank]
 
-        display = self._normalize_display(display)
-        invalid = set(display) - {'nominal', 'optimal'}
-        if invalid:
-            raise ValueError(f"display must contain 'nominal' and/or 'optimal', got {display}")
-        if not display:
-            raise ValueError("display must not be empty")
-        
+        display = validate_display(display)
+
         if not isinstance(levels, list):
             levels = [levels]
         
@@ -3710,7 +3217,10 @@ class ComparisonPlotter(BasePlotter):
         all_colors = []
         all_alphas = []
         all_line_styles = []
+        # One label per sample; None for extra runs/ranks of a group (no legend entry).
         legend_labels = []
+        # Prior overlays are drawn in full; every posterior series is fenced.
+        all_fenced = []
         plotted_group_keys = []
         group_labels = {}
         group_prior_entropy = {}
@@ -3751,19 +3261,48 @@ class ComparisonPlotter(BasePlotter):
                     continue
                 for rank_idx, rank in enumerate(global_ranks):
                     try:
-                        nf_entries, _ = self._nf_display_samples(
-                            display,
-                            guide_samples,
-                            transform_output=transform_output,
-                            run_obj=run_data_item['run_obj'],
-                            run_args=run_data_item['params'],
-                            exp_id=exp_id,
-                            step=step,
-                            seed=seed,
-                            device=device,
+                        use_device = device
+                        if str(use_device).startswith("cuda") and not torch.cuda.is_available():
+                            use_device = "cpu"
+                        experiment = init_experiment(
+                            run_data_item['run_obj'],
+                            run_data_item['params'],
+                            device=use_device,
                             global_rank=rank,
-                            eval_step=eval_step,
+                            verbose=False,
+                        )
+                        posterior_flow, _ = load_model(
+                            experiment,
+                            step,
+                            run_data_item['run_obj'],
+                            run_data_item['params'],
+                            use_device,
+                            global_rank=rank,
+                        )
+                        eig_data = None
+                        artifacts_dir = (
+                            f"{self.storage_path}/mlruns/{exp_id}/"
+                            f"{run_data_item['run_obj'].info.run_id}/artifacts"
+                        )
+                        try:
+                            _, eig_data = self.load_eig_data_file(
+                                artifacts_dir, eval_step=eval_step, eig_kind='variable'
+                            )
+                        except ValueError:
+                            # Nominal-only comparisons can go without EIG legend values.
+                            if 'optimal' in display:
+                                raise
+                        auto_seed(seed)
+                        nf_entries = nf_posterior_entries(
+                            experiment,
+                            posterior_flow,
+                            eig_data,
+                            eval_step,
+                            display=display,
+                            guide_samples=guide_samples,
+                            transform_output=transform_output,
                             plot_prior=plot_prior,
+                            device=use_device,
                         )
                     except Exception as e:
                         print(
@@ -3776,11 +3315,14 @@ class ComparisonPlotter(BasePlotter):
                         all_colors.append(group_color)
                         all_alphas.append(entry.get('alpha', 1.0))
                         all_line_styles.append(entry.get('line_style', '-'))
+                        all_fenced.append(True)
                         if run_idx == 0 and rank_idx == 0:
                             label = entry.get('label', group_label)
                             if len(sorted_group_keys) > 1:
                                 label = f"{group_label}: {label}"
                             legend_labels.append(label)
+                        else:
+                            legend_labels.append(None)
                     group_has_samples = group_has_samples or bool(nf_entries)
             
             if not group_has_samples:
@@ -3817,6 +3359,7 @@ class ComparisonPlotter(BasePlotter):
                 all_alphas.append(1.0)
                 all_line_styles.append('--')
                 legend_labels.append(nominal_label)
+                all_fenced.append(True)
             except (NotImplementedError, FileNotFoundError, OSError) as e:
                 print(f"Warning: Could not load MCMC reference samples: {e}")
 
@@ -3861,29 +3404,38 @@ class ComparisonPlotter(BasePlotter):
                     for _, _, prior_args, _ in prior_entries[1:]
                 )
                 if all_priors_identical:
-                    _mark_prior_mcsamples(prior_entries[0][0])
                     all_samples.append(prior_entries[0][0])
                     all_colors.append('black')
                     all_alphas.append(PRIOR_CONTOUR_ALPHA)
                     all_line_styles.append('-')
+                    all_fenced.append(False)
                     prior_h = group_prior_entropy.get(prior_entries[0][3])
                     legend_labels.append(
                         f"Prior{self._prior_entropy_legend_suffix(prior_h)}"
                     )
                 else:
                     for prior_samples_gd, color, _, group_key in prior_entries:
-                        _mark_prior_mcsamples(prior_samples_gd)
                         all_samples.append(prior_samples_gd)
                         all_colors.append(color)
                         all_alphas.append(PRIOR_CONTOUR_ALPHA)
                         all_line_styles.append('-')
+                        all_fenced.append(False)
                         prior_h = group_prior_entropy.get(group_key)
                         legend_labels.append(
                             f"Prior ({group_labels[group_key]})"
                             f"{self._prior_entropy_legend_suffix(prior_h)}"
                         )
         
-        g = self.plot_posterior(
+        # Display window / fence: union of the groups' prior plot windows.
+        plotted_params = all_samples[0].paramNames.list()
+        ranges = {}
+        if transform_output:
+            for experiment in group_experiments.values():
+                for p, (lo, hi) in prior_plot_ranges(experiment.prior_args, plotted_params).items():
+                    cur_lo, cur_hi = ranges.get(p, (lo, hi))
+                    ranges[p] = (min(lo, cur_lo), max(hi, cur_hi))
+
+        g = self.plot_triangle(
             all_samples,
             all_colors,
             legend_labels=legend_labels,
@@ -3892,10 +3444,10 @@ class ComparisonPlotter(BasePlotter):
             width_inch=width_inch,
             alpha=all_alphas,
             line_style=all_line_styles,
-            **kwargs,
+            ranges=ranges,
+            fenced=all_fenced,
         )
 
-        plotted_params = all_samples[0].paramNames.list()
         marker_entries = []
         for group_key, experiment in group_experiments.items():
             central_params = getattr(experiment, "central_params", None)
@@ -3935,15 +3487,6 @@ class ComparisonPlotter(BasePlotter):
             title += f' (filter: {filter_str})'
         
         g.fig.set_constrained_layout(True)
-        apply_outlier_legend(
-            g,
-            all_colors,
-            legend_labels,
-            line_styles=all_line_styles,
-            alphas=all_alphas,
-            outlier_stats=getattr(g, "_outlier_stats", None),
-            outlier_color=kwargs.get("outlier_color", getattr(g, "_outlier_annot_color", None)),
-        )
         g.fig.suptitle(title)
         
         # Save figure
@@ -3981,7 +3524,6 @@ class ComparisonPlotter(BasePlotter):
         sort_reference=None,
         normalize=False,
         show_errorbars=True,
-        plot_input_design=False,
         design_labels=None,
         show_ratio_to_nominal=True,
         filename=None,
@@ -4014,7 +3556,6 @@ class ComparisonPlotter(BasePlotter):
             normalize (bool): If True, plot percent difference vs each run's nominal EIG:
                                     ``100 * (EIG - EIG_nominal) / EIG_nominal``.
             show_errorbars (bool): If True, draw the filled std bands for each run.
-            plot_input_design (bool): If True, plot scatter points for input_designs from MLflow params on the heatmap.
                                     Only plots if they match the evaluation designs. Default False.
             design_labels (list, optional): Custom labels for each design dimension. Must be the same length as the number of design dimensions.
                                     If omitted, tries eig_data metadata, then the sort-reference (or first) run's
@@ -4030,11 +3571,10 @@ class ComparisonPlotter(BasePlotter):
         var = self._resolve_var(var)
         storage_path = self.storage_path
 
-        # Parse params if we need them for var labels/sorting, plot_input_design,
+        # Parse params if we need them for var labels/sorting,
         # or experiment init (design_labels / nominal_design fallback).
         need_params = (
-            plot_input_design
-            or var is not None
+            var is not None
             or design_labels is None
             or show_ratio_to_nominal
         )
@@ -4169,26 +3709,6 @@ class ComparisonPlotter(BasePlotter):
             optimal_eig = variable_data.get('optimal_eig')
             optimal_design = variable_data.get('optimal_design')
 
-            # Get input_designs from MLflow params if requested
-            input_designs_from_params = None
-            if plot_input_design:
-                # Find the corresponding run_data to get run_obj
-                run_data_item = next((r for r in run_data_list if r['run_id'] == run_id), None)
-                if run_data_item and run_data_item.get('run_obj') is not None:
-                    try:
-                        input_designs_param = run_data_item['run_obj'].data.params.get('input_designs')
-                        if input_designs_param is not None:
-                            input_designs_list = json.loads(input_designs_param)
-                            input_designs_from_params = np.array(input_designs_list)
-                            if input_designs_from_params.ndim == 1:
-                                input_designs_from_params = input_designs_from_params.reshape(-1, 1)
-                            # Check if design dimensionality matches (allow different number of designs)
-                            if input_designs_from_params.shape[1] != designs_arr.shape[1]:
-                                print(f"Warning: input_designs from params for run {run_id} has {input_designs_from_params.shape[1]} dimensions, but evaluation designs have {designs_arr.shape[1]} dimensions. Skipping.")
-                                input_designs_from_params = None
-                    except Exception as e:
-                        print(f"Warning: Error loading input_designs from params for run {run_id}: {e}")
-
             run_records.append({
                 'run_id': run_id,
                 'run_label': run_label,
@@ -4199,7 +3719,6 @@ class ComparisonPlotter(BasePlotter):
                 'nominal_eig': nominal_eig,
                 'optimal_eig': optimal_eig,
                 'optimal_design': np.array(optimal_design) if optimal_design is not None else None,
-                'input_designs_from_params': input_designs_from_params
             })
 
         if not run_records:
@@ -4464,40 +3983,6 @@ class ComparisonPlotter(BasePlotter):
                         zorder=5,
                         s=60
                     )
-            
-            # Plot input_designs from MLflow params if requested
-            if plot_input_design and record.get('input_designs_from_params') is not None:
-                input_designs = record['input_designs_from_params']
-                # Match each input_design to the corresponding evaluation design
-                scatter_x = []
-                scatter_y = []
-                
-                for input_design in input_designs:
-                    # Find the index in the original (unsorted) designs array
-                    match_idx = None
-                    for idx, eval_design in enumerate(record['designs']):
-                        if np.allclose(eval_design, input_design, rtol=1e-5, atol=1e-8):
-                            match_idx = idx
-                            break
-                    
-                    if match_idx is not None:
-                        # Find the position in the sorted array
-                        sorted_pos = np.where(sort_idx == match_idx)[0][0]
-                        scatter_x.append(x_vals[sorted_pos])
-                        scatter_y.append(eig_vals_plot[sorted_pos])
-                
-                if scatter_x:
-                    # Plot scatter points for this run with its color (no label to exclude from legend)
-                    ax_line.scatter(
-                        scatter_x,
-                        scatter_y,
-                        marker='x',
-                        s=100,
-                        color=color,
-                        linewidths=2.5,
-                        zorder=6,
-                        alpha=0.9
-                    )
 
         y_label = 'Expected Information Gain [bits]'
         if normalize:
@@ -4667,9 +4152,7 @@ class ComparisonPlotter(BasePlotter):
                 artifacts_dir, eval_step=eval_step, eig_kind=eig_kind
             )
 
-        _, step_str = self._resolve_step(eig_data, eval_step)
-        if step_str is None:
-            raise ValueError(f"{axis_name}: could not resolve eval step in eig_data")
+        _, step_str = resolve_eig_step(eig_data, eval_step)
 
         designs, eigs, eigs_std, auto_label = _extract_eig_values(
             eig_data, step_str, eig_kind, subset=subset
@@ -7032,19 +6515,26 @@ def compare_contours(
         run_args = parse_mlflow_params(run_obj.data.params)
         exp_id = run_obj.info.experiment_id
         for step in steps:
-            nf_entries, _ = plotter._nf_display_samples(
-                'nominal',
-                guide_samples,
-                run_obj=run_obj,
-                run_args=run_args,
-                exp_id=exp_id,
-                step=step,
-                seed=seed,
-                device=device,
-                global_rank=global_rank,
+            use_device = device
+            if str(use_device).startswith("cuda") and not torch.cuda.is_available():
+                use_device = "cpu"
+            experiment = init_experiment(
+                run_obj, run_args, device=use_device, global_rank=global_rank, verbose=False
             )
-            if nf_entries:
-                samples.append(nf_entries[0]['samples'])
+            posterior_flow, _ = load_model(
+                experiment, step, run_obj, run_args, use_device, global_rank=global_rank
+            )
+            auto_seed(seed)
+            samples.append(
+                sample_nf(
+                    experiment,
+                    posterior_flow,
+                    experiment.nominal_design,
+                    experiment.central_val,
+                    num_samples=guide_samples,
+                    device=use_device,
+                )
+            )
     
     areas_shoelace = []
     areas_grid = []

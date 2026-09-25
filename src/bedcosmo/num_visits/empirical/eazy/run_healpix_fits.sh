@@ -11,7 +11,7 @@ N_MAX="${N_MAX:-}"
 SEED="${SEED:-7}"
 Z_MIN="${Z_MIN:-0.01}"
 FORCE="${FORCE:-0}"
-PY="conda run -n bedcosmo python -m bedcosmo.num_visits.empirical"
+PY="conda run -n bedcosmo python -m bedcosmo.num_visits.empirical.eazy"
 
 HEALPIX=(23040 27257 27245 27259 27247 27256 27258 27344 26282)
 

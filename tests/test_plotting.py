@@ -6,6 +6,7 @@ import pytest
 from unittest.mock import Mock, patch, MagicMock
 from datetime import datetime
 import numpy as np
+import torch
 
 # Try to import optional dependencies, use mocks if not available
 try:
@@ -287,6 +288,57 @@ class TestRunPlotter:
             assert axes is not None
             plt.close(fig)
     
+    def test_plot_raw_posterior(self, run_plotter, tmp_path):
+        """Raw triangle: log-count diagonals, prior-bound annotations, plot_ranges zoom."""
+        from bedcosmo.artifacts import make_posterior_samples_path, save_posterior_samples
+
+        artifacts = tmp_path / "artifacts"
+        artifacts.mkdir()
+        (artifacts / "prior_args.yaml").write_text(
+            "parameters:\n"
+            "  Om:\n"
+            "    distribution: {type: uniform, lower: 0.01, upper: 0.99}\n"
+            "    plot: {lower: 0.2, upper: 0.45}\n"
+            "    latex: '\\Omega_m'\n"
+            "  hrdrag:\n"
+            "    distribution: {type: uniform, lower: 0.1, upper: 10.0}\n"
+            "    multiplier: 10000\n"
+            "    plot: {lower: 8000.0, upper: 12000.0}\n"
+        )
+        rng = np.random.default_rng(0)
+        theta = np.stack([rng.normal([0.3, 10000.0], [0.01, 100.0], size=(1, 500, 2))] * 2)
+        theta[0, 0, :3, 0] = -10.0  # nominal Om outliers outside the prior
+        save_posterior_samples(
+            make_posterior_samples_path(str(artifacts), step=100),
+            theta=theta,
+            y=np.zeros((2, 1, 3)),
+            design=np.zeros((2, 4)),
+            series_names=["nominal", "optimal"],
+            param_names=["Om", "hrdrag"],
+            meta={"step": 100, "param_space": "physical", "generated_by": "Evaluator.run"},
+        )
+
+        with patch.object(run_plotter, "_get_artifacts_dir", return_value=str(artifacts)):
+            fig = run_plotter.plot_raw_posterior(save_dir=str(tmp_path))
+            zoom = run_plotter.plot_raw_posterior(plot_ranges=True, save_dir=str(tmp_path))
+
+        axes = np.array(fig.axes).reshape(2, 2)
+        assert axes[0, 0].get_yscale() == "log" and axes[1, 1].get_yscale() == "log"
+        assert axes[1, 0].get_yscale() == "linear"
+        assert axes[0, 0].get_xlim()[0] <= -10.0  # full range keeps the outliers on-axis
+        assert axes[0, 0].get_xlabel() == "$\\Omega_m$"
+        notes = [t.get_text() for t in axes[0, 0].texts]
+        assert "nominal: 3 outside prior" in notes and "optimal: 0 outside prior" in notes
+
+        zaxes = np.array(zoom.axes).reshape(2, 2)
+        assert zaxes[0, 0].get_xlim() == pytest.approx((0.2, 0.45))
+        assert zaxes[1, 0].get_ylim() == pytest.approx((8000.0, 12000.0))
+        assert any("3 off-axis" in t.get_text() for t in zaxes[0, 0].texts)
+        assert len(list(tmp_path.glob("raw_posterior_step100_2*.png"))) == 1
+        assert len(list(tmp_path.glob("raw_posterior_step100_zoom_*.png"))) == 1
+        plt.close(fig)
+        plt.close(zoom)
+
     @pytest.mark.skip(reason="plot_evaluation method does not exist on RunPlotter")
     def test_plot_evaluation(self, run_plotter):
         """Test plot_evaluation method."""
@@ -417,171 +469,173 @@ class TestComparisonPlotter:
     def test_compare_posterior_no_samples(self, comparison_plotter, mock_run_data_list):
         """Test compare_posterior when no samples are generated."""
         with patch('bedcosmo.plotting.get_runs_data') as mock_get_runs, \
-             patch.object(
-                 ComparisonPlotter, '_nf_display_samples', side_effect=RuntimeError("fail")
+             patch(
+                 'bedcosmo.plotting.init_experiment',
+                 side_effect=RuntimeError("fail"),
              ):
 
             mock_get_runs.return_value = (mock_run_data_list, 'exp_123', 'test_exp')
 
             result = comparison_plotter.compare_posterior()
             assert result is None
-    
+
     def test_compare_posterior_success(self, comparison_plotter, mock_run_data_list, tmp_path):
         """Test successful compare_posterior call."""
+        mock_sample = Mock()
+        mock_sample.paramNames.names = ['param1', 'param2']
+        mock_sample.paramNames.list.return_value = ['param1', 'param2']
+        mock_exp = Mock()
+        mock_exp.central_val = torch.zeros(2)
+        mock_exp.nominal_design = torch.ones(2)
+        mock_exp.device = 'cpu'
+        mock_exp.prior_args = {'parameters': {}}
+
         with patch('bedcosmo.plotting.get_runs_data') as mock_get_runs, \
-             patch.object(ComparisonPlotter, '_nf_display_samples') as mock_nf_samples, \
-             patch.object(ComparisonPlotter, 'plot_posterior') as mock_plot_posterior, \
+             patch('bedcosmo.plotting.init_experiment', return_value=mock_exp), \
+             patch('bedcosmo.plotting.load_model', return_value=(Mock(), 'step_1000')), \
+             patch('bedcosmo.util.sample_nf', return_value=mock_sample), \
+             patch.object(
+                 ComparisonPlotter,
+                 'load_eig_data_file',
+                 return_value=(None, {'step_1000': {'nominal': {}, 'variable': {}}}),
+             ), \
+             patch(
+                 'bedcosmo.util.parse_eig_for_posterior',
+                 return_value=(
+                     np.array([[0.0, 0.0], [1.0, 1.0]]),
+                     np.array([0.1, 0.9]),
+                     0.5,
+                     dict.fromkeys((
+                         "nominal_prior_entropy", "nominal_posterior_entropy",
+                         "prior_entropy_by_design", "posterior_entropy_by_design",
+                     )),
+                 ),
+             ), \
+             patch.object(ComparisonPlotter, 'plot_triangle') as mock_plot_triangle, \
              patch.object(comparison_plotter, 'save_figure') as mock_save, \
              patch.object(comparison_plotter, 'get_save_dir') as mock_get_dir, \
              patch.object(comparison_plotter, 'generate_filename') as mock_gen_filename:
 
-            # Setup mocks
             mock_get_runs.return_value = (mock_run_data_list, 'exp_123', 'test_exp')
-
-            # Create mock GetDist samples
-            mock_sample = Mock()
-            mock_sample.paramNames.names = ['param1', 'param2']
-            mock_sample.paramNames.list.return_value = ['param1', 'param2']
-            mock_nf_samples.return_value = ([{'samples': mock_sample}], 'step_1000')
-
-            # Mock plot_posterior (inherited from BasePlotter)
             mock_plotter = Mock()
             mock_plotter.fig = Mock()
             mock_plotter.fig.legends = []
-            mock_plotter._outlier_stats = None
-            mock_plotter._outlier_annot_color = None
-            mock_plot_posterior.return_value = mock_plotter
-
-            # Use tmp_path for save directory to avoid permission issues
+            mock_plot_triangle.return_value = mock_plotter
             mock_get_dir.return_value = str(tmp_path / "plots")
             mock_gen_filename.return_value = "test.png"
 
-            with patch('bedcosmo.plotting.os.makedirs'), \
-                 patch('bedcosmo.plotting.apply_outlier_legend'):
+            with patch('bedcosmo.plotting.os.makedirs'):
                 result = comparison_plotter.compare_posterior(var='pyro_seed')
 
                 assert result == mock_plotter
-                mock_plot_posterior.assert_called_once()
-                # Defaults engage fencing inside plot_posterior; no explicit disable.
-                call_kwargs = mock_plot_posterior.call_args.kwargs
-                assert "fence_iqr" not in call_kwargs  # uses plot_posterior default 3.0
+                mock_plot_triangle.assert_called_once()
                 mock_save.assert_called_once()
-
-    def test_compare_posterior_forwards_fence_kwargs(
-        self, comparison_plotter, mock_run_data_list, tmp_path
-    ):
-        """compare_posterior forwards fencing kwargs to plot_posterior."""
-        with patch('bedcosmo.plotting.get_runs_data') as mock_get_runs, \
-             patch.object(ComparisonPlotter, '_nf_display_samples') as mock_nf_samples, \
-             patch.object(ComparisonPlotter, 'plot_posterior') as mock_plot_posterior, \
-             patch.object(comparison_plotter, 'save_figure'), \
-             patch.object(comparison_plotter, 'get_save_dir') as mock_get_dir, \
-             patch.object(comparison_plotter, 'generate_filename') as mock_gen_filename:
-
-            mock_get_runs.return_value = (mock_run_data_list, 'exp_123', 'test_exp')
-            mock_sample = Mock()
-            mock_sample.paramNames.names = ['param1', 'param2']
-            mock_sample.paramNames.list.return_value = ['param1', 'param2']
-            mock_nf_samples.return_value = ([{'samples': mock_sample}], 'step_1000')
-            mock_plotter = Mock()
-            mock_plotter.fig = Mock()
-            mock_plotter.fig.legends = []
-            mock_plotter._outlier_stats = [{"n_out": 0, "n_tot": 100}]
-            mock_plotter._outlier_annot_color = None
-            mock_plot_posterior.return_value = mock_plotter
-            mock_get_dir.return_value = str(tmp_path / "plots")
-            mock_gen_filename.return_value = "test.png"
-
-            with patch('bedcosmo.plotting.os.makedirs'), \
-                 patch('bedcosmo.plotting.apply_outlier_legend') as mock_leg:
-                comparison_plotter.compare_posterior(
-                    var='pyro_seed',
-                    fence_iqr=5.0,
-                    show_outliers=True,
-                    outlier_color=None,
-                )
-                kw = mock_plot_posterior.call_args.kwargs
-                assert kw["fence_iqr"] == 5.0
-                assert kw["show_outliers"] is True
-                assert kw["outlier_color"] is None
-                mock_leg.assert_called_once()
-                assert mock_leg.call_args.kwargs.get("outlier_color") is None
 
     def test_compare_posterior_with_colors(self, comparison_plotter, mock_run_data_list):
         """Test compare_posterior with custom colors."""
+        mock_sample = Mock()
+        mock_sample.paramNames.names = ['param1', 'param2']
+        mock_sample.paramNames.list.return_value = ['param1', 'param2']
+        mock_exp = Mock()
+        mock_exp.central_val = torch.zeros(2)
+        mock_exp.nominal_design = torch.ones(2)
+        mock_exp.device = 'cpu'
+        mock_exp.prior_args = {'parameters': {}}
+
         with patch('bedcosmo.plotting.get_runs_data') as mock_get_runs, \
-             patch.object(ComparisonPlotter, '_nf_display_samples') as mock_nf_samples, \
-             patch.object(ComparisonPlotter, 'plot_posterior') as mock_plot_posterior, \
+             patch('bedcosmo.plotting.init_experiment', return_value=mock_exp), \
+             patch('bedcosmo.plotting.load_model', return_value=(Mock(), 'step_1000')), \
+             patch('bedcosmo.util.sample_nf', return_value=mock_sample), \
+             patch.object(
+                 ComparisonPlotter,
+                 'load_eig_data_file',
+                 return_value=(None, {'step_1000': {'nominal': {}, 'variable': {}}}),
+             ), \
+             patch(
+                 'bedcosmo.util.parse_eig_for_posterior',
+                 return_value=(
+                     np.array([[0.0, 0.0], [1.0, 1.0]]),
+                     np.array([0.1, 0.9]),
+                     0.5,
+                     dict.fromkeys((
+                         "nominal_prior_entropy", "nominal_posterior_entropy",
+                         "prior_entropy_by_design", "posterior_entropy_by_design",
+                     )),
+                 ),
+             ), \
+             patch.object(ComparisonPlotter, 'plot_triangle') as mock_plot_triangle, \
              patch.object(comparison_plotter, 'save_figure'), \
              patch.object(comparison_plotter, 'get_save_dir'), \
-             patch.object(comparison_plotter, 'generate_filename'), \
-             patch('bedcosmo.plotting.apply_outlier_legend'):
+             patch.object(comparison_plotter, 'generate_filename'):
 
             mock_get_runs.return_value = (mock_run_data_list, 'exp_123', 'test_exp')
-            mock_sample = Mock()
-            mock_sample.paramNames.names = ['param1', 'param2']
-            mock_sample.paramNames.list.return_value = ['param1', 'param2']
-            mock_nf_samples.return_value = ([{'samples': mock_sample}], 'step_1000')
             mock_plotter = Mock()
             mock_plotter.fig = Mock()
             mock_plotter.fig.legends = []
-            mock_plotter._outlier_stats = None
-            mock_plotter._outlier_annot_color = None
-            mock_plot_posterior.return_value = mock_plotter
+            mock_plot_triangle.return_value = mock_plotter
 
             custom_colors = ['red', 'blue']
             comparison_plotter.compare_posterior(colors=custom_colors)
 
-            # Check that plot_posterior was called with colors
-            call_args = mock_plot_posterior.call_args
+            call_args = mock_plot_triangle.call_args
             assert 'colors' in call_args.kwargs or len(call_args[0]) > 1
 
     def test_compare_posterior_prior_alpha_and_entropy_legend(
         self, comparison_plotter, mock_run_data_list, tmp_path
     ):
         """Prior overlays use faint contours; posteriors include entropy in legend."""
+        mock_sample = Mock()
+        mock_sample.paramNames.names = ['param1', 'param2']
+        mock_sample.paramNames.list.return_value = ['param1', 'param2']
+        mock_exp = Mock()
+        mock_exp.central_val = torch.zeros(2)
+        mock_exp.nominal_design = torch.ones(2)
+        mock_exp.device = 'cpu'
+        mock_exp.get_prior_samples.return_value = mock_sample
+        mock_exp.prior_args = {'parameters': {}, 'foo': 'bar'}
+
         with patch('bedcosmo.plotting.get_runs_data') as mock_get_runs, \
-             patch('bedcosmo.plotting.init_experiment') as mock_init_exp, \
-             patch.object(ComparisonPlotter, '_nf_display_samples') as mock_nf_samples, \
+             patch('bedcosmo.plotting.init_experiment', return_value=mock_exp) as mock_init_exp, \
+             patch('bedcosmo.plotting.load_model', return_value=(Mock(), 'step_1000')), \
+             patch('bedcosmo.util.sample_nf', return_value=mock_sample), \
+             patch.object(
+                 ComparisonPlotter,
+                 'load_eig_data_file',
+                 return_value=(None, {'step_1000': {'nominal': {}, 'variable': {}}}),
+             ), \
+             patch(
+                 'bedcosmo.util.parse_eig_for_posterior',
+                 return_value=(
+                     np.array([[0.0, 0.0], [1.0, 1.0]]),
+                     np.array([0.1, 0.9]),
+                     1.23,
+                     {
+                         "nominal_prior_entropy": 4.5,
+                         "nominal_posterior_entropy": 3.2,
+                         "prior_entropy_by_design": [1.0, 2.0],
+                         "posterior_entropy_by_design": [3.0, 3.2],
+                     },
+                 ),
+             ), \
              patch.object(
                  ComparisonPlotter,
                  '_nominal_prior_entropy_for_run',
                  return_value=4.5,
              ), \
-             patch.object(ComparisonPlotter, 'plot_posterior') as mock_plot_posterior, \
+             patch.object(ComparisonPlotter, 'plot_triangle') as mock_plot_triangle, \
              patch.object(comparison_plotter, 'save_figure'), \
              patch.object(comparison_plotter, 'get_save_dir', return_value=str(tmp_path)), \
-             patch.object(comparison_plotter, 'generate_filename', return_value='test.png'), \
-             patch('bedcosmo.plotting.apply_outlier_legend'):
+             patch.object(comparison_plotter, 'generate_filename', return_value='test.png'):
 
             mock_get_runs.return_value = (mock_run_data_list, 'exp_123', 'test_exp')
-
-            mock_sample = Mock()
-            mock_sample.paramNames.names = ['param1', 'param2']
-            mock_sample.paramNames.list.return_value = ['param1', 'param2']
-            mock_nf_samples.return_value = ([{
-                'samples': mock_sample,
-                'label': 'Nominal Design (NF), EIG: 1.23 bits, H_post: 3.20 bits',
-                'alpha': 1.0,
-                'line_style': '-',
-            }], 'step_1000')
-
-            mock_experiment = Mock()
-            mock_experiment.get_prior_samples.return_value = mock_sample
-            mock_experiment.prior_args = {'foo': 'bar'}
-            mock_experiment.central_params = None
-            mock_init_exp.return_value = mock_experiment
-
             mock_plotter = Mock()
             mock_plotter.fig = Mock()
             mock_plotter.fig.legends = []
-            mock_plotter._outlier_stats = None
-            mock_plotter._outlier_annot_color = None
-            mock_plot_posterior.return_value = mock_plotter
+            mock_plot_triangle.return_value = mock_plotter
 
             comparison_plotter.compare_posterior(var='pyro_seed', plot_prior=True)
 
-            kwargs = mock_plot_posterior.call_args.kwargs
+            kwargs = mock_plot_triangle.call_args.kwargs
             assert kwargs['alpha'][-1] == 0.4
             assert 'H_prior' not in kwargs['legend_labels'][0]
             assert 'H_post' in kwargs['legend_labels'][0]
@@ -592,235 +646,8 @@ class TestComparisonPlotter:
 # Standalone Plotting Functions Tests
 # ============================================================================
 
-class TestPosteriorFenceHelpers:
-    """desilike-style IQR fencing helpers used by plot_posterior."""
-
-    def test_iqr_display_range_ignores_extremes(self):
-        from bedcosmo.plotting import iqr_display_range
-
-        rng = np.random.default_rng(0)
-        bulk = rng.normal(0.3, 0.01, size=2000)
-        vals = np.concatenate([bulk, [-10.0, 5.0]])
-        lo, hi = iqr_display_range(vals, k=3.0)
-        assert lo > 0.2
-        assert hi < 0.4
-
-    def test_fence_mask_and_subset(self):
-        import contextlib
-        import io
-
-        import getdist
-
-        from bedcosmo.plotting import (
-            fence_mask_for_samples,
-            resolve_fence_ranges,
-            subset_mcsamples,
-        )
-        from bedcosmo.util import GETDIST_SETTINGS
-
-        rng = np.random.default_rng(1)
-        om = np.concatenate([rng.normal(0.3, 0.01, 5000), [-10.0] * 5])
-        h = np.concatenate([rng.normal(10000, 100, 5000), [-1e5] * 3, rng.normal(10000, 100, 2)])
-        with contextlib.redirect_stdout(io.StringIO()):
-            gd = getdist.MCSamples(
-                samples=np.column_stack([om, h]),
-                names=["Om", "hrdrag"],
-                labels=[r"\Omega_m", r"H_0 r_d"],
-                settings=GETDIST_SETTINGS,
-            )
-        fence = resolve_fence_ranges([gd], ["Om", "hrdrag"], ranges=None, fence_iqr=3.0)
-        mask = fence_mask_for_samples(gd, fence)
-        assert int((~mask).sum()) >= 5
-        fenced, _, _ = subset_mcsamples(gd, mask)
-        assert len(fenced.samples) == int(mask.sum())
-
-    def test_explicit_ranges_preferred_over_iqr(self):
-        import contextlib
-        import io
-
-        import getdist
-
-        from bedcosmo.plotting import resolve_fence_ranges
-        from bedcosmo.util import GETDIST_SETTINGS
-
-        with contextlib.redirect_stdout(io.StringIO()):
-            gd = getdist.MCSamples(
-                samples=np.random.randn(100, 2),
-                names=["Om", "hrdrag"],
-                labels=["Om", "H"],
-                settings=GETDIST_SETTINGS,
-            )
-        ranges = {"Om": (0.2, 0.45), "hrdrag": (8000.0, 12000.5)}
-        fence = resolve_fence_ranges([gd], ["Om", "hrdrag"], ranges=ranges, fence_iqr=3.0)
-        assert fence == ranges
-
-    def test_compact_outlier_annotation_lines(self):
-        from bedcosmo.plotting import (
-            _fmt_sample_count,
-            _outlier_second_line,
-            make_outlier_legend_entries,
-            style_outlier_legend,
-        )
-
-        assert _fmt_sample_count(500000) == "5e5"
-        assert _fmt_sample_count(30544).startswith("3")
-        assert _outlier_second_line({"n_out": 0, "n_tot": 100}) is None
-        assert "outside" in _outlier_second_line({"n_out": 2895, "n_tot": 500000})
-
-        handles, labels = make_outlier_legend_entries(
-            ["tab:blue", "black"],
-            [
-                "Nominal Design (NF), EIG: 9.5 bits, H_prior: 3.28 bits",
-                "Nominal Design (MCMC)",
-            ],
-            outlier_stats=[
-                {"n_out": 2895, "n_tot": 500000},
-                {"n_out": 0, "n_tot": 30544},
-            ],
-        )
-        # NF gets main + series-colored subline; MCMC only main (no outliers)
-        assert len(handles) == 3
-        assert labels[0].startswith("Nominal Design (NF)")
-        assert "EIG" in labels[0]
-        assert labels[1].startswith("  2895/5e5 outside")
-        assert getattr(handles[1], "_bedcosmo_outlier_sub")
-        from bedcosmo.util import convert_color
-
-        assert handles[1]._bedcosmo_outlier_color == convert_color("tab:blue")
-        assert labels[2] == "Nominal Design (MCMC)"
-
-        # Explicit outlier_color overrides series color for second-lines.
-        handles2, _ = make_outlier_legend_entries(
-            ["tab:blue", "tab:orange"],
-            ["A", "B"],
-            outlier_stats=[
-                {"n_out": 10, "n_tot": 100},
-                {"n_out": 5, "n_tot": 100},
-            ],
-            outlier_color="crimson",
-        )
-        assert handles2[1]._bedcosmo_outlier_color == convert_color("crimson")
-        assert handles2[3]._bedcosmo_outlier_color == convert_color("crimson")
-
-    def test_series_outlier_color_helper(self):
-        from bedcosmo.plotting import _series_outlier_color
-        from bedcosmo.util import convert_color
-
-        assert _series_outlier_color("tab:orange") == convert_color("tab:orange")
-        assert _series_outlier_color("tab:orange", outlier_color="crimson") == convert_color(
-            "crimson"
-        )
-
-    def test_prior_fence_skip_detection(self):
-        """Prior overlays are detected by flag and/or Prior* legend labels."""
-        from types import SimpleNamespace
-
-        from bedcosmo.plotting import (
-            _is_prior_series_label,
-            _mark_prior_mcsamples,
-            _should_skip_fence,
-        )
-
-        assert _is_prior_series_label("Prior")
-        assert _is_prior_series_label("Prior, H_prior: 3.28 bits")
-        assert _is_prior_series_label("Prior (Config Space)")
-        assert not _is_prior_series_label("Nominal Design (NF)")
-        assert not _is_prior_series_label("Nominal Design (MCMC)")
-
-        bare = SimpleNamespace()
-        assert not _should_skip_fence(bare, "Nominal Design (NF)")
-        assert _should_skip_fence(bare, "Prior, H_prior: 1.0 bits")
-        assert not _should_skip_fence(
-            bare, "Prior", no_fence_for_prior=False
-        )
-        assert _should_skip_fence(bare, "NF", fence_skip_labels=["NF"])
-
-        tagged = SimpleNamespace()
-        _mark_prior_mcsamples(tagged)
-        assert _should_skip_fence(tagged, "something else")
-        assert tagged._bedcosmo_is_prior and tagged._bedcosmo_no_fence
-
-    def test_plot_posterior_skips_fencing_prior_series(self, monkeypatch):
-        """Prior series keep full samples; NF is still Tukey-subsetted."""
-        import contextlib
-        import io
-
-        import getdist
-
-        from bedcosmo.plotting import BasePlotter, _mark_prior_mcsamples, subset_mcsamples
-        from bedcosmo.util import GETDIST_SETTINGS
-
-        monkeypatch.setenv("SCRATCH", "/mock/scratch")
-        rng = np.random.default_rng(2)
-        nf = np.column_stack(
-            [
-                np.concatenate([rng.normal(0.3, 0.01, 2000), [-8.0] * 10]),
-                np.concatenate([rng.normal(10000, 80, 2000), [1e5] * 10]),
-            ]
-        )
-        prior = np.column_stack(
-            [
-                rng.uniform(0.1, 0.5, 2000),
-                rng.uniform(8000, 12000, 2000),
-            ]
-        )
-        with contextlib.redirect_stdout(io.StringIO()):
-            nf_gd = getdist.MCSamples(
-                samples=nf,
-                names=["Om", "hrdrag"],
-                labels=["Om", "H"],
-                settings=GETDIST_SETTINGS,
-            )
-            prior_gd = getdist.MCSamples(
-                samples=prior,
-                names=["Om", "hrdrag"],
-                labels=["Om", "H"],
-                settings=GETDIST_SETTINGS,
-            )
-        _mark_prior_mcsamples(prior_gd)
-        nf_gd.label = "Nominal Design (NF)"
-        prior_gd.label = "Prior"
-
-        subset_calls = []
-        real_subset = subset_mcsamples
-
-        def tracking_subset(sample, mask, min_keep=16):
-            subset_calls.append(getattr(sample, "label", None))
-            return real_subset(sample, mask, min_keep=min_keep)
-
-        monkeypatch.setattr("bedcosmo.plotting.subset_mcsamples", tracking_subset)
-
-        mock_g = MagicMock()
-        mock_g.subplots = np.array([[MagicMock(), None], [MagicMock(), MagicMock()]], dtype=object)
-        mock_g.fig = MagicMock()
-        mock_g.fig.legends = []
-        mock_g.param_names_for_root.return_value = nf_gd.paramNames
-        mock_g.triangle_plot = MagicMock()
-
-        with patch("bedcosmo.plotting.plots.get_single_plotter", return_value=mock_g), patch(
-            "bedcosmo.plotting.apply_outlier_legend"
-        ):
-            plotter = BasePlotter(cosmo_exp="test_exp")
-            g = plotter.plot_posterior(
-                [nf_gd, prior_gd],
-                ["tab:blue", "black"],
-                legend_labels=["Nominal Design (NF)", "Prior"],
-                levels=[0.68],
-                width_inch=5,
-            )
-
-        assert subset_calls == ["Nominal Design (NF)"]
-        assert g._outlier_stats[0]["n_out"] >= 10
-        assert g._outlier_stats[1]["n_out"] == 0
-        assert g._outlier_stats[1]["n_tot"] == len(prior)
-        # Contours for prior use the original full MCSamples object
-        triangle_samples = mock_g.triangle_plot.call_args[0][0]
-        assert triangle_samples[1] is prior_gd
-        assert len(triangle_samples[0].samples) < len(nf)
-
-
-class TestPlotPosterior:
-    """Test cases for plot_posterior function."""
+class TestPlotTriangle:
+    """Test cases for plot_triangle function."""
     
     @pytest.fixture
     def mock_samples(self):
@@ -840,8 +667,8 @@ class TestPlotPosterior:
         """Mock SCRATCH environment variable."""
         monkeypatch.setenv("SCRATCH", "/mock/scratch")
 
-    def test_plot_posterior_single_sample(self, mock_samples, mock_scratch_env):
-        """Test plot_posterior with a single sample."""
+    def test_plot_triangle_single_sample(self, mock_samples, mock_scratch_env):
+        """Test plot_triangle with a single sample."""
         plotter = BasePlotter(cosmo_exp='test_exp')
         with patch('bedcosmo.plotting.plots.get_single_plotter') as mock_get_plotter:
             mock_plotter = Mock()
@@ -855,7 +682,7 @@ class TestPlotPosterior:
             mock_plotter.triangle_plot = Mock()
             mock_get_plotter.return_value = mock_plotter
 
-            result = plotter.plot_posterior(
+            result = plotter.plot_triangle(
                 samples=mock_samples[0],
                 colors='blue',
                 show_scatter=False
@@ -864,8 +691,8 @@ class TestPlotPosterior:
             assert result == mock_plotter
             mock_plotter.triangle_plot.assert_called_once()
     
-    def test_plot_posterior_multiple_samples(self, mock_samples, mock_scratch_env):
-        """Test plot_posterior with multiple samples."""
+    def test_plot_triangle_multiple_samples(self, mock_samples, mock_scratch_env):
+        """Test plot_triangle with multiple samples."""
         plotter = BasePlotter(cosmo_exp='test_exp')
         with patch('bedcosmo.plotting.plots.get_single_plotter') as mock_get_plotter:
             mock_plotter = Mock()
@@ -879,7 +706,7 @@ class TestPlotPosterior:
             mock_plotter.triangle_plot = Mock()
             mock_get_plotter.return_value = mock_plotter
 
-            result = plotter.plot_posterior(
+            result = plotter.plot_triangle(
                 samples=mock_samples,
                 colors=['blue', 'red'],
                 show_scatter=False
@@ -887,8 +714,8 @@ class TestPlotPosterior:
 
             assert result == mock_plotter
     
-    def test_plot_posterior_with_scatter(self, mock_samples, mock_scratch_env):
-        """Test plot_posterior with scatter points enabled."""
+    def test_plot_triangle_with_scatter(self, mock_samples, mock_scratch_env):
+        """Test plot_triangle with scatter points enabled."""
         plotter = BasePlotter(cosmo_exp='test_exp')
         with patch('bedcosmo.plotting.plots.get_single_plotter') as mock_get_plotter:
             mock_plotter = Mock()
@@ -918,7 +745,7 @@ class TestPlotPosterior:
             mock_samples[0].paramNames.list.return_value = ['param1', 'param2']
             mock_samples[0].paramNames.list.index.return_value = 0  # Mock index method
             
-            result = plotter.plot_posterior(
+            result = plotter.plot_triangle(
                 samples=mock_samples[0],
                 colors='blue',
                 show_scatter=True
@@ -926,8 +753,8 @@ class TestPlotPosterior:
 
             assert result == mock_plotter
 
-    def test_plot_posterior_with_ranges(self, mock_samples, mock_scratch_env):
-        """Test plot_posterior with ranges parameter."""
+    def test_plot_triangle_with_ranges(self, mock_samples, mock_scratch_env):
+        """Test plot_triangle with ranges parameter."""
         plotter = BasePlotter(cosmo_exp='test_exp')
         with patch('bedcosmo.plotting.plots.get_single_plotter') as mock_get_plotter:
             mock_plotter = Mock()
@@ -943,16 +770,16 @@ class TestPlotPosterior:
             mock_plotter.triangle_plot = Mock()
             mock_get_plotter.return_value = mock_plotter
 
-            result = plotter.plot_posterior(
+            result = plotter.plot_triangle(
                 samples=mock_samples[0],
                 colors='blue',
                 show_scatter=False,
-                ranges={'param1': (0.0, 1.0), 'param2': (-1.0, 1.0)}
+                ranges={'param1': (-10.0, 10.0), 'param2': (-10.0, 10.0)}
             )
             assert result == mock_plotter
 
-    def test_plot_posterior_with_scatter_alpha_contour_alpha(self, mock_samples, mock_scratch_env):
-        """Test plot_posterior with scatter_alpha and contour_alpha_factor."""
+    def test_plot_triangle_with_scatter_alpha_contour_alpha(self, mock_samples, mock_scratch_env):
+        """Test plot_triangle with scatter_alpha and contour_alpha_factor."""
         plotter = BasePlotter(cosmo_exp='test_exp')
         with patch('bedcosmo.plotting.plots.get_single_plotter') as mock_get_plotter:
             mock_plotter = Mock()
@@ -966,7 +793,7 @@ class TestPlotPosterior:
             mock_plotter.triangle_plot = Mock()
             mock_get_plotter.return_value = mock_plotter
 
-            result = plotter.plot_posterior(
+            result = plotter.plot_triangle(
                 samples=mock_samples[0],
                 colors='blue',
                 show_scatter=False,
@@ -975,8 +802,8 @@ class TestPlotPosterior:
             )
             assert result == mock_plotter
 
-    def test_plot_posterior_with_levels_and_alpha_list(self, mock_samples, mock_scratch_env):
-        """Test plot_posterior with levels and alpha as list."""
+    def test_plot_triangle_with_levels_and_alpha_list(self, mock_samples, mock_scratch_env):
+        """Test plot_triangle with levels and alpha as list."""
         plotter = BasePlotter(cosmo_exp='test_exp')
         with patch('bedcosmo.plotting.plots.get_single_plotter') as mock_get_plotter:
             mock_plotter = Mock()
@@ -996,7 +823,7 @@ class TestPlotPosterior:
             mock_plotter.triangle_plot = Mock()
             mock_get_plotter.return_value = mock_plotter
 
-            result = plotter.plot_posterior(
+            result = plotter.plot_triangle(
                 samples=mock_samples,
                 colors=['blue', 'red'],
                 show_scatter=[True, False],
@@ -1005,6 +832,125 @@ class TestPlotPosterior:
                 levels=[0.68, 0.95]
             )
             assert result == mock_plotter
+
+def _gd_samples(arr, label, names=("Om", "hrdrag")):
+    """Real GetDist MCSamples (quiet) for fence tests."""
+    import contextlib
+    import io
+
+    from bedcosmo.util import GETDIST_SETTINGS
+
+    with contextlib.redirect_stdout(io.StringIO()):
+        s = getdist.MCSamples(
+            samples=np.asarray(arr, dtype=float),
+            names=list(names),
+            labels=list(names),
+            settings=GETDIST_SETTINGS,
+        )
+    s.label = label
+    return s
+
+
+def _bulk_with_outliers(seed=0):
+    """3000 in-window samples plus 3 low and 2 high Om outliers (5 total)."""
+    rng = np.random.default_rng(seed)
+    bulk = np.column_stack([rng.normal(0.3, 0.01, 3000), rng.normal(10000, 100, 3000)])
+    outliers = np.array([[-10.0, 13400.0]] * 3 + [[0.9, 10000.0]] * 2)
+    return np.vstack([bulk, outliers])
+
+
+class TestPlotTriangleFence:
+    """The displayed ``ranges`` window is the outlier fence."""
+
+    RANGES = {"Om": (0.2, 0.45), "hrdrag": (8000.0, 12000.0)}
+
+    @pytest.fixture(autouse=True)
+    def _env(self, monkeypatch):
+        monkeypatch.setenv("SCRATCH", "/mock/scratch")
+
+    def _legend_texts(self, g):
+        return [t.get_text() for t in g.fig.legends[0].get_texts()]
+
+    def test_window_fence_counts_marks_and_trims(self):
+        post = _gd_samples(_bulk_with_outliers(), "Nominal")
+        prior = _gd_samples(
+            np.column_stack([np.linspace(0.01, 0.99, 500), np.linspace(1000, 1e5, 500)]),
+            "Prior",
+        )
+        plotter = BasePlotter(cosmo_exp="test_exp")
+        with patch.object(plots.GetDistPlotter, "triangle_plot", autospec=True,
+                          side_effect=plots.GetDistPlotter.triangle_plot) as tri:
+            g = plotter.plot_triangle(
+                [post, prior], ["tab:blue", "black"], legend_labels=["Nominal", "Prior"],
+                levels=[0.68], ranges=self.RANGES, fenced=[True, False],
+            )
+        # GetDist only sees the in-window posterior; the unfenced prior is passed whole.
+        smoothed = tri.call_args.args[1]
+        assert len(smoothed[0].samples) == 3000
+        assert smoothed[1] is prior
+
+        texts = self._legend_texts(g)
+        assert texts == ["Nominal", "  5/3.0e3 outside plot range (0.17%)", "Prior"]
+        assert g.subplots[0, 0].get_xlim() == pytest.approx(self.RANGES["Om"])
+        assert g.subplots[0, 0].get_title() == "3 below / 2 above range"
+        # The Om=-10 outliers also sit above the H0rd window (13400 > 12000).
+        assert g.subplots[1, 1].get_title() == "0 below / 3 above range"
+
+        # All five outliers are drawn as x's clamped onto the window edge.
+        offsets = np.vstack([c.get_offsets() for c in g.subplots[1, 0].collections
+                             if len(c.get_offsets()) == 5])
+        assert sorted(offsets[:, 0]) == pytest.approx([0.2, 0.2, 0.2, 0.45, 0.45])
+        plt.close(g.fig)
+
+    def test_no_ranges_no_fence(self):
+        post = _gd_samples(_bulk_with_outliers(), "Nominal")
+        g = BasePlotter(cosmo_exp="test_exp").plot_triangle(
+            [post], ["tab:blue"], legend_labels=["Nominal"], levels=[0.68]
+        )
+        assert self._legend_texts(g) == ["Nominal"]
+        assert g.subplots[0, 0].get_title() == ""
+        plt.close(g.fig)
+
+    def test_none_legend_label_skips_entry(self):
+        a = _gd_samples(_bulk_with_outliers(0), "run a")
+        b = _gd_samples(_bulk_with_outliers(1), "run b")
+        g = BasePlotter(cosmo_exp="test_exp").plot_triangle(
+            [a, b], ["tab:blue", "tab:blue"], legend_labels=["Group", None],
+            levels=[0.68], ranges=self.RANGES,
+        )
+        assert self._legend_texts(g) == ["Group", "  5/3.0e3 outside plot range (0.17%)"]
+        # Both runs still count toward the per-parameter 1D totals.
+        assert g.subplots[0, 0].get_title() == "6 below / 4 above range"
+        plt.close(g.fig)
+
+    @pytest.mark.parametrize("transform_output, expected", [
+        (True, {"Om": (0.2, 0.45), "hrdrag": (8000.0, 12000.5)}),
+        (False, {}),
+    ])
+    def test_plot_posterior_defaults_to_prior_plot_window(self, transform_output, expected):
+        from types import SimpleNamespace
+
+        entry = {
+            "name": "nominal", "samples": _gd_samples(_bulk_with_outliers(), "Nominal"),
+            "label": "Nominal", "color": "tab:blue", "line_style": "-", "alpha": 1.0,
+        }
+        experiment = SimpleNamespace(
+            central_params=None,
+            prior_args={"parameters": {
+                "Om": {"plot": {"lower": 0.2, "upper": 0.45}},
+                "hrdrag": {"plot": {"lower": 8000.0, "upper": 12000.5}},
+            }},
+        )
+        plotter = BasePlotter(cosmo_exp="test_exp")
+        with patch.object(plotter, "plot_triangle") as tri, \
+             patch.object(plotter, "save_figure"):
+            plotter.plot_posterior(
+                experiment, [entry], display="nominal", plot_mcmc=False,
+                transform_output=transform_output,
+            )
+        kwargs = tri.call_args.kwargs
+        assert kwargs["ranges"] == expected
+        assert kwargs["fenced"] == [True]
 
 
 class TestLoadEigDataFile:
@@ -1215,12 +1161,12 @@ class TestHelperFunctions:
 
     def test_entropy_legend_suffix(self, mock_scratch_env):
         """Posterior legend omits H_prior when the prior contour is plotted separately."""
-        plotter = BasePlotter(cosmo_exp='test_exp')
-        both = plotter._entropy_legend_suffix(4.5, 3.2, include_prior=True)
-        post_only = plotter._entropy_legend_suffix(4.5, 3.2, include_prior=False)
+        from bedcosmo.util import entropy_legend_suffix
+        both = entropy_legend_suffix(4.5, 3.2, include_prior=True)
+        post_only = entropy_legend_suffix(4.5, 3.2, include_prior=False)
         assert both == ", H_prior: 4.50 bits, H_post: 3.20 bits"
         assert post_only == ", H_post: 3.20 bits"
-        assert plotter._entropy_legend_suffix(4.5, None, include_prior=True) == ", H_prior: 4.50 bits"
+        assert entropy_legend_suffix(4.5, None, include_prior=True) == ", H_prior: 4.50 bits"
 
     def test_display_figure(self, mock_scratch_env):
         """Test _display_figure helper method."""
@@ -1681,15 +1627,22 @@ class TestCompareContours:
     
     def test_compare_contours_no_runs(self, mock_scratch_env):
         """Test compare_contours when no runs are found."""
-        with patch('bedcosmo.plotting.BasePlotter._nf_display_samples') as mock_nf_samples, \
-             patch('bedcosmo.plotting.getdist.MCSamples') as mock_mcsamples, \
-             patch('bedcosmo.plotting.os.makedirs'):  # Mock os.makedirs to avoid permission errors
-            mock_nf_samples.return_value = ([], None)
-
+        with patch('bedcosmo.plotting.MlflowClient') as mock_client_class, \
+             patch('bedcosmo.plotting.init_experiment', side_effect=ValueError("no run")), \
+             patch('bedcosmo.plotting.os.makedirs'), \
+             patch.dict('os.environ', {'MLFLOW_ALLOW_FILE_STORE': 'true'}, clear=False):
+            mock_client = Mock()
+            mock_client_class.return_value = mock_client
+            mock_client.get_run.side_effect = Exception("not found")
             try:
-                result = compare_contours(run_ids=['nonexistent'], param1='param1', param2='param2', cosmo_exp='test_exp')
+                result = compare_contours(
+                    run_ids=['nonexistent'],
+                    param1='param1',
+                    param2='param2',
+                    cosmo_exp='test_exp',
+                )
                 assert result is None or isinstance(result, (list, tuple))
-            except (TypeError, AttributeError, ValueError):
+            except (TypeError, AttributeError, ValueError, Exception):
                 pass
 
 

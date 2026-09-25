@@ -58,6 +58,8 @@ Use `bedcosmo.num_tracers.design` (the num_tracers counterpart of `bedcosmo.num_
 - `design_args_*.yaml` → this directory (`--out-dir`), where `--design-args-path` resolves
 - `.png` → beside the `.npy` (`--plot` to relocate, `--no-plot` to skip)
 
+The YAML header records the command that regenerates it.
+
 Global flags (`--dataset`, `--out-dir`, `--designs-dir`, `--plot`, `--no-plot`) go **before** the subcommand; mode flags go after.
 
 ### `pool` — one multi-design pool (preferred)
@@ -79,6 +81,7 @@ python -m bedcosmo.num_tracers.design pool \
 | `--include-scales` | Force-add uniformly scaled nominal designs as within-pool reference points (they fall between grid nodes) |
 | `--n-target`, `--seed` | Cap pool size by seeded random subsample; pinned rows always survive |
 | `--name` | Filename for the `.npy` (`.npy` suffix optional). Omit for a date-stamped default |
+| `--yaml` | YAML file name in `--out-dir`, e.g. `design_args_budget.yaml` (default `design_args_<name>.yaml`); refuses to overwrite an existing file |
 
 The generator reproduces the experiment's own grid exactly: the defaults give **287** designs at sum 1.0 and **2447** over [1.0, 1.2], matching `design_args_dr1.yaml` and `design_args_dr1_budget.yaml`.
 
@@ -126,7 +129,7 @@ Also note `--upper` is exclusive via `np.arange`, and float accumulation makes t
 
 ## Parameters (`prior_args_*.yaml`)
 
-Each entry under `parameters` defines a `distribution` (type + bounds), optional `multiplier`, `plot` ranges, and a `latex` label. `constraints` prune the prior:
+Each entry under `parameters` defines a `distribution` (type + bounds), optional `multiplier`, `plot` ranges, and a `latex` label. The `plot` range (physical units) is the posterior plot window and its outlier fence: contours come from the samples inside it, and samples outside are drawn as edge `x` markers and counted in the legend. `constraints` prune the prior:
 
 - `valid_densities` — `Om + Ok` within `[0, 1]`
 - `high_z_matter_dom` — `w0 + wa <= 0`

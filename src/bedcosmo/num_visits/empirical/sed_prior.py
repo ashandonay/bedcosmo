@@ -15,6 +15,7 @@ from .fit_sed_prior_kde import load_sed_prior_kde, sample_sed_prior
 from .paths import (
     SED_PRIOR_KDE_GAUSSIANIZED_FILENAME,
     SED_PRIOR_KDE_NATIVE_FILENAME,
+    TEMPLATE_BANK_SUBDIR,
     get_prior_build_dir,
 )
 
@@ -159,7 +160,8 @@ def snapshot_sed_prior(
 ) -> dict[str, Any]:
     """Freeze the empirical prior into ``artifacts/empirical/``.
 
-    Always copies ``sed_prior_kde_native.joblib`` from ``prior_dir``. When
+    Always copies ``sed_prior_kde_native.joblib`` and ``templates/`` from
+    ``prior_dir``. When
     ``density_type == 'flow'`` also copies ``sed_prior_flow_*.pt`` from the same
     directory. Resolves ``template_source`` / ``reduced_templates`` into
     ``prior_dir`` / ``template_param`` / ``parameters`` before copying.
@@ -175,13 +177,26 @@ def snapshot_sed_prior(
             reduced_templates=reduced_templates,
         )
     )
-    src = resolve_prior_dir(out) / SED_PRIOR_KDE_NATIVE_FILENAME
+    prior_root = resolve_prior_dir(out)
+    src = prior_root / SED_PRIOR_KDE_NATIVE_FILENAME
     if not src.is_file():
         raise FileNotFoundError(f"prior KDE not found: {src}")
 
     dest = sed_prior_kde_artifact_path(artifacts_dir, space="native")
     dest.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(src, dest)
+
+    template_src = prior_root / TEMPLATE_BANK_SUBDIR
+    if not template_src.is_dir():
+        raise FileNotFoundError(f"prior template bank not found: {template_src}")
+    template_param = template_src / str(out["template_param"])
+    if not template_param.is_file():
+        raise FileNotFoundError(f"prior template parameter file not found: {template_param}")
+    shutil.copytree(
+        template_src,
+        dest.parent / TEMPLATE_BANK_SUBDIR,
+        dirs_exist_ok=True,
+    )
 
     # NOTE: sed_prior_kde_gaussianized.joblib is intentionally NOT snapshotted.
     # Runtime empirical entropy uses the trained native/gaussianized PriorFlows
@@ -478,13 +493,36 @@ class EmpiricalSedPrior:
         if int(pool_size) <= 0:
             raise ValueError("pool_size must be positive")
         dev = torch.device(device) if device is not None else self.pool.pool.device
-        x = self.native_flow.sample(int(pool_size), seed=int(seed)).astype(np.float64)
-        pool = torch.tensor(x, device=dev, dtype=torch.float64)
         bmin = self.artifact.get("feature_bounds_min")
         bmax = self.artifact.get("feature_bounds_max")
-        if bmin is None or bmax is None:
+        if bmin is not None and bmax is not None:
+            bmin = np.asarray(bmin, dtype=np.float64)
+            bmax = np.asarray(bmax, dtype=np.float64)
+            accepted: list[np.ndarray] = []
+            n_accepted = 0
+            attempt = 0
+            while n_accepted < int(pool_size) and attempt < 100:
+                remaining = int(pool_size) - n_accepted
+                candidates = self.native_flow.sample(
+                    max(1024, 2 * remaining), seed=int(seed) + attempt
+                ).astype(np.float64)
+                inside = np.all((candidates >= bmin) & (candidates <= bmax), axis=1)
+                if np.any(inside):
+                    kept = candidates[inside][:remaining]
+                    accepted.append(kept)
+                    n_accepted += len(kept)
+                attempt += 1
+            if n_accepted < int(pool_size):
+                raise RuntimeError(
+                    "Could not draw enough native-flow samples inside the empirical "
+                    f"training support: accepted {n_accepted}/{pool_size} after {attempt} batches"
+                )
+            x = np.concatenate(accepted, axis=0)
+        else:
+            x = self.native_flow.sample(int(pool_size), seed=int(seed)).astype(np.float64)
             bmin = x.min(axis=0)
             bmax = x.max(axis=0)
+        pool = torch.tensor(x, device=dev, dtype=torch.float64)
         self.pool = EmpiricalPriorPool(
             pool=pool,
             feature_names=list(self.pool.feature_names),

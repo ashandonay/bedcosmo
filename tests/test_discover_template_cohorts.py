@@ -4,12 +4,14 @@ import numpy as np
 import pandas as pd
 from scipy.optimize import nnls
 
-from bedcosmo.num_visits.empirical.fit_eazy_weights_to_desi import _divide_by_continuum
-from bedcosmo.num_visits.empirical.reduced.discover_template_cohorts import (
+from bedcosmo.num_visits.empirical.eazy.fit_eazy_weights_to_desi import (
+    _divide_by_continuum,
+)
+from bedcosmo.num_visits.empirical.eazy.reduced.discover_template_cohorts import (
     full_fit_chi2_dof_from_statistics,
     solve_subset_nnls,
 )
-from bedcosmo.num_visits.empirical.reduced.plot_template_subset_examples import (
+from bedcosmo.num_visits.empirical.eazy.reduced.plot_template_subset_examples import (
     continuum_sigma_in_observed_frame,
     divide_by_display_continuum,
     ivar_bin_spectrum,

@@ -14,7 +14,7 @@ import pandas as pd
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 
-from ..templates import load_eazy_templates  # noqa: E402
+from ...templates import load_eazy_templates  # noqa: E402
 from .discover_template_cohorts import (  # noqa: E402
     solve_subset_nnls,
 )

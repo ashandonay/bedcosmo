@@ -70,7 +70,6 @@ base_omegak_w_wa:
   particle_batch_size: 50000  
   n_evals: 10
   param_space: physical
-  input_designs: null
   design_args_path: null
   design_chunk_size: 1
   profile: true

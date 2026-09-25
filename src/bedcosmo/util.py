@@ -77,6 +77,7 @@ from bedcosmo.artifacts import (  # noqa: F401 — public re-exports for star-im
     resolve_design_args_input_path,
     snapshot_design_args_config,
 )
+from bedcosmo.artifacts import resolve_eig_step, parse_eig_for_posterior, nominal_grid_eig
 
 
 def get_experiments_dir() -> Path:
@@ -1098,6 +1099,160 @@ def load_model(experiment, step, run_obj, run_args, device, global_rank=0):
     return posterior_flow, selected_step
 
 
+def sample_nf(
+    experiment,
+    posterior_flow,
+    design,
+    y,
+    *,
+    num_samples=1000,
+    transform_output=True,
+    params=None,
+    device=None,
+):
+    """
+    Sample a normalizing flow conditioned on ``design`` and observation ``y``.
+
+    Builds context ``[design, y]`` and returns a GetDist ``MCSamples`` object
+    via ``experiment.get_guide_samples``. Callers choose which design/``y`` to
+    use (e.g. nominal vs optimal, central vs sampled data).
+    """
+    if device is None:
+        device = experiment.device
+
+    def _as_1d(value):
+        if isinstance(value, torch.Tensor):
+            return value.detach().to(device=device, dtype=torch.float64).reshape(-1)
+        return torch.as_tensor(
+            np.asarray(value, dtype=np.float64).reshape(-1),
+            device=device,
+            dtype=torch.float64,
+        )
+
+    context = torch.cat([_as_1d(design), _as_1d(y)], dim=-1)
+    return experiment.get_guide_samples(
+        posterior_flow,
+        context,
+        num_samples=num_samples,
+        params=params,
+        transform_output=transform_output,
+    )
+
+
+def validate_display(display):
+    """Normalize ``display`` to a non-empty tuple of 'nominal' / 'optimal'."""
+    if isinstance(display, str):
+        display = (display,)
+    display = tuple(display)
+    if not display or set(display) - {"nominal", "optimal"}:
+        raise ValueError(f"display must contain 'nominal' and/or 'optimal', got {display}")
+    return display
+
+
+NF_SERIES_COLORS = {
+    "nominal": "tab:blue",
+    "optimal": "tab:orange",
+}
+NF_SERIES_LABELS = {
+    "nominal": "Nominal Design (NF)",
+    "optimal": "Optimal Design (NF)",
+}
+
+
+def entropy_legend_suffix(prior_entropy=None, posterior_entropy=None, *, include_prior=True):
+    parts = []
+    if include_prior and prior_entropy is not None:
+        parts.append(f"H_prior: {float(prior_entropy):.2f} bits")
+    if posterior_entropy is not None:
+        parts.append(f"H_post: {float(posterior_entropy):.2f} bits")
+    if not parts:
+        return ""
+    return ", " + ", ".join(parts)
+
+
+def nf_posterior_entries(
+    experiment,
+    posterior_flow,
+    eig_data=None,
+    eval_step=None,
+    *,
+    display=("nominal", "optimal"),
+    guide_samples=1000,
+    transform_output=True,
+    params=None,
+    plot_prior=False,
+    device=None,
+):
+    """
+    Sample the flow at central ``y`` for each ``display`` design and build plot entries.
+
+    ``eig_data`` picks the optimal design (EIG argmax) and supplies legend EIG /
+    entropy values; it may be None only for ``display=('nominal',)``. With
+    ``params`` and a matching ``marginal`` block, samples are restricted to the
+    subset and the optimal design / legend EIG come from the marginal EIG.
+    """
+    display = validate_display(display)
+    nominal_eig = None
+    entropy_info = dict.fromkeys((
+        "nominal_prior_entropy", "nominal_posterior_entropy",
+        "prior_entropy_by_design", "posterior_entropy_by_design",
+    ))
+    eig_label = "EIG"
+    if eig_data is not None:
+        input_designs, eig_values, nominal_eig, entropy_info = parse_eig_for_posterior(
+            eig_data, eval_step, params=params
+        )
+        if params is not None:
+            _, step_str = resolve_eig_step(eig_data, eval_step)
+            marginal = eig_data[step_str].get("marginal", {}).get("+".join(params))
+            if marginal is not None:
+                eig_values = np.asarray(marginal["eigs_avg"], dtype=float)
+                nominal_eig = float(marginal["nominal"]["eigs_avg"])
+                eig_label = "Marginal EIG"
+    elif "optimal" in display:
+        raise ValueError("eig_data is required to pick the optimal design")
+
+    include_prior = not plot_prior
+    entries = []
+    for name in display:
+        if name == "nominal":
+            design = experiment.nominal_design
+            eig = nominal_eig
+            prior_h = entropy_info["nominal_prior_entropy"]
+            post_h = entropy_info["nominal_posterior_entropy"]
+            label = NF_SERIES_LABELS["nominal"]
+        else:
+            # A single-design pool has no argmax to speak of.
+            idx = int(np.argmax(eig_values)) if len(input_designs) > 1 else 0
+            design = input_designs[idx]
+            eig = float(eig_values[idx])
+            by_design = (entropy_info["prior_entropy_by_design"], entropy_info["posterior_entropy_by_design"])
+            prior_h, post_h = (None if h is None else h[idx] for h in by_design)
+            label = NF_SERIES_LABELS["optimal"] if len(input_designs) > 1 else "Input Design (NF)"
+        if eig is not None:
+            label += f", {eig_label}: {eig:.3f} bits"
+        label += entropy_legend_suffix(prior_h, post_h, include_prior=include_prior)
+        entries.append({
+            "samples": sample_nf(
+                experiment,
+                posterior_flow,
+                design,
+                experiment.central_val,
+                num_samples=guide_samples,
+                transform_output=transform_output,
+                params=params,
+                device=device,
+            ),
+            "name": name,
+            "design": torch.as_tensor(design, dtype=torch.float64).reshape(-1).cpu().numpy(),
+            "label": label,
+            "color": NF_SERIES_COLORS[name],
+            "line_style": "-",
+            "alpha": 1.0,
+        })
+    return entries
+
+
 def load_posterior_flow_from_checkpoint_file(
     experiment,
     checkpoint_path: str,
@@ -1146,37 +1301,6 @@ def load_posterior_flow_from_checkpoint_file(
     posterior_flow.eval()
     _ = global_rank
     return posterior_flow
-
-
-def _posterior_kwds_from_merged_eig(combined: dict, step_key: str) -> dict:
-    """Build ``generate_posterior`` kwargs from merged NF+grid eig_data (no MLflow read)."""
-    step_data = combined[step_key]
-    variable_data = step_data.get("variable", {})
-    nominal_data = step_data.get("nominal", {})
-    input_designs = np.asarray(combined.get("input_designs", []))
-    if input_designs.size == 0:
-        raise ValueError("No input designs in merged eig_data")
-    eig_values = np.asarray(variable_data.get("eigs_avg", []))
-    if eig_values.size == 0:
-        raise ValueError("No NF EIG values (variable/eigs_avg) in merged eig_data")
-    nominal_eig = nominal_data.get("eigs_avg")
-    if isinstance(nominal_eig, list):
-        nominal_eig = nominal_eig[0] if len(nominal_eig) > 0 else None
-    nominal_eig = float(nominal_eig) if nominal_eig is not None else None
-    nominal_grid_eig = None
-    nominal_grid_data = nominal_data.get("grid", {})
-    if isinstance(nominal_grid_data, dict) and "eigs_avg" in nominal_grid_data:
-        nominal_grid_eig = nominal_grid_data.get("eigs_avg")
-        if isinstance(nominal_grid_eig, list):
-            nominal_grid_eig = nominal_grid_eig[0] if len(nominal_grid_eig) > 0 else None
-        nominal_grid_eig = float(nominal_grid_eig) if nominal_grid_eig is not None else None
-    return dict(
-        input_designs=input_designs,
-        eig_values=eig_values,
-        nominal_eig=nominal_eig,
-        nominal_grid_eig=nominal_grid_eig,
-        title="Posterior (NF + grid)",
-    )
 
 
 def _eig_design_kwds_from_merged_eig(
@@ -1552,30 +1676,8 @@ def apply_prior_cli_overrides(prior_args: dict | None, overrides: dict | None) -
     return out
 
 
-def _coerce_train_arg_override(key, value, yaml_default, project_root):
+def _coerce_train_arg_override(key, value, yaml_default):
     """Coerce a single train CLI override according to the YAML default type."""
-    if key == "input_designs":
-        if isinstance(value, str):
-            input_design_str = value.strip()
-            if input_design_str.lower() == "nominal":
-                return "nominal"
-            if input_design_str.endswith(".json") or input_design_str.endswith(".JSON"):
-                file_path = input_design_str
-                if not os.path.isfile(file_path) and not os.path.isabs(file_path):
-                    file_path = os.path.join(project_root, input_design_str)
-                if os.path.isfile(file_path):
-                    with open(file_path, "r") as f:
-                        return json.load(f)
-                try:
-                    return json.loads(input_design_str)
-                except json.JSONDecodeError:
-                    return value
-            try:
-                return json.loads(input_design_str)
-            except json.JSONDecodeError:
-                return value
-        return value
-
     if isinstance(yaml_default, bool) and isinstance(value, bool):
         return value
     if isinstance(yaml_default, list):
@@ -1597,7 +1699,7 @@ def _coerce_train_arg_override(key, value, yaml_default, project_root):
     return value
 
 
-def finalize_train_run_args(parsed_args, yaml_config, unknown_argv=None, project_root="."):
+def finalize_train_run_args(parsed_args, yaml_config, unknown_argv=None):
     """
     Merge argparse output, train_args.yaml defaults, and extension CLI flags.
 
@@ -1611,7 +1713,7 @@ def finalize_train_run_args(parsed_args, yaml_config, unknown_argv=None, project
     for key, default in yaml_config.items():
         cli_value = run_args.get(key)
         if cli_value is not None:
-            run_args[key] = _coerce_train_arg_override(key, cli_value, default, project_root)
+            run_args[key] = _coerce_train_arg_override(key, cli_value, default)
         else:
             run_args[key] = default
 
@@ -2408,7 +2510,7 @@ def render_overlay(
         transform_output: Whether to transform samples to physical space.
         include_nominal: Passed to eig_designs.
         sort: Passed to eig_designs.
-        plot_prior: Passed to generate_posterior overlay figures.
+        plot_prior: Passed to plot_posterior overlay figures.
         overlay_save_dir: If set, figures are written here instead of the default
             MLflow artifacts path (used by standalone ``grid_calc`` overlays).
         device: Torch device string for loading the NF checkpoint (default: cuda if
@@ -2461,7 +2563,7 @@ def render_overlay(
     if device is None:
         device = "cuda:0" if torch.cuda.is_available() else "cpu"
 
-    posterior_kwargs = {"device": device}
+    posterior_kwargs = {}
     eig_kwargs = {}
     if overlay_save_dir is not None:
         posterior_kwargs["save_dir"] = overlay_save_dir
@@ -2487,25 +2589,37 @@ def render_overlay(
             post_flow = load_posterior_flow_from_checkpoint_file(
                 experiment_pf, nf_checkpoint_path, run_params, device, global_rank=0
             )
-            pk = _posterior_kwds_from_merged_eig(combined, step_key)
-            bp = BasePlotter(cosmo_exp=cosmo_exp)
-            bp.generate_posterior(
-                experiment=experiment_pf,
-                posterior_flow=post_flow,
-                display=['nominal', 'optimal'],
+            auto_seed(1)
+            nf_entries = nf_posterior_entries(
+                experiment_pf,
+                post_flow,
+                combined,
+                step_key,
                 guide_samples=50000,
+                transform_output=transform_output,
+                plot_prior=plot_prior,
+                device=device,
+            )
+            bp = BasePlotter(cosmo_exp=cosmo_exp)
+            bp.plot_posterior(
+                experiment=experiment_pf,
+                nf_entries=nf_entries,
                 levels=list(levels),
                 plot_prior=plot_prior,
                 transform_output=transform_output,
                 grid_samples=grid_samples,
                 filename='posterior_samples_overlay',
+                guide_samples=50000,
+                title="Posterior (NF + grid)",
+                nominal_grid_eig=nominal_grid_eig(combined, step_key),
                 **posterior_kwargs,
-                **pk,
             )
         elif isinstance(plotter, RunPlotter) and nf_checkpoint_path is None:
-            plotter.generate_posterior(
+            # NF series come from the run's saved default-eval NPZ;
+            # guide_samples only sets the prior-contour sample count.
+            plotter.plot_posterior(
                 eval_step=eval_step,
-                display=['nominal', 'optimal'],
+                device=device,
                 guide_samples=50000,
                 levels=list(levels),
                 plot_prior=plot_prior,
@@ -2519,16 +2633,14 @@ def render_overlay(
             if grid_samples is None:
                 print("No grid_samples available; skipping posterior overlay figure.")
             else:
-                plotter.generate_posterior(
+                plotter.plot_posterior(
                     experiment=grid_experiment,
-                    posterior_flow=None,
-                    display=(),
+                    nf_entries=[],
                     guide_samples=50000,
                     levels=list(levels),
                     plot_prior=plot_prior,
                     transform_output=transform_output,
                     grid_samples=grid_samples,
-                    device=device,
                     filename='posterior_samples_overlay',
                     title="Posterior (grid nominal + prior)",
                     **eig_kwargs,
@@ -2539,7 +2651,7 @@ def render_overlay(
                 "BasePlotter + grid_experiment for grid-only)."
             )
     except Exception as e:
-        print(f"Warning: overlay generate_posterior failed: {e}")
+        print(f"Warning: overlay plot_posterior failed: {e}")
         traceback.print_exc()
 
     # --- EIG designs ---

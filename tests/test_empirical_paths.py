@@ -8,14 +8,16 @@ import pytest
 
 from bedcosmo.num_visits.empirical.paths import (
     get_bedcosmo_scratch,
+    get_desi_candidate_manifest_path,
     get_desi_data_dir,
-    get_template_dir,
+    get_desi_training_data_dir,
     get_healpix_fit_dir,
     get_num_visits_scratch,
     get_prior_build_dir,
     get_prior_kde_path,
     get_prior_weights_csv,
     get_scratch_root,
+    get_template_dir,
     resolve_desi_dir,
 )
 
@@ -28,15 +30,17 @@ def test_scratch_paths_use_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) 
     assert get_bedcosmo_scratch() == scratch / "bedcosmo"
     assert get_num_visits_scratch() == scratch / "bedcosmo" / "num_visits"
     assert get_desi_data_dir() == scratch / "bedcosmo" / "desi" / "tiny_dr1"
-    assert get_template_dir() == scratch / "bedcosmo" / "eazy"
+    assert get_desi_training_data_dir() == (
+        scratch / "bedcosmo" / "num_visits" / "desi_training_data"
+    )
+    assert get_desi_candidate_manifest_path() == (
+        scratch / "bedcosmo" / "num_visits" / "desi_training_data" / "desi_candidate_manifest.csv"
+    )
+    assert get_template_dir() == (
+        scratch / "bedcosmo" / "num_visits" / "empirical_prior" / "eazy12" / "templates"
+    )
     assert get_healpix_fit_dir(23040) == (
-        scratch
-        / "bedcosmo"
-        / "num_visits"
-        / "empirical_prior"
-        / "eazy12"
-        / "healpix"
-        / "hp23040"
+        scratch / "bedcosmo" / "num_visits" / "empirical_prior" / "eazy12" / "healpix" / "hp23040"
     )
     assert get_prior_build_dir() == (
         scratch / "bedcosmo" / "num_visits" / "empirical_prior" / "eazy12"

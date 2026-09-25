@@ -51,5 +51,5 @@ class TestVariableRedshiftFiducials:
         cosmo_params = ["Om", "hrdrag", "w0"]
         defaults = {p: PLANCK18_FIDUCIAL[p] for p in cosmo_params if p in PLANCK18_FIDUCIAL}
         assert defaults["Om"] == 0.3152
-        assert defaults["hrdrag"] == 99.079
+        assert defaults["hrdrag"] == 9907.9
         assert defaults["w0"] == -1.0

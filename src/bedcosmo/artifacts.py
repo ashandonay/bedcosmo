@@ -8,7 +8,7 @@ import os
 import shutil
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, Sequence
 
 import numpy as np
 import yaml
@@ -174,6 +174,89 @@ def load_eig_data_file(artifacts_dir, eval_step=None, eig_kind="any"):
             f"No completed eig_data files with step {eval_step}{kind_suffix} found in {artifacts_dir}"
         )
     raise ValueError(f"No completed eig_data files{kind_suffix} found in {artifacts_dir}")
+
+
+def resolve_eig_step(eig_data, eval_step):
+    """Resolve ``eval_step`` to ``(step_int, 'step_N')``: the latest eig_data step <= ``eval_step``
+    (the latest step overall when ``eval_step`` is None)."""
+    step_ints = sorted(int(k.split("_")[1]) for k in eig_data if k.startswith("step_"))
+    if not step_ints:
+        raise ValueError("No step_* keys in eig_data")
+    if eval_step is None:
+        return step_ints[-1], f"step_{step_ints[-1]}"
+    eval_step_int = int(str(eval_step).removeprefix("step_"))
+    available = [s for s in step_ints if s <= eval_step_int]
+    if not available:
+        raise ValueError(
+            f"No eig_data steps <= requested step {eval_step_int} (have {step_ints})"
+        )
+    return available[-1], f"step_{available[-1]}"
+
+
+def parse_eig_for_posterior(eig_data, eval_step=None, params=None):
+    """Extract EIG and entropy summaries from eig_data for posterior sampling/plots."""
+    _, step_str = resolve_eig_step(eig_data, eval_step)
+    step_data = eig_data[step_str]
+    variable_data = step_data.get('variable', {})
+    nominal_data = step_data.get('nominal', {})
+
+    input_designs = np.array(eig_data.get('input_designs', []))
+    if input_designs.size == 0:
+        raise ValueError("No input designs found in EIG data")
+
+    eig_values = np.array(variable_data.get('eigs_avg', []))
+    nominal_eig = nominal_data.get('eigs_avg')
+    if isinstance(nominal_eig, list):
+        nominal_eig = nominal_eig[0] if len(nominal_eig) > 0 else None
+    nominal_eig = float(nominal_eig) if nominal_eig is not None else None
+
+    def _scalar_entropy(block, key):
+        val = block.get(key)
+        if val is None:
+            return None
+        if isinstance(val, list):
+            val = val[0] if len(val) > 0 else None
+        return float(val) if val is not None else None
+
+    nominal_prior_entropy = _scalar_entropy(nominal_data, "prior_entropy_avg")
+    nominal_posterior_entropy = _scalar_entropy(nominal_data, "posterior_entropy_avg")
+    prior_entropy_by_design = variable_data.get("prior_entropy_avg")
+    posterior_entropy_by_design = variable_data.get("posterior_entropy_avg")
+    if prior_entropy_by_design is not None:
+        prior_entropy_by_design = np.asarray(prior_entropy_by_design, dtype=float)
+    if posterior_entropy_by_design is not None:
+        posterior_entropy_by_design = np.asarray(posterior_entropy_by_design, dtype=float)
+
+    # Fall back to the marginal block when joint (variable) EIG was not computed.
+    if eig_values.size == 0 and params is not None:
+        subset_id = "+".join(list(params))
+        marginal = step_data.get("marginal", {}).get(subset_id)
+        if marginal is not None:
+            eig_values = np.array(marginal.get("eigs_avg", []), dtype=float)
+            nominal_eig = float(marginal["nominal"]["eigs_avg"])
+            nominal_prior_entropy = None
+            nominal_posterior_entropy = None
+            prior_entropy_by_design = None
+            posterior_entropy_by_design = None
+
+    if eig_values.size == 0:
+        raise ValueError("No EIG values found in EIG data")
+
+    entropy_info = {
+        "nominal_prior_entropy": nominal_prior_entropy,
+        "nominal_posterior_entropy": nominal_posterior_entropy,
+        "prior_entropy_by_design": prior_entropy_by_design,
+        "posterior_entropy_by_design": posterior_entropy_by_design,
+    }
+    return input_designs, eig_values, nominal_eig, entropy_info
+
+
+def nominal_grid_eig(eig_data: dict, step_key: str):
+    """Nominal-design grid EIG from eig_data (e.g. merged NF+grid), or None if absent."""
+    nominal_grid_eig = eig_data[step_key].get("nominal", {}).get("grid", {}).get("eigs_avg")
+    if isinstance(nominal_grid_eig, list):
+        nominal_grid_eig = nominal_grid_eig[0] if nominal_grid_eig else None
+    return float(nominal_grid_eig) if nominal_grid_eig is not None else None
 
 
 # ---------------------------------------------------------------------------
@@ -344,6 +427,12 @@ def _step_matches(meta: dict, step) -> bool:
         return str(meta_step) == str(step)
 
 
+def _meta_has_series(meta: dict, require_series: Optional[Sequence[str]]) -> bool:
+    if not require_series:
+        return True
+    return set(require_series) <= set(meta["series_names"])
+
+
 def load_posterior_samples_file(
     artifacts_dir: str,
     step=None,
@@ -351,13 +440,18 @@ def load_posterior_samples_file(
     status: str = "complete",
     subdir: str = DEFAULT_SUBDIR,
     path: Optional[str] = None,
+    require_series: Optional[Sequence[str]] = None,
+    generated_by: Optional[str] = None,
 ) -> dict[str, Any]:
     """
     Load the newest matching posterior-sample bundle under an artifacts dir.
 
-    If ``path`` is given, load that file directly (still validates ``status`` when set).
+    If ``path`` is given, load that file directly (still validates ``status``,
+    ``step``, and ``require_series`` when set).
     Otherwise scan ``artifacts_dir/subdir/posterior*.npz``, prefer files whose meta
-    matches ``step`` and ``status``, newest by mtime.
+    matches ``step``, ``status``, ``generated_by`` (``Evaluator.run`` central
+    bundles vs ``Evaluator.sample_posterior`` multi-y bundles), and contains every
+    name in ``require_series``, newest by mtime.
     """
     if path is not None:
         bundle = load_posterior_samples(path)
@@ -370,6 +464,11 @@ def load_posterior_samples_file(
             raise ValueError(
                 f"Posterior samples at {path} have step={bundle['meta'].get('step')!r}, "
                 f"expected {step!r}"
+            )
+        if not _meta_has_series(bundle["meta"], require_series):
+            raise ValueError(
+                f"Posterior samples at {path} have series {bundle['meta']['series_names']}, "
+                f"expected to include {list(require_series)}"
             )
         return bundle
 
@@ -402,12 +501,21 @@ def load_posterior_samples_file(
             continue
         if not _step_matches(meta, step):
             continue
+        if not _meta_has_series(meta, require_series):
+            continue
+        if generated_by is not None and meta.get("generated_by") != generated_by:
+            continue
         matches.append((os.path.getmtime(p), p, meta))
 
     if not matches:
         step_msg = f" for step={step}" if step is not None else ""
+        series_msg = (
+            f" containing series {list(require_series)}" if require_series else ""
+        )
+        source_msg = f" from {generated_by}" if generated_by is not None else ""
         raise FileNotFoundError(
-            f"No {status!r} posterior sample files{step_msg} under {search_dir}"
+            f"No {status!r} posterior sample files{source_msg}{step_msg}{series_msg} "
+            f"under {search_dir}"
         )
 
     matches.sort(key=lambda t: t[0], reverse=True)

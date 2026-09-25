@@ -62,7 +62,8 @@ class BaseExperiment(ABC):
         - nominal_context: Nominal context for guide sampling
         - transform_input: Whether to transform parameters to unconstrained space
         - central_params: dict mapping cosmological parameter names to reference
-          values used for synthetic data (via central_val) and posterior plot markers
+          values used for synthetic data (via central_val) and posterior plot markers,
+          in reported units (``{name}_multiplier`` applied, like posterior samples)
         - central_val: tensor of central feature / observation values in context space
     """
 

@@ -24,7 +24,6 @@ features: one shape coordinate, scale, and redshift.
 |---|---|
 | `discover_template_cohorts` | Exhaustively refit the DESI sample with every exact-`N` subset and save fit/color quality matrices. |
 | `build_template_prior` | Build the reduced coefficient table, EAZY `.param` file, provenance, KDE, and diagnostic samples for one subset. |
-| `build_reduced_template_prior` | Historical alias for `build_template_prior`. |
 | `plot_template_subset_examples` | Plot observed DESI spectra, full fits, reduced fits, and individual template contributions. |
 | `summarize_template_composition` | Summarize integrated flux shares and template-dominance fractions within fixed-`N` cohorts. |
 | `discover_eazy_spectral_families` | Transform full-fit weights to ILR space, apply PCA, cluster with HDBSCAN, and decode families back to sparse original-template subsets. |
@@ -38,16 +37,16 @@ without depending on the repository's `experiments/` directory.
 
 ## Paths and inputs
 
-The path helpers default to:
+The path helpers default to the self-contained EAZY12 build:
 
 ```text
-$SCRATCH/bedcosmo/eazy/
 $SCRATCH/bedcosmo/num_visits/empirical_prior/eazy12/
+$SCRATCH/bedcosmo/num_visits/empirical_prior/eazy12/templates/
 ```
 
-The full EAZY12 build must contain `desi_eazy_empirical_weights.csv`. The EAZY
-root must contain `templates/fsps_full/fsps_QSF_12_v3.param` and its referenced
-spectra.
+The full EAZY12 build must contain `desi_eazy_empirical_weights.csv`. The shared
+build contains `templates/eazy12.param` and its referenced components;
+these are downloaded automatically when first loaded.
 
 ## 1. Search all fixed-size subsets
 
@@ -55,11 +54,11 @@ Run once for every subset size of interest. The sufficient-statistics cache is
 shared, so later searches do not reread and reproject every DESI spectrum.
 
 ```bash
-python -m bedcosmo.num_visits.empirical.reduced.discover_template_cohorts \
+python -m bedcosmo.num_visits.empirical.eazy.reduced.discover_template_cohorts \
   --n-templates 2 \
   --build-name empirical_prior/eazy12
 
-python -m bedcosmo.num_visits.empirical.reduced.discover_template_cohorts \
+python -m bedcosmo.num_visits.empirical.eazy.reduced.discover_template_cohorts \
   --n-templates 3 \
   --build-name empirical_prior/eazy12
 ```
@@ -92,7 +91,7 @@ After searches through the largest subset size that should be considered (the
 current analysis used `N=1,...,5`), run:
 
 ```bash
-python -m bedcosmo.num_visits.empirical.reduced.discover_eazy_spectral_families \
+python -m bedcosmo.num_visits.empirical.eazy.reduced.discover_eazy_spectral_families \
   --build-name empirical_prior/eazy12 \
   --variance-threshold 0.90 \
   --pca-scaling standardized
@@ -115,11 +114,11 @@ If the default full build and cohort layout are present, only the template
 label is required:
 
 ```bash
-python -m bedcosmo.num_visits.empirical.reduced.build_template_prior \
+python -m bedcosmo.num_visits.empirical.eazy.reduced.build_template_prior \
   --templates T1+T7 \
   --kde-sample 2000
 
-python -m bedcosmo.num_visits.empirical.reduced.build_template_prior \
+python -m bedcosmo.num_visits.empirical.eazy.reduced.build_template_prior \
   --templates T7+T10 \
   --kde-sample 2000
 ```
@@ -131,7 +130,7 @@ $SCRATCH/bedcosmo/num_visits/empirical_prior/eazy12-t1-t7/
 $SCRATCH/bedcosmo/num_visits/empirical_prior/eazy12-t7-t10/
 ```
 
-Use `--source-build-name`, `--cohort-dir`, `--template-dir`, or `--build-name`
+Use `--source-build-name`, `--cohort-dir`, or `--build-name`
 only for a nonstandard layout. A custom `--build-name` controls the output
 directory and must match the intended subset to avoid misleading paths.
 
@@ -142,7 +141,7 @@ Each build writes:
 - `sed_prior_kde_native.joblib`
 - `sed_prior_kde_gaussianized.joblib`
 - KDE diagnostic triangle plots
-- `templates/reduced/<source>_<subset>.param` under the EAZY root
+- `templates/<source>_<subset>.param` and copied selected components
 
 The coefficient scale and KDE `log_c_scale` inherit the full-fit template
 normalization recorded in `discovery_parameters.json`. DESI coadd fluxes are
@@ -163,8 +162,10 @@ Select a built prior without maintaining a separate YAML file:
 ```
 
 `density_type: flow` requires the corresponding trained prior-flow artifacts in
-the selected build. Use `--prior-density-type kde` for a KDE-backed test or
-train the prior flow following the parent empirical-prior README.
+the selected build: the native flow supplies prior samples, and the
+gaussianized flow supplies the prior density when BED uses
+`transform_input: true`. Use `--prior-density-type kde` for a KDE-backed test
+or train both flow spaces following the parent empirical-prior README.
 
 ## Interpretation and recommended comparisons
 

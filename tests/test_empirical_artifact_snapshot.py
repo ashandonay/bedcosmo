@@ -17,6 +17,13 @@ from bedcosmo.num_visits.empirical.sed_prior import (
 )
 
 
+def _write_template_bank(prior_dir: Path) -> None:
+    templates = prior_dir / "templates"
+    templates.mkdir(parents=True)
+    (templates / "component_01.dat").write_text("1000 1\n")
+    (templates / "test.param").write_text("1 component_01.dat 1.0\n")
+
+
 def test_resolve_prior_dir_null_uses_default(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -60,9 +67,14 @@ def test_snapshot_sed_prior_copies_from_prior_dir(tmp_path: Path) -> None:
     src = prior_dir / SED_PRIOR_KDE_NATIVE_FILENAME
     prior_dir.mkdir(parents=True)
     src.write_bytes(b"physical-kde-bytes")
+    _write_template_bank(prior_dir)
 
     artifacts = tmp_path / "run" / "artifacts"
-    prior_args = {"prior_dir": str(prior_dir), "prior_pool_size": 1024}
+    prior_args = {
+        "prior_dir": str(prior_dir),
+        "template_param": "test.param",
+        "prior_pool_size": 1024,
+    }
 
     out = snapshot_sed_prior(prior_args, artifacts)
 
@@ -71,6 +83,7 @@ def test_snapshot_sed_prior_copies_from_prior_dir(tmp_path: Path) -> None:
     assert dest.read_bytes() == b"physical-kde-bytes"
     assert out["prior_dir"] == str(prior_dir)
     assert out["prior_pool_size"] == 1024
+    assert (dest.parent / "templates" / "test.param").is_file()
 
 
 def test_sed_prior_kde_gaussianized_artifact_path(tmp_path: Path) -> None:
@@ -87,9 +100,14 @@ def test_snapshot_sed_prior_does_not_copy_gaussianized_kde(tmp_path: Path) -> No
     prior_dir.mkdir(parents=True)
     src.write_bytes(b"physical-kde-bytes")
     gauss_src.write_bytes(b"gauss-kde-bytes")
+    _write_template_bank(prior_dir)
 
     artifacts = tmp_path / "run" / "artifacts"
-    prior_args = {"prior_dir": str(prior_dir), "prior_pool_size": 1024}
+    prior_args = {
+        "prior_dir": str(prior_dir),
+        "template_param": "test.param",
+        "prior_pool_size": 1024,
+    }
 
     snapshot_sed_prior(prior_args, artifacts)
 
