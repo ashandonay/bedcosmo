@@ -413,7 +413,7 @@ def test_run_plots_sampled_entries_and_saves_npz(tmp_path):
     ev.get_eig = MagicMock(
         side_effect=[(0.5, 0.01), (np.array([0.1, 0.9, 0.5]), np.zeros(3))]
     )
-    ev.plotter.plot_raw_posterior.side_effect = lambda **kw: plt.figure()
+    ev.plotter.plot_posterior_full_range.side_effect = lambda **kw: plt.figure()
 
     mcsamples = [
         _make_mcsamples(theta_nom, ["p0", "p1"]),
@@ -440,12 +440,10 @@ def test_run_plots_sampled_entries_and_saves_npz(tmp_path):
     np.testing.assert_allclose(bundle["theta"][1, 0], theta_opt)
     np.testing.assert_allclose(bundle["design"][1], [1.0, 1.0])
 
-    # Raw-sample triangles come from the saved NPZ: full range, then plot ranges.
-    raw_calls = ev.plotter.plot_raw_posterior.call_args_list
-    assert [c.kwargs for c in raw_calls] == [
-        {"posterior_samples_path": bundle["path"], "plot_ranges": False},
-        {"posterior_samples_path": bundle["path"], "plot_ranges": True},
-    ]
+    # The full-range triangle comes from the saved NPZ.
+    ev.plotter.plot_posterior_full_range.assert_called_once_with(
+        posterior_samples_path=bundle["path"]
+    )
 
     # Replot from the NPZ keeps the saved legend labels.
     entries = nf_entries_from_posterior_bundle(
@@ -526,8 +524,8 @@ def test_render_overlay_checkpoint_branch_plots_nf_and_grid(tmp_path):
     assert kwargs["save_dir"] == str(tmp_path)
 
 
-def test_run_skips_raw_posterior_outside_physical_space(tmp_path):
-    """Prior bounds/plot windows are physical-space only, so no raw plots otherwise."""
+def test_run_skips_full_range_posterior_outside_physical_space(tmp_path):
+    """Prior bounds are physical-space only, so no full-range plot otherwise."""
     ev = _make_evaluator(tmp_path, _entries_experiment(), _eig_data_with_marginal())
     ev.param_space = "unconstrained"
     ev.get_eig = MagicMock(
@@ -540,4 +538,4 @@ def test_run_skips_raw_posterior_outside_physical_space(tmp_path):
         ev.run(eval_step=100)
 
     ev.plotter.plot_posterior.assert_called_once()
-    ev.plotter.plot_raw_posterior.assert_not_called()
+    ev.plotter.plot_posterior_full_range.assert_not_called()

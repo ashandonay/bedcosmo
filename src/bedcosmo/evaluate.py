@@ -1984,8 +1984,8 @@ class Evaluator:
         """Sample nominal/optimal posteriors at central y and plot them.
 
         With ``save_samples``, the samples are written as an n_data=1 NPZ before
-        plotting, so a plotting failure does not lose them, and raw-sample
-        triangles (full range and ``plot_ranges``) are made from that NPZ.
+        plotting, so a plotting failure does not lose them, and a full-range
+        triangle (``plot_posterior_full_range``) is made from that NPZ.
         """
         auto_seed(self.seed)
         nf_entries = nf_posterior_entries(
@@ -2042,13 +2042,10 @@ class Evaluator:
             seed=self.seed,
             filename=filename,
         )
-        # Raw-sample triangles (log-count 1D) for spotting NF outliers. Prior
-        # bounds and plot windows only exist in physical space.
+        # Full-sample-range triangle for spotting NF outliers. Prior bounds only
+        # exist in physical space.
         if save_samples and self.param_space == "physical":
-            for plot_ranges in (False, True):
-                plt.close(self.plotter.plot_raw_posterior(
-                    posterior_samples_path=out_path, plot_ranges=plot_ranges
-                ))
+            plt.close(self.plotter.plot_posterior_full_range(posterior_samples_path=out_path))
 
     def run(self, eval_step=None):
         # Determine eval_step
