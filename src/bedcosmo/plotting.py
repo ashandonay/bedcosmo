@@ -1208,6 +1208,9 @@ class BasePlotter:
 
         if title is None:
             title = "Posterior Evaluation"
+        if levels is not None:
+            level_label = ", ".join(f"{level:.0%}" for level in levels)
+            title = f"{title} ({level_label})"
         g.fig.suptitle(title, fontsize=title_fontsize, weight='bold')
         # Keep a small gap between panels while reserving room for the title.
         g.subplots[0][0].get_subplotspec().get_gridspec().update(
@@ -1469,6 +1472,30 @@ class BasePlotter:
 
         param_names = g.param_names_for_root(samples[0])
         param_name_list = [p.name for p in param_names.names]
+
+        if levels is not None:
+            fill_blends = np.linspace(0.68, 0.34, len(levels))
+            for i in range(1, len(param_name_list)):
+                for j in range(i):
+                    ax = g.subplots[i, j]
+                    px, py = param_name_list[j], param_name_list[i]
+                    for sample_idx, sample in enumerate(samples):
+                        density = sample.get2DDensityGridData(
+                            px, py, num_plot_contours=len(levels), get_density=True
+                        )
+                        thresholds = sorted(density.getContourLevels(list(levels)))
+                        ax.contourf(
+                            density.x,
+                            density.y,
+                            density.P,
+                            [*thresholds, density.P.max() + 1],
+                            colors=[
+                                blend_with_white(colors[sample_idx], blend)
+                                for blend in fill_blends
+                            ],
+                            alpha=0.24,
+                            zorder=0.5,
+                        )
         
         # Axes show exactly the fence window.
         for i, param in enumerate(param_name_list):
