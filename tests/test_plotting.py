@@ -719,193 +719,95 @@ class TestComparisonPlotter:
 # ============================================================================
 
 class TestPlotTriangle:
-    """Test cases for plot_triangle function."""
-    
-    @pytest.fixture
-    def mock_samples(self):
-        """Create mock GetDist samples."""
-        samples = []
-        for i in range(2):
-            sample = Mock()
-            sample.paramNames.names = ['param1', 'param2']
-            sample.paramNames.list.return_value = ['param1', 'param2']
-            sample.samples = np.random.randn(100, 2)
-            sample.updateSettings = Mock()
-            # GetDist's automatic view range (the default fence window).
-            sample.get1DDensity.return_value.bounds.return_value = (-10.0, 10.0)
-            samples.append(sample)
-        return samples
-    
-    @pytest.fixture
-    def mock_scratch_env(self, monkeypatch):
-        """Mock SCRATCH environment variable."""
+    """plot_triangle on real GetDist samples (no ranges -> GetDist's own window)."""
+
+    @pytest.fixture(autouse=True)
+    def _env(self, monkeypatch):
         monkeypatch.setenv("SCRATCH", "/mock/scratch")
 
-    def test_plot_triangle_single_sample(self, mock_samples, mock_scratch_env):
-        """Test plot_triangle with a single sample."""
-        plotter = BasePlotter(cosmo_exp='test_exp')
-        with patch('bedcosmo.plotting.plots.get_single_plotter') as mock_get_plotter:
-            mock_plotter = Mock()
-            mock_plotter.settings = Mock()
-            mock_plotter.subplots = np.array([[Mock(), None], [Mock(collections=[]), Mock()]])  # lower triangle holds the 2D panel
-            mock_plotter.param_names_for_root.return_value = Mock()
-            mock_plotter.param_names_for_root.return_value.names = [
-                Mock(name='param1'),
-                Mock(name='param2')
-            ]
-            mock_plotter.triangle_plot = Mock()
-            mock_get_plotter.return_value = mock_plotter
+    @staticmethod
+    def _samples(n_series=1):
+        rng = np.random.default_rng(3)
+        return [
+            _gd_samples(rng.normal([0.3, 10000.0], [0.01, 100.0], size=(4000, 2)), f"s{k}")
+            for k in range(n_series)
+        ]
 
-            result = plotter.plot_triangle(
-                samples=mock_samples[0],
-                colors='blue',
-                show_scatter=False
-            )
+    @staticmethod
+    def _contour_sets(ax):
+        from matplotlib.contour import ContourSet
 
-            assert result == mock_plotter
-            mock_plotter.triangle_plot.assert_called_once()
-    
-    def test_plot_triangle_multiple_samples(self, mock_samples, mock_scratch_env):
-        """Test plot_triangle with multiple samples."""
-        plotter = BasePlotter(cosmo_exp='test_exp')
-        with patch('bedcosmo.plotting.plots.get_single_plotter') as mock_get_plotter:
-            mock_plotter = Mock()
-            mock_plotter.settings = Mock()
-            mock_plotter.subplots = np.array([[Mock(), None], [Mock(collections=[]), Mock()]])  # lower triangle holds the 2D panel
-            mock_plotter.param_names_for_root.return_value = Mock()
-            mock_plotter.param_names_for_root.return_value.names = [
-                Mock(name='param1'),
-                Mock(name='param2')
-            ]
-            mock_plotter.triangle_plot = Mock()
-            mock_get_plotter.return_value = mock_plotter
+        return [c for c in ax.collections if isinstance(c, ContourSet)]
 
-            result = plotter.plot_triangle(
-                samples=mock_samples,
-                colors=['blue', 'red'],
-                show_scatter=False
-            )
+    def test_plot_triangle_single_sample(self):
+        """One series: 1D curves on the diagonal, filled + line contours in 2D."""
+        g = BasePlotter(cosmo_exp="test_exp").plot_triangle(self._samples()[0], "tab:blue")
+        assert g.subplots.shape == (2, 2)
+        assert g.subplots[0, 0].get_lines() and g.subplots[1, 1].get_lines()
+        # Default levels (0.68, 0.95): GetDist's line contours plus the filled bands.
+        filled = [c for c in self._contour_sets(g.subplots[1, 0]) if c.filled]
+        assert len(filled) == 1 and len(filled[0].levels) == 3  # 2 thresholds + top
+        assert not g.fig.legends  # no legend_labels -> no legend
+        plt.close(g.fig)
 
-            assert result == mock_plotter
-    
-    def test_plot_triangle_with_scatter(self, mock_samples, mock_scratch_env):
-        """Test plot_triangle with scatter points enabled."""
-        plotter = BasePlotter(cosmo_exp='test_exp')
-        with patch('bedcosmo.plotting.plots.get_single_plotter') as mock_get_plotter:
-            mock_plotter = Mock()
-            mock_plotter.settings = Mock()
-            
-            # Create proper subplot structure with axes that have get_ylim
-            mock_ax1 = Mock()
-            mock_ax1.get_ylim.return_value = (0, 1)
-            mock_ax2 = Mock()
-            mock_plotter.subplots = np.array([[mock_ax1, None], [Mock(collections=[]), mock_ax2]])  # lower triangle holds the 2D panel
-            
-            # Create proper param names structure
-            # param_names.names should be a list of objects with .name attribute
-            param_name_obj1 = Mock()
-            param_name_obj1.name = 'param1'
-            param_name_obj2 = Mock()
-            param_name_obj2.name = 'param2'
-            param_names_obj = Mock()
-            param_names_obj.names = [param_name_obj1, param_name_obj2]
-            mock_plotter.param_names_for_root.return_value = param_names_obj
-            
-            mock_plotter.triangle_plot = Mock()
-            mock_plotter.add_2d_scatter = Mock()
-            mock_get_plotter.return_value = mock_plotter
-            
-            # Fix the sample to have proper paramNames.list() method
-            mock_samples[0].paramNames.list.return_value = ['param1', 'param2']
-            mock_samples[0].paramNames.list.index.return_value = 0  # Mock index method
-            
-            result = plotter.plot_triangle(
-                samples=mock_samples[0],
-                colors='blue',
-                show_scatter=True
-            )
+    def test_plot_triangle_multiple_samples(self):
+        """Each series gets its own filled contour, in its own color."""
+        g = BasePlotter(cosmo_exp="test_exp").plot_triangle(
+            self._samples(2), ["tab:blue", "tab:red"], legend_labels=["a", "b"],
+            show_outliers=False,  # fence counts would add legend lines
+        )
+        filled = [c for c in self._contour_sets(g.subplots[1, 0]) if c.filled]
+        assert len(filled) == 2
+        assert [t.get_text() for t in g.fig.legends[0].get_texts()] == ["a", "b"]
+        plt.close(g.fig)
 
-            assert result == mock_plotter
+    def test_plot_triangle_with_scatter(self):
+        """show_scatter adds 1D histograms and 2D sample points."""
+        g = BasePlotter(cosmo_exp="test_exp").plot_triangle(
+            self._samples()[0], "tab:blue", show_scatter=True
+        )
+        assert g.subplots[0, 0].patches  # histogram under the 1D curve
+        from matplotlib.collections import PathCollection
+        assert any(isinstance(c, PathCollection) for c in g.subplots[1, 0].collections)
+        plt.close(g.fig)
 
-    def test_plot_triangle_with_ranges(self, mock_samples, mock_scratch_env):
-        """Test plot_triangle with ranges parameter."""
-        plotter = BasePlotter(cosmo_exp='test_exp')
-        with patch('bedcosmo.plotting.plots.get_single_plotter') as mock_get_plotter:
-            mock_plotter = Mock()
-            mock_plotter.settings = Mock()
-            mock_ax = Mock()
-            mock_ax.get_ylim.return_value = (0, 1)
-            mock_plotter.subplots = np.array([[mock_ax, None], [Mock(collections=[]), mock_ax]])  # lower triangle holds the 2D panel
-            mock_plotter.param_names_for_root.return_value = Mock()
-            mock_plotter.param_names_for_root.return_value.names = [
-                Mock(name='param1'),
-                Mock(name='param2')
-            ]
-            mock_plotter.triangle_plot = Mock()
-            mock_get_plotter.return_value = mock_plotter
+    def test_plot_triangle_with_ranges(self):
+        """Explicit ranges set every panel's axis limits."""
+        ranges = {"Om": (0.25, 0.35), "hrdrag": (9700.0, 10300.0)}
+        g = BasePlotter(cosmo_exp="test_exp").plot_triangle(
+            self._samples()[0], "tab:blue", ranges=ranges
+        )
+        assert g.subplots[0, 0].get_xlim() == pytest.approx(ranges["Om"])
+        assert g.subplots[1, 0].get_xlim() == pytest.approx(ranges["Om"])
+        assert g.subplots[1, 0].get_ylim() == pytest.approx(ranges["hrdrag"])
+        assert g.subplots[1, 1].get_xlim() == pytest.approx(ranges["hrdrag"])
+        plt.close(g.fig)
 
-            result = plotter.plot_triangle(
-                samples=mock_samples[0],
-                colors='blue',
-                show_scatter=False,
-                ranges={'param1': (-10.0, 10.0), 'param2': (-10.0, 10.0)}
-            )
-            assert result == mock_plotter
+    def test_plot_triangle_with_scatter_alpha_contour_alpha(self):
+        """A scalar alpha is scaled by contour_alpha_factor for the plotted lines."""
+        g = BasePlotter(cosmo_exp="test_exp").plot_triangle(
+            self._samples()[0], "tab:blue", alpha=1.0, contour_alpha_factor=0.9,
+            show_scatter=True, scatter_alpha=0.5,
+        )
+        assert g.subplots[0, 0].get_lines()[0].get_alpha() == pytest.approx(0.9)
+        assert g.subplots[0, 0].patches[0].get_alpha() == pytest.approx(0.5)
+        plt.close(g.fig)
 
-    def test_plot_triangle_with_scatter_alpha_contour_alpha(self, mock_samples, mock_scratch_env):
-        """Test plot_triangle with scatter_alpha and contour_alpha_factor."""
-        plotter = BasePlotter(cosmo_exp='test_exp')
-        with patch('bedcosmo.plotting.plots.get_single_plotter') as mock_get_plotter:
-            mock_plotter = Mock()
-            mock_plotter.settings = Mock()
-            mock_plotter.subplots = np.array([[Mock(), None], [Mock(collections=[]), Mock()]])  # lower triangle holds the 2D panel
-            mock_plotter.param_names_for_root.return_value = Mock()
-            mock_plotter.param_names_for_root.return_value.names = [
-                Mock(name='param1'),
-                Mock(name='param2')
-            ]
-            mock_plotter.triangle_plot = Mock()
-            mock_get_plotter.return_value = mock_plotter
+    def test_plot_triangle_with_levels_and_alpha_list(self):
+        """Per-series alpha, line style and scatter flags are applied per series."""
+        g = BasePlotter(cosmo_exp="test_exp").plot_triangle(
+            self._samples(2), ["tab:blue", "tab:red"], show_scatter=[True, False],
+            line_style=["-", "--"], alpha=[0.8, 1.0], levels=[0.68, 0.95],
+            show_outliers=False,  # fence x markers are scatter collections too
+        )
+        lines = g.subplots[0, 0].get_lines()
+        assert [ln.get_alpha() for ln in lines] == pytest.approx([0.64, 0.8])
+        assert [ln.get_linestyle() for ln in lines] == ["-", "--"]
+        from matplotlib.collections import PathCollection
+        points = [c for c in g.subplots[1, 0].collections if isinstance(c, PathCollection)]
+        assert len(points) == 1  # only the first series scatters
+        plt.close(g.fig)
 
-            result = plotter.plot_triangle(
-                samples=mock_samples[0],
-                colors='blue',
-                show_scatter=False,
-                scatter_alpha=0.5,
-                contour_alpha_factor=0.9
-            )
-            assert result == mock_plotter
-
-    def test_plot_triangle_with_levels_and_alpha_list(self, mock_samples, mock_scratch_env):
-        """Test plot_triangle with levels and alpha as list."""
-        plotter = BasePlotter(cosmo_exp='test_exp')
-        with patch('bedcosmo.plotting.plots.get_single_plotter') as mock_get_plotter:
-            mock_plotter = Mock()
-            mock_plotter.settings = Mock()
-            mock_ax = Mock()
-            mock_ax.get_lines.return_value = []
-            mock_ax.collections = []
-            mock_plotter.subplots = np.array([[mock_ax, None], [Mock(collections=[]), mock_ax]])  # lower triangle holds the 2D panel
-            # Create proper mock param objects with .name attribute
-            param1_mock = Mock()
-            param1_mock.name = 'param1'
-            param2_mock = Mock()
-            param2_mock.name = 'param2'
-            mock_param_names = Mock()
-            mock_param_names.names = [param1_mock, param2_mock]
-            mock_plotter.param_names_for_root.return_value = mock_param_names
-            mock_plotter.triangle_plot = Mock()
-            mock_get_plotter.return_value = mock_plotter
-
-            result = plotter.plot_triangle(
-                samples=mock_samples,
-                colors=['blue', 'red'],
-                show_scatter=[True, False],
-                line_style=['-', '--'],
-                alpha=[0.8, 1.0],
-                levels=[0.68, 0.95]
-            )
-            assert result == mock_plotter
 
 def _gd_samples(arr, label, names=("Om", "hrdrag")):
     """Real GetDist MCSamples (quiet) for fence tests."""
