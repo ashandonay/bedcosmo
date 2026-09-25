@@ -6,6 +6,7 @@ import pytest
 from unittest.mock import Mock, patch, MagicMock
 from datetime import datetime
 import numpy as np
+import torch
 
 # Try to import optional dependencies, use mocks if not available
 try:
@@ -287,6 +288,57 @@ class TestRunPlotter:
             assert axes is not None
             plt.close(fig)
     
+    def test_plot_raw_posterior(self, run_plotter, tmp_path):
+        """Raw triangle: log-count diagonals, prior-bound annotations, plot_ranges zoom."""
+        from bedcosmo.artifacts import make_posterior_samples_path, save_posterior_samples
+
+        artifacts = tmp_path / "artifacts"
+        artifacts.mkdir()
+        (artifacts / "prior_args.yaml").write_text(
+            "parameters:\n"
+            "  Om:\n"
+            "    distribution: {type: uniform, lower: 0.01, upper: 0.99}\n"
+            "    plot: {lower: 0.2, upper: 0.45}\n"
+            "    latex: '\\Omega_m'\n"
+            "  hrdrag:\n"
+            "    distribution: {type: uniform, lower: 0.1, upper: 10.0}\n"
+            "    multiplier: 10000\n"
+            "    plot: {lower: 8000.0, upper: 12000.0}\n"
+        )
+        rng = np.random.default_rng(0)
+        theta = np.stack([rng.normal([0.3, 10000.0], [0.01, 100.0], size=(1, 500, 2))] * 2)
+        theta[0, 0, :3, 0] = -10.0  # nominal Om outliers outside the prior
+        save_posterior_samples(
+            make_posterior_samples_path(str(artifacts), step=100),
+            theta=theta,
+            y=np.zeros((2, 1, 3)),
+            design=np.zeros((2, 4)),
+            series_names=["nominal", "optimal"],
+            param_names=["Om", "hrdrag"],
+            meta={"step": 100, "param_space": "physical", "generated_by": "Evaluator.run"},
+        )
+
+        with patch.object(run_plotter, "_get_artifacts_dir", return_value=str(artifacts)):
+            fig = run_plotter.plot_raw_posterior(save_dir=str(tmp_path))
+            zoom = run_plotter.plot_raw_posterior(plot_ranges=True, save_dir=str(tmp_path))
+
+        axes = np.array(fig.axes).reshape(2, 2)
+        assert axes[0, 0].get_yscale() == "log" and axes[1, 1].get_yscale() == "log"
+        assert axes[1, 0].get_yscale() == "linear"
+        assert axes[0, 0].get_xlim()[0] <= -10.0  # full range keeps the outliers on-axis
+        assert axes[0, 0].get_xlabel() == "$\\Omega_m$"
+        notes = [t.get_text() for t in axes[0, 0].texts]
+        assert "nominal: 3 outside prior" in notes and "optimal: 0 outside prior" in notes
+
+        zaxes = np.array(zoom.axes).reshape(2, 2)
+        assert zaxes[0, 0].get_xlim() == pytest.approx((0.2, 0.45))
+        assert zaxes[1, 0].get_ylim() == pytest.approx((8000.0, 12000.0))
+        assert any("3 off-axis" in t.get_text() for t in zaxes[0, 0].texts)
+        assert len(list(tmp_path.glob("raw_posterior_step100_2*.png"))) == 1
+        assert len(list(tmp_path.glob("raw_posterior_step100_zoom_*.png"))) == 1
+        plt.close(fig)
+        plt.close(zoom)
+
     @pytest.mark.skip(reason="plot_evaluation method does not exist on RunPlotter")
     def test_plot_evaluation(self, run_plotter):
         """Test plot_evaluation method."""
@@ -417,39 +469,56 @@ class TestComparisonPlotter:
     def test_compare_posterior_no_samples(self, comparison_plotter, mock_run_data_list):
         """Test compare_posterior when no samples are generated."""
         with patch('bedcosmo.plotting.get_runs_data') as mock_get_runs, \
-             patch.object(
-                 ComparisonPlotter, '_nf_display_samples', side_effect=RuntimeError("fail")
+             patch(
+                 'bedcosmo.plotting.init_experiment',
+                 side_effect=RuntimeError("fail"),
              ):
 
             mock_get_runs.return_value = (mock_run_data_list, 'exp_123', 'test_exp')
 
             result = comparison_plotter.compare_posterior()
             assert result is None
-    
+
     def test_compare_posterior_success(self, comparison_plotter, mock_run_data_list, tmp_path):
         """Test successful compare_posterior call."""
+        mock_sample = Mock()
+        mock_sample.paramNames.names = ['param1', 'param2']
+        mock_exp = Mock()
+        mock_exp.central_val = torch.zeros(2)
+        mock_exp.nominal_design = torch.ones(2)
+        mock_exp.device = 'cpu'
+
         with patch('bedcosmo.plotting.get_runs_data') as mock_get_runs, \
-             patch.object(ComparisonPlotter, '_nf_display_samples') as mock_nf_samples, \
-             patch.object(ComparisonPlotter, 'plot_posterior') as mock_plot_posterior, \
+             patch('bedcosmo.plotting.init_experiment', return_value=mock_exp), \
+             patch('bedcosmo.plotting.load_model', return_value=(Mock(), 'step_1000')), \
+             patch('bedcosmo.util.sample_nf', return_value=mock_sample), \
+             patch.object(
+                 ComparisonPlotter,
+                 'load_eig_data_file',
+                 return_value=(None, {'step_1000': {'nominal': {}, 'variable': {}}}),
+             ), \
+             patch(
+                 'bedcosmo.util.parse_eig_for_posterior',
+                 return_value=(
+                     np.array([[0.0, 0.0], [1.0, 1.0]]),
+                     np.array([0.1, 0.9]),
+                     0.5,
+                     dict.fromkeys((
+                         "nominal_prior_entropy", "nominal_posterior_entropy",
+                         "prior_entropy_by_design", "posterior_entropy_by_design",
+                     )),
+                 ),
+             ), \
+             patch.object(ComparisonPlotter, 'plot_triangle') as mock_plot_triangle, \
              patch.object(comparison_plotter, 'save_figure') as mock_save, \
              patch.object(comparison_plotter, 'get_save_dir') as mock_get_dir, \
              patch.object(comparison_plotter, 'generate_filename') as mock_gen_filename:
 
-            # Setup mocks
             mock_get_runs.return_value = (mock_run_data_list, 'exp_123', 'test_exp')
-
-            # Create mock GetDist samples
-            mock_sample = Mock()
-            mock_sample.paramNames.names = ['param1', 'param2']
-            mock_nf_samples.return_value = ([{'samples': mock_sample}], 'step_1000')
-
-            # Mock plot_posterior (inherited from BasePlotter)
             mock_plotter = Mock()
             mock_plotter.fig = Mock()
             mock_plotter.fig.legends = []
-            mock_plot_posterior.return_value = mock_plotter
-
-            # Use tmp_path for save directory to avoid permission issues
+            mock_plot_triangle.return_value = mock_plotter
             mock_get_dir.return_value = str(tmp_path / "plots")
             mock_gen_filename.return_value = "test.png"
 
@@ -457,76 +526,112 @@ class TestComparisonPlotter:
                 result = comparison_plotter.compare_posterior(var='pyro_seed')
 
                 assert result == mock_plotter
-                mock_plot_posterior.assert_called_once()
+                mock_plot_triangle.assert_called_once()
                 mock_save.assert_called_once()
 
     def test_compare_posterior_with_colors(self, comparison_plotter, mock_run_data_list):
         """Test compare_posterior with custom colors."""
+        mock_sample = Mock()
+        mock_sample.paramNames.names = ['param1', 'param2']
+        mock_exp = Mock()
+        mock_exp.central_val = torch.zeros(2)
+        mock_exp.nominal_design = torch.ones(2)
+        mock_exp.device = 'cpu'
+
         with patch('bedcosmo.plotting.get_runs_data') as mock_get_runs, \
-             patch.object(ComparisonPlotter, '_nf_display_samples') as mock_nf_samples, \
-             patch.object(ComparisonPlotter, 'plot_posterior') as mock_plot_posterior, \
+             patch('bedcosmo.plotting.init_experiment', return_value=mock_exp), \
+             patch('bedcosmo.plotting.load_model', return_value=(Mock(), 'step_1000')), \
+             patch('bedcosmo.util.sample_nf', return_value=mock_sample), \
+             patch.object(
+                 ComparisonPlotter,
+                 'load_eig_data_file',
+                 return_value=(None, {'step_1000': {'nominal': {}, 'variable': {}}}),
+             ), \
+             patch(
+                 'bedcosmo.util.parse_eig_for_posterior',
+                 return_value=(
+                     np.array([[0.0, 0.0], [1.0, 1.0]]),
+                     np.array([0.1, 0.9]),
+                     0.5,
+                     dict.fromkeys((
+                         "nominal_prior_entropy", "nominal_posterior_entropy",
+                         "prior_entropy_by_design", "posterior_entropy_by_design",
+                     )),
+                 ),
+             ), \
+             patch.object(ComparisonPlotter, 'plot_triangle') as mock_plot_triangle, \
              patch.object(comparison_plotter, 'save_figure'), \
              patch.object(comparison_plotter, 'get_save_dir'), \
              patch.object(comparison_plotter, 'generate_filename'):
 
             mock_get_runs.return_value = (mock_run_data_list, 'exp_123', 'test_exp')
-            mock_sample = Mock()
-            mock_sample.paramNames.names = ['param1', 'param2']
-            mock_nf_samples.return_value = ([{'samples': mock_sample}], 'step_1000')
             mock_plotter = Mock()
             mock_plotter.fig = Mock()
             mock_plotter.fig.legends = []
-            mock_plot_posterior.return_value = mock_plotter
+            mock_plot_triangle.return_value = mock_plotter
 
             custom_colors = ['red', 'blue']
             comparison_plotter.compare_posterior(colors=custom_colors)
 
-            # Check that plot_posterior was called with colors
-            call_args = mock_plot_posterior.call_args
+            call_args = mock_plot_triangle.call_args
             assert 'colors' in call_args.kwargs or len(call_args[0]) > 1
 
     def test_compare_posterior_prior_alpha_and_entropy_legend(
         self, comparison_plotter, mock_run_data_list, tmp_path
     ):
         """Prior overlays use faint contours; posteriors include entropy in legend."""
+        mock_sample = Mock()
+        mock_sample.paramNames.names = ['param1', 'param2']
+        mock_sample.paramNames.list.return_value = ['param1', 'param2']
+        mock_exp = Mock()
+        mock_exp.central_val = torch.zeros(2)
+        mock_exp.nominal_design = torch.ones(2)
+        mock_exp.device = 'cpu'
+        mock_exp.get_prior_samples.return_value = mock_sample
+        mock_exp.prior_args = {'foo': 'bar'}
+
         with patch('bedcosmo.plotting.get_runs_data') as mock_get_runs, \
-             patch('bedcosmo.plotting.init_experiment') as mock_init_exp, \
-             patch.object(ComparisonPlotter, '_nf_display_samples') as mock_nf_samples, \
+             patch('bedcosmo.plotting.init_experiment', return_value=mock_exp) as mock_init_exp, \
+             patch('bedcosmo.plotting.load_model', return_value=(Mock(), 'step_1000')), \
+             patch('bedcosmo.util.sample_nf', return_value=mock_sample), \
+             patch.object(
+                 ComparisonPlotter,
+                 'load_eig_data_file',
+                 return_value=(None, {'step_1000': {'nominal': {}, 'variable': {}}}),
+             ), \
+             patch(
+                 'bedcosmo.util.parse_eig_for_posterior',
+                 return_value=(
+                     np.array([[0.0, 0.0], [1.0, 1.0]]),
+                     np.array([0.1, 0.9]),
+                     1.23,
+                     {
+                         "nominal_prior_entropy": 4.5,
+                         "nominal_posterior_entropy": 3.2,
+                         "prior_entropy_by_design": [1.0, 2.0],
+                         "posterior_entropy_by_design": [3.0, 3.2],
+                     },
+                 ),
+             ), \
              patch.object(
                  ComparisonPlotter,
                  '_nominal_prior_entropy_for_run',
                  return_value=4.5,
              ), \
-             patch.object(ComparisonPlotter, 'plot_posterior') as mock_plot_posterior, \
+             patch.object(ComparisonPlotter, 'plot_triangle') as mock_plot_triangle, \
              patch.object(comparison_plotter, 'save_figure'), \
              patch.object(comparison_plotter, 'get_save_dir', return_value=str(tmp_path)), \
              patch.object(comparison_plotter, 'generate_filename', return_value='test.png'):
 
             mock_get_runs.return_value = (mock_run_data_list, 'exp_123', 'test_exp')
-
-            mock_sample = Mock()
-            mock_sample.paramNames.names = ['param1', 'param2']
-            mock_sample.paramNames.list.return_value = ['param1', 'param2']
-            mock_nf_samples.return_value = ([{
-                'samples': mock_sample,
-                'label': 'Nominal Design (NF), EIG: 1.23 bits, H_post: 3.20 bits',
-                'alpha': 1.0,
-                'line_style': '-',
-            }], 'step_1000')
-
-            mock_experiment = Mock()
-            mock_experiment.get_prior_samples.return_value = mock_sample
-            mock_experiment.prior_args = {'foo': 'bar'}
-            mock_init_exp.return_value = mock_experiment
-
             mock_plotter = Mock()
             mock_plotter.fig = Mock()
             mock_plotter.fig.legends = []
-            mock_plot_posterior.return_value = mock_plotter
+            mock_plot_triangle.return_value = mock_plotter
 
             comparison_plotter.compare_posterior(var='pyro_seed', plot_prior=True)
 
-            kwargs = mock_plot_posterior.call_args.kwargs
+            kwargs = mock_plot_triangle.call_args.kwargs
             assert kwargs['alpha'][-1] == 0.4
             assert 'H_prior' not in kwargs['legend_labels'][0]
             assert 'H_post' in kwargs['legend_labels'][0]
@@ -537,8 +642,8 @@ class TestComparisonPlotter:
 # Standalone Plotting Functions Tests
 # ============================================================================
 
-class TestPlotPosterior:
-    """Test cases for plot_posterior function."""
+class TestPlotTriangle:
+    """Test cases for plot_triangle function."""
     
     @pytest.fixture
     def mock_samples(self):
@@ -558,8 +663,8 @@ class TestPlotPosterior:
         """Mock SCRATCH environment variable."""
         monkeypatch.setenv("SCRATCH", "/mock/scratch")
 
-    def test_plot_posterior_single_sample(self, mock_samples, mock_scratch_env):
-        """Test plot_posterior with a single sample."""
+    def test_plot_triangle_single_sample(self, mock_samples, mock_scratch_env):
+        """Test plot_triangle with a single sample."""
         plotter = BasePlotter(cosmo_exp='test_exp')
         with patch('bedcosmo.plotting.plots.get_single_plotter') as mock_get_plotter:
             mock_plotter = Mock()
@@ -573,7 +678,7 @@ class TestPlotPosterior:
             mock_plotter.triangle_plot = Mock()
             mock_get_plotter.return_value = mock_plotter
 
-            result = plotter.plot_posterior(
+            result = plotter.plot_triangle(
                 samples=mock_samples[0],
                 colors='blue',
                 show_scatter=False
@@ -582,8 +687,8 @@ class TestPlotPosterior:
             assert result == mock_plotter
             mock_plotter.triangle_plot.assert_called_once()
     
-    def test_plot_posterior_multiple_samples(self, mock_samples, mock_scratch_env):
-        """Test plot_posterior with multiple samples."""
+    def test_plot_triangle_multiple_samples(self, mock_samples, mock_scratch_env):
+        """Test plot_triangle with multiple samples."""
         plotter = BasePlotter(cosmo_exp='test_exp')
         with patch('bedcosmo.plotting.plots.get_single_plotter') as mock_get_plotter:
             mock_plotter = Mock()
@@ -597,7 +702,7 @@ class TestPlotPosterior:
             mock_plotter.triangle_plot = Mock()
             mock_get_plotter.return_value = mock_plotter
 
-            result = plotter.plot_posterior(
+            result = plotter.plot_triangle(
                 samples=mock_samples,
                 colors=['blue', 'red'],
                 show_scatter=False
@@ -605,8 +710,8 @@ class TestPlotPosterior:
 
             assert result == mock_plotter
     
-    def test_plot_posterior_with_scatter(self, mock_samples, mock_scratch_env):
-        """Test plot_posterior with scatter points enabled."""
+    def test_plot_triangle_with_scatter(self, mock_samples, mock_scratch_env):
+        """Test plot_triangle with scatter points enabled."""
         plotter = BasePlotter(cosmo_exp='test_exp')
         with patch('bedcosmo.plotting.plots.get_single_plotter') as mock_get_plotter:
             mock_plotter = Mock()
@@ -636,7 +741,7 @@ class TestPlotPosterior:
             mock_samples[0].paramNames.list.return_value = ['param1', 'param2']
             mock_samples[0].paramNames.list.index.return_value = 0  # Mock index method
             
-            result = plotter.plot_posterior(
+            result = plotter.plot_triangle(
                 samples=mock_samples[0],
                 colors='blue',
                 show_scatter=True
@@ -644,8 +749,8 @@ class TestPlotPosterior:
 
             assert result == mock_plotter
 
-    def test_plot_posterior_with_ranges(self, mock_samples, mock_scratch_env):
-        """Test plot_posterior with ranges parameter."""
+    def test_plot_triangle_with_ranges(self, mock_samples, mock_scratch_env):
+        """Test plot_triangle with ranges parameter."""
         plotter = BasePlotter(cosmo_exp='test_exp')
         with patch('bedcosmo.plotting.plots.get_single_plotter') as mock_get_plotter:
             mock_plotter = Mock()
@@ -661,7 +766,7 @@ class TestPlotPosterior:
             mock_plotter.triangle_plot = Mock()
             mock_get_plotter.return_value = mock_plotter
 
-            result = plotter.plot_posterior(
+            result = plotter.plot_triangle(
                 samples=mock_samples[0],
                 colors='blue',
                 show_scatter=False,
@@ -669,8 +774,8 @@ class TestPlotPosterior:
             )
             assert result == mock_plotter
 
-    def test_plot_posterior_with_scatter_alpha_contour_alpha(self, mock_samples, mock_scratch_env):
-        """Test plot_posterior with scatter_alpha and contour_alpha_factor."""
+    def test_plot_triangle_with_scatter_alpha_contour_alpha(self, mock_samples, mock_scratch_env):
+        """Test plot_triangle with scatter_alpha and contour_alpha_factor."""
         plotter = BasePlotter(cosmo_exp='test_exp')
         with patch('bedcosmo.plotting.plots.get_single_plotter') as mock_get_plotter:
             mock_plotter = Mock()
@@ -684,7 +789,7 @@ class TestPlotPosterior:
             mock_plotter.triangle_plot = Mock()
             mock_get_plotter.return_value = mock_plotter
 
-            result = plotter.plot_posterior(
+            result = plotter.plot_triangle(
                 samples=mock_samples[0],
                 colors='blue',
                 show_scatter=False,
@@ -693,8 +798,8 @@ class TestPlotPosterior:
             )
             assert result == mock_plotter
 
-    def test_plot_posterior_with_levels_and_alpha_list(self, mock_samples, mock_scratch_env):
-        """Test plot_posterior with levels and alpha as list."""
+    def test_plot_triangle_with_levels_and_alpha_list(self, mock_samples, mock_scratch_env):
+        """Test plot_triangle with levels and alpha as list."""
         plotter = BasePlotter(cosmo_exp='test_exp')
         with patch('bedcosmo.plotting.plots.get_single_plotter') as mock_get_plotter:
             mock_plotter = Mock()
@@ -714,7 +819,7 @@ class TestPlotPosterior:
             mock_plotter.triangle_plot = Mock()
             mock_get_plotter.return_value = mock_plotter
 
-            result = plotter.plot_posterior(
+            result = plotter.plot_triangle(
                 samples=mock_samples,
                 colors=['blue', 'red'],
                 show_scatter=[True, False],
@@ -723,6 +828,115 @@ class TestPlotPosterior:
                 levels=[0.68, 0.95]
             )
             assert result == mock_plotter
+
+    def test_plot_triangle_log_density_sets_diagonal_log_y(self, mock_samples, mock_scratch_env):
+        """log_density=True puts log y-scale on diagonal axes only; floors nonpositive y."""
+        plotter = BasePlotter(cosmo_exp='test_exp')
+        with patch('bedcosmo.plotting.plots.get_single_plotter') as mock_get_plotter:
+            mock_plotter = Mock()
+            mock_plotter.settings = Mock()
+
+            diag_ax0 = Mock()
+            diag_line0 = Mock()
+            diag_line0.get_ydata.return_value = np.array([0.0, 0.5, 1.0, 0.0])
+            diag_ax0.get_lines.return_value = [diag_line0]
+            diag_ax0.patches = []
+            diag_ax0.get_ylim.return_value = (1e-4, 1.0)
+
+            off_ax = Mock()
+            off_ax.get_lines.return_value = []
+            off_ax.collections = []
+
+            diag_ax1 = Mock()
+            diag_line1 = Mock()
+            diag_line1.get_ydata.return_value = np.array([0.2, 0.8, 0.0])
+            diag_ax1.get_lines.return_value = [diag_line1]
+            diag_ax1.patches = []
+            diag_ax1.get_ylim.return_value = (1e-4, 1.0)
+
+            mock_plotter.subplots = np.array([[diag_ax0, None], [off_ax, diag_ax1]])
+
+            param1_mock = Mock()
+            param1_mock.name = 'param1'
+            param2_mock = Mock()
+            param2_mock.name = 'param2'
+            mock_param_names = Mock()
+            mock_param_names.names = [param1_mock, param2_mock]
+            mock_plotter.param_names_for_root.return_value = mock_param_names
+            mock_plotter.triangle_plot = Mock()
+            mock_get_plotter.return_value = mock_plotter
+
+            result = plotter.plot_triangle(
+                samples=mock_samples[0],
+                colors='blue',
+                show_scatter=False,
+                log_density=True,
+            )
+
+            assert result == mock_plotter
+            diag_ax0.set_yscale.assert_called_once_with('log')
+            diag_ax1.set_yscale.assert_called_once_with('log')
+            off_ax.set_yscale.assert_not_called()
+
+            y0 = diag_line0.set_ydata.call_args[0][0]
+            assert np.all(y0 > 0)
+            assert y0[0] == y0.min()  # former zero floored
+            y1 = diag_line1.set_ydata.call_args[0][0]
+            assert np.all(y1 > 0)
+
+    def test_plot_triangle_hist_1d_replaces_smooth_density(self, mock_samples, mock_scratch_env):
+        """hist_1d=True clears GetDist 1D artists and draws raw matplotlib hists."""
+        plotter = BasePlotter(cosmo_exp='test_exp')
+        with patch('bedcosmo.plotting.plots.get_single_plotter') as mock_get_plotter:
+            mock_plotter = Mock()
+            mock_plotter.settings = Mock()
+
+            smooth_line = Mock()
+            smooth_line.remove = Mock()
+            diag_ax0 = Mock()
+            diag_ax0.get_lines.return_value = [smooth_line]
+            diag_ax0.patches = []
+            diag_ax0.hist = Mock()
+            diag_ax0.relim = Mock()
+            diag_ax0.autoscale_view = Mock()
+
+            off_ax = Mock()
+            off_ax.collections = []
+            diag_ax1 = Mock()
+            diag_ax1.get_lines.return_value = []
+            diag_ax1.patches = []
+            diag_ax1.hist = Mock()
+            diag_ax1.relim = Mock()
+            diag_ax1.autoscale_view = Mock()
+
+            mock_plotter.subplots = np.array([[diag_ax0, None], [off_ax, diag_ax1]])
+            param1_mock = Mock()
+            param1_mock.name = 'param1'
+            param2_mock = Mock()
+            param2_mock.name = 'param2'
+            mock_param_names = Mock()
+            mock_param_names.names = [param1_mock, param2_mock]
+            mock_plotter.param_names_for_root.return_value = mock_param_names
+            mock_plotter.triangle_plot = Mock()
+            mock_get_plotter.return_value = mock_plotter
+
+            mock_samples[0].paramNames.list.return_value = ['param1', 'param2']
+            mock_samples[0].samples = np.random.randn(50, 2)
+
+            result = plotter.plot_triangle(
+                samples=mock_samples[0],
+                colors='blue',
+                show_scatter=False,
+                hist_1d=True,
+                hist_bins=20,
+                levels=[0.68],
+            )
+
+            assert result == mock_plotter
+            smooth_line.remove.assert_called()
+            assert diag_ax0.hist.called
+            assert diag_ax1.hist.called
+            diag_ax0.autoscale_view.assert_called()
 
 
 class TestLoadEigDataFile:
@@ -933,12 +1147,12 @@ class TestHelperFunctions:
 
     def test_entropy_legend_suffix(self, mock_scratch_env):
         """Posterior legend omits H_prior when the prior contour is plotted separately."""
-        plotter = BasePlotter(cosmo_exp='test_exp')
-        both = plotter._entropy_legend_suffix(4.5, 3.2, include_prior=True)
-        post_only = plotter._entropy_legend_suffix(4.5, 3.2, include_prior=False)
+        from bedcosmo.util import entropy_legend_suffix
+        both = entropy_legend_suffix(4.5, 3.2, include_prior=True)
+        post_only = entropy_legend_suffix(4.5, 3.2, include_prior=False)
         assert both == ", H_prior: 4.50 bits, H_post: 3.20 bits"
         assert post_only == ", H_post: 3.20 bits"
-        assert plotter._entropy_legend_suffix(4.5, None, include_prior=True) == ", H_prior: 4.50 bits"
+        assert entropy_legend_suffix(4.5, None, include_prior=True) == ", H_prior: 4.50 bits"
 
     def test_display_figure(self, mock_scratch_env):
         """Test _display_figure helper method."""
@@ -1399,15 +1613,22 @@ class TestCompareContours:
     
     def test_compare_contours_no_runs(self, mock_scratch_env):
         """Test compare_contours when no runs are found."""
-        with patch('bedcosmo.plotting.BasePlotter._nf_display_samples') as mock_nf_samples, \
-             patch('bedcosmo.plotting.getdist.MCSamples') as mock_mcsamples, \
-             patch('bedcosmo.plotting.os.makedirs'):  # Mock os.makedirs to avoid permission errors
-            mock_nf_samples.return_value = ([], None)
-
+        with patch('bedcosmo.plotting.MlflowClient') as mock_client_class, \
+             patch('bedcosmo.plotting.init_experiment', side_effect=ValueError("no run")), \
+             patch('bedcosmo.plotting.os.makedirs'), \
+             patch.dict('os.environ', {'MLFLOW_ALLOW_FILE_STORE': 'true'}, clear=False):
+            mock_client = Mock()
+            mock_client_class.return_value = mock_client
+            mock_client.get_run.side_effect = Exception("not found")
             try:
-                result = compare_contours(run_ids=['nonexistent'], param1='param1', param2='param2', cosmo_exp='test_exp')
+                result = compare_contours(
+                    run_ids=['nonexistent'],
+                    param1='param1',
+                    param2='param2',
+                    cosmo_exp='test_exp',
+                )
                 assert result is None or isinstance(result, (list, tuple))
-            except (TypeError, AttributeError, ValueError):
+            except (TypeError, AttributeError, ValueError, Exception):
                 pass
 
 

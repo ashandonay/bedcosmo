@@ -36,7 +36,7 @@ from bedcosmo.util import (
     parse_float_or_list,
     parse_param_subsets,
     get_rng_state, parse_extra_args, render_overlay,
-    get_checkpoint, get_contour_area,
+    get_checkpoint, get_contour_area, nf_posterior_entries,
 )
 from bedcosmo.artifacts import (
     load_eig_data_file,
@@ -405,6 +405,7 @@ class Evaluator:
                 self.save_path,
                 step=step if posterior_samples_path is None else None,
                 path=posterior_samples_path,
+                generated_by="Evaluator.sample_posterior",
             )
             print(f"  Reusing posterior samples from {bundle['path']}")
             selected_step = bundle["meta"].get("step", step)
@@ -597,7 +598,7 @@ class Evaluator:
                 colors.extend([color] * len(data_idxs))
 
         plot_width = 10
-        g = self.plotter.plot_posterior(all_samples, colors, levels=levels, alpha=0.4, width_inch=plot_width)
+        g = self.plotter.plot_triangle(all_samples, colors, levels=levels, alpha=0.4, width_inch=plot_width)
 
         n_params = len(all_samples[0].paramNames.names)
         base_fontsize = max(6, min(18, plot_width * (0.2 + 0.42 * np.sqrt(n_params))))
@@ -1977,6 +1978,78 @@ class Evaluator:
             json.dump(self.eig_data, f, indent=2)
         print(f"Saved EIG steps data to {eig_data_save_path}")
 
+    def _generate_posterior(
+        self, posterior_flow, eval_step, params=None, filename=None, save_samples=False
+    ):
+        """Sample nominal/optimal posteriors at central y and plot them.
+
+        With ``save_samples``, the samples are written as an n_data=1 NPZ before
+        plotting, so a plotting failure does not lose them, and raw-sample
+        triangles (full range and ``plot_ranges``) are made from that NPZ.
+        """
+        auto_seed(self.seed)
+        nf_entries = nf_posterior_entries(
+            self.experiment,
+            posterior_flow,
+            self.eig_data,
+            eval_step,
+            guide_samples=self.guide_samples,
+            transform_output=self.nf_transform_output,
+            params=params,
+            plot_prior=self.plot_prior,
+            device=self.device,
+        )
+        if save_samples:
+            eig_file = self.eig_file_path or self.output_path
+            y = self.experiment.central_val.detach().cpu().numpy().reshape(1, 1, -1)
+            out_path = save_posterior_samples(
+                make_posterior_samples_path(self.save_path, step=eval_step),
+                theta=np.stack([e["samples"].samples[np.newaxis] for e in nf_entries]),
+                y=np.repeat(y, len(nf_entries), axis=0),
+                design=np.stack([e["design"] for e in nf_entries]),
+                series_names=[e["name"] for e in nf_entries],
+                param_names=nf_entries[0]["samples"].paramNames.list(),
+                meta={
+                    "status": "complete",
+                    "run_id": self.run_id,
+                    "step": int(eval_step),
+                    "eig_file": os.path.basename(str(eig_file)) if eig_file is not None else None,
+                    "conditioning": "central_val",
+                    "seed": int(self.seed),
+                    "guide_samples": int(self.guide_samples),
+                    "num_data_samples": 1,
+                    "transform_output": bool(self.nf_transform_output),
+                    "param_space": self.param_space,
+                    "cosmo_exp": self.cosmo_exp,
+                    "series": [
+                        {"name": e["name"], "color": e["color"], "label": e["label"]}
+                        for e in nf_entries
+                    ],
+                    "generated_by": "Evaluator.run",
+                },
+            )
+            print(f"  Saved central-context posterior samples to {out_path}")
+        self.plotter.plot_posterior(
+            self.experiment,
+            nf_entries,
+            eval_step=eval_step,
+            eig_data=self.eig_data,
+            params=params,
+            levels=self.levels,
+            guide_samples=self.guide_samples,
+            plot_prior=self.plot_prior,
+            transform_output=self.nf_transform_output,
+            seed=self.seed,
+            filename=filename,
+        )
+        # Raw-sample triangles (log-count 1D) for spotting NF outliers. Prior
+        # bounds and plot windows only exist in physical space.
+        if save_samples and self.param_space == "physical":
+            for plot_ranges in (False, True):
+                plt.close(self.plotter.plot_raw_posterior(
+                    posterior_samples_path=out_path, plot_ranges=plot_ranges
+                ))
+
     def run(self, eval_step=None):
         # Determine eval_step
         if eval_step is None or eval_step == 'last':
@@ -2068,32 +2141,25 @@ class Evaluator:
                 json.dump(self.eig_data, f, indent=2)
             print(f"Saved EIG data to {eig_data_save_path}")
 
-        # Make some evaluation plots
+        # Main posterior at central y. Its samples are also saved as an n_data=1
+        # NPZ for replotting; multi-y bundles come from --sample-posterior.
+        posterior_flow, _ = load_model(
+            self.experiment, eval_step, self.run_obj, self.run_args, self.device, global_rank=0
+        )
         try:
-            self.plotter.generate_posterior(
-                eval_step=eval_step,
-                display=['nominal', 'optimal'],
-                guide_samples=self.guide_samples,
-                levels=self.levels,
-                plot_prior=self.plot_prior,
-                transform_output=self.nf_transform_output,
-            )
+            self._generate_posterior(posterior_flow, eval_step, save_samples=True)
             self._update_runtime()
         except Exception as e:
-            print(f"Warning: generate_posterior failed: {e}")
+            print(f"Warning: main posterior sample/save/plot failed: {e}")
             traceback.print_exc()
 
         # Marginal posterior triangles + marginal EIG-vs-design plots per subset.
         for subset in self.marginal_eig_subsets:
             subset_id = self._subset_id(subset)
             try:
-                self.plotter.generate_posterior(
-                    eval_step=eval_step,
-                    display=['nominal', 'optimal'],
-                    guide_samples=self.guide_samples,
-                    levels=self.levels,
-                    plot_prior=self.plot_prior,
-                    transform_output=self.nf_transform_output,
+                self._generate_posterior(
+                    posterior_flow,
+                    eval_step,
                     params=subset,
                     filename=f"posterior_marginal_{subset_id}",
                 )
@@ -2224,17 +2290,17 @@ class Evaluator:
             json.dump(self.eig_data, f, indent=2)
         print(f"Saved marginal EIG data to {eig_data_save_path}")
 
+        posterior_flow, _ = load_model(
+            self.experiment, eval_step, self.run_obj, self.run_args, self.device, global_rank=0
+        )
+
         # Marginal posterior triangles + marginal EIG-vs-design plots per subset.
         for subset in self.marginal_eig_subsets:
             subset_id = self._subset_id(subset)
             try:
-                self.plotter.generate_posterior(
-                    eval_step=eval_step,
-                    display=['nominal', 'optimal'],
-                    guide_samples=self.guide_samples,
-                    levels=self.levels,
-                    plot_prior=self.plot_prior,
-                    transform_output=self.nf_transform_output,
+                self._generate_posterior(
+                    posterior_flow,
+                    eval_step,
                     params=subset,
                     filename=f"posterior_marginal_{subset_id}",
                 )
@@ -2287,9 +2353,9 @@ if __name__ == "__main__":
     parser.add_argument('--marginal-knn-k', type=int, default=3, help='Neighbor rank k for the k-NN entropy estimator (default: 3)')
     parser.add_argument('--marginal', action='store_true', help='Run only the marginal EIG evaluation loop (and its per-subset plots), skipping the full joint EIG pipeline. Requires --marginal-eig-subsets (or marginal_eig_subsets in eval_args.yaml).')
     parser.add_argument('--step-diagnostics', action='store_true', help='Run intermediate-step diagnostics (posterior_steps and eig_designs_steps). Disabled by default.')
-    parser.add_argument('--sample-posterior', dest='sample_posterior_only', action='store_true', help='Only run sample_posterior (multi-y conditioned posteriors) and save an npz bundle; skip the full EIG pipeline.')
+    parser.add_argument('--sample-posterior', dest='sample_posterior_only', action='store_true', help='Only run sample_posterior (multi-y conditioned posteriors) and save an npz bundle; skip the full EIG pipeline. Default eval (run) already saves central-context n_data=1 plot samples.')
     parser.add_argument('--num-data-samples', type=int, default=10, help='Number of likelihood data realizations for sample_posterior (default: 10)')
-    parser.add_argument('--reuse-posterior-samples', action='store_true', help='Replot from the newest cached posterior_*.npz for the eval step instead of resampling.')
+    parser.add_argument('--reuse-posterior-samples', action='store_true', help='Replot from the newest cached --sample-posterior bundle for the eval step instead of resampling.')
     parser.add_argument('--posterior-samples-path', type=str, default=None, help='Explicit path to a posterior_*.npz bundle (implies reuse).')
 
     args, extra_args = parser.parse_known_args()
