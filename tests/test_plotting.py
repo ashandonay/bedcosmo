@@ -347,6 +347,13 @@ class TestRunPlotter:
         assert axes[1, 0].get_xlim()[0] <= -10.0
         # Axes follow the samples, not the (much wider) hrdrag prior box.
         assert axes[1, 1].get_xlim()[1] < theta[..., 1].max() + 0.1 * np.ptp(theta[..., 1])
+        # Linear inside the window, log beyond: the window keeps a sizeable share
+        # of the Om axis even with an outlier ~1000 window half-widths away.
+        assert axes[1, 0].get_xscale() == "function"
+        forward = axes[1, 0].xaxis.get_transform().transform
+        x0, x1 = forward(np.array(axes[1, 0].get_xlim()))
+        w0, w1 = forward(np.array(window["Om"]))
+        assert (w1 - w0) / (x1 - x0) > 0.3
         assert axes[0, 0].get_xlabel() == "$\\Omega_m$"
         n_om_out = int(((theta[0, 0, :, 0] < om_lo) | (theta[0, 0, :, 0] > om_hi)).sum())
         notes = [t.get_text() for t in axes[0, 0].texts]
@@ -883,6 +890,25 @@ def _bulk_with_outliers(seed=0):
     bulk = np.column_stack([rng.normal(0.3, 0.01, 3000), rng.normal(10000, 100, 3000)])
     outliers = np.array([[-10.0, 13400.0]] * 3 + [[0.9, 10000.0]] * 2)
     return np.vstack([bulk, outliers])
+
+
+def test_window_log_scale_linear_inside_log_outside():
+    from bedcosmo.plotting import _window_log_scale
+
+    forward, inverse = _window_log_scale(9000.0, 11000.0)
+    x = np.array([-1e5, 8000.0, 9000.0, 10000.0, 10500.0, 11000.0, 1.1e6])
+    np.testing.assert_allclose(forward(x), [-3.04139, -1.30103, -1, 0, 0.5, 1, 4.03743], rtol=1e-5)
+    np.testing.assert_allclose(inverse(forward(x)), x)
+
+
+def test_window_log_ticks_spread_on_scaled_axis():
+    from bedcosmo.plotting import _window_log_scale, _window_log_ticks
+
+    ticks = _window_log_ticks(9000.0, 11000.0, -1.2e5, 2e4)
+    forward, _ = _window_log_scale(9000.0, 11000.0)
+    assert any(9000 <= t <= 11000 for t in ticks)  # ticks inside the window
+    assert min(ticks) <= -5e4 and max(ticks) >= 1.5e4  # and out in the log tails
+    assert np.all(np.diff(forward(np.array(ticks))) >= 0.4)  # no overlapping labels
 
 
 class TestPlotTriangleFence:

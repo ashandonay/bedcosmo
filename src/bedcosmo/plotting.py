@@ -33,6 +33,7 @@ from matplotlib.patches import Rectangle
 from scipy.spatial import ConvexHull
 from scipy.interpolate import griddata
 import matplotlib.colors
+from matplotlib.ticker import FixedLocator, FuncFormatter, MaxNLocator
 import warnings
 from datetime import datetime
 from bedcosmo.pyro_oed_src import posterior_loss
@@ -74,6 +75,46 @@ def getdist_view_ranges(samples):
         bounds = [s.get1DDensity(p).bounds() for s in samples]
         ranges[p] = (min(b[0] for b in bounds), max(b[1] for b in bounds))
     return ranges
+
+
+def _window_log_scale(lo, hi):
+    """``(forward, inverse)`` for a matplotlib ``"function"`` scale around a window.
+
+    Coordinates are in window half-widths from its centre: linear inside
+    ``[lo, hi]`` (mapped to [-1, 1]) and log10 beyond, one unit per decade,
+    so far outliers stay on-axis without squashing the window.
+    """
+    centre, half = (lo + hi) / 2, (hi - lo) / 2
+
+    def forward(x):
+        u = (np.asarray(x, dtype=float) - centre) / half
+        a = np.abs(u)
+        return np.where(a <= 1, u, np.sign(u) * (1 + np.log10(np.maximum(a, 1))))
+
+    def inverse(y):
+        y = np.asarray(y, dtype=float)
+        a = np.abs(y)
+        return centre + half * np.where(a <= 1, y, np.sign(y) * 10 ** (np.maximum(a, 1) - 1))
+
+    return forward, inverse
+
+
+def _window_log_ticks(lo, hi, vmin, vmax):
+    """Ticks for ``_window_log_scale(lo, hi)`` within ``[vmin, vmax]``.
+
+    Round values inside the window, then about one per decade outside (1
+    significant figure), dropping any within 0.4 scaled units of a kept tick.
+    """
+    forward, _ = _window_log_scale(lo, hi)
+    centre, half = (lo + hi) / 2, (hi - lo) / 2
+    candidates = [t for t in MaxNLocator(nbins=3).tick_values(lo, hi) if lo <= t <= hi]
+    for k in range(1, 12):
+        candidates += [float(f"{centre + sign * half * 10**k:.1g}") for sign in (-1, 1)]
+    ticks = []
+    for t in candidates:
+        if vmin <= t <= vmax and all(abs(forward(t) - forward(u)) >= 0.4 for u in ticks):
+            ticks.append(t)
+    return sorted(ticks)
 
 
 def _fmt_sample_count(n):
@@ -1941,7 +1982,9 @@ class RunPlotter(BasePlotter):
         GetDist contours as ``plot_posterior`` (smoothed from the in-window
         samples) and every out-of-window sample as an ``x`` at its true position;
         axes span all samples. 1D panels are log-count histograms over the full
-        range, with the window edges dashed. Axes span the samples (5% pad), so
+        range, with the window edges dashed. Every axis is linear inside the
+        window and log10 beyond it (``_window_log_scale``), so the contour stays
+        readable while far outliers stay on-axis; axes span the samples and
         prior bounds further out are clipped. Reads the newest default-eval NPZ
         under the run's artifacts (or ``posterior_samples_path``) and needs no
         experiment/flow; labels and prior bounds come from the run's
@@ -1995,11 +2038,15 @@ class RunPlotter(BasePlotter):
             outside |= (theta[..., c] < window[p][0]) | (theta[..., c] > window[p][1])
         # Same contours as plot_posterior: GetDist on the in-window samples.
         in_window = [_subset_mcsamples(s, ~out) for s, out in zip(full, outside)]
-        # Axes span the samples (5% pad); wider prior-bound lines are clipped.
-        lims = {}
+        # Axes are linear inside the window and log beyond, spanning the samples
+        # (5% pad in scaled units); wider prior-bound lines are clipped.
+        scales, lims = {}, {}
         for c, p in enumerate(names):
-            lo, hi = theta[..., c].min(), theta[..., c].max()
-            lims[p] = (lo - 0.05 * (hi - lo), hi + 0.05 * (hi - lo))
+            scales[p] = _window_log_scale(*window[p])
+            forward, inverse = scales[p]
+            lo, hi = forward([theta[..., c].min(), theta[..., c].max()])
+            lims[p] = tuple(inverse([lo - 0.05 * (hi - lo), hi + 0.05 * (hi - lo)]))
+        ticks = {p: _window_log_ticks(*window[p], *lims[p]) for p in names}
 
         fig, axes = plt.subplots(n, n, figsize=(4.2 * n, 4.2 * n), squeeze=False)
         for i in range(n):
@@ -2010,9 +2057,11 @@ class RunPlotter(BasePlotter):
                     continue
                 if i == j:
                     p = names[i]
-                    lo, hi = theta[..., i].min(), theta[..., i].max()
-                    # Shared edges so series counts are directly comparable.
-                    edges = np.linspace(lo, hi, bins + 1)
+                    forward, inverse = scales[p]
+                    lo, hi = forward([theta[..., i].min(), theta[..., i].max()])
+                    # Shared edges, even on the window scale: fine inside the window,
+                    # wider in the tails.
+                    edges = inverse(np.linspace(lo, hi, bins + 1))
                     for k, name in enumerate(display):
                         x = theta[k, :, i]
                         ax.hist(x, bins=edges, histtype="step", color=colors[k], lw=1.3, label=name)
@@ -2030,8 +2079,11 @@ class RunPlotter(BasePlotter):
                     for v in window[p]:
                         ax.axvline(v, color="0.4", ls="--", lw=0.8)
                     ax.set_yscale("log")
-                    ax.set_ylabel("counts")
+                    ax.set_ylabel("counts per bin")
+                    ax.set_xscale("function", functions=scales[p])
                     ax.set_xlim(lims[p])
+                    ax.xaxis.set_major_locator(FixedLocator(ticks[p]))
+                    ax.xaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:g}"))
                 else:
                     px, py = names[j], names[i]
                     for k, sample in enumerate(in_window):
@@ -2050,10 +2102,16 @@ class RunPlotter(BasePlotter):
                     (wxl, wxh), (wyl, wyh) = window[px], window[py]
                     ax.add_patch(Rectangle((wxl, wyl), wxh - wxl, wyh - wyl, fill=False,
                                            ls="--", lw=0.8, color="0.4"))
+                    ax.set_xscale("function", functions=scales[px])
+                    ax.set_yscale("function", functions=scales[py])
                     ax.set_xlim(lims[px])
                     ax.set_ylim(lims[py])
+                    for axis, q in ((ax.xaxis, px), (ax.yaxis, py)):
+                        axis.set_major_locator(FixedLocator(ticks[q]))
+                        axis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:g}"))
                     ax.set_ylabel(labels[py])
                 ax.set_xlabel(labels[names[j]])
+                ax.tick_params(axis="x", labelrotation=30)
 
         handles, legend_labels = axes[0, 0].get_legend_handles_labels()
         handles += [Line2D([0], [0], ls="", marker="x", color="k"),
@@ -2066,7 +2124,8 @@ class RunPlotter(BasePlotter):
         step = bundle["meta"].get("step")
         fig.suptitle(
             f"Posterior, full sample range - Run: {self.run_id[:8]}, step {step}, "
-            f"{theta.shape[1]:,} samples/series; dotted = prior bounds",
+            f"{theta.shape[1]:,} samples/series\naxes linear inside the dashed "
+            f"window, log beyond; dotted = prior bounds",
             fontsize=10,
         )
         fig.tight_layout()
