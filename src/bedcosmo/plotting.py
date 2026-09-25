@@ -1873,8 +1873,8 @@ class RunPlotter(BasePlotter):
         ``display`` series. Pass ``nf_entries=[]`` for overlay-only figures.
 
         Extra keyword arguments are forwarded to ``BasePlotter.plot_posterior``
-        (e.g. ``plot_mcmc=False``, ``ranges``). For the unfenced raw samples use
-        ``plot_raw_posterior``.
+        (e.g. ``plot_mcmc=False``, ``ranges``). To see the out-of-window samples
+        where they actually lie, use ``plot_posterior_full_range``.
         """
         if device is None:
             device = "cuda:0" if torch.cuda.is_available() else "cpu"
@@ -1920,38 +1920,34 @@ class RunPlotter(BasePlotter):
             **kwargs,
         )
 
-    def plot_raw_posterior(
+    def plot_posterior_full_range(
         self,
         *,
         eval_step=None,
         posterior_samples_path=None,
         display=("nominal", "optimal"),
         data_index=0,
-        plot_ranges=False,
+        levels=(0.68,),
         bins=200,
         filename=None,
         save_dir=None,
         dpi=200,
     ):
         """
-        Triangle of the raw saved posterior samples, for spotting outliers.
+        Posterior triangle over the full sample range, for seeing where outliers sit.
 
-        No GetDist smoothing or fencing and no experiment/flow construction: 1D
-        panels are count histograms on a log y-axis, 2D panels scatter every
-        sample. Reads the newest default-eval NPZ under the run's artifacts (or
-        ``posterior_samples_path``); labels and bounds come from the run's
-        ``prior_args.yaml`` artifact.
-
-        The plot window is GetDist's default axis range over the displayed series
-        (``getdist_view_ranges``), the same window ``plot_posterior`` fences at
-        (which also widens it for the MCMC reference when that is shown).
-        2D panels draw in-window samples as dots and the rest as ``x`` markers in
-        the series color. ``plot_ranges``: if False (default), axes span the full
-        sample range so every outlier is visible; if True, zoom the axes to the
-        plot window instead. Dotted lines mark uniform prior
-        bounds (times ``multiplier``, matching the saved physical-space samples).
-        1D panels annotate per-series counts outside the prior and, when zoomed,
-        off-axis.
+        Uses the standard plot's window (GetDist's default axis range over the
+        displayed series, ``getdist_view_ranges``). 2D panels show the same
+        GetDist contours as ``plot_posterior`` (smoothed from the in-window
+        samples) and every out-of-window sample as an ``x`` at its true position;
+        axes span all samples. 1D panels are log-count histograms over the full
+        range, with the window edges dashed. Axes span the samples (5% pad), so
+        prior bounds further out are clipped. Reads the newest default-eval NPZ
+        under the run's artifacts (or ``posterior_samples_path``) and needs no
+        experiment/flow; labels and prior bounds come from the run's
+        ``prior_args.yaml`` artifact. Dotted lines mark uniform prior bounds
+        (times ``multiplier``, matching the saved physical-space samples). 1D
+        panels annotate per-series counts outside the prior and the window.
         """
         display = validate_display(display)
         artifacts_dir = self._get_artifacts_dir()
@@ -1965,7 +1961,7 @@ class RunPlotter(BasePlotter):
         print(f"  Loaded posterior samples from {bundle['path']}")
         if bundle["meta"]["param_space"] != "physical":
             raise ValueError(
-                f"plot_raw_posterior expects physical-space samples, got "
+                f"plot_posterior_full_range expects physical-space samples, got "
                 f"param_space={bundle['meta']['param_space']!r} in {bundle['path']}"
             )
         with open(os.path.join(artifacts_dir, "prior_args.yaml")) as f:
@@ -1988,12 +1984,22 @@ class RunPlotter(BasePlotter):
         theta = bundle["theta"][series_idx, data_index]
         colors = [series_meta.get(name, {}).get("color", NF_SERIES_COLORS[name]) for name in display]
         with contextlib.redirect_stdout(io.StringIO()):
-            gd_samples = [
+            full = [
                 getdist.MCSamples(samples=theta[k], names=names, settings=GETDIST_SETTINGS)
                 for k in range(len(display))
             ]
-        window = getdist_view_ranges(gd_samples)
-        ranges = window if plot_ranges else {}
+        window = getdist_view_ranges(full)
+        # (n_display, n_guide): sample lies outside the window in any parameter
+        outside = np.zeros(theta.shape[:2], dtype=bool)
+        for c, p in enumerate(names):
+            outside |= (theta[..., c] < window[p][0]) | (theta[..., c] > window[p][1])
+        # Same contours as plot_posterior: GetDist on the in-window samples.
+        in_window = [_subset_mcsamples(s, ~out) for s, out in zip(full, outside)]
+        # Axes span the samples (5% pad); wider prior-bound lines are clipped.
+        lims = {}
+        for c, p in enumerate(names):
+            lo, hi = theta[..., c].min(), theta[..., c].max()
+            lims[p] = (lo - 0.05 * (hi - lo), hi + 0.05 * (hi - lo))
 
         fig, axes = plt.subplots(n, n, figsize=(4.2 * n, 4.2 * n), squeeze=False)
         for i in range(n):
@@ -2004,7 +2010,7 @@ class RunPlotter(BasePlotter):
                     continue
                 if i == j:
                     p = names[i]
-                    lo, hi = ranges[p] if p in ranges else (theta[..., i].min(), theta[..., i].max())
+                    lo, hi = theta[..., i].min(), theta[..., i].max()
                     # Shared edges so series counts are directly comparable.
                     edges = np.linspace(lo, hi, bins + 1)
                     for k, name in enumerate(display):
@@ -2014,58 +2020,58 @@ class RunPlotter(BasePlotter):
                         if p in prior_bounds:
                             pl, ph = prior_bounds[p]
                             notes.append(f"{int(((x < pl) | (x > ph)).sum())} outside prior")
-                        if p in ranges:
-                            notes.append(f"{int(((x < lo) | (x > hi)).sum())} off-axis")
-                        if notes:
-                            ax.text(0.02, 0.97 - 0.07 * k, f"{name}: " + ", ".join(notes),
-                                    color=colors[k], transform=ax.transAxes, va="top", fontsize=8)
+                        wl, wh = window[p]
+                        notes.append(f"{int(((x < wl) | (x > wh)).sum())} outside window")
+                        ax.text(0.02, 0.97 - 0.07 * k, f"{name}: " + ", ".join(notes),
+                                color=colors[k], transform=ax.transAxes, va="top", fontsize=8)
                     if p in prior_bounds:
                         for v in prior_bounds[p]:
                             ax.axvline(v, color="k", ls=":", lw=0.8)
+                    for v in window[p]:
+                        ax.axvline(v, color="0.4", ls="--", lw=0.8)
                     ax.set_yscale("log")
                     ax.set_ylabel("counts")
-                    if p in ranges:
-                        ax.set_xlim(lo, hi)
+                    ax.set_xlim(lims[p])
                 else:
                     px, py = names[j], names[i]
-                    for k in range(len(display)):
-                        # In-window samples as dots, the rest as x's (off-axis when zoomed).
-                        out = np.zeros(theta.shape[1], dtype=bool)
-                        for c, p in ((j, px), (i, py)):
-                            out |= (theta[k, :, c] < window[p][0]) | (theta[k, :, c] > window[p][1])
-                        ax.scatter(theta[k, ~out, j], theta[k, ~out, i], s=1.5, color=colors[k],
-                                   alpha=0.3, lw=0, rasterized=True)
+                    for k, sample in enumerate(in_window):
+                        density = sample.get2DDensityGridData(
+                            px, py, num_plot_contours=len(levels), get_density=True
+                        )
+                        ax.contour(density.x, density.y, density.P,
+                                   sorted(density.getContourLevels(list(levels))), colors=colors[k])
+                        out = outside[k]
                         ax.scatter(theta[k, out, j], theta[k, out, i], s=16, color=colors[k],
                                    alpha=0.7, marker="x", lw=0.8)
                     if px in prior_bounds and py in prior_bounds:
                         (xl, xh), (yl, yh) = prior_bounds[px], prior_bounds[py]
                         ax.add_patch(Rectangle((xl, yl), xh - xl, yh - yl, fill=False,
                                                ls=":", lw=0.8, color="k"))
-                    if px in ranges:
-                        ax.set_xlim(ranges[px])
-                    if py in ranges:
-                        ax.set_ylim(ranges[py])
+                    (wxl, wxh), (wyl, wyh) = window[px], window[py]
+                    ax.add_patch(Rectangle((wxl, wyl), wxh - wxl, wyh - wyl, fill=False,
+                                           ls="--", lw=0.8, color="0.4"))
+                    ax.set_xlim(lims[px])
+                    ax.set_ylim(lims[py])
                     ax.set_ylabel(labels[py])
                 ax.set_xlabel(labels[names[j]])
+
         handles, legend_labels = axes[0, 0].get_legend_handles_labels()
-        # Zoomed, the x's are off-axis; the 1D panels count them instead.
-        if n > 1 and not plot_ranges:
-            handles.append(Line2D([0], [0], ls="", marker="x", color="k"))
-            legend_labels.append("outside plot window")
+        handles += [Line2D([0], [0], ls="", marker="x", color="k"),
+                    Line2D([0], [0], ls="--", lw=0.8, color="0.4")]
+        legend_labels += ["outside plot window", "plot window (GetDist)"]
         # The upper-right panel is empty for n > 1; keep the legend off the 1D notes.
         axes[0, -1].legend(handles, legend_labels,
                            loc="upper right" if n == 1 else "center", fontsize=9)
 
         step = bundle["meta"].get("step")
-        view = "plot ranges" if plot_ranges else "full range"
         fig.suptitle(
-            f"Raw posterior samples - Run: {self.run_id[:8]}, step {step}, "
-            f"{theta.shape[1]:,} samples/series ({view}); dotted = prior bounds",
+            f"Posterior, full sample range - Run: {self.run_id[:8]}, step {step}, "
+            f"{theta.shape[1]:,} samples/series; dotted = prior bounds",
             fontsize=10,
         )
         fig.tight_layout()
         if filename is None:
-            filename = f"raw_posterior_step{step}" + ("_zoom" if plot_ranges else "")
+            filename = f"posterior_full_range_step{step}"
         self.save_figure(
             fig,
             filename=filename,

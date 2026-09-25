@@ -288,11 +288,14 @@ class TestRunPlotter:
             assert axes is not None
             plt.close(fig)
     
-    def test_plot_raw_posterior(self, run_plotter, tmp_path):
-        """Raw triangle: log-count diagonals, prior-bound annotations, GetDist-window
-        outlier markers and plot_ranges zoom."""
+    def test_plot_posterior_full_range(self, run_plotter, tmp_path):
+        """Full range: GetDist contours from in-window samples, x's at the true
+        positions of out-of-window samples, log-count 1D panels."""
         import contextlib
         import io
+
+        from matplotlib.collections import PathCollection
+        from matplotlib.patches import Rectangle
 
         from bedcosmo.artifacts import make_posterior_samples_path, save_posterior_samples
         from bedcosmo.plotting import getdist_view_ranges
@@ -304,12 +307,10 @@ class TestRunPlotter:
             "parameters:\n"
             "  Om:\n"
             "    distribution: {type: uniform, lower: 0.01, upper: 0.99}\n"
-            "    plot: {lower: 0.2, upper: 0.45}\n"
             "    latex: '\\Omega_m'\n"
             "  hrdrag:\n"
             "    distribution: {type: uniform, lower: 0.1, upper: 10.0}\n"
             "    multiplier: 10000\n"
-            "    plot: {lower: 8000.0, upper: 12000.0}\n"
         )
         rng = np.random.default_rng(0)
         # 5000 samples so the 3 outliers (0.06%) sit past GetDist's 0.1% range cut.
@@ -326,19 +327,8 @@ class TestRunPlotter:
         )
 
         with patch.object(run_plotter, "_get_artifacts_dir", return_value=str(artifacts)):
-            fig = run_plotter.plot_raw_posterior(save_dir=str(tmp_path))
-            zoom = run_plotter.plot_raw_posterior(plot_ranges=True, save_dir=str(tmp_path))
+            fig = run_plotter.plot_posterior_full_range(save_dir=str(tmp_path))
 
-        axes = np.array(fig.axes).reshape(2, 2)
-        assert axes[0, 0].get_yscale() == "log" and axes[1, 1].get_yscale() == "log"
-        assert axes[1, 0].get_yscale() == "linear"
-        assert axes[0, 0].get_xlim()[0] <= -10.0  # full range keeps the outliers on-axis
-        assert axes[0, 0].get_xlabel() == "$\\Omega_m$"
-        notes = [t.get_text() for t in axes[0, 0].texts]
-        assert "nominal: 3 outside prior" in notes and "optimal: 0 outside prior" in notes
-
-        # The plot window is GetDist's default range over both series (the YAML
-        # `plot` box is not used); outliers don't stretch it.
         with contextlib.redirect_stdout(io.StringIO()):
             gd = [getdist.MCSamples(samples=theta[k, 0], names=["Om", "hrdrag"],
                                     settings=GETDIST_SETTINGS) for k in range(2)]
@@ -349,23 +339,33 @@ class TestRunPlotter:
             (t[0, :, 0] < om_lo) | (t[0, :, 0] > om_hi) | (t[0, :, 1] < h_lo) | (t[0, :, 1] > h_hi)
             for t in theta
         ]
-        # Per series: in-window samples as dots, out-of-window ones as x's.
-        dots, crosses = axes[1, 0].collections[0::2], axes[1, 0].collections[1::2]
-        assert [len(c.get_offsets()) for c in crosses] == [int(o.sum()) for o in outside]
-        assert [len(c.get_offsets()) for c in dots] == [int((~o).sum()) for o in outside]
         assert outside[0].sum() >= 3
-        legend = [t.get_text() for t in axes[0, 1].get_legend().get_texts()]
-        assert legend == ["nominal", "optimal", "outside plot window"]
 
-        zaxes = np.array(zoom.axes).reshape(2, 2)
-        assert zaxes[0, 0].get_xlim() == pytest.approx(window["Om"])
-        assert zaxes[1, 0].get_ylim() == pytest.approx(window["hrdrag"])
-        n_off = int(((theta[0, 0, :, 0] < om_lo) | (theta[0, 0, :, 0] > om_hi)).sum())
-        assert any(f"{n_off} off-axis" in t.get_text() for t in zaxes[0, 0].texts)
-        assert len(list(tmp_path.glob("raw_posterior_step100_2*.png"))) == 1
-        assert len(list(tmp_path.glob("raw_posterior_step100_zoom_*.png"))) == 1
+        axes = np.array(fig.axes).reshape(2, 2)
+        assert axes[0, 0].get_yscale() == "log" and axes[1, 1].get_yscale() == "log"
+        assert axes[0, 0].get_xlim()[0] <= -10.0  # full range keeps the outliers on-axis
+        assert axes[1, 0].get_xlim()[0] <= -10.0
+        # Axes follow the samples, not the (much wider) hrdrag prior box.
+        assert axes[1, 1].get_xlim()[1] < theta[..., 1].max() + 0.1 * np.ptp(theta[..., 1])
+        assert axes[0, 0].get_xlabel() == "$\\Omega_m$"
+        n_om_out = int(((theta[0, 0, :, 0] < om_lo) | (theta[0, 0, :, 0] > om_hi)).sum())
+        notes = [t.get_text() for t in axes[0, 0].texts]
+        assert f"nominal: 3 outside prior, {n_om_out} outside window" in notes
+
+        # 2D: one contour set per series, plus x's at the true out-of-window positions.
+        ax2d = axes[1, 0]
+        crosses = [c for c in ax2d.collections if isinstance(c, PathCollection)]
+        assert len(ax2d.collections) - len(crosses) >= 2  # contour sets
+        assert [len(c.get_offsets()) for c in crosses] == [int(o.sum()) for o in outside]
+        np.testing.assert_allclose(crosses[0].get_offsets(), theta[0, 0][outside[0]])
+        # Dashed box = GetDist's window.
+        box = [r for r in ax2d.patches if isinstance(r, Rectangle) and r.get_linestyle() == "--"]
+        assert len(box) == 1 and box[0].get_xy() == pytest.approx((om_lo, h_lo))
+
+        legend = [t.get_text() for t in axes[0, 1].get_legend().get_texts()]
+        assert legend == ["nominal", "optimal", "outside plot window", "plot window (GetDist)"]
+        assert len(list(tmp_path.glob("posterior_full_range_step100_*.png"))) == 1
         plt.close(fig)
-        plt.close(zoom)
 
     @pytest.mark.skip(reason="plot_evaluation method does not exist on RunPlotter")
     def test_plot_evaluation(self, run_plotter):
