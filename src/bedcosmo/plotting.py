@@ -1537,7 +1537,7 @@ class BasePlotter:
                     g.subplots[i, j].scatter(
                         np.clip(arr[:, names.index(px)], *fence[px]),
                         np.clip(arr[:, names.index(py)], *fence[py]),
-                        s=22, marker="x", color=colors[k], linewidths=1.2, zorder=6, clip_on=False,
+                        s=12, marker="x", color=colors[k], linewidths=1.2, zorder=6, clip_on=False,
                     )
             if py in fence:
                 lo, hi = fence[py]
