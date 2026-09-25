@@ -1209,10 +1209,9 @@ class BasePlotter:
         if title is None:
             title = "Posterior Evaluation"
         g.fig.suptitle(title, fontsize=title_fontsize, weight='bold')
-        # Touching panels with room for the title, like plot_posterior_full_range
-        # (constrained layout pads between panels and couples that to the title gap).
+        # Keep a small gap between panels while reserving room for the title.
         g.subplots[0][0].get_subplotspec().get_gridspec().update(
-            left=0.09, right=0.985, bottom=0.06, top=0.95, wspace=0, hspace=0
+            left=0.09, right=0.985, bottom=0.06, top=0.95, wspace=0.12, hspace=0.12
         )
 
         if filename is None:
@@ -2063,12 +2062,12 @@ class RunPlotter(BasePlotter):
             lims[p] = tuple(inverse([lo - 0.05 * (hi - lo), hi + 0.05 * (hi - lo)]))
         ticks = {p: _window_log_ticks(*window[p], *lims[p]) for p in names}
 
-        # Same layout as plot_posterior's GetDist triangle: 10 in wide, touching
-        # panels, tick labels only on the outer edges, same font sizes.
+        # Same panel spacing as plot_posterior, with tick labels only on the
+        # outer edges and matching font sizes.
         width = 10
         axis_fs, title_fs, legend_fs = triangle_font_sizes(width, n)
         fig, axes = plt.subplots(n, n, figsize=(width, width), squeeze=False,
-                                 gridspec_kw=dict(wspace=0, hspace=0))
+                                 gridspec_kw=dict(wspace=0.12, hspace=0.12))
         for i in range(n):
             for j in range(n):
                 ax = axes[i, j]

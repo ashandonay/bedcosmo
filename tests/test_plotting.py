@@ -375,10 +375,10 @@ class TestRunPlotter:
                           "samples (5e3/series)", "plot window (GetDist); axes log beyond it",
                           "prior bounds"]
 
-        # Same layout as the GetDist triangle: touching panels, labels on outer edges.
+        # Small gaps separate panels; labels stay on the outer edges.
         pos = {(i, j): axes[i, j].get_position() for i, j in ((0, 0), (1, 0), (1, 1))}
-        assert pos[(1, 0)].x1 == pytest.approx(pos[(1, 1)].x0)
-        assert pos[(1, 0)].y1 == pytest.approx(pos[(0, 0)].y0)
+        assert pos[(1, 1)].x0 > pos[(1, 0)].x1
+        assert pos[(1, 0)].y1 < pos[(0, 0)].y0
         assert axes[0, 0].get_xlabel() == "" and axes[1, 0].get_xlabel() == "$\\Omega_m$"
         assert axes[1, 1].get_ylabel() == "counts per bin"
         assert axes[1, 1].yaxis.get_label_position() == "right"
@@ -1006,8 +1006,8 @@ class TestPlotTriangleFence:
         assert [t.get_text() for t in g.subplots[0, 0].texts] == ["6 below / 4 above range"]
         plt.close(g.fig)
 
-    def test_plot_posterior_panels_touch(self):
-        """Panels touch, and the title sits clear of the top panel."""
+    def test_plot_posterior_panels_have_spacing(self):
+        """Panels have a small gap, and the title sits clear of the top panel."""
         from types import SimpleNamespace
 
         entry = {
@@ -1020,8 +1020,8 @@ class TestPlotTriangleFence:
                                        display="nominal", plot_mcmc=False)
         g.fig.canvas.draw()
         pos = {k: g.subplots[k].get_position() for k in ((0, 0), (1, 0), (1, 1))}
-        assert pos[(1, 1)].x0 == pytest.approx(pos[(1, 0)].x1, abs=1e-6)
-        assert pos[(0, 0)].y0 == pytest.approx(pos[(1, 0)].y1, abs=1e-6)
+        assert pos[(1, 1)].x0 > pos[(1, 0)].x1
+        assert pos[(0, 0)].y0 > pos[(1, 0)].y1
         renderer = g.fig.canvas.get_renderer()
         title = g.fig._suptitle.get_window_extent(renderer).transformed(g.fig.transFigure.inverted())
         assert title.y0 > pos[(0, 0)].y1
