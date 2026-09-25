@@ -483,12 +483,10 @@ class TestComparisonPlotter:
         """Test successful compare_posterior call."""
         mock_sample = Mock()
         mock_sample.paramNames.names = ['param1', 'param2']
-        mock_sample.paramNames.list.return_value = ['param1', 'param2']
         mock_exp = Mock()
         mock_exp.central_val = torch.zeros(2)
         mock_exp.nominal_design = torch.ones(2)
         mock_exp.device = 'cpu'
-        mock_exp.prior_args = {'parameters': {}}
 
         with patch('bedcosmo.plotting.get_runs_data') as mock_get_runs, \
              patch('bedcosmo.plotting.init_experiment', return_value=mock_exp), \
@@ -535,12 +533,10 @@ class TestComparisonPlotter:
         """Test compare_posterior with custom colors."""
         mock_sample = Mock()
         mock_sample.paramNames.names = ['param1', 'param2']
-        mock_sample.paramNames.list.return_value = ['param1', 'param2']
         mock_exp = Mock()
         mock_exp.central_val = torch.zeros(2)
         mock_exp.nominal_design = torch.ones(2)
         mock_exp.device = 'cpu'
-        mock_exp.prior_args = {'parameters': {}}
 
         with patch('bedcosmo.plotting.get_runs_data') as mock_get_runs, \
              patch('bedcosmo.plotting.init_experiment', return_value=mock_exp), \
@@ -592,7 +588,7 @@ class TestComparisonPlotter:
         mock_exp.nominal_design = torch.ones(2)
         mock_exp.device = 'cpu'
         mock_exp.get_prior_samples.return_value = mock_sample
-        mock_exp.prior_args = {'parameters': {}, 'foo': 'bar'}
+        mock_exp.prior_args = {'foo': 'bar'}
 
         with patch('bedcosmo.plotting.get_runs_data') as mock_get_runs, \
              patch('bedcosmo.plotting.init_experiment', return_value=mock_exp) as mock_init_exp, \
@@ -659,6 +655,8 @@ class TestPlotTriangle:
             sample.paramNames.list.return_value = ['param1', 'param2']
             sample.samples = np.random.randn(100, 2)
             sample.updateSettings = Mock()
+            # GetDist's automatic view range (the default fence window).
+            sample.get1DDensity.return_value.bounds.return_value = (-10.0, 10.0)
             samples.append(sample)
         return samples
     
@@ -673,7 +671,7 @@ class TestPlotTriangle:
         with patch('bedcosmo.plotting.plots.get_single_plotter') as mock_get_plotter:
             mock_plotter = Mock()
             mock_plotter.settings = Mock()
-            mock_plotter.subplots = np.array([[Mock(), None], [None, Mock()]])
+            mock_plotter.subplots = np.array([[Mock(), None], [Mock(collections=[]), Mock()]])  # lower triangle holds the 2D panel
             mock_plotter.param_names_for_root.return_value = Mock()
             mock_plotter.param_names_for_root.return_value.names = [
                 Mock(name='param1'),
@@ -697,7 +695,7 @@ class TestPlotTriangle:
         with patch('bedcosmo.plotting.plots.get_single_plotter') as mock_get_plotter:
             mock_plotter = Mock()
             mock_plotter.settings = Mock()
-            mock_plotter.subplots = np.array([[Mock(), None], [None, Mock()]])
+            mock_plotter.subplots = np.array([[Mock(), None], [Mock(collections=[]), Mock()]])  # lower triangle holds the 2D panel
             mock_plotter.param_names_for_root.return_value = Mock()
             mock_plotter.param_names_for_root.return_value.names = [
                 Mock(name='param1'),
@@ -725,7 +723,7 @@ class TestPlotTriangle:
             mock_ax1 = Mock()
             mock_ax1.get_ylim.return_value = (0, 1)
             mock_ax2 = Mock()
-            mock_plotter.subplots = np.array([[mock_ax1, None], [None, mock_ax2]])
+            mock_plotter.subplots = np.array([[mock_ax1, None], [Mock(collections=[]), mock_ax2]])  # lower triangle holds the 2D panel
             
             # Create proper param names structure
             # param_names.names should be a list of objects with .name attribute
@@ -761,7 +759,7 @@ class TestPlotTriangle:
             mock_plotter.settings = Mock()
             mock_ax = Mock()
             mock_ax.get_ylim.return_value = (0, 1)
-            mock_plotter.subplots = np.array([[mock_ax, None], [None, mock_ax]])
+            mock_plotter.subplots = np.array([[mock_ax, None], [Mock(collections=[]), mock_ax]])  # lower triangle holds the 2D panel
             mock_plotter.param_names_for_root.return_value = Mock()
             mock_plotter.param_names_for_root.return_value.names = [
                 Mock(name='param1'),
@@ -784,7 +782,7 @@ class TestPlotTriangle:
         with patch('bedcosmo.plotting.plots.get_single_plotter') as mock_get_plotter:
             mock_plotter = Mock()
             mock_plotter.settings = Mock()
-            mock_plotter.subplots = np.array([[Mock(), None], [None, Mock()]])
+            mock_plotter.subplots = np.array([[Mock(), None], [Mock(collections=[]), Mock()]])  # lower triangle holds the 2D panel
             mock_plotter.param_names_for_root.return_value = Mock()
             mock_plotter.param_names_for_root.return_value.names = [
                 Mock(name='param1'),
@@ -811,7 +809,7 @@ class TestPlotTriangle:
             mock_ax = Mock()
             mock_ax.get_lines.return_value = []
             mock_ax.collections = []
-            mock_plotter.subplots = np.array([[mock_ax, None], [None, mock_ax]])
+            mock_plotter.subplots = np.array([[mock_ax, None], [Mock(collections=[]), mock_ax]])  # lower triangle holds the 2D panel
             # Create proper mock param objects with .name attribute
             param1_mock = Mock()
             param1_mock.name = 'param1'
@@ -902,13 +900,32 @@ class TestPlotTriangleFence:
         assert sorted(offsets[:, 0]) == pytest.approx([0.2, 0.2, 0.2, 0.45, 0.45])
         plt.close(g.fig)
 
-    def test_no_ranges_no_fence(self):
+    def test_default_window_is_getdist_view_range(self):
         post = _gd_samples(_bulk_with_outliers(), "Nominal")
-        g = BasePlotter(cosmo_exp="test_exp").plot_triangle(
-            [post], ["tab:blue"], legend_labels=["Nominal"], levels=[0.68]
+        prior = _gd_samples(
+            np.column_stack([np.linspace(0.01, 0.99, 500), np.linspace(1000, 1e5, 500)]),
+            "Prior",
         )
-        assert self._legend_texts(g) == ["Nominal"]
-        assert g.subplots[0, 0].get_title() == ""
+        g = BasePlotter(cosmo_exp="test_exp").plot_triangle(
+            [post, prior], ["tab:blue", "black"], legend_labels=["Nominal", "Prior"],
+            levels=[0.68], fenced=[True, False],
+        )
+        # Window = GetDist's own range for the fenced series; outliers don't move
+        # it and the unfenced prior doesn't widen it.
+        windows = {p: post.get1DDensity(p).bounds() for p in ("Om", "hrdrag")}
+        assert 0.2 < windows["Om"][0] and windows["Om"][1] < 0.4
+        assert g.subplots[0, 0].get_xlim() == pytest.approx(windows["Om"])
+        assert g.subplots[1, 1].get_xlim() == pytest.approx(windows["hrdrag"])
+
+        arr = post.samples
+        n_out = int(sum(
+            (arr[:, i] < windows[p][0]) | (arr[:, i] > windows[p][1])
+            for i, p in enumerate(("Om", "hrdrag"))
+        ).astype(bool).sum())
+        assert n_out >= 5  # the five gross outliers, plus any bulk tail past GetDist's range
+        texts = self._legend_texts(g)
+        assert texts[:2] == ["Nominal", f"  {n_out}/3.0e3 outside plot range ({100 * n_out / 3005:.2f}%)"]
+        assert texts[2] == "Prior"
         plt.close(g.fig)
 
     def test_none_legend_label_skips_entry(self):
@@ -923,34 +940,24 @@ class TestPlotTriangleFence:
         assert g.subplots[0, 0].get_title() == "6 below / 4 above range"
         plt.close(g.fig)
 
-    @pytest.mark.parametrize("transform_output, expected", [
-        (True, {"Om": (0.2, 0.45), "hrdrag": (8000.0, 12000.5)}),
-        (False, {}),
-    ])
-    def test_plot_posterior_defaults_to_prior_plot_window(self, transform_output, expected):
+    def test_plot_posterior_fences_posteriors_not_prior(self):
         from types import SimpleNamespace
 
         entry = {
             "name": "nominal", "samples": _gd_samples(_bulk_with_outliers(), "Nominal"),
             "label": "Nominal", "color": "tab:blue", "line_style": "-", "alpha": 1.0,
         }
-        experiment = SimpleNamespace(
-            central_params=None,
-            prior_args={"parameters": {
-                "Om": {"plot": {"lower": 0.2, "upper": 0.45}},
-                "hrdrag": {"plot": {"lower": 8000.0, "upper": 12000.5}},
-            }},
-        )
+        prior = _gd_samples(np.random.default_rng(2).uniform(0.01, 0.99, (500, 2)), "Prior")
+        experiment = SimpleNamespace(central_params=None, get_prior_samples=Mock(return_value=prior))
         plotter = BasePlotter(cosmo_exp="test_exp")
         with patch.object(plotter, "plot_triangle") as tri, \
              patch.object(plotter, "save_figure"):
             plotter.plot_posterior(
-                experiment, [entry], display="nominal", plot_mcmc=False,
-                transform_output=transform_output,
+                experiment, [entry], display="nominal", plot_mcmc=False, plot_prior=True,
             )
         kwargs = tri.call_args.kwargs
-        assert kwargs["ranges"] == expected
-        assert kwargs["fenced"] == [True]
+        assert kwargs["ranges"] is None  # GetDist picks the window
+        assert kwargs["fenced"] == [True, False]
 
 
 class TestLoadEigDataFile:

@@ -61,20 +61,6 @@ plt.rcParams['font.serif'] = ['DejaVu Serif', 'Times New Roman', 'Times', 'serif
 PRIOR_CONTOUR_ALPHA = 0.4
 
 
-def prior_plot_ranges(prior_args, params):
-    """``{param: (lower, upper)}`` from the ``plot`` windows in ``prior_args``.
-
-    Windows are in physical (reported) units. Params without a ``plot`` entry
-    are left out, so they autoscale and are not fenced.
-    """
-    parameters = prior_args["parameters"]
-    return {
-        p: (float(parameters[p]["plot"]["lower"]), float(parameters[p]["plot"]["upper"]))
-        for p in params
-        if "plot" in parameters.get(p, {})
-    }
-
-
 def _fmt_sample_count(n):
     """Compact count for legends, e.g. 500000 -> 5e5, 30544 -> 3.1e4."""
     if n < 1000:
@@ -987,10 +973,9 @@ class BasePlotter:
         ``plot_mcmc``: if True (default) and ``cosmo_exp == 'num_tracers'``, overlay
         the DESI/MCMC nominal reference. Set False for NF-only figures.
 
-        ``ranges`` (``{param: (lo, hi)}``) is the displayed window and the
-        outlier fence (see ``plot_triangle``). ``None`` uses the prior's ``plot``
-        windows when ``transform_output`` is True; unconstrained-space plots are
-        not fenced by default. Pass ``{}`` to autoscale without fencing.
+        ``ranges`` (``{param: (lo, hi)}``) overrides the displayed window, which is
+        also the outlier fence (see ``plot_triangle``). By default GetDist picks the
+        window from the posterior series; the prior overlay is not fenced.
 
         Raises if ``nf_entries is None`` and no matching artifact is found.
         """
@@ -1127,13 +1112,6 @@ class BasePlotter:
             sample.label = label
 
         plotted_params = all_samples[0].paramNames.list()
-        if ranges is None:
-            ranges = (
-                prior_plot_ranges(experiment.prior_args, plotted_params)
-                if transform_output
-                else {}
-            )
-
         plot_width = 10
         n_params = len(plotted_params)
         base_fontsize = max(6, min(18, plot_width * (0.2 + 0.42 * np.sqrt(n_params))))
@@ -1227,17 +1205,17 @@ class BasePlotter:
                 If None, the default GetDist settings are used.
             width_inch (float): Width of the plot in inches. Higher values increase resolution.
             ranges (dict, optional): ``{param: (min, max)}`` display window, which is
-                also the outlier fence. Fenced series are smoothed by GetDist from
-                their in-window samples only; the rest are drawn as ``x`` markers
-                clamped to the window edge, counted per series in the legend, and
-                summed per parameter above the 1D panels. Params not in ``ranges``
-                autoscale and are not fenced. ``None`` disables both.
+                also the outlier fence. Params not in ``ranges`` use GetDist's own
+                view range over the fenced series. Fenced series are smoothed by
+                GetDist from their in-window samples only; the rest are drawn as
+                ``x`` markers clamped to the window edge, counted per series in the
+                legend, and summed per parameter above the 1D panels.
             scatter_alpha (float): Alpha value for scatter points. Default 0.6 for better distinguishability.
             contour_alpha_factor (float): Factor to adjust contour alpha for distinguishability. Default 0.8.
             style (object, optional): Style object (like KP7StylePaper) to apply to the plotter settings.
-            fenced (list of bool, optional): Per-sample flag for applying the ``ranges``
-                fence; default all True. Pass False for prior overlays, which are
-                drawn from all their samples.
+            fenced (list of bool, optional): Per-sample flag for applying the fence;
+                default all True. Pass False for prior overlays, which are drawn from
+                all their samples and do not widen the automatic window.
             legend_fontsize (float, optional): Font size for the figure legend.
         Returns:
             g: GetDist plotter object with the generated triangle plot.
@@ -1268,8 +1246,20 @@ class BasePlotter:
             fenced = [True] * len(samples)
 
         # The displayed window is the outlier fence: GetDist smooths only the
-        # in-window samples, and the rest are marked and counted below.
-        fence = {p: ranges[p] for p in samples[0].paramNames.list() if ranges and p in ranges}
+        # in-window samples, and the rest are marked and counted below. Per param
+        # the window is ``ranges[p]`` if given, else GetDist's own view range
+        # (0.1%/99.9% quantiles plus a smoothing pad, so outliers do not move it)
+        # over the fenced series.
+        for sample in samples:
+            sample.updateSettings(GETDIST_SETTINGS)
+        fence = {}
+        for p in samples[0].paramNames.list():
+            if ranges and p in ranges:
+                fence[p] = tuple(ranges[p])
+                continue
+            bounds = [s.get1DDensity(p).bounds() for s, f in zip(samples, fenced) if f]
+            if bounds:
+                fence[p] = (min(b[0] for b in bounds), max(b[1] for b in bounds))
         full_samples = samples
         in_window = []
         for sample, fence_sample in zip(full_samples, fenced):
@@ -1344,9 +1334,6 @@ class BasePlotter:
         # Prepare contour_args with custom levels if provided
         # For GetDist, we don't pass line styles in contour_args when using multiple styles
 
-        for sample in samples:
-            sample.updateSettings(GETDIST_SETTINGS)
-
         # Set contour levels if provided
         if levels is not None:
             if isinstance(levels, float):
@@ -1420,20 +1407,15 @@ class BasePlotter:
         param_names = g.param_names_for_root(samples[0])
         param_name_list = [p.name for p in param_names.names]
         
-        # Manual axis limits if ranges is provided and didn't work
-        if ranges is not None:
-            # Set axis limits manually for each parameter
-            for i, param in enumerate(param_name_list):
-                if param in ranges:
-                    min_val, max_val = ranges[param]
-                    # Set limits for diagonal (1D) plots
-                    if hasattr(g, 'subplots') and g.subplots is not None:
-                        g.subplots[i, i].set_xlim(min_val, max_val)
-                        # Set limits for off-diagonal (2D) plots
-                        for j in range(i):
-                            if param_name_list[j] in ranges:
-                                g.subplots[i, j].set_xlim(ranges[param_name_list[j]][0], ranges[param_name_list[j]][1])
-                                g.subplots[i, j].set_ylim(min_val, max_val)
+        # Axes show exactly the fence window.
+        for i, param in enumerate(param_name_list):
+            if param not in fence:
+                continue
+            g.subplots[i, i].set_xlim(*fence[param])
+            for j in range(i):
+                if param_name_list[j] in fence:
+                    g.subplots[i, j].set_xlim(*fence[param_name_list[j]])
+                    g.subplots[i, j].set_ylim(*fence[param])
 
         if any(show_scatter):
             for i, param in enumerate(param_name_list):
@@ -3426,15 +3408,6 @@ class ComparisonPlotter(BasePlotter):
                             f"{self._prior_entropy_legend_suffix(prior_h)}"
                         )
         
-        # Display window / fence: union of the groups' prior plot windows.
-        plotted_params = all_samples[0].paramNames.list()
-        ranges = {}
-        if transform_output:
-            for experiment in group_experiments.values():
-                for p, (lo, hi) in prior_plot_ranges(experiment.prior_args, plotted_params).items():
-                    cur_lo, cur_hi = ranges.get(p, (lo, hi))
-                    ranges[p] = (min(lo, cur_lo), max(hi, cur_hi))
-
         g = self.plot_triangle(
             all_samples,
             all_colors,
@@ -3444,10 +3417,10 @@ class ComparisonPlotter(BasePlotter):
             width_inch=width_inch,
             alpha=all_alphas,
             line_style=all_line_styles,
-            ranges=ranges,
             fenced=all_fenced,
         )
 
+        plotted_params = all_samples[0].paramNames.list()
         marker_entries = []
         for group_key, experiment in group_experiments.items():
             central_params = getattr(experiment, "central_params", None)

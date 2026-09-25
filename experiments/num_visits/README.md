@@ -97,7 +97,7 @@ Each parameter entry contains:
   - `uniform`: requires `lower` and `upper`.
   - `gamma`: requires `shape` (concentration) and `z_0` (scale; internally converted to rate = 1/z_0). Models the LSST-style redshift distribution `p(z) ~ (z/z_0)^(shape-1) * exp(-z/z_0)`.
   - `gaussian`: requires `loc` (mean) and `scale` (standard deviation).
-- **`plot`** -- plotting range (`lower`, `upper`, physical units) used for posterior visualization. It is also the outlier fence: posterior contours are smoothed from the samples inside it, and samples outside it are drawn as `x` markers on the frame edge and counted in the legend. `RunPlotter.plot_raw_posterior` shows the unfenced samples.
+- **`plot`** -- plotting range (`lower`, `upper`) used for posterior visualization.
 - **`latex`** -- LaTeX string for axis labels.
 
 **`constraints`** is a placeholder dictionary (currently unused).

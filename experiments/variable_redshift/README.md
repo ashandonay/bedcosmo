@@ -29,7 +29,7 @@ The **nominal design** is the midpoint of `[lower, upper]` for one redshift, or 
 
 ## Parameters (`prior_args*.yaml`)
 
-All priors are uniform. Each entry under `parameters` has a `distribution` (`lower`, `upper`), an optional `multiplier`, `plot` ranges and a `latex` label. The `plot` range (physical units) is the posterior plot window and its outlier fence: samples outside it are drawn as edge `x` markers and counted in the legend. The prior range is in sampling units, and the physical value is `multiplier × sample`. The distance functions apply `hrdrag_multiplier`, and posterior samples are reported in physical units.
+All priors are uniform. Each entry under `parameters` has a `distribution` (`lower`, `upper`), an optional `multiplier`, `plot` ranges and a `latex` label. The prior range is in sampling units, and the physical value is `multiplier × sample`. The distance functions apply `hrdrag_multiplier`, and posterior samples are reported in physical units.
 
 Constraints are enforced by sampling the affected pair jointly from `ConstrainedUniform2D`:
 

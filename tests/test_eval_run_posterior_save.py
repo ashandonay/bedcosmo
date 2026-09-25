@@ -80,7 +80,6 @@ def test_plot_posterior_does_not_sample(tmp_path, monkeypatch):
         latex_labels=["p0", "p1"],
         device="cpu",
         central_params=None,
-        prior_args={"parameters": {}},
         get_guide_samples=MagicMock(side_effect=AssertionError("should not sample")),
     )
     fake_g = MagicMock()
@@ -143,7 +142,6 @@ def test_plot_posterior_loads_npz_when_entries_omitted(tmp_path, monkeypatch):
         latex_labels=["p0", "p1"],
         device="cpu",
         central_params=None,
-        prior_args={"parameters": {}},
     )
     fake_g = MagicMock()
     fake_g.fig.legends = []
@@ -197,7 +195,6 @@ def test_plot_posterior_display_filters_loaded_and_provided(tmp_path, monkeypatc
         latex_labels=["p0", "p1"],
         device="cpu",
         central_params=None,
-        prior_args={"parameters": {}},
     )
     fake_g = MagicMock()
     fake_g.fig.legends = []

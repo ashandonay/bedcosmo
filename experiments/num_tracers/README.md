@@ -129,7 +129,7 @@ Also note `--upper` is exclusive via `np.arange`, and float accumulation makes t
 
 ## Parameters (`prior_args_*.yaml`)
 
-Each entry under `parameters` defines a `distribution` (type + bounds), optional `multiplier`, `plot` ranges, and a `latex` label. The `plot` range (physical units) is the posterior plot window and its outlier fence: contours come from the samples inside it, and samples outside are drawn as edge `x` markers and counted in the legend. `constraints` prune the prior:
+Each entry under `parameters` defines a `distribution` (type + bounds), optional `multiplier`, `plot` ranges, and a `latex` label. `constraints` prune the prior:
 
 - `valid_densities` — `Om + Ok` within `[0, 1]`
 - `high_z_matter_dom` — `w0 + wa <= 0`
