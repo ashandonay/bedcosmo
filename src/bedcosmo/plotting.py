@@ -61,6 +61,32 @@ plt.rcParams['font.serif'] = ['DejaVu Serif', 'Times New Roman', 'Times', 'serif
 PRIOR_CONTOUR_ALPHA = 0.4
 
 
+def _fmt_sample_count(n):
+    """Compact count for legends, e.g. 500000 -> 5e5, 30544 -> 3.1e4."""
+    if n < 1000:
+        return str(n)
+    exp = int(np.floor(np.log10(n)))
+    mant = n / 10**exp
+    return f"{mant:.0f}e{exp}" if mant == round(mant) else f"{mant:.1f}e{exp}"
+
+
+def _subset_mcsamples(sample, mask):
+    """Copy of ``sample`` keeping only the rows in ``mask`` (same names, labels, legend label)."""
+    if not mask.any():
+        raise ValueError(
+            f"No samples of {sample.label!r} fall inside the plot ranges; widen ``ranges``."
+        )
+    with contextlib.redirect_stdout(io.StringIO()):
+        subset = getdist.MCSamples(
+            samples=np.asarray(sample.samples)[mask],
+            names=sample.paramNames.list(),
+            labels=[p.label for p in sample.paramNames.names],
+            settings=GETDIST_SETTINGS,
+        )
+    subset.label = sample.label
+    return subset
+
+
 def nf_entries_from_posterior_bundle(
     bundle,
     experiment,
@@ -926,11 +952,8 @@ class BasePlotter:
         eval_step=None,
         posterior_samples_path=None,
         data_index=0,
-        log_density=False,
         show_scatter=False,
         ranges=None,
-        hist_1d=False,
-        hist_bins=40,
     ):
         """
         Plot a posterior triangle from NF entries or a saved posterior NPZ.
@@ -950,14 +973,9 @@ class BasePlotter:
         ``plot_mcmc``: if True (default) and ``cosmo_exp == 'num_tracers'``, overlay
         the DESI/MCMC nominal reference. Set False for NF-only figures.
 
-        ``log_density``: if True, use a log scale on the 1D density/count y-axes
-        (diagonal only); parameter axes stay linear. Applies to GetDist curves
-        and to raw ``hist_1d`` bars.
-
-        ``hist_1d``: if True, replace GetDist smoothed 1D densities with raw
-        matplotlib histograms (full sample range; no fencing). ``show_scatter``
-        still controls 2D scatter overlays. ``ranges`` is forwarded to
-        ``plot_triangle`` (``None`` = no axis clipping).
+        ``ranges`` (``{param: (lo, hi)}``) overrides the displayed window, which is
+        also the outlier fence (see ``plot_triangle``). By default GetDist picks the
+        window from the posterior series; the prior overlay is not fenced.
 
         Raises if ``nf_entries is None`` and no matching artifact is found.
         """
@@ -999,6 +1017,8 @@ class BasePlotter:
         all_alphas = []
         all_line_styles = []
         legend_labels = []
+        # Prior overlays are drawn in full; every posterior series is fenced.
+        all_fenced = []
 
         for entry in nf_entries:
             samples = entry['samples']
@@ -1009,6 +1029,7 @@ class BasePlotter:
             all_alphas.append(entry['alpha'])
             all_line_styles.append(entry['line_style'])
             legend_labels.append(entry['label'])
+            all_fenced.append(True)
 
         if grid_samples is not None:
             grid_samples_np = np.asarray(grid_samples, dtype=np.float64)
@@ -1051,6 +1072,7 @@ class BasePlotter:
                 else ""
             )
             legend_labels.append(f'Nominal Design (Grid){eig_str}')
+            all_fenced.append(True)
 
         if plot_mcmc and self.cosmo_exp == 'num_tracers':
             try:
@@ -1063,6 +1085,7 @@ class BasePlotter:
                 all_alphas.append(1.0)
                 all_line_styles.append('--')
                 legend_labels.append('Nominal Design (MCMC)')
+                all_fenced.append(True)
             except NotImplementedError:
                 print(
                     f"Warning: get_nominal_samples not implemented for {self.cosmo_exp}, "
@@ -1079,6 +1102,7 @@ class BasePlotter:
             legend_labels.append(
                 f'Prior{self._prior_entropy_legend_suffix(nominal_prior_entropy)}'
             )
+            all_fenced.append(False)
 
         if not all_samples:
             print("Warning: No samples to plot.")
@@ -1087,30 +1111,9 @@ class BasePlotter:
         for sample, label in zip(all_samples, legend_labels):
             sample.label = label
 
+        plotted_params = all_samples[0].paramNames.list()
         plot_width = 10
-        g = self.plot_triangle(
-            all_samples,
-            all_colors,
-            legend_labels=legend_labels,
-            levels=levels,
-            width_inch=plot_width,
-            alpha=all_alphas,
-            line_style=all_line_styles,
-            plot_size_ratio=plot_size_ratio,
-            log_density=log_density,
-            show_scatter=show_scatter,
-            ranges=ranges,
-            hist_1d=hist_1d,
-            hist_bins=hist_bins,
-        )
-
-        if getattr(experiment, "central_params", None):
-            plotted_params = all_samples[0].paramNames.list()
-            self._mark_central_parameter_values(
-                g, experiment, transform_output=transform_output, plotted_params=plotted_params
-            )
-
-        n_params = len(all_samples[0].paramNames.names)
+        n_params = len(plotted_params)
         base_fontsize = max(6, min(18, plot_width * (0.2 + 0.42 * np.sqrt(n_params))))
         if n_params == 1:
             base_fontsize = max(base_fontsize, 12)
@@ -1121,35 +1124,30 @@ class BasePlotter:
         elif n_params == 2:
             legend_fontsize = max(legend_fontsize * 1.25, 12)
 
-        if g.fig.legends:
-            for legend in g.fig.legends:
-                legend.remove()
+        g = self.plot_triangle(
+            all_samples,
+            all_colors,
+            legend_labels=legend_labels,
+            levels=levels,
+            width_inch=plot_width,
+            alpha=all_alphas,
+            line_style=all_line_styles,
+            plot_size_ratio=plot_size_ratio,
+            show_scatter=show_scatter,
+            ranges=ranges,
+            fenced=all_fenced,
+            legend_fontsize=legend_fontsize,
+        )
 
-        custom_legend = []
-        for i, label in enumerate(legend_labels):
-            custom_legend.append(
-                Line2D(
-                    [0],
-                    [0],
-                    color=all_colors[i],
-                    label=label,
-                    linewidth=1.2,
-                    linestyle=all_line_styles[i],
-                    alpha=all_alphas[i],
-                )
+        if getattr(experiment, "central_params", None):
+            self._mark_central_parameter_values(
+                g, experiment, transform_output=transform_output, plotted_params=plotted_params
             )
 
         if title is None:
             title = "Posterior Evaluation"
         g.fig.suptitle(title, fontsize=title_fontsize, weight='bold')
         g.fig.set_constrained_layout(True)
-        leg = g.fig.legend(
-            handles=custom_legend,
-            loc='upper right',
-            bbox_to_anchor=(0.99, 0.96),
-            fontsize=legend_fontsize,
-        )
-        leg.set_in_layout(False)
 
         if filename is None:
             filename = 'posterior'
@@ -1186,9 +1184,8 @@ class BasePlotter:
         scatter_alpha=0.6,
         contour_alpha_factor=0.8,
         style=style,
-        log_density=False,
-        hist_1d=False,
-        hist_bins=40,
+        fenced=None,
+        legend_fontsize=None,
     ):
         """
         Low-level GetDist triangle plot from MCSamples lists.
@@ -1197,31 +1194,29 @@ class BasePlotter:
         Args:
             samples (list): List of GetDist MCSamples objects.
             colors (list): List of colors for each sample.
-            legend_labels (list, optional): List of legend labels for each sample.
+            legend_labels (list, optional): One legend label per sample; ``None`` skips
+                that sample's legend entry.
             show_scatter (bool or list): If True, show scatter/histograms on the 1D/2D plots for all samples.
                 If a list, specifies whether to show scatter for each sample individually.
-                When ``hist_1d`` is True, diagonal histograms come from ``hist_1d`` and
-                ``show_scatter`` only controls 2D scatter overlays.
             line_style (str or list): Line style for contours. Can be a single string or a list of strings corresponding to each sample.
             alpha (float or list): Alpha value for the contours. Can be a single float or a list of floats corresponding to each sample.
             levels (float or list, optional): Contour levels to use (e.g., 0.68 or [0.68, 0.95]).
                 If a single float is provided, it is converted to a list.
                 If None, the default GetDist settings are used.
             width_inch (float): Width of the plot in inches. Higher values increase resolution.
-            ranges (dict, optional): Dictionary specifying fixed ranges for parameters.
-                Keys should be parameter names, values should be tuples of (min, max).
-                Omit (``None``) to leave GetDist autoscaling to the full sample span.
+            ranges (dict, optional): ``{param: (min, max)}`` display window, which is
+                also the outlier fence. Params not in ``ranges`` use GetDist's own
+                view range over the fenced series. Fenced series are smoothed by
+                GetDist from their in-window samples only; the rest are drawn as
+                ``x`` markers clamped to the window edge, counted per series in the
+                legend, and summed per parameter above the 1D panels.
             scatter_alpha (float): Alpha value for scatter points. Default 0.6 for better distinguishability.
             contour_alpha_factor (float): Factor to adjust contour alpha for distinguishability. Default 0.8.
             style (object, optional): Style object (like KP7StylePaper) to apply to the plotter settings.
-            log_density (bool): If True, use a log scale on the 1D density/count y-axes
-                (diagonal panels only). Parameter (x) axes stay linear. Nonpositive
-                density values are floored so matplotlib's log scale does not fail.
-            hist_1d (bool): If True, clear GetDist smoothed 1D densities on the
-                diagonal and replace them with raw matplotlib histograms over the
-                full sample range (no fencing).
-            hist_bins (int): Number of bins for ``hist_1d`` (and for legacy
-                ``show_scatter`` diagonal hists when ``hist_1d`` is False).
+            fenced (list of bool, optional): Per-sample flag for applying the fence;
+                default all True. Pass False for prior overlays, which are drawn from
+                all their samples and do not widen the automatic window.
+            legend_fontsize (float, optional): Font size for the figure legend.
         Returns:
             g: GetDist plotter object with the generated triangle plot.
         """
@@ -1247,6 +1242,39 @@ class BasePlotter:
             legend_labels = [legend_labels]
 
         colors = [convert_color(c) for c in colors]
+        if fenced is None:
+            fenced = [True] * len(samples)
+
+        # The displayed window is the outlier fence: GetDist smooths only the
+        # in-window samples, and the rest are marked and counted below. Per param
+        # the window is ``ranges[p]`` if given, else GetDist's own view range
+        # (0.1%/99.9% quantiles plus a smoothing pad, so outliers do not move it)
+        # over the fenced series.
+        for sample in samples:
+            sample.updateSettings(GETDIST_SETTINGS)
+        fence = {}
+        for p in samples[0].paramNames.list():
+            if ranges and p in ranges:
+                fence[p] = tuple(ranges[p])
+                continue
+            bounds = [s.get1DDensity(p).bounds() for s, f in zip(samples, fenced) if f]
+            if bounds:
+                fence[p] = (min(b[0] for b in bounds), max(b[1] for b in bounds))
+        full_samples = samples
+        in_window = []
+        for sample, fence_sample in zip(full_samples, fenced):
+            arr = np.asarray(sample.samples)
+            names = sample.paramNames.list()
+            mask = np.ones(len(arr), dtype=bool)
+            if fence_sample:
+                for p, (lo, hi) in fence.items():
+                    col = arr[:, names.index(p)]
+                    mask &= (col >= lo) & (col <= hi)
+            in_window.append(mask)
+        samples = [
+            sample if mask.all() else _subset_mcsamples(sample, mask)
+            for sample, mask in zip(full_samples, in_window)
+        ]
 
         # Create adjusted colors for contours and scatter points
         def adjust_color_brightness(color, factor):
@@ -1306,9 +1334,6 @@ class BasePlotter:
         # Prepare contour_args with custom levels if provided
         # For GetDist, we don't pass line styles in contour_args when using multiple styles
 
-        for sample in samples:
-            sample.updateSettings(GETDIST_SETTINGS)
-
         # Set contour levels if provided
         if levels is not None:
             if isinstance(levels, float):
@@ -1320,7 +1345,7 @@ class BasePlotter:
         g.triangle_plot(
             samples,
             colors=contour_colors,
-            legend_labels=legend_labels,
+            legend_labels=None,
             filled=False,
             normalized=True,
             diag1d_kwargs={
@@ -1382,75 +1407,29 @@ class BasePlotter:
         param_names = g.param_names_for_root(samples[0])
         param_name_list = [p.name for p in param_names.names]
         
-        # Manual axis limits if ranges is provided and didn't work
-        if ranges is not None:
-            # Set axis limits manually for each parameter
-            for i, param in enumerate(param_name_list):
-                if param in ranges:
-                    min_val, max_val = ranges[param]
-                    # Set limits for diagonal (1D) plots
-                    if hasattr(g, 'subplots') and g.subplots is not None:
-                        g.subplots[i, i].set_xlim(min_val, max_val)
-                        # Set limits for off-diagonal (2D) plots
-                        for j in range(i):
-                            if param_name_list[j] in ranges:
-                                g.subplots[i, j].set_xlim(ranges[param_name_list[j]][0], ranges[param_name_list[j]][1])
-                                g.subplots[i, j].set_ylim(min_val, max_val)
-
-        if hist_1d:
-            for i, param in enumerate(param_name_list):
-                ax = g.subplots[i, i]
-                if ax is None:
-                    continue
-                # Drop GetDist KDE/smooth 1D artists so only raw hists remain.
-                for line in list(ax.get_lines()):
-                    line.remove()
-                for patch in list(getattr(ax, "patches", [])):
-                    patch.remove()
-                for k, sample in enumerate(samples):
-                    param_names_k = sample.paramNames.list()
-                    if param not in param_names_k:
-                        continue
-                    param_index = param_names_k.index(param)
-                    values = np.asarray(sample.samples[:, param_index], dtype=float)
-                    values = values[np.isfinite(values)]
-                    if values.size == 0:
-                        continue
-                    ax.hist(
-                        values,
-                        bins=hist_bins,
-                        alpha=scatter_alpha,
-                        color=scatter_colors[k],
-                        density=True,
-                        histtype="stepfilled",
-                        zorder=1,
-                    )
-                # Autoscale to the raw hist (full sample span on x; hist heights on y).
-                ax.relim()
-                ax.autoscale_view()
+        # Axes show exactly the fence window.
+        for i, param in enumerate(param_name_list):
+            if param not in fence:
+                continue
+            g.subplots[i, i].set_xlim(*fence[param])
+            for j in range(i):
+                if param_name_list[j] in fence:
+                    g.subplots[i, j].set_xlim(*fence[param_name_list[j]])
+                    g.subplots[i, j].set_ylim(*fence[param])
 
         if any(show_scatter):
-            # Legacy path: overlay hists under GetDist 1D curves when hist_1d is off.
-            if not hist_1d:
-                for i, param in enumerate(param_name_list):
-                    if i < len(g.subplots) and i < len(g.subplots[i]):
-                        ax = g.subplots[i][i]
-                        current_ylim = ax.get_ylim()
-                        for k, sample in enumerate(samples):
-                            if show_scatter[k]:  # Only show scatter for this sample if enabled
-                                param_index = sample.paramNames.list().index(param)
-                                if param_index is not None:
-                                    values = sample.samples[:, param_index]
-                                    ax.hist(
-                                        values,
-                                        bins=hist_bins,
-                                        alpha=scatter_alpha,
-                                        color=scatter_colors[k],
-                                        density=True,
-                                        histtype="stepfilled",
-                                        zorder=1,
-                                    )
-                        ax.set_ylim(current_ylim)
+            for i, param in enumerate(param_name_list):
+                if i < len(g.subplots) and i < len(g.subplots[i]):
+                    ax = g.subplots[i][i]
+                    current_ylim = ax.get_ylim()
+                    for k, sample in enumerate(samples):
+                        if show_scatter[k]:  # Only show scatter for this sample if enabled
+                            param_index = sample.paramNames.list().index(param)
+                            if param_index is not None:
+                                values = sample.samples[:, param_index]
+                                ax.hist(values, bins=30, alpha=scatter_alpha, color=scatter_colors[k],
+                                        density=True, histtype='stepfilled', zorder=1)
+                    ax.set_ylim(current_ylim)
 
             param_combinations = [
                 (param_name_list[i], param_name_list[j])
@@ -1475,59 +1454,67 @@ class BasePlotter:
                                         alpha=scatter_alpha,
                                     )
 
-        if log_density:
-            self._set_diagonal_log_density(g, len(param_name_list))
+        # Out-of-window samples of fenced series, clamped onto the window edge.
+        for i, py in enumerate(param_name_list):
+            for j, px in enumerate(param_name_list[:i]):
+                if px not in fence or py not in fence:
+                    continue
+                for k, sample in enumerate(full_samples):
+                    out = ~in_window[k]
+                    if not out.any():
+                        continue
+                    names = sample.paramNames.list()
+                    arr = np.asarray(sample.samples)[out]
+                    g.subplots[i, j].scatter(
+                        np.clip(arr[:, names.index(px)], *fence[px]),
+                        np.clip(arr[:, names.index(py)], *fence[py]),
+                        s=34, marker="x", color=colors[k], linewidths=1.3, zorder=6, clip_on=False,
+                    )
+            if py in fence:
+                lo, hi = fence[py]
+                cols = [
+                    np.asarray(sample.samples)[:, sample.paramNames.list().index(py)]
+                    for sample, fence_sample in zip(full_samples, fenced)
+                    if fence_sample
+                ]
+                n_lo = sum(int((c < lo).sum()) for c in cols)
+                n_hi = sum(int((c > hi).sum()) for c in cols)
+                if n_lo or n_hi:
+                    g.subplots[i, i].set_title(
+                        f"{n_lo} below / {n_hi} above range", fontsize=9, color="crimson", pad=3
+                    )
+
+        if legend_labels is not None:
+            alphas = alpha if isinstance(alpha, list) else [alpha] * len(samples)
+            handles, labels, outlier_colors = [], [], []
+            for k, label in enumerate(legend_labels):
+                if label is None:
+                    continue
+                handles.append(Line2D([0], [0], color=colors[k], linestyle=line_style[k],
+                                      linewidth=1.2, alpha=alphas[k]))
+                labels.append(label)
+                outlier_colors.append(None)
+                n_out, n_tot = int((~in_window[k]).sum()), len(in_window[k])
+                if n_out:
+                    # Second, handle-less line under the series: its outside-window count.
+                    handles.append(Line2D([0], [0], color="none"))
+                    labels.append(
+                        f"  {n_out}/{_fmt_sample_count(n_tot)} outside plot range "
+                        f"({100 * n_out / n_tot:.2f}%)"
+                    )
+                    outlier_colors.append(colors[k])
+            # Replace GetDist's auto legend (built from sample labels).
+            for leg in list(g.fig.legends):
+                leg.remove()
+            leg = g.fig.legend(handles=handles, labels=labels, loc='upper right',
+                               bbox_to_anchor=(0.99, 0.96), fontsize=legend_fontsize)
+            leg.set_in_layout(False)
+            for text, color in zip(leg.get_texts(), outlier_colors):
+                if color is not None:
+                    text.set_color(color)
+                    text.set_fontsize(0.85 * text.get_fontsize())
 
         return g
-
-    @staticmethod
-    def _set_diagonal_log_density(g, n_params, floor_frac=1e-3):
-        """Set log y-scale on triangle diagonal (1D density) axes only.
-
-        Floors nonpositive line/patch y-values to a fraction of the smallest
-        positive density so matplotlib's log scale does not fail on zeros.
-        Parameter (x) axes are left linear.
-        """
-        if not hasattr(g, "subplots") or g.subplots is None:
-            return
-        for i in range(n_params):
-            ax = g.subplots[i, i]
-            if ax is None:
-                continue
-
-            positives = []
-            for line in ax.get_lines():
-                y = np.asarray(line.get_ydata(), dtype=float)
-                positives.append(y[np.isfinite(y) & (y > 0)])
-            for patch in getattr(ax, "patches", []):
-                height = getattr(patch, "get_height", None)
-                if height is None:
-                    continue
-                h = float(height())
-                if np.isfinite(h) and h > 0:
-                    positives.append(np.array([h]))
-
-            pos_arrays = [p for p in positives if p.size > 0]
-            if not pos_arrays:
-                continue
-            y_min = min(float(p.min()) for p in pos_arrays)
-            floor = max(y_min * floor_frac, np.finfo(float).tiny)
-
-            for line in ax.get_lines():
-                y = np.asarray(line.get_ydata(), dtype=float)
-                line.set_ydata(np.maximum(y, floor))
-            for patch in getattr(ax, "patches", []):
-                height = getattr(patch, "get_height", None)
-                set_height = getattr(patch, "set_height", None)
-                if height is None or set_height is None:
-                    continue
-                h = float(height())
-                if not np.isfinite(h) or h <= 0:
-                    set_height(floor)
-
-            ax.set_yscale("log")
-            ymin, ymax = ax.get_ylim()
-            ax.set_ylim(max(ymin, floor), ymax)
 
 
 # ============================================================================
@@ -1876,8 +1863,8 @@ class RunPlotter(BasePlotter):
         ``display`` series. Pass ``nf_entries=[]`` for overlay-only figures.
 
         Extra keyword arguments are forwarded to ``BasePlotter.plot_posterior``
-        (e.g. ``log_density=True``, ``plot_mcmc=False``, ``hist_1d=True``,
-        ``show_scatter=True`` for NF-only raw-hist triangles).
+        (e.g. ``plot_mcmc=False``, ``ranges``). For the unfenced raw samples use
+        ``plot_raw_posterior``.
         """
         if device is None:
             device = "cuda:0" if torch.cuda.is_available() else "cpu"
@@ -3212,7 +3199,10 @@ class ComparisonPlotter(BasePlotter):
         all_colors = []
         all_alphas = []
         all_line_styles = []
+        # One label per sample; None for extra runs/ranks of a group (no legend entry).
         legend_labels = []
+        # Prior overlays are drawn in full; every posterior series is fenced.
+        all_fenced = []
         plotted_group_keys = []
         group_labels = {}
         group_prior_entropy = {}
@@ -3307,11 +3297,14 @@ class ComparisonPlotter(BasePlotter):
                         all_colors.append(group_color)
                         all_alphas.append(entry.get('alpha', 1.0))
                         all_line_styles.append(entry.get('line_style', '-'))
+                        all_fenced.append(True)
                         if run_idx == 0 and rank_idx == 0:
                             label = entry.get('label', group_label)
                             if len(sorted_group_keys) > 1:
                                 label = f"{group_label}: {label}"
                             legend_labels.append(label)
+                        else:
+                            legend_labels.append(None)
                     group_has_samples = group_has_samples or bool(nf_entries)
             
             if not group_has_samples:
@@ -3348,6 +3341,7 @@ class ComparisonPlotter(BasePlotter):
                 all_alphas.append(1.0)
                 all_line_styles.append('--')
                 legend_labels.append(nominal_label)
+                all_fenced.append(True)
             except (NotImplementedError, FileNotFoundError, OSError) as e:
                 print(f"Warning: Could not load MCMC reference samples: {e}")
 
@@ -3396,6 +3390,7 @@ class ComparisonPlotter(BasePlotter):
                     all_colors.append('black')
                     all_alphas.append(PRIOR_CONTOUR_ALPHA)
                     all_line_styles.append('-')
+                    all_fenced.append(False)
                     prior_h = group_prior_entropy.get(prior_entries[0][3])
                     legend_labels.append(
                         f"Prior{self._prior_entropy_legend_suffix(prior_h)}"
@@ -3406,6 +3401,7 @@ class ComparisonPlotter(BasePlotter):
                         all_colors.append(color)
                         all_alphas.append(PRIOR_CONTOUR_ALPHA)
                         all_line_styles.append('-')
+                        all_fenced.append(False)
                         prior_h = group_prior_entropy.get(group_key)
                         legend_labels.append(
                             f"Prior ({group_labels[group_key]})"
@@ -3421,6 +3417,7 @@ class ComparisonPlotter(BasePlotter):
             width_inch=width_inch,
             alpha=all_alphas,
             line_style=all_line_styles,
+            fenced=all_fenced,
         )
 
         plotted_params = all_samples[0].paramNames.list()
@@ -3454,10 +3451,6 @@ class ComparisonPlotter(BasePlotter):
                         color=color,
                     )
 
-        if g.fig.legends:
-            for legend in g.fig.legends:
-                legend.remove()
-        
         title = (
             f'Posterior Comparison ({", ".join(display)}), Step: {step}, '
             f'Levels: {self._format_contour_levels_list(levels)}'
@@ -3467,26 +3460,6 @@ class ComparisonPlotter(BasePlotter):
             title += f' (filter: {filter_str})'
         
         g.fig.set_constrained_layout(True)
-        legend_handles = [
-            Line2D(
-                [0],
-                [0],
-                color=color,
-                label=label,
-                linewidth=1.2,
-                linestyle=line_style,
-                alpha=alpha,
-            )
-            for label, color, line_style, alpha in zip(
-                legend_labels, all_colors, all_line_styles, all_alphas
-            )
-        ]
-        leg = g.fig.legend(
-            handles=legend_handles,
-            loc='upper right',
-            bbox_to_anchor=(0.99, 0.96),
-        )
-        leg.set_in_layout(False)
         g.fig.suptitle(title)
         
         # Save figure
