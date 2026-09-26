@@ -2034,6 +2034,7 @@ class RunPlotter(BasePlotter):
         levels=(0.68, 0.95),
         window_bins=100,
         max_bins=20000,
+        max_scatter=None,
         filename=None,
         save_dir=None,
         dpi=400,
@@ -2043,8 +2044,10 @@ class RunPlotter(BasePlotter):
 
         Uses the standard plot's window (GetDist's default axis range over the
         displayed series, ``getdist_view_ranges``). 2D panels show filled
-        ``levels`` contours from in-window samples over every sample as a faint,
-        muted dot; axes span all samples. 1D panels are log-count histograms over
+        ``levels`` contours from in-window samples over the samples as dots; axes
+        span all samples. ``max_scatter`` caps the dots per series to a random
+        subset (fixed seed) for readability; the 1D histograms, counts, contours
+        and window always use every sample. 1D panels are log-count histograms over
         the full range with one fixed bin width (``window_bins`` bins across the
         window, window edges on bin edges), so counts per bin track the density
         everywhere; if that needs more than ``max_bins`` bins the width grows to fit
@@ -2101,6 +2104,16 @@ class RunPlotter(BasePlotter):
                 for k in range(len(display))
             ]
         window = getdist_view_ranges(full)
+        # Per series: indices of the samples drawn as 2D dots (all, or a random
+        # max_scatter of them). Everything else below uses every sample.
+        n_samples = theta.shape[1]
+        n_shown = n_samples if max_scatter is None else min(max_scatter, n_samples)
+        rng = np.random.default_rng(0)
+        shown = [
+            np.arange(n_samples) if n_shown == n_samples
+            else np.sort(rng.choice(n_samples, n_shown, replace=False))
+            for _ in display
+        ]
         # (n_display, n_guide): sample lies outside the window in any parameter
         outside = np.zeros(theta.shape[:2], dtype=bool)
         for c, p in enumerate(names):
@@ -2176,10 +2189,11 @@ class RunPlotter(BasePlotter):
                     ax.xaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:g}"))
                 else:
                     px, py = names[j], names[i]
-                    # Every sample in one style, in and out of the window; the
-                    # contours on top carry the structure inside the window.
+                    # Every shown sample in one style, in and out of the window;
+                    # the contours on top carry the structure inside the window.
                     for k in range(len(display)):
-                        ax.scatter(theta[k, :, j], theta[k, :, i], s=3, color=colors[k],
+                        pts = theta[k, shown[k]]
+                        ax.scatter(pts[:, j], pts[:, i], s=3, color=colors[k],
                                    alpha=0.4, lw=0, rasterized=True, zorder=1)
                     for k, sample in enumerate(in_window):
                         density = sample.get2DDensityGridData(
@@ -2237,7 +2251,11 @@ class RunPlotter(BasePlotter):
         handles += [Line2D([0], [0], ls="", marker="o", ms=3, color="0.4", alpha=0.5),
                     Line2D([0], [0], ls="--", lw=0.8, color="0.4"),
                     Line2D([0], [0], ls=":", lw=0.8, color="k")]
-        legend_labels += [f"samples ({_fmt_sample_count(theta.shape[1])}/series)",
+        sample_note = (
+            f"{_fmt_sample_count(n_samples)}/series" if n_shown == n_samples
+            else f"{_fmt_sample_count(n_shown)} of {_fmt_sample_count(n_samples)} shown/series"
+        )
+        legend_labels += [f"samples ({sample_note})",
                           "plot window (GetDist); axes log beyond it",
                           "prior bounds"]
         fig.legend(handles, legend_labels, loc="upper right", bbox_to_anchor=(0.99, 0.96),
