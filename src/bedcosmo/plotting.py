@@ -2032,7 +2032,8 @@ class RunPlotter(BasePlotter):
         display=("nominal", "optimal"),
         data_index=0,
         levels=(0.68, 0.95),
-        bins=200,
+        window_bins=100,
+        max_bins=20000,
         filename=None,
         save_dir=None,
         dpi=400,
@@ -2044,7 +2045,10 @@ class RunPlotter(BasePlotter):
         displayed series, ``getdist_view_ranges``). 2D panels show filled
         ``levels`` contours from in-window samples over every sample as a faint,
         muted dot; axes span all samples. 1D panels are log-count histograms over
-        the full range, with the window edges dashed. Every axis is linear inside the
+        the full range with one fixed bin width (``window_bins`` bins across the
+        window, window edges on bin edges), so counts per bin track the density
+        everywhere; if that needs more than ``max_bins`` bins the width grows to fit
+        and the axis label says so. Window edges are dashed. Every axis is linear inside the
         window and logarithmic beyond it (``_window_log_scale``), so the contour stays
         readable while far outliers stay on-axis; axes span the samples and
         prior bounds further out are clipped. Reads the newest default-eval NPZ
@@ -2133,14 +2137,20 @@ class RunPlotter(BasePlotter):
                     continue
                 if i == j:
                     p = names[i]
-                    forward, inverse = scales[p]
+                    # One bin width over the full range (independent of the axis
+                    # scale), aligned so the window edges fall on bin edges.
                     x_min, x_max = theta[..., i].min(), theta[..., i].max()
-                    lo, hi = forward([x_min, x_max])
-                    # Shared edges, even on the window scale: fine inside the window,
-                    # wider in the tails. Pin the ends to the data: the exp/log round
-                    # trip can land just inside and drop samples sitting at the min/max.
-                    edges = inverse(np.linspace(lo, hi, bins + 1))
-                    edges[0], edges[-1] = x_min, x_max
+                    wl, wh = window[p]
+                    width = (wh - wl) / window_bins
+                    k0, k1 = np.floor((x_min - wl) / width), np.ceil((x_max - wl) / width)
+                    capped = k1 - k0 > max_bins
+                    if capped:
+                        edges = np.linspace(x_min, x_max, max_bins + 1)
+                        width = edges[1] - edges[0]
+                    else:
+                        edges = wl + width * np.arange(k0, k1 + 1)
+                    # Guard the ends against float round-off dropping the min/max samples.
+                    edges[0], edges[-1] = min(edges[0], x_min), max(edges[-1], x_max)
                     for k, name in enumerate(display):
                         x = theta[k, :, i]
                         ax.hist(x, bins=edges, histtype="step", color=colors[k], lw=1.3, label=name)
@@ -2148,7 +2158,6 @@ class RunPlotter(BasePlotter):
                         if p in prior_bounds:
                             pl, ph = prior_bounds[p]
                             notes.append(f"{int(((x < pl) | (x > ph)).sum())} outside prior")
-                        wl, wh = window[p]
                         notes.append(f"{int(((x < wl) | (x > wh)).sum())} outside window")
                         ax.text(0.02, 0.97 - 0.07 * k, f"{name}: " + ", ".join(notes),
                                 color=colors[k], transform=ax.transAxes, va="top",
@@ -2162,7 +2171,11 @@ class RunPlotter(BasePlotter):
                     ax.set_yscale("log")
                     ax.yaxis.tick_right()
                     ax.yaxis.set_label_position("right")
-                    ax.set_ylabel("counts per bin", fontsize=axis_fs)
+                    ax.set_ylabel(
+                        f"counts per bin (width {width:.2g}"
+                        + (f", capped at {max_bins} bins)" if capped else ")"),
+                        fontsize=axis_fs,
+                    )
                     ax.set_xscale("function", functions=scales[p])
                     ax.set_xlim(lims[p])
                     ax.xaxis.set_major_locator(FixedLocator(ticks[p]))
