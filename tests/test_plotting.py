@@ -928,6 +928,65 @@ def test_window_log_ticks_spread_on_scaled_axis():
     assert np.all(np.diff(forward(np.array(ticks))) >= 0.12 * span)  # no overlapping labels
 
 
+def test_in_window_levels_correct_for_masked_samples():
+    from bedcosmo.plotting import _in_window_levels
+
+    mask = np.ones(10000, dtype=bool)
+    mask[:20] = False  # 0.2% masked
+    np.testing.assert_allclose(_in_window_levels([0.68, 0.95], mask, "s"),
+                               [0.68 / 0.998, 0.95 / 0.998])
+    mask[:600] = False  # 6% masked: a 95% contour of all samples is unreachable
+    with pytest.raises(ValueError, match="95% contour of all samples of 's'"):
+        _in_window_levels([0.68, 0.95], mask, "s")
+
+
+class TestPlotTriangleContourCoverage:
+    """Contours enclose ``levels`` of all samples, masked outliers included.
+
+    Explicit ``ranges`` mask a known fraction: GetDist's own window only trims
+    ~0.1% per edge, so large masked fractions need an explicit window.
+    """
+
+    RANGES = {"Om": (0.2, 0.4), "hrdrag": (9000.0, 11000.0)}
+
+    @pytest.fixture(autouse=True)
+    def _env(self, monkeypatch):
+        monkeypatch.setenv("SCRATCH", "/mock/scratch")
+
+    @staticmethod
+    def _with_outliers(frac, seed=4):
+        rng = np.random.default_rng(seed)
+        n_out = int(20000 * frac)
+        bulk = rng.normal([0.3, 10000.0], [0.01, 100.0], size=(20000 - n_out, 2))
+        return np.vstack([bulk, np.tile([-10.0, 10000.0], (n_out, 1))])
+
+    def test_95_contour_encloses_95_percent_of_all_samples(self):
+        from matplotlib.contour import ContourSet
+        from matplotlib.path import Path as MplPath
+
+        arr = self._with_outliers(0.02)  # 2% far outliers, masked by the window
+        g = BasePlotter(cosmo_exp="test_exp").plot_triangle(
+            [_gd_samples(arr, "s")], ["tab:blue"], levels=[0.68, 0.95],
+            ranges=self.RANGES, show_outliers=False,
+        )
+        filled = [c for c in g.subplots[1, 0].collections
+                  if isinstance(c, ContourSet) and c.filled][0]
+        inside = np.zeros(len(arr), dtype=bool)
+        for path in filled.get_paths():  # bands [95%, 68%] and [68%, peak]
+            if len(path.vertices):
+                inside |= MplPath(path.vertices, path.codes).contains_points(arr)
+        # Uncorrected thresholds would give ~0.95 * 0.98 = 0.931.
+        assert np.mean(inside) == pytest.approx(0.95, abs=0.005)
+        plt.close(g.fig)
+
+    def test_unreachable_level_raises(self):
+        arr = self._with_outliers(0.10)  # 10% outside the window
+        with pytest.raises(ValueError, match="95% contour of all samples"):
+            BasePlotter(cosmo_exp="test_exp").plot_triangle(
+                [_gd_samples(arr, "s")], ["tab:blue"], levels=[0.68, 0.95], ranges=self.RANGES
+            )
+
+
 class TestPlotTriangleFence:
     """The displayed ``ranges`` window is the outlier fence."""
 

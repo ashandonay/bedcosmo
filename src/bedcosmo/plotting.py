@@ -135,6 +135,24 @@ def triangle_font_sizes(width_inch, n_params):
     return axis, base * 1.15, legend
 
 
+def _in_window_levels(levels, in_window, label):
+    """Contour levels as fractions of the in-window samples, so each contour
+    encloses ``levels`` of *all* samples.
+
+    Contours are smoothed from in-window samples only; every masked sample lies
+    outside the window and so outside every contour, so enclosing ``L / f`` of the
+    in-window mass (``f`` = in-window fraction) encloses exactly ``L`` of the total.
+    """
+    frac = float(np.mean(in_window))
+    adjusted = [float(level) / frac for level in levels]
+    if max(adjusted) >= 1:
+        raise ValueError(
+            f"Cannot draw a {max(levels):.0%} contour of all samples of {label!r}: only "
+            f"{frac:.2%} of them lie inside the plot window."
+        )
+    return adjusted
+
+
 def _fmt_sample_count(n):
     """Compact count for legends, e.g. 500000 -> 5e5, 30544 -> 3.1e4."""
     if n < 1000:
@@ -1277,7 +1295,10 @@ class BasePlotter:
             alpha (float or list): Alpha value for the contours. Can be a single float or a list of floats corresponding to each sample.
             levels (float or list, optional): Contour levels to use (e.g., 0.68 or [0.68, 0.95]).
                 If a single float is provided, it is converted to a list.
-                If None, the default GetDist settings are used.
+                If None, the default GetDist settings are used. Each level is the
+                fraction of *all* of a series' samples enclosed: contours are smoothed
+                from in-window samples, with thresholds corrected for the masked ones
+                (raises if a level exceeds the in-window fraction).
             width_inch (float): Width of the plot in inches. Higher values increase resolution.
             ranges (dict, optional): ``{param: (min, max)}`` display window, which is
                 also the outlier fence. Params not in ``ranges`` use GetDist's own
@@ -1406,12 +1427,17 @@ class BasePlotter:
         # Prepare contour_args with custom levels if provided
         # For GetDist, we don't pass line styles in contour_args when using multiple styles
 
-        # Set contour levels if provided
+        # Set contour levels if provided, corrected per series for masked samples
+        # so each contour encloses ``levels`` of all its samples.
         if levels is not None:
             if isinstance(levels, float):
                 levels = [levels]
-            for sample in samples:
-                sample.updateSettings({'contours': levels})
+            sample_levels = [
+                _in_window_levels(levels, mask, sample.label)
+                for sample, mask in zip(samples, in_window)
+            ]
+            for sample, sample_lev in zip(samples, sample_levels):
+                sample.updateSettings({'contours': sample_lev})
 
         # Create triangle plot
         g.triangle_plot(
@@ -1488,7 +1514,7 @@ class BasePlotter:
                         density = sample.get2DDensityGridData(
                             px, py, num_plot_contours=len(levels), get_density=True
                         )
-                        thresholds = sorted(density.getContourLevels(list(levels)))
+                        thresholds = sorted(density.getContourLevels(sample_levels[sample_idx]))
                         ax.contourf(
                             density.x,
                             density.y,
@@ -2044,7 +2070,8 @@ class RunPlotter(BasePlotter):
 
         Uses the standard plot's window (GetDist's default axis range over the
         displayed series, ``getdist_view_ranges``). 2D panels show filled
-        ``levels`` contours from in-window samples over the samples as dots; axes
+        ``levels`` contours (smoothed from in-window samples, each enclosing that
+        fraction of *all* samples; see ``_in_window_levels``) over the samples as dots; axes
         span all samples. ``max_scatter`` caps the dots per series to a random
         subset (fixed seed) for readability; the 1D histograms, counts, contours
         and window always use every sample. 1D panels are log-count histograms over
@@ -2120,6 +2147,10 @@ class RunPlotter(BasePlotter):
             outside |= (theta[..., c] < window[p][0]) | (theta[..., c] > window[p][1])
         # Same contours as plot_posterior: GetDist on the in-window samples.
         in_window = [_subset_mcsamples(s, ~out) for s, out in zip(full, outside)]
+        # Levels corrected for the masked samples, so contours enclose ``levels`` of all.
+        series_levels = [
+            _in_window_levels(levels, ~out, name) for out, name in zip(outside, display)
+        ]
         # Axes are linear inside the window and log beyond, spanning the samples
         # (5% pad in scaled units); wider prior-bound lines are clipped.
         scales, lims = {}, {}
@@ -2199,7 +2230,7 @@ class RunPlotter(BasePlotter):
                         density = sample.get2DDensityGridData(
                             px, py, num_plot_contours=len(levels), get_density=True
                         )
-                        thresholds = sorted(density.getContourLevels(list(levels)))
+                        thresholds = sorted(density.getContourLevels(series_levels[k]))
                         fill_colors = [
                             matplotlib.colors.to_hex(
                                 (1 - blend) * np.array(matplotlib.colors.to_rgb(colors[k])) + blend
