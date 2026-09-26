@@ -358,6 +358,13 @@ class TestRunPlotter:
         # the scale's float round trip).
         step = axes[0, 0].patches[0].get_path().vertices
         assert step[1, 1] == 3
+        # One bin width over the full range (window width / 100), with the window
+        # edges on bin edges, so counts per bin track the density everywhere.
+        bin_edges = np.unique(step[:, 0])
+        width = (om_hi - om_lo) / 100
+        np.testing.assert_allclose(np.diff(bin_edges)[1:-1], width, rtol=1e-6)
+        steps = (bin_edges[1:-1] - om_lo) / width  # interior edges: whole bins from om_lo
+        np.testing.assert_allclose(steps, np.round(steps), atol=1e-6)
         n_om_out = int(((theta[0, 0, :, 0] < om_lo) | (theta[0, 0, :, 0] > om_hi)).sum())
         notes = [t.get_text() for t in axes[0, 0].texts]
         assert f"nominal: 3 outside prior, {n_om_out} outside window" in notes
@@ -395,7 +402,7 @@ class TestRunPlotter:
         assert pos[(1, 1)].x0 > pos[(1, 0)].x1
         assert pos[(1, 0)].y1 < pos[(0, 0)].y0
         assert axes[0, 0].get_xlabel() == "" and axes[1, 0].get_xlabel() == "$\\Omega_m$"
-        assert axes[1, 1].get_ylabel() == "counts per bin"
+        assert axes[1, 1].get_ylabel() == f"counts per bin (width {(h_hi - h_lo) / 100:.2g})"
         assert axes[1, 1].yaxis.get_label_position() == "right"
         assert axes[1, 0].get_ylabel() == "hrdrag"
         assert len(list(tmp_path.glob("posterior_full_range_step100_*.png"))) == 1
@@ -422,6 +429,31 @@ class TestRunPlotter:
             )
 
         assert base_plot.call_args.kwargs["show_outliers"] is False
+
+    def test_plot_posterior_full_range_caps_bins(self, run_plotter, tmp_path):
+        """A far outlier that would need too many fixed-width bins widens them."""
+        from bedcosmo.artifacts import make_posterior_samples_path, save_posterior_samples
+
+        artifacts = tmp_path / "artifacts"
+        artifacts.mkdir()
+        (artifacts / "prior_args.yaml").write_text("parameters: {}\n")
+        rng = np.random.default_rng(1)
+        theta = rng.normal([0.3, 10000.0], [0.01, 100.0], size=(1, 1, 5000, 2))
+        theta[0, 0, 0, 0] = 1e6  # ~1e8 window-bins away
+        save_posterior_samples(
+            make_posterior_samples_path(str(artifacts), step=5),
+            theta=theta, y=np.zeros((1, 1, 3)), design=np.zeros((1, 4)),
+            series_names=["nominal"], param_names=["Om", "hrdrag"],
+            meta={"step": 5, "param_space": "physical", "generated_by": "Evaluator.run"},
+        )
+        with patch.object(run_plotter, "_get_artifacts_dir", return_value=str(artifacts)):
+            fig = run_plotter.plot_posterior_full_range(
+                display="nominal", max_bins=500, save_dir=str(tmp_path)
+            )
+        ax = np.array(fig.axes).reshape(2, 2)[0, 0]
+        assert "capped at 500 bins" in ax.get_ylabel()
+        assert len(np.unique(ax.patches[0].get_path().vertices[:, 0])) == 501
+        plt.close(fig)
 
     @pytest.mark.skip(reason="plot_evaluation method does not exist on RunPlotter")
     def test_plot_evaluation(self, run_plotter):
