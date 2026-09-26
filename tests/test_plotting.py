@@ -369,24 +369,20 @@ class TestRunPlotter:
         notes = [t.get_text() for t in axes[0, 0].texts]
         assert f"nominal: 3 outside prior, {n_om_out} outside window" in notes
 
-        # 2D: in-window samples as faint dots under the contours; out-of-window
-        # samples drawn clearly so isolated extremes stay visible.
+        # 2D: every sample in one style (in and out of the window), contours on top.
         ax2d = axes[1, 0]
         dots = [c for c in ax2d.collections if isinstance(c, PathCollection)]
         contours = [c for c in ax2d.collections if not isinstance(c, PathCollection)]
-        bulk = [c for c in dots if c.get_alpha() == pytest.approx(0.035)]
-        extremes = [c for c in dots if c.get_alpha() == pytest.approx(0.6)]
-        assert [len(c.get_offsets()) for c in bulk] == [int((~o).sum()) for o in outside]
-        assert [len(c.get_offsets()) for c in extremes] == [int(o.sum()) for o in outside]
-        np.testing.assert_allclose(extremes[0].get_offsets(), theta[0, 0][outside[0]])
-        assert (extremes[0].get_offsets()[:, 0] == -10.0).sum() == 3
+        assert [len(c.get_offsets()) for c in dots] == [5000, 5000]
+        np.testing.assert_allclose(dots[0].get_offsets(), theta[0, 0])
+        assert len({(c.get_alpha(), tuple(c.get_sizes())) for c in dots}) == 1
         fills = [c for c in contours if len(c.get_facecolor()) == 2]
         assert len(fills) == 2
         for fill in fills:
             outer_rgb, inner_rgb = fill.get_facecolor()[:, :3]
             assert outer_rgb.mean() > inner_rgb.mean()
         assert len(contours) >= 4
-        assert min(c.get_zorder() for c in contours) > max(d.get_zorder() for d in bulk)
+        assert min(c.get_zorder() for c in contours) > max(d.get_zorder() for d in dots)
         # Dashed box = GetDist's window.
         box = [r for r in ax2d.patches if isinstance(r, Rectangle) and r.get_linestyle() == "--"]
         assert len(box) == 1 and box[0].get_xy() == pytest.approx((om_lo, h_lo))
