@@ -2095,12 +2095,6 @@ class RunPlotter(BasePlotter):
         contour_colors = [
             matplotlib.colors.to_hex(0.6 * np.array(matplotlib.colors.to_rgb(c))) for c in colors
         ]
-        sample_colors = [
-            matplotlib.colors.to_hex(
-                0.45 * np.array(matplotlib.colors.to_rgb(c)) + 0.55
-            )
-            for c in colors
-        ]
         with contextlib.redirect_stdout(io.StringIO()):
             full = [
                 getdist.MCSamples(samples=theta[k], names=names, settings=GETDIST_SETTINGS)
@@ -2182,15 +2176,11 @@ class RunPlotter(BasePlotter):
                     ax.xaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:g}"))
                 else:
                     px, py = names[j], names[i]
-                    # Keep the in-window bulk subdued behind the contours, but draw
-                    # out-of-window samples clearly so isolated extremes stay visible.
+                    # Every sample in one style, in and out of the window; the
+                    # contours on top carry the structure inside the window.
                     for k in range(len(display)):
-                        out = outside[k]
-                        ax.scatter(theta[k, ~out, j], theta[k, ~out, i], s=1.2,
-                                   color=sample_colors[k], alpha=0.035, lw=0,
-                                   rasterized=True, zorder=1)
-                        ax.scatter(theta[k, out, j], theta[k, out, i], s=4, color=colors[k],
-                                   alpha=0.6, lw=0, rasterized=True, zorder=4)
+                        ax.scatter(theta[k, :, j], theta[k, :, i], s=3, color=colors[k],
+                                   alpha=0.4, lw=0, rasterized=True, zorder=1)
                     for k, sample in enumerate(in_window):
                         density = sample.get2DDensityGridData(
                             px, py, num_plot_contours=len(levels), get_density=True
