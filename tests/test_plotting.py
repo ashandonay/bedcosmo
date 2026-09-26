@@ -426,6 +426,38 @@ class TestRunPlotter:
 
         assert base_plot.call_args.kwargs["show_outliers"] is False
 
+    def test_plot_posterior_full_range_max_scatter(self, run_plotter, tmp_path):
+        """max_scatter thins only the 2D dots; the 1D histograms count every sample."""
+        from matplotlib.collections import PathCollection
+
+        from bedcosmo.artifacts import make_posterior_samples_path, save_posterior_samples
+
+        artifacts = tmp_path / "artifacts"
+        artifacts.mkdir()
+        (artifacts / "prior_args.yaml").write_text("parameters: {}\n")
+        rng = np.random.default_rng(2)
+        theta = rng.normal([0.3, 10000.0], [0.01, 100.0], size=(2, 1, 5000, 2))
+        save_posterior_samples(
+            make_posterior_samples_path(str(artifacts), step=5),
+            theta=theta, y=np.zeros((2, 1, 3)), design=np.zeros((2, 4)),
+            series_names=["nominal", "optimal"], param_names=["Om", "hrdrag"],
+            meta={"step": 5, "param_space": "physical", "generated_by": "Evaluator.run"},
+        )
+        with patch.object(run_plotter, "_get_artifacts_dir", return_value=str(artifacts)):
+            fig = run_plotter.plot_posterior_full_range(max_scatter=1000, save_dir=str(tmp_path))
+        axes = np.array(fig.axes).reshape(2, 2)
+        dots = [c for c in axes[1, 0].collections if isinstance(c, PathCollection)]
+        assert [len(c.get_offsets()) for c in dots] == [1000, 1000]
+        for k, c in enumerate(dots):  # a subset of that series' real samples
+            rows = {tuple(r) for r in theta[k, 0].round(12)}
+            assert all(tuple(r) in rows for r in c.get_offsets().data.round(12))
+        for patch_ in axes[0, 0].patches:  # 1D step histograms still count all 5000
+            heights = patch_.get_path().vertices[1:-1:2, 1]
+            assert heights.sum() == 5000
+        legend = [t.get_text() for t in fig.legends[0].get_texts()]
+        assert "samples (1e3 of 5e3 shown/series)" in legend
+        plt.close(fig)
+
     def test_plot_posterior_full_range_caps_bins(self, run_plotter, tmp_path):
         """A far outlier that would need too many fixed-width bins widens them."""
         from bedcosmo.artifacts import make_posterior_samples_path, save_posterior_samples
