@@ -2045,7 +2045,11 @@ class Evaluator:
         # Full-sample-range triangle for spotting NF outliers. Prior bounds only
         # exist in physical space.
         if save_samples and self.param_space == "physical":
-            plt.close(self.plotter.plot_posterior_full_range(posterior_samples_path=out_path))
+            # 1e4 dots per series keeps the 2D panels readable; the 1D histograms,
+            # counts and contours still use every sample.
+            plt.close(self.plotter.plot_posterior_full_range(
+                posterior_samples_path=out_path, max_scatter=10_000
+            ))
 
     def run(self, eval_step=None):
         # Determine eval_step
