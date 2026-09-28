@@ -442,7 +442,7 @@ def test_run_plots_sampled_entries_and_saves_npz(tmp_path):
 
     # The full-range triangle comes from the saved NPZ.
     ev.plotter.plot_posterior_full_range.assert_called_once_with(
-        posterior_samples_path=bundle["path"], max_scatter=10_000
+        posterior_samples_path=bundle["path"], max_scatter=50_000
     )
 
     # Replot from the NPZ keeps the saved legend labels.
