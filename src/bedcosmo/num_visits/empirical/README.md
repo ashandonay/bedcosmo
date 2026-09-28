@@ -380,7 +380,7 @@ Or all patches: `./eazy/run_healpix_diagnostic_plots.sh`
 | `--bandwidth` | `0.3` (scaled space) |
 | `--z-min` | `0.01` |
 | training-bound sampling | rejection/redraw (disable with `--no-restrict-to-training-bounds`) |
-| `--gaussianizer-fit-source` | `kde` (100k reference draws) |
+| `--gaussianizer-fit-source` | `kde` (`--gaussianizer-fit-samples`, default 1e7 reference draws, all used for the CDF tables) |
 | `--gaussianizer-whitening` | `cholesky` |
 | `--sample` | `20000` (post-save diagnostic triangles) |
 | `--no-gaussianized-kde` | off (by default also writes `sed_prior_kde_gaussianized.joblib`) |
@@ -398,6 +398,17 @@ python -m bedcosmo.num_visits.empirical.fit_sed_prior_kde \
 ```
 
 Paths default from `paths.py` (`desi_eazy_empirical_weights.csv` and `sed_prior_kde_native.joblib` under the build directory). Requires `torch` (use `bedcosmo` env).
+
+The gaussianizer's per-feature CDF tables (5000 grid points) are built from every reference draw. Each grid segment then holds about draws/5000 of them, and `transform_input=True` posteriors inherit that segment's slope noise, roughly 1/sqrt(draws/5000), as stripes, and as empty slices where a segment gets no draws. With 1e7 draws the noise is ~2%; the old 1e5 draws, capped to 50k rows, gave 25–40%.
+
+To refit only the gaussianizer of an existing build (same KDE and seed, so the prior is unchanged), rewriting `sed_prior_kde_native.joblib`, its `.json` and `sed_prior_kde_gaussianized.joblib` in place:
+
+```bash
+python -m bedcosmo.num_visits.empirical.fit_sed_prior_kde refit-gaussianizer \
+  $SCRATCH/bedcosmo/num_visits/empirical_prior/desi6/sed_prior_kde_native.joblib
+```
+
+Anything trained in gaussianized coordinates must then be retrained: `sed_prior_flow_gaussianized.pt` (`./scripts/train_prior_flow.sh`) and any `transform_input=True` runs on that prior.
 
 ### Artifacts
 

@@ -113,3 +113,13 @@ def test_fit_from_matrix_marginal_vs_joint():
     y_m = bj_marg.matrix_to_gaussian(xt, apply_joint=False)
     y_j = bj_joint.matrix_to_gaussian(xt, apply_joint=True)
     assert y_m.shape == y_j.shape == xt.shape
+
+
+def test_fit_from_matrix_cdfs_use_every_row():
+    """max_rows caps only the whitening covariance, not the CDF tables."""
+    x = _correlated_physical(80_000)
+    bj = Bijector.fit_from_matrix(x, ["a", "b"], max_rows=10_000)
+    for name in ["a", "b"]:
+        du = np.diff(bj.cdfs[name]["cdf_values"].double().numpy())[1:-1]  # ends are eps-clamped
+        assert round(1 / du[du > 0].min()) == 80_000
+    assert bj.joint_state is not None

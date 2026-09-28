@@ -99,6 +99,8 @@ DEFAULT_Z_MIN = 0.01
 DEFAULT_SIMPLEX_SMOOTHING_EPS = 1e-5
 DEFAULT_GAUSSIANIZER_WHITENING = "cholesky"
 DEFAULT_GAUSSIANIZER_FIT_SOURCE = "kde"
+# ~2000 draws per CDF grid segment (5000 bins): ~2% segment-to-segment density noise.
+DEFAULT_GAUSSIANIZER_FIT_SAMPLES = 10_000_000
 A_ZERO_EPS = 1e-12
 
 SupportMode = Literal["smooth", "masked", "none"]
@@ -110,24 +112,25 @@ def fit_empirical_gaussianizer(
     *,
     shrinkage: float = 1e-3,
     eps: float = 1e-6,
-    max_rows: int | None = 50_000,
     seed: int = 0,
 ) -> Bijector:
-    """Fit a torch ``Bijector`` on the reference feature matrix (joint whitening by default)."""
+    """Fit a torch ``Bijector`` on the reference feature matrix (joint whitening by default).
+
+    Every row of ``x`` goes into the per-feature CDF tables, so pass enough rows
+    (~1e7) that each of the 5000 grid segments holds thousands of them.
+    """
     x = np.asarray(x, dtype=float)
     if x.ndim != 2:
         raise ValueError(f"Expected 2D feature matrix, got shape {x.shape}")
     if x.shape[1] != len(feature_names):
         raise ValueError("feature_names length does not match x.shape[1]")
 
-    max_fit = max_rows if max_rows is not None else x.shape[0]
     return Bijector.fit_from_matrix(
         x,
         feature_names,
         input_transform_type="joint",
         cdf_eps=float(eps),
         shrinkage=float(shrinkage),
-        max_rows=int(max_fit),
         seed=int(seed),
     )
 
@@ -1091,15 +1094,6 @@ def main() -> None:
         ),
     )
     parser.add_argument(
-        "--gaussianizer-max-rows",
-        type=int,
-        default=50000,
-        help=(
-            "Maximum number of rows used to fit gaussianizer quantile grids/correlations; "
-            "<=0 uses all rows from the selected gaussianizer fit source."
-        ),
-    )
-    parser.add_argument(
         "--gaussianizer-fit-source",
         choices=("training", "kde"),
         default=DEFAULT_GAUSSIANIZER_FIT_SOURCE,
@@ -1113,9 +1107,11 @@ def main() -> None:
     parser.add_argument(
         "--gaussianizer-fit-samples",
         type=int,
-        default=100000,
+        default=DEFAULT_GAUSSIANIZER_FIT_SAMPLES,
         help=(
             "Number of KDE reference samples used when --gaussianizer-fit-source=kde. "
+            "All of them build the per-feature CDF tables; fewer than ~1e7 leaves "
+            "visible stripes and gaps in transform_input=True posteriors. "
             "This is distinct from --sample, which only controls diagnostic draws."
         ),
     )
@@ -1233,8 +1229,6 @@ def main() -> None:
         else int(args.seed) + 100003
     )
     if not args.no_gaussianizer:
-        max_rows = None if args.gaussianizer_max_rows <= 0 else int(args.gaussianizer_max_rows)
-
         if args.gaussianizer_fit_source == "training":
             gaussianizer_fit_x = x
         elif args.gaussianizer_fit_source == "kde":
@@ -1281,7 +1275,6 @@ def main() -> None:
             feature_names,
             shrinkage=float(args.gaussianizer_shrinkage),
             eps=float(args.gaussianizer_eps),
-            max_rows=max_rows,
             seed=args.seed,
         )
         y_train_marginal = gaussianize_with(gaussianizer, x, "none")
@@ -1529,6 +1522,72 @@ def main() -> None:
                 )
 
 
+def refit_gaussianizer(
+    kde_path: str | Path,
+    *,
+    n_samples: int = DEFAULT_GAUSSIANIZER_FIT_SAMPLES,
+) -> dict[str, Any]:
+    """Refit only the NF gaussianizer of a built KDE artifact, in place.
+
+    Redraws ``n_samples`` KDE reference samples with the build's seed and the
+    runtime sampler's settings (``sed_prior`` calls ``sample_sed_prior`` with its
+    defaults), so the gaussianizer is fit on exactly the distribution it later
+    transforms. Refits the gaussianizer on all of them and rewrites the
+    artifact, its JSON sidecar and (if present) the gaussianized-KDE diagnostic.
+    The KDE itself is untouched, so the prior is unchanged; anything trained in
+    gaussianized space (``sed_prior_flow_gaussianized.pt``, transform_input=True
+    runs) must be retrained against the new gaussianizer.
+    """
+    kde_path = Path(kde_path).expanduser().resolve()
+    artifact = load_sed_prior_kde(kde_path)
+    metadata = artifact["metadata"]
+    build_args = metadata["kde_parameters"]
+    if metadata["gaussianizer_fit_source"] != "kde":
+        raise ValueError(
+            f"{kde_path} gaussianizer was fit on {metadata['gaussianizer_fit_source']!r}, "
+            "not KDE draws; rebuild it with build_prior instead."
+        )
+
+    fit_x = sample_sed_prior(artifact, int(n_samples), seed=int(metadata["gaussianizer_fit_seed"]))
+    gaussianizer = fit_empirical_gaussianizer(
+        fit_x,
+        list(artifact["feature_names"]),
+        shrinkage=float(metadata["gaussianizer_shrinkage"]),
+        eps=float(metadata["gaussianizer_eps"]),
+        seed=int(build_args["seed"]),
+    )
+    artifact["gaussianizer_state"] = gaussianizer.get_state()
+    metadata["gaussianizer_fit_samples"] = int(n_samples)
+    metadata["gaussianizer_fit_n_rows"] = int(fit_x.shape[0])
+    build_args["gaussianizer_fit_samples"] = int(n_samples)
+    save_sed_prior_kde(kde_path, artifact)
+    kde_path.with_suffix(".json").write_text(json.dumps(metadata, indent=2) + "\n")
+
+    from .paths import SED_PRIOR_KDE_GAUSSIANIZED_FILENAME
+
+    if (kde_path.parent / SED_PRIOR_KDE_GAUSSIANIZED_FILENAME).exists():
+        seed = build_args["gaussianized_kde_seed"]
+        fit_and_save_gaussianized_kde(
+            kde_path,
+            n_samples=int(build_args["gaussianized_kde_samples"]),
+            seed=int(seed) if seed is not None else int(build_args["seed"]) + 300_003,
+            bandwidth=build_args["gaussianized_kde_bandwidth"],
+            kernel=build_args["kernel"],
+        )
+    return artifact
+
+
+def main_refit_gaussianizer(argv: list[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(
+        description="Refit only the NF gaussianizer of a built sed_prior_kde_native.joblib.",
+    )
+    parser.add_argument("kde_path", help="Path to sed_prior_kde_native.joblib")
+    parser.add_argument("--n-samples", type=int, default=DEFAULT_GAUSSIANIZER_FIT_SAMPLES)
+    args = parser.parse_args(argv)
+    refit_gaussianizer(args.kde_path, n_samples=args.n_samples)
+    print(f"Refit gaussianizer on {args.n_samples} KDE draws: {args.kde_path}")
+
+
 def main_gaussianized_kde(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(
         description="Fit and freeze gaussianized KDE for a transform_input=True run.",
@@ -1550,5 +1609,7 @@ def main_gaussianized_kde(argv: list[str] | None = None) -> None:
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "gaussianized-kde":
         main_gaussianized_kde(sys.argv[2:])
+    elif len(sys.argv) > 1 and sys.argv[1] == "refit-gaussianizer":
+        main_refit_gaussianizer(sys.argv[2:])
     else:
         main()

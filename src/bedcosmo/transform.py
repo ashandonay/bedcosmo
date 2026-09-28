@@ -110,7 +110,13 @@ class Bijector:
         max_rows: int = 50_000,
         seed: int = 0,
     ) -> "Bijector":
-        """Fit CDFs (and optional joint whitening) from a ``(N, D)`` reference matrix."""
+        """Fit CDFs (and optional joint whitening) from a ``(N, D)`` reference matrix.
+
+        The per-column CDF tables use every row: each of the ``cdf_bins`` grid
+        segments holds about ``N / cdf_bins`` rows, and its slope (the density of
+        samples mapped back through the table) scatters by 1/sqrt of that. Only
+        the joint whitening covariance is fit on a seeded ``max_rows`` subset.
+        """
         device = torch.device(device)
         x = torch.as_tensor(x_ref, dtype=torch.float64, device=device)
         if x.ndim != 2:
@@ -123,12 +129,6 @@ class Bijector:
         if not torch.isfinite(x).all():
             raise ValueError("x_ref contains non-finite values")
 
-        if x.shape[0] > max_rows:
-            g = torch.Generator(device=device)
-            g.manual_seed(seed)
-            idx = torch.randperm(x.shape[0], generator=g, device=device)[:max_rows]
-            x = x[idx]
-
         bj = cls(
             experiment=None,
             skip_sampling=True,
@@ -138,6 +138,11 @@ class Bijector:
         bj.cdfs = bj._cdfs_from_matrix_columns(x, num_bins=int(cdf_bins))
 
         if _normalize_input_transform_type(input_transform_type) == "joint":
+            if x.shape[0] > max_rows:
+                g = torch.Generator(device=device)
+                g.manual_seed(seed)
+                idx = torch.randperm(x.shape[0], generator=g, device=device)[:max_rows]
+                x = x[idx]
             bj.fit_joint_gaussianizer(
                 x,
                 param_names=names,
