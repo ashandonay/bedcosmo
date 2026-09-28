@@ -230,11 +230,7 @@ class NumTracers(BaseExperiment, CosmologyMixin):
         # param_bijector is built unconditionally (DESI sampling consumes it
         # even when transform_input is False). State resolution (explicit
         # arg vs prior_flow_metadata fallback) lives in the helper.
-        self._init_param_bijector(
-            bijector_state=bijector_state,
-            cdf_samples=int(1e5),
-            always_build=True,
-        )
+        self._init_param_bijector(bijector_state=bijector_state, always_build=True)
 
         # If the main prior differs from the DESI prior, build a separate
         # bijector against the uniform DESI prior (not the prior_flow).
@@ -243,7 +239,7 @@ class NumTracers(BaseExperiment, CosmologyMixin):
                 self,
                 prior=self.desi_prior,
                 cdf_bins=5000,
-                cdf_samples=1e6,
+                cdf_samples=int(1e7),
                 use_prior_flow=False,
             )
         else:
@@ -1241,6 +1237,18 @@ class NumTracers(BaseExperiment, CosmologyMixin):
         for i in range(num_param_samples):
             param_samples.append(param_mesh[tuple(indices[i])])
         return torch.tensor(np.array(param_samples), device=self.device)
+
+    def exact_prior_marginals(self, use_prior_flow=True):
+        # Mirrors sample_parameters: a prior flow, or a 2D constraint drawn by
+        # ConstrainedUniform2D, reshapes the marginals; the other parameters it
+        # draws come straight from their priors.
+        if use_prior_flow and self.prior_flow is not None:
+            return set()
+        drawn = {"Om", "Ok", "w0", "wa"} | ({"hrdrag"} if self.analysis == "bao" else set())
+        constrained = {
+            p for c in self.param_constraints.values() for p in c["affected_parameters"]
+        }
+        return (set(self.prior) & drawn) - constrained
 
     @profile_method
     def sample_parameters(self, sample_shape, prior=None, use_prior_flow=True):

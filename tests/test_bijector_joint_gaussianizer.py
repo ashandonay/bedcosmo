@@ -15,6 +15,9 @@ class _MockExperiment:
         self.device = device
         self.cosmo_params = list(prior.keys())
 
+    def exact_prior_marginals(self, use_prior_flow=True):
+        return set()
+
     def sample_parameters(self, sample_shape, prior=None, use_prior_flow=True):
         p = prior if prior is not None else self.prior
         return {k: p[k].sample(sample_shape) for k in p}

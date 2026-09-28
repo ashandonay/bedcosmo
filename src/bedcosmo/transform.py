@@ -200,33 +200,49 @@ class Bijector:
     # ------------------------------------------------------------------
 
     def create_cdfs(self, num_bins: int, num_samples: int) -> dict[str, dict[str, torch.Tensor]]:
-        """Create marginal empirical-CDF tables from ``experiment.sample_parameters``."""
-        with pyro.plate_stack("plate", (num_samples,)):
-            empirical_prior = self.experiment.sample_parameters(
-                (num_samples,), prior=self.prior, use_prior_flow=self.use_prior_flow
-            )
+        """Create marginal CDF tables on a ``num_bins`` grid over each prior bracket.
+
+        Parameters whose sampled marginal is exactly their prior distribution
+        (``experiment.exact_prior_marginals``) get the analytic CDF. The rest get
+        the empirical CDF of ``num_samples`` draws from
+        ``experiment.sample_parameters``: each grid segment holds about
+        ``num_samples / num_bins`` draws, so its slope, and hence the density of
+        samples mapped back through the table, scatters by 1/sqrt of that.
+        """
+        keys = [k for k in self.prior if self._param_keys is None or k in self._param_keys]
+        exact = self.experiment.exact_prior_marginals(use_prior_flow=self.use_prior_flow)
+
+        if any(k not in exact for k in keys):
+            with pyro.plate_stack("plate", (num_samples,)):
+                empirical_prior = self.experiment.sample_parameters(
+                    (num_samples,), prior=self.prior, use_prior_flow=self.use_prior_flow
+                )
 
         cdfs: dict[str, dict[str, torch.Tensor]] = {}
-        keys = self._param_keys
-        for key, samples in empirical_prior.items():
-            if keys is not None and key not in keys:
-                continue
-            flat = samples.detach().flatten()
-            sorted_samples, _ = torch.sort(flat)
-            n_samples = int(sorted_samples.numel())
-            if n_samples < 2:
-                raise ValueError(f"Need at least two samples to build CDF for {key!r}")
-
+        for key in keys:
             low, high = self._bin_bracket(self.prior[key], key)
-            low = torch.as_tensor(low, device=samples.device, dtype=samples.dtype).reshape(())
-            high = torch.as_tensor(high, device=samples.device, dtype=samples.dtype).reshape(())
-            if not torch.isfinite(low) or not torch.isfinite(high) or not (high > low):
-                low = sorted_samples[0]
-                high = sorted_samples[-1]
+            if key in exact:
+                low = torch.as_tensor(low).reshape(())
+                bins = torch.linspace(
+                    low, high, int(num_bins), device=low.device, dtype=low.dtype
+                )
+                cdf_values = self.prior[key].cdf(bins)
+            else:
+                samples = empirical_prior[key]
+                sorted_samples, _ = torch.sort(samples.detach().flatten())
+                n_samples = int(sorted_samples.numel())
+                if n_samples < 2:
+                    raise ValueError(f"Need at least two samples to build CDF for {key!r}")
 
-            bins = torch.linspace(low, high, int(num_bins), device=samples.device, dtype=samples.dtype)
-            counts = torch.searchsorted(sorted_samples, bins, right=True)
-            cdf_values = counts.to(samples.dtype) / float(n_samples)
+                low = torch.as_tensor(low, device=samples.device, dtype=samples.dtype).reshape(())
+                high = torch.as_tensor(high, device=samples.device, dtype=samples.dtype).reshape(())
+                if not torch.isfinite(low) or not torch.isfinite(high) or not (high > low):
+                    low = sorted_samples[0]
+                    high = sorted_samples[-1]
+
+                bins = torch.linspace(low, high, int(num_bins), device=samples.device, dtype=samples.dtype)
+                counts = torch.searchsorted(sorted_samples, bins, right=True)
+                cdf_values = counts.to(samples.dtype) / float(n_samples)
             cdf_values = torch.clamp(cdf_values, self.cdf_eps, 1.0 - self.cdf_eps)
             cdfs[key] = {"bins": bins, "cdf_values": cdf_values}
         return cdfs

@@ -503,6 +503,14 @@ class VariableRedshift(BaseExperiment, CosmologyMixin):
 
     # Note: _E_of_z, D_H_func, D_M_func are inherited from CosmologyMixin
 
+    def exact_prior_marginals(self, use_prior_flow=True):
+        # sample_parameters ignores the prior flow; only the 2D constraints drawn
+        # by ConstrainedUniform2D reshape a marginal.
+        constrained = {
+            p for c in self.param_constraints.values() for p in c["affected_parameters"]
+        }
+        return set(self.prior) - constrained
+
     @profile_method
     def sample_parameters(self, sample_shape, prior=None, use_prior_flow=True):
         """Sample parameters from prior with constraints."""

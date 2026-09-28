@@ -488,3 +488,52 @@ class TestDesignGridHelpers:
 
         assert points.shape == (1, 2)
         assert torch.allclose(points, design_pts)
+
+
+class TestExactPriorMarginals:
+    """Which parameters NumTracers / VariableRedshift draw straight from the prior."""
+
+    @staticmethod
+    def _exp(**attrs):
+        from types import SimpleNamespace
+
+        prior = {k: None for k in ["Om", "Ok", "w0", "wa", "hrdrag"]}
+        return SimpleNamespace(prior=prior, **attrs)
+
+    def test_num_tracers_excludes_constrained_params(self):
+        from bedcosmo.num_tracers.experiment import NumTracers
+
+        exp = self._exp(
+            analysis="bao",
+            prior_flow=None,
+            param_constraints={"valid_densities": {"affected_parameters": ["Om", "Ok"]}},
+        )
+        assert NumTracers.exact_prior_marginals(exp) == {"w0", "wa", "hrdrag"}
+
+    def test_num_tracers_only_claims_params_it_draws(self):
+        from types import SimpleNamespace
+
+        from bedcosmo.num_tracers.experiment import NumTracers
+
+        exp = SimpleNamespace(
+            prior={"omega_cdm": None, "h": None},
+            analysis="fullshape",
+            prior_flow=None,
+            param_constraints={},
+        )
+        assert NumTracers.exact_prior_marginals(exp) == set()
+
+    def test_num_tracers_prior_flow_claims_nothing_unless_bypassed(self):
+        from bedcosmo.num_tracers.experiment import NumTracers
+
+        exp = self._exp(analysis="bao", prior_flow=object(), param_constraints={})
+        assert NumTracers.exact_prior_marginals(exp) == set()
+        assert NumTracers.exact_prior_marginals(exp, use_prior_flow=False) == set(exp.prior)
+
+    def test_variable_redshift_excludes_constrained_params(self):
+        from bedcosmo.variable_redshift.experiment import VariableRedshift
+
+        exp = self._exp(
+            param_constraints={"high_z_matter_dom": {"affected_parameters": ["w0", "wa"]}}
+        )
+        assert VariableRedshift.exact_prior_marginals(exp) == {"Om", "Ok", "hrdrag"}

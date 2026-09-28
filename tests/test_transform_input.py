@@ -296,3 +296,65 @@ class TestDefaultBijectorResolution:
         x = torch.tensor([[0.5]], dtype=torch.float64)
         with pytest.raises(AttributeError):
             stub.params_to_unconstrained(x)
+
+
+# ============================================================================
+# Analytic CDFs for parameters whose sampled marginal is exactly the prior.
+# ============================================================================
+
+class _ExactStub(_Stub):
+    """Declares ``exact`` as drawn straight from the prior; counts sampler calls."""
+
+    def __init__(self, prior, exact):
+        super().__init__(prior, transform_input=True)
+        self.exact = set(exact)
+        self.n_sample_calls = 0
+
+    def exact_prior_marginals(self, use_prior_flow=True):
+        return self.exact
+
+    def sample_parameters(self, sample_shape, prior=None, use_prior_flow=True, **kwargs):
+        self.n_sample_calls += 1
+        return super().sample_parameters(sample_shape, prior, use_prior_flow, **kwargs)
+
+
+class TestExactPriorCDF:
+    def test_uniform_cdf_is_exact_and_skips_sampling(self):
+        low, high = 0.1, 10.0
+        stub = _ExactStub(
+            {"h": dist.Uniform(torch.tensor(low, dtype=torch.float64), torch.tensor(high, dtype=torch.float64))},
+            exact={"h"},
+        )
+        bj = Bijector(stub, cdf_bins=5000, cdf_samples=_CDF_SAMPLES, use_prior_flow=False)
+        assert stub.n_sample_calls == 0
+        bins, cdf = bj.cdfs["h"]["bins"], bj.cdfs["h"]["cdf_values"]
+        expected = torch.clamp((bins - low) / (high - low), bj.cdf_eps, 1 - bj.cdf_eps)
+        assert torch.allclose(cdf, expected, rtol=0, atol=1e-12)
+        # Every grid segment has the same slope, so mapped samples carry no
+        # segment-to-segment density jumps.
+        slope = torch.diff(cdf[1:-1]) / torch.diff(bins[1:-1])
+        assert torch.allclose(slope, torch.full_like(slope, 1 / (high - low)), rtol=1e-6)
+
+    def test_normal_cdf_matches_distribution(self):
+        d = dist.Normal(torch.tensor(1.0, dtype=torch.float64), torch.tensor(0.5, dtype=torch.float64))
+        stub = _ExactStub({"n": d}, exact={"n"})
+        bj = Bijector(stub, cdf_bins=2000, cdf_samples=_CDF_SAMPLES, use_prior_flow=False)
+        bins = bj.cdfs["n"]["bins"]
+        expected = torch.clamp(d.cdf(bins), bj.cdf_eps, 1 - bj.cdf_eps)
+        assert torch.allclose(bj.cdfs["n"]["cdf_values"], expected)
+
+    def test_mixed_exact_and_sampled_keep_prior_order(self):
+        prior = {
+            "a": dist.Uniform(torch.tensor(0.0), torch.tensor(1.0)),
+            "b": dist.Uniform(torch.tensor(2.0), torch.tensor(4.0)),
+            "c": dist.Uniform(torch.tensor(-1.0), torch.tensor(1.0)),
+        }
+        stub = _ExactStub(prior, exact={"b"})
+        torch.manual_seed(0)
+        bj = Bijector(stub, cdf_bins=_CDF_BINS, cdf_samples=_CDF_SAMPLES, use_prior_flow=False)
+        assert stub.n_sample_calls == 1
+        assert list(bj.cdfs) == ["a", "b", "c"]
+        # "a" is the sampled fallback: an empirical CDF, close to but not exactly linear.
+        bins, cdf = bj.cdfs["a"]["bins"], bj.cdfs["a"]["cdf_values"]
+        assert torch.allclose(cdf, bins.clamp(bj.cdf_eps, 1 - bj.cdf_eps), atol=2e-2)
+        assert not torch.allclose(cdf, bins.clamp(bj.cdf_eps, 1 - bj.cdf_eps), atol=1e-6)

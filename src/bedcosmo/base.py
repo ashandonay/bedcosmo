@@ -124,6 +124,14 @@ class BaseExperiment(ABC):
         """
         raise NotImplementedError
 
+    def exact_prior_marginals(self, use_prior_flow=True):
+        """Names whose ``sample_parameters`` marginal is exactly ``self.prior[name]``.
+
+        The Bijector uses the analytic CDF for these and samples the rest. The
+        default claims none; experiments whose sampler is known override it.
+        """
+        return set()
+
     @property
     def _name(self):
         """Experiment name."""
