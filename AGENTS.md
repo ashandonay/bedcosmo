@@ -20,6 +20,7 @@ bedcosmo is a Bayesian Experimental Design framework for cosmology and astronomi
 
 ```bash
 conda activate bedcosmo && pip install -e ".[dev]"
+conda activate bedcosmo               # every shell: python, pytest and gh (gh is installed in this env)
 pytest -m "not slow"                  # quick suite; `pytest tests/test_x.py -k name` for one test
 black . && ruff check --fix .         # format + lint
 export SCRATCH=${SCRATCH:-$HOME/scratch}  # needed when running python directly; submit.sh sets it
