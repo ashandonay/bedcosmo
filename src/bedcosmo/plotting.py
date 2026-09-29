@@ -7249,5 +7249,6 @@ def plot_input_transform(experiment, n_samples=200_000, seed=0):
         f"through the transform; max |corr| between transformed params {max_corr:.3f}",
         fontsize=11,
     )
-    fig.tight_layout()
+    # Keep ~0.5 in at the top for the suptitle, whatever the number of rows.
+    fig.tight_layout(rect=(0, 0, 1, 1 - 0.5 / fig.get_figheight()))
     return fig, stats
