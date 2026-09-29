@@ -7245,8 +7245,8 @@ def plot_input_transform(experiment, n_samples=200_000, seed=0):
     corr = np.corrcoef(y, rowvar=False)
     max_corr = float(np.max(np.abs(corr - np.eye(len(names))))) if len(names) > 1 else 0.0
     fig.suptitle(
-        f"Input transform check ({_fmt_sample_count(n_samples)} prior draws); "
-        f"max |corr| between transformed params {max_corr:.3f}",
+        f"Input transform check; right panels: {_fmt_sample_count(n_samples)} prior draws "
+        f"through the transform; max |corr| between transformed params {max_corr:.3f}",
         fontsize=11,
     )
     fig.tight_layout()
