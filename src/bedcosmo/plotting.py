@@ -5,6 +5,7 @@ import contextlib
 from collections.abc import Mapping
 
 import torch
+import pyro
 import mlflow
 from mlflow.tracking import MlflowClient
 import getdist
@@ -7178,3 +7179,69 @@ def plot_2d_eig(
         print(f"Saved plot to {save_path}")
     
     return fig
+
+
+def plot_input_transform(experiment, n_samples=200_000, seed=0):
+    """Check a ``transform_input=True`` experiment's input transform on fresh prior draws.
+
+    One row per cosmo param. Left: the marginal CDF table's segment slopes over
+    its bulk, relative to their local running mean (flat at 1 for a clean
+    table). Samples mapped back through the table get
+    density proportional to these slopes, so scatter shows up as stripes in
+    posterior samples and an empty segment (red tick) as a slice no sample can
+    reach. Right: training-prior draws pushed through
+    ``experiment.params_to_unconstrained`` against N(0, 1).
+
+    Returns ``(fig, stats)`` with ``stats[name]`` holding ``y_mean``, ``y_std``
+    and, for tabled params, :meth:`Bijector.table_diagnostics`.
+    """
+    bijector = experiment.param_bijector
+    names = list(experiment.cosmo_params)
+    stats = {name: {} for name in names}
+    for name, table_stats in bijector.table_diagnostics().items():
+        stats[name].update(table_stats)
+
+    torch.manual_seed(seed)
+    with pyro.plate("plate", n_samples):
+        params = experiment.sample_parameters((n_samples,))
+    theta = torch.stack([params[k].reshape(n_samples) for k in names], dim=-1)
+    y = experiment.params_to_unconstrained(theta.to(torch.float64)).cpu().numpy()
+
+    fig, axes = plt.subplots(len(names), 2, figsize=(12, 2.4 * len(names)), squeeze=False)
+    z = np.linspace(-5, 5, 201)
+    for i, name in enumerate(names):
+        ax_table, ax_y = axes[i]
+        if name in bijector.cdfs:
+            x_mid, rel, empty = bijector.table_slope_noise(name)
+            ax_table.plot(x_mid, 1.0 + rel, lw=0.5, color="C0")
+            ax_table.plot(x_mid[empty], np.zeros(empty.sum()), "|", color="C3", ms=8)
+            ax_table.set_ylabel("CDF slope / local mean")
+            ax_table.set_title(
+                f"{name}: table slope scatter {stats[name]['slope_scatter']:.1%}, "
+                f"empty segments {stats[name]['empty_frac']:.1%}",
+                fontsize=9,
+            )
+        else:
+            ax_table.axis("off")
+            ax_table.text(0.5, 0.5, f"{name}: no CDF table", ha="center", va="center")
+
+        stats[name]["y_mean"] = float(y[:, i].mean())
+        stats[name]["y_std"] = float(y[:, i].std())
+        ax_y.hist(y[:, i], bins=120, range=(-5, 5), density=True, histtype="step", color="C0")
+        ax_y.plot(z, np.exp(-0.5 * z**2) / np.sqrt(2 * np.pi), "k--", lw=0.8, label="N(0, 1)")
+        ax_y.set_title(
+            f"transformed prior: mean {stats[name]['y_mean']:+.3f}, "
+            f"std {stats[name]['y_std']:.3f}",
+            fontsize=9,
+        )
+        ax_y.legend(fontsize=7, loc="upper right")
+
+    corr = np.corrcoef(y, rowvar=False)
+    max_corr = float(np.max(np.abs(corr - np.eye(len(names))))) if len(names) > 1 else 0.0
+    fig.suptitle(
+        f"Input transform check ({_fmt_sample_count(n_samples)} prior draws); "
+        f"max |corr| between transformed params {max_corr:.3f}",
+        fontsize=11,
+    )
+    fig.tight_layout()
+    return fig, stats

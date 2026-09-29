@@ -231,6 +231,7 @@ Then open `http://localhost:5000` in your browser.
 - Training metrics (loss, learning rate)
 - Hyperparameters
 - EIG evaluation results (JSON)
+- `transform_input=True` runs only: `plots/input_transform.png` and `input_transform/{param}/*` metrics, written once at the start of training (not on resume). They show each marginal CDF table's segment-slope noise and empty segments, and prior draws pushed through the input transform against N(0, 1). Training prints a warning when a table's slope scatter exceeds 10% or it has empty segments: posterior samples mapped back through such a table show stripes and empty slices.
 
 ## Adding a New Experiment
 

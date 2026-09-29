@@ -358,3 +358,54 @@ class TestExactPriorCDF:
         bins, cdf = bj.cdfs["a"]["bins"], bj.cdfs["a"]["cdf_values"]
         assert torch.allclose(cdf, bins.clamp(bj.cdf_eps, 1 - bj.cdf_eps), atol=2e-2)
         assert not torch.allclose(cdf, bins.clamp(bj.cdf_eps, 1 - bj.cdf_eps), atol=1e-6)
+
+
+# ============================================================================
+# CDF-table noise diagnostics and the input-transform check plot.
+# ============================================================================
+
+class TestTableDiagnostics:
+    def test_exact_table_has_no_noise(self):
+        stub = _ExactStub({"h": dist.Uniform(torch.tensor(0.1), torch.tensor(10.0))}, exact={"h"})
+        bj = Bijector(stub, cdf_bins=5000, cdf_samples=_CDF_SAMPLES, use_prior_flow=False)
+        d = bj.table_diagnostics()["h"]
+        assert d["slope_scatter"] < 1e-6
+        assert d["empty_frac"] == 0.0
+
+    def test_sampled_table_noise_matches_counting(self):
+        # 1e5 draws over 1000 segments: ~100 per segment -> ~10% slope scatter.
+        stub = _ExactStub({"h": dist.Uniform(torch.tensor(0.0), torch.tensor(1.0))}, exact=set())
+        torch.manual_seed(0)
+        bj = Bijector(stub, cdf_bins=1000, cdf_samples=100_000, use_prior_flow=False)
+        assert bj.table_diagnostics()["h"]["slope_scatter"] == pytest.approx(0.1, rel=0.2)
+
+    def test_counts_empty_segments(self):
+        stub = _ExactStub({"h": dist.Uniform(torch.tensor(0.0), torch.tensor(1.0))}, exact={"h"})
+        bj = Bijector(stub, cdf_bins=1001, cdf_samples=_CDF_SAMPLES, use_prior_flow=False)
+        u = bj.cdfs["h"]["cdf_values"]
+        u[500:511] = u[500]  # flatten 10 segments in the middle
+        x_mid, rel, empty = bj.table_slope_noise("h")
+        assert x_mid.shape == rel.shape == empty.shape
+        assert empty.sum() == 10
+        assert bj.table_diagnostics()["h"]["empty_frac"] == pytest.approx(10 / empty.size)
+
+
+def test_plot_input_transform_rows_and_stats():
+    import matplotlib
+
+    matplotlib.use("Agg")
+    from bedcosmo.plotting import plot_input_transform
+
+    torch.manual_seed(0)
+    stub = _make_stub_with_bijector(
+        {
+            "a": dist.Uniform(torch.tensor(0.0), torch.tensor(1.0)),
+            "b": dist.Normal(torch.tensor(2.0), torch.tensor(0.5)),
+        }
+    )
+    fig, stats = plot_input_transform(stub, n_samples=20_000)
+    assert fig.axes and len(fig.axes) == 4  # 2 params x (table, transformed prior)
+    for name in ["a", "b"]:
+        assert set(stats[name]) == {"slope_scatter", "empty_frac", "y_mean", "y_std"}
+        assert abs(stats[name]["y_mean"]) < 0.05
+        assert stats[name]["y_std"] == pytest.approx(1.0, abs=0.05)

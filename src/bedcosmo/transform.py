@@ -447,6 +447,38 @@ class Bijector:
         log_phi = -0.5 * z.pow(2) - 0.5 * np.log(2.0 * np.pi)
         return (log_f_emp - log_phi).reshape(samples.shape).to(samples.dtype)
 
+    def table_slope_noise(self, name: str, window: int = 25):
+        """Segment-to-segment noise of one marginal CDF table over its bulk (CDF 2%-98%).
+
+        Samples mapped back through a table get density proportional to its
+        segment slopes, so slope noise shows up as stripes in physical space and
+        a flat (empty) segment as a slice no sample can land in.
+
+        Returns ``(x_mid, rel, empty)``, all over the bulk segments: midpoints,
+        each slope relative to its ``window``-segment running mean minus one (~0
+        for an analytic CDF, std ~1/sqrt(draws per segment) for an empirical one;
+        NaN within ``window // 2`` of the ends), and a mask of segments with no
+        CDF increment.
+        """
+        x = self.cdfs[name]["bins"].double().cpu().numpy()
+        u = self.cdfs[name]["cdf_values"].double().cpu().numpy()
+        du = np.diff(u)
+        bulk = (u[:-1] >= 0.02) & (u[1:] <= 0.98)
+        slope = du[bulk] / np.diff(x)[bulk]
+        w = min(window, slope.size)
+        local = np.convolve(slope, np.ones(w) / w, mode="valid")
+        rel = np.full(slope.size, np.nan)
+        rel[w // 2 : w // 2 + local.size] = slope[w // 2 : w // 2 + local.size] / local - 1.0
+        return 0.5 * (x[:-1] + x[1:])[bulk], rel, du[bulk] == 0
+
+    def table_diagnostics(self, window: int = 25) -> dict[str, dict[str, float]]:
+        """``{name: {"slope_scatter", "empty_frac"}}`` from :meth:`table_slope_noise`."""
+        out = {}
+        for name in self.cdfs:
+            _, rel, empty = self.table_slope_noise(name, window)
+            out[name] = {"slope_scatter": float(np.nanstd(rel)), "empty_frac": float(empty.mean())}
+        return out
+
     # ------------------------------------------------------------------
     # Joint whitening
     # ------------------------------------------------------------------
