@@ -7215,6 +7215,12 @@ def plot_input_transform(experiment, n_samples=200_000, seed=0):
             x_mid, rel, empty = bijector.table_slope_noise(name)
             ax_table.plot(x_mid, 1.0 + rel, lw=0.5, color="C0")
             ax_table.plot(x_mid[empty], np.zeros(empty.sum()), "|", color="C3", ms=8)
+            # Span at least 0.8-1.2 so an exact table (float noise ~1e-13) reads
+            # as the flat line it is, not as autoscaled noise.
+            lo = min(0.8, np.nanmin(1.0 + rel), 0.0 if empty.any() else 0.8)
+            hi = max(1.2, np.nanmax(1.0 + rel))
+            ax_table.set_ylim(lo - 0.05 * (hi - lo), hi + 0.05 * (hi - lo))
+            ax_table.ticklabel_format(axis="y", useOffset=False)
             ax_table.set_ylabel("CDF slope / local mean")
             ax_table.set_title(
                 f"{name}: table slope scatter {stats[name]['slope_scatter']:.1%}, "
