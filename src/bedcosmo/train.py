@@ -35,7 +35,7 @@ from bedcosmo.util import *
 import json
 import yaml
 import argparse
-from bedcosmo.plotting import RunPlotter
+from bedcosmo.plotting import RunPlotter, plot_input_transform
 
 class Trainer:
     def __init__(self, cosmo_exp, mlflow_exp, run_args, device=None, profile=False, verbose=False):
@@ -104,6 +104,9 @@ class Trainer:
         if self.global_rank == 0:
             if not self.run_args.get("resume_id", None) and not self.run_args.get("restart_id", None):
                 self._save_design_array()
+
+            if getattr(self.experiment, "transform_input", False) and not self.run_args.get("resume_id"):
+                self._check_input_transform()
 
             print("MLFlow Run Info:", self.run_obj.info.experiment_id + "/" + self.run_obj.info.run_id)
             print(f"Using {self.run_args['n_devices']} devices with {self.run_args['n_particles']} total particles.")
@@ -1078,6 +1081,27 @@ class Trainer:
         # design_args will be loaded from artifacts in init_experiment
         # For new runs, we can also get it from run_args if provided
         self.design_args = self.run_args.get("design_args", None)
+
+    def _check_input_transform(self):
+        """Save the input-transform check plot and metrics; warn on a noisy CDF table.
+
+        A noisy or gappy table distorts every posterior sample mapped back to
+        physical space (stripes, empty slices), so check it before training on it.
+        """
+        fig, stats = plot_input_transform(self.experiment)
+        fig.savefig(f"{self.run_path}/artifacts/plots/input_transform.png", dpi=150)
+        plt.close(fig)
+        mlflow.log_metrics(
+            {f"input_transform/{name}/{k}": v for name, s in stats.items() for k, v in s.items()}
+        )
+        for name, s in stats.items():
+            if s.get("slope_scatter", 0.0) > 0.1 or s.get("empty_frac", 0.0) > 0.0:
+                print(
+                    f"WARNING: input transform CDF table for {name!r} is noisy "
+                    f"(slope scatter {s['slope_scatter']:.1%}, empty segments "
+                    f"{s['empty_frac']:.1%}); transformed posteriors will show "
+                    "stripes/gaps. See artifacts/plots/input_transform.png."
+                )
 
     def _save_input_args(self, restart_run=False):
         """
