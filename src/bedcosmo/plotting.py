@@ -1922,7 +1922,8 @@ class RunPlotter(BasePlotter):
                     
                     try:
                         nominal_samples, target_labels, latex_labels = load_nominal_samples(
-                            run_params['cosmo_exp'], run_params['cosmo_model'], dataset=run_params['dataset'])
+                            run_params['cosmo_exp'], run_params['cosmo_model'], dataset=run_params['dataset'],
+                            analysis=run_params.get('analysis'))
                         with contextlib.redirect_stdout(io.StringIO()):
                             nominal_samples_gd = getdist.MCSamples(samples=nominal_samples, names=target_labels, labels=latex_labels, settings=GETDIST_SETTINGS)
                         nominal_area = get_contour_area([nominal_samples_gd], 0.68, param1, param2)[0]["nominal_area_"+pair_name]
@@ -5647,7 +5648,7 @@ class ComparisonPlotter(BasePlotter):
 
                         # Get nominal samples and area for comparison
                         try:
-                            nominal_samples, target_labels, latex_labels = load_nominal_samples(run_params['cosmo_exp'], run_params['cosmo_model'], dataset=run_params['dataset'])
+                            nominal_samples, target_labels, latex_labels = load_nominal_samples(run_params['cosmo_exp'], run_params['cosmo_model'], dataset=run_params['dataset'], analysis=run_params.get('analysis'))
                             with contextlib.redirect_stdout(io.StringIO()):
                                 nominal_samples_gd = getdist.MCSamples(samples=nominal_samples, names=target_labels, labels=latex_labels, settings=GETDIST_SETTINGS)
                             nominal_area = get_contour_area([nominal_samples_gd], 0.68, param1, param2)[0]["nominal_area_"+f"{param1}_{param2}"]

@@ -23,7 +23,10 @@ bao:
     latex_labels: ["\\Omega_m", "\\Omega_k", "w_0", "w_a", "H_0r_d"]
     constraints: ["valid_densities", "high_z_matter_dom"]
 
-fullshape:
+shapefit:
+  # The shapefit emulators marginalize the EFT nuisances internally (Schur), so only
+  # cosmology is sampled. omega_m_domain is the emulators' training domain.
   base:
-    parameters: ["omega_cdm", "omega_b", "h", "ln10A_s", "n_s", "b1_sigma8", "b2_sigma8_sq", "bs_sigma8_sq", "alpha_0", "alpha_2", "SN_0", "SN_2"]
-    latex_labels: ["\\omega_{cdm}", "\\omega_b", "h", "\\ln(10^{10} A_s)", "n_s", "(1 + b_1) \\sigma_8", "b_2 \\sigma_8^2", "b_s \\sigma_8^2", "\\alpha_0", "\\alpha_2", "SN_0", "SN_2"]
+    parameters: ["omega_cdm", "omega_b", "h", "ln10A_s", "n_s"]
+    latex_labels: ["\\omega_{cdm}", "\\omega_b", "h", "\\ln(10^{10} A_s)", "n_s"]
+    constraints: ["omega_m_domain"]

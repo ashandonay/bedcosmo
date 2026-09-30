@@ -1357,9 +1357,12 @@ def _eig_design_kwds_from_merged_eig(
     )
 
 
-def load_nominal_samples(cosmo_exp, cosmo_model, dataset='dr2'):
+def load_nominal_samples(cosmo_exp, cosmo_model, dataset='dr2', analysis=None):
     home_dir = os.environ["HOME"]
     if cosmo_exp == 'num_tracers':
+        # DESI's MCMC chains exist only for the BAO parameterization (Om, hrdrag, ...).
+        if analysis != 'bao':
+            raise NotImplementedError(f"Nominal samples exist only for analysis='bao', got {analysis!r}")
         nominal_samples = np.load(f"{home_dir}/data/desi/bao_{dataset}/mcmc_samples/{cosmo_model}.npy")
         if cosmo_model == 'base':
             target_labels = ['Om', 'hrdrag']
