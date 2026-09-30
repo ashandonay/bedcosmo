@@ -1046,7 +1046,7 @@ class BasePlotter:
         posterior_samples_path=None,
         data_index=0,
         show_scatter=False,
-        show_outliers=True,
+        show_outliers=False,
         ranges=None,
     ):
         """
@@ -1279,7 +1279,7 @@ class BasePlotter:
         style=style,
         fenced=None,
         legend_fontsize=None,
-        show_outliers=True,
+        show_outliers=False,
     ):
         """
         Low-level GetDist triangle plot from MCSamples lists.
@@ -1305,10 +1305,11 @@ class BasePlotter:
                 also the outlier fence. Params not in ``ranges`` use GetDist's own
                 view range over the fenced series. Fenced series are smoothed by
                 GetDist from samples inside all parameter windows. Out-of-window
-                samples are marked with ``x`` in 2D panels only when either plotted
-                parameter is outside its window; counts are per series in the legend
-                and per parameter in the 1D panels' top-left corner. Set
-                ``show_outliers=False`` to hide those markers and counts.
+                samples are dropped from the smoothing but not drawn. Set
+                ``show_outliers=True`` to mark them with ``x`` in 2D panels (only
+                when either plotted parameter is outside its window) and count them
+                per series in the legend and per parameter in the 1D panels'
+                top-left corner.
             scatter_alpha (float): Alpha value for scatter points. Default 0.6 for better distinguishability.
             contour_alpha_factor (float): Factor to adjust contour alpha for distinguishability. Default 0.8.
             style (object, optional): Style object (like KP7StylePaper) to apply to the plotter settings.
@@ -2002,9 +2003,9 @@ class RunPlotter(BasePlotter):
 
         Extra keyword arguments are forwarded to ``BasePlotter.plot_posterior``
         (e.g. ``plot_mcmc=False``, ``ranges``). To see the out-of-window samples
-        where they actually lie, use ``plot_posterior_full_range``. NumVisits
-        plots hide outlier markers and counts by default; pass
-        ``show_outliers=True`` to display them.
+        where they actually lie, use ``plot_posterior_full_range``. Outlier
+        markers and counts are hidden by default; pass ``show_outliers=True`` to
+        display them.
         """
         if device is None:
             device = "cuda:0" if torch.cuda.is_available() else "cpu"
@@ -2036,8 +2037,6 @@ class RunPlotter(BasePlotter):
 
         if nf_entries is None and artifacts_dir is None and posterior_samples_path is None:
             artifacts_dir = self._get_artifacts_dir()
-
-        kwargs.setdefault("show_outliers", self.cosmo_exp != "num_visits")
 
         return super().plot_posterior(
             experiment=experiment,
