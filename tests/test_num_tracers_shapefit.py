@@ -121,6 +121,42 @@ def test_prior_draws_respect_omega_m_domain(exp):
     assert omega_m.min() >= 0.01 and omega_m.max() <= 0.99
 
 
+def test_omega_m_acceptance_matches_quadrature(exp):
+    # P(accept) = E_{h, omega_b}[ length of allowed omega_cdm interval ] / omega_cdm range:
+    # the cut is linear in omega_cdm at fixed (omega_b, h).
+    import numpy as np
+
+    b = exp.param_constraints["omega_m_domain"]["bounds"]
+    wc, wb, hp = exp.prior["omega_cdm"], exp.prior["omega_b"], exp.prior["h"]
+    wc_lo, wc_hi = float(wc.low), float(wc.high)
+    h = np.linspace(float(hp.low), float(hp.high), 200_001)
+    x, w = np.polynomial.hermite_e.hermegauss(60)
+    omega_b = float(wb.loc) + float(wb.scale) * x
+    lo = np.maximum(wc_lo, b["lower"] * h[:, None] ** 2 - omega_b - exp._OMEGA_NU_FID)
+    hi = np.minimum(wc_hi, b["upper"] * h[:, None] ** 2 - omega_b - exp._OMEGA_NU_FID)
+    frac = np.clip(hi - lo, 0, None) / (wc_hi - wc_lo)
+    p_accept = np.trapz(frac @ (w / w.sum()), h) / (float(hp.high) - float(hp.low))
+    assert exp._omega_m_log_acceptance == pytest.approx(np.log(p_accept), abs=2e-3)
+
+
+def test_trace_records_truncated_prior_density(exp):
+    import pyro
+    from pyro import poutine
+
+    n = 50_000
+
+    def model():
+        with pyro.plate("p", n):
+            return exp.sample_parameters((n,))
+
+    tr = poutine.trace(model).get_trace()
+    tr.compute_log_prob()
+    recorded = sum(tr.nodes[k]["log_prob"] for k in exp.cosmo_params)
+    expected = sum(exp.prior[k].log_prob(tr.nodes[k]["value"]) for k in exp.cosmo_params)
+    expected = expected - exp._omega_m_log_acceptance
+    assert torch.allclose(recorded, expected, atol=1e-4)
+
+
 def test_central_sample_data_shape(exp):
     y = exp.sample_data(exp.nominal_design.view(1, -1), num_samples=5, central=True)
     assert y.shape == (5, 1, 24)

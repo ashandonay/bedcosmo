@@ -273,6 +273,8 @@ class NumTracers(BaseExperiment, CosmologyMixin):
             self.prior_flow_metadata,
         ) = self.init_prior(**self.prior_args)
         self.cosmo_params = list(self.prior.keys())
+        if self.analysis == "shapefit":
+            self._omega_m_log_acceptance = self._omega_m_domain_log_acceptance()
 
         # Extract prior_flow settings for use in _sample_prior_flow
         if self.prior_flow_metadata is not None:
@@ -1336,27 +1338,58 @@ class NumTracers(BaseExperiment, CosmologyMixin):
     # the shapefit emulators' training domain.
     _OMEGA_NU_FID = 0.06 / 93.14
 
-    def _sample_shapefit_parameters(self, sample_shape, prior):
-        """Draw the omega-basis cosmology, rejecting Omega_m outside the emulator domain.
+    _OMEGA_M_COUPLED = ("omega_cdm", "omega_b", "h")
 
-        The shapefit training generator rejects samples whose derived
-        Omega_m = (omega_cdm + omega_b + omega_nu) / h^2 falls outside
-        [lower, upper] (desilike_emulator shapefit/core.py _check_omega_m; ~58% of the
-        raw omega_cdm x h box), so the emulators are only valid inside it. The
-        ``omega_m_domain`` constraint carries those bounds; rejected rows are redrawn
-        from the prior until every row is inside. The other parameters are independent.
+    def _omega_m_in_domain(self, omega_cdm, omega_b, h):
+        bounds = self.param_constraints["omega_m_domain"]["bounds"]
+        omega_m = (omega_cdm + omega_b + self._OMEGA_NU_FID) / h ** 2
+        return (omega_m >= bounds["lower"]) & (omega_m <= bounds["upper"])
+
+    def _omega_m_domain_log_acceptance(self, n_chunks=4, chunk_size=10_000_000):
+        """log P(accept) of the omega_m_domain cut under the independent prior.
+
+        The truncated prior's normalizer. Monte Carlo over n_chunks * chunk_size draws:
+        relative error ~2e-4 at the defaults, i.e. a ~2e-4 nat, design-independent shift
+        of H_prior. Seeded under a forked RNG, so every rank gets the same value and the
+        run's seeded stream is untouched.
         """
         if "omega_m_domain" not in self.param_constraints:
             raise ValueError(
                 "analysis='shapefit' needs the 'omega_m_domain' constraint in prior_args: "
                 "the emulators are only trained on Omega_m inside it.")
-        bounds = self.param_constraints["omega_m_domain"]["bounds"]
+        accepted = 0
+        with torch.random.fork_rng(devices=range(torch.cuda.device_count())):
+            torch.manual_seed(0)
+            for _ in range(n_chunks):
+                draws = {n: self.prior[n].sample((chunk_size,)) for n in self._OMEGA_M_COUPLED}
+                accepted += int(self._omega_m_in_domain(**draws).sum())
+        return math.log(accepted / (n_chunks * chunk_size))
+
+    def _sample_shapefit_parameters(self, sample_shape, prior):
+        """Draw the omega-basis cosmology, rejecting Omega_m outside the emulator domain.
+
+        The shapefit training generator rejects samples whose derived
+        Omega_m = (omega_cdm + omega_b + omega_nu) / h^2 falls outside
+        [lower, upper] (desilike_emulator shapefit/core.py _check_omega_m; ~62% of the
+        raw prior box), so the emulators are only valid inside it. The
+        ``omega_m_domain`` constraint carries those bounds; rejected rows are redrawn
+        jointly from the prior until every row is inside. The other parameters are
+        independent.
+
+        Accepted draws have density prior(theta) * 1[in domain] / P(accept). Each coupled
+        site records its marginal prior log-density, and omega_cdm also carries
+        -log P(accept), so the trace's summed prior log-prob (and hence H_prior) is exact;
+        a plain Delta would score 0 (see PresampledPrior).
+        """
+        if prior is not self.prior:
+            raise ValueError(
+                "shapefit's Omega_m acceptance is computed for self.prior; sampling another "
+                "prior would record the wrong truncated density.")
         shape = torch.Size(sample_shape)
-        coupled = ("omega_cdm", "omega_b", "h")
+        coupled = self._OMEGA_M_COUPLED
         draws = {name: prior[name].sample(shape) for name in coupled}
         while True:
-            omega_m = (draws["omega_cdm"] + draws["omega_b"] + self._OMEGA_NU_FID) / draws["h"] ** 2
-            reject = (omega_m < bounds["lower"]) | (omega_m > bounds["upper"])
+            reject = ~self._omega_m_in_domain(**draws)
             if not reject.any():
                 break
             for name in coupled:
@@ -1365,7 +1398,11 @@ class NumTracers(BaseExperiment, CosmologyMixin):
         parameters = {}
         for name in prior:
             if name in coupled:
-                parameters[name] = pyro.sample(name, dist.Delta(draws[name])).unsqueeze(-1)
+                log_density = prior[name].log_prob(draws[name])
+                if name == coupled[0]:
+                    log_density = log_density - self._omega_m_log_acceptance
+                parameters[name] = pyro.sample(
+                    name, PresampledPrior(draws[name], log_density=log_density)).unsqueeze(-1)
             else:
                 parameters[name] = pyro.sample(name, prior[name]).unsqueeze(-1)
         return parameters
