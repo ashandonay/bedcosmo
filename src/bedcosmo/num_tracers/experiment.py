@@ -2191,20 +2191,30 @@ class NumTracers(BaseExperiment, CosmologyMixin):
     def _shapefit_cov_block(self, sigma, rho):
         """4x4 covariance from sigma (..., 4) and the row-major upper-triangle rho (..., 6).
 
-        The correlation matrix is projected to its nearest PD neighbour by flooring its
-        eigenvalues at ``_SHAPEFIT_CORR_EIG_FLOOR`` and restoring the unit diagonal.
+        A correlation matrix with an eigenvalue below ``_SHAPEFIT_CORR_EIG_FLOOR`` is
+        projected to its nearest PD neighbour by flooring its eigenvalues there and
+        restoring the unit diagonal; the others are used as predicted. Only those blocks
+        go through eigh, in chunks: cuSOLVER's batched eigh raises INVALID_VALUE at
+        batch >= 32768 (eval's particle batches are 50000), and they are ~5e-5 of draws.
         """
         n = sigma.shape[-1]
         i, j = torch.triu_indices(n, n, offset=1, device=sigma.device)
-        corr = torch.eye(n, dtype=sigma.dtype, device=sigma.device).expand(
-            sigma.shape + (n,)).clone()
+        eye = torch.eye(n, dtype=sigma.dtype, device=sigma.device)
+        corr = eye.expand(sigma.shape + (n,)).clone()
         corr[..., i, j] = rho
         corr[..., j, i] = rho
-        evals, evecs = torch.linalg.eigh(corr)
-        evals = evals.clamp(min=self._SHAPEFIT_CORR_EIG_FLOOR)
-        corr = evecs @ torch.diag_embed(evals) @ evecs.transpose(-1, -2)
-        d = torch.diagonal(corr, dim1=-2, dim2=-1).sqrt()
-        cov = corr / (d.unsqueeze(-1) * d.unsqueeze(-2)) * sigma.unsqueeze(-1) * sigma.unsqueeze(-2)
+        # Cholesky of corr - floor*I succeeds iff every eigenvalue exceeds the floor.
+        below = torch.linalg.cholesky_ex(corr - self._SHAPEFIT_CORR_EIG_FLOOR * eye).info != 0
+        if below.any():
+            projected = []
+            for chunk in torch.split(corr[below], 16384):
+                evals, evecs = torch.linalg.eigh(chunk)
+                evals = evals.clamp(min=self._SHAPEFIT_CORR_EIG_FLOOR)
+                chunk = evecs @ torch.diag_embed(evals) @ evecs.transpose(-1, -2)
+                d = torch.diagonal(chunk, dim1=-2, dim2=-1).sqrt()
+                projected.append(chunk / (d.unsqueeze(-1) * d.unsqueeze(-2)))
+            corr[below] = torch.cat(projected)
+        cov = corr * sigma.unsqueeze(-1) * sigma.unsqueeze(-2)
         return 0.5 * (cov + cov.transpose(-1, -2))
 
     def _shapefit_likelihood(self, n_tracers, parameters):

@@ -103,6 +103,18 @@ def test_cov_block_projects_non_pd_correlation(exp):
     assert torch.allclose(rho, good[0])
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="cuSOLVER batch limit is GPU-only")
+def test_cov_block_large_batch_on_gpu(exp):
+    # Eval's particle batches (50000) exceed cuSOLVER's batched-eigh limit (32768).
+    n = 40000
+    sigma = torch.full((n, 4), 0.01, dtype=torch.float64, device="cuda")
+    rho = torch.zeros(n, 6, dtype=torch.float64, device="cuda")
+    rho[0] = torch.tensor([0.9, 0.9, 0.0, -0.9, 0.0, 0.0], dtype=torch.float64)
+    cov = exp._shapefit_cov_block(sigma, rho)
+    assert (torch.linalg.cholesky_ex(cov).info == 0).all()
+    assert torch.equal(cov[1:], torch.diag_embed(sigma[1:] ** 2))
+
+
 def test_prior_draws_respect_omega_m_domain(exp):
     params = exp.sample_parameters((20000,))
     omega_m = (params["omega_cdm"] + params["omega_b"] + exp._OMEGA_NU_FID) / params["h"] ** 2
