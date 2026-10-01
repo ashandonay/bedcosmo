@@ -71,6 +71,7 @@ class NumTracers(BaseExperiment, CosmologyMixin):
         ref_cov=None,
         emulator_sqrtn_ref=None,
         emulator_space=None,
+        emulator_covariance="cosmology",
         artifacts_dir=None,
         input_transform_type="marginal",
         joint_transform_shrinkage=1e-3,
@@ -180,6 +181,16 @@ class NumTracers(BaseExperiment, CosmologyMixin):
 
         # Initialize emulator-based likelihood mode
         self.likelihood_mode = likelihood_mode
+        # Which cosmology the covariance emulators see. "cosmology": the sampled one, so
+        # the covariance's own theta-dependence is information in the likelihood.
+        # "fiducial": the fiducial cosmology at the design's N_tracers, as a real analysis
+        # fixes its covariance; the design dependence (through N) is kept.
+        if emulator_covariance not in ("cosmology", "fiducial"):
+            raise ValueError(
+                f"emulator_covariance must be 'cosmology' or 'fiducial'; got {emulator_covariance!r}.")
+        if emulator_covariance == "fiducial" and analysis != "shapefit":
+            raise ValueError("emulator_covariance='fiducial' is implemented for analysis='shapefit' only.")
+        self.emulator_covariance = emulator_covariance
         if self.analysis == "shapefit":
             # ShapeFit has no DESI covariance to rescale and its emulators already
             # derive z_eff(N) internally, so the BAO-only switches have no meaning here.
@@ -2310,16 +2321,19 @@ class NumTracers(BaseExperiment, CosmologyMixin):
     def _shapefit_likelihood(self, n_tracers, parameters):
         """ShapeFit Gaussian likelihood: mean (..., 4 * n_bins) and block-diagonal covariance.
 
-        Per bin, the mean emulator gives [qiso, qap, f_sigmar, m] and the covar emulator its
-        4x4 covariance, both at the bin's N_tracers and the sampled cosmology. Bins are
-        independent (distinct redshift slices), so off-diagonal blocks are zero.
+        Per bin, the mean emulator gives [qiso, qap, f_sigmar, m] at the bin's N_tracers and
+        the sampled cosmology, and the covar emulator its 4x4 covariance at the same N and
+        the cosmology ``emulator_covariance`` selects. Bins are independent (distinct
+        redshift slices), so off-diagonal blocks are zero.
         """
         n_q = len(self.shapefit_quantities)
+        cov_parameters = (parameters if self.emulator_covariance == "cosmology"
+                          else self._shapefit_fiducial_parameters())
         means, blocks = [], []
         for i, tracer_bin in enumerate(self.shapefit_bins):
             n = n_tracers[..., i]
             means.append(self._shapefit_predict("mean", tracer_bin, n, parameters))
-            pred = self._shapefit_predict("covar", tracer_bin, n, parameters)
+            pred = self._shapefit_predict("covar", tracer_bin, n, cov_parameters)
             blocks.append(self._shapefit_cov_block(pred[..., :n_q], pred[..., n_q:]))
         mean = torch.cat(means, dim=-1)
         covariance = torch.zeros(

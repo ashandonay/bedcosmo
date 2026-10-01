@@ -13,6 +13,8 @@ base:
   # config = config-space xi (Grieb), fourier = windowed P(k) (thecov).
   # Unused with --analysis shapefit, which loads both its mean and covar emulators.
   emulator_space: fourier
+  # shapefit only: covariance emulators at the sampled cosmology or fixed at the fiducial.
+  emulator_covariance: cosmology
   flow_type: NAF
   transform_input: true
   input_transform_type: marginal
