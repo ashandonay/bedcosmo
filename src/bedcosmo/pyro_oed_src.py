@@ -1,11 +1,13 @@
 import torch
 import pyro
 import pyro.poutine as poutine
+import pyro.distributions as dist
 from pyro.contrib.util import lexpand
 from pyro.infer.autoguide.utils import mean_field_entropy
 import math
 from torch.utils.data import Dataset
 from bedcosmo.profiling import profile_method
+from bedcosmo.custom_dist import PresampledPrior
 
 
 def transform_input_standard_normal_log_prob(experiment, samples: torch.Tensor) -> torch.Tensor:
@@ -951,9 +953,17 @@ class LikelihoodDataset(Dataset):
             if bijector is not None and bijector.uses_joint_gaussianizer():
                 return {"joint": transform_input_standard_normal_log_prob(self.experiment, samples)}
 
+        # Otherwise fall back to Pyro trace log-probs. A plain Delta scores 0 there, so a
+        # parameter drawn outside Pyro would silently drop its prior density from H_prior.
+        for name in self.experiment.cosmo_params:
+            fn = trace.nodes[name]["fn"]
+            if isinstance(fn, dist.Delta) and not isinstance(fn, PresampledPrior):
+                raise TypeError(
+                    f"Prior site '{name}' is a plain Delta, whose log-prob is 0, so its prior "
+                    "density would be missing from H_prior. Register values drawn outside "
+                    "Pyro with custom_dist.PresampledPrior(value, log_density=<prior log-density>)."
+                )
         trace.compute_log_prob()
-
-        # Otherwise fall back to Pyro trace log-probs.
         prior_log_probs = {l: trace.nodes[l]["log_prob"] for l in self.experiment.cosmo_params}
 
         if getattr(self.experiment, "transform_input", False):

@@ -31,7 +31,7 @@ from bedcosmo.util import (
 )
 from bedcosmo.transform import Bijector
 from cosmopower_jax.cosmopower_jax import CosmoPowerJAX
-from bedcosmo.custom_dist import ConstrainedUniform2D
+from bedcosmo.custom_dist import ConstrainedUniform2D, PresampledPrior
 from bedcosmo.base import BaseExperiment
 from bedcosmo.cosmology import CosmologyMixin, FIDUCIAL_PARAMS, _infer_plate_shape
 
@@ -1293,11 +1293,15 @@ class NumTracers(BaseExperiment, CosmologyMixin):
             if "valid_densities" in self.param_constraints:
                 # 0 < Om + Ok < 1
                 OmOk_prior = {"Om": prior["Om"], "Ok": prior["Ok"]}
-                OmOk_samples = ConstrainedUniform2D(
+                OmOk = ConstrainedUniform2D(
                     OmOk_prior, **self.param_constraints["valid_densities"]["bounds"]
-                ).sample(sample_shape)
-                parameters["Om"] = pyro.sample("Om", dist.Delta(OmOk_samples[..., 0])).unsqueeze(-1)
-                parameters["Ok"] = pyro.sample("Ok", dist.Delta(OmOk_samples[..., 1])).unsqueeze(-1)
+                )
+                OmOk_samples = OmOk.sample(sample_shape)
+                # The pair is uniform on the constrained region; record its density once, on Om.
+                parameters["Om"] = pyro.sample(
+                    "Om", PresampledPrior(OmOk_samples[..., 0], log_density=-math.log(float(OmOk.areas.sum())))
+                ).unsqueeze(-1)
+                parameters["Ok"] = pyro.sample("Ok", PresampledPrior(OmOk_samples[..., 1])).unsqueeze(-1)
             else:
                 # Sample Om, Ok normally if no constraint or Ok not present
                 if "Om" in prior.keys():
@@ -1309,11 +1313,15 @@ class NumTracers(BaseExperiment, CosmologyMixin):
             if "high_z_matter_dom" in self.param_constraints:
                 # w0 + wa < 0
                 w0wa_prior = {"w0": prior["w0"], "wa": prior["wa"]}
-                w0wa_samples = ConstrainedUniform2D(
+                w0wa = ConstrainedUniform2D(
                     w0wa_prior, **self.param_constraints["high_z_matter_dom"]["bounds"]
-                ).sample(sample_shape)
-                parameters["w0"] = pyro.sample("w0", dist.Delta(w0wa_samples[..., 0])).unsqueeze(-1)
-                parameters["wa"] = pyro.sample("wa", dist.Delta(w0wa_samples[..., 1])).unsqueeze(-1)
+                )
+                w0wa_samples = w0wa.sample(sample_shape)
+                # Uniform on the constrained region; density recorded once, on w0 (see Om/Ok).
+                parameters["w0"] = pyro.sample(
+                    "w0", PresampledPrior(w0wa_samples[..., 0], log_density=-math.log(float(w0wa.areas.sum())))
+                ).unsqueeze(-1)
+                parameters["wa"] = pyro.sample("wa", PresampledPrior(w0wa_samples[..., 1])).unsqueeze(-1)
             else:
                 # Sample w0, wa normally if no constraint or wa not present
                 if "w0" in prior.keys():

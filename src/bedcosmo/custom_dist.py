@@ -6,6 +6,16 @@ from pyro.distributions.torch_distribution import TorchDistribution
 from torch.distributions import constraints
 import matplotlib.pyplot as plt
 
+class PresampledPrior(dist.Delta):
+    """Point mass for a parameter value drawn outside Pyro, carrying its prior log-density.
+
+    Prior-entropy estimators read each parameter's density from the trace, and a plain
+    Delta scores 0 there, so pass the value's prior log-density as ``log_density``. A
+    constrained group's joint density may sit on one member, with the rest passing 0.
+    ``LikelihoodDataset`` rejects plain Delta prior sites.
+    """
+
+
 class ConstrainedUniform2D(TorchDistribution):
     """
     Uniform over the region defined by:

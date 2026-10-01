@@ -696,3 +696,52 @@ def test_compute_prior_log_probs_flow_transform_uses_gaussianized_flow():
     )
     assert not torch.allclose(out["joint"], std_normal, atol=0.1)
     assert not torch.allclose(out["joint"], native, atol=0.1)
+
+
+# ============================================================================
+# Prior sites registered as point masses (values drawn outside Pyro).
+# ============================================================================
+
+class _DrawnStub(_Stub):
+    """Draws each parameter outside Pyro and registers it as ``delta_cls``."""
+
+    def __init__(self, prior, delta_cls):
+        super().__init__(prior)
+        self.delta_cls = delta_cls
+
+    def sample_parameters(self, sample_shape, prior=None, use_prior_flow=True, **kwargs):
+        parameters = {}
+        for k, v in self.prior.items():
+            value = v.sample(sample_shape)
+            parameters[k] = pyro.sample(
+                k, self.delta_cls(value, log_density=v.log_prob(value))
+            ).unsqueeze(-1)
+        return parameters
+
+
+def _drawn_trace(stub):
+    with pyro.plate("p", 500):
+        return pyro.poutine.trace(stub.pyro_model).get_trace(torch.zeros(1))
+
+
+_DRAWN_PRIOR = {"a": dist.Normal(torch.tensor(0.0), torch.tensor(2.0)),
+                "b": dist.Uniform(torch.tensor(-1.0), torch.tensor(3.0))}
+
+
+def test_plain_delta_prior_site_raises():
+    stub = _DrawnStub(_DRAWN_PRIOR, dist.Delta)
+    stub.init_designs()
+    tr = _drawn_trace(stub)
+    with pytest.raises(TypeError, match="plain Delta"):
+        _build_dataset(stub)._compute_prior_log_probs(torch.zeros(500, 2), tr)
+
+
+def test_presampled_prior_site_reports_its_log_density():
+    from bedcosmo.custom_dist import PresampledPrior
+
+    stub = _DrawnStub(_DRAWN_PRIOR, PresampledPrior)
+    stub.init_designs()
+    tr = _drawn_trace(stub)
+    got = _build_dataset(stub)._compute_prior_log_probs(torch.zeros(500, 2), tr)
+    for k, prior in _DRAWN_PRIOR.items():
+        assert torch.allclose(got[k], prior.log_prob(tr.nodes[k]["value"]))
