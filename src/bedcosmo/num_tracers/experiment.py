@@ -2200,12 +2200,58 @@ class NumTracers(BaseExperiment, CosmologyMixin):
                 for quantity, by_bin in self._shapefit_emulators.items()
                 for tb, emu in by_bin.items()})
 
-        # The flow's nominal data: the mean emulator at the fiducial and the nominal design.
-        # Evaluated as a batch of one: the emulators' (1, in_dim) x_mu adds that dim anyway.
+        # The flow's nominal data: DESI's measured ShapeFit data vector, as BAO uses DESI's
+        # measured distances. f_sigmar is carried over as a fraction of the fiducial, so it
+        # needs our fiducial f_sigmar: the mean emulator at the fiducial and the nominal
+        # design (a batch of one: the emulators' (1, in_dim) x_mu adds that dim anyway).
         n_nominal = self._shapefit_n_tracers(self.nominal_design.view(1, -1))
-        self.central_val = torch.cat([
+        fiducial_mean = torch.cat([
             self._shapefit_predict("mean", tb, n_nominal[..., i], self._shapefit_fiducial_parameters())
-            for i, tb in enumerate(self.shapefit_bins)], dim=-1)[0]
+            for i, tb in enumerate(self.shapefit_bins)], dim=-1)[0].reshape(len(self.shapefit_bins), -1)
+        self.central_val = self._desi_shapefit_data_vector(fiducial_mean[:, names.index("f_sigmar")])
+
+    def _desi_shapefit_data_vector(self, f_sigmar_fid):
+        """DESI DR1's measured ShapeFit-alone data vector in the emulators' basis, (24,).
+
+        ``f_sigmar_fid``: our fiducial f_sigmar per bin, in ``shapefit_bins`` order.
+        """
+        if self.dataset != "dr1":
+            raise ValueError(f"DESI ShapeFit data vectors exist for dr1 only; got {self.dataset!r}.")
+        if self.shapefit_quantities != ["qiso", "qap", "f_sigmar", "m"]:
+            raise ValueError(f"desi_shapefit_to_targets assumes [qiso, qap, f_sigmar, m]; "
+                             f"the mean emulators give {self.shapefit_quantities}.")
+        from desilike_emulator.shapefit import desi_reference
+
+        rows = []
+        for i, tracer_bin in enumerate(self.shapefit_bins):
+            _, measured, _ = desi_reference.datavector(tracer_bin)
+            rows.append(self.desi_shapefit_to_targets(
+                measured, desi_reference.published_fiducial(tracer_bin),
+                float(f_sigmar_fid[i]), desi_reference._SF_DM_COEFF))
+        return torch.tensor(np.concatenate(rows), device=self.device, dtype=torch.float64)
+
+    @staticmethod
+    def desi_shapefit_to_targets(measured, fiducial, f_sigmar_fid, dm_coeff):
+        """One tracer's DESI ShapeFit measurement -> [qiso, qap, f_sigmar, m].
+
+        DESI publishes (D_V/r_d, D_H/D_M, f sigma_s8, m+n) (DESI 2024 V App. A; n is fixed
+        to 0, so the last entry is m in our convention). Against the same template
+        fiducial (``fiducial``: DESI's Table 11 row):
+
+        - qiso, qap: the measured distance ratios over their fiducial values.
+        - f_sigmar: DESI's f sigma_s8 carries a factor exp(dm_coeff * m) that our
+          m-independent f_sigmar does not (desi_reference.to_ap_basis). With it divided
+          out, the measurement enters as a fraction of the fiducial, so the <=4.4% offset
+          between our fiducial f_sigmar and Table 11's is not read as a measurement.
+        """
+        dv, dh_dm, f_sigma_s8, m = (float(x) for x in measured)
+        f_sigma_s8_m_free = f_sigma_s8 * math.exp(-dm_coeff * m)
+        return np.array([
+            dv / fiducial["DV_over_rd"],
+            dh_dm / fiducial["DH_over_DM"],
+            f_sigmar_fid * f_sigma_s8_m_free / fiducial["f_sigma_s8"],
+            m,
+        ])
 
     def _shapefit_n_tracers(self, tracer_ratio):
         """Passed N_tracers per shapefit bin, shape (..., n_bins) in ``shapefit_bins`` order."""

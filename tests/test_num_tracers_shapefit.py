@@ -12,6 +12,7 @@ Needs the v4 shapefit checkpoints under $SCRATCH; skipped when they are absent.
 """
 import os
 
+import numpy as np
 import pytest
 import torch
 
@@ -51,6 +52,29 @@ def test_bins_and_context(exp):
     assert exp.shapefit_quantities == ["qiso", "qap", "f_sigmar", "m"]
     assert exp.central_val.shape == (24,)
     assert exp.context_dim == len(exp.design_labels) + 24
+
+
+def test_desi_conversion_null_case():
+    from desilike_emulator.shapefit import desi_reference
+
+    from bedcosmo.num_tracers.experiment import NumTracers
+
+    fid = desi_reference.published_fiducial("LRG2")
+    at_fid = [fid["DV_over_rd"], fid["DH_over_DM"], fid["f_sigma_s8"], 0.0]
+    out = NumTracers.desi_shapefit_to_targets(at_fid, fid, 0.4607, desi_reference._SF_DM_COEFF)
+    np.testing.assert_allclose(out, [1.0, 1.0, 0.4607, 0.0], rtol=1e-12)
+
+
+def test_central_val_is_desi_measurement(exp):
+    from desilike_emulator.shapefit import desi_reference
+
+    _, measured, _ = desi_reference.datavector("BGS")
+    fid = desi_reference.published_fiducial("BGS")
+    i = exp.shapefit_bins.index("BGS")
+    qiso, qap, _, m = exp.central_val[4 * i:4 * i + 4].tolist()
+    assert qiso == pytest.approx(measured[0] / fid["DV_over_rd"])
+    assert qap == pytest.approx(measured[1] / fid["DH_over_DM"])
+    assert m == pytest.approx(measured[3])
 
 
 def test_nominal_n_tracers_match_desilike(exp):
