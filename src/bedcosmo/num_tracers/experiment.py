@@ -948,8 +948,13 @@ class NumTracers(BaseExperiment, CosmologyMixin):
             names = [target_labels[i] for i in param_indices]
             labels = [latex_labels[i] for i in param_indices]
 
+        # The legend label of every plot that overlays this reference.
+        source = {"bao": "BAO", "shapefit": "ShapeFit"}[self.analysis]
         with contextlib.redirect_stdout(io.StringIO()):
-            desi_samples_gd = getdist.MCSamples(samples=param_samples, names=names, labels=labels)
+            desi_samples_gd = getdist.MCSamples(
+                samples=param_samples, names=names, labels=labels,
+                label=f"DESI {self.dataset.upper()} {source}",
+            )
 
         return desi_samples_gd
 

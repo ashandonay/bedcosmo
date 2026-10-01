@@ -1186,12 +1186,13 @@ class BasePlotter:
                 nominal_samples_mcmc = experiment.get_nominal_samples(
                     transform_output=not transform_output
                 )
+                nominal_label = nominal_samples_mcmc.label
                 nominal_samples_mcmc = restrict_mcsamples(nominal_samples_mcmc, params)
                 all_samples.append(nominal_samples_mcmc)
                 all_colors.append('black')
                 all_alphas.append(1.0)
                 all_line_styles.append('--')
-                legend_labels.append('Nominal Design (MCMC)')
+                legend_labels.append(nominal_label)
                 all_fenced.append(True)
             except NotImplementedError:
                 print(
@@ -3592,9 +3593,9 @@ class ComparisonPlotter(BasePlotter):
                     transform_output=not transform_output
                 )
                 nominal_label = (
-                    f'Nominal Design (MCMC) ({cosmo_model_for_desi})'
+                    f'{nominal_samples_gd.label} ({cosmo_model_for_desi})'
                     if cosmo_model_for_desi
-                    else 'Nominal Design (MCMC)'
+                    else nominal_samples_gd.label
                 )
                 all_samples.append(nominal_samples_gd)
                 all_colors.append('black')

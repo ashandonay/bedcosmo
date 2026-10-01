@@ -169,6 +169,7 @@ def test_central_sample_data_shape(exp):
 def test_nominal_samples_are_desi_shapefit_chain(exp):
     gd = exp.get_nominal_samples(num_samples=5000)
     assert gd.getParamNames().list() == exp.cosmo_params
+    assert gd.label == "DESI DR1 ShapeFit"
     means = gd.getMeans()
     # DESI DR1 ShapeFit-alone (all-nolya, BBN + ns10) published means, chain.margestats.
     assert means[0] == pytest.approx(0.1233, abs=0.002)    # omega_cdm
