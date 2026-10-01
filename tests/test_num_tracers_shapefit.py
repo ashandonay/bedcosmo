@@ -61,8 +61,11 @@ def test_desi_conversion_null_case():
 
     fid = desi_reference.published_fiducial("LRG2")
     at_fid = [fid["DV_over_rd"], fid["DH_over_DM"], fid["f_sigma_s8"], 0.0]
-    out = NumTracers.desi_shapefit_to_targets(at_fid, fid, 0.4607, desi_reference._SF_DM_COEFF)
+    out = NumTracers.desi_shapefit_to_targets(at_fid, fid, 0.4607)
     np.testing.assert_allclose(out, [1.0, 1.0, 0.4607, 0.0], rtol=1e-12)
+    # f_sigmar carries DESI's m-dependence: only the fiducial ratio is applied.
+    off = NumTracers.desi_shapefit_to_targets([*at_fid[:2], 1.05 * fid["f_sigma_s8"], 0.06], fid, 0.4607)
+    assert off[2] == pytest.approx(0.4607 * 1.05) and off[3] == 0.06
 
 
 def test_central_val_is_desi_measurement(exp):

@@ -2226,12 +2226,11 @@ class NumTracers(BaseExperiment, CosmologyMixin):
         for i, tracer_bin in enumerate(self.shapefit_bins):
             _, measured, _ = desi_reference.datavector(tracer_bin)
             rows.append(self.desi_shapefit_to_targets(
-                measured, desi_reference.published_fiducial(tracer_bin),
-                float(f_sigmar_fid[i]), desi_reference._SF_DM_COEFF))
+                measured, desi_reference.published_fiducial(tracer_bin), float(f_sigmar_fid[i])))
         return torch.tensor(np.concatenate(rows), device=self.device, dtype=torch.float64)
 
     @staticmethod
-    def desi_shapefit_to_targets(measured, fiducial, f_sigmar_fid, dm_coeff):
+    def desi_shapefit_to_targets(measured, fiducial, f_sigmar_fid):
         """One tracer's DESI ShapeFit measurement -> [qiso, qap, f_sigmar, m].
 
         DESI publishes (D_V/r_d, D_H/D_M, f sigma_s8, m+n) (DESI 2024 V App. A; n is fixed
@@ -2239,17 +2238,16 @@ class NumTracers(BaseExperiment, CosmologyMixin):
         fiducial (``fiducial``: DESI's Table 11 row):
 
         - qiso, qap: the measured distance ratios over their fiducial values.
-        - f_sigmar: DESI's f sigma_s8 carries a factor exp(dm_coeff * m) that our
-          m-independent f_sigmar does not (desi_reference.to_ap_basis). With it divided
-          out, the measurement enters as a fraction of the fiducial, so the <=4.4% offset
-          between our fiducial f_sigmar and Table 11's is not read as a measurement.
+        - f_sigmar: the mean emulator's labels are in DESI's own Eq. (4.10) convention,
+          m-dependence included (desilike_emulator fix_desilike_fsigmar), so DESI's
+          f sigma_s8 carries over unchanged, as a fraction of the fiducial: the <=4.4%
+          offset between our fiducial f_sigmar and Table 11's is not read as a measurement.
         """
         dv, dh_dm, f_sigma_s8, m = (float(x) for x in measured)
-        f_sigma_s8_m_free = f_sigma_s8 * math.exp(-dm_coeff * m)
         return np.array([
             dv / fiducial["DV_over_rd"],
             dh_dm / fiducial["DH_over_DM"],
-            f_sigmar_fid * f_sigma_s8_m_free / fiducial["f_sigma_s8"],
+            f_sigmar_fid * f_sigma_s8 / fiducial["f_sigma_s8"],
             m,
         ])
 
