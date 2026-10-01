@@ -183,7 +183,8 @@ Both are listed under `shapefit: <dataset>: <cosmo_model>: {mean, covar}` in `em
 - **Covariance** is block-diagonal across bins. The six `rho` are predicted independently, so each 4x4 correlation is projected to its nearest positive-definite matrix by flooring the eigenvalues at 1e-6 and restoring the unit diagonal. With the v4 emulators this changes about 5e-5 of LRG2 prior draws and nothing else.
 - **Prior** (`prior_args_shapefit.yaml`) matches the emulators' training distributions. The `omega_m_domain` constraint redraws samples until `(omega_cdm + omega_b + omega_nu)/h^2` lies in [0.01, 0.99], the emulators' domain. Nuisance parameters are marginalized inside the emulators, so they are not sampled.
 - **Nominal data** (`central_val`, the flow's nominal context) is the mean emulator at the DESI template fiducial (AbacusSummit c000) and the nominal design.
-- **Not applicable**: `likelihood_mode` must be `emulator`. `vary_z_eff`, `apply_desi_syst` and `emulator_sqrtn_ref` are rejected, and `emulator_space`, `include_D_M`, `include_D_V` and `vary_lya_qso` are unused. There are no DESI ShapeFit chains, so `log_nominal_area` plots raw contour areas rather than the ratio to DESI.
+- **Not applicable**: `likelihood_mode` must be `emulator`. `vary_z_eff`, `apply_desi_syst` and `emulator_sqrtn_ref` are rejected, and `emulator_space`, `include_D_M`, `include_D_V` and `vary_lya_qso` are unused.
+- **DESI reference posterior**: `load_nominal_samples` reads DESI's DR1 ShapeFit-alone chain (`desi-shapefit-all-nolya` with the BBN and ns10 priors, the same tracers and priors as this forecast) from `~/data/desi/shapefit_dr1/mcmc_samples/base.npy`, converted from the public DR1 full-shape VAC as recorded in `PROVENANCE.md` beside it. It is DESI's posterior for the real data, so it is centred on the measured cosmology, not the fiducial.
 
 ## Cosmology Models (`models.yaml`)
 

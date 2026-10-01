@@ -162,9 +162,28 @@ def test_central_sample_data_shape(exp):
     assert y.shape == (5, 1, 24)
 
 
-def test_get_nominal_samples_not_available(exp):
-    with pytest.raises(NotImplementedError):
-        exp.get_nominal_samples()
+@pytest.mark.skipif(
+    not os.path.exists(os.path.join(os.environ.get("HOME", ""), "data", "desi", "shapefit_dr1",
+                                    "mcmc_samples", "base.npy")),
+    reason="DESI ShapeFit reference chain not converted")
+def test_nominal_samples_are_desi_shapefit_chain(exp):
+    gd = exp.get_nominal_samples(num_samples=5000)
+    assert gd.getParamNames().list() == exp.cosmo_params
+    means = gd.getMeans()
+    # DESI DR1 ShapeFit-alone (all-nolya, BBN + ns10) published means, chain.margestats.
+    assert means[0] == pytest.approx(0.1233, abs=0.002)    # omega_cdm
+    assert means[2] == pytest.approx(0.700, abs=0.005)     # h, not H0
+    assert means[4] == pytest.approx(0.969, abs=0.01)      # n_s, not divided by 100
+
+
+def test_split_param_pair_handles_underscored_names():
+    from bedcosmo.plotting import split_param_pair
+
+    names = ["omega_cdm", "omega_b", "h", "ln10A_s", "n_s"]
+    assert split_param_pair("omega_cdm_omega_b", names) == ("omega_cdm", "omega_b")
+    assert split_param_pair("ln10A_s_n_s", names) == ("ln10A_s", "n_s")
+    with pytest.raises(ValueError):
+        split_param_pair("omega_cdm_w0", names)
 
 
 @pytest.mark.parametrize("override", [

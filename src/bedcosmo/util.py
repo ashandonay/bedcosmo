@@ -1359,10 +1359,17 @@ def _eig_design_kwds_from_merged_eig(
 
 def load_nominal_samples(cosmo_exp, cosmo_model, dataset='dr2', analysis=None):
     home_dir = os.environ["HOME"]
-    if cosmo_exp == 'num_tracers':
-        # DESI's MCMC chains exist only for the BAO parameterization (Om, hrdrag, ...).
+    if cosmo_exp == 'num_tracers' and analysis == 'shapefit':
+        # DESI DR1 ShapeFit-alone chains (BBN + ns10 priors), equal-weight; the conversion
+        # is recorded in mcmc_samples/PROVENANCE.md beside the file.
+        if cosmo_model != 'base':
+            raise NotImplementedError(f"No DESI ShapeFit chains converted for cosmo_model={cosmo_model!r}")
+        nominal_samples = np.load(f"{home_dir}/data/desi/shapefit_{dataset}/mcmc_samples/{cosmo_model}.npy")
+        target_labels = ['omega_cdm', 'omega_b', 'h', 'ln10A_s', 'n_s']
+        latex_labels = ['\\omega_{cdm}', '\\omega_b', 'h', '\\ln(10^{10} A_s)', 'n_s']
+    elif cosmo_exp == 'num_tracers':
         if analysis != 'bao':
-            raise NotImplementedError(f"Nominal samples exist only for analysis='bao', got {analysis!r}")
+            raise NotImplementedError(f"Nominal samples exist only for analysis 'bao' or 'shapefit', got {analysis!r}")
         nominal_samples = np.load(f"{home_dir}/data/desi/bao_{dataset}/mcmc_samples/{cosmo_model}.npy")
         if cosmo_model == 'base':
             target_labels = ['Om', 'hrdrag']

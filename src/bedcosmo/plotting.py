@@ -122,6 +122,19 @@ def _window_log_ticks(lo, hi, vmin, vmax):
     return sorted(ticks)
 
 
+def split_param_pair(pair_name, names):
+    """``(p1, p2)`` with ``f"{p1}_{p2}" == pair_name``, both in ``names``.
+
+    Area metrics are logged as ``nominal_area_avg_{p1}_{p2}``, and names like
+    ``omega_cdm`` contain underscores, so the pair can only be recovered against the
+    known parameter names.
+    """
+    matches = [(a, b) for a in names for b in names if f"{a}_{b}" == pair_name]
+    if len(matches) != 1:
+        raise ValueError(f"Cannot split {pair_name!r} into two of {list(names)}: matches {matches}")
+    return matches[0]
+
+
 def triangle_font_sizes(width_inch, n_params):
     """``(axis, title, legend)`` font sizes for an ``n_params`` triangle ``width_inch`` wide."""
     axis = max(9, min(22, width_inch * (0.3 + 0.5 * np.sqrt(n_params))))
@@ -1912,8 +1925,7 @@ class RunPlotter(BasePlotter):
             for area_idx, (metric_name, area_data) in enumerate(nom_area.items()):
                 if area_data:
                     pair_name = metric_name.replace('nominal_area_avg_', '')
-                    param1, param2 = pair_name.split('_')[:2]
-                    
+
                     area_steps, area_values = zip(*area_data)
                     sampled_indices = np.arange(0, len(area_steps), sampling_rate)
                     plot_area_steps = np.array(area_steps)[sampled_indices]
@@ -1927,13 +1939,14 @@ class RunPlotter(BasePlotter):
                             analysis=run_params.get('analysis'))
                         with contextlib.redirect_stdout(io.StringIO()):
                             nominal_samples_gd = getdist.MCSamples(samples=nominal_samples, names=target_labels, labels=latex_labels, settings=GETDIST_SETTINGS)
+                        param1, param2 = split_param_pair(pair_name, target_labels)
                         nominal_area = get_contour_area([nominal_samples_gd], 0.68, param1, param2)[0]["nominal_area_"+pair_name]
                         ax_area.plot(plot_area_steps, plot_area_values/nominal_area, 
-                                    color=line_color, label=pair_name.replace('_', ', '))
+                                    color=line_color, label=f"{param1}, {param2}")
                         ax_area.axhline(1, color='black', linestyle='--', lw=1.5)
                     except NotImplementedError:
                         ax_area.plot(plot_area_steps, plot_area_values, 
-                                    color=line_color, label=pair_name.replace('_', ', '))
+                                    color=line_color, label=pair_name)
             
             ax_area.set_ylabel("Nominal Design Area Ratio to DESI")
             ax_area.set_ylim(area_limits)

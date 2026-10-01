@@ -929,7 +929,8 @@ class NumTracers(BaseExperiment, CosmologyMixin):
         param_samples = param_samples[:num_samples]
         if transform_output:
             param_samples = torch.tensor(param_samples, device=self.device)
-            param_samples[..., -1] /= 100  # to get hrdrag in units of 100 km/s/Mpc
+            if self.analysis == "bao":
+                param_samples[..., -1] /= 100  # to get hrdrag in units of 100 km/s/Mpc
             param_samples = (
                 self.params_to_unconstrained(param_samples, bijector_class=self.desi_bijector)
                 .cpu()
