@@ -38,6 +38,24 @@ GETDIST_SETTINGS = {
 import getdist
 import io
 
+# Reference MCMC chains (DESI's published posteriors) are correlated draws: DR1 ShapeFit's
+# 32k rows hold ~1.4k effective samples. The fixed GETDIST_SETTINGS width suits independent
+# flow samples but leaves a chain's sampling noise in its contours, so chains keep GetDist's
+# automatic width, chosen from an autocorrelation-aware effective sample size.
+GETDIST_CHAIN_SETTINGS = {**GETDIST_SETTINGS, "smooth_scale_1D": -1, "smooth_scale_2D": -1}
+
+
+class ReferenceChain(getdist.MCSamples):
+    """MCMC chain samples (rows in chain order), smoothed with GETDIST_CHAIN_SETTINGS.
+
+    Plotting code that re-sets or rebuilds a sample keeps this class and its settings via
+    ``getdist_settings_for``.
+    """
+
+
+def getdist_settings_for(sample):
+    return GETDIST_CHAIN_SETTINGS if isinstance(sample, ReferenceChain) else GETDIST_SETTINGS
+
 
 def restrict_mcsamples(gd, params):
     """Return a new MCSamples restricted to ``params`` (a list of names).
@@ -53,11 +71,12 @@ def restrict_mcsamples(gd, params):
         return gd
     sub_labels = [gd.paramNames.names[i].label for i in idx]
     with contextlib.redirect_stdout(io.StringIO()):
-        restricted = getdist.MCSamples(
+        restricted = type(gd)(
             samples=gd.samples[:, idx],
             names=[names[i] for i in idx],
             labels=sub_labels,
-            settings=GETDIST_SETTINGS,
+            settings=getdist_settings_for(gd),
+            label=gd.label,
         )
     return restricted
 

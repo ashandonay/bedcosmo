@@ -28,6 +28,8 @@ from bedcosmo.util import (
     auto_seed,
     load_nominal_samples,
     get_experiment_config_path,
+    ReferenceChain,
+    GETDIST_CHAIN_SETTINGS,
 )
 from bedcosmo.transform import Bijector
 from bedcosmo.custom_dist import ConstrainedUniform2D, PresampledPrior
@@ -951,9 +953,10 @@ class NumTracers(BaseExperiment, CosmologyMixin):
         # The legend label of every plot that overlays this reference.
         source = {"bao": "BAO", "shapefit": "ShapeFit"}[self.analysis]
         with contextlib.redirect_stdout(io.StringIO()):
-            desi_samples_gd = getdist.MCSamples(
+            desi_samples_gd = ReferenceChain(
                 samples=param_samples, names=names, labels=labels,
                 label=f"DESI {self.dataset.upper()} {source}",
+                settings=GETDIST_CHAIN_SETTINGS,
             )
 
         return desi_samples_gd

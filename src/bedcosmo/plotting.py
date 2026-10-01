@@ -14,7 +14,8 @@ from getdist import plots
 from bedcosmo.util import (
     get_runs_data, init_experiment, load_model, auto_seed, convert_color,
     load_nominal_samples, get_contour_area, parse_mlflow_params, sort_key_for_group_tuple,
-    GETDIST_SETTINGS, restrict_mcsamples, sample_nf,
+    GETDIST_SETTINGS, restrict_mcsamples, sample_nf, ReferenceChain, GETDIST_CHAIN_SETTINGS,
+    getdist_settings_for,
     nf_posterior_entries, validate_display, NF_SERIES_COLORS, NF_SERIES_LABELS,
 )
 from bedcosmo.artifacts import (
@@ -183,11 +184,11 @@ def _subset_mcsamples(sample, mask):
             f"No samples of {sample.label!r} fall inside the plot ranges; widen ``ranges``."
         )
     with contextlib.redirect_stdout(io.StringIO()):
-        subset = getdist.MCSamples(
+        subset = type(sample)(
             samples=np.asarray(sample.samples)[mask],
             names=sample.paramNames.list(),
             labels=[p.label for p in sample.paramNames.names],
-            settings=GETDIST_SETTINGS,
+            settings=getdist_settings_for(sample),
         )
     subset.label = sample.label
     return subset
@@ -1365,7 +1366,7 @@ class BasePlotter:
         # (0.1%/99.9% quantiles plus a smoothing pad, so outliers do not move it)
         # over the fenced series.
         for sample in samples:
-            sample.updateSettings(GETDIST_SETTINGS)
+            sample.updateSettings(getdist_settings_for(sample))
         fence = getdist_view_ranges([s for s, f in zip(samples, fenced) if f])
         names = samples[0].paramNames.list()
         fence.update({p: tuple(r) for p, r in (ranges or {}).items() if p in names})
@@ -1939,7 +1940,7 @@ class RunPlotter(BasePlotter):
                             run_params['cosmo_exp'], run_params['cosmo_model'], dataset=run_params['dataset'],
                             analysis=run_params.get('analysis'))
                         with contextlib.redirect_stdout(io.StringIO()):
-                            nominal_samples_gd = getdist.MCSamples(samples=nominal_samples, names=target_labels, labels=latex_labels, settings=GETDIST_SETTINGS)
+                            nominal_samples_gd = ReferenceChain(samples=nominal_samples, names=target_labels, labels=latex_labels, settings=GETDIST_CHAIN_SETTINGS)
                         param1, param2 = split_param_pair(pair_name, target_labels)
                         nominal_area = get_contour_area([nominal_samples_gd], 0.68, param1, param2)[0]["nominal_area_"+pair_name]
                         ax_area.plot(plot_area_steps, plot_area_values/nominal_area, 
@@ -5663,7 +5664,7 @@ class ComparisonPlotter(BasePlotter):
                         try:
                             nominal_samples, target_labels, latex_labels = load_nominal_samples(run_params['cosmo_exp'], run_params['cosmo_model'], dataset=run_params['dataset'], analysis=run_params.get('analysis'))
                             with contextlib.redirect_stdout(io.StringIO()):
-                                nominal_samples_gd = getdist.MCSamples(samples=nominal_samples, names=target_labels, labels=latex_labels, settings=GETDIST_SETTINGS)
+                                nominal_samples_gd = ReferenceChain(samples=nominal_samples, names=target_labels, labels=latex_labels, settings=GETDIST_CHAIN_SETTINGS)
                             nominal_area = get_contour_area([nominal_samples_gd], 0.68, param1, param2)[0]["nominal_area_"+f"{param1}_{param2}"]
                             ax_area.plot(plot_area_steps, plot_area_values/nominal_area, 
                                         alpha=base_alpha, color=color, label=plot_label)
