@@ -265,6 +265,53 @@ class Trainer:
         
         return True
 
+    def _log_batch_health(self, loss, context, grad_norm, current_step):
+        """Log the batch tails the mean loss hides. Collective: every rank must call it.
+
+        One draw far outside what the flow has learned can sit at a loss of hundreds
+        for thousands of steps before overflowing to NaN while the mean barely moves.
+        ``loss_max`` and ``context_abs_max`` are maxima over all ranks, the experiment's
+        ``training_batch_stats`` are averaged over ranks, and ``grad_norm`` (pre-clip)
+        is already identical on every rank after DDP's all-reduce.
+        """
+        peaks = torch.stack([loss.detach().max(), context.abs().max()])
+        tdist.all_reduce(peaks, op=tdist.ReduceOp.MAX)
+        stats = self.experiment.training_batch_stats(context)
+        names = sorted(stats)
+        means = torch.tensor([stats[n] for n in names], device=peaks.device, dtype=torch.float64)
+        tdist.all_reduce(means, op=tdist.ReduceOp.SUM)
+        means /= tdist.get_world_size()
+        if self.global_rank == 0:
+            metrics = {
+                "loss_max": peaks[0].item(),
+                "context_abs_max": peaks[1].item(),
+                "grad_norm": grad_norm.item(),
+            }
+            metrics.update(zip(names, means.tolist()))
+            mlflow.log_metrics(metrics, step=current_step)
+
+    def _save_nan_dump(self, loss, samples, context, current_step):
+        """Save the failing batch with the pre-step state, so the NaN can be replayed.
+
+        ``step`` skips the update on a non-finite loss, so the model, optimizer and
+        scheduler here are exactly what produced it. Only ranks whose own batch holds a
+        non-finite loss save, to ``artifacts/nan_dump/checkpoint_rank_{rank}_{step}.pt``.
+        """
+        if torch.isfinite(loss).all():
+            return
+        dump_dir = f"{self.run_path}/artifacts/nan_dump"
+        os.makedirs(dump_dir, exist_ok=True)
+        path = f"{dump_dir}/checkpoint_rank_{self.global_rank}_{current_step}.pt"
+        self.save_checkpoint(
+            path, step=current_step, scheduler=self.scheduler, global_rank=self.global_rank,
+            additional_state={
+                "samples": samples.detach().cpu(),
+                "context": context.detach().cpu(),
+                "loss": loss.detach().cpu(),
+            },
+        )
+        print(f"Rank {self.global_rank}: saved the failing batch and pre-step state to {path}")
+
     @profile_method
     def step(self, samples, context, current_step):
         # Time the step if we're in the first 100 steps
@@ -301,6 +348,13 @@ class Trainer:
             indent = "  " * get_profile_depth()
             print(f"{indent}  all_reduce took {allreduce_time:.5f} seconds")
 
+        global_loss = loss_tensor.item() / tdist.get_world_size()
+        global_agg_loss = agg_loss_tensor.item() / tdist.get_world_size()
+        # Every rank sees the same global loss, so all skip together. Skipping the
+        # update leaves the pre-step weights in place for the NaN dump to replay.
+        if not np.isfinite(global_loss):
+            return loss, agg_loss, global_loss, global_agg_loss, current_step, None, None
+
         # Profile backpropagation
         if self.profile and (not hasattr(self, 'global_rank') or self.global_rank == 0):
             backward_start = time.time()
@@ -319,14 +373,15 @@ class Trainer:
             indent = "  " * get_profile_depth()
             print(f"{indent}  aggregation total: {agg_time:.5f} seconds")
         
-        global_loss = loss_tensor.item() / tdist.get_world_size()
-        global_agg_loss = agg_loss_tensor.item() / tdist.get_world_size()
-
-        # Optional gradient clipping for stability
+        # Optional gradient clipping for stability. The returned total norm is
+        # measured before clipping; an infinite max_norm only measures it.
         grad_clip = self.run_args.get("grad_clip", 0.0)
         if grad_clip > 0:
             print(f"Clipping gradients to {grad_clip}")
-            torch.nn.utils.clip_grad_norm_(self.posterior_flow.parameters(), max_norm=float(grad_clip))
+        grad_norm = torch.nn.utils.clip_grad_norm_(
+            self.posterior_flow.parameters(),
+            max_norm=float(grad_clip) if grad_clip > 0 else float("inf"),
+        )
 
         # Profile optimizer step
         if self.profile and (not hasattr(self, 'global_rank') or self.global_rank == 0):
@@ -365,7 +420,7 @@ class Trainer:
         # Calculate step time if we were timing
         step_time = (time.time() - start_time) if start_time is not None else None
 
-        return loss, agg_loss, global_loss, global_agg_loss, current_step, step_time
+        return loss, agg_loss, global_loss, global_agg_loss, current_step, step_time, grad_norm
 
     @profile_method
     def run(self):
@@ -391,10 +446,11 @@ class Trainer:
         break_loop = False
         while current_step < self.run_args["total_steps"] and not break_loop:
             for samples, context in self.dataloader:
-                loss, agg_loss, global_loss, global_agg_loss, current_step, step_time = self.step(samples, context, current_step)
+                loss, agg_loss, global_loss, global_agg_loss, current_step, step_time, grad_norm = self.step(samples, context, current_step)
                 
                 # Check for NaN loss values
                 if self._check_nan_loss(loss, global_loss, current_step, samples, context):
+                    self._save_nan_dump(loss, samples, context, current_step)
                     if self.global_rank == 0 and self.is_tty and not self.profile:
                         self.pbar.close()
                     tdist.barrier()
@@ -513,6 +569,7 @@ class Trainer:
 
                 # Update progress bar or print status
                 if current_step % 10 == 0:
+                    self._log_batch_health(loss, context, grad_norm, current_step)
                     mlflow.log_metric(f"loss_rank_{self.global_rank}", loss.mean().detach().item(), step=current_step)
                     mlflow.log_metric(f"agg_loss_rank_{self.global_rank}", agg_loss.detach().item(), step=current_step)
                     if self.global_rank == 0:
