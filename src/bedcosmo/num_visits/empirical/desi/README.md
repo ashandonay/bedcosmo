@@ -124,10 +124,15 @@ python -m bedcosmo.num_visits.empirical.prior_flow \
 `--prior-only` overwrites the fit table, selection provenance, `prior_args.yaml`,
 KDEs, and diagnostic triangles in the existing build. It loads `desi_basis.npz`
 and the training matrix recorded in provenance (or `--training-matrix`), checks
-target-ID order, wavelengths and the exported template bank, and reuses the
+the matrix's SHA-256 fingerprint, target-ID order, wavelengths and the exported
+template bank, and reuses the
 saved coefficients. Rank, normalization and template paths come from the saved
 build; no support reselection, coefficient solve, or factorization is performed.
 Templates, basis arrays and factorization checkpoints remain untouched.
+Full builds save the training-matrix fingerprint in provenance and checkpoint
+requests. Changing any matrix contents prevents reuse of cached coefficients
+or checkpoints. Older builds without a fingerprint require a new full build;
+no automatic metadata migration is performed.
 Redshift overrides and `--max-chi2-dof` control the new prior selection;
 `--skip-kde` updates the table, provenance, runtime YAML and template-redshift plot.
 Like the full build, this does not train prior flows. Rebuild them with the

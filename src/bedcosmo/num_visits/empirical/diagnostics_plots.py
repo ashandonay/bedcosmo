@@ -7,8 +7,8 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from speclite.filters import load_filters
 from matplotlib.colors import LogNorm
+from speclite.filters import load_filters
 
 from .desi.support import largest_contiguous_region, lsst_support_limits
 from .paths import get_desi_training_data_dir, get_prior_build_dir
@@ -182,7 +182,7 @@ def weighted_redshift_summary(redshift, shares):
 
 
 def plot_template_redshifts(prior_dir, redshift_bins=24, log_flux=False,
-                            flux_max=None, template_param=None):
+                            flux_max=None):
     """Show templates and coefficient-weighted redshifts of quality-passing fits."""
     if flux_max is not None and (not np.isfinite(flux_max) or flux_max <= 0):
         raise ValueError("Flux maximum must be finite and positive")
@@ -190,7 +190,8 @@ def plot_template_redshifts(prior_dir, redshift_bins=24, log_flux=False,
     frame = frame.loc[frame["quality_pass"] == True]  # noqa: E712
     if frame.empty:
         raise ValueError("No quality-passing fitted spectra")
-    template_param = template_param or f"{prior_dir.name}.param"
+    metadata = json.loads((prior_dir / "build_provenance.json").read_text())
+    template_param = metadata["template"]["template_param"]
     template_paths = read_template_param(prior_dir / "templates" / template_param)
     filters = load_filters("lsst2023-*")
     wavelength_limits = (min(f.wavelength.min() for f in filters),
@@ -217,7 +218,14 @@ def plot_template_redshifts(prior_dir, redshift_bins=24, log_flux=False,
         if log_flux:
             shape = np.ma.masked_less_equal(shape, 0)
         shares = frame[f"a{i+1}"].to_numpy(float)
-        z05, z50, z95 = weighted_redshift_summary(frame.z, shares)
+        if not np.isfinite(shares).all() or np.any(shares < 0):
+            raise ValueError("Coefficient shares must be finite and nonnegative")
+        active = shares.sum() > 0
+        redshift_curves = []
+        if active:
+            z05, z50, z95 = weighted_redshift_summary(frame.z, shares)
+            redshift_curves = [(z05, "tab:blue", "5%"), (z50, ".4", "median"),
+                              (z95, "tab:red", "95%")]
         rest = fig.add_subplot(gs[0, i])
         rest.plot(wave, shape, color="black")
         if log_flux:
@@ -229,11 +237,7 @@ def plot_template_redshifts(prior_dir, redshift_bins=24, log_flux=False,
         )
         observed = fig.add_subplot(gs[1, i], sharex=wavelength_axes[0] if wavelength_axes else None)
         wavelength_axes.append(observed)
-        for z, color, label in (
-            (z05, "tab:blue", "5%"),
-            (z50, ".4", "median"),
-            (z95, "tab:red", "95%"),
-        ):
+        for z, color, label in redshift_curves:
             observed.plot(wave * (1 + z), shape, color=color,
                           alpha=.7 if label != "median" else 1.,
                           label=f"z {label} = {z:.3f}")
@@ -247,16 +251,24 @@ def plot_template_redshifts(prior_dir, redshift_bins=24, log_flux=False,
                 else:
                     ax.set_ylim(0, flux_max)
         observed.grid(alpha=.15)
-        observed.legend(fontsize=8, loc="upper right")
+        if active:
+            observed.legend(fontsize=8, loc="upper right")
+        else:
+            observed.text(.5, .5, "No contribution", transform=observed.transAxes,
+                          ha="center", va="center")
         hist = fig.add_subplot(gs[2, i])
         hist.hist(
             frame.z, bins=edges, density=True, histtype="stepfilled",
             facecolor="white", edgecolor="black", linewidth=1.3, label="All passed fits"
         )
-        hist.hist(frame.z, bins=edges, weights=shares, density=True,
-                  histtype="stepfilled", color=".4", alpha=.45,
-                  label="Coefficient-weighted (all fits)")
-        hist.axvline(z50, color=".4", alpha=.45, ls="--", label="Weighted median")
+        if active:
+            hist.hist(frame.z, bins=edges, weights=shares, density=True,
+                      histtype="stepfilled", color=".4", alpha=.45,
+                      label="Coefficient-weighted (all fits)")
+            hist.axvline(z50, color=".4", alpha=.45, ls="--", label="Weighted median")
+        else:
+            hist.text(.5, .9, "No contribution", transform=hist.transAxes,
+                      ha="center", va="top")
         hist.set(xlabel="Redshift z", xlim=(z_min, z_max))
         hist_axes.append(hist)
         if i == 0:

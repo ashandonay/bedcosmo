@@ -180,10 +180,13 @@ def derive_rest_frame_grid(
             row_by_target = {
                 int(target): row for row, target in enumerate(hdul["FIBERMAP"].data["TARGETID"])
             }
+            arm_wave = {
+                arm: np.asarray(hdul[f"{arm}_WAVELENGTH"].data, float) for arm in "BRZ"
+            }
             for item in patch.itertuples():
                 row = row_by_target[int(item.targetid)]
                 for arm in "BRZ":
-                    wave = np.asarray(hdul[f"{arm}_WAVELENGTH"].data, float)
+                    wave = arm_wave[arm]
                     flux = hdul[f"{arm}_FLUX"].data[row]
                     ivar = hdul[f"{arm}_IVAR"].data[row]
                     mask = hdul[f"{arm}_MASK"].data[row]

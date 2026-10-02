@@ -4,16 +4,18 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import subprocess
 import sys
 from pathlib import Path
 
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import yaml
-import matplotlib.pyplot as plt
 
+from ..diagnostics_plots import plot_template_redshifts
 from ..paths import (
     BUILD_PROVENANCE_FILENAME,
     SED_PRIOR_KDE_NATIVE_FILENAME,
@@ -21,7 +23,6 @@ from ..paths import (
     get_prior_build_dir,
 )
 from ..provenance import write_provenance
-from ..diagnostics_plots import plot_template_redshifts
 from ..template_config import default_empirical_parameters
 from ..templates import load_two_column_template, read_template_param
 from .evaluate_factorization_methods import (
@@ -34,6 +35,15 @@ from .support import lsst_support_limits, select_wavelength_support
 from .weighted_nmf import infer_coefficients
 
 KDE_MODULE = "bedcosmo.num_visits.empirical.fit_sed_prior_kde"
+
+
+def training_matrix_sha256(path):
+    """Fingerprint the exact matrix used to fit cached coefficients."""
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def resolve_prior_redshift_limits(wave, prior_z_min=None, prior_z_max=None):
@@ -302,23 +312,21 @@ def require_compatible_checkpoints(
 
 def finish_prior_build(args, output_dir, weights_table):
     """Write runtime config and fit KDEs for either a fresh or reused basis."""
-    relative_param = args.template_param or Path(f"desi{args.rank}.param")
     weights_path = output_dir / "desi_eazy_empirical_weights.csv"
     provenance_path = output_dir / BUILD_PROVENANCE_FILENAME
+    template = json.loads(provenance_path.read_text())["template"]
     prior_args_path = write_prior_args(
         output_dir / "prior_args.yaml",
         prior_dir=output_dir,
-        template_param=relative_param,
-        rank=args.rank,
-        norm_min=args.norm_min,
-        norm_max=args.norm_max,
+        template_param=Path(template["template_param"]),
+        rank=template["rank"],
+        norm_min=template["normalization"]["wave_min_aa"],
+        norm_max=template["normalization"]["wave_max_aa"],
         log_scale=weights_table.loc[weights_table["quality_pass"], "log_c_scale"].to_numpy(float),
         redshift=weights_table.loc[weights_table["quality_pass"], "z"].to_numpy(float),
     )
     print(f"Wrote NumVisits prior config to {prior_args_path}")
-    figure = plot_template_redshifts(
-        output_dir, flux_max=12, template_param=relative_param
-    )
+    figure = plot_template_redshifts(output_dir, flux_max=12)
     plot_path = output_dir / "template_redshifts.png"
     figure.savefig(plot_path, dpi=180)
     plt.close(figure)
@@ -354,6 +362,11 @@ def rebuild_prior(args, output_dir):
     provenance_path = output_dir / BUILD_PROVENANCE_FILENAME
     metadata = json.loads(provenance_path.read_text())
     matrix_path = args.training_matrix or Path(metadata["factorization"]["training_matrix"])
+    expected_digest = metadata["factorization"].get("training_matrix_sha256")
+    if expected_digest is None:
+        raise ValueError("Saved basis has no training-matrix fingerprint; run a full basis build")
+    if training_matrix_sha256(matrix_path) != expected_digest:
+        raise ValueError("Training-matrix fingerprint does not match saved coefficients")
     with np.load(output_dir / "desi_basis.npz") as saved:
         wave = saved["wave_rest_aa"]
         basis = saved["basis"]
@@ -372,9 +385,9 @@ def rebuild_prior(args, output_dir):
         weights = data["relative_ivar"][:, support].astype(float)
         scales = data["normalization_scale"]
     template = metadata["template"]
-    args.template_param = Path(template["template_param"])
+    template_param = Path(template["template_param"])
     template_dir = output_dir / "templates"
-    paths = read_template_param(template_dir / args.template_param)
+    paths = read_template_param(template_dir / template_param)
     if len(paths) != basis.shape[0] or coefficients.shape != (len(manifest), basis.shape[0]):
         raise ValueError("Saved template/basis/coefficient dimensions do not match")
     for component, filename in zip(basis, paths):
@@ -383,10 +396,8 @@ def rebuild_prior(args, output_dir):
             exported_flux, component, rtol=1e-10, atol=1e-15
         ):
             raise ValueError("Exported template bank does not match saved basis")
-    args.rank = basis.shape[0]
-    args.norm_min = template["normalization"]["wave_min_aa"]
-    args.norm_max = template["normalization"]["wave_max_aa"]
-    args.prior_z_min, args.prior_z_max = resolve_prior_redshift_limits(
+    rank = basis.shape[0]
+    prior_z_min, prior_z_max = resolve_prior_redshift_limits(
         wave, args.prior_z_min, args.prior_z_max
     )
     table = make_prior_table(
@@ -396,15 +407,15 @@ def rebuild_prior(args, output_dir):
         weights,
         basis,
         scales,
-        prior_z_min=args.prior_z_min,
-        prior_z_max=args.prior_z_max,
+        prior_z_min=prior_z_min,
+        prior_z_max=prior_z_max,
         max_chi2_dof=args.max_chi2_dof,
     )
     if not table.quality_pass.any():
         raise ValueError("No quality-passing spectra remain for prior fitting")
     metadata["selection"].update(
-        prior_z_min=args.prior_z_min,
-        prior_z_max=args.prior_z_max,
+        prior_z_min=prior_z_min,
+        prior_z_max=prior_z_max,
         max_chi2_dof=args.max_chi2_dof,
         n_supported_redshift=len(table),
         n_prior_quality_pass=int(table.quality_pass.sum()),
@@ -418,8 +429,8 @@ def rebuild_prior(args, output_dir):
     table.to_csv(output_dir / "desi_eazy_empirical_weights.csv", index=False)
     write_provenance(provenance_path, metadata)
     print(
-        f"Reusing saved DESI{args.rank} basis; prior redshift cut "
-        f"{args.prior_z_min:.6f}–{args.prior_z_max:.6f}; "
+        f"Reusing saved DESI{rank} basis; prior redshift cut "
+        f"{prior_z_min:.6f}–{prior_z_max:.6f}; "
         f"{int(table.quality_pass.sum()):,} quality-passing rows",
         flush=True,
     )
@@ -460,6 +471,7 @@ def main() -> None:
         raise ValueError("--template-param must be relative to <prior-dir>/templates")
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    args.training_matrix_sha256 = training_matrix_sha256(args.training_matrix)
     data = np.load(args.training_matrix)
     manifest = pd.DataFrame(
         {
@@ -678,6 +690,7 @@ def main() -> None:
             "factorization": {
                 "method": "Nearly-NMF",
                 "training_matrix": args.training_matrix,
+                "training_matrix_sha256": args.training_matrix_sha256,
                 "split_seed": args.split_seed,
                 "n_train": len(train),
                 "n_validation": len(validation),

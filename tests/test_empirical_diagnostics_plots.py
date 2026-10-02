@@ -93,6 +93,9 @@ def test_template_redshifts_selects_real_quality_pass_rows(tmp_path):
     templates = prior / "templates"
     templates.mkdir(parents=True)
     (templates / "desi2.param").write_text("1 component_01.dat 1.0\n2 component_02.dat 1.0\n")
+    (prior / "build_provenance.json").write_text(json.dumps({
+        "template": {"template_param": "desi2.param"}
+    }))
     for i in (1, 2):
         np.savetxt(templates / f"component_{i:02d}.dat", [[1390, 1], [4000, 2], [9120, 3]])
     pd.DataFrame(
@@ -154,6 +157,20 @@ def test_template_redshifts_selects_real_quality_pass_rows(tmp_path):
         assert capped_fig.axes[i].get_ylim() == (0, 20)
     assert capped_fig.axes[2].get_yscale() == "linear"
     plt.close(capped_fig)
+    table = pd.read_csv(prior / "desi_eazy_empirical_weights.csv")
+    table["a1"] = 1.
+    table["a2"] = 0.
+    table.to_csv(prior / "desi_eazy_empirical_weights.csv", index=False)
+    inactive_fig = plot_template_redshifts(prior)
+    assert len(inactive_fig.axes[3].lines) == 1
+    assert inactive_fig.axes[4].texts[0].get_text() == "No contribution"
+    assert inactive_fig.axes[5].texts[0].get_text() == "No contribution"
+    assert len(inactive_fig.axes[5].patches) == 1
+    plt.close(inactive_fig)
+    renamed = prior.with_name("custom-build")
+    prior.rename(renamed)
+    main(["template-redshifts", "--prior-dir", str(renamed), "--output", str(output)])
+    assert output.stat().st_size > 0
 
 
 def test_weighted_redshift_summary_ignores_tiny_extremes():

@@ -252,6 +252,10 @@ def test_grid_uses_selected_valid_pixels_and_rounds_outward(tmp_path, monkeypatc
         manifest, desi_dir=tmp_path, wave_step=10, wave_min=1400, wave_max=2900
     )
     assert override[0] == 1400 and override[-1] == 2900
+    population = pd.DataFrame({"targetid": [targetid, 2], "healpix": [1, 1], "z": [1., 0.]})
+    population_grid = derive_rest_frame_grid(population, desi_dir=tmp_path, wave_step=10)
+    assert population_grid[0] == 1330
+    assert population_grid[-1] == 9000
 
 
 def test_lsst_demand_coverage_is_unity_when_every_pixel_is_observed():

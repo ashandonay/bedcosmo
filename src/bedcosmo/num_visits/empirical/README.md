@@ -590,7 +590,8 @@ be narrower (including older builds with fixed bounds). These overlays do not mo
 the build's selection or prior.
 
 `template-redshifts` defaults `--prior-dir` to the DESI8 build and reads
-the build's template bank and quality-passing fitted
+the template parameter path recorded in build provenance, the build's template
+bank and quality-passing fitted
 weights. Each column shows the rest-frame shape, one observed-frame panel
 overlaying the template at the coefficient-weighted 5th percentile redshift
 (blue), median (gray), and 95th percentile (red), and their
@@ -608,7 +609,9 @@ The gray filled histogram is coefficient-weighted; the black outline/white fill 
 unweighted population, and a dashed line marks the weighted median.
 Each histogram is separately normalized to unit area. This measures the
 redshift distribution of fitted component shares, not absolute flux or a
-population count. Zero total contribution for a component raises an error.
+population count. Components with zero total contribution retain their rest-frame
+shape and population histogram, but display "No contribution" instead of
+undefined weighted redshift curves or distributions; this does not stop a build.
 Histogram bins and x-axis limits span exactly the LSST-compatible redshift
 range derived from the template bank's common rest-frame support, without
 axis padding or per-component ranges.
