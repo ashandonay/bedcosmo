@@ -81,25 +81,47 @@ def test_log_batch_health(process_group):
     )
 
 
-def test_nan_dump_saves_only_on_a_failing_rank(tmp_path):
-    trainer = SimpleNamespace(
-        run_path=str(tmp_path), global_rank=2, scheduler="sched", save_checkpoint=mock.Mock()
+def _rank(tmp_path, rank):
+    return SimpleNamespace(
+        run_path=str(tmp_path), global_rank=rank, scheduler="sched", save_checkpoint=mock.Mock()
     )
-    samples, context = _batch()
 
-    Trainer._save_nan_dump(trainer, torch.zeros(8, dtype=torch.float64), samples, context, 9)
+
+def test_finite_global_loss_continues(tmp_path):
+    trainer = _rank(tmp_path, 0)
+    loss = torch.zeros(8, dtype=torch.float64)
+    assert not Trainer._check_nan_loss(trainer, loss, 0.0, 9, *_batch())
     trainer.save_checkpoint.assert_not_called()
 
-    loss = torch.zeros(8, dtype=torch.float64)
-    loss[3] = float("nan")
-    Trainer._save_nan_dump(trainer, loss, samples, context, 9)
-    (path,), kwargs = trainer.save_checkpoint.call_args
+
+def test_nan_stops_every_rank_and_only_the_failing_one_dumps(tmp_path, capsys):
+    samples, context = _batch()
+    finite = torch.zeros(8, dtype=torch.float64)
+    failing = finite.clone()
+    failing[3] = float("nan")
+    failing[5] = float("inf")
+
+    # Rank 0's batch is fine: it stops and announces, but saves nothing.
+    rank0 = _rank(tmp_path, 0)
+    assert Trainer._check_nan_loss(rank0, finite, float("nan"), 9, samples, context)
+    rank0.save_checkpoint.assert_not_called()
+    assert "ERROR: non-finite global loss (nan) at step 9" in capsys.readouterr().out
+
+    # Rank 2 failed: it saves its own batch and reports itself.
+    rank2 = _rank(tmp_path, 2)
+    assert Trainer._check_nan_loss(rank2, failing, float("nan"), 9, samples, context)
+    (path,), kwargs = rank2.save_checkpoint.call_args
     assert path == f"{tmp_path}/artifacts/nan_dump/checkpoint_rank_2_9.pt"
     assert kwargs["step"] == 9
     state = kwargs["additional_state"]
     assert torch.equal(state["samples"], samples)
     assert torch.equal(state["context"], context)
     assert torch.isnan(state["loss"][3])
+    out = capsys.readouterr().out
+    assert "ERROR" not in out
+    assert (
+        f"Rank 2: 1 NaN and 1 Inf of 8 losses; saved the batch and pre-step state to {path}" in out
+    )
 
 
 def test_num_tracers_flags_sigma_ceiling_draws():
