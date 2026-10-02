@@ -79,9 +79,8 @@ For the configured `desi8` source, first build the shared full-population
 rest-frame matrix, then learn the production basis and coefficient prior:
 
 ```bash
-python -m bedcosmo.num_visits.empirical.desi.fit_basis \
-  --max-spectra 0 \
-  --ranks 8
+python -m bedcosmo.num_visits.empirical.desi.build_matrix \
+  --max-spectra 0
 
 python -m bedcosmo.num_visits.empirical.desi.build_prior --rank 8
 ```
@@ -151,7 +150,9 @@ that the parameter file exists under that build's `templates/` directory.
 | File | Role |
 |------|------|
 | `eazy/build_prior.py` | **EAZY orchestrator:** DESI download → fits → combine → KDE |
+| `desi/build_matrix.py` | DESI selection → manifests → rest-frame training matrix (input to `desi/build_prior.py`) |
 | `desi/build_prior.py` | **Direct DESI orchestrator:** basis learning → full-population refit → KDE |
+| `desi/compare_ranks.py` | Optional diagnostic: held-out error of quick NMF bases at several ranks |
 | `paths.py` | Default scratch paths (`get_prior_kde_path`, `get_desi_data_dir`, …) |
 | `desi_get_dr_subset.py` | Download DESI DR1 coadd + redrock for selected HEALPix patches |
 | `eazy/fit_eazy_weights_to_desi.py` | Per-galaxy NNLS template fit → weights CSV + fit diagnostics |
@@ -849,7 +850,7 @@ Legacy layouts (`desi_eazy_hp*` at scratch root, `desi_eazy_empirical_prior_full
 | Step | Command / setting |
 |------|-------------------|
 | **Configured source** | `desi8` (`empirical_prior/desi8`, including `templates/`) |
-| **DESI8 build** | `desi.fit_basis --max-spectra 0 --ranks 8`, then `desi.build_prior --rank 8` |
+| **DESI8 build** | `desi.build_matrix --max-spectra 0`, then `desi.build_prior --rank 8` |
 | **EAZY12 build** | `python -m bedcosmo.num_visits.empirical.eazy.build_prior` |
 | EAZY fit | **NNLS**, **L1** norm, **`z_min=0.01`**, all candidates (no `--n-max`) |
 | KDE | **ILR**, **smooth**, \(\varepsilon=10^{-5}\), bandwidth **0.3** |
