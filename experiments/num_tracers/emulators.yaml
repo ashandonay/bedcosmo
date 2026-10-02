@@ -1,6 +1,10 @@
-# Emulator checkpoint paths: <analysis>: <dataset>: <cosmo_model>: <space>: <tracer_bin>: <path>
+# Emulator checkpoint paths: <analysis>: <dataset>: <cosmo_model>: <quantity>: <tracer_bin>: <path>
 # Nesting mirrors the storage path $SCRATCH/bedcosmo/num_tracers/emulator/{analysis}/models/{dataset}/{cosmo_model}/
-# Relative paths resolve against it; absolute paths are used verbatim; null means "no checkpoint -> fall back to the fixed DESI nominal covariance".
+# <analysis> and <quantity> are desilike-emulator's --analysis and --quantity:
+#   bao:      config | fourier (one forecast space per run, chosen by emulator_space)
+#   shapefit: mean and covar (both loaded; tracer bins are tracers_for("shapefit"), LRG3 not LRG3_ELG1)
+# Relative paths resolve against it; absolute paths are used verbatim; null means "no checkpoint -> fall back to the
+# fixed DESI nominal covariance" (bao only; every shapefit bin needs both checkpoints).
 bao:
   dr1:
     base:
@@ -58,3 +62,20 @@ bao:
         ELG2: config/v2/ELG2.pt
         QSO: config/v2/QSO.pt
         Lya_QSO: null
+shapefit:
+  dr1:
+    base:
+      mean:
+        BGS: mean/v4/BGS.pt
+        LRG1: mean/v4/LRG1.pt
+        LRG2: mean/v4/LRG2.pt
+        LRG3: mean/v4/LRG3.pt
+        ELG2: mean/v4/ELG2.pt
+        QSO: mean/v4/QSO.pt
+      covar:
+        BGS: covar/v4/BGS.pt
+        LRG1: covar/v4/LRG1.pt
+        LRG2: covar/v4/LRG2.pt
+        LRG3: covar/v4/LRG3.pt
+        ELG2: covar/v4/ELG2.pt
+        QSO: covar/v4/QSO.pt

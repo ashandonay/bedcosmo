@@ -28,12 +28,13 @@ from bedcosmo.util import (
     auto_seed,
     load_nominal_samples,
     get_experiment_config_path,
+    ReferenceChain,
+    GETDIST_CHAIN_SETTINGS,
 )
 from bedcosmo.transform import Bijector
-from cosmopower_jax.cosmopower_jax import CosmoPowerJAX
 from bedcosmo.custom_dist import ConstrainedUniform2D, PresampledPrior
 from bedcosmo.base import BaseExperiment
-from bedcosmo.cosmology import CosmologyMixin, FIDUCIAL_PARAMS, _infer_plate_shape
+from bedcosmo.cosmology import CosmologyMixin, FIDUCIAL_PARAMS
 
 storage_path = os.environ["SCRATCH"] + "/bedcosmo/num_tracers"
 home_dir = os.environ["HOME"]
@@ -63,11 +64,6 @@ class NumTracers(BaseExperiment, CosmologyMixin):
         prior_flow_batch_size=10000,
         prior_flow_cache_size=100000,
         prior_flow_use_cache=True,
-        fullshape_mocks=None,
-        fullshape_covariance=None,
-        fullshape_k_bins=None,
-        fullshape_z_eff=None,
-        fullshape_ells=(0, 2, 4),
         likelihood_mode="scaling",
         apply_desi_syst=False,
         vary_z_eff=False,
@@ -86,6 +82,10 @@ class NumTracers(BaseExperiment, CosmologyMixin):
 
         self.name = "num_tracers"
         self.dataset = dataset
+        # Same values as desilike-emulator's --analysis: they select the tracer bins
+        # (util.tracers_for), the emulators.yaml subtree and the models.yaml block.
+        if analysis not in ("bao", "shapefit"):
+            raise ValueError(f"analysis must be 'bao' or 'shapefit'; got {analysis!r}.")
         self.analysis = analysis
         self.desi_data = pd.read_csv(
             os.path.join(home_dir, f"data/desi/bao_{self.dataset}", "desi_data.csv")
@@ -177,10 +177,89 @@ class NumTracers(BaseExperiment, CosmologyMixin):
             )
         else:
             self.nominal_design = nominal_design
-        self.nominal_context = torch.cat(
-            [self.nominal_design, self.central_val if self.include_D_M else self.central_val[1::2]],
-            dim=-1,
-        )
+
+        # Initialize emulator-based likelihood mode
+        self.likelihood_mode = likelihood_mode
+        if self.analysis == "shapefit":
+            # ShapeFit has no DESI covariance to rescale and its emulators already
+            # derive z_eff(N) internally, so the BAO-only switches have no meaning here.
+            if likelihood_mode != "emulator":
+                raise ValueError(
+                    f"analysis='shapefit' requires likelihood_mode='emulator'; got {likelihood_mode!r}.")
+            for name, value in (("vary_z_eff", vary_z_eff), ("apply_desi_syst", apply_desi_syst),
+                                ("emulator_sqrtn_ref", emulator_sqrtn_ref)):
+                if value:
+                    raise ValueError(f"{name} is BAO-only; got {name}={value!r} with analysis='shapefit'.")
+        # Optionally inflate the emulator's statistical covariance by DESI's measured
+        # per-tracer systematic budget (desilike_emulator desi_reference.apply_desi_syst).
+        self.apply_desi_syst = apply_desi_syst
+        self._desi_syst_factors_cache = None
+        # Evaluate the BAO means at each tracer bin's effective redshift for the
+        # design's N_tracers (desilike_emulator util.effective_redshift, DESI 2024 III
+        # Eq. 2.1 in the fiducial frame) instead of desi_data.csv's fixed DR1 z. The
+        # emulator's sigma labels are defined at z_eff(N) (desilike-emulator shapefit
+        # CHANGELOG §159), so this makes mean and covariance describe the same
+        # redshift. Emulator mode only: scaling-mode sigmas are DESI's, measured at
+        # DESI's z. DR1 only: desilike-emulator ships DR1 n(z) tables. Off by default.
+        if vary_z_eff and likelihood_mode != "emulator":
+            raise ValueError(
+                "vary_z_eff requires likelihood_mode='emulator': scaling-mode sigmas "
+                "are DESI's own, measured at desi_data.csv's fixed z.")
+        if vary_z_eff and dataset != "dr1":
+            raise ValueError(
+                f"vary_z_eff is DR1-only (desilike-emulator has no {dataset} n(z) "
+                "tables); got dataset={dataset!r}.")
+        self.vary_z_eff = bool(vary_z_eff)
+        self._effective_redshift = None
+        if self.vary_z_eff:
+            # Import now so a missing or pre-#37 desilike_emulator fails at
+            # construction, not at the first likelihood call of a queued job.
+            from desilike_emulator.util import effective_redshift
+            self._effective_redshift = effective_redshift
+        self._init_mean_z_eff_rows()
+        # Diagnostic: replace the emulator's nonlinear N-dependence with pure 1/sqrt(N)
+        # scaling anchored to the nominal design, while keeping the emulator's magnitude.
+        # None -> off (full emulator); "sampled" -> reference sigma at sampled cosmology,
+        # nominal N (cosmology dependence retained, only N-law replaced); "fiducial" ->
+        # reference sigma at fiducial cosmology + nominal N, cached once (cosmology-independent,
+        # the direct analog of likelihood_mode='scaling').
+        if emulator_sqrtn_ref not in (None, "sampled", "fiducial"):
+            raise ValueError(
+                f"emulator_sqrtn_ref must be None, 'sampled', or 'fiducial'; got {emulator_sqrtn_ref!r}."
+            )
+        self.emulator_sqrtn_ref = emulator_sqrtn_ref
+        # Which forecast space's BAO emulators to load (bao's emulators.yaml entries are
+        # keyed by space). Unused by shapefit, which always loads both mean and covar.
+        self.emulator_space = emulator_space
+        self._sqrtn_n_ref_cache = None  # per-bin nominal N_tracers (design-independent)
+        self._sqrtn_ref_cov_cache = None  # frozen fiducial reference covariance
+        self._n_extrap_warned = set()  # checkpoint paths already warned (warn once)
+        # Prefer checkpoints snapshotted into the run's artifacts at submission time
+        # (bao: artifacts/emulators/<tracer_bin>.pt, shapefit:
+        # artifacts/emulators/<quantity>/<tracer_bin>.pt). When no artifacts dir is
+        # provided (direct/local init), resolve from emulators.yaml against $SCRATCH.
+        emu_dir = os.path.join(artifacts_dir, "emulators") if artifacts_dir else None
+        if self.analysis == "shapefit":
+            self._init_shapefit(emu_dir)
+        elif self.likelihood_mode == "emulator":
+            # Bins without a .pt in the artifacts are treated as fallback (null) bins.
+            if emu_dir is not None and os.path.isdir(emu_dir):
+                checkpoints = {}
+                for tracer_bin in self._EMULATOR_TRACER_TO_DESI:
+                    ckpt_path = os.path.join(emu_dir, f"{tracer_bin}.pt")
+                    checkpoints[tracer_bin] = ckpt_path if os.path.exists(ckpt_path) else None
+            else:
+                checkpoints = self.resolve_emulator_checkpoints(
+                    self.analysis, self.cosmo_model, self.dataset, self.emulator_space,
+                )
+            self._emulator_checkpoints = checkpoints
+            self._load_emulators()
+
+        if self.analysis == "shapefit":
+            nominal_data = self.central_val
+        else:
+            nominal_data = self.central_val if self.include_D_M else self.central_val[1::2]
+        self.nominal_context = torch.cat([self.nominal_design, nominal_data], dim=-1)
         # Compute context_dim dynamically from the actual nominal_context size
         # This ensures it matches the actual data structure regardless of flags
         self.context_dim = self.nominal_context.shape[-1]
@@ -196,6 +275,8 @@ class NumTracers(BaseExperiment, CosmologyMixin):
             self.prior_flow_metadata,
         ) = self.init_prior(**self.prior_args)
         self.cosmo_params = list(self.prior.keys())
+        if self.analysis == "shapefit":
+            self._omega_m_log_acceptance = self._omega_m_domain_log_acceptance()
 
         # Extract prior_flow settings for use in _sample_prior_flow
         if self.prior_flow_metadata is not None:
@@ -207,9 +288,10 @@ class NumTracers(BaseExperiment, CosmologyMixin):
             self.prior_flow_transform_input = False
             self.prior_flow_nominal_context = None
 
-        # Load DESI prior from the default location
+        # Load DESI prior from the default location. It is a BAO prior (Om, hrdrag, ...),
+        # so shapefit's omega-basis parameters use their own prior.
         desi_prior_path = os.path.join(home_dir, f"data/desi/bao_{self.dataset}", "prior_args.yaml")
-        if os.path.exists(desi_prior_path):
+        if self.analysis == "bao" and os.path.exists(desi_prior_path):
             with open(desi_prior_path, "r") as file:
                 desi_prior_data = yaml.safe_load(file)
             self.desi_prior, _, _, _, _ = self.init_prior(**desi_prior_data)
@@ -252,110 +334,6 @@ class NumTracers(BaseExperiment, CosmologyMixin):
             self.init_designs(**design_args)
         else:
             self.init_designs()
-
-        # Initialize emulator-based likelihood mode
-        self.likelihood_mode = likelihood_mode
-        # Optionally inflate the emulator's statistical covariance by DESI's measured
-        # per-tracer systematic budget (desilike_emulator desi_reference.apply_desi_syst).
-        self.apply_desi_syst = apply_desi_syst
-        self._desi_syst_factors_cache = None
-        # Evaluate the BAO means at each tracer bin's effective redshift for the
-        # design's N_tracers (desilike_emulator util.effective_redshift, DESI 2024 III
-        # Eq. 2.1 in the fiducial frame) instead of desi_data.csv's fixed DR1 z. The
-        # emulator's sigma labels are defined at z_eff(N) (desilike-emulator shapefit
-        # CHANGELOG §159), so this makes mean and covariance describe the same
-        # redshift. Emulator mode only: scaling-mode sigmas are DESI's, measured at
-        # DESI's z. DR1 only: desilike-emulator ships DR1 n(z) tables. Off by default.
-        if vary_z_eff and likelihood_mode != "emulator":
-            raise ValueError(
-                "vary_z_eff requires likelihood_mode='emulator': scaling-mode sigmas "
-                "are DESI's own, measured at desi_data.csv's fixed z.")
-        if vary_z_eff and dataset != "dr1":
-            raise ValueError(
-                f"vary_z_eff is DR1-only (desilike-emulator has no {dataset} n(z) "
-                "tables); got dataset={dataset!r}.")
-        self.vary_z_eff = bool(vary_z_eff)
-        self._effective_redshift = None
-        if self.vary_z_eff:
-            # Import now so a missing or pre-#37 desilike_emulator fails at
-            # construction, not at the first likelihood call of a queued job.
-            from desilike_emulator.util import effective_redshift
-            self._effective_redshift = effective_redshift
-        self._init_mean_z_eff_rows()
-        # Diagnostic: replace the emulator's nonlinear N-dependence with pure 1/sqrt(N)
-        # scaling anchored to the nominal design, while keeping the emulator's magnitude.
-        # None -> off (full emulator); "sampled" -> reference sigma at sampled cosmology,
-        # nominal N (cosmology dependence retained, only N-law replaced); "fiducial" ->
-        # reference sigma at fiducial cosmology + nominal N, cached once (cosmology-independent,
-        # the direct analog of likelihood_mode='scaling').
-        if emulator_sqrtn_ref not in (None, "sampled", "fiducial"):
-            raise ValueError(
-                f"emulator_sqrtn_ref must be None, 'sampled', or 'fiducial'; got {emulator_sqrtn_ref!r}."
-            )
-        self.emulator_sqrtn_ref = emulator_sqrtn_ref
-        # Which forecast space's emulators to load, for entries in emulators.yaml
-        # that are keyed by space (bao has both config and fourier). None is
-        # correct for the flat legacy entries; required for nested ones.
-        self.emulator_space = emulator_space
-        self._sqrtn_n_ref_cache = None  # per-bin nominal N_tracers (design-independent)
-        self._sqrtn_ref_cov_cache = None  # frozen fiducial reference covariance
-        if self.likelihood_mode == "emulator":
-            # Prefer checkpoints snapshotted into the run's artifacts at submission time
-            # (artifacts/emulators/<tracer_bin>.pt). Bins without a .pt there are treated as
-            # fallback (null) bins. When no artifacts dir is provided (direct/local init), fall
-            # back to resolving from emulators.yaml against $SCRATCH.
-            emu_dir = os.path.join(artifacts_dir, "emulators") if artifacts_dir else None
-            if emu_dir is not None and os.path.isdir(emu_dir):
-                checkpoints = {}
-                for tracer_bin in self._EMULATOR_TRACER_TO_DESI:
-                    ckpt_path = os.path.join(emu_dir, f"{tracer_bin}.pt")
-                    checkpoints[tracer_bin] = ckpt_path if os.path.exists(ckpt_path) else None
-            else:
-                checkpoints = self.resolve_emulator_checkpoints(
-                    self.analysis, self.cosmo_model, self.dataset,
-                    space=self.emulator_space,
-                )
-            self._emulator_checkpoints = checkpoints
-            self._load_emulators()
-
-        # Initialize full shape data if provided
-        if fullshape_mocks is not None:
-            self.fullshape_covariance = self.compute_covariance_from_mocks(fullshape_mocks)
-        elif fullshape_covariance is not None:
-            if isinstance(fullshape_covariance, np.ndarray):
-                self.fullshape_covariance = torch.tensor(
-                    fullshape_covariance, device=self.device, dtype=torch.float64
-                )
-            else:
-                self.fullshape_covariance = fullshape_covariance.to(self.device)
-        else:
-            self.fullshape_covariance = None
-
-        if fullshape_k_bins is not None:
-            if isinstance(fullshape_k_bins, np.ndarray):
-                self.fullshape_k_bins = torch.tensor(
-                    fullshape_k_bins, device=self.device, dtype=torch.float64
-                )
-            else:
-                self.fullshape_k_bins = fullshape_k_bins.to(self.device)
-        else:
-            self.fullshape_k_bins = None
-
-        if fullshape_z_eff is not None:
-            if isinstance(fullshape_z_eff, (int, float)):
-                self.fullshape_z_eff = torch.tensor(
-                    fullshape_z_eff, device=self.device, dtype=torch.float64
-                )
-            elif isinstance(fullshape_z_eff, np.ndarray):
-                self.fullshape_z_eff = torch.tensor(
-                    fullshape_z_eff, device=self.device, dtype=torch.float64
-                )
-            else:
-                self.fullshape_z_eff = fullshape_z_eff.to(self.device)
-        else:
-            self.fullshape_z_eff = None
-
-        self.fullshape_ells = fullshape_ells
 
     @profile_method
     def init_designs(
@@ -948,12 +926,13 @@ class NumTracers(BaseExperiment, CosmologyMixin):
 
     def get_nominal_samples(self, num_samples=100000, params=None, transform_output=False):
         param_samples, target_labels, latex_labels = load_nominal_samples(
-            "num_tracers", self.cosmo_model, dataset=self.dataset
+            "num_tracers", self.cosmo_model, dataset=self.dataset, analysis=self.analysis
         )
         param_samples = param_samples[:num_samples]
         if transform_output:
             param_samples = torch.tensor(param_samples, device=self.device)
-            param_samples[..., -1] /= 100  # to get hrdrag in units of 100 km/s/Mpc
+            if self.analysis == "bao":
+                param_samples[..., -1] /= 100  # to get hrdrag in units of 100 km/s/Mpc
             param_samples = (
                 self.params_to_unconstrained(param_samples, bijector_class=self.desi_bijector)
                 .cpu()
@@ -971,8 +950,14 @@ class NumTracers(BaseExperiment, CosmologyMixin):
             names = [target_labels[i] for i in param_indices]
             labels = [latex_labels[i] for i in param_indices]
 
+        # The legend label of every plot that overlays this reference.
+        source = {"bao": "BAO", "shapefit": "ShapeFit"}[self.analysis]
         with contextlib.redirect_stdout(io.StringIO()):
-            desi_samples_gd = getdist.MCSamples(samples=param_samples, names=names, labels=labels)
+            desi_samples_gd = ReferenceChain(
+                samples=param_samples, names=names, labels=labels,
+                label=f"DESI {self.dataset.upper()} {source}",
+                settings=GETDIST_CHAIN_SETTINGS,
+            )
 
         return desi_samples_gd
 
@@ -986,7 +971,18 @@ class NumTracers(BaseExperiment, CosmologyMixin):
             central (bool): Whether to use the fixed central value of the data samples.
 
         """
-        if central:
+        if central and self.analysis == "shapefit":
+            # Fixed fiducial mean (central_val); covariance from the emulators at the
+            # fiducial cosmology and this design's N_tracers.
+            n_tracers = self._shapefit_n_tracers(lexpand(tracer_ratio, num_samples))
+            _, covariance_matrix = self._shapefit_likelihood(
+                n_tracers, self._shapefit_fiducial_parameters())
+            with pyro.plate("data", num_samples):
+                data_samples = pyro.sample(
+                    self.observation_labels[0],
+                    dist.MultivariateNormal(self.central_val, covariance_matrix.squeeze(-3)),
+                ).unsqueeze(1)
+        elif central:
             # Expand tracer_ratio for batching with num_samples
             expanded_tracer_ratio = lexpand(tracer_ratio, num_samples)
             passed_ratio = self.calc_passed(expanded_tracer_ratio)
@@ -1244,7 +1240,10 @@ class NumTracers(BaseExperiment, CosmologyMixin):
         # draws come straight from their priors.
         if use_prior_flow and self.prior_flow is not None:
             return set()
-        drawn = {"Om", "Ok", "w0", "wa"} | ({"hrdrag"} if self.analysis == "bao" else set())
+        drawn = {
+            "bao": {"Om", "Ok", "w0", "wa", "hrdrag"},
+            "shapefit": {"omega_cdm", "omega_b", "h", "ln10A_s", "n_s"},
+        }[self.analysis]
         constrained = {
             p for c in self.param_constraints.values() for p in c["affected_parameters"]
         }
@@ -1286,6 +1285,9 @@ class NumTracers(BaseExperiment, CosmologyMixin):
         # Otherwise sample from explicit prior distributions
         if prior is None:
             prior = self.prior
+
+        if self.analysis == "shapefit":
+            return self._sample_shapefit_parameters(sample_shape, prior)
 
         # Handle constraints based on YAML configuration
         if hasattr(self, "param_constraints"):
@@ -1336,21 +1338,97 @@ class NumTracers(BaseExperiment, CosmologyMixin):
                 parameters["w0"] = pyro.sample("w0", prior["w0"]).unsqueeze(-1)
 
         # Always sample hrdrag
-        if self.analysis == "bao":
-            parameters["hrdrag"] = pyro.sample("hrdrag", prior["hrdrag"]).unsqueeze(-1)
+        parameters["hrdrag"] = pyro.sample("hrdrag", prior["hrdrag"]).unsqueeze(-1)
 
         return parameters
 
+    # Fixed neutrino density of the DESI fiducial (one massive neutrino, 0.06 eV), as in
+    # desilike_emulator bao/core.py _OMEGA_NU_FID. Enters the derived Omega_m that bounds
+    # the shapefit emulators' training domain.
+    _OMEGA_NU_FID = 0.06 / 93.14
+
+    _OMEGA_M_COUPLED = ("omega_cdm", "omega_b", "h")
+
+    def _omega_m_in_domain(self, omega_cdm, omega_b, h):
+        bounds = self.param_constraints["omega_m_domain"]["bounds"]
+        omega_m = (omega_cdm + omega_b + self._OMEGA_NU_FID) / h ** 2
+        return (omega_m >= bounds["lower"]) & (omega_m <= bounds["upper"])
+
+    def _omega_m_domain_log_acceptance(self, n_chunks=4, chunk_size=10_000_000):
+        """log P(accept) of the omega_m_domain cut under the independent prior.
+
+        The truncated prior's normalizer. Monte Carlo over n_chunks * chunk_size draws:
+        relative error ~2e-4 at the defaults, i.e. a ~2e-4 nat, design-independent shift
+        of H_prior. Seeded under a forked RNG, so every rank gets the same value and the
+        run's seeded stream is untouched.
+        """
+        if "omega_m_domain" not in self.param_constraints:
+            raise ValueError(
+                "analysis='shapefit' needs the 'omega_m_domain' constraint in prior_args: "
+                "the emulators are only trained on Omega_m inside it.")
+        accepted = 0
+        with torch.random.fork_rng(devices=range(torch.cuda.device_count())):
+            torch.manual_seed(0)
+            for _ in range(n_chunks):
+                draws = {n: self.prior[n].sample((chunk_size,)) for n in self._OMEGA_M_COUPLED}
+                accepted += int(self._omega_m_in_domain(**draws).sum())
+        return math.log(accepted / (n_chunks * chunk_size))
+
+    def _sample_shapefit_parameters(self, sample_shape, prior):
+        """Draw the omega-basis cosmology, rejecting Omega_m outside the emulator domain.
+
+        The shapefit training generator rejects samples whose derived
+        Omega_m = (omega_cdm + omega_b + omega_nu) / h^2 falls outside
+        [lower, upper] (desilike_emulator shapefit/core.py _check_omega_m; ~62% of the
+        raw prior box), so the emulators are only valid inside it. The
+        ``omega_m_domain`` constraint carries those bounds; rejected rows are redrawn
+        jointly from the prior until every row is inside. The other parameters are
+        independent.
+
+        Accepted draws have density prior(theta) * 1[in domain] / P(accept). Each coupled
+        site records its marginal prior log-density, and omega_cdm also carries
+        -log P(accept), so the trace's summed prior log-prob (and hence H_prior) is exact;
+        a plain Delta would score 0 (see PresampledPrior).
+        """
+        if prior is not self.prior:
+            raise ValueError(
+                "shapefit's Omega_m acceptance is computed for self.prior; sampling another "
+                "prior would record the wrong truncated density.")
+        shape = torch.Size(sample_shape)
+        coupled = self._OMEGA_M_COUPLED
+        draws = {name: prior[name].sample(shape) for name in coupled}
+        while True:
+            reject = ~self._omega_m_in_domain(**draws)
+            if not reject.any():
+                break
+            for name in coupled:
+                draws[name] = torch.where(reject, prior[name].sample(shape), draws[name])
+
+        parameters = {}
+        for name in prior:
+            if name in coupled:
+                log_density = prior[name].log_prob(draws[name])
+                if name == coupled[0]:
+                    log_density = log_density - self._omega_m_log_acceptance
+                parameters[name] = pyro.sample(
+                    name, PresampledPrior(draws[name], log_density=log_density)).unsqueeze(-1)
+            else:
+                parameters[name] = pyro.sample(name, prior[name]).unsqueeze(-1)
+        return parameters
+
     @staticmethod
-    def resolve_emulator_checkpoints(analysis, cosmo_model, dataset, space=None):
-        """Resolve emulator checkpoint paths for a (analysis, cosmo_model, dataset) from emulators.yaml.
+    def resolve_emulator_checkpoints(analysis, cosmo_model, dataset, quantity):
+        """Resolve emulator checkpoint paths for one (analysis, cosmo_model, dataset, quantity).
 
         Emulator checkpoints live in emulators.yaml under
-        <analysis>.<dataset>.<cosmo_model>.<space>, mirroring the storage path
-        models/{dataset}/{cosmo_model}/{space}/. Relative
-        paths resolve against
+        <analysis>.<dataset>.<cosmo_model>.<quantity>, mirroring the storage path
+        models/{dataset}/{cosmo_model}/{quantity}/. ``quantity`` is desilike-emulator's
+        ``--quantity``: the forecast space for bao (config | fourier, one per run, set by
+        ``emulator_space``), and mean or covar for shapefit (both loaded together).
+        Relative paths resolve against
         $SCRATCH/bedcosmo/num_tracers/emulator/{analysis}/models/{dataset}/{cosmo_model}/;
-        absolute paths are used verbatim; null -> fall back to fixed DESI nominal covariance.
+        absolute paths are used verbatim; null -> fall back to fixed DESI nominal covariance
+        (bao only).
 
         The {analysis} segment is required: the emulator repo stores each analysis in its own
         subtree, and 'covar' is a valid quantity for both bao and shapefit, so an analysis-less
@@ -1376,19 +1454,19 @@ class NumTracers(BaseExperiment, CosmologyMixin):
                 f"Cosmo model '{cosmo_model}' has no emulator entry under "
                 f"{analysis}.{dataset} in emulators.yaml (have: {sorted(by_dataset)})"
             )
-        by_space = by_dataset[cosmo_model]
-        if space is None:
+        by_quantity = by_dataset[cosmo_model]
+        if quantity is None:
             raise ValueError(
                 f"emulator_space is required: {analysis}.{dataset}.{cosmo_model} in "
-                f"emulators.yaml is keyed by forecast space (have: {sorted(by_space)}). "
+                f"emulators.yaml is keyed by forecast space (have: {sorted(by_quantity)}). "
                 f"Set it in train_args.yaml or pass --emulator-space."
             )
-        if space not in by_space:
+        if quantity not in by_quantity:
             raise ValueError(
-                f"No emulator checkpoints for space '{space}' under "
-                f"{analysis}.{dataset}.{cosmo_model} (have: {sorted(by_space)})"
+                f"No emulator checkpoints for '{quantity}' under "
+                f"{analysis}.{dataset}.{cosmo_model} (have: {sorted(by_quantity)})"
             )
-        entry = by_space[space]
+        entry = by_quantity[quantity]
 
         base_dir = os.path.join(
             storage_path, "emulator", analysis, "models", dataset, cosmo_model)
@@ -1404,8 +1482,25 @@ class NumTracers(BaseExperiment, CosmologyMixin):
         ``self._emulator_fallback_bins``; their covariance blocks fall back to the
         fixed DESI nominal covariance in ``_build_emulator_covariance``.
         """
-        from desilike_emulator.util import (
-            DEFAULT_SIGMA_FLOOR, load_model, model_label)
+        self._emulators = {}
+        self._emulator_fallback_bins = []
+        for tracer_bin, ckpt_path in self._emulator_checkpoints.items():
+            if ckpt_path is None:
+                self._emulator_fallback_bins.append(tracer_bin)
+                continue
+            self._emulators[tracer_bin] = self._load_emulator(ckpt_path)
+
+        if self.global_rank == 0:
+            self._print_emulator_summary(self._emulators)
+            if self._emulator_fallback_bins:
+                print(
+                    f"No emulator checkpoint for tracer bins {self._emulator_fallback_bins}; "
+                    f"falling back to fixed DESI nominal covariance for these."
+                )
+
+    def _load_emulator(self, ckpt_path):
+        """Load one emulator checkpoint into the dict ``_emulator_predict`` consumes."""
+        from desilike_emulator.util import DEFAULT_SIGMA_FLOOR, load_model, model_label
 
         # Sigma clamps passed to decode_and_unscale. The floor is the
         # emulator's own convention (single-sourced from util, so it can't drift
@@ -1415,71 +1510,56 @@ class NumTracers(BaseExperiment, CosmologyMixin):
         self._sigma_floor = DEFAULT_SIGMA_FLOOR
         self._sigma_ceiling = self._SIGMA_CEILING
 
-        self._emulators = {}
-        self._emulator_fallback_bins = []
-        self._n_extrap_warned = set()  # tracer bins already warned (warn once)
-        for tracer_bin, ckpt_path in self._emulator_checkpoints.items():
-            if ckpt_path is None:
-                self._emulator_fallback_bins.append(tracer_bin)
-                continue
-            ckpt = torch.load(ckpt_path, map_location=self.device, weights_only=False)
-            model = load_model(ckpt).to(self.device)
-            model.requires_grad_(False)
+        ckpt = torch.load(ckpt_path, map_location=self.device, weights_only=False)
+        model = load_model(ckpt).to(self.device)
+        model.requires_grad_(False)
 
-            # Recover the trained N_tracers box from the input standardization
-            # stats: N was drawn uniform[a, b], so mu = (a+b)/2 and
-            # sigma = (b-a)/sqrt(12)  =>  [a, b] = mu -+ sqrt(3)*sigma. Used only
-            # to warn (not clamp) on gross N-extrapolation, which signals a
-            # wiring bug rather than a valid design excursion.
-            pnames = list(ckpt["param_names"])
-            n_train_lo = n_train_hi = None
-            if "N_tracers" in pnames:
-                i_n = pnames.index("N_tracers")
-                xmu = ckpt["x_mu"].reshape(-1)[i_n].item()
-                xsg = ckpt["x_sigma"].reshape(-1)[i_n].item()
-                half = (3.0 ** 0.5) * xsg
-                n_train_lo, n_train_hi = xmu - half, xmu + half
+        # Recover the trained N_tracers box from the input standardization
+        # stats: N was drawn uniform[a, b], so mu = (a+b)/2 and
+        # sigma = (b-a)/sqrt(12)  =>  [a, b] = mu -+ sqrt(3)*sigma. Used only
+        # to warn (not clamp) on gross N-extrapolation, which signals a
+        # wiring bug rather than a valid design excursion.
+        pnames = list(ckpt["param_names"])
+        n_train_lo = n_train_hi = None
+        if "N_tracers" in pnames:
+            i_n = pnames.index("N_tracers")
+            xmu = ckpt["x_mu"].reshape(-1)[i_n].item()
+            xsg = ckpt["x_sigma"].reshape(-1)[i_n].item()
+            half = (3.0 ** 0.5) * xsg
+            n_train_lo, n_train_hi = xmu - half, xmu + half
 
-            # scale_data.py recipe recorded by train.py. Empty = unscaled (legacy).
-            # Must be passed to decode_and_unscale or σ comes back still multiplied
-            # by the scale factor (e.g. hrdrag ~ 100) and hits _SIGMA_CEILING.
-            scale_expressions = list(ckpt.get("scale_expressions") or [])
+        # scale_data.py recipe recorded by train.py. Empty = unscaled (legacy).
+        # Must be passed to decode_and_unscale or σ comes back still multiplied
+        # by the scale factor (e.g. hrdrag ~ 100) and hits _SIGMA_CEILING.
+        scale_expressions = list(ckpt.get("scale_expressions") or [])
 
-            self._emulators[tracer_bin] = {
-                "model": model,
-                "n_train_lo": n_train_lo,
-                "n_train_hi": n_train_hi,
-                "param_names": list(ckpt["param_names"]),
-                "target_names": list(ckpt["target_names"]),
-                "x_mu": ckpt["x_mu"].to(self.device),
-                "x_sigma": ckpt["x_sigma"].to(self.device),
-                "y_mu": ckpt["y_mu"].to(self.device),
-                "y_sigma": ckpt["y_sigma"].to(self.device),
-                "log_normalize": ckpt.get("log_normalize", False),
-                "y_linthresh": (
-                    ckpt["y_linthresh"].to(self.device)
-                    if ckpt.get("y_linthresh") is not None
-                    else None
-                ),
-                "scale_expressions": scale_expressions,
-                # Provenance, for the summary printed below. A forecast is only
-                # as good as the emulator behind it, and the run log is the only
-                # place that pairing is recorded.
-                "ckpt_path": str(ckpt_path),
-                "arch": model_label(ckpt.get("architecture", "resnet"), ckpt["model_kwargs"]),
-                "n_params": sum(p_.numel() for p_ in model.parameters()),
-                "git_commit": str(ckpt.get("git_commit", "") or ""),
-            }
+        return {
+            "model": model,
+            "n_train_lo": n_train_lo,
+            "n_train_hi": n_train_hi,
+            "param_names": list(ckpt["param_names"]),
+            "target_names": list(ckpt["target_names"]),
+            "x_mu": ckpt["x_mu"].to(self.device),
+            "x_sigma": ckpt["x_sigma"].to(self.device),
+            "y_mu": ckpt["y_mu"].to(self.device),
+            "y_sigma": ckpt["y_sigma"].to(self.device),
+            "log_normalize": ckpt.get("log_normalize", False),
+            "y_linthresh": (
+                ckpt["y_linthresh"].to(self.device)
+                if ckpt.get("y_linthresh") is not None
+                else None
+            ),
+            "scale_expressions": scale_expressions,
+            # Provenance, for the summary printed below. A forecast is only
+            # as good as the emulator behind it, and the run log is the only
+            # place that pairing is recorded.
+            "ckpt_path": str(ckpt_path),
+            "arch": model_label(ckpt.get("architecture", "resnet"), ckpt["model_kwargs"]),
+            "n_params": sum(p_.numel() for p_ in model.parameters()),
+            "git_commit": str(ckpt.get("git_commit", "") or ""),
+        }
 
-        if self.global_rank == 0:
-            self._print_emulator_summary()
-            if self._emulator_fallback_bins:
-                print(
-                    f"No emulator checkpoint for tracer bins {self._emulator_fallback_bins}; "
-                    f"falling back to fixed DESI nominal covariance for these."
-                )
-
-    def _print_emulator_summary(self):
+    def _print_emulator_summary(self, emulators):
         """Log WHICH emulators were loaded and their defining properties.
 
         Every forecast this class produces is conditioned on these checkpoints, and
@@ -1489,13 +1569,13 @@ class NumTracers(BaseExperiment, CosmologyMixin):
         target transform and scaling recipe makes a stale or mixed pool obvious at a
         glance instead of after re-deriving it from the numbers.
         """
-        if not self._emulators:
+        if not emulators:
             print("No emulators loaded; every tracer bin falls back to the fixed "
                   "DESI nominal covariance.")
             return
-        print(f"Loaded {len(self._emulators)} emulator(s):")
-        w = max(len(tb) for tb in self._emulators)
-        for tb, emu in self._emulators.items():
+        print(f"Loaded {len(emulators)} emulator(s):")
+        w = max(len(tb) for tb in emulators)
+        for tb, emu in emulators.items():
             n_lo, n_hi = emu.get("n_train_lo"), emu.get("n_train_hi")
             nbox = (f"N[{n_lo:.3g}, {n_hi:.3g}]" if n_lo is not None else "N box unknown")
             print(f"  {tb:<{w}}  {emu['arch']} ({emu['n_params']:,} params)  "
@@ -1510,11 +1590,11 @@ class NumTracers(BaseExperiment, CosmologyMixin):
                   f"  | inputs {', '.join(emu['param_names'])}"
                   f"  | scaling: {recipe}{extra}")
 
-    def _emulator_predict(self, tracer_bin, emulator_input):
+    def _emulator_predict(self, emu, emulator_input):
         """Run differentiable inference through an emulator.
 
         Args:
-            tracer_bin: Key into self._emulators (e.g. 'LRG1')
+            emu: A loaded emulator (``_load_emulator`` output), e.g. self._emulators['LRG1'].
             emulator_input: Tensor of shape (..., in_dim) with columns
                 matching the checkpoint's ``param_names`` (raw / physical).
 
@@ -1526,7 +1606,6 @@ class NumTracers(BaseExperiment, CosmologyMixin):
         """
         from desilike_emulator.util import decode_and_unscale
 
-        emu = self._emulators[tracer_bin]
         model_dtype = next(emu["model"].parameters()).dtype
         x = emulator_input.to(model_dtype)
         x_mu = emu["x_mu"].to(model_dtype)
@@ -1565,19 +1644,18 @@ class NumTracers(BaseExperiment, CosmologyMixin):
     _N_EXTRAP_LO = 0.5   # warn below 0.5 x trained low
     _N_EXTRAP_HI = 2.0   # warn above 2.0 x trained high
 
-    def _warn_n_extrapolation(self, tracer_bin, n_values):
-        """Warn once per tracer bin if fed N_tracers grossly outside training."""
-        if tracer_bin in self._n_extrap_warned:
+    def _warn_n_extrapolation(self, tracer_bin, emu, n_values):
+        """Warn once per emulator if fed N_tracers grossly outside training."""
+        if emu["ckpt_path"] in self._n_extrap_warned:
             return
-        emu = self._emulators.get(tracer_bin, {})
-        lo, hi = emu.get("n_train_lo"), emu.get("n_train_hi")
+        lo, hi = emu["n_train_lo"], emu["n_train_hi"]
         if lo is None or hi is None:
             return
         with torch.no_grad():
             nmin = float(torch.as_tensor(n_values).min())
             nmax = float(torch.as_tensor(n_values).max())
         if nmin < self._N_EXTRAP_LO * lo or nmax > self._N_EXTRAP_HI * hi:
-            self._n_extrap_warned.add(tracer_bin)
+            self._n_extrap_warned.add(emu["ckpt_path"])
             import warnings
             warnings.warn(
                 f"[{tracer_bin}] N_tracers fed to emulator "
@@ -1768,7 +1846,7 @@ class NumTracers(BaseExperiment, CosmologyMixin):
             # Build emulator inputs in the exact feature order expected by the
             # checkpoint (e.g. current BAO models use ['N_tracers', 'Om', 'hrdrag']).
             emu = self._emulators[tracer_bin]
-            self._warn_n_extrapolation(tracer_bin, n_tracers[tracer_bin])
+            self._warn_n_extrapolation(tracer_bin, emu, n_tracers[tracer_bin])
             feature_values = {
                 "N_tracers": n_tracers[tracer_bin],
                 "Om": Om,
@@ -1792,7 +1870,8 @@ class NumTracers(BaseExperiment, CosmologyMixin):
         def _predict_sigmas(tracer_bin):
             """Return dict {target_name: tensor} of emulator sigma predictions."""
             emu_input = _build_emulator_input(tracer_bin)
-            pred = self._emulator_predict(tracer_bin, emu_input).to(torch.float64)
+            pred = self._emulator_predict(
+                self._emulators[tracer_bin], emu_input).to(torch.float64)
             return {
                 name: pred[..., k]
                 for k, name in enumerate(self._emulators[tracer_bin]["target_names"])
@@ -2039,8 +2118,227 @@ class NumTracers(BaseExperiment, CosmologyMixin):
             out[quantity] = torch.stack(cols, dim=-1)
         return out
 
+    _SHAPEFIT_QUANTITIES = ("mean", "covar")
+    # DESI template fiducial (AbacusSummit c000): desilike_emulator shapefit/core.py
+    # FIDUCIAL_SAMPLE, the cosmology the mean labels are measured against. Copied rather
+    # than imported because that module needs desilike, which this env does not install.
+    _SHAPEFIT_FIDUCIAL = {
+        "omega_cdm": 0.1200,
+        "omega_b": 0.02237,
+        "h": 0.6736,
+        "ln10A_s": 3.036394,
+        "n_s": 0.9649,
+    }
+    # Eigenvalue floor for each tracer's 4x4 ShapeFit correlation matrix. The covar
+    # emulator predicts the six rho independently, and the tanh decode only keeps each
+    # 2x2 block PD, so the 4x4 needs a nearest-PD projection (desilike-emulator
+    # shapefit/README "Target contract"). Blocks already above the floor are unchanged.
+    _SHAPEFIT_CORR_EIG_FLOOR = 1e-6
+
+    def _init_shapefit(self, emu_dir):
+        """Tracer bins, N_tracers weights, both emulator sets and the central data vector.
+
+        Bins are desilike-emulator's ``tracers_for("shapefit")``: the 0.8-1.1 bin is
+        LRG3 alone, not BAO's LRG3+ELG1 (ELG1 is excluded from full shape, DESI 2024 V
+        Sec 2). A bin's passed count sums its ``components`` (default: the bin itself)
+        in desi_tracers.csv, as ``util.ntracers`` does:
+
+            N_b = sum_c design[class_c] * observed_c / observed_{class_c} * efficiency_c
+                  * nominal_total_obs
+
+        which is ``calc_passed``'s split and efficiency per sub-sample, stored as one
+        (n_bins, n_design_labels) matrix so ``_shapefit_n_tracers`` is a matmul.
+        """
+        from desilike_emulator.util import get_tracer_config, tracers_for
+
+        self.shapefit_bins = tracers_for("shapefit")
+        tracers = self.desi_tracers.set_index("tracer")
+        class_observed = tracers.groupby("class")["observed"].sum()
+        weights = torch.zeros(len(self.shapefit_bins), len(self.design_labels), dtype=torch.float64)
+        for i, tracer_bin in enumerate(self.shapefit_bins):
+            cfg = get_tracer_config(tracer_bin, analysis="shapefit", data_release=self.dataset)
+            for comp in cfg.get("components", [tracer_bin]):
+                row = tracers.loc[comp]
+                j = list(self.design_labels).index(row["class"])
+                weights[i, j] += row["observed"] / class_observed[row["class"]] * row["efficiency"]
+        self._shapefit_n_weights = (weights * self.nominal_total_obs).to(self.device)
+
+        self._shapefit_emulators = {}
+        for quantity in self._SHAPEFIT_QUANTITIES:
+            if emu_dir is not None and os.path.isdir(emu_dir):
+                paths = {tb: os.path.join(emu_dir, quantity, f"{tb}.pt") for tb in self.shapefit_bins}
+            else:
+                paths = self.resolve_emulator_checkpoints(
+                    "shapefit", self.cosmo_model, self.dataset, quantity)
+            missing = [tb for tb in self.shapefit_bins if paths.get(tb) is None]
+            if missing or set(paths) != set(self.shapefit_bins):
+                raise ValueError(
+                    f"shapefit {quantity} emulators must cover exactly {self.shapefit_bins} "
+                    f"(no null fallback: there is no DESI ShapeFit covariance to fall back to); "
+                    f"got {paths}.")
+            self._shapefit_emulators[quantity] = {
+                tb: self._load_emulator(paths[tb]) for tb in self.shapefit_bins}
+
+        # Target contract: mean -> the physical parameters, covar -> their sigma_* then the
+        # upper-triangle rho_*, row-major (desilike_emulator shapefit/core.py TARGET_NAMES).
+        self.shapefit_quantities = self._shapefit_emulators["mean"][self.shapefit_bins[0]]["target_names"]
+        names = self.shapefit_quantities
+        covar_names = [f"sigma_{n}" for n in names] + [
+            f"rho_{names[i]}_{names[j]}"
+            for i in range(len(names)) for j in range(i + 1, len(names))]
+        for tracer_bin in self.shapefit_bins:
+            got_mean = self._shapefit_emulators["mean"][tracer_bin]["target_names"]
+            got_covar = self._shapefit_emulators["covar"][tracer_bin]["target_names"]
+            if got_mean != names or got_covar != covar_names:
+                raise ValueError(
+                    f"[{tracer_bin}] shapefit emulator targets mean={got_mean}, covar={got_covar}; "
+                    f"expected mean={names}, covar={covar_names}.")
+
+        if self.global_rank == 0:
+            self._print_emulator_summary({
+                f"{quantity}/{tb}": emu
+                for quantity, by_bin in self._shapefit_emulators.items()
+                for tb, emu in by_bin.items()})
+
+        # The flow's nominal data: DESI's measured ShapeFit data vector, as BAO uses DESI's
+        # measured distances. f_sigmar is carried over as a fraction of the fiducial, so it
+        # needs our fiducial f_sigmar: the mean emulator at the fiducial and the nominal
+        # design (a batch of one: the emulators' (1, in_dim) x_mu adds that dim anyway).
+        n_nominal = self._shapefit_n_tracers(self.nominal_design.view(1, -1))
+        fiducial_mean = torch.cat([
+            self._shapefit_predict("mean", tb, n_nominal[..., i], self._shapefit_fiducial_parameters())
+            for i, tb in enumerate(self.shapefit_bins)], dim=-1)[0].reshape(len(self.shapefit_bins), -1)
+        self.central_val = self._desi_shapefit_data_vector(fiducial_mean[:, names.index("f_sigmar")])
+
+    def _desi_shapefit_data_vector(self, f_sigmar_fid):
+        """DESI DR1's measured ShapeFit-alone data vector in the emulators' basis, (24,).
+
+        ``f_sigmar_fid``: our fiducial f_sigmar per bin, in ``shapefit_bins`` order.
+        """
+        if self.dataset != "dr1":
+            raise ValueError(f"DESI ShapeFit data vectors exist for dr1 only; got {self.dataset!r}.")
+        if self.shapefit_quantities != ["qiso", "qap", "f_sigmar", "m"]:
+            raise ValueError(f"desi_shapefit_to_targets assumes [qiso, qap, f_sigmar, m]; "
+                             f"the mean emulators give {self.shapefit_quantities}.")
+        from desilike_emulator.shapefit import desi_reference
+
+        rows = []
+        for i, tracer_bin in enumerate(self.shapefit_bins):
+            _, measured, _ = desi_reference.datavector(tracer_bin)
+            rows.append(self.desi_shapefit_to_targets(
+                measured, desi_reference.published_fiducial(tracer_bin), float(f_sigmar_fid[i])))
+        return torch.tensor(np.concatenate(rows), device=self.device, dtype=torch.float64)
+
+    @staticmethod
+    def desi_shapefit_to_targets(measured, fiducial, f_sigmar_fid):
+        """One tracer's DESI ShapeFit measurement -> [qiso, qap, f_sigmar, m].
+
+        DESI publishes (D_V/r_d, D_H/D_M, f sigma_s8, m+n) (DESI 2024 V App. A; n is fixed
+        to 0, so the last entry is m in our convention). Against the same template
+        fiducial (``fiducial``: DESI's Table 11 row):
+
+        - qiso, qap: the measured distance ratios over their fiducial values.
+        - f_sigmar: the mean emulator's labels are in DESI's own Eq. (4.10) convention,
+          m-dependence included (desilike_emulator fix_desilike_fsigmar), so DESI's
+          f sigma_s8 carries over unchanged, as a fraction of the fiducial: the <=4.4%
+          offset between our fiducial f_sigmar and Table 11's is not read as a measurement.
+        """
+        dv, dh_dm, f_sigma_s8, m = (float(x) for x in measured)
+        return np.array([
+            dv / fiducial["DV_over_rd"],
+            dh_dm / fiducial["DH_over_DM"],
+            f_sigmar_fid * f_sigma_s8 / fiducial["f_sigma_s8"],
+            m,
+        ])
+
+    def _shapefit_n_tracers(self, tracer_ratio):
+        """Passed N_tracers per shapefit bin, shape (..., n_bins) in ``shapefit_bins`` order."""
+        return tracer_ratio.to(torch.float64) @ self._shapefit_n_weights.T
+
+    def _shapefit_fiducial_parameters(self):
+        return {
+            name: torch.tensor([value], device=self.device, dtype=torch.float64)
+            for name, value in self._SHAPEFIT_FIDUCIAL.items()}
+
+    def _shapefit_predict(self, quantity, tracer_bin, n_tracers, parameters):
+        """One shapefit emulator's physical targets at (N_tracers, cosmology).
+
+        ``parameters`` holds (..., 1) tensors (``sample_parameters`` output); inputs are
+        stacked in the checkpoint's ``param_names`` order and broadcast against N.
+        """
+        emu = self._shapefit_emulators[quantity][tracer_bin]
+        self._warn_n_extrapolation(tracer_bin, emu, n_tracers)
+        features = {"N_tracers": n_tracers, **{k: v.squeeze(-1) for k, v in parameters.items()}}
+        missing = [p for p in emu["param_names"] if p not in features]
+        if missing:
+            raise ValueError(
+                f"[{quantity}/{tracer_bin}] emulator needs inputs {missing}, which cosmo_model "
+                f"'{self.cosmo_model}' does not sample (have {sorted(features)}).")
+        x = torch.stack(torch.broadcast_tensors(
+            *[features[p].to(torch.float64) for p in emu["param_names"]]), dim=-1)
+        return self._emulator_predict(emu, x).to(torch.float64)
+
+    def _shapefit_cov_block(self, sigma, rho):
+        """4x4 covariance from sigma (..., 4) and the row-major upper-triangle rho (..., 6).
+
+        A correlation matrix with an eigenvalue below ``_SHAPEFIT_CORR_EIG_FLOOR`` is
+        projected to its nearest PD neighbour by flooring its eigenvalues there and
+        restoring the unit diagonal; the others are used as predicted. Only those blocks
+        go through eigh, in chunks: cuSOLVER's batched eigh raises INVALID_VALUE at
+        batch >= 32768 (eval's particle batches are 50000), and they are ~5e-5 of draws.
+        """
+        n = sigma.shape[-1]
+        i, j = torch.triu_indices(n, n, offset=1, device=sigma.device)
+        eye = torch.eye(n, dtype=sigma.dtype, device=sigma.device)
+        corr = eye.expand(sigma.shape + (n,)).clone()
+        corr[..., i, j] = rho
+        corr[..., j, i] = rho
+        # Cholesky of corr - floor*I succeeds iff every eigenvalue exceeds the floor.
+        below = torch.linalg.cholesky_ex(corr - self._SHAPEFIT_CORR_EIG_FLOOR * eye).info != 0
+        if below.any():
+            projected = []
+            for chunk in torch.split(corr[below], 16384):
+                evals, evecs = torch.linalg.eigh(chunk)
+                evals = evals.clamp(min=self._SHAPEFIT_CORR_EIG_FLOOR)
+                chunk = evecs @ torch.diag_embed(evals) @ evecs.transpose(-1, -2)
+                d = torch.diagonal(chunk, dim1=-2, dim2=-1).sqrt()
+                projected.append(chunk / (d.unsqueeze(-1) * d.unsqueeze(-2)))
+            corr[below] = torch.cat(projected)
+        cov = corr * sigma.unsqueeze(-1) * sigma.unsqueeze(-2)
+        return 0.5 * (cov + cov.transpose(-1, -2))
+
+    def _shapefit_likelihood(self, n_tracers, parameters):
+        """ShapeFit Gaussian likelihood: mean (..., 4 * n_bins) and block-diagonal covariance.
+
+        Per bin, the mean emulator gives [qiso, qap, f_sigmar, m] and the covar emulator its
+        4x4 covariance, both at the bin's N_tracers and the sampled cosmology. Bins are
+        independent (distinct redshift slices), so off-diagonal blocks are zero.
+        """
+        n_q = len(self.shapefit_quantities)
+        means, blocks = [], []
+        for i, tracer_bin in enumerate(self.shapefit_bins):
+            n = n_tracers[..., i]
+            means.append(self._shapefit_predict("mean", tracer_bin, n, parameters))
+            pred = self._shapefit_predict("covar", tracer_bin, n, parameters)
+            blocks.append(self._shapefit_cov_block(pred[..., :n_q], pred[..., n_q:]))
+        mean = torch.cat(means, dim=-1)
+        covariance = torch.zeros(
+            mean.shape + (mean.shape[-1],), device=mean.device, dtype=torch.float64)
+        for i, block in enumerate(blocks):
+            covariance[..., i * n_q:(i + 1) * n_q, i * n_q:(i + 1) * n_q] = block
+        return mean, covariance
+
     @profile_method
     def pyro_model(self, tracer_ratio):
+        if self.analysis == "shapefit":
+            n_tracers = self._shapefit_n_tracers(tracer_ratio)
+            with pyro.plate_stack("plate", n_tracers.shape[:-1]):
+                parameters = self.sample_parameters(n_tracers.shape[:-1])
+                means, covariance_matrix = self._shapefit_likelihood(n_tracers, parameters)
+                return pyro.sample(
+                    self.observation_labels[0], dist.MultivariateNormal(means, covariance_matrix)
+                )
+
         passed_ratio = self.calc_passed(tracer_ratio)
         with pyro.plate_stack("plate", passed_ratio.shape[:-1]):
             parameters = self.sample_parameters(passed_ratio.shape[:-1])
@@ -2118,351 +2416,6 @@ class NumTracers(BaseExperiment, CosmologyMixin):
                 return pyro.sample(
                     self.observation_labels[0], dist.MultivariateNormal(means, covariance_matrix)
                 )
-
-    @profile_method
-    def Pk_multipoles(
-        self,
-        k_bins,
-        z_eff,
-        omega_cdm,
-        omega_b,
-        h,
-        ln10A_s,
-        n_s,
-        b1_sigma8,
-        b2_sigma8_sq=None,
-        bs_sigma8_sq=None,
-        alpha_0=None,
-        alpha_2=None,
-        SN_0=None,
-        SN_2=None,
-        ells=(0, 2, 4),
-        tau_reio=0.054,
-        use_cosmopower=True,
-    ):
-        """
-        Compute power spectrum multipoles P_ell(k) for given cosmological parameters.
-
-        This method:
-        1. Computes matter power spectrum P_m(k) using cosmopower-jax (or placeholder)
-        2. Applies Kaiser formula: P_g(k, mu) = (b1 + f*mu^2)^2 * P_m(k)
-        3. Converts to multipoles: P_ell(k) = (2*ell+1)/2 * int_0^1 P_g(k,mu) * L_ell(mu) dmu
-
-        Args:
-            k_bins (torch.Tensor): k bins for power spectrum evaluation, shape (n_k,)
-            z_eff (float or torch.Tensor): Effective redshift(s)
-            omega_cdm (torch.Tensor): Cold dark matter density, shape (..., 1)
-            omega_b (torch.Tensor): Baryon density, shape (..., 1)
-            h (torch.Tensor): Hubble parameter, shape (..., 1)
-            ln10A_s (torch.Tensor): Amplitude of primordial power spectrum, shape (..., 1)
-            n_s (torch.Tensor): Spectral index, shape (..., 1)
-            b1_sigma8 (torch.Tensor): (1 + b_1) * σ_8, shape (..., 1)
-            b2_sigma8_sq (torch.Tensor, optional): b_2 * σ_8^2, shape (..., 1)
-            bs_sigma8_sq (torch.Tensor, optional): b_s * σ_8^2, shape (..., 1)
-            alpha_0 (torch.Tensor, optional): Monopole counterterm, shape (..., 1)
-            alpha_2 (torch.Tensor, optional): Quadrupole counterterm, shape (..., 1)
-            SN_0 (torch.Tensor, optional): Shot noise monopole, shape (..., 1)
-            SN_2 (torch.Tensor, optional): Shot noise quadrupole, shape (..., 1)
-            ells (tuple): Multipoles to compute, default (0, 2, 4)
-            tau_reio (float): Reionization optical depth, default 0.054
-            use_cosmopower (bool): Whether to use cosmopower-jax for P_m(k). If False, uses placeholder.
-
-        Returns:
-            torch.Tensor: Power spectrum multipoles with shape (..., n_ells, n_k)
-                where the ell dimension corresponds to the multipoles in order
-        """
-        DTYPE = torch.float64
-        dev = self.device
-
-        # Infer plate shape from required parameters
-        plate = _infer_plate_shape(dev, DTYPE, omega_cdm, omega_b, h, ln10A_s, n_s, b1_sigma8)
-
-        def to_plate1(x, default=None):
-            if x is None:
-                x = default
-            t = torch.as_tensor(x, device=dev, dtype=DTYPE)
-            if t.ndim == len(plate) + 1 and t.shape[-1] == 1 and list(t.shape[:-1]) == list(plate):
-                return t
-            return t.view(*([1] * len(plate)), 1).expand(plate + (1,))
-
-        # Convert parameters to plate shape
-        omega_cdm = to_plate1(omega_cdm)
-        omega_b = to_plate1(omega_b)
-        h = to_plate1(h)
-        ln10A_s = to_plate1(ln10A_s)
-        n_s = to_plate1(n_s)
-        b1_sigma8 = to_plate1(b1_sigma8)
-        tau_reio = to_plate1(tau_reio)
-
-        # Convert inputs to tensors
-        k_bins = torch.as_tensor(k_bins, device=dev, dtype=DTYPE)
-        z_eff = torch.as_tensor(z_eff, device=dev, dtype=DTYPE)
-        if z_eff.ndim == 0:
-            z_eff = z_eff[None]
-
-        n_k = k_bins.shape[0]
-        n_ells = len(ells)
-
-        # z -> (plate, Nz)
-        if z_eff.ndim == 1:
-            Nz = z_eff.shape[0]
-            z = z_eff.reshape(*([1] * len(plate)), Nz).expand(plate + (Nz,))
-        else:
-            if tuple(z_eff.shape[:-1]) != tuple(plate):
-                z = torch.broadcast_to(z_eff, plate + (z_eff.shape[-1],))
-            else:
-                z = z_eff
-
-        # Step 1: Compute matter power spectrum P_m(k)
-        if use_cosmopower:
-            try:
-                # Load emulators (cache them as instance attributes)
-                if not hasattr(self, "_cp_lin"):
-                    self._cp_lin = CosmoPowerJAX(probe="mpk_lin")
-                if not hasattr(self, "_cp_boost"):
-                    self._cp_boost = CosmoPowerJAX(probe="mpk_boost")
-
-                # cosmopower expects: omega_b, omega_cdm, h, n_s, ln10^10A_s, tau_reio
-                # Stack parameters: shape (..., 6)
-                param_array = torch.stack(
-                    [
-                        omega_b.squeeze(-1),
-                        omega_cdm.squeeze(-1),
-                        h.squeeze(-1),
-                        n_s.squeeze(-1),
-                        ln10A_s.squeeze(-1),
-                        tau_reio.squeeze(-1),
-                    ],
-                    dim=-1,
-                )
-
-                # Convert to numpy for cosmopower (handle batching)
-                param_array_np = param_array.cpu().numpy()
-                k_bins_np = k_bins.cpu().numpy()
-
-                # Reshape for cosmopower: expects (n_samples, n_params)
-                original_shape = param_array_np.shape[:-1]
-                n_samples = int(np.prod(original_shape))
-                param_flat = param_array_np.reshape(n_samples, -1)
-
-                # Compute P_m(k) vectorized
-                pk_lin = self._cp_lin.predict(param_flat, k=k_bins_np)  # (n_samples, n_k)
-                pk_boost = self._cp_boost.predict(param_flat, k=k_bins_np)
-                pk_nonlin = pk_lin * pk_boost  # (n_samples, n_k)
-
-                # Reshape back to plate shape
-                pk_m = torch.tensor(pk_nonlin, device=self.device, dtype=torch.float64)
-                pk_m = pk_m.reshape(*original_shape, n_k)
-
-            except (ImportError, AttributeError) as e:
-                if self.global_rank == 0:
-                    print(
-                        f"Warning: cosmopower-jax not available or error: {e}. Using placeholder."
-                    )
-                use_cosmopower = False
-
-        if not use_cosmopower:
-            # Placeholder: return a simple power law (for testing)
-            # P_m(k) ~ k^n with n ~ -2
-            pk_m = (k_bins.unsqueeze(0) / 0.1) ** (-2.0)
-            # Expand to plate shape
-            pk_m = pk_m.expand(*plate, n_k)
-
-        # Step 2: Compute growth rate f from cosmology
-        # f ≈ Ω_m(z)^0.55 (approximate formula)
-        # Compute Om from omega_cdm, omega_b, h
-        Om = (omega_cdm.squeeze(-1) + omega_b.squeeze(-1)) / (h.squeeze(-1) ** 2)
-
-        # Compute Om(z) = Om * (1+z)^3 / [Om*(1+z)^3 + (1-Om)]
-        zp1 = 1.0 + z
-        Om_z = Om.unsqueeze(-1) * zp1**3 / (Om.unsqueeze(-1) * zp1**3 + (1 - Om.unsqueeze(-1)))
-        f = Om_z**0.55  # shape (plate, Nz)
-
-        # Step 3: Extract bias parameter from b1_sigma8
-        # b1_sigma8 = (1 + b1) * sigma8
-        # For Kaiser formula, we need b1, but we have b1_sigma8
-        # This is a simplification - in full implementation, compute sigma8 from cosmology
-        # For now, use b1_sigma8 as effective bias (needs proper sigma8 calculation)
-        b1_eff = b1_sigma8.squeeze(-1)  # shape (plate,)
-
-        # Expand f and b1_eff to match pk_m shape (plate, n_k)
-        # pk_m has shape (plate, n_k), f has shape (plate, Nz), need to broadcast
-        if z.ndim == len(plate) + 1:
-            # f is (plate, Nz), need (plate, n_k) - use first z value or average
-            f_tensor = f[..., 0:1].expand(plate + (n_k,))  # Use first redshift
-        else:
-            f_tensor = f.expand(plate + (n_k,))
-
-        b1_tensor = b1_eff.unsqueeze(-1).expand(plate + (n_k,))
-
-        # Step 3: Apply Kaiser formula and convert to multipoles
-        # P_g(k, mu) = (b1 + f*mu^2)^2 * P_m(k)
-        # P_ell(k) = (2*ell+1)/2 * int_0^1 P_g(k,mu) * L_ell(mu) dmu
-        # Using analytical formulas for ell=0,2,4:
-        # P_0 = (b1^2 + 2/3*b1*f + 1/5*f^2) * P_m
-        # P_2 = (4/3*b1*f + 4/7*f^2) * P_m
-        # P_4 = (8/35*f^2) * P_m
-
-        # Compute multipoles using analytical formulas
-        multipoles = []
-        for ell in ells:
-            if ell == 0:
-                # Monopole: P_0 = (b1^2 + 2/3*b1*f + 1/5*f^2) * P_m
-                P_ell = (
-                    b1_tensor**2 + (2.0 / 3.0) * b1_tensor * f_tensor + (1.0 / 5.0) * f_tensor**2
-                ) * pk_m
-            elif ell == 2:
-                # Quadrupole: P_2 = (4/3*b1*f + 4/7*f^2) * P_m
-                P_ell = ((4.0 / 3.0) * b1_tensor * f_tensor + (4.0 / 7.0) * f_tensor**2) * pk_m
-            elif ell == 4:
-                # Hexadecapole: P_4 = (8/35*f^2) * P_m
-                P_ell = (8.0 / 35.0) * f_tensor**2 * pk_m
-            else:
-                # For higher multipoles, use numerical integration
-                # This is a simplified version - for production, use proper integration
-                raise NotImplementedError(
-                    f"Multipole ell={ell} not implemented. Only ell=0,2,4 supported."
-                )
-
-            multipoles.append(P_ell)
-
-        # Stack multipoles: shape (..., n_ells, n_k)
-        P_multipoles = torch.stack(multipoles, dim=-2)
-
-        return P_multipoles
-
-    @profile_method
-    def compute_covariance_from_mocks(self, mocks):
-        """
-        Compute covariance matrix from DESI mocks.
-
-        Args:
-            mocks (list or np.ndarray): List of mock power spectrum measurements or
-                array of shape (n_mocks, n_data_points)
-
-        Returns:
-            torch.Tensor: Covariance matrix with shape (n_data_points, n_data_points)
-        """
-        # Convert mocks to numpy array if needed
-        if isinstance(mocks, list):
-            # If mocks are PowerSpectrumStatistics objects, extract the flat power
-            try:
-                mock_array = np.array([mock.power_nonorm.ravel() for mock in mocks])
-            except AttributeError:
-                # Assume mocks are already arrays
-                mock_array = np.array(mocks)
-        else:
-            mock_array = np.asarray(mocks)
-
-        # Compute covariance: cov = mean((x - mean(x))^T @ (x - mean(x)))
-        mock_mean = np.mean(mock_array, axis=0)
-        mock_centered = mock_array - mock_mean[None, :]
-        covariance = np.cov(mock_centered.T)
-
-        return torch.tensor(covariance, device=self.device, dtype=torch.float64)
-
-    @profile_method
-    def pyro_model_fs(
-        self, tracer_ratio, mocks=None, covariance=None, k_bins=None, z_eff=None, ells=None
-    ):
-        """
-        Full shape version of pyro_model using power spectrum multipoles.
-
-        This function defines a Gaussian likelihood for power spectrum multipoles:
-        - Means come from theory calculated with vectorized approach
-        - Covariance comes from DESI mocks
-
-        Args:
-            tracer_ratio (torch.Tensor): Design variables (tracer ratios)
-            mocks (list or np.ndarray, optional): DESI mocks for covariance computation.
-                If None, uses self.fullshape_covariance if available.
-            covariance (torch.Tensor, optional): Pre-computed covariance matrix.
-                If None, computes from mocks.
-            k_bins (torch.Tensor, optional): k bins for power spectrum.
-                If None, uses self.fullshape_k_bins if available.
-            z_eff (float or torch.Tensor, optional): Effective redshift(s).
-                If None, uses self.fullshape_z_eff if available.
-            ells (tuple, optional): Multipoles to compute (e.g., (0, 2, 4) for monopole,
-                quadrupole, hexadecapole). If None, uses self.fullshape_ells if available,
-                otherwise defaults to (0, 2, 4).
-
-        Returns:
-            torch.Tensor: Sampled power spectrum multipoles
-        """
-        passed_ratio = self.calc_passed(tracer_ratio)
-
-        # Get ells: use provided value, or instance attribute, or default
-        if ells is None:
-            ells = getattr(self, "fullshape_ells", (0, 2, 4))
-
-        # Get or compute covariance
-        if covariance is None:
-            if mocks is not None:
-                covariance = self.compute_covariance_from_mocks(mocks)
-            elif hasattr(self, "fullshape_covariance"):
-                covariance = self.fullshape_covariance
-            else:
-                raise ValueError(
-                    "Must provide either mocks or covariance, or set self.fullshape_covariance"
-                )
-
-        # Get k_bins and z_eff
-        if k_bins is None:
-            if hasattr(self, "fullshape_k_bins"):
-                k_bins = self.fullshape_k_bins
-            else:
-                raise ValueError("Must provide k_bins or set self.fullshape_k_bins")
-
-        if z_eff is None:
-            if hasattr(self, "fullshape_z_eff"):
-                z_eff = self.fullshape_z_eff
-            else:
-                raise ValueError("Must provide z_eff or set self.fullshape_z_eff")
-
-        # Ensure covariance is on correct device and has correct shape
-        if isinstance(covariance, np.ndarray):
-            covariance = torch.tensor(covariance, device=self.device, dtype=torch.float64)
-        else:
-            covariance = covariance.to(self.device)
-
-        n_data_points = covariance.shape[0]
-
-        with pyro.plate_stack("plate", passed_ratio.shape[:-1]):
-            # Sample cosmological parameters from prior
-            parameters = self.sample_parameters(passed_ratio.shape[:-1])
-
-            # Compute theoretical power spectrum multipoles (vectorized)
-            # Shape: (..., n_ells, n_k)
-            P_multipoles = self.Pk_multipoles(k_bins, z_eff, **parameters, ells=ells)
-
-            # Flatten: [P_0(k1), P_0(k2), ..., P_0(k_nk), P_2(k1), ..., P_4(k1), ...]
-            # Reshape from (..., n_ells, n_k) to (..., n_ells * n_k)
-            n_ells, n_k = P_multipoles.shape[-2:]
-            means = P_multipoles.reshape(*P_multipoles.shape[:-2], n_ells * n_k)
-
-            # Ensure means have correct shape: (..., n_data_points)
-            if means.shape[-1] != n_data_points:
-                raise ValueError(
-                    f"Computed means shape {means.shape[-1]} does not match "
-                    f"covariance shape {n_data_points}. "
-                    f"Expected n_ells * n_k = {n_ells} * {n_k} = {n_ells * n_k} data points."
-                )
-
-            # Broadcast covariance to match batch dimensions if needed
-            # covariance is (n_data_points, n_data_points)
-            # means is (..., n_data_points)
-            # We need covariance to be (..., n_data_points, n_data_points)
-            batch_shape = means.shape[:-1]
-            if len(batch_shape) > 0:
-                # Expand covariance to match batch dimensions
-                cov_expanded = covariance.unsqueeze(0).expand(*batch_shape, -1, -1)
-            else:
-                cov_expanded = covariance
-
-            # Sample from MultivariateNormal
-            return pyro.sample(
-                self.observation_labels[0], dist.MultivariateNormal(means, cov_expanded)
-            )
 
     def unnorm_lfunc(self, params, features, designs):
         parameters = {}

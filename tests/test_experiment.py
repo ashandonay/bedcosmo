@@ -510,18 +510,20 @@ class TestExactPriorMarginals:
         )
         assert NumTracers.exact_prior_marginals(exp) == {"w0", "wa", "hrdrag"}
 
-    def test_num_tracers_only_claims_params_it_draws(self):
+    def test_num_tracers_shapefit_excludes_constrained_params(self):
         from types import SimpleNamespace
 
         from bedcosmo.num_tracers.experiment import NumTracers
 
         exp = SimpleNamespace(
-            prior={"omega_cdm": None, "h": None},
-            analysis="fullshape",
+            prior={"omega_cdm": None, "omega_b": None, "h": None, "ln10A_s": None, "n_s": None},
+            analysis="shapefit",
             prior_flow=None,
-            param_constraints={},
+            param_constraints={
+                "omega_m_domain": {"affected_parameters": ["omega_cdm", "omega_b", "h"]}
+            },
         )
-        assert NumTracers.exact_prior_marginals(exp) == set()
+        assert NumTracers.exact_prior_marginals(exp) == {"ln10A_s", "n_s"}
 
     def test_num_tracers_prior_flow_claims_nothing_unless_bypassed(self):
         from bedcosmo.num_tracers.experiment import NumTracers

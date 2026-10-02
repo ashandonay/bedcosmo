@@ -1,6 +1,8 @@
 # NumTracers Experiment
 
-This experiment optimizes how a DESI-like spectroscopic survey divides its observing budget across target classes, maximizing the expected information gain (EIG) for cosmological parameters inferred from BAO distance measurements. The design variable is the fraction of total observations allocated to each tracer class; the goal is to find allocations more informative about cosmology than DESI's nominal split.
+This experiment optimizes how a DESI-like spectroscopic survey divides its observing budget across target classes, maximizing the expected information gain (EIG) for cosmological parameters inferred from BAO distance measurements (`analysis: bao`) or from ShapeFit full-shape measurements (`analysis: shapefit`, see [ShapeFit analysis](#shapefit-analysis-analysis-shapefit)). The design variable is the fraction of total observations allocated to each tracer class; the goal is to find allocations more informative about cosmology than DESI's nominal split.
+
+`analysis` takes the same values as desilike-emulator's `--analysis` and selects the tracer bins, the `emulators.yaml` subtree and the `models.yaml` block.
 
 ## Problem Description
 
@@ -139,7 +141,7 @@ Each entry under `parameters` defines a `distribution` (type + bounds), optional
 | `prior_args_hrdrag.yaml` | Default; `Om`, `Ok`, `w0`, `wa`, `hrdrag` |
 | `prior_args.yaml` | Base prior set |
 | `prior_args_small.yaml` | Narrowed ranges for fast tests |
-| `prior_args_fs.yaml` | Full-shape parameters |
+| `prior_args_shapefit.yaml` | `analysis: shapefit`; omega-basis cosmology matching the emulators' training box, plus the `omega_m_domain` constraint |
 | `prior_args_posterior*.yaml` | Posterior-informed priors, per model/dataset |
 
 ## Likelihood Model
@@ -164,6 +166,26 @@ With `vary_lya_qso: false` (default) the Lya QSO rows are pinned at their nomina
 
 Emulator bins map to data rows as `BGS, LRG1, LRG2, LRG3_ELG1 -> "LRG3+ELG1", ELG2, QSO, Lya_QSO`. A `null` checkpoint falls back to the fixed nominal covariance.
 
+`emulators.yaml` is keyed `<analysis>: <dataset>: <cosmo_model>: <quantity>: <tracer_bin>`, mirroring `$SCRATCH/bedcosmo/num_tracers/emulator/{analysis}/models/{dataset}/{cosmo_model}/`. For bao, `<quantity>` is the forecast space (`config` | `fourier`) and `emulator_space` picks one per run. At submission the checkpoints are copied into the run's `artifacts/emulators/<tracer_bin>.pt`.
+
+## ShapeFit analysis (`analysis: shapefit`)
+
+The data vector is DESI's ShapeFit compression per tracer bin, `y = [qiso, qap, f_sigmar, m]` for each of `BGS, LRG1, LRG2, LRG3, ELG2, QSO`, giving 24 values. Each bin has two desilike-emulator networks, both taking `(N_tracers, omega_cdm, omega_b, h, ln10A_s, n_s)`:
+
+| Quantity | Predicts | Role |
+|----------|----------|------|
+| `mean`  | `qiso, qap, f_sigmar, m` | Likelihood mean. It depends on `N_tracers` because z_eff(N) moves the compressed parameters. |
+| `covar` | 4 `sigma_*` and 6 `rho_*` | That bin's 4x4 covariance block. |
+
+Both are listed under `shapefit: <dataset>: <cosmo_model>: {mean, covar}` in `emulators.yaml` (currently `dr1/base`, `v4`). Every bin needs both checkpoints, because there is no DESI covariance to fall back to. They are snapshotted to `artifacts/emulators/{mean,covar}/<tracer_bin>.pt`.
+
+- **Tracer bins** come from desilike-emulator's `tracers_for("shapefit")`. The 0.8–1.1 bin is **LRG3 only**, not BAO's LRG3+ELG1, because ELG1 is excluded from DESI's full-shape analysis. A bin's passed `N_tracers` sums its `components` in `desi_tracers.csv` (design class fraction × observed share × efficiency × nominal total), as desilike-emulator's `util.ntracers` does. At the nominal design it reproduces `util.ntracers` exactly (LRG3: 859,822).
+- **Covariance** is block-diagonal across bins. The six `rho` are predicted independently, so each 4x4 correlation is projected to its nearest positive-definite matrix by flooring the eigenvalues at 1e-6 and restoring the unit diagonal. With the v4 emulators this changes about 5e-5 of LRG2 prior draws and nothing else.
+- **Prior** (`prior_args_shapefit.yaml`) matches the emulators' training distributions. The `omega_m_domain` constraint redraws samples until `(omega_cdm + omega_b + omega_nu)/h^2` lies in [0.01, 0.99], the emulators' domain. Nuisance parameters are marginalized inside the emulators, so they are not sampled.
+- **Nominal data** (`central_val`, the flow's nominal context) is DESI DR1's measured ShapeFit-alone data vector (DESI 2024 V App. A, via desilike-emulator's `desi_reference`), as BAO uses DESI's measured distances. Each tracer's (D_V/r_d, D_H/D_M, fσ_s8, m+n) becomes (q_iso, q_ap, f_σr, m): distance ratios over their Table 11 fiducials, fσ_s8 as a fraction of the fiducial (the mean emulator's f_σr labels are in DESI's own m-dependent convention, so no m-correction applies), and m directly. It affects posterior plots, not EIG.
+- **Not applicable**: `likelihood_mode` must be `emulator`. `vary_z_eff`, `apply_desi_syst` and `emulator_sqrtn_ref` are rejected, and `emulator_space`, `include_D_M`, `include_D_V` and `vary_lya_qso` are unused.
+- **DESI reference posterior**: `load_nominal_samples` reads DESI's DR1 ShapeFit-alone chain (`desi-shapefit-all-nolya` with the BBN and ns10 priors, the same tracers and priors as this forecast) from `~/data/desi/shapefit_dr1/mcmc_samples/base.npy`, converted from the public DR1 full-shape VAC as recorded in `PROVENANCE.md` beside it. It is DESI's posterior for the real data, so it is centred on the measured cosmology, not the fiducial.
+
 ## Cosmology Models (`models.yaml`)
 
 Keyed by `<analysis>: <cosmo_model>`, giving `parameters`, `latex_labels`, and optional `constraints`.
@@ -176,7 +198,7 @@ Keyed by `<analysis>: <cosmo_model>`, giving `parameters`, `latex_labels`, and o
 | `base_w_wa` | `+ w0`, `wa` (constraint: `high_z_matter_dom`) |
 | `base_omegak_w_wa` | all five (both constraints) |
 
-The `fullshape` analysis defines its own parameter set (bias, counterterm, and stochastic parameters alongside cosmology).
+The `shapefit` analysis has one model, `base`: `omega_cdm`, `omega_b`, `h`, `ln10A_s`, `n_s` (constraint: `omega_m_domain`).
 
 ## Running
 
@@ -196,5 +218,14 @@ The `fullshape` analysis defines its own parameter set (bias, counterterm, and s
     --design-args-path design_args_nominal_p25.yaml \
     --n-particles-per-device 5000 --time 05:00 --queue regular
 ```
+
+```bash
+# ShapeFit, from the base entry
+./submit.sh train num_tracers base \
+    --analysis shapefit --prior-args-path prior_args_shapefit.yaml \
+    --mlflow-exp shapefit_base
+```
+
+ShapeFit runs from the `base` entry rather than an entry of its own. `train.py` reads its defaults from `train_args.yaml[cosmo_model]`, so a separate entry with `cosmo_model: base` would inherit `base`'s values for any key it set to null or false.
 
 Any `train_args.yaml` key is overridable on the command line (`--likelihood-mode`, `--design-args-path`, `--n-particles-per-device`, …).

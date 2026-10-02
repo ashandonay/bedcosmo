@@ -404,28 +404,6 @@ class TestRunPlotter:
         assert len(list(tmp_path.glob("posterior_full_range_step100_*.png"))) == 1
         plt.close(fig)
 
-    def test_num_visits_posterior_hides_outliers_by_default(self):
-        from types import SimpleNamespace
-
-        plotter = RunPlotter(run_id="run", cosmo_exp="num_visits")
-        plotter._experiment_id = "1"
-        eig_data = {"step_100": {}}
-        entropy_info = {"nominal_prior_entropy": 0.0}
-        with patch(
-            "bedcosmo.plotting.parse_eig_for_posterior",
-            return_value=(None, None, None, entropy_info),
-        ), patch("bedcosmo.plotting.nominal_grid_eig", return_value=None), patch.object(
-            BasePlotter, "plot_posterior", autospec=True
-        ) as base_plot:
-            plotter.plot_posterior(
-                experiment=SimpleNamespace(central_params=None),
-                eig_data=eig_data,
-                eval_step=100,
-                nf_entries=[],
-            )
-
-        assert base_plot.call_args.kwargs["show_outliers"] is False
-
     def test_plot_posterior_full_range_max_scatter(self, run_plotter, tmp_path):
         """max_scatter thins only the 2D dots; the 1D histograms count every sample."""
         from matplotlib.collections import PathCollection
@@ -1010,7 +988,7 @@ class TestPlotTriangleFence:
                           side_effect=plots.GetDistPlotter.triangle_plot) as tri:
             g = plotter.plot_triangle(
                 [post, prior], ["tab:blue", "black"], legend_labels=["Nominal", "Prior"],
-                levels=[0.68], ranges=self.RANGES, fenced=[True, False],
+                levels=[0.68], ranges=self.RANGES, fenced=[True, False], show_outliers=True,
             )
         # GetDist only sees the in-window posterior; the unfenced prior is passed whole.
         smoothed = tri.call_args.args[1]
@@ -1042,7 +1020,7 @@ class TestPlotTriangleFence:
         )
         g = BasePlotter(cosmo_exp="test_exp").plot_triangle(
             [post, prior], ["tab:blue", "black"], legend_labels=["Nominal", "Prior"],
-            levels=[0.68], fenced=[True, False],
+            levels=[0.68], fenced=[True, False], show_outliers=True,
         )
         # Window = GetDist's own range for the fenced series; outliers don't move
         # it and the unfenced prior doesn't widen it.
@@ -1067,7 +1045,7 @@ class TestPlotTriangleFence:
         b = _gd_samples(_bulk_with_outliers(1), "run b")
         g = BasePlotter(cosmo_exp="test_exp").plot_triangle(
             [a, b], ["tab:blue", "tab:blue"], legend_labels=["Group", None],
-            levels=[0.68], ranges=self.RANGES,
+            levels=[0.68], ranges=self.RANGES, show_outliers=True,
         )
         assert self._legend_texts(g) == ["Group", "  5/3.0e3 outside plot range (0.17%)"]
         # Each fenced series gets its own per-parameter diagonal count.
@@ -1076,7 +1054,7 @@ class TestPlotTriangleFence:
         ]
         plt.close(g.fig)
 
-    def test_show_outliers_false_hides_markers_and_counts(self):
+    def test_outliers_hidden_by_default(self):
         from matplotlib.axes import Axes
 
         sample = _gd_samples(_bulk_with_outliers(), "Nominal")
@@ -1091,7 +1069,7 @@ class TestPlotTriangleFence:
         with patch.object(Axes, "scatter", record_marks):
             g = BasePlotter(cosmo_exp="test_exp").plot_triangle(
                 [sample], ["tab:blue"], legend_labels=["Nominal"],
-                ranges=self.RANGES, show_outliers=False,
+                ranges=self.RANGES,
             )
 
         assert marked == []
@@ -1125,6 +1103,7 @@ class TestPlotTriangleFence:
             g = BasePlotter(cosmo_exp="test_exp").plot_triangle(
                 [sample], ["tab:blue"], legend_labels=["Nominal"],
                 ranges={"Om": (0.2, 0.4), "hrdrag": (9000, 11000), "z": (0.8, 1.2)},
+                show_outliers=True,
             )
 
         # No mark in Om-vs-hrdrag; the z outlier is marked in both panels that

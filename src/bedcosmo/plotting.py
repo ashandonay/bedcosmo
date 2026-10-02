@@ -14,7 +14,8 @@ from getdist import plots
 from bedcosmo.util import (
     get_runs_data, init_experiment, load_model, auto_seed, convert_color,
     load_nominal_samples, get_contour_area, parse_mlflow_params, sort_key_for_group_tuple,
-    GETDIST_SETTINGS, restrict_mcsamples, sample_nf,
+    GETDIST_SETTINGS, restrict_mcsamples, sample_nf, ReferenceChain, GETDIST_CHAIN_SETTINGS,
+    getdist_settings_for,
     nf_posterior_entries, validate_display, NF_SERIES_COLORS, NF_SERIES_LABELS,
 )
 from bedcosmo.artifacts import (
@@ -122,6 +123,19 @@ def _window_log_ticks(lo, hi, vmin, vmax):
     return sorted(ticks)
 
 
+def split_param_pair(pair_name, names):
+    """``(p1, p2)`` with ``f"{p1}_{p2}" == pair_name``, both in ``names``.
+
+    Area metrics are logged as ``nominal_area_avg_{p1}_{p2}``, and names like
+    ``omega_cdm`` contain underscores, so the pair can only be recovered against the
+    known parameter names.
+    """
+    matches = [(a, b) for a in names for b in names if f"{a}_{b}" == pair_name]
+    if len(matches) != 1:
+        raise ValueError(f"Cannot split {pair_name!r} into two of {list(names)}: matches {matches}")
+    return matches[0]
+
+
 def triangle_font_sizes(width_inch, n_params):
     """``(axis, title, legend)`` font sizes for an ``n_params`` triangle ``width_inch`` wide."""
     axis = max(9, min(22, width_inch * (0.3 + 0.5 * np.sqrt(n_params))))
@@ -170,11 +184,11 @@ def _subset_mcsamples(sample, mask):
             f"No samples of {sample.label!r} fall inside the plot ranges; widen ``ranges``."
         )
     with contextlib.redirect_stdout(io.StringIO()):
-        subset = getdist.MCSamples(
+        subset = type(sample)(
             samples=np.asarray(sample.samples)[mask],
             names=sample.paramNames.list(),
             labels=[p.label for p in sample.paramNames.names],
-            settings=GETDIST_SETTINGS,
+            settings=getdist_settings_for(sample),
         )
     subset.label = sample.label
     return subset
@@ -1046,7 +1060,7 @@ class BasePlotter:
         posterior_samples_path=None,
         data_index=0,
         show_scatter=False,
-        show_outliers=True,
+        show_outliers=False,
         ranges=None,
     ):
         """
@@ -1173,12 +1187,13 @@ class BasePlotter:
                 nominal_samples_mcmc = experiment.get_nominal_samples(
                     transform_output=not transform_output
                 )
+                nominal_label = nominal_samples_mcmc.label
                 nominal_samples_mcmc = restrict_mcsamples(nominal_samples_mcmc, params)
                 all_samples.append(nominal_samples_mcmc)
                 all_colors.append('black')
                 all_alphas.append(1.0)
                 all_line_styles.append('--')
-                legend_labels.append('Nominal Design (MCMC)')
+                legend_labels.append(nominal_label)
                 all_fenced.append(True)
             except NotImplementedError:
                 print(
@@ -1279,7 +1294,7 @@ class BasePlotter:
         style=style,
         fenced=None,
         legend_fontsize=None,
-        show_outliers=True,
+        show_outliers=False,
     ):
         """
         Low-level GetDist triangle plot from MCSamples lists.
@@ -1305,10 +1320,11 @@ class BasePlotter:
                 also the outlier fence. Params not in ``ranges`` use GetDist's own
                 view range over the fenced series. Fenced series are smoothed by
                 GetDist from samples inside all parameter windows. Out-of-window
-                samples are marked with ``x`` in 2D panels only when either plotted
-                parameter is outside its window; counts are per series in the legend
-                and per parameter in the 1D panels' top-left corner. Set
-                ``show_outliers=False`` to hide those markers and counts.
+                samples are dropped from the smoothing but not drawn. Set
+                ``show_outliers=True`` to mark them with ``x`` in 2D panels (only
+                when either plotted parameter is outside its window) and count them
+                per series in the legend and per parameter in the 1D panels'
+                top-left corner.
             scatter_alpha (float): Alpha value for scatter points. Default 0.6 for better distinguishability.
             contour_alpha_factor (float): Factor to adjust contour alpha for distinguishability. Default 0.8.
             style (object, optional): Style object (like KP7StylePaper) to apply to the plotter settings.
@@ -1350,7 +1366,7 @@ class BasePlotter:
         # (0.1%/99.9% quantiles plus a smoothing pad, so outliers do not move it)
         # over the fenced series.
         for sample in samples:
-            sample.updateSettings(GETDIST_SETTINGS)
+            sample.updateSettings(getdist_settings_for(sample))
         fence = getdist_view_ranges([s for s, f in zip(samples, fenced) if f])
         names = samples[0].paramNames.list()
         fence.update({p: tuple(r) for p, r in (ranges or {}).items() if p in names})
@@ -1911,8 +1927,7 @@ class RunPlotter(BasePlotter):
             for area_idx, (metric_name, area_data) in enumerate(nom_area.items()):
                 if area_data:
                     pair_name = metric_name.replace('nominal_area_avg_', '')
-                    param1, param2 = pair_name.split('_')[:2]
-                    
+
                     area_steps, area_values = zip(*area_data)
                     sampled_indices = np.arange(0, len(area_steps), sampling_rate)
                     plot_area_steps = np.array(area_steps)[sampled_indices]
@@ -1922,16 +1937,18 @@ class RunPlotter(BasePlotter):
                     
                     try:
                         nominal_samples, target_labels, latex_labels = load_nominal_samples(
-                            run_params['cosmo_exp'], run_params['cosmo_model'], dataset=run_params['dataset'])
+                            run_params['cosmo_exp'], run_params['cosmo_model'], dataset=run_params['dataset'],
+                            analysis=run_params.get('analysis'))
                         with contextlib.redirect_stdout(io.StringIO()):
-                            nominal_samples_gd = getdist.MCSamples(samples=nominal_samples, names=target_labels, labels=latex_labels, settings=GETDIST_SETTINGS)
+                            nominal_samples_gd = ReferenceChain(samples=nominal_samples, names=target_labels, labels=latex_labels, settings=GETDIST_CHAIN_SETTINGS)
+                        param1, param2 = split_param_pair(pair_name, target_labels)
                         nominal_area = get_contour_area([nominal_samples_gd], 0.68, param1, param2)[0]["nominal_area_"+pair_name]
                         ax_area.plot(plot_area_steps, plot_area_values/nominal_area, 
-                                    color=line_color, label=pair_name.replace('_', ', '))
+                                    color=line_color, label=f"{param1}, {param2}")
                         ax_area.axhline(1, color='black', linestyle='--', lw=1.5)
                     except NotImplementedError:
                         ax_area.plot(plot_area_steps, plot_area_values, 
-                                    color=line_color, label=pair_name.replace('_', ', '))
+                                    color=line_color, label=pair_name)
             
             ax_area.set_ylabel("Nominal Design Area Ratio to DESI")
             ax_area.set_ylim(area_limits)
@@ -2001,9 +2018,9 @@ class RunPlotter(BasePlotter):
 
         Extra keyword arguments are forwarded to ``BasePlotter.plot_posterior``
         (e.g. ``plot_mcmc=False``, ``ranges``). To see the out-of-window samples
-        where they actually lie, use ``plot_posterior_full_range``. NumVisits
-        plots hide outlier markers and counts by default; pass
-        ``show_outliers=True`` to display them.
+        where they actually lie, use ``plot_posterior_full_range``. Outlier
+        markers and counts are hidden by default; pass ``show_outliers=True`` to
+        display them.
         """
         if device is None:
             device = "cuda:0" if torch.cuda.is_available() else "cpu"
@@ -2035,8 +2052,6 @@ class RunPlotter(BasePlotter):
 
         if nf_entries is None and artifacts_dir is None and posterior_samples_path is None:
             artifacts_dir = self._get_artifacts_dir()
-
-        kwargs.setdefault("show_outliers", self.cosmo_exp != "num_visits")
 
         return super().plot_posterior(
             experiment=experiment,
@@ -3579,9 +3594,9 @@ class ComparisonPlotter(BasePlotter):
                     transform_output=not transform_output
                 )
                 nominal_label = (
-                    f'Nominal Design (MCMC) ({cosmo_model_for_desi})'
+                    f'{nominal_samples_gd.label} ({cosmo_model_for_desi})'
                     if cosmo_model_for_desi
-                    else 'Nominal Design (MCMC)'
+                    else nominal_samples_gd.label
                 )
                 all_samples.append(nominal_samples_gd)
                 all_colors.append('black')
@@ -5647,9 +5662,9 @@ class ComparisonPlotter(BasePlotter):
 
                         # Get nominal samples and area for comparison
                         try:
-                            nominal_samples, target_labels, latex_labels = load_nominal_samples(run_params['cosmo_exp'], run_params['cosmo_model'], dataset=run_params['dataset'])
+                            nominal_samples, target_labels, latex_labels = load_nominal_samples(run_params['cosmo_exp'], run_params['cosmo_model'], dataset=run_params['dataset'], analysis=run_params.get('analysis'))
                             with contextlib.redirect_stdout(io.StringIO()):
-                                nominal_samples_gd = getdist.MCSamples(samples=nominal_samples, names=target_labels, labels=latex_labels, settings=GETDIST_SETTINGS)
+                                nominal_samples_gd = ReferenceChain(samples=nominal_samples, names=target_labels, labels=latex_labels, settings=GETDIST_CHAIN_SETTINGS)
                             nominal_area = get_contour_area([nominal_samples_gd], 0.68, param1, param2)[0]["nominal_area_"+f"{param1}_{param2}"]
                             ax_area.plot(plot_area_steps, plot_area_values/nominal_area, 
                                         alpha=base_alpha, color=color, label=plot_label)
