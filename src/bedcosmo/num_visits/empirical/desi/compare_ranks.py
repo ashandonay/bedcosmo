@@ -1,5 +1,9 @@
 #!/usr/bin/env python
-"""Fit and compare low-rank nonnegative spectral bases from DESI data."""
+"""Diagnostic: compare held-out error of quick NMF bases at several ranks.
+
+Reads the matrix written by ``desi.build_matrix``. The bases fitted here are
+not used by ``desi.build_prior``, which learns its own production basis.
+"""
 
 from __future__ import annotations
 
@@ -15,24 +19,8 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 from speclite import filters as speclite_filters  # noqa: E402
 
-from ..desi_data import ensure_desi_healpix  # noqa: E402
-from ..paths import (  # noqa: E402
-    DEFAULT_HEALPIX,
-    ZWARN_UNSTABLE_BIT,
-    get_desi_candidate_manifest_path,
-    get_desi_data_dir,
-    get_desi_training_data_dir,
-)
-from .support import (  # noqa: E402
-    lsst_demand_weighted_coverage,
-    select_wavelength_support,
-)
-from .training_matrix import (  # noqa: E402
-    build_rest_frame_matrix,
-    discover_desi_manifest,
-    derive_rest_frame_grid,
-    load_desi_manifest,
-)
+from ..paths import get_desi_training_data_dir  # noqa: E402
+from .support import select_wavelength_support  # noqa: E402
 from .weighted_nmf import (  # noqa: E402
     fit_weighted_nmf,
     infer_coefficients,
@@ -90,40 +78,16 @@ def parse_args() -> argparse.Namespace:
         description=__doc__, formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
     parser.add_argument(
-        "--manifest",
+        "--training-matrix",
         type=Path,
         default=None,
-        help="Explicit target/redshift manifest override; default discovers directly from DESI",
-    )
-    parser.add_argument("--desi-dir", type=Path, default=None)
-    parser.add_argument("--output-dir", type=Path, default=None)
-    parser.add_argument("--healpix", type=int, nargs="+", default=list(DEFAULT_HEALPIX))
-    parser.add_argument("--target-spectype", default="GALAXY")
-    parser.add_argument("--z-min", type=float, default=0.01)
-    parser.add_argument("--z-max", type=float, default=None)
-    parser.add_argument("--allow-nonzero-zwarn", action="store_true")
-    parser.add_argument("--zwarn-forbid-mask", type=int, default=None, metavar="BITS")
-    parser.add_argument(
-        "--drop-unstable-zwarn",
-        action="store_true",
-        help=f"Shorthand for --zwarn-forbid-mask {ZWARN_UNSTABLE_BIT}.",
-    )
-    parser.add_argument("--min-good-pixels", type=int, default=100)
-    parser.add_argument("--ranks", type=int, nargs="+", default=(2, 3, 4, 5, 6))
-    parser.add_argument("--max-spectra", type=int, default=1500)
-    parser.add_argument(
-        "--wave-min",
-        type=float,
-        default=None,
-        help="Override lower candidate bound; default derives it from valid DESI pixels",
+        help="Matrix from desi.build_matrix (default: <num_visits>/desi_training_data/"
+        "desi_rest_frame_training_matrix.npz)",
     )
     parser.add_argument(
-        "--wave-max",
-        type=float,
-        default=None,
-        help="Override upper candidate bound; default derives it from valid DESI pixels",
+        "--output-dir", type=Path, default=None, help="Default: the matrix's directory"
     )
-    parser.add_argument("--wave-step", type=float, default=10.0)
+    parser.add_argument("--ranks", type=int, nargs="+", required=True)
     parser.add_argument("--iterations", type=int, default=8)
     parser.add_argument("--smooth-sigma-aa", type=float, default=10.0)
     parser.add_argument("--observations-per-component", type=int, default=10)
@@ -220,72 +184,29 @@ def make_figure(
 
 def main() -> None:
     args = parse_args()
-    if args.min_good_pixels <= 0:
-        raise ValueError("--min-good-pixels must be positive")
-    if args.z_max is not None and args.z_min is not None and args.z_min >= args.z_max:
-        raise ValueError("--z-min must be below --z-max")
-    desi_dir = Path(args.desi_dir or get_desi_data_dir()).expanduser().resolve()
-    output_dir = Path(args.output_dir or get_desi_training_data_dir()).expanduser().resolve()
+    matrix_path = (
+        Path(
+            args.training_matrix
+            or get_desi_training_data_dir() / "desi_rest_frame_training_matrix.npz"
+        )
+        .expanduser()
+        .resolve()
+    )
+    output_dir = Path(args.output_dir or matrix_path.parent).expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    zwarn_forbid_mask = args.zwarn_forbid_mask
-    if args.drop_unstable_zwarn:
-        if zwarn_forbid_mask is not None and zwarn_forbid_mask != ZWARN_UNSTABLE_BIT:
-            raise ValueError(
-                "Use only one of --drop-unstable-zwarn and --zwarn-forbid-mask, "
-                f"or pass --zwarn-forbid-mask {ZWARN_UNSTABLE_BIT}."
-            )
-        zwarn_forbid_mask = ZWARN_UNSTABLE_BIT
+    with np.load(matrix_path) as data:
+        manifest = pd.DataFrame(
+            {"targetid": data["targetid"], "healpix": data["healpix"], "z": data["redshift"]}
+        )
+        wave = data["wave_rest_aa"]
+        flux = data["flux"]
+        weights = data["relative_ivar"]
+    wave_step = np.diff(wave)
+    if not np.allclose(wave_step, wave_step[0]):
+        raise ValueError(f"{matrix_path} does not have a uniform wavelength grid")
+    wave_step = float(wave_step[0])
 
-    if args.manifest is not None:
-        manifest_path = args.manifest.expanduser().resolve()
-        manifest = load_desi_manifest(manifest_path)
-        sample_source = "explicit_manifest"
-    else:
-        for healpix in args.healpix:
-            ensure_desi_healpix(int(healpix), desi_dir=desi_dir)
-        manifest = discover_desi_manifest(
-            args.healpix,
-            desi_dir=desi_dir,
-            target_spectype=args.target_spectype,
-            z_min=args.z_min,
-            z_max=args.z_max,
-            allow_nonzero_zwarn=args.allow_nonzero_zwarn,
-            zwarn_forbid_mask=zwarn_forbid_mask,
-        )
-        manifest_path = None
-        sample_source = "direct_desi_redrock"
-    if manifest.empty:
-        raise ValueError("No DESI spectra passed the sample selection")
-    n_candidates = len(manifest)
-    candidate_manifest_path = (
-        get_desi_candidate_manifest_path()
-        if args.output_dir is None
-        else output_dir / "desi_candidate_manifest.csv"
-    )
-    candidate_manifest_path.parent.mkdir(parents=True, exist_ok=True)
-    manifest.to_csv(candidate_manifest_path, index=False)
-    if args.max_spectra and len(manifest) > args.max_spectra:
-        manifest = (
-            manifest.sample(args.max_spectra, random_state=args.seed)
-            .sort_values(["healpix", "targetid"])
-            .reset_index(drop=True)
-        )
-    wave = derive_rest_frame_grid(
-        manifest,
-        desi_dir=desi_dir,
-        wave_step=args.wave_step,
-        wave_min=args.wave_min,
-        wave_max=args.wave_max,
-    )
-    manifest, flux, weights, scales = build_rest_frame_matrix(
-        manifest,
-        desi_dir=desi_dir,
-        rest_wave=wave,
-        min_good_pixels=args.min_good_pixels,
-    )
-    sample_manifest_path = output_dir / "desi_sample_manifest.csv"
-    manifest.to_csv(sample_manifest_path, index=False)
     rng = np.random.default_rng(args.seed)
     test = rng.random(len(manifest)) < args.test_fraction
     if not np.any(test) or not np.any(~test):
@@ -305,29 +226,13 @@ def main() -> None:
     learned_wave = wave[learned]
     learned_flux = flux[:, learned]
     learned_weights = weights[:, learned]
-    np.savez_compressed(
-        output_dir / "desi_rest_frame_training_matrix.npz",
-        targetid=manifest["targetid"].to_numpy(np.int64),
-        healpix=manifest["healpix"].to_numpy(np.int64),
-        redshift=manifest["z"].to_numpy(float),
-        wave_rest_aa=wave,
-        flux=flux,
-        relative_ivar=weights,
-        normalization_scale=scales,
-    )
-    lsst_conditional_coverage = lsst_demand_weighted_coverage(
-        wave, manifest["z"].to_numpy(float), weights
-    )
     pd.DataFrame(
         {
             "wave_rest_aa": wave,
             "training_contributing_spectra": wavelength_contributors,
-            "all_contributing_spectra": np.sum(weights > 0, axis=0),
-            "observed_fraction": wavelength_coverage,
-            "lsst_demand_weighted_coverage": lsst_conditional_coverage,
             "basis_support": learned,
         }
-    ).to_csv(output_dir / "rest_wavelength_coverage.csv", index=False)
+    ).to_csv(output_dir / "rank_comparison_support.csv", index=False)
 
     rows: list[dict[str, float | int]] = []
     bases: dict[int, np.ndarray] = {}
@@ -338,7 +243,7 @@ def main() -> None:
             learned_weights[~test],
             rank,
             iterations=args.iterations,
-            smooth_sigma_pixels=args.smooth_sigma_aa / args.wave_step,
+            smooth_sigma_pixels=args.smooth_sigma_aa / wave_step,
             seed=args.seed,
         )
         coefficients = infer_coefficients(learned_flux, learned_weights, basis)
@@ -406,14 +311,9 @@ def main() -> None:
     parameters = vars(args).copy()
     parameters.update(
         {
-            "sample_source": sample_source,
-            "input_manifest": str(manifest_path) if manifest_path is not None else None,
-            "candidate_manifest": str(candidate_manifest_path),
-            "sample_manifest": str(sample_manifest_path),
-            "desi_dir": str(desi_dir),
+            "training_matrix": str(matrix_path),
             "output_dir": str(output_dir),
-            "n_candidate_spectra": n_candidates,
-            "n_loaded_spectra": len(manifest),
+            "n_spectra": len(manifest),
             "learned_wave_min_aa": float(learned_wave.min()),
             "learned_wave_max_aa": float(learned_wave.max()),
             "n_learned_wavelength_bins": int(np.sum(learned)),
@@ -422,19 +322,12 @@ def main() -> None:
                 "largest contiguous interval with at least the required number "
                 "of observed spectra in every bin"
             ),
-            "uses_eazy_selection": (False if sample_source == "direct_desi_redrock" else None),
-            "selection_role": (
-                "Direct Redrock/FIBERMAP galaxy selection"
-                if sample_source == "direct_desi_redrock"
-                else "Explicit user-supplied manifest override"
-            ),
-            "desi_flux_unit_scale_cgs": 1e-17,
         }
     )
     for key, value in list(parameters.items()):
         if isinstance(value, Path):
             parameters[key] = str(value)
-    (output_dir / "desi_basis_provenance.json").write_text(
+    (output_dir / "rank_comparison_provenance.json").write_text(
         json.dumps(parameters, indent=2, sort_keys=True) + "\n"
     )
     make_figure(
@@ -447,7 +340,7 @@ def main() -> None:
         len(manifest),
         output_dir / "desi_basis_rank_comparison.png",
     )
-    print(f"Wrote DESI-basis pilot to {output_dir}")
+    print(f"Wrote DESI rank comparison to {output_dir}")
 
 
 if __name__ == "__main__":

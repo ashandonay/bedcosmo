@@ -13,12 +13,12 @@ from bedcosmo.num_visits.empirical.desi.build_prior import (
     resolve_prior_redshift_limits,
     write_template_bank,
 )
+from bedcosmo.num_visits.empirical.desi.compare_ranks import (
+    desi_covered_lsst_color_rms,
+)
 from bedcosmo.num_visits.empirical.desi.evaluate_factorization_methods import (
     fit_anls,
     shared_initialization,
-)
-from bedcosmo.num_visits.empirical.desi.fit_basis import (
-    desi_covered_lsst_color_rms,
 )
 from bedcosmo.num_visits.empirical.desi.support import (
     largest_contiguous_region,
@@ -167,6 +167,53 @@ def test_covered_lsst_color_rms_is_zero_for_exact_reconstruction():
     assert np.allclose(rms, 0.0, atol=1e-12)
 
 
+def test_compare_ranks_reads_only_the_saved_matrix(tmp_path, monkeypatch):
+    import pandas as pd
+
+    from bedcosmo.num_visits.empirical.desi import compare_ranks
+
+    rng = np.random.default_rng(0)
+    wave = np.arange(3000.0, 9000.0, 20.0)
+    components = np.vstack([np.ones_like(wave), wave / 5000.0])
+    flux = rng.uniform(0.2, 1.0, (200, 2)) @ components
+    matrix = tmp_path / "matrix" / "desi_rest_frame_training_matrix.npz"
+    matrix.parent.mkdir()
+    np.savez_compressed(
+        matrix,
+        targetid=np.arange(200, dtype=np.int64),
+        healpix=np.zeros(200, dtype=np.int64),
+        redshift=rng.uniform(0.05, 0.3, 200),
+        wave_rest_aa=wave,
+        flux=flux,
+        relative_ivar=np.ones_like(flux),
+        normalization_scale=np.ones(200),
+    )
+    output_dir = tmp_path / "out"
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "compare_ranks",
+            "--training-matrix",
+            str(matrix),
+            "--output-dir",
+            str(output_dir),
+            "--ranks",
+            "2",
+            "3",
+            "--iterations",
+            "4",
+        ],
+    )
+    compare_ranks.main()
+
+    metrics = pd.read_csv(output_dir / "rank_comparison.csv")
+    assert metrics["rank"].tolist() == [2, 3]
+    assert metrics["test_median_wrms"].iloc[0] < 0.05
+    assert (output_dir / "desi_basis_rank3.csv").exists()
+    assert (output_dir / "desi_basis_rank_comparison.png").exists()
+    assert sorted(p.name for p in matrix.parent.iterdir()) == [matrix.name]
+
+
 def test_largest_contiguous_region_drops_short_supported_islands():
     mask = np.array([True, True, False, True, True, True, False, True])
     assert np.array_equal(
@@ -189,9 +236,9 @@ def test_wavelength_support_scales_contributors_with_largest_rank():
 
 
 def test_candidate_grid_retains_supported_uv_below_1400(monkeypatch):
-    from bedcosmo.num_visits.empirical.desi.fit_basis import parse_args
+    from bedcosmo.num_visits.empirical.desi.build_matrix import parse_args
 
-    monkeypatch.setattr("sys.argv", ["fit_basis"])
+    monkeypatch.setattr("sys.argv", ["build_matrix"])
     args = parse_args()
     assert args.wave_min is None and args.wave_max is None
     wave = np.arange(1330, 9720 + args.wave_step, args.wave_step)
@@ -252,7 +299,7 @@ def test_grid_uses_selected_valid_pixels_and_rounds_outward(tmp_path, monkeypatc
         manifest, desi_dir=tmp_path, wave_step=10, wave_min=1400, wave_max=2900
     )
     assert override[0] == 1400 and override[-1] == 2900
-    population = pd.DataFrame({"targetid": [targetid, 2], "healpix": [1, 1], "z": [1., 0.]})
+    population = pd.DataFrame({"targetid": [targetid, 2], "healpix": [1, 1], "z": [1.0, 0.0]})
     population_grid = derive_rest_frame_grid(population, desi_dir=tmp_path, wave_step=10)
     assert population_grid[0] == 1330
     assert population_grid[-1] == 9000

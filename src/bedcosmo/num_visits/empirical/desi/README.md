@@ -21,14 +21,12 @@ The training path:
 6. evaluates reconstruction on a fixed held-out galaxy sample; and
 7. saves simplex-normalized component coefficients for eventual prior fitting.
 
-First create the direct-DESI sample manifests and rest-frame matrix. This
-example processes the complete selected population and evaluates rank 8 in the
-exploratory basis diagnostic:
+First create the direct-DESI sample manifests and rest-frame matrix. This is
+the only step `build_prior` depends on; it has no rank argument:
 
 ```bash
-python -m bedcosmo.num_visits.empirical.desi.fit_basis \
-  --max-spectra 0 \
-  --ranks 8
+python -m bedcosmo.num_visits.empirical.desi.build_matrix \
+  --max-spectra 0
 ```
 
 The default output is:
@@ -37,7 +35,9 @@ The default output is:
 $SCRATCH/bedcosmo/num_visits/desi_training_data/
 ├── desi_candidate_manifest.csv
 ├── desi_sample_manifest.csv
-└── desi_rest_frame_training_matrix.npz
+├── desi_rest_frame_training_matrix.npz
+├── desi_training_matrix_provenance.json
+└── rest_wavelength_coverage.csv
 ```
 
 The candidate manifest records the shared catalog-level population passing the
@@ -49,8 +49,24 @@ the final direct-basis subset with enough usable matrix pixels. Pass
 selection with a table containing `targetid`, `healpix`, and `z`.
 
 The default `--max-spectra 1500` is useful for a bounded pilot; set it to zero
-for a production matrix. A development rank scan can use
-`--ranks 2 3 4 5 6 7 8 9 10 11 12`.
+for a production matrix.
+
+### Optional: compare ranks
+
+`compare_ranks` is an exploratory diagnostic for choosing a rank. It reads the
+saved matrix, fits a quick weighted NMF per rank on a training split, and
+reports held-out spectral and LSST-color RMS. Its bases are not used by
+`build_prior`, which learns its own production basis:
+
+```bash
+python -m bedcosmo.num_visits.empirical.desi.compare_ranks \
+  --ranks 2 3 4 5 6 7 8 9 10 11 12
+```
+
+It writes `rank_comparison.csv`, `desi_basis_rank{K}.csv`,
+`desi_basis_coefficients.csv`, `rank_comparison_support.csv`,
+`rank_comparison_provenance.json`, and `desi_basis_rank_comparison.png` beside
+the matrix (override with `--output-dir`).
 
 DESI rest-frame wavelength support is strongly redshift-dependent. A global
 catalog-fraction cutoff is inappropriate: low-redshift spectra supply the red
@@ -73,9 +89,11 @@ LSST coverage is handled later by the prior redshift selection. Existing saved
 matrices retain their original grid: regenerate the training matrix before
 building a basis with expanded UV support.
 
-The saved `rest_wavelength_coverage.csv` reports contributor counts, the
+The matrix's `rest_wavelength_coverage.csv` reports contributor counts, the
 catalog-wide observed fraction, and an LSST-demand-weighted conditional
-coverage evaluated at each object's redshift. Missing pixels always retain zero
+coverage evaluated at each object's redshift. `compare_ranks` writes its
+training-split contributor counts and selected support separately.
+Missing pixels always retain zero
 weight during factorization. These components must not be extrapolated by
 silently clamping their endpoint values. The production prior therefore
 excludes redshifts for which its learned rest-frame support cannot cover the
