@@ -38,6 +38,24 @@ GETDIST_SETTINGS = {
 import getdist
 import io
 
+# Reference MCMC chains (DESI's published posteriors) are correlated draws: DR1 ShapeFit's
+# 32k rows hold ~1.4k effective samples. The fixed GETDIST_SETTINGS width suits independent
+# flow samples but leaves a chain's sampling noise in its contours, so chains keep GetDist's
+# automatic width, chosen from an autocorrelation-aware effective sample size.
+GETDIST_CHAIN_SETTINGS = {**GETDIST_SETTINGS, "smooth_scale_1D": -1, "smooth_scale_2D": -1}
+
+
+class ReferenceChain(getdist.MCSamples):
+    """MCMC chain samples (rows in chain order), smoothed with GETDIST_CHAIN_SETTINGS.
+
+    Plotting code that re-sets or rebuilds a sample keeps this class and its settings via
+    ``getdist_settings_for``.
+    """
+
+
+def getdist_settings_for(sample):
+    return GETDIST_CHAIN_SETTINGS if isinstance(sample, ReferenceChain) else GETDIST_SETTINGS
+
 
 def restrict_mcsamples(gd, params):
     """Return a new MCSamples restricted to ``params`` (a list of names).
@@ -53,11 +71,12 @@ def restrict_mcsamples(gd, params):
         return gd
     sub_labels = [gd.paramNames.names[i].label for i in idx]
     with contextlib.redirect_stdout(io.StringIO()):
-        restricted = getdist.MCSamples(
+        restricted = type(gd)(
             samples=gd.samples[:, idx],
             names=[names[i] for i in idx],
             labels=sub_labels,
-            settings=GETDIST_SETTINGS,
+            settings=getdist_settings_for(gd),
+            label=gd.label,
         )
     return restricted
 
@@ -1357,9 +1376,19 @@ def _eig_design_kwds_from_merged_eig(
     )
 
 
-def load_nominal_samples(cosmo_exp, cosmo_model, dataset='dr2'):
+def load_nominal_samples(cosmo_exp, cosmo_model, dataset='dr2', analysis=None):
     home_dir = os.environ["HOME"]
-    if cosmo_exp == 'num_tracers':
+    if cosmo_exp == 'num_tracers' and analysis == 'shapefit':
+        # DESI DR1 ShapeFit-alone chains (BBN + ns10 priors), equal-weight; the conversion
+        # is recorded in mcmc_samples/PROVENANCE.md beside the file.
+        if cosmo_model != 'base':
+            raise NotImplementedError(f"No DESI ShapeFit chains converted for cosmo_model={cosmo_model!r}")
+        nominal_samples = np.load(f"{home_dir}/data/desi/shapefit_{dataset}/mcmc_samples/{cosmo_model}.npy")
+        target_labels = ['omega_cdm', 'omega_b', 'h', 'ln10A_s', 'n_s']
+        latex_labels = ['\\omega_{cdm}', '\\omega_b', 'h', '\\ln(10^{10} A_s)', 'n_s']
+    elif cosmo_exp == 'num_tracers':
+        if analysis != 'bao':
+            raise NotImplementedError(f"Nominal samples exist only for analysis 'bao' or 'shapefit', got {analysis!r}")
         nominal_samples = np.load(f"{home_dir}/data/desi/bao_{dataset}/mcmc_samples/{cosmo_model}.npy")
         if cosmo_model == 'base':
             target_labels = ['Om', 'hrdrag']

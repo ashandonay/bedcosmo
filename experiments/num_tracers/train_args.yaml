@@ -11,7 +11,11 @@ base:
   analysis: bao
   # bao's emulators.yaml entry is keyed by forecast space; pick one.
   # config = config-space xi (Grieb), fourier = windowed P(k) (thecov).
+  # Unused with --analysis shapefit, which loads both its mean and covar emulators.
   emulator_space: fourier
+  # Covariance emulators at the fiducial cosmology (as a real analysis fixes its covariance)
+  # or at the sampled one. Design dependence through N_tracers is kept either way.
+  emulator_covariance: fiducial
   flow_type: NAF
   transform_input: true
   input_transform_type: marginal

@@ -434,7 +434,7 @@ class Trainer:
                             nominal_samples = self.experiment.get_nominal_samples(num_samples=10000, params=self.experiment.cosmo_params, transform_output=False)
                             plot_samples.append(nominal_samples)
                             plot_colors.append('black')
-                            plot_labels.append('MCMC')
+                            plot_labels.append(nominal_samples.label)
                             plot_scatter.append(False)
                         except NotImplementedError:
                             pass

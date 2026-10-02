@@ -1,0 +1,72 @@
+# ShapeFit (analysis: shapefit) cosmology prior. Distributions match the emulators'
+# training box (desilike_emulator shapefit/core.py DEFAULT_PRIORS); a wider prior would
+# evaluate the emulators outside what they were trained on.
+parameters:
+  # Cold dark matter density parameter (ω_cdm = Ω_cdm * h^2)
+  omega_cdm:
+    distribution:
+      type: "uniform"
+      lower: 0.01
+      upper: 0.99
+    plot:
+      lower: 0.08
+      upper: 0.17
+    latex: "\\omega_{cdm}"
+
+  # Baryon density parameter (ω_b = Ω_b * h^2)
+  omega_b:
+    # Schoneberg 2024 BBN as DESI's DR1 full-shape chains apply it: the (omega_b, N_eff)
+    # Gaussian, mean (0.02196, 3.034), conditioned on the fixed N_eff = 3.044. The
+    # emulators were trained on N(0.02218, 0.00055); this sits 0.37 sd inside that.
+    distribution:
+      type: "gaussian"
+      loc: 0.021976
+      scale: 0.000534
+    plot:
+      lower: 0.02
+      upper: 0.0244
+    latex: "\\omega_b"
+
+  # Hubble parameter
+  h:
+    distribution:
+      type: "uniform"
+      lower: 0.2
+      upper: 1.0
+    plot:
+      lower: 0.55
+      upper: 0.85
+    latex: "h"
+
+  # Amplitude of primordial power spectrum (ln(10^10 A_s))
+  ln10A_s:
+    distribution:
+      type: "uniform"
+      lower: 1.61
+      upper: 3.91
+    plot:
+      lower: 2.2
+      upper: 3.8
+    latex: "\\ln(10^{10} A_s)"
+
+  # Spectral index
+  n_s:
+    distribution:
+      type: "gaussian"
+      loc: 0.9649
+      scale: 0.042
+    plot:
+      lower: 0.84
+      upper: 1.09
+    latex: "n_s"
+
+# Parameter constraints
+constraints:
+  # Derived Omega_m = (omega_cdm + omega_b + omega_nu) / h^2 must lie in the emulators'
+  # training domain (desilike_emulator shapefit/core.py _check_omega_m). Rejects ~58% of
+  # the raw omega_cdm x h box; rejected draws are resampled.
+  omega_m_domain:
+    affected_parameters: ["omega_cdm", "omega_b", "h"]
+    bounds:
+      lower: 0.01
+      upper: 0.99

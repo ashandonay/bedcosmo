@@ -15,7 +15,8 @@ Snapshotted artifacts:
                        ``--prior-<field>`` CLI overrides are applied before freeze)
   - design_args.yaml  (from --design-args-path)
   - ref_cov.npy       (scaling mode only; the reference covariance, from --ref-cov or the dataset default)
-  - emulators/<tracer_bin>.pt  (when --likelihood-mode == emulator)
+  - emulators/<tracer_bin>.pt  (bao, when --likelihood-mode == emulator)
+  - emulators/{mean,covar}/<tracer_bin>.pt  (shapefit, always emulator mode)
   - empirical/sed_prior_kde_native.joblib  (num_visits empirical; loaded from artifacts/empirical/)
   - empirical/sed_prior_flow_*.pt   (num_visits empirical, density_type=flow; beside the KDE)
 
@@ -145,26 +146,32 @@ def _snapshot_ref_cov(args, artifacts_dir):
 
 def _snapshot_emulators(args, artifacts_dir):
     # Only num_tracers emulator mode has checkpoints; resolve and copy each non-null .pt.
+    # bao loads one forecast space (emulators/<bin>.pt); shapefit loads both its mean and
+    # covar emulators (emulators/<quantity>/<bin>.pt), matching NumTracers' artifact lookup.
     if args.cosmo_exp != "num_tracers" or args.likelihood_mode != "emulator":
         return
     from bedcosmo.num_tracers.experiment import NumTracers
 
-    checkpoints = NumTracers.resolve_emulator_checkpoints(
-        args.analysis, args.cosmo_model, args.dataset,
-        space=getattr(args, "emulator_space", None),
-    )
+    if args.analysis == "shapefit":
+        subdirs = {q: q for q in NumTracers._SHAPEFIT_QUANTITIES}
+    else:
+        subdirs = {args.emulator_space: ""}
     emu_dir = os.path.join(artifacts_dir, "emulators")
-    os.makedirs(emu_dir, exist_ok=True)
     copied = []
-    for tracer_bin, ckpt_path in checkpoints.items():
-        if ckpt_path is None:
-            continue
-        if not os.path.exists(ckpt_path):
-            raise FileNotFoundError(
-                f"Emulator checkpoint for '{tracer_bin}' not found: {ckpt_path}"
-            )
-        shutil.copy2(ckpt_path, os.path.join(emu_dir, f"{tracer_bin}.pt"))
-        copied.append(tracer_bin)
+    for quantity, subdir in subdirs.items():
+        checkpoints = NumTracers.resolve_emulator_checkpoints(
+            args.analysis, args.cosmo_model, args.dataset, quantity,
+        )
+        os.makedirs(os.path.join(emu_dir, subdir), exist_ok=True)
+        for tracer_bin, ckpt_path in checkpoints.items():
+            if ckpt_path is None:
+                continue
+            if not os.path.exists(ckpt_path):
+                raise FileNotFoundError(
+                    f"Emulator checkpoint for '{tracer_bin}' not found: {ckpt_path}"
+                )
+            shutil.copy2(ckpt_path, os.path.join(emu_dir, subdir, f"{tracer_bin}.pt"))
+            copied.append(os.path.join(subdir, tracer_bin))
     print(f"Snapshotted emulator checkpoints: {copied}", file=sys.stderr)
 
 
