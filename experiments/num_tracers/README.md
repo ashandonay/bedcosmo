@@ -139,6 +139,7 @@ Each entry under `parameters` defines a `distribution` (type + bounds), optional
 | File | Use |
 |------|-----|
 | `prior_args_hrdrag.yaml` | Default; `Om`, `Ok`, `w0`, `wa`, `hrdrag` |
+| `prior_args_hrdrag_realistic.yaml` | `prior_args_hrdrag.yaml` with `Om` in [0.2, 0.45] and H₀r_d in [8000, 12000] km/s: a generous box around Planck and DESI DR1 that stays inside the BAO emulators' training domain |
 | `prior_args.yaml` | Base prior set |
 | `prior_args_small.yaml` | Narrowed ranges for fast tests |
 | `prior_args_shapefit.yaml` | `analysis: shapefit`; omega-basis cosmology matching the emulators' training box, plus the `omega_m_domain` constraint |
