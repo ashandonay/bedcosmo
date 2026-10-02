@@ -229,6 +229,12 @@ Then open `http://localhost:5000` in your browser.
 
 - Model checkpoints (`checkpoint_rank0_step*.pt`)
 - Training metrics (loss, learning rate)
+- Training-health metrics, every 10 steps beside the loss. The mean loss hides a single extreme draw, which can sit at a loss of hundreds for thousands of steps before it overflows to NaN.
+  - `loss_max`: the largest per-sample loss in the batch, over all ranks
+  - `context_abs_max`: the largest |flow context| in the batch, over all ranks
+  - `grad_norm`: the total gradient norm before any clipping
+  - experiment-specific stats from `training_batch_stats`, averaged over ranks. NumTracers in emulator mode logs `frac_sigma_ceiling`: the fraction of draws outside the emulators' domain, whose σ sits at the 1e8 ceiling.
+- `nan_dump/checkpoint_rank_{rank}_{step}.pt`, if training stops on a NaN/Inf loss. The failing step's update is skipped, so this holds the model, optimizer and scheduler state that produced the NaN, plus the rank's batch (`additional_state`: `samples`, `context`, `loss`). Load it like a checkpoint to replay the failure.
 - Hyperparameters
 - EIG evaluation results (JSON)
 - `transform_input=True` runs only: `plots/input_transform.png` and `input_transform/{param}/*` metrics, written once at the start of training (not on resume). They show each marginal CDF table's segment-slope noise and empty segments, and prior draws pushed through the input transform against N(0, 1). Training prints a warning when a table's slope scatter exceeds 10% or it has empty segments: posterior samples mapped back through such a table show stripes and empty slices.

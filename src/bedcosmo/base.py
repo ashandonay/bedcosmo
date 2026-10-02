@@ -132,6 +132,15 @@ class BaseExperiment(ABC):
         """
         return set()
 
+    def training_batch_stats(self, context):
+        """Experiment-specific health metrics of one training batch, as {name: float}.
+
+        ``context`` is the flow's conditioning input, shape (..., context_dim). The
+        Trainer averages each value over ranks and logs it beside the loss. The default
+        reports none.
+        """
+        return {}
+
     @property
     def _name(self):
         """Experiment name."""

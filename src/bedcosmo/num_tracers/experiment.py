@@ -1264,6 +1264,18 @@ class NumTracers(BaseExperiment, CosmologyMixin):
         }
         return (set(self.prior) & drawn) - constrained
 
+    def training_batch_stats(self, context):
+        if self.likelihood_mode != "emulator":
+            return {}
+        # A draw outside the emulators' domain gets sigma at _SIGMA_CEILING, so its
+        # simulated observations are ~1e8 against in-domain values of at most ~1e3.
+        # Such draws are rare, unfamiliar inputs the flow can overflow on (NaN).
+        # |y| above 1% of the ceiling flags them; a capped draw drops under it only
+        # when every observation's noise is below 0.01 sigma.
+        y = context[..., self.nominal_design.shape[-1]:]
+        capped = (y.abs() > 1e-2 * self._SIGMA_CEILING).any(-1)
+        return {"frac_sigma_ceiling": capped.double().mean().item()}
+
     @profile_method
     def sample_parameters(self, sample_shape, prior=None, use_prior_flow=True):
         """
