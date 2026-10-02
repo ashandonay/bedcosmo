@@ -15,10 +15,13 @@ parameters:
 
   # Baryon density parameter (ω_b = Ω_b * h^2)
   omega_b:
+    # Schoneberg 2024 BBN as DESI's DR1 full-shape chains apply it: the (omega_b, N_eff)
+    # Gaussian, mean (0.02196, 3.034), conditioned on the fixed N_eff = 3.044. The
+    # emulators were trained on N(0.02218, 0.00055); this sits 0.37 sd inside that.
     distribution:
       type: "gaussian"
-      loc: 0.02218
-      scale: 0.00055
+      loc: 0.021976
+      scale: 0.000534
     plot:
       lower: 0.02
       upper: 0.0244
