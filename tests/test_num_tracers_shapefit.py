@@ -241,9 +241,29 @@ def test_fiducial_covariance_ignores_cosmology_but_keeps_design():
     assert not torch.allclose(cov_theta[0], cov_theta[1])
 
 
-def test_fiducial_covariance_rejected_for_bao():
-    with pytest.raises(ValueError, match="analysis='shapefit' only"):
-        init_experiment(cosmo_exp="num_tracers", prior_args_path="prior_args_hrdrag.yaml",
-                        design_args_path="design_args_dr1.yaml", dataset="dr1", analysis="bao",
-                        cosmo_model="base", likelihood_mode="scaling", emulator_covariance="fiducial",
-                        device="cpu", mode="eval")
+def _make_bao_emulator_exp(**overrides):
+    return init_experiment(cosmo_exp="num_tracers", prior_args_path="prior_args_hrdrag.yaml",
+                           design_args_path="design_args_dr1.yaml", dataset="dr1", analysis="bao",
+                           cosmo_model="base", likelihood_mode="emulator", emulator_space="fourier",
+                           device="cpu", mode="eval", **overrides)
+
+
+def test_bao_fiducial_covariance_ignores_cosmology_but_keeps_design():
+    fixed = _make_bao_emulator_exp(emulator_covariance="fiducial")
+    designs = fixed.designs[:2].double().unsqueeze(0).expand(2, -1, -1)   # (cosmology, design, 4)
+    passed_ratio = fixed.calc_passed(designs)
+    params = {"Om": torch.tensor([[0.3152], [0.36]], dtype=torch.float64).expand(2, 2).unsqueeze(-1),
+              "hrdrag": torch.tensor([[0.9908], [1.03]], dtype=torch.float64).expand(2, 2).unsqueeze(-1)}
+    cov = fixed._build_emulator_covariance(passed_ratio, params)
+    assert torch.equal(cov[0], cov[1])                                 # covariance ignores cosmology
+    assert not torch.allclose(cov[0, 0], cov[0, 1])                    # but follows the design
+
+    cov_theta = _make_bao_emulator_exp(emulator_covariance="cosmology")._build_emulator_covariance(
+        passed_ratio, params)
+    assert not torch.allclose(cov_theta[0], cov_theta[1])
+    assert torch.allclose(cov_theta[0], cov[0])                        # first row sits at the fiducial
+
+
+def test_sampled_sqrtn_reference_rejects_fiducial_covariance():
+    with pytest.raises(ValueError, match="contradicts emulator_covariance='fiducial'"):
+        _make_bao_emulator_exp(emulator_covariance="fiducial", emulator_sqrtn_ref="sampled")
