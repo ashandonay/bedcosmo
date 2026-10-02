@@ -262,7 +262,9 @@ def nf_loss(
     ``EIG = H_prior - H_post`` is then a subtraction at the call site.
 
     Parameters:
-    - samples: Pre-sampled parameter values (theta).
+    - samples: Pre-sampled parameter values (theta), shape
+      (num_particles, num_designs, dim), or (1, num_particles, num_designs, dim) with
+      the training DataLoader's batch dim.
     - context: The design tensor (batch of designs).
     - guide: The normalizing flow guide model (e.g., a Pyro or zuko flow).
     - experiment: Object with transform_input, params_to_unconstrained, cosmo_params, etc.
@@ -272,9 +274,13 @@ def nf_loss(
                   flattened batch dimension to reduce peak memory usage.
 
     Returns:
-    - agg_loss: Aggregated loss over all samples (the training objective).
-    - posterior_entropy: Per-design ``E[-log q]`` in NATS, shaped to the design
-      batch. This is the training loss and the EIG's posterior term.
+    - agg_loss: ``posterior_entropy`` summed over designs (the training objective).
+    - posterior_entropy: Per-design ``E[-log q]`` in NATS, the mean over the particle
+      dim (-2). This is the EIG's posterior term.
+    - neg_log_prob: The per-sample ``-log q`` terms, shaped like ``samples[..., 0]``.
+
+    Non-finite terms are not masked: they propagate, so training stops on them and
+    an evaluation cannot silently drop particles from H_post.
     """
     # Store original batch shape
     batch_shape = samples.shape[:-1]  # e.g. [num_particles, num_designs]
@@ -323,9 +329,9 @@ def nf_loss(
     # Reshape back to original batch shape
     neg_log_prob = neg_log_prob.reshape(batch_shape)
 
-    # Compute the aggregate loss
-    agg_loss, posterior_entropy = _safe_mean_terms(neg_log_prob)
-    return agg_loss, posterior_entropy
+    posterior_entropy = neg_log_prob.mean(dim=-2)
+    agg_loss = posterior_entropy.sum()
+    return agg_loss, posterior_entropy, neg_log_prob
 
 
 def posterior_loss(

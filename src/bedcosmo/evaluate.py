@@ -763,7 +763,7 @@ class Evaluator:
         )
         with torch.no_grad():
             with nfloss_cm:
-                _, posterior_entropy = nf_loss(
+                _, posterior_entropy, _ = nf_loss(
                     samples=samples,
                     context=context,
                     guide=flow_model,
