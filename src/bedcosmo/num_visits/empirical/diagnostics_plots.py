@@ -10,6 +10,7 @@ import pandas as pd
 from matplotlib.colors import LogNorm
 from speclite.filters import load_filters
 
+from .desi.support import largest_contiguous_region, lsst_support_limits
 from .paths import get_desi_training_data_dir, get_prior_build_dir
 from .templates import load_two_column_template, read_template_param
 
@@ -43,6 +44,23 @@ def plot_coverage(training_matrix, prior_dir=None, redshift_bins=70):
         counts = valid[train].sum(axis=0)
         if not np.array_equal(counts, saved):
             raise ValueError("Training matrix/split does not match saved basis contributors")
+        threshold = meta["factorization"]["required_wavelength_contributors"]
+        lo, hi = meta["selection"]["prior_z_min"], meta["selection"]["prior_z_max"]
+    else:
+        train = np.random.default_rng(42).permutation(len(z))[: int(0.70 * len(z))]
+        counts = valid[train].sum(axis=0)
+        threshold = 100
+        support = largest_contiguous_region(counts >= threshold)
+        if not np.any(support):
+            raise ValueError("No wavelength bins have at least 100 training contributors")
+        learned = wave[support]
+    lsst_blue, lsst_red, supported_lo, supported_hi = lsst_support_limits(
+        learned.min(), learned.max()
+    )
+    if prior_dir is None:
+        lo, hi = supported_lo, supported_hi
+        if lo >= hi:
+            raise ValueError("Retained support cannot cover all LSST filters at any redshift")
     edges = np.linspace(z.min(), z.max(), redshift_bins + 1)
     heat = contributor_density(valid, z, edges)
     fig = plt.figure(figsize=(11, 10))
@@ -73,10 +91,36 @@ def plot_coverage(training_matrix, prior_dir=None, redshift_bins=70):
     zz = np.linspace(z.min(), z.max(), 500)
     ax.plot(3600 / (1 + zz), zz, color="tab:blue", lw=2, label="DESI blue edge: 3600 Å observed")
     ax.plot(9824 / (1 + zz), zz, color="tab:red", lw=2, label="DESI red edge: 9824 Å observed")
-    if prior_dir is not None:
-        lo, hi = meta["selection"]["prior_z_min"], meta["selection"]["prior_z_max"]
-        ax.axhline(lo, color=".25", ls=":", label=f"Later prior redshift cut: {lo:g}–{hi:g}")
-        ax.axhline(hi, color=".25", ls=":")
+    ax.plot(
+        lsst_blue / (1 + zz),
+        zz,
+        color="tab:blue",
+        ls="--",
+        lw=1.5,
+        label=f"LSST blue edge: {lsst_blue:,.0f} Å observed",
+    )
+    ax.plot(
+        lsst_red / (1 + zz),
+        zz,
+        color="tab:red",
+        ls="--",
+        lw=1.5,
+        label=f"LSST red edge: {lsst_red:,.0f} Å observed",
+    )
+    # Intersections delimit complete filter coverage, not the catalog redshift cut.
+    if supported_lo <= supported_hi:
+        ax.scatter(
+            [learned.max(), learned.min()],
+            [supported_lo, supported_hi],
+            color=".4",
+            edgecolors="white",
+            s=65,
+            zorder=5,
+            label=f"Full LSST support: z={supported_lo:.3f}–{supported_hi:.3f}",
+        )
+    ax.axhspan(lo, hi, color=".5", alpha=0.08)
+    ax.axhline(lo, color=".4", ls=":", lw=1.2)
+    ax.axhline(hi, color=".4", ls=":", lw=1.2)
     ax.legend(loc="upper right", fontsize=9)
     ax.set(ylim=(z.min(), z.max()), ylabel="DESI redshift z")
     ax.set_title(
@@ -87,27 +131,25 @@ def plot_coverage(training_matrix, prior_dir=None, redshift_bins=70):
     ax.tick_params(axis="x", labelbottom=False)
     fig.colorbar(mesh, cax=cax).set_label("Spectra per redshift–wavelength bin (log scale)")
     lower.plot(wave, valid.sum(axis=0), color=".6", label=f"Full population (N={len(z):,})")
-    if prior_dir is not None:
-        lower.plot(
-            wave,
-            counts,
-            color="tab:blue",
-            label=f"Training spectra used to select wavelength range (N={len(train):,})",
-        )
-        threshold = meta["factorization"]["required_wavelength_contributors"]
-        lower.axhline(
-            threshold, color="tab:red", ls=":", label=f"Minimum {threshold} training contributors"
-        )
-        lower.axvspan(
-            learned.min(),
-            learned.max(),
-            color="tab:blue",
-            alpha=0.08,
-            label=f"Retained templates: {learned.min():,.0f}–{learned.max():,.0f} Å",
-        )
-        for panel in (ax, lower):
-            for cut in (learned.min(), learned.max()):
-                panel.axvline(cut, color=".3", ls="--", lw=1.2)
+    lower.plot(
+        wave,
+        counts,
+        color="tab:blue",
+        label=f"Training spectra used to select wavelength range (N={len(train):,})",
+    )
+    lower.axhline(
+        threshold, color="tab:red", ls=":", label=f"Minimum {threshold} training contributors"
+    )
+    lower.axvspan(
+        learned.min(),
+        learned.max(),
+        color="tab:blue",
+        alpha=0.08,
+        label=f"Retained support: {learned.min():,.0f}–{learned.max():,.0f} Å",
+    )
+    for panel in (ax, lower):
+        for cut in (learned.min(), learned.max()):
+            panel.axvline(cut, color=".3", ls="--", lw=1.2)
     lower.set(
         xlim=(wave.min(), wave.max()),
         ylim=(1, len(z) * 1.3),
@@ -116,19 +158,11 @@ def plot_coverage(training_matrix, prior_dir=None, redshift_bins=70):
         ylabel="Number of spectra with valid data",
     )
     lower.set_title(
-        "Contributors summed across redshift"
-        + (
-            "\nDashed vertical lines mark the retained template endpoints"
-            if prior_dir is not None
-            else ""
-        )
+        "Contributors summed across redshift\n"
+        "Dashed vertical lines mark the retained wavelength endpoints"
     )
     lower.grid(alpha=0.18)
     lower.legend(loc="lower left", fontsize=9)
-    fig.suptitle(
-        "DESI observations" + (" and template wavelength support" if prior_dir is not None else ""),
-        y=0.975,
-    )
     fig.subplots_adjust(left=0.10, right=0.89, top=0.89, bottom=0.075)
     return fig
 

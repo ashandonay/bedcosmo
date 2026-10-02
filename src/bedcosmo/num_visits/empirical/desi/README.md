@@ -88,9 +88,18 @@ require an explicit external spectral anchor.
 of several Nearly-NMF initializations on validation spectra, reports the result
 on an untouched test split, and then refits the selected basis on all spectra.
 The basis is learned from the full quality-selected DESI population. Only the
-coefficient/redshift rows used to train the prior are restricted to the default
-`0.21 <= z <= 1.28`, where the learned rest-frame support covers the full
-tabulated LSST `ugrizy` bandpasses without endpoint extrapolation.
+coefficient/redshift rows used to train the prior are restricted to a redshift
+interval derived directly from the retained support and the full tabulated
+LSST `ugrizy` bandpasses, without endpoint extrapolation:
+`z_min = max(0, lambda_LSST_red / lambda_support_max - 1)` and
+`z_max = lambda_LSST_blue / lambda_support_min - 1`.
+For support 1390–9120 Å this is approximately 0.205–1.301.
+`--prior-z-min` and `--prior-z-max` can narrow these limits; overrides outside
+the supported interval are rejected. Resolved bounds are printed and saved in
+build provenance; they select the coefficient rows used to fit the KDE.
+Existing prior files are not changed automatically. Use `--prior-only` below
+to update their selection without retraining templates. A full factorization
+build still checks its request against saved checkpoints.
 
 Install the shared empirical-prior and pinned Nearly-NMF dependencies before
 building:
@@ -98,6 +107,33 @@ building:
 ```bash
 pip install -e '.[sed-prior,desi-basis]'
 ```
+
+### Rebuild only the prior from an existing basis
+
+```bash
+python -m bedcosmo.num_visits.empirical.desi.build_prior \
+  --build-name desi8 \
+  --prior-only
+
+python -m bedcosmo.num_visits.empirical.prior_flow \
+  --kde-path "$SCRATCH/bedcosmo/num_visits/empirical_prior/desi8/sed_prior_kde_native.joblib" \
+  --out-dir "$SCRATCH/bedcosmo/num_visits/empirical_prior/desi8" \
+  --space both
+```
+
+`--prior-only` overwrites the fit table, selection provenance, `prior_args.yaml`,
+KDEs, and diagnostic triangles in the existing build. It loads `desi_basis.npz`
+and the training matrix recorded in provenance (or `--training-matrix`), checks
+target-ID order, wavelengths and the exported template bank, and reuses the
+saved coefficients. Rank, normalization and template paths come from the saved
+build; no support reselection, coefficient solve, or factorization is performed.
+Templates, basis arrays and factorization checkpoints remain untouched.
+Redshift overrides and `--max-chi2-dof` control the new prior selection;
+`--skip-kde` updates only the table, provenance and runtime YAML.
+Like the full build, this does not train prior flows. Rebuild them with the
+second command before BED use; old flows no longer describe the updated KDE.
+
+### Full basis and prior build
 
 ```bash
 python -m bedcosmo.num_visits.empirical.desi.build_prior \
@@ -114,12 +150,18 @@ give other ranks their own build name. For example, the production K=4 build is:
 ```bash
 python -m bedcosmo.num_visits.empirical.desi.build_prior \
   --rank 4 \
-  --build-name empirical_prior/desi4
+  --build-name desi4
 ```
 
 That command writes the prior artifacts and four-component template bank under
 `$SCRATCH/bedcosmo/num_visits/empirical_prior/desi4/`, with the components in
 its `templates/` subdirectory.
+
+`--build-name` is a single directory name, not a relative path. The builder
+adds `empirical_prior/` internally: `--build-name desi6` resolves to
+`$SCRATCH/bedcosmo/num_visits/empirical_prior/desi6/`. For a custom filesystem
+location, use `--output-dir /path/to/build` instead. This applies to both full
+builds and `--prior-only`.
 
 With no path overrides, the prior artifacts are written to
 `$SCRATCH/bedcosmo/num_visits/empirical_prior/desi8/` and the learned template

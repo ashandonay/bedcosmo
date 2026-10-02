@@ -10,6 +10,7 @@ import pytest
 from bedcosmo.num_visits.empirical.desi.build_prior import (
     normalize_basis_for_export,
     physical_prior_coefficients,
+    resolve_prior_redshift_limits,
     write_template_bank,
 )
 from bedcosmo.num_visits.empirical.desi.evaluate_factorization_methods import (
@@ -26,14 +27,29 @@ from bedcosmo.num_visits.empirical.desi.support import (
 )
 from bedcosmo.num_visits.empirical.desi.training_matrix import (
     bin_rest_frame_spectrum,
-    discover_desi_manifest,
     derive_rest_frame_grid,
+    discover_desi_manifest,
 )
 from bedcosmo.num_visits.empirical.desi.weighted_nmf import (
     fit_weighted_nmf,
     infer_coefficients,
     weighted_reconstruction_error,
 )
+
+
+def test_prior_redshift_limits_derived_from_retained_support():
+    wave = np.array([1390.0, 4000.0, 9120.0])
+    lo, hi = resolve_prior_redshift_limits(wave)
+    assert lo == pytest.approx(10990.0 / 9120.0 - 1.0)
+    assert hi == pytest.approx(3199.0 / 1390.0 - 1.0)
+    assert resolve_prior_redshift_limits(wave, 0.3, 1.2) == (0.3, 1.2)
+    assert resolve_prior_redshift_limits(wave, prior_z_max=1.2) == (lo, 1.2)
+    with pytest.raises(ValueError, match="within LSST-supported"):
+        resolve_prior_redshift_limits(wave, 0.1, 1.2)
+    with pytest.raises(ValueError, match="within LSST-supported"):
+        resolve_prior_redshift_limits(wave, 0.3, 1.4)
+    with pytest.raises(ValueError, match="nonempty"):
+        resolve_prior_redshift_limits(np.array([2000.0, 3000.0]))
 
 
 def test_rest_frame_binning_combines_pixels_and_masks_bad_data():
@@ -192,8 +208,8 @@ def test_candidate_grid_retains_supported_uv_below_1400(monkeypatch):
 
 
 def test_grid_uses_selected_valid_pixels_and_rounds_outward(tmp_path, monkeypatch):
-    from astropy.io import fits
     import pandas as pd
+    from astropy.io import fits
 
     coadd = tmp_path / "coadd.fits"
     targetid = 39627568982265273

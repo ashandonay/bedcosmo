@@ -544,6 +544,14 @@ pass the path explicitly for DESI8 or a reduced EAZY build.
 
 ## Coverage and template activation (`diagnostics_plots.py`)
 
+For an existing DESI build, `desi.build_prior --prior-only` rebuilds the
+coefficient-row selection and KDE without retraining the basis. See
+[DESI prior-only rebuild](desi/README.md#rebuild-only-the-prior-from-an-existing-basis);
+prior flows must then be retrained separately.
+DESI `--build-name` takes only a name (for example `desi8`), automatically
+placing it under `$SCRATCH/bedcosmo/num_visits/empirical_prior/`; use
+`--output-dir` for custom paths.
+
 These figures read existing data files; they do not refit templates or sample
 the KDE. The plural `diagnostics_plots.py` module is separate from the prior
 diagnostics in `diagnostic_plots.py` below.
@@ -564,11 +572,23 @@ without any prior build. It defaults `--training-matrix` to
 Pass `--training-matrix /path/to/another_matrix.npz` to use other data (the same
 `wave_rest_aa`, `redshift`, and `relative_ivar` arrays are required).
 It plots contributor counts per rest-wavelength/redshift bin, then the counts
-summed over redshift. Optionally pass `--prior-dir` to overlay a saved DESI build's
-training contributors, support threshold, retained endpoints, and prior redshift
-cuts. In that mode it checks the reconstructed training split against the saved
+summed over redshift. By default it also shows the 70% training split (seed 42),
+the ≥100 training-contributor threshold, and the longest contiguous wavelength
+interval meeting that threshold. No template basis is required.
+Optionally pass `--prior-dir` to use a saved DESI build's training split, support
+threshold and endpoints, and add its prior redshift cuts.
+In that mode it checks the reconstructed training split against the saved
 basis contributor counts.
 DESI observed edges (3600 and 9824 Å) are reference overlays, not data masks.
+Dashed LSST edge curves use the full tabulated `lsst2023-ugrizy` wavelength
+extent divided by `1 + z`. Dots at their intersections with the retained
+support endpoints show the geometric redshift limits for complete LSST
+coverage: `z_min = max(0, lambda_LSST_red / lambda_support_max - 1)` and
+`z_max = lambda_LSST_blue / lambda_support_min - 1`. The gray shaded band
+shows the derived prior cut by default, matching those geometric limits.
+With `--prior-dir` it instead shows the saved build's actual cut, which can
+be narrower (including older builds with fixed bounds). These overlays do not modify
+the build's selection or prior.
 
 `template-redshifts` defaults `--prior-dir` to the DESI8 build and reads
 the build's template bank and quality-passing fitted

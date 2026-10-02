@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from bedcosmo.num_visits.empirical.desi.support import lsst_support_limits
 from bedcosmo.num_visits.empirical.diagnostics_plots import (
     contributor_density,
     main,
@@ -23,6 +24,15 @@ def test_contributor_density_includes_endpoints():
     np.testing.assert_array_equal(counts.sum(axis=0), valid.sum(axis=0))
     with pytest.raises(ValueError, match="entire population"):
         contributor_density(valid, np.array([0.0, 0.5, 2.0]), np.array([0.0, 0.5, 1.0]))
+
+
+def test_lsst_redshift_limits_match_support_edge_intersections():
+    blue, red, lo, hi = lsst_support_limits(1390.0, 9120.0)
+    assert 0 < lo < hi
+    assert red / (1 + lo) == pytest.approx(9120.0)
+    assert blue / (1 + hi) == pytest.approx(1390.0)
+    _, _, lo, hi = lsst_support_limits(2000.0, 3000.0)
+    assert lo > hi  # No redshift can place every LSST filter inside this support.
 
 
 def test_coverage_matches_saved_training_split(tmp_path):
@@ -51,13 +61,20 @@ def test_coverage_matches_saved_training_split(tmp_path):
 
 
 def test_coverage_reads_data_without_a_prior_build(tmp_path, monkeypatch):
-    wave = np.array([2000.0, 2010.0, 2020.0])
-    weights = np.array([[1.0, 0.0, 1.0], [0.0, 1.0, 1.0], [1.0, 1.0, np.nan]])
+    wave = np.array([1300.0, 1390.0, 9120.0])
+    weights = np.tile([0.0, 1.0, 1.0], (150, 1))
     matrix = tmp_path / "matrix.npz"
-    np.savez(matrix, wave_rest_aa=wave, relative_ivar=weights, redshift=[0.2, 0.5, 1.0])
+    np.savez(matrix, wave_rest_aa=wave, relative_ivar=weights, redshift=np.linspace(0.2, 1.0, 150))
     fig = plot_coverage(matrix, redshift_bins=2)
-    np.testing.assert_array_equal(fig.axes[1].lines[0].get_ydata(), [2, 2, 2])
+    np.testing.assert_array_equal(fig.axes[1].lines[0].get_ydata(), [0, 150, 150])
+    np.testing.assert_array_equal(fig.axes[1].lines[1].get_ydata(), [0, 105, 105])
+    np.testing.assert_array_equal(fig.axes[1].lines[2].get_ydata(), [100, 100])
+    np.testing.assert_array_equal(fig.axes[1].lines[3].get_xdata(), [1390, 1390])
+    np.testing.assert_array_equal(fig.axes[1].lines[4].get_xdata(), [9120, 9120])
     assert fig.axes[0].get_ylim() == (0.2, 1.0)
+    _, _, lo, hi = lsst_support_limits(1390.0, 9120.0)
+    np.testing.assert_allclose(fig.axes[0].lines[4].get_ydata(), [lo, lo])
+    np.testing.assert_allclose(fig.axes[0].lines[5].get_ydata(), [hi, hi])
     plt.close(fig)
     output = tmp_path / "coverage.png"
     main(["coverage", "--training-matrix", str(matrix), "--output", str(output)])
