@@ -542,6 +542,87 @@ pass the path explicitly for DESI8 or a reduced EAZY build.
 
 ---
 
+## Coverage and template activation (`diagnostics_plots.py`)
+
+For an existing DESI build, `desi.build_prior --prior-only` rebuilds the
+coefficient-row selection and KDE without retraining the basis. See
+[DESI prior-only rebuild](desi/README.md#rebuild-only-the-prior-from-an-existing-basis);
+prior flows must then be retrained separately.
+DESI `--build-name` takes only a name (for example `desi8`), automatically
+placing it under `$SCRATCH/bedcosmo/num_visits/empirical_prior/`; use
+`--output-dir` for custom paths.
+
+These figures read existing data files; they do not refit templates or sample
+the KDE. The plural `diagnostics_plots.py` module is separate from the prior
+diagnostics in `diagnostic_plots.py` below.
+
+```bash
+python -m bedcosmo.num_visits.empirical.diagnostics_plots coverage \
+  --output desi_coverage.png
+
+python -m bedcosmo.num_visits.empirical.diagnostics_plots template-redshifts \
+  --prior-dir "$SCRATCH/bedcosmo/num_visits/empirical_prior/desi8" \
+  --output desi8_template_redshifts.png
+```
+
+Both commands require an explicit `--output`. `coverage` reads DESI data directly,
+without any prior build. It defaults `--training-matrix` to
+`$SCRATCH/bedcosmo/num_visits/desi_training_data/desi_rest_frame_training_matrix.npz`.
+Pass `--training-matrix /path/to/another_matrix.npz` to use other data (the same
+`wave_rest_aa`, `redshift`, and `relative_ivar` arrays are required).
+It plots contributor counts per rest-wavelength/redshift bin, then the counts
+summed over redshift. By default it also shows the 70% training split (seed 42),
+the ≥100 training-contributor threshold, and the longest contiguous wavelength
+interval meeting that threshold. No template basis is required.
+Optionally pass `--prior-dir` to use a saved DESI build's training split, support
+threshold and endpoints, and add its prior redshift cuts.
+In that mode it checks the reconstructed training split against the saved
+basis contributor counts.
+DESI observed edges (3600 and 9824 Å) are reference overlays, not data masks.
+Dashed LSST edge curves use the full tabulated `lsst2023-ugrizy` wavelength
+extent divided by `1 + z`. Dots at their intersections with the retained
+support endpoints show the geometric redshift limits for complete LSST
+coverage: `z_min = max(0, lambda_LSST_red / lambda_support_max - 1)` and
+`z_max = lambda_LSST_blue / lambda_support_min - 1`. The gray shaded band
+shows the derived prior cut by default, matching those geometric limits.
+With `--prior-dir` it instead shows the saved build's actual cut, which can
+be narrower (including older builds with fixed bounds). These overlays do not modify
+the build's selection or prior.
+
+`template-redshifts` defaults `--prior-dir` to the DESI8 build and reads
+the build's template bank and quality-passing fitted
+weights. Each column shows the rest-frame shape, one observed-frame panel
+overlaying the template at the coefficient-weighted 5th percentile redshift
+(blue), median (gray), and 95th percentile (red), and their
+redshift distribution versus all passed fits. The top row spans each template's
+full retained rest-frame grid. The middle row uses the full tabulated LSST
+filter range (approximately 3199–10990 Å), shared across components.
+The top row is rest-frame; the middle row is observed-frame.
+Blue/red curves have alpha 0.7; the rest-frame shapes and histograms are grayscale.
+There is no activation threshold: every quality-passing galaxy contributes its
+fitted share `a_k` to its redshift bin and to the middle-row summaries.
+Percentiles use the weighted empirical CDF (the first redshift reaching the
+requested cumulative share). The gray spectrum uses the same weighted median
+as the histogram's dashed line.
+The gray filled histogram is coefficient-weighted; the black outline/white fill shows the
+unweighted population, and a dashed line marks the weighted median.
+Each histogram is separately normalized to unit area. This measures the
+redshift distribution of fitted component shares, not absolute flux or a
+population count. Zero total contribution for a component raises an error.
+Histogram bins and x-axis limits span exactly the LSST-compatible redshift
+range derived from the template bank's common rest-frame support, without
+axis padding or per-component ranges.
+Displayed shapes are divided by their full-grid mean, with the same amplitudes in the three
+redshifted views (not a physical flux prediction). `--redshift-bins` controls the
+heatmap/histogram bin count (defaults 70/24). No build files are modified.
+Pass `--log-flux` for logarithmic y-axes in the top and middle template rows.
+Nonpositive flux is masked, not replaced by a floor; histograms remain linear.
+`--flux-max 20` caps all template panels at 20 in mean-normalized flux units.
+DESI `build_prior` automatically saves this diagnostic as `template_redshifts.png`
+in each build directory, with a cap of 12, including prior-only and skip-KDE builds.
+On linear axes their range is 0–20; histogram axes are unaffected. This crops
+the display only and does not change template data or normalization.
+
 ## Diagnostics (`diagnostic_plots.py`)
 
 Not part of the build pipeline. All subcommands take a **prior build directory** and write under **`diagnostics/<name>/`** (override with `--outdir`).
