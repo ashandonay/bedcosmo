@@ -587,7 +587,7 @@ def test_nf_loss_empirical_transform_input_eval_pairs_nf_prior_with_y_flow():
 
     # nf_loss owns only the posterior term; EIG = H_prior - H_post is assembled
     # by the caller (Evaluator._prior_entropy) from the two halves.
-    _, posterior_entropy = nf_loss(
+    _, posterior_entropy, _ = nf_loss(
         samples,
         context,
         _ConstLogProbGuide(),

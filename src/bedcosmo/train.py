@@ -144,7 +144,7 @@ class Trainer:
     
     @profile_method
     def loss(self, samples, context):
-        agg_loss, loss = nf_loss(
+        agg_loss, _, loss = nf_loss(
             samples, context, self.posterior_flow, self.experiment,
             rank=self.global_rank, verbose_shapes=self.verbose
             )
