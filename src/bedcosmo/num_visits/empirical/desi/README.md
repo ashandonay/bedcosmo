@@ -63,6 +63,16 @@ requires ten observed spectra per component, or 100 contributors per bin.
 Support is selected from the training split only; validation and test masks do
 not influence the fitted wavelength interval.
 
+The candidate rest-frame grid is derived from the selected coadds' valid pixels
+(finite wavelength, flux and positive inverse variance, with zero mask).
+Observed wavelengths are divided by each object's `1 + z`; the population's
+minimum and maximum are rounded outward to the 10 Angstrom bin spacing
+(`--wave-step`). `--wave-min` and `--wave-max` optionally override those bounds.
+The same training-contributor threshold then selects both retained endpoints.
+LSST coverage is handled later by the prior redshift selection. Existing saved
+matrices retain their original grid: regenerate the training matrix before
+building a basis with expanded UV support.
+
 The saved `rest_wavelength_coverage.csv` reports contributor counts, the
 catalog-wide observed fraction, and an LSST-demand-weighted conditional
 coverage evaluated at each object's redshift. Missing pixels always retain zero

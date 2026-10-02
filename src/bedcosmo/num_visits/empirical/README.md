@@ -542,6 +542,44 @@ pass the path explicitly for DESI8 or a reduced EAZY build.
 
 ---
 
+## Coverage and template activation (`diagnostics_plots.py`)
+
+These figures read existing data files; they do not refit templates or sample
+the KDE. The plural `diagnostics_plots.py` module is separate from the prior
+diagnostics in `diagnostic_plots.py` below.
+
+```bash
+python -m bedcosmo.num_visits.empirical.diagnostics_plots coverage \
+  --output desi_coverage.png
+
+python -m bedcosmo.num_visits.empirical.diagnostics_plots template-redshifts \
+  --prior-dir "$SCRATCH/bedcosmo/num_visits/empirical_prior/desi8" \
+  --activation-threshold 0.10 \
+  --output desi8_template_redshifts.png
+```
+
+Both commands require an explicit `--output`. `coverage` reads DESI data directly,
+without any prior build. It defaults `--training-matrix` to
+`$SCRATCH/bedcosmo/num_visits/desi_training_data/desi_rest_frame_training_matrix.npz`.
+Pass `--training-matrix /path/to/another_matrix.npz` to use other data (the same
+`wave_rest_aa`, `redshift`, and `relative_ivar` arrays are required).
+It plots contributor counts per rest-wavelength/redshift bin, then the counts
+summed over redshift. Optionally pass `--prior-dir` to overlay a saved DESI build's
+training contributors, support threshold, retained endpoints, and prior redshift
+cuts. In that mode it checks the reconstructed training split against the saved
+basis contributor counts.
+DESI observed edges (3600 and 9824 Å) are reference overlays, not data masks.
+
+`template-redshifts` defaults `--prior-dir` to the DESI8 build and reads
+the build's template bank and quality-passing fitted
+weights. Each column shows the full rest-frame shape, two flush observed-frame
+views at the activated samples' minimum/maximum redshift within the LSST filter
+range, and their redshift distribution versus all passed fits. Activation means
+`a_k >= --activation-threshold` (default 0.10); selections may overlap. Display
+shapes are divided by their full-grid mean, with the same amplitudes in the two
+redshifted views (not a physical flux prediction). `--redshift-bins` controls the
+heatmap/histogram bin count (defaults 70/33). No build files are modified.
+
 ## Diagnostics (`diagnostic_plots.py`)
 
 Not part of the build pipeline. All subcommands take a **prior build directory** and write under **`diagnostics/<name>/`** (override with `--outdir`).

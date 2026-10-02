@@ -27,6 +27,7 @@ from bedcosmo.num_visits.empirical.desi.support import (
 from bedcosmo.num_visits.empirical.desi.training_matrix import (
     bin_rest_frame_spectrum,
     discover_desi_manifest,
+    derive_rest_frame_grid,
 )
 from bedcosmo.num_visits.empirical.desi.weighted_nmf import (
     fit_weighted_nmf,
@@ -169,6 +170,72 @@ def test_wavelength_support_scales_contributors_with_largest_rank():
     assert required == 20
     assert np.array_equal(measured, contributors)
     assert np.array_equal(selected, np.array([False, True, True, True, True, False, False]))
+
+
+def test_candidate_grid_retains_supported_uv_below_1400(monkeypatch):
+    from bedcosmo.num_visits.empirical.desi.fit_basis import parse_args
+
+    monkeypatch.setattr("sys.argv", ["fit_basis"])
+    args = parse_args()
+    assert args.wave_min is None and args.wave_max is None
+    wave = np.arange(1330, 9720 + args.wave_step, args.wave_step)
+    weights = np.zeros((120, len(wave)))
+    weights[:, (wave >= 1390) & (wave <= 9120)] = 1.0
+    weights[:99, wave == 1380] = 1.0
+    weights[:99, wave == 9130] = 1.0
+
+    selected, _, required = select_wavelength_support(weights, [8])
+
+    assert required == 100
+    assert wave[selected][0] == 1390
+    assert wave[selected][-1] == 9120
+
+
+def test_grid_uses_selected_valid_pixels_and_rounds_outward(tmp_path, monkeypatch):
+    from astropy.io import fits
+    import pandas as pd
+
+    coadd = tmp_path / "coadd.fits"
+    targetid = 39627568982265273
+    hdus = [
+        fits.PrimaryHDU(),
+        fits.BinTableHDU(
+            np.array([(targetid,), (2,)], dtype=[("TARGETID", "i8")]), name="FIBERMAP"
+        ),
+    ]
+    for arm in "BRZ":
+        hdus.extend(
+            [
+                fits.ImageHDU(
+                    np.array([2000.0, 2671.0, 6001.0, 8000.0, 9000.0]), name=f"{arm}_WAVELENGTH"
+                ),
+                fits.ImageHDU(
+                    np.array([[1.0, 1.0, 1.0, np.nan, 1.0], [1.0, 1.0, 1.0, 1.0, 1.0]]),
+                    name=f"{arm}_FLUX",
+                ),
+                fits.ImageHDU(
+                    np.array([[1.0, 1.0, 1.0, 1.0, 0.0], [1.0, 1.0, 1.0, 1.0, 1.0]]),
+                    name=f"{arm}_IVAR",
+                ),
+                fits.ImageHDU(
+                    np.array([[1, 0, 0, 0, 0], [0, 0, 0, 0, 0]], dtype=np.int32), name=f"{arm}_MASK"
+                ),
+            ]
+        )
+    fits.HDUList(hdus).writeto(coadd)
+    monkeypatch.setattr(
+        "bedcosmo.num_visits.empirical.desi.training_matrix.get_local_desi_paths",
+        lambda *args: (coadd, tmp_path / "redrock.fits"),
+    )
+    manifest = pd.DataFrame({"targetid": [targetid], "healpix": [1], "z": [1.0]})
+    grid = derive_rest_frame_grid(manifest, desi_dir=tmp_path, wave_step=10)
+    assert grid[0] == 1330
+    assert grid[-1] == 3010
+    assert np.all(np.diff(grid) == 10)
+    override = derive_rest_frame_grid(
+        manifest, desi_dir=tmp_path, wave_step=10, wave_min=1400, wave_max=2900
+    )
+    assert override[0] == 1400 and override[-1] == 2900
 
 
 def test_lsst_demand_coverage_is_unity_when_every_pixel_is_observed():
