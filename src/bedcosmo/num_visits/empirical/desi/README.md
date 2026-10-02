@@ -129,7 +129,7 @@ saved coefficients. Rank, normalization and template paths come from the saved
 build; no support reselection, coefficient solve, or factorization is performed.
 Templates, basis arrays and factorization checkpoints remain untouched.
 Redshift overrides and `--max-chi2-dof` control the new prior selection;
-`--skip-kde` updates only the table, provenance and runtime YAML.
+`--skip-kde` updates the table, provenance, runtime YAML and template-redshift plot.
 Like the full build, this does not train prior flows. Rebuild them with the
 second command before BED use; old flows no longer describe the updated KDE.
 
@@ -170,7 +170,17 @@ component-plus-parameter-file layout.
 
 The command writes an EAZY-compatible component bank, the standard
 `desi_eazy_empirical_weights.csv`, build provenance, native and gaussianized KDE
-artifacts, and diagnostic triangle plots. The component spectra are normalized
+artifacts, and diagnostic triangle plots.
+
+Every full build and `--prior-only` rebuild also saves `template_redshifts.png`
+in the prior directory, including when `--skip-kde` is used. Each component
+shows its mean-normalized rest-frame shape in black, observed-frame curves at
+coefficient-weighted redshift percentiles (5th, median, 95th), and the
+coefficient-weighted redshift histogram alongside the full fitted population.
+The template panels use linear axes capped at 12; histogram axes are uncapped.
+This diagnostic uses real quality-passing fitted coefficients, not KDE draws.
+
+The component spectra are normalized
 to unit integrated flux over 3600--4200 Angstrom and the coefficients are
 rescaled exactly, so this convention does not change any reconstructed spectrum.
 Because the rest-frame matrix retains the observed DESI `f_lambda` values while

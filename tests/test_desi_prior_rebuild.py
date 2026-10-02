@@ -83,6 +83,18 @@ def test_prior_only_cli_rebuilds_selection_and_kde_without_changing_factors(
     assert build_prior.KDE_MODULE in calls[0]
     assert str(prior / "sed_prior_kde_native.joblib") in calls[0]
     assert (prior / "prior_args.yaml").exists()
+    assert (prior / "template_redshifts.png").stat().st_size > 0
+
+
+def test_prior_only_plot_uses_saved_template_param_in_custom_directory(saved_build, monkeypatch):
+    prior, _ = saved_build
+    destination = prior.with_name("custom-build")
+    prior.rename(destination)
+    monkeypatch.setattr("sys.argv", [
+        "build_prior", "--prior-only", "--output-dir", str(destination), "--skip-kde"
+    ])
+    build_prior.main()
+    assert (destination / "template_redshifts.png").stat().st_size > 0
 
 
 def test_prior_only_mismatched_matrix_fails_before_writing(saved_build, monkeypatch):
@@ -109,6 +121,7 @@ def test_short_build_name_resolves_under_empirical_prior(saved_build, monkeypatc
     table = pd.read_csv(destination / "desi_eazy_empirical_weights.csv")
     np.testing.assert_allclose(table.z, [.6, 1.29])
     assert (destination / "prior_args.yaml").exists()
+    assert (destination / "template_redshifts.png").stat().st_size > 0
 
 
 @pytest.mark.parametrize("name", ["", ".", "..", "/tmp/build", "nested/build"])

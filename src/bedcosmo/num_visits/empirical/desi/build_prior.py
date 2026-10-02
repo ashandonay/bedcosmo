@@ -12,6 +12,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import yaml
+import matplotlib.pyplot as plt
 
 from ..paths import (
     BUILD_PROVENANCE_FILENAME,
@@ -20,6 +21,7 @@ from ..paths import (
     get_prior_build_dir,
 )
 from ..provenance import write_provenance
+from ..diagnostics_plots import plot_template_redshifts
 from ..template_config import default_empirical_parameters
 from ..templates import load_two_column_template, read_template_param
 from .evaluate_factorization_methods import (
@@ -314,6 +316,13 @@ def finish_prior_build(args, output_dir, weights_table):
         redshift=weights_table.loc[weights_table["quality_pass"], "z"].to_numpy(float),
     )
     print(f"Wrote NumVisits prior config to {prior_args_path}")
+    figure = plot_template_redshifts(
+        output_dir, flux_max=12, template_param=relative_param
+    )
+    plot_path = output_dir / "template_redshifts.png"
+    figure.savefig(plot_path, dpi=180)
+    plt.close(figure)
+    print(f"Wrote template redshift diagnostic to {plot_path}")
     if args.skip_kde:
         return
 

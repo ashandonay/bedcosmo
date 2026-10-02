@@ -14,6 +14,7 @@ from bedcosmo.num_visits.empirical.diagnostics_plots import (
     main,
     plot_coverage,
     plot_template_redshifts,
+    weighted_redshift_summary,
 )
 
 
@@ -93,7 +94,7 @@ def test_template_redshifts_selects_real_quality_pass_rows(tmp_path):
     templates.mkdir(parents=True)
     (templates / "desi2.param").write_text("1 component_01.dat 1.0\n2 component_02.dat 1.0\n")
     for i in (1, 2):
-        np.savetxt(templates / f"component_{i:02d}.dat", [[2000, 1], [4000, 2], [9000, 3]])
+        np.savetxt(templates / f"component_{i:02d}.dat", [[1390, 1], [4000, 2], [9120, 3]])
     pd.DataFrame(
         {
             "z": [0.3, 0.7, 1.0, 1.2],
@@ -103,14 +104,60 @@ def test_template_redshifts_selects_real_quality_pass_rows(tmp_path):
         }
     ).to_csv(prior / "desi_eazy_empirical_weights.csv", index=False)
     fig = plot_template_redshifts(prior)
-    assert fig.axes[3].get_title() == "N = 2"
-    assert fig.axes[7].get_title() == "N = 3"
+    assert fig.axes[0].get_title() == "Template B1"
+    assert fig.axes[0].lines[0].get_color() == "black"
+    assert fig.axes[3].get_title() == "Template B2"
+    assert "coefficient-weighted template redshifts" in fig._suptitle.get_text()
     np.testing.assert_allclose(fig.axes[0].lines[0].get_ydata(), [0.5, 1.0, 1.5])
-    np.testing.assert_allclose(fig.axes[1].lines[0].get_xdata(), np.array([2000, 4000, 9000]) * 1.3)
-    np.testing.assert_allclose(fig.axes[2].lines[0].get_xdata(), np.array([2000, 4000, 9000]) * 2.0)
+    np.testing.assert_allclose(fig.axes[1].lines[0].get_xdata(), np.array([1390, 4000, 9120]) * 1.3)
+    np.testing.assert_allclose(fig.axes[1].lines[1].get_xdata(), np.array([1390, 4000, 9120]) * 1.3)
+    np.testing.assert_allclose(fig.axes[1].lines[2].get_xdata(), np.array([1390, 4000, 9120]) * 2.0)
+    assert [line.get_label() for line in fig.axes[1].lines] == [
+        "z 5% = 0.300", "z median = 0.300", "z 95% = 1.000"
+    ]
+    assert fig.axes[2].lines[0].get_xdata()[0] == .3
+    assert fig.axes[1].lines[0].get_color() == "tab:blue"
+    assert fig.axes[1].lines[2].get_color() == "tab:red"
+    assert fig.axes[1].lines[0].get_alpha() == .7
+    assert fig.axes[1].lines[2].get_alpha() == .7
+    assert fig.axes[0].get_xlim() == (1390., 9120.)
+    assert fig.axes[1].get_shared_x_axes().joined(fig.axes[1], fig.axes[4])
+    assert fig.axes[1].get_xlim() == pytest.approx((3199., 10990.))
+    assert fig.axes[1].get_xlabel() == "Observed wavelength [Å]"
+    # All passed rows contribute, including the small 0.05-share object.
+    _, _, z_min, z_max = lsst_support_limits(1390., 9120.)
+    edges = np.linspace(z_min, z_max, 25)
+    assert fig.axes[2].get_xlim() == (z_min, z_max)
+    assert fig.axes[5].get_xlim() == (z_min, z_max)
+    np.testing.assert_allclose(fig.axes[2].patches[0].get_facecolor(), [1, 1, 1, 1])
+    np.testing.assert_allclose(fig.axes[2].patches[0].get_edgecolor(), [0, 0, 0, 1])
+    density, _ = np.histogram([.3, .7, 1.], bins=edges, weights=[.9, .05, .4], density=True)
+    polygon = fig.axes[2].patches[-1]
+    assert fig.axes[1].lines[1].get_color() == ".4"
+    assert fig.axes[1].lines[1].get_alpha() == 1.
+    assert fig.axes[2].lines[0].get_color() == ".4"
+    assert fig.axes[2].lines[0].get_alpha() == polygon.get_alpha() == .45
+    np.testing.assert_allclose(polygon.get_xy()[1:2*len(density)+1, 1], np.repeat(density, 2))
     plt.close(fig)
     output = tmp_path / "plot.png"
-    main(["template-redshifts", "--prior-dir", str(prior), "--output", str(output)])
+    main(["template-redshifts", "--prior-dir", str(prior), "--output", str(output), "--log-flux"])
     assert output.stat().st_size > 0
-    with pytest.raises(ValueError, match="threshold"):
-        plot_template_redshifts(prior, 0)
+    np.savetxt(templates / "component_01.dat", [[1390, 0], [4000, 2], [9120, 3]])
+    log_fig = plot_template_redshifts(prior, log_flux=True)
+    assert log_fig.axes[0].get_yscale() == "log"
+    assert log_fig.axes[1].get_yscale() == "log"
+    assert log_fig.axes[2].get_yscale() == "linear"
+    assert np.ma.getmaskarray(log_fig.axes[0].lines[0].get_ydata())[0]
+    plt.close(log_fig)
+    capped_fig = plot_template_redshifts(prior, flux_max=20)
+    for i in (0, 1, 3, 4):
+        assert capped_fig.axes[i].get_ylim() == (0, 20)
+    assert capped_fig.axes[2].get_yscale() == "linear"
+    plt.close(capped_fig)
+
+
+def test_weighted_redshift_summary_ignores_tiny_extremes():
+    percentiles = weighted_redshift_summary([0., .3, .7, 1., 2.], [.001, .499, .499, .001, 0.])
+    np.testing.assert_allclose(percentiles, [.3, .3, .7])
+    with pytest.raises(ValueError, match="positive total weight"):
+        weighted_redshift_summary([.3, .7], [0., 0.])

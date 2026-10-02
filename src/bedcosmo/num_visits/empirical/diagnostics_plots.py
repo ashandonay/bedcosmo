@@ -7,8 +7,8 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from matplotlib.colors import LogNorm
 from speclite.filters import load_filters
+from matplotlib.colors import LogNorm
 
 from .desi.support import largest_contiguous_region, lsst_support_limits
 from .paths import get_desi_training_data_dir, get_prior_build_dir
@@ -167,77 +167,111 @@ def plot_coverage(training_matrix, prior_dir=None, redshift_bins=70):
     return fig
 
 
-def plot_template_redshifts(prior_dir, activation_threshold=0.1, redshift_bins=33):
-    """Show templates and redshifts of quality-passing fits with a_k >= cutoff."""
-    if not 0 < activation_threshold <= 1:
-        raise ValueError("Activation threshold must be in (0, 1]")
+def weighted_redshift_summary(redshift, shares):
+    """Weighted empirical-CDF percentiles (5/50/95)."""
+    redshift = np.asarray(redshift, dtype=float)
+    shares = np.asarray(shares, dtype=float)
+    if (redshift.shape != shares.shape or redshift.ndim != 1
+            or not np.isfinite(redshift).all() or not np.isfinite(shares).all()
+            or np.any(shares < 0) or shares.sum() <= 0):
+        raise ValueError("Redshifts and coefficient shares must be finite, with positive total weight")
+    order = np.argsort(redshift, kind="stable")
+    cumulative = np.cumsum(shares[order]) / shares.sum()
+    indices = np.searchsorted(cumulative, [.05, .5, .95], side="left")
+    return redshift[order][indices]
+
+
+def plot_template_redshifts(prior_dir, redshift_bins=24, log_flux=False,
+                            flux_max=None, template_param=None):
+    """Show templates and coefficient-weighted redshifts of quality-passing fits."""
+    if flux_max is not None and (not np.isfinite(flux_max) or flux_max <= 0):
+        raise ValueError("Flux maximum must be finite and positive")
     frame = pd.read_csv(prior_dir / "desi_eazy_empirical_weights.csv")
     frame = frame.loc[frame["quality_pass"] == True]  # noqa: E712
     if frame.empty:
         raise ValueError("No quality-passing fitted spectra")
-    template_paths = read_template_param(prior_dir / "templates" / f"{prior_dir.name}.param")
+    template_param = template_param or f"{prior_dir.name}.param"
+    template_paths = read_template_param(prior_dir / "templates" / template_param)
     filters = load_filters("lsst2023-*")
-    observed_limits = (
-        min(f.wavelength.min() for f in filters),
-        max(f.wavelength.max() for f in filters),
-    )
+    wavelength_limits = (min(f.wavelength.min() for f in filters),
+                         max(f.wavelength.max() for f in filters))
     k = len(template_paths)
-    colors = plt.get_cmap("tab10" if k <= 10 else "tab20")
-    fig = plt.figure(figsize=(3 * k, 10))
-    gs = fig.add_gridspec(3, k, height_ratios=[1, 2, 0.95], hspace=0.38, wspace=0.3)
-    edges = np.linspace(frame.z.min(), frame.z.max(), redshift_bins + 1)
+    bank = [load_two_column_template(prior_dir / "templates" / path) for path in template_paths]
+    _, _, z_min, z_max = lsst_support_limits(
+        max(wave.min() for wave, _ in bank), min(wave.max() for wave, _ in bank)
+    )
+    if z_min >= z_max:
+        raise ValueError("Template support cannot cover all LSST filters at any redshift")
+    if frame.z.min() < z_min or frame.z.max() > z_max:
+        raise ValueError("Quality-passing redshifts exceed the derived template support limits")
+    fig = plt.figure(figsize=(3 * k, 9))
+    gs = fig.add_gridspec(3, k, height_ratios=[1, 1.2, 0.95], hspace=0.38, wspace=0.3)
+    edges = np.linspace(z_min, z_max, redshift_bins + 1)
     hist_axes = []
+    wavelength_axes = []
     for i, filename in enumerate(template_paths):
-        color = colors(i % colors.N)
-        wave, shape = load_two_column_template(prior_dir / "templates" / filename)
+        wave, shape = bank[i]
         if not np.isfinite(shape).all() or shape.mean() <= 0:
             raise ValueError(f"Invalid template shape: {filename}")
         shape = shape / shape.mean()
-        selected = frame.loc[frame[f"a{i+1}"] >= activation_threshold, "z"]
-        if selected.empty:
-            raise ValueError(f"No spectra pass activation threshold for B{i+1}")
+        if log_flux:
+            shape = np.ma.masked_less_equal(shape, 0)
+        shares = frame[f"a{i+1}"].to_numpy(float)
+        z05, z50, z95 = weighted_redshift_summary(frame.z, shares)
         rest = fig.add_subplot(gs[0, i])
-        rest.plot(wave, shape, color=color)
+        rest.plot(wave, shape, color="black")
+        if log_flux:
+            rest.set_yscale("log")
         rest.set(
+            title=f"Template B{i+1}",
             xlim=(wave.min(), wave.max()),
-            title=f"B{i+1}: full rest-frame shape",
             xlabel="Rest wavelength [Å]",
         )
-        pair = gs[1, i].subgridspec(2, 1, hspace=0)
-        upper = fig.add_subplot(pair[0])
-        lower = fig.add_subplot(pair[1], sharex=upper, sharey=upper)
-        for ax, z in ((upper, selected.min()), (lower, selected.max())):
-            ax.plot(wave * (1 + z), shape, color=color)
-            ax.text(0.04, 0.88, f"z = {z:.3f}", transform=ax.transAxes)
-            ax.set_xlim(*observed_limits)
-            ax.grid(alpha=0.15)
-        upper.tick_params(axis="x", labelbottom=False)
-        upper.set_title("Observed shape\nLSST wavelength range")
-        lower.set_xlabel("Observed wavelength [Å]")
+        observed = fig.add_subplot(gs[1, i], sharex=wavelength_axes[0] if wavelength_axes else None)
+        wavelength_axes.append(observed)
+        for z, color, label in (
+            (z05, "tab:blue", "5%"),
+            (z50, ".4", "median"),
+            (z95, "tab:red", "95%"),
+        ):
+            observed.plot(wave * (1 + z), shape, color=color,
+                          alpha=.7 if label != "median" else 1.,
+                          label=f"z {label} = {z:.3f}")
+        observed.set_xlabel("Observed wavelength [Å]")
+        if log_flux:
+            observed.set_yscale("log")
+        if flux_max is not None:
+            for ax in (rest, observed):
+                if log_flux:
+                    ax.set_ylim(top=flux_max)
+                else:
+                    ax.set_ylim(0, flux_max)
+        observed.grid(alpha=.15)
+        observed.legend(fontsize=8, loc="upper right")
         hist = fig.add_subplot(gs[2, i])
         hist.hist(
-            frame.z, bins=edges, density=True, histtype="step", color=".6", label="All passed fits"
+            frame.z, bins=edges, density=True, histtype="stepfilled",
+            facecolor="white", edgecolor="black", linewidth=1.3, label="All passed fits"
         )
-        hist.hist(
-            selected,
-            bins=edges,
-            density=True,
-            color=color,
-            alpha=0.45,
-            label=f"a{i+1} ≥ {activation_threshold:g}",
-        )
-        hist.axvline(selected.median(), color=color, ls="--", label="Selected median")
-        hist.set(xlabel="Redshift z", title=f"N = {len(selected):,}")
+        hist.hist(frame.z, bins=edges, weights=shares, density=True,
+                  histtype="stepfilled", color=".4", alpha=.45,
+                  label="Coefficient-weighted (all fits)")
+        hist.axvline(z50, color=".4", alpha=.45, ls="--", label="Weighted median")
+        hist.set(xlabel="Redshift z", xlim=(z_min, z_max))
         hist_axes.append(hist)
         if i == 0:
             rest.set_ylabel("Template / full-grid mean")
-            upper.set_ylabel("Template / full-grid mean")
+            observed.set_ylabel("Template / full-grid mean")
             hist.set_ylabel("Probability density")
             hist.legend(fontsize=8)
+    wavelength_axes[0].set_xlim(*wavelength_limits)
     ymax = max(ax.get_ylim()[1] for ax in hist_axes)
     for ax in hist_axes:
         ax.set_ylim(0, ymax)
-    fig.suptitle(f"{prior_dir.name.upper()}: fitted-template activation and redshift", y=0.99)
+    fig.suptitle(
+        f"{prior_dir.name.upper()}: coefficient-weighted template redshifts "
+        f"({len(frame):,} fitted spectra)", y=0.99
+    )
     fig.subplots_adjust(top=0.93, bottom=0.07)
     return fig
 
@@ -258,7 +292,7 @@ def main(argv=None):
             ),
         )
         sub.add_argument("--output", type=Path, required=True)
-        sub.add_argument("--redshift-bins", type=int, default=70 if name == "coverage" else 33)
+        sub.add_argument("--redshift-bins", type=int, default=70 if name == "coverage" else 24)
         if name == "coverage":
             sub.add_argument(
                 "--training-matrix",
@@ -266,14 +300,18 @@ def main(argv=None):
                 default=get_desi_training_data_dir() / "desi_rest_frame_training_matrix.npz",
             )
         else:
-            sub.add_argument("--activation-threshold", type=float, default=0.1)
+            sub.add_argument("--log-flux", action="store_true",
+                             help="Logarithmic template flux axes; mask nonpositive values")
+            sub.add_argument("--flux-max", type=float, default=None,
+                             help="Common upper y-axis limit for template panels")
     args = parser.parse_args(argv)
     if args.redshift_bins < 1:
         parser.error("--redshift-bins must be positive")
     if args.command == "coverage":
         fig = plot_coverage(args.training_matrix, args.prior_dir, args.redshift_bins)
     else:
-        fig = plot_template_redshifts(args.prior_dir, args.activation_threshold, args.redshift_bins)
+        fig = plot_template_redshifts(args.prior_dir, args.redshift_bins,
+                                      log_flux=args.log_flux, flux_max=args.flux_max)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(args.output, dpi=180, bbox_inches="tight")
     plt.close(fig)

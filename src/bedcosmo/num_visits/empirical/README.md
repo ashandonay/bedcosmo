@@ -562,7 +562,6 @@ python -m bedcosmo.num_visits.empirical.diagnostics_plots coverage \
 
 python -m bedcosmo.num_visits.empirical.diagnostics_plots template-redshifts \
   --prior-dir "$SCRATCH/bedcosmo/num_visits/empirical_prior/desi8" \
-  --activation-threshold 0.10 \
   --output desi8_template_redshifts.png
 ```
 
@@ -592,13 +591,37 @@ the build's selection or prior.
 
 `template-redshifts` defaults `--prior-dir` to the DESI8 build and reads
 the build's template bank and quality-passing fitted
-weights. Each column shows the full rest-frame shape, two flush observed-frame
-views at the activated samples' minimum/maximum redshift within the LSST filter
-range, and their redshift distribution versus all passed fits. Activation means
-`a_k >= --activation-threshold` (default 0.10); selections may overlap. Display
-shapes are divided by their full-grid mean, with the same amplitudes in the two
+weights. Each column shows the rest-frame shape, one observed-frame panel
+overlaying the template at the coefficient-weighted 5th percentile redshift
+(blue), median (gray), and 95th percentile (red), and their
+redshift distribution versus all passed fits. The top row spans each template's
+full retained rest-frame grid. The middle row uses the full tabulated LSST
+filter range (approximately 3199–10990 Å), shared across components.
+The top row is rest-frame; the middle row is observed-frame.
+Blue/red curves have alpha 0.7; the rest-frame shapes and histograms are grayscale.
+There is no activation threshold: every quality-passing galaxy contributes its
+fitted share `a_k` to its redshift bin and to the middle-row summaries.
+Percentiles use the weighted empirical CDF (the first redshift reaching the
+requested cumulative share). The gray spectrum uses the same weighted median
+as the histogram's dashed line.
+The gray filled histogram is coefficient-weighted; the black outline/white fill shows the
+unweighted population, and a dashed line marks the weighted median.
+Each histogram is separately normalized to unit area. This measures the
+redshift distribution of fitted component shares, not absolute flux or a
+population count. Zero total contribution for a component raises an error.
+Histogram bins and x-axis limits span exactly the LSST-compatible redshift
+range derived from the template bank's common rest-frame support, without
+axis padding or per-component ranges.
+Displayed shapes are divided by their full-grid mean, with the same amplitudes in the three
 redshifted views (not a physical flux prediction). `--redshift-bins` controls the
-heatmap/histogram bin count (defaults 70/33). No build files are modified.
+heatmap/histogram bin count (defaults 70/24). No build files are modified.
+Pass `--log-flux` for logarithmic y-axes in the top and middle template rows.
+Nonpositive flux is masked, not replaced by a floor; histograms remain linear.
+`--flux-max 20` caps all template panels at 20 in mean-normalized flux units.
+DESI `build_prior` automatically saves this diagnostic as `template_redshifts.png`
+in each build directory, with a cap of 12, including prior-only and skip-KDE builds.
+On linear axes their range is 0–20; histogram axes are unaffected. This crops
+the display only and does not change template data or normalization.
 
 ## Diagnostics (`diagnostic_plots.py`)
 
