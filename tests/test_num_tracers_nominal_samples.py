@@ -41,7 +41,11 @@ def test_reference_chain_keeps_automatic_smoothing_through_restrict_and_plot():
 
     from bedcosmo.plotting import BasePlotter
     from bedcosmo.util import (
-        GETDIST_CHAIN_SETTINGS, GETDIST_SETTINGS, ReferenceChain, restrict_mcsamples)
+        GETDIST_CHAIN_SETTINGS,
+        GETDIST_SETTINGS,
+        ReferenceChain,
+        restrict_mcsamples,
+    )
 
     rng = np.random.default_rng(0)
     x = rng.normal(size=(4000, 3))
