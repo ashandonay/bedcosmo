@@ -30,7 +30,6 @@ from .support import (  # noqa: E402
 from .training_matrix import (  # noqa: E402
     build_rest_frame_matrix,
     discover_desi_manifest,
-    derive_rest_frame_grid,
     load_desi_manifest,
 )
 from .weighted_nmf import (  # noqa: E402
@@ -71,11 +70,15 @@ def desi_covered_lsst_color_rms(
         for loaded, normalization in zip(loaded_filters, full_norm):
             response = np.asarray(loaded(observed_wave), dtype=float)
             kernel = response * observed_wave
-            covered = float(np.trapz(kernel * observed, observed_wave) / normalization)
+            covered = float(
+                np.trapz(kernel * observed, observed_wave) / normalization
+            )
             if covered < minimum_band_coverage:
                 continue
             reference = float(np.trapz(flux[row] * kernel * observed, observed_wave))
-            predicted = float(np.trapz(reconstruction[row] * kernel * observed, observed_wave))
+            predicted = float(
+                np.trapz(reconstruction[row] * kernel * observed, observed_wave)
+            )
             if reference > 0 and predicted > 0:
                 delta_magnitude.append(-2.5 * np.log10(predicted / reference))
         band_count[row] = len(delta_magnitude)
@@ -111,18 +114,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--min-good-pixels", type=int, default=100)
     parser.add_argument("--ranks", type=int, nargs="+", default=(2, 3, 4, 5, 6))
     parser.add_argument("--max-spectra", type=int, default=1500)
-    parser.add_argument(
-        "--wave-min",
-        type=float,
-        default=None,
-        help="Override lower candidate bound; default derives it from valid DESI pixels",
-    )
-    parser.add_argument(
-        "--wave-max",
-        type=float,
-        default=None,
-        help="Override upper candidate bound; default derives it from valid DESI pixels",
-    )
+    parser.add_argument("--wave-min", type=float, default=1400.0)
+    parser.add_argument("--wave-max", type=float, default=10000.0)
     parser.add_argument("--wave-step", type=float, default=10.0)
     parser.add_argument("--iterations", type=int, default=8)
     parser.add_argument("--smooth-sigma-aa", type=float, default=10.0)
@@ -163,9 +156,7 @@ def make_figure(
     axes[0].legend(frameon=False)
 
     axes[1].plot(metrics["rank"], metrics["test_median_color_rms"], marker="o", label="median")
-    axes[1].plot(
-        metrics["rank"], metrics["test_p90_color_rms"], marker="o", label="90th percentile"
-    )
+    axes[1].plot(metrics["rank"], metrics["test_p90_color_rms"], marker="o", label="90th percentile")
     axes[1].set(
         xlabel="DESI basis rank",
         ylabel="Held-out LSST color RMS [mag]",
@@ -266,18 +257,10 @@ def main() -> None:
     candidate_manifest_path.parent.mkdir(parents=True, exist_ok=True)
     manifest.to_csv(candidate_manifest_path, index=False)
     if args.max_spectra and len(manifest) > args.max_spectra:
-        manifest = (
-            manifest.sample(args.max_spectra, random_state=args.seed)
-            .sort_values(["healpix", "targetid"])
-            .reset_index(drop=True)
-        )
-    wave = derive_rest_frame_grid(
-        manifest,
-        desi_dir=desi_dir,
-        wave_step=args.wave_step,
-        wave_min=args.wave_min,
-        wave_max=args.wave_max,
-    )
+        manifest = manifest.sample(args.max_spectra, random_state=args.seed).sort_values(
+            ["healpix", "targetid"]
+        ).reset_index(drop=True)
+    wave = np.arange(args.wave_min, args.wave_max + 0.5 * args.wave_step, args.wave_step)
     manifest, flux, weights, scales = build_rest_frame_matrix(
         manifest,
         desi_dir=desi_dir,
@@ -342,7 +325,9 @@ def main() -> None:
             seed=args.seed,
         )
         coefficients = infer_coefficients(learned_flux, learned_weights, basis)
-        error = weighted_reconstruction_error(learned_flux, learned_weights, coefficients, basis)
+        error = weighted_reconstruction_error(
+            learned_flux, learned_weights, coefficients, basis
+        )
         color_rms, color_band_count = desi_covered_lsst_color_rms(
             learned_flux,
             learned_weights,
@@ -422,7 +407,9 @@ def main() -> None:
                 "largest contiguous interval with at least the required number "
                 "of observed spectra in every bin"
             ),
-            "uses_eazy_selection": (False if sample_source == "direct_desi_redrock" else None),
+            "uses_eazy_selection": (
+                False if sample_source == "direct_desi_redrock" else None
+            ),
             "selection_role": (
                 "Direct Redrock/FIBERMAP galaxy selection"
                 if sample_source == "direct_desi_redrock"

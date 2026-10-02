@@ -86,9 +86,15 @@ def load_desi_manifest(path: Path | str) -> pd.DataFrame:
     if missing:
         raise ValueError(f"Missing manifest columns: {sorted(missing)}")
     if {"success", "quality_pass"}.issubset(table.columns):
-        table = table.loc[table["success"].astype(bool) & table["quality_pass"].astype(bool)]
-    table = table.loc[np.isfinite(table["z"].to_numpy(float)) & (table["z"].to_numpy(float) >= 0)]
-    return table[["targetid", "healpix", "z"]].drop_duplicates("targetid").reset_index(drop=True)
+        table = table.loc[
+            table["success"].astype(bool) & table["quality_pass"].astype(bool)
+        ]
+    table = table.loc[
+        np.isfinite(table["z"].to_numpy(float)) & (table["z"].to_numpy(float) >= 0)
+    ]
+    return table[["targetid", "healpix", "z"]].drop_duplicates("targetid").reset_index(
+        drop=True
+    )
 
 
 def _robust_flux_scale(rest_wave: np.ndarray, flux: np.ndarray, ivar: np.ndarray) -> float:
@@ -145,7 +151,9 @@ def bin_rest_frame_spectrum(
     index = index[valid]
     scaled_flux = flux[good][valid] / scale
     scaled_ivar = ivar[good][valid] * scale**2
-    weighted_sum = np.bincount(index, weights=scaled_flux * scaled_ivar, minlength=len(rest_wave))
+    weighted_sum = np.bincount(
+        index, weights=scaled_flux * scaled_ivar, minlength=len(rest_wave)
+    )
     weight_sum = np.bincount(index, weights=scaled_ivar, minlength=len(rest_wave))
     observed = weight_sum > 0
     values[observed] = (weighted_sum[observed] / weight_sum[observed]).astype(np.float32)
@@ -158,53 +166,6 @@ def bin_rest_frame_spectrum(
         cap = float(np.percentile(weight_sum[observed], 99))
         weights[observed] = np.minimum(weight_sum[observed], cap).astype(np.float32)
     return values, weights, scale
-
-
-def derive_rest_frame_grid(
-    manifest: pd.DataFrame,
-    *,
-    desi_dir: Path,
-    wave_step: float,
-    wave_min: float | None = None,
-    wave_max: float | None = None,
-) -> np.ndarray:
-    """Round selected coadds' valid rest-frame pixel endpoints outward."""
-    if not np.isfinite(wave_step) or wave_step <= 0:
-        raise ValueError("wave_step must be finite and positive")
-    lower, upper = np.inf, -np.inf
-    for healpix, patch in manifest.groupby("healpix", sort=True):
-        coadd_path, _ = get_local_desi_paths(
-            desi_dir, DEFAULT_SPECPROD, DEFAULT_SURVEY, DEFAULT_PROGRAM, int(healpix)
-        )
-        with fits.open(coadd_path, memmap=True) as hdul:
-            row_by_target = {
-                int(target): row for row, target in enumerate(hdul["FIBERMAP"].data["TARGETID"])
-            }
-            for item in patch.itertuples():
-                row = row_by_target[int(item.targetid)]
-                for arm in "BRZ":
-                    wave = np.asarray(hdul[f"{arm}_WAVELENGTH"].data, float)
-                    flux = hdul[f"{arm}_FLUX"].data[row]
-                    ivar = hdul[f"{arm}_IVAR"].data[row]
-                    mask = hdul[f"{arm}_MASK"].data[row]
-                    valid = (
-                        np.isfinite(wave)
-                        & np.isfinite(flux)
-                        & np.isfinite(ivar)
-                        & (ivar > 0)
-                        & (mask == 0)
-                    )
-                    if np.any(valid):
-                        rest = wave[valid] / (1 + item.z)
-                        lower = min(lower, float(rest.min()))
-                        upper = max(upper, float(rest.max()))
-    if not np.isfinite(lower) or not np.isfinite(upper):
-        raise ValueError("No valid DESI pixels available to derive wavelength grid")
-    lower = np.floor(lower / wave_step) * wave_step if wave_min is None else wave_min
-    upper = np.ceil(upper / wave_step) * wave_step if wave_max is None else wave_max
-    if not np.isfinite(lower) or not np.isfinite(upper) or lower <= 0 or upper <= lower:
-        raise ValueError("Candidate wavelength limits must be finite, positive and ordered")
-    return np.arange(lower, upper + 0.5 * wave_step, wave_step)
 
 
 def build_rest_frame_matrix(
@@ -224,14 +185,17 @@ def build_rest_frame_matrix(
     found = np.zeros(len(manifest), dtype=bool)
 
     for healpix, patch in manifest.groupby("healpix", sort=True):
-        coadd_path, _ = get_local_desi_paths(desi_dir, specprod, survey, program, int(healpix))
+        coadd_path, _ = get_local_desi_paths(
+            desi_dir, specprod, survey, program, int(healpix)
+        )
         if not coadd_path.is_file():
             raise FileNotFoundError(coadd_path)
         with fits.open(coadd_path, memmap=True) as hdul:
             targetids = np.asarray(hdul["FIBERMAP"].data["TARGETID"], dtype=np.int64)
             row_by_target = {int(value): index for index, value in enumerate(targetids)}
             arm_wave = {
-                arm: np.asarray(hdul[f"{arm}_WAVELENGTH"].data, dtype=float) for arm in "BRZ"
+                arm: np.asarray(hdul[f"{arm}_WAVELENGTH"].data, dtype=float)
+                for arm in "BRZ"
             }
             # itertuples preserves the int64 TARGETID. DataFrame.iterrows would
             # coerce this mixed numeric row to float and corrupt 18-digit IDs.
@@ -265,7 +229,9 @@ def build_rest_frame_matrix(
             f"{int(np.sum(accepted)):,}/{len(patch):,} usable"
         )
 
-    keep = np.isfinite(scales) & (np.sum(weight_matrix > 0, axis=1) >= int(min_good_pixels))
+    keep = np.isfinite(scales) & (
+        np.sum(weight_matrix > 0, axis=1) >= int(min_good_pixels)
+    )
     if np.any(~found):
         print(f"Warning: {int(np.sum(~found)):,} manifest targets were absent from coadds")
     return (

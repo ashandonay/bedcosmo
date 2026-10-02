@@ -6,16 +6,6 @@ import numpy as np
 from speclite import filters as speclite_filters
 
 
-def lsst_support_limits(rest_min, rest_max):
-    """Full tabulated ugrizy coverage requires both LSST edges inside support."""
-    if not 0 < rest_min < rest_max or not np.isfinite([rest_min, rest_max]).all():
-        raise ValueError("Rest wavelength endpoints must be finite, positive and ordered")
-    filters = speclite_filters.load_filters("lsst2023-*")
-    blue = min(f.wavelength.min() for f in filters)
-    red = max(f.wavelength.max() for f in filters)
-    return blue, red, max(0., red / rest_max - 1.), blue / rest_min - 1.
-
-
 def largest_contiguous_region(mask: np.ndarray) -> np.ndarray:
     """Keep the longest contiguous True region of a one-dimensional mask."""
     mask = np.asarray(mask, dtype=bool)

@@ -12,7 +12,6 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import yaml
-import matplotlib.pyplot as plt
 
 from ..paths import (
     BUILD_PROVENANCE_FILENAME,
@@ -21,34 +20,17 @@ from ..paths import (
     get_prior_build_dir,
 )
 from ..provenance import write_provenance
-from ..diagnostics_plots import plot_template_redshifts
 from ..template_config import default_empirical_parameters
-from ..templates import load_two_column_template, read_template_param
 from .evaluate_factorization_methods import (
     evaluate_basis,
     fit_nearly_nmf,
     nearly_nmf_package_metadata,
     shared_initialization,
 )
-from .support import lsst_support_limits, select_wavelength_support
+from .support import select_wavelength_support
 from .weighted_nmf import infer_coefficients
 
 KDE_MODULE = "bedcosmo.num_visits.empirical.fit_sed_prior_kde"
-
-
-def resolve_prior_redshift_limits(wave, prior_z_min=None, prior_z_max=None):
-    """Derive LSST-safe defaults and reject overrides outside template support."""
-    _, _, supported_min, supported_max = lsst_support_limits(wave.min(), wave.max())
-    lower = supported_min if prior_z_min is None else prior_z_min
-    upper = supported_max if prior_z_max is None else prior_z_max
-    if not np.isfinite([lower, upper]).all() or lower >= upper:
-        raise ValueError("No nonempty, finite LSST-supported prior redshift interval")
-    if lower < supported_min or upper > supported_max:
-        raise ValueError(
-            f"Prior redshift limits must lie within LSST-supported range "
-            f"[{supported_min:g}, {supported_max:g}]"
-        )
-    return lower, upper
 
 
 def normalize_basis_for_export(
@@ -226,14 +208,11 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument("--rank", type=int, default=8)
-    parser.add_argument("--build-name", default="desi8",
-                        help="Build name below num_visits/empirical_prior (not a path)")
+    parser.add_argument("--build-name", default="empirical_prior/desi8")
     parser.add_argument("--output-dir", type=Path, default=None)
     parser.add_argument("--template-param", type=Path, default=None)
-    parser.add_argument("--prior-z-min", type=float, default=None,
-                        help="Override lower redshift cut; default derives it from retained support")
-    parser.add_argument("--prior-z-max", type=float, default=None,
-                        help="Override upper redshift cut; default derives it from retained support")
+    parser.add_argument("--prior-z-min", type=float, default=0.21)
+    parser.add_argument("--prior-z-max", type=float, default=1.28)
     parser.add_argument("--max-chi2-dof", type=float, default=1.5)
     parser.add_argument("--norm-min", type=float, default=3600.0)
     parser.add_argument("--norm-max", type=float, default=4200.0)
@@ -254,8 +233,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--kde-sample", type=int, default=2000)
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--skip-kde", action="store_true")
-    parser.add_argument("--prior-only", action="store_true",
-                        help="Rebuild prior tables and KDEs from this build's saved basis and coefficients")
     return parser.parse_args()
 
 
@@ -267,7 +244,7 @@ def require_compatible_checkpoints(
     request = {
         key: str(value.expanduser().resolve()) if isinstance(value, Path) else value
         for key, value in vars(args).items()
-        if key not in {"kde_sample", "seed", "skip_kde", "max_chi2_dof", "prior_only"}
+        if key not in {"kde_sample", "seed", "skip_kde", "max_chi2_dof"}
     }
     request.update(
         {
@@ -289,132 +266,8 @@ def require_compatible_checkpoints(
         path.write_text(json.dumps(request, indent=2, sort_keys=True) + "\n")
 
 
-def finish_prior_build(args, output_dir, weights_table):
-    """Write runtime config and fit KDEs for either a fresh or reused basis."""
-    relative_param = args.template_param or Path(f"desi{args.rank}.param")
-    weights_path = output_dir / "desi_eazy_empirical_weights.csv"
-    provenance_path = output_dir / BUILD_PROVENANCE_FILENAME
-    prior_args_path = write_prior_args(
-        output_dir / "prior_args.yaml",
-        prior_dir=output_dir,
-        template_param=relative_param,
-        rank=args.rank,
-        norm_min=args.norm_min,
-        norm_max=args.norm_max,
-        log_scale=weights_table.loc[weights_table["quality_pass"], "log_c_scale"].to_numpy(
-            float
-        ),
-        redshift=weights_table.loc[weights_table["quality_pass"], "z"].to_numpy(float),
-    )
-    print(f"Wrote NumVisits prior config to {prior_args_path}")
-    figure = plot_template_redshifts(
-        output_dir, flux_max=12, template_param=relative_param
-    )
-    plot_path = output_dir / "template_redshifts.png"
-    figure.savefig(plot_path, dpi=180)
-    plt.close(figure)
-    print(f"Wrote template redshift diagnostic to {plot_path}")
-    if args.skip_kde:
-        return
-
-    subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            KDE_MODULE,
-            "--weights-csv",
-            str(weights_path),
-            "--out",
-            str(output_dir / SED_PRIOR_KDE_NATIVE_FILENAME),
-            "--build-provenance",
-            str(provenance_path),
-            "--no-z-filter",
-            "--max-chi2-dof",
-            str(args.max_chi2_dof),
-            "--sample",
-            str(args.kde_sample),
-            "--seed",
-            str(args.seed),
-        ],
-        check=True,
-    )
-
-
-
-def rebuild_prior(args, output_dir):
-    """Reuse saved factors, verifying matrix identity and exported templates."""
-    provenance_path = output_dir / BUILD_PROVENANCE_FILENAME
-    metadata = json.loads(provenance_path.read_text())
-    matrix_path = args.training_matrix or Path(metadata["factorization"]["training_matrix"])
-    with np.load(output_dir / "desi_basis.npz") as saved:
-        wave = saved["wave_rest_aa"]
-        basis = saved["basis"]
-        coefficients = saved["coefficients"]
-        targetids = saved["targetid"]
-        support = saved["support_mask"]
-    with np.load(matrix_path) as data:
-        if not np.array_equal(targetids, data["targetid"]):
-            raise ValueError("Training-matrix target IDs/order do not match saved coefficients")
-        if not np.array_equal(wave, data["wave_rest_aa"][support]):
-            raise ValueError("Training-matrix wavelengths do not match saved basis support")
-        manifest = pd.DataFrame({"targetid": data["targetid"], "healpix": data["healpix"],
-                                 "z": data["redshift"]})
-        flux = data["flux"][:, support].astype(float)
-        weights = data["relative_ivar"][:, support].astype(float)
-        scales = data["normalization_scale"]
-    template = metadata["template"]
-    args.template_param = Path(template["template_param"])
-    template_dir = output_dir / "templates"
-    paths = read_template_param(template_dir / args.template_param)
-    if len(paths) != basis.shape[0] or coefficients.shape != (len(manifest), basis.shape[0]):
-        raise ValueError("Saved template/basis/coefficient dimensions do not match")
-    for component, filename in zip(basis, paths):
-        exported_wave, exported_flux = load_two_column_template(template_dir / filename)
-        if not np.allclose(exported_wave, wave, rtol=0, atol=1e-7) or not np.allclose(
-            exported_flux, component, rtol=1e-10, atol=1e-15
-        ):
-            raise ValueError("Exported template bank does not match saved basis")
-    args.rank = basis.shape[0]
-    args.norm_min = template["normalization"]["wave_min_aa"]
-    args.norm_max = template["normalization"]["wave_max_aa"]
-    args.prior_z_min, args.prior_z_max = resolve_prior_redshift_limits(
-        wave, args.prior_z_min, args.prior_z_max
-    )
-    table = make_prior_table(manifest, coefficients, flux, weights, basis, scales,
-                             prior_z_min=args.prior_z_min, prior_z_max=args.prior_z_max,
-                             max_chi2_dof=args.max_chi2_dof)
-    if not table.quality_pass.any():
-        raise ValueError("No quality-passing spectra remain for prior fitting")
-    metadata["selection"].update(
-        prior_z_min=args.prior_z_min, prior_z_max=args.prior_z_max,
-        max_chi2_dof=args.max_chi2_dof, n_supported_redshift=len(table),
-        n_prior_quality_pass=int(table.quality_pass.sum()),
-    )
-    metadata["prior_rebuild"] = {
-        "basis_retrained": False, "training_matrix": str(matrix_path),
-        "kde_sample": args.kde_sample, "seed": args.seed,
-    }
-    table.to_csv(output_dir / "desi_eazy_empirical_weights.csv", index=False)
-    write_provenance(provenance_path, metadata)
-    print(f"Reusing saved DESI{args.rank} basis; prior redshift cut "
-          f"{args.prior_z_min:.6f}–{args.prior_z_max:.6f}; "
-          f"{int(table.quality_pass.sum()):,} quality-passing rows", flush=True)
-    finish_prior_build(args, output_dir, table)
-    print("Prior flows are not rebuilt by build_prior; retrain prior_flow --space both before BED use.")
-
-
 def main() -> None:
     args = parse_args()
-    if (not args.build_name or args.build_name in {".", ".."}
-            or "/" in args.build_name or "\\" in args.build_name):
-        raise ValueError("--build-name must be a single directory name; use --output-dir for paths")
-    output_dir = (
-        args.output_dir.expanduser().resolve()
-        if args.output_dir is not None else get_prior_build_dir(f"empirical_prior/{args.build_name}")
-    )
-    if args.prior_only:
-        rebuild_prior(args, output_dir)
-        return
     args.training_matrix = (
         args.training_matrix.expanduser().resolve()
         if args.training_matrix is not None
@@ -426,7 +279,14 @@ def main() -> None:
         raise ValueError("--train-fraction must lie between zero and one")
     if not 0 < args.validation_fraction < 1 - args.train_fraction:
         raise ValueError("--validation-fraction must leave a nonempty test split")
+    if args.prior_z_min >= args.prior_z_max:
+        raise ValueError("--prior-z-min must be below --prior-z-max")
 
+    output_dir = (
+        args.output_dir.expanduser().resolve()
+        if args.output_dir is not None
+        else get_prior_build_dir(args.build_name)
+    )
     template_dir = output_dir / "templates"
     relative_param = args.template_param or Path(f"desi{args.rank}.param")
     if relative_param.is_absolute():
@@ -463,10 +323,6 @@ def main() -> None:
     if np.count_nonzero(support) < 20:
         raise ValueError(f"Too few wavelength bins have at least {required} contributors")
     wave = wave_all[support]
-    args.prior_z_min, args.prior_z_max = resolve_prior_redshift_limits(
-        wave, args.prior_z_min, args.prior_z_max
-    )
-    print(f"LSST-supported prior redshift cut: {args.prior_z_min:.6f}–{args.prior_z_max:.6f}")
     flux = flux_all[:, support]
     weights = weights_all[:, support]
     require_compatible_checkpoints(output_dir, args, wave, required)
@@ -688,7 +544,44 @@ def main() -> None:
     print(f"Wrote {len(weights_table):,} supported prior rows to {weights_path}")
     print(f"Wrote template bank to {param_path}")
     print(f"Wrote build provenance to {provenance_path}")
-    finish_prior_build(args, output_dir, weights_table)
+    prior_args_path = write_prior_args(
+        output_dir / "prior_args.yaml",
+        prior_dir=output_dir,
+        template_param=relative_param,
+        rank=args.rank,
+        norm_min=args.norm_min,
+        norm_max=args.norm_max,
+        log_scale=weights_table.loc[weights_table["quality_pass"], "log_c_scale"].to_numpy(
+            float
+        ),
+        redshift=weights_table.loc[weights_table["quality_pass"], "z"].to_numpy(float),
+    )
+    print(f"Wrote NumVisits prior config to {prior_args_path}")
+    if args.skip_kde:
+        return
+
+    subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            KDE_MODULE,
+            "--weights-csv",
+            str(weights_path),
+            "--out",
+            str(output_dir / SED_PRIOR_KDE_NATIVE_FILENAME),
+            "--build-provenance",
+            str(provenance_path),
+            "--no-z-filter",
+            "--max-chi2-dof",
+            str(args.max_chi2_dof),
+            "--sample",
+            str(args.kde_sample),
+            "--seed",
+            str(args.seed),
+        ],
+        check=True,
+    )
+
 
 if __name__ == "__main__":
     main()
