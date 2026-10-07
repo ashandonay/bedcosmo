@@ -31,7 +31,7 @@ The design configuration controls which filters are varied and how the grid of c
 |----------------------|-------------------|-------------|
 | `labels`             | list of strings   | Filter bands in the experiment (e.g. `["u","g","r","i","z","y"]`), in design-column order. Filters not listed are not observed at all: the forward model, nominal design and flow context only cover the listed bands. |
 | `input_type`         | string            | `"variable"` builds a grid over the bands; `"nominal"` uses a single fixed design equal to the fiducial visit counts. |
-| `input_designs_path` | string or null    | Absolute path to a `.npy` file of explicit design points (shape `(n_designs, n_filters)`). When set, the grid parameters below are ignored. |
+| `input_path` | string or null    | Absolute path to a `.npy` file of explicit design points (shape `(n_designs, n_filters)`). When set, the grid parameters below are ignored. The old name `input_designs_path` is still accepted. |
 | `step`               | float or list     | Grid spacing for each filter. A scalar applies to all filters; a list sets per-filter spacing. |
 | `lower`              | float or list     | Lower bound on visits for each filter (scalar or per-filter list). |
 | `upper`              | float or list     | Upper bound on visits for each filter (scalar or per-filter list). |

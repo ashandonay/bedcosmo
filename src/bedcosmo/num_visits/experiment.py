@@ -868,7 +868,7 @@ class NumVisits(BaseExperiment, CosmologyMixin):
     @profile_method
     def init_designs(
         self,
-        input_designs_path=None,
+        input_path=None,
         input_type="variable",
         step=20.0,
         lower=10.0,
@@ -881,7 +881,7 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         Initialize design space.
 
         Args:
-            input_designs_path: Path to numpy file containing designs (assumed to be absolute)
+            input_path: Path to numpy file containing designs (assumed to be absolute)
             input_type: Type of input designs ("nominal" or "variable")
             step: Step size(s) for design grid. Can be:
                 - float: Same step size for all dimensions (default: 20.0)
@@ -909,18 +909,18 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         elif input_type == "variable":
             # Config loading normally resolves this path relative to its YAML and
             # snapshots the array. Expand variables here as well for direct callers.
-            if input_designs_path is not None:
-                input_designs_path = os.path.expandvars(
-                    os.path.expanduser(os.fspath(input_designs_path))
+            if input_path is not None:
+                input_path = os.path.expandvars(
+                    os.path.expanduser(os.fspath(input_path))
                 )
-                if not os.path.isabs(input_designs_path):
+                if not os.path.isabs(input_path):
                     raise ValueError(
-                        f"input_designs_path must be an absolute path, got: {input_designs_path}"
+                        f"input_path must be an absolute path, got: {input_path}"
                     )
-                if not os.path.exists(input_designs_path):
-                    raise FileNotFoundError(f"input_designs_path not found: {input_designs_path}")
+                if not os.path.exists(input_path):
+                    raise FileNotFoundError(f"input_path not found: {input_path}")
 
-                input_designs_array = np.load(input_designs_path)
+                input_designs_array = np.load(input_path)
                 # Convert to tensor
                 if isinstance(input_designs_array, torch.Tensor):
                     design_pts = input_designs_array.to(self.device, dtype=torch.float64)
@@ -994,7 +994,7 @@ class NumVisits(BaseExperiment, CosmologyMixin):
             )
 
         if design_pts is not None:
-            # Explicit designs (nominal or input_designs_path): use the points
+            # Explicit designs (nominal or input_path): use the points
             # directly. A bed.grid.Grid is a Cartesian product, so building one
             # from scattered points materializes prod(unique values per axis)
             # cells (e.g. ~6e8 for a wide 6-band set -> GPU OOM), and nothing in

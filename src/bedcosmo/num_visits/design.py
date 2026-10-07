@@ -2,7 +2,7 @@
 
 A Cartesian grid over the bands with an exact sum constraint is sparse or
 enormous depending on step size. This module builds explicit design arrays
-(``input_designs_path``) by combining:
+(``input_path``) by combining:
 
 1. All ratio-grid points that satisfy the budget exactly.
 2. Single-band floor/cap corners with proportional fill on the rest.
@@ -295,7 +295,7 @@ def write_design_args(
     """Write ``<name>.npy`` and the ``yaml_file`` that points at it; return both paths.
 
     Refuses to overwrite an existing YAML. The YAML stores an absolute
-    ``input_designs_path``, so moving the ``.npy`` afterwards breaks the YAML unless
+    ``input_path``, so moving the ``.npy`` afterwards breaks the YAML unless
     it is rewritten.
     """
     os.makedirs(out_dir, exist_ok=True)
@@ -313,7 +313,7 @@ def write_design_args(
         # "variable" + an explicit path bypasses step/lower/upper/sum entirely;
         # the file *is* the design pool.
         "input_type": "variable",
-        "input_designs_path": npy_path,  # absolute path required by the loader
+        "input_path": npy_path,  # absolute path required by the loader
     }
     with open(yaml_path, "w") as f:
         f.write(f"# {header}\n")

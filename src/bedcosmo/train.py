@@ -71,16 +71,16 @@ class Trainer:
             
             if design_args is not None and len(design_args) > 0:
                 input_type = design_args.get('input_type', 'variable')
-                input_designs_path = design_args.get('input_designs_path', None)
+                input_path = design_args.get('input_path', None)
                 
                 if input_type == "nominal":
                     print(f"Using nominal design as input design: {self.experiment.designs}")
-                elif input_designs_path is None:
+                elif input_path is None:
                     # Print design_args when designs are generated (not loaded from file)
                     print("Designs initialized with the following parameters:")
                     print(yaml.dump(design_args, default_flow_style=False, sort_keys=False))
                 else:
-                    print(f"Input designs loaded from numpy file: {input_designs_path}")
+                    print(f"Input designs loaded from numpy file: {input_path}")
                     print(f"Input designs: {self.experiment.designs[:10]}")
             else:
                 # Fallback: if design_args is None or empty, just print basic info
@@ -1081,6 +1081,9 @@ class Trainer:
         os.makedirs(artifacts_dir, exist_ok=True)
         
         if restart_run:
+            if self.run_args.get("design_cli_overrides"):
+                raise ValueError("--design-<field> overrides are not supported with --restart-id; "
+                                 "the restart reuses the source run's design_args.yaml")
             # Copy prior_args.yaml and design_args.yaml from restart run's artifacts
             restart_artifacts_dir = f"{self.storage_path}/mlruns/{self.restart_exp_id}/{self.restart_run_id}/artifacts"
             
@@ -1185,13 +1188,14 @@ class Trainer:
                 snapshot_design_args_config(
                     self.design_args_path,
                     design_args_artifact_path,
+                    overrides=self.run_args.get("design_cli_overrides"),
                 )
                 mlflow.log_artifact(design_args_artifact_path)
                 if self.verbose:
                     print(f"Saved design_args.yaml to artifacts: {design_args_artifact_path}")
 
     def _save_design_array(self):
-        """Save designs.npy to artifacts and update design_args.yaml with input_designs_path."""
+        """Save designs.npy to artifacts and update design_args.yaml with input_path."""
         artifacts_dir = f"{self.storage_path}/mlruns/{mlflow.active_run().info.experiment_id}/{mlflow.active_run().info.run_id}/artifacts"
         print(f"Saving designs to artifacts directory.")
 
@@ -1204,9 +1208,9 @@ class Trainer:
         design_args = self.run_args.get('design_args', {})
         if design_args is None:
             design_args = {}
-        design_args["input_designs_path"] = designs_artifact_path
+        design_args["input_path"] = designs_artifact_path
 
-        # Update design_args.yaml in artifacts with the input_designs_path
+        # Update design_args.yaml in artifacts with the input_path
         try:
             design_args_artifact_path = f"{artifacts_dir}/design_args.yaml"
             with open(design_args_artifact_path, 'w') as f:

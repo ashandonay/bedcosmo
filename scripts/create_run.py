@@ -13,7 +13,8 @@ the job, which attaches to this run (see bedcosmo.train._init_run) instead of cr
 Snapshotted artifacts:
   - prior_args.yaml   (from --prior-args-path, or from --prior-flow-path's run when set;
                        ``--prior-<field>`` CLI overrides are applied before freeze)
-  - design_args.yaml  (from --design-args-path)
+  - design_args.yaml  (from --design-args-path; ``--design-<field>`` CLI overrides are
+                       applied before freeze)
   - ref_cov.npy       (scaling mode only; the reference covariance, from --ref-cov or the dataset default)
   - emulators/<tracer_bin>.pt  (bao, when --likelihood-mode == emulator)
   - emulators/{mean,covar}/<tracer_bin>.pt  (shapefit, always emulator mode)
@@ -43,6 +44,7 @@ from bedcosmo.util import (
     apply_prior_cli_overrides,
     extract_run_info_from_checkpoint_path,
     get_experiment_config_path,
+    parse_design_cli_overrides,
     parse_prior_cli_overrides,
 )
 
@@ -64,6 +66,7 @@ def _parse_args():
     parser.add_argument("--prior-flow-path", type=str, default=None)
     parser.add_argument("--ref-cov", type=str, default=None)
     args, unknown = parser.parse_known_args()
+    args.design_cli_overrides, unknown = parse_design_cli_overrides(unknown)
     prior_overrides, _ = parse_prior_cli_overrides(unknown)
     args.prior_cli_overrides = prior_overrides
     return args
@@ -114,10 +117,11 @@ def _snapshot_design_args(args, artifacts_dir):
     frozen = snapshot_design_args_config(
         src,
         os.path.join(artifacts_dir, "design_args.yaml"),
+        overrides=args.design_cli_overrides,
     )
-    if frozen.get("input_designs_path") is not None:
+    if frozen.get("input_path") is not None:
         print(
-            f"Snapshotted explicit designs -> {frozen['input_designs_path']}",
+            f"Snapshotted explicit designs -> {frozen['input_path']}",
             file=sys.stderr,
         )
 

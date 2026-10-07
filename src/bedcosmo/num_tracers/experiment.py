@@ -373,7 +373,7 @@ class NumTracers(BaseExperiment, CosmologyMixin):
     @profile_method
     def init_designs(
         self,
-        input_designs_path=None,
+        input_path=None,
         step=0.05,
         lower=0.05,
         upper=None,
@@ -387,7 +387,7 @@ class NumTracers(BaseExperiment, CosmologyMixin):
         Initialize design space.
 
         Args:
-            input_designs_path: Path to numpy file containing designs
+            input_path: Path to numpy file containing designs
             step: Step size(s) for design grid (default: 0.05)
             lower: Lower bound(s) for each design variable (default: 0.05)
             upper: Upper bound(s) for each design variable (default: None)
@@ -409,16 +409,16 @@ class NumTracers(BaseExperiment, CosmologyMixin):
         if input_type == "nominal":
             design_pts = self.nominal_design.unsqueeze(0)  # Add batch dimension
         elif input_type == "variable":
-            # If input_designs_path is provided, load from path (assumed to be absolute)
-            if input_designs_path is not None:
-                if not os.path.isabs(input_designs_path):
+            # If input_path is provided, load from path (assumed to be absolute)
+            if input_path is not None:
+                if not os.path.isabs(input_path):
                     raise ValueError(
-                        f"input_designs_path must be an absolute path, got: {input_designs_path}"
+                        f"input_path must be an absolute path, got: {input_path}"
                     )
-                if not os.path.exists(input_designs_path):
-                    raise FileNotFoundError(f"input_designs_path not found: {input_designs_path}")
+                if not os.path.exists(input_path):
+                    raise FileNotFoundError(f"input_path not found: {input_path}")
 
-                input_designs_array = np.load(input_designs_path)
+                input_designs_array = np.load(input_path)
                 # Convert to tensor
                 design_pts = torch.tensor(
                     input_designs_array, device=self.device, dtype=torch.float64
