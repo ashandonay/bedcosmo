@@ -11,7 +11,7 @@
 #   python -m bedcosmo.num_visits.design --ratio-min 0 --ratio-max 2.0 --output ...
 labels: ["u", "g", "r", "i", "z", "y"]
 input_type: variable # variable or nominal
-input_path: $SCRATCH/bedcosmo/num_visits/designs/designs_100_20260625_162938.npy
+input_path: $SCRATCH/bedcosmo/num_visits/designs/designs_100_20260625_162938
 # Grid fields below are ignored when input_path is set.
 step: null
 lower: null
