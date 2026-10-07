@@ -25,14 +25,11 @@ Example::
     python -m bedcosmo.num_tracers.design scaled --scales 1.00 1.05 1.10 1.15 1.20 1.25
     python -m bedcosmo.num_tracers.design pool --sum-lower 1.0 --sum-upper 1.25
 
-Outputs land in two places: a design directory
-``$SCRATCH/bedcosmo/num_tracers/designs/<name>/`` (``--designs-dir``) holding
-``designs.npy``, its plot ``designs.png`` and ``provenance.json`` (command, args, git
-commit, checksum), matching ``bedcosmo.num_visits.design``, while the
-``design_args_<name>.yaml`` whose ``input_path`` points at that directory goes to the
-experiment config dir (``--out-dir``) so ``--design-args-path`` can find it. The YAML
-stores an absolute ``input_path``, so relocating the directory afterwards requires
-rewriting the YAML.
+Output is a design directory ``$SCRATCH/bedcosmo/num_tracers/designs/<name>/``
+(``--designs-dir``) holding ``designs.npy``, its plot ``designs.png`` and
+``provenance.json`` (command, args, git commit, checksum), matching
+``bedcosmo.num_visits.design``. Point a design_args YAML's ``input_path`` at the
+directory, or pass ``--design-input-path <dir>`` at submission.
 """
 from __future__ import annotations
 
@@ -44,9 +41,8 @@ from datetime import datetime
 from typing import Iterable, Sequence
 
 import numpy as np
-import yaml
 
-from bedcosmo.artifacts import DESIGN_PLOT_FILENAME, DESIGN_PROVENANCE_FILENAME, write_design_dir
+from bedcosmo.artifacts import DESIGN_PLOT_FILENAME, write_design_dir
 
 LABELS = ["BGS", "LRG", "ELG", "QSO"]
 # Mirror NumTracers: DESI CSVs live under $HOME/data/desi/bao_<dataset>/
@@ -198,52 +194,6 @@ def _validate_pool(pool: np.ndarray, sum_lower: float, sum_upper: float) -> None
         raise AssertionError("non-positive class fraction in pool")
 
 
-def write_design_args(
-    designs: np.ndarray,
-    name: str,
-    out_dir: str,
-    header: str,
-    provenance: dict,
-    yaml_file: str | None = None,
-    designs_dir: str | None = None,
-) -> tuple[str, str]:
-    """Write the design dir ``<designs_dir>/<name>/`` and its ``design_args_*.yaml``;
-    return both paths.
-
-    The two land in different places by default, because they play different roles:
-    the design dir is bulk data (``designs_dir``, default ``$SCRATCH/.../designs``,
-    mirroring ``bedcosmo.num_visits.design``), while the YAML is config that
-    ``--design-args-path`` resolves against the experiment config dir (``out_dir``). The
-    YAML always stores the dir's absolute path as ``input_path``, so the two may live
-    anywhere relative to each other -- but moving the dir afterwards breaks the YAML
-    unless it is rewritten.
-
-    ``yaml_file`` is the YAML file name (default ``design_args_<name>.yaml``). An
-    existing YAML or design dir is never overwritten.
-    """
-    os.makedirs(out_dir, exist_ok=True)
-    yaml_path = os.path.abspath(
-        os.path.join(out_dir, yaml_file or f"design_args_{name}.yaml")
-    )
-    if os.path.exists(yaml_path):
-        raise FileExistsError(
-            f"{yaml_path} already exists; pick another --yaml/--name or remove it first"
-        )
-
-    design_dir = write_design_dir(designs_dir or _designs_dir(), name, designs, provenance)
-    design_args = {
-        "labels": LABELS,
-        # "variable" + an explicit path bypasses step/lower/upper/sum entirely;
-        # the array *is* the design pool.
-        "input_type": "variable",
-        "input_path": str(design_dir),  # absolute path required by the loader
-    }
-    with open(yaml_path, "w") as f:
-        f.write(f"# {header}\n")
-        f.write(f"# Provenance: {design_dir / DESIGN_PROVENANCE_FILENAME}\n")
-        yaml.safe_dump(design_args, f, sort_keys=False)
-    return str(design_dir), yaml_path
-
 
 def plot_designs(
     designs: np.ndarray, out_path: str, cmap: str = "viridis", title: str = ""
@@ -348,13 +298,6 @@ def plot_designs(
     plt.close(fig)
 
 
-def _default_out_dir() -> str:
-    """Experiment config dir, so generated design_args sit beside the hand-written ones."""
-    from bedcosmo.util import get_experiment_config_path
-
-    return os.path.dirname(str(get_experiment_config_path("num_tracers", "train_args.yaml")))
-
-
 def _designs_dir() -> str:
     """Scratch dir for design arrays, mirroring ``bedcosmo.num_visits.design``."""
     scratch = os.environ.get("SCRATCH", "/pscratch/sd/a/ashandon")
@@ -375,32 +318,18 @@ def _cmd_scaled(args: argparse.Namespace) -> np.ndarray:
         tag = scale_tag(s)
         design = uniform_scaled(v0, s)
         rows.append(design)
-        design_dir, yaml_path = write_design_args(
-            design,
-            f"nominal_scaled_p{tag}",
-            args.out_dir,
-            header=f"Uniform nominal scaling x{s:g} (design sum == {s:g})",
-            provenance={**args._provenance, "scale": s},
-            # Existing convention: nominal_scaled_pNN/ <-> design_args_nominal_pNN.yaml
-            yaml_file=f"design_args_nominal_p{tag}.yaml",
-            designs_dir=args.designs_dir,
+        design_dir = write_design_dir(
+            args.designs_dir, f"nominal_scaled_p{tag}", design, {**args._provenance, "scale": s}
         )
         print(f"s={s:<5g} tag={tag}  sum={design.sum():.4f}  "
               f"design={np.round(design, 4).tolist()}")
         print(f"           wrote {design_dir}")
-        print(f"           wrote design_args -> {yaml_path}")
         # One plot per design, in its own design dir.
         args._plots.append((design_dir, design.reshape(1, -1), f"Nominal x{s:g}"))
     return np.array(rows)
 
 
 def _cmd_pool(args: argparse.Namespace) -> np.ndarray:
-    if args.yaml is not None and (
-        os.path.basename(args.yaml) != args.yaml or not args.yaml.endswith(".yaml")
-    ):
-        raise ValueError(
-            f"--yaml must be a bare *.yaml file name (use --out-dir for the dir), got {args.yaml}"
-        )
     scales = args.include_scales if args.include_scales else None
     pool = budget_pool(
         sum_lower=args.sum_lower,
@@ -420,21 +349,9 @@ def _cmd_pool(args: argparse.Namespace) -> np.ndarray:
     else:
         span = f"{args.sum_lower:g}_{args.sum_upper:g}".replace(".", "p")
         name = f"pool_sum{span}_{pool.shape[0]}_{_timestamp()}"
-    design_dir, yaml_path = write_design_args(
-        pool,
-        name,
-        args.out_dir,
-        header=(
-            f"Budget pool: sum in [{args.sum_lower:g}, {args.sum_upper:g}], "
-            f"{pool.shape[0]} designs"
-        ),
-        provenance=args._provenance,
-        yaml_file=args.yaml,
-        designs_dir=args.designs_dir,
-    )
+    design_dir = write_design_dir(args.designs_dir, name, pool, args._provenance)
     total = pool.sum(axis=1)
     print(f"wrote {pool.shape[0]} designs -> {design_dir}")
-    print(f"wrote design_args -> {yaml_path}")
     print(f"grid step:  {list(args.step)}")
     print(f"grid lower: {list(args.lower)}  (inclusive)")
     print(f"grid upper: {list(args.upper)}  (exclusive)")
@@ -461,10 +378,6 @@ def main(argv: list[str] | None = None) -> np.ndarray:
     )
     parser.add_argument("--dataset", default="dr1", help="DESI dataset suffix (default: dr1)")
     parser.add_argument(
-        "--out-dir", default=None,
-        help="Dir for the design_args_*.yaml (default: experiment config dir)",
-    )
-    parser.add_argument(
         "--designs-dir", default=None,
         help="Parent dir for the <name>/ design dirs (default: $SCRATCH/bedcosmo/num_tracers/designs)",
     )
@@ -484,14 +397,9 @@ def main(argv: list[str] | None = None) -> np.ndarray:
     p_pool.add_argument("--sum-upper", type=float, default=1.25, help="Max design sum (budget)")
     p_pool.add_argument(
         "--name", default=None,
-        help="Names the design dir <name>/ and the design_args_<name>.yaml. Default is "
-             "date-stamped (pool_sum<lo>_<hi>_<n>_<YYYYMMDD_HHMMSS>) so builds accumulate; "
-             "pass --name for a stable name",
-    )
-    p_pool.add_argument(
-        "--yaml", default=None,
-        help="File name for the design_args YAML in --out-dir, e.g. design_args_budget.yaml "
-             "(default: design_args_<name>.yaml). Must not already exist",
+        help="Names the design dir <name>/. Default is date-stamped "
+             "(pool_sum<lo>_<hi>_<n>_<YYYYMMDD_HHMMSS>) so builds accumulate; "
+             "pass --name for a stable name. An existing dir is never overwritten",
     )
     p_pool.add_argument(
         "--include-scales", type=float, nargs="*", default=None,
@@ -527,8 +435,6 @@ def main(argv: list[str] | None = None) -> np.ndarray:
         "args": {k: v for k, v in vars(args).items() if k != "func"},
         "labels": LABELS,
     }
-    if args.out_dir is None:
-        args.out_dir = _default_out_dir()
     if args.designs_dir is None:
         args.designs_dir = _designs_dir()
 

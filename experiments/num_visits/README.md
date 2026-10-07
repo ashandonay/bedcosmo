@@ -49,19 +49,20 @@ These are useful for low-dimensional visualization or faster exploratory runs.
 
 ### Generating explicit design pools (`bedcosmo.num_visits.design`)
 
-For a fixed-budget pool too sparse or too large for a Cartesian grid, generate explicit designs. The generator writes a design directory `$SCRATCH/bedcosmo/num_visits/designs/<name>/` and a matching `design_args_<name>.yaml` to this directory, ready for `--design-args-path`. The YAML's `input_path` is the design directory, which holds:
+For a fixed-budget pool too sparse or too large for a Cartesian grid, generate explicit designs. The generator writes a design directory `$SCRATCH/bedcosmo/num_visits/designs/<name>/` holding:
 
 - `designs.npy`: the design array
 - `designs.png`: a parallel-coordinates plot
 - `provenance.json`: the command and parsed args, git commit and dirty flag, creation time, bands, nominal, budget, per-band bounds, array shape and sha256
 
-A training run copies `provenance.json` into its artifacts as `design_provenance.json`, beside the frozen `designs.npy`.
+To use it, point a design_args YAML's `input_path` at the directory (as `design_args.yaml` does for `ugrizy_100`), or pass it at submission. For a band subset, also pass `--design-labels` in the array's column order; the generator prints the exact flags. A training run copies `provenance.json` into its artifacts as `design_provenance.json`, beside the frozen `designs.npy`.
 
 ```bash
-python -m bedcosmo.num_visits.design --bands gri --n-target 100 --ratio-min 0.7 --ratio-max 1.3
+python -m bedcosmo.num_visits.design --bands gri --n-target 100 --ratio-min 0.7 --ratio-max 1.3 --name gri_100
+./submit.sh train num_visits empirical --design-input-path $SCRATCH/bedcosmo/num_visits/designs/gri_100 --design-labels [g,r,i]
 ```
 
-Every design sums to exactly the nominal total of the chosen bands, uses multiples of 10 visits, keeps each band within `[ratio_min, ratio_max] x nominal`, and includes the nominal design. The YAML's `labels` are the bands in array-column order, and its header points at the `provenance.json`.
+Every design sums to exactly the nominal total of the chosen bands, uses multiples of 10 visits, keeps each band within `[ratio_min, ratio_max] x nominal`, and includes the nominal design.
 
 | Flag | Default | Effect |
 |------|---------|--------|
@@ -71,9 +72,8 @@ Every design sums to exactly the nominal total of the chosen bands, uses multipl
 | `--n-levels` | 3 | Levels per band in the ratio grid |
 | `--seed` | 0 | RNG seed for random fill / subsample |
 | `--no-corners` | off | Skip single-band floor/cap corner designs |
-| `--name` | `<bands>_<n>_<YYYYMMDD_HHMMSS>` | Names the design directory `<name>/` and `design_args_<name>.yaml`; refuses to overwrite an existing directory |
-| `--yaml` | `design_args_<name>.yaml` | YAML file name in `--out-dir`, e.g. `design_args_extreme.yaml`; refuses to overwrite an existing file |
-| `--out-dir` / `--designs-dir` | this dir / `$SCRATCH/bedcosmo/num_visits/designs` | Where the YAML / the design directory goes |
+| `--name` | `<bands>_<n>_<YYYYMMDD_HHMMSS>` | Names the design directory `<name>/`; refuses to overwrite an existing directory |
+| `--designs-dir` | `$SCRATCH/bedcosmo/num_visits/designs` | Parent of the design directory |
 
 ## Parameters (`prior_args.yaml`)
 
