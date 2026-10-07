@@ -1723,6 +1723,9 @@ def _coerce_train_arg_override(key, value, yaml_default):
             if os.environ.get("RANK", "0") == "0":
                 print(f"Warning: Could not parse '{key}' as JSON object: {e}. Keeping default value.")
             return yaml_default
+    if key == "emulator_covariance" and value.startswith("{"):
+        # num_tracers: 'cosmology' | 'fiducial' | a JSON {parameter: value} cosmology.
+        return json.loads(value)
     if not isinstance(yaml_default, float):
         return value
     return value
