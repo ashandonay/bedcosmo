@@ -25,13 +25,13 @@ The Bayesian experimental design problem has three components:
 
 ## Design Space (`design_args.yaml`)
 
-The design configuration controls which filters are varied and how the grid of candidate designs is built.
+The design configuration controls which filters are varied and how the grid of candidate designs is built. The default `design_args.yaml` sets no grid: its `input_path` is the `ugrizy_100` design directory (100 designs summing to 1030 visits, each band within 0.75–1.25x nominal; see [Generating explicit design pools](#generating-explicit-design-pools-bedcosmonum_visitsdesign)). The grid fields below are used by the variant files.
 
 | Field                | Type              | Description |
 |----------------------|-------------------|-------------|
 | `labels`             | list of strings   | Filter bands in the experiment (e.g. `["u","g","r","i","z","y"]`), in design-column order. Filters not listed are not observed at all: the forward model, nominal design and flow context only cover the listed bands. |
 | `input_type`         | string            | `"variable"` builds a grid over the bands; `"nominal"` uses a single fixed design equal to the fiducial visit counts. |
-| `input_path` | string or null    | Absolute path to a `.npy` file of explicit design points (shape `(n_designs, n_filters)`). When set, the grid parameters below are ignored. The old name `input_designs_path` is still accepted. |
+| `input_path` | string or null    | Absolute path to a design directory (holding `designs.npy`, as written by the generator below) or to a `.npy` file of explicit design points (shape `(n_designs, n_filters)`). When set, the grid parameters below are ignored. The old name `input_designs_path` is still accepted. |
 | `step`               | float or list     | Grid spacing for each filter. A scalar applies to all filters; a list sets per-filter spacing. |
 | `lower`              | float or list     | Lower bound on visits for each filter (scalar or per-filter list). |
 | `upper`              | float or list     | Upper bound on visits for each filter (scalar or per-filter list). |
@@ -49,13 +49,20 @@ These are useful for low-dimensional visualization or faster exploratory runs.
 
 ### Generating explicit design pools (`bedcosmo.num_visits.design`)
 
-For a fixed-budget pool too sparse or too large for a Cartesian grid, generate explicit designs. The generator writes the `.npy` (plus a parallel-coordinates `.png`) to `$SCRATCH/bedcosmo/num_visits/designs/` and a matching `design_args_<name>.yaml` to this directory, ready for `--design-args-path`:
+For a fixed-budget pool too sparse or too large for a Cartesian grid, generate explicit designs. The generator writes a design directory `$SCRATCH/bedcosmo/num_visits/designs/<name>/` holding:
+
+- `designs.npy`: the design array
+- `designs.png`: a parallel-coordinates plot
+- `provenance.json`: the command and parsed args, git commit and dirty flag, creation time, bands, nominal, budget, per-band bounds, array shape and sha256
+
+To use it, point a design_args YAML's `input_path` at the directory (as `design_args.yaml` does for `ugrizy_100`), or pass it at submission. For a band subset, also pass `--design-labels` in the array's column order; the generator prints the exact flags. A training run copies `provenance.json` into its artifacts as `design_provenance.json`, beside the frozen `designs.npy`.
 
 ```bash
-python -m bedcosmo.num_visits.design --bands gri --n-target 100 --ratio-min 0.7 --ratio-max 1.3
+python -m bedcosmo.num_visits.design --bands gri --n-target 100 --ratio-min 0.7 --ratio-max 1.3 --name gri_100
+./submit.sh train num_visits empirical --design-input-path $SCRATCH/bedcosmo/num_visits/designs/gri_100 --design-labels [g,r,i]
 ```
 
-Every design sums to exactly the nominal total of the chosen bands, uses multiples of 10 visits, keeps each band within `[ratio_min, ratio_max] x nominal`, and includes the nominal design. The YAML's `labels` are the bands in array-column order, and its header records the command that regenerates it.
+Every design sums to exactly the nominal total of the chosen bands, uses multiples of 10 visits, keeps each band within `[ratio_min, ratio_max] x nominal`, and includes the nominal design.
 
 | Flag | Default | Effect |
 |------|---------|--------|
@@ -65,9 +72,8 @@ Every design sums to exactly the nominal total of the chosen bands, uses multipl
 | `--n-levels` | 3 | Levels per band in the ratio grid |
 | `--seed` | 0 | RNG seed for random fill / subsample |
 | `--no-corners` | off | Skip single-band floor/cap corner designs |
-| `--name` | `<bands>_<n>_<YYYYMMDD_HHMMSS>` | Names `<name>.npy` and `design_args_<name>.yaml` |
-| `--yaml` | `design_args_<name>.yaml` | YAML file name in `--out-dir`, e.g. `design_args_extreme.yaml`; refuses to overwrite an existing file |
-| `--out-dir` / `--designs-dir` / `--plot` | this dir / `$SCRATCH/...` / beside `.npy` | Output locations |
+| `--name` | `<bands>_<n>_<YYYYMMDD_HHMMSS>` | Names the design directory `<name>/`; refuses to overwrite an existing directory |
+| `--designs-dir` | `$SCRATCH/bedcosmo/num_visits/designs` | Parent of the design directory |
 
 ## Parameters (`prior_args.yaml`)
 

@@ -68,8 +68,6 @@ def build_experiment(device: str = "cpu") -> NumVisits:
         verbose=False,
     )
     exp.init_prior(parameters=prior_args["parameters"], cosmo_model="bbt")
-    keys = ("input_type", "step", "lower", "upper", "sum_lower", "sum_upper", "labels")
-    exp.init_designs(**{k: v for k, v in design_args.items() if k in keys})
     return exp
 
 

@@ -6,7 +6,11 @@ import numpy as np
 import pytest
 import yaml
 
-from bedcosmo.artifacts import resolve_design_args_input_path, snapshot_design_args_config
+from bedcosmo.artifacts import (
+    resolve_design_args_input_path,
+    resolve_design_input_path,
+    snapshot_design_args_config,
+)
 from bedcosmo.util import finalize_train_run_args, parse_design_cli_overrides
 
 
@@ -158,3 +162,30 @@ def test_snapshot_old_key_yaml_accepts_input_path_override(tmp_path):
     frozen = yaml.safe_load(destination_yaml.read_text())
     assert "input_designs_path" not in frozen
     np.testing.assert_array_equal(np.load(frozen["input_path"]), designs)
+
+
+def test_snapshot_design_dir_freezes_array_and_provenance(tmp_path):
+    design_dir = tmp_path / "designs" / "pool"
+    design_dir.mkdir(parents=True)
+    designs = np.arange(6, dtype=float).reshape(3, 2)
+    np.save(design_dir / "designs.npy", designs)
+    (design_dir / "provenance.json").write_text('{"command": "python -m gen"}\n')
+    source_yaml = tmp_path / "design_args.yaml"
+    source_yaml.write_text(f"input_type: variable\ninput_path: {design_dir}\n")
+    destination_yaml = tmp_path / "artifacts" / "design_args.yaml"
+
+    snapshot_design_args_config(source_yaml, destination_yaml)
+
+    frozen = yaml.safe_load(destination_yaml.read_text())
+    assert frozen["input_path"] == str((tmp_path / "artifacts" / "designs.npy").resolve())
+    np.testing.assert_array_equal(np.load(frozen["input_path"]), designs)
+    assert (tmp_path / "artifacts" / "design_provenance.json").read_text() == '{"command": "python -m gen"}\n'
+
+
+def test_resolve_design_input_path_expands_dir_with_env_var(monkeypatch, tmp_path):
+    # Experiments call this directly, so a raw "$SCRATCH/.../<dir>" from a YAML loads.
+    (tmp_path / "pool").mkdir()
+    monkeypatch.setenv("DESIGN_ROOT", str(tmp_path))
+
+    assert resolve_design_input_path("$DESIGN_ROOT/pool") == str((tmp_path / "pool" / "designs.npy").resolve())
+    assert resolve_design_input_path(None) is None

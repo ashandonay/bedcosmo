@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import glob
+import hashlib
 import json
 import os
 import shutil
+import subprocess
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional, Sequence
@@ -17,17 +19,81 @@ import yaml
 # Design args snapshot
 # ---------------------------------------------------------------------------
 
+# A design directory (``input_path``) holds the array, its plot and how it was made.
+DESIGNS_FILENAME = "designs.npy"
+DESIGN_PLOT_FILENAME = "designs.png"
+DESIGN_PROVENANCE_FILENAME = "provenance.json"
+# Name of the provenance copy frozen into a run's artifacts beside designs.npy.
+DESIGN_PROVENANCE_ARTIFACT = "design_provenance.json"
+
+
+def _git_state() -> dict:
+    """Commit and dirty flag of the bedcosmo checkout that generated a design."""
+    repo = Path(__file__).resolve().parents[2]
+
+    def git(*cmd):
+        return subprocess.run(
+            ["git", "-C", str(repo), *cmd], check=True, capture_output=True, text=True
+        ).stdout.strip()
+
+    return {
+        "commit": git("rev-parse", "HEAD"),
+        "dirty": bool(git("status", "--porcelain", "--untracked-files=no")),
+    }
+
+
+def write_design_dir(
+    designs_dir: str | Path, name: str, designs: np.ndarray, provenance: dict
+) -> Path:
+    """Create ``<designs_dir>/<name>/`` with ``designs.npy`` and ``provenance.json``.
+
+    ``provenance`` is the generator's own record (command, args, derived bounds);
+    the creation time, git state, array shape and sha256 are added here. An
+    existing directory is never overwritten.
+    """
+    design_dir = Path(designs_dir).expanduser().resolve() / name
+    design_dir.mkdir(parents=True, exist_ok=False)
+    npy_path = design_dir / DESIGNS_FILENAME
+    np.save(npy_path, designs)
+    document = {
+        "created": datetime.now().isoformat(timespec="seconds"),
+        "git": _git_state(),
+        "shape": list(designs.shape),
+        "sha256": hashlib.sha256(npy_path.read_bytes()).hexdigest(),
+        **provenance,
+    }
+    (design_dir / DESIGN_PROVENANCE_FILENAME).write_text(json.dumps(document, indent=2) + "\n")
+    return design_dir
+
+
+def resolve_design_input_path(raw, config_path: str | Path | None = None) -> str | None:
+    """Resolve a design ``input_path`` to an absolute ``.npy`` path.
+
+    Environment variables and ``~`` are expanded. Relative paths are anchored to
+    the directory containing ``config_path`` (the YAML), or to the current
+    directory without one. A design directory resolves to its ``designs.npy``.
+    """
+    if raw in (None, ""):
+        return None
+    expanded = os.path.expandvars(os.path.expanduser(os.fspath(raw)))
+    if "$" in expanded:
+        raise ValueError(f"input_path contains an undefined environment variable: {raw}")
+    path = Path(expanded)
+    if not path.is_absolute():
+        base = Path(config_path).expanduser().resolve().parent if config_path else Path.cwd()
+        path = base / path
+    if path.is_dir():
+        path = path / DESIGNS_FILENAME
+    return str(path.resolve())
+
 
 def resolve_design_args_input_path(
     design_args: dict | None,
     config_path: str | Path | None = None,
 ) -> dict | None:
-    """Resolve ``input_path`` from a design-arguments document.
-
-    Environment variables and ``~`` are expanded. Relative paths are anchored
-    to the directory containing the YAML file, or to the current directory when
-    the arguments were supplied directly as a dictionary. The pre-rename key
-    ``input_designs_path`` (old runs' artifacts and YAMLs) is read as ``input_path``.
+    """Resolve ``input_path`` in a design-arguments document (see
+    :func:`resolve_design_input_path`). The pre-rename key ``input_designs_path``
+    (old runs' artifacts and YAMLs) is read as ``input_path``.
     """
     if design_args is None:
         return None
@@ -36,19 +102,8 @@ def resolve_design_args_input_path(
         if "input_path" in resolved:
             raise ValueError("design_args sets both input_path and its old name input_designs_path")
         resolved["input_path"] = resolved.pop("input_designs_path")
-    raw = resolved.get("input_path")
-    if raw in (None, ""):
-        return resolved
-    expanded = os.path.expandvars(os.path.expanduser(os.fspath(raw)))
-    if "$" in expanded:
-        raise ValueError(
-            f"input_path contains an undefined environment variable: {raw}"
-        )
-    path = Path(expanded)
-    if not path.is_absolute():
-        base = Path(config_path).expanduser().resolve().parent if config_path else Path.cwd()
-        path = base / path
-    resolved["input_path"] = str(path.resolve())
+    if resolved.get("input_path") not in (None, ""):
+        resolved["input_path"] = resolve_design_input_path(resolved["input_path"], config_path)
     return resolved
 
 
@@ -58,6 +113,9 @@ def snapshot_design_args_config(
     overrides: dict | None = None,
 ) -> dict:
     """Freeze a design YAML and its referenced array into an artifact directory.
+
+    A ``provenance.json`` beside the array (a design directory) is frozen as
+    ``design_provenance.json``; loose ``.npy`` files have none.
 
     ``overrides`` (from ``--design-<field>`` CLI flags) replace existing YAML
     fields before the freeze. An overridden relative ``input_path`` is
@@ -87,6 +145,9 @@ def snapshot_design_args_config(
         destination_path.parent.mkdir(parents=True, exist_ok=True)
         if input_path.resolve() != frozen_path.resolve():
             shutil.copy2(input_path, frozen_path)
+            provenance = input_path.parent / DESIGN_PROVENANCE_FILENAME
+            if provenance.is_file():
+                shutil.copy2(provenance, destination_path.parent / DESIGN_PROVENANCE_ARTIFACT)
         design_args["input_path"] = str(frozen_path.resolve())
 
     destination_path.parent.mkdir(parents=True, exist_ok=True)

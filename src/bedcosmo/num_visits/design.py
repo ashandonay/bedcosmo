@@ -17,11 +17,11 @@ Example::
 
     python -m bedcosmo.num_visits.design --bands gri --n-target 100
 
-Outputs land in two places: the design array (and its plot) goes to
-``$SCRATCH/bedcosmo/num_visits/designs/<name>.npy`` (``--designs-dir``), while the
-``design_args_<name>.yaml`` (or ``--yaml``) that points at it goes to the experiment
-config dir (``--out-dir``) so ``--design-args-path`` can find it. The YAML's ``labels`` list the
-bands in column order of the array.
+Output is a design directory ``$SCRATCH/bedcosmo/num_visits/designs/<name>/``
+(``--designs-dir``) holding ``designs.npy``, its plot ``designs.png`` and
+``provenance.json`` (command, args, git commit, bounds, checksum). Point a design_args
+YAML's ``input_path`` at the directory, or pass ``--design-input-path <dir>`` (plus
+``--design-labels`` for a band subset, in the array's column order) at submission.
 """
 from __future__ import annotations
 
@@ -33,8 +33,8 @@ from datetime import datetime
 from typing import Iterable, Sequence
 
 import numpy as np
-import yaml
 
+from bedcosmo.artifacts import DESIGN_PLOT_FILENAME, write_design_dir
 from bedcosmo.num_visits.experiment import fiducial_nvisits
 
 BANDS = list(fiducial_nvisits)
@@ -282,45 +282,6 @@ def _validate_designs(
         raise AssertionError("nominal design missing from output")
 
 
-def write_design_args(
-    visits: np.ndarray,
-    bands: Sequence[str],
-    name: str,
-    yaml_file: str,
-    out_dir: str,
-    designs_dir: str,
-    header: str,
-    command: str,
-) -> tuple[str, str]:
-    """Write ``<name>.npy`` and the ``yaml_file`` that points at it; return both paths.
-
-    Refuses to overwrite an existing YAML. The YAML stores an absolute
-    ``input_path``, so moving the ``.npy`` afterwards breaks the YAML unless
-    it is rewritten.
-    """
-    os.makedirs(out_dir, exist_ok=True)
-    os.makedirs(designs_dir, exist_ok=True)
-    npy_path = os.path.abspath(os.path.join(designs_dir, f"{name}.npy"))
-    yaml_path = os.path.abspath(os.path.join(out_dir, yaml_file))
-    if os.path.exists(yaml_path):
-        raise FileExistsError(
-            f"{yaml_path} already exists; pick another --yaml/--name or remove it first"
-        )
-
-    np.save(npy_path, visits)
-    design_args = {
-        "labels": list(bands),
-        # "variable" + an explicit path bypasses step/lower/upper/sum entirely;
-        # the file *is* the design pool.
-        "input_type": "variable",
-        "input_path": npy_path,  # absolute path required by the loader
-    }
-    with open(yaml_path, "w") as f:
-        f.write(f"# {header}\n")
-        f.write(f"# Regenerate with:\n#   {command}\n")
-        yaml.safe_dump(design_args, f, sort_keys=False, default_flow_style=None)
-    return npy_path, yaml_path
-
 
 def plot_designs(
     visits: np.ndarray,
@@ -340,8 +301,7 @@ def plot_designs(
     n_designs, n_dims = visits.shape
     x = np.arange(n_dims)
     nominal = nominal_visits(bands)
-    lower, cap = ratio_bounds(nominal, ratio_min, ratio_max)
-    cap = cap.astype(float)
+    cap = ratio_bounds(nominal, ratio_min, ratio_max)[1].astype(float)
 
     fig, ax = plt.subplots(figsize=(10, 6))
     norm = visits / cap[None, :]
@@ -363,8 +323,6 @@ def plot_designs(
     ax.set_ylabel(f"visits / ({ratio_max:.2f}x nominal)", fontsize=12)
     for xi in range(n_dims):
         ax.axvline(xi, color="0.85", linewidth=0.8, zorder=0)
-        ax.text(xi, 1.045, f"{int(cap[xi])}", ha="center", va="bottom", fontsize=8, color="0.4")
-        ax.text(xi, -0.055, f"{int(lower[xi])}", ha="center", va="top", fontsize=8, color="0.4")
 
     ax.set_title(
         f"NumVisits design space: {n_designs} designs, all summing to {int(nominal.sum())} visits",
@@ -381,13 +339,6 @@ def plot_designs(
     plt.close(fig)
 
 
-def _default_out_dir() -> str:
-    """Experiment config dir, so generated design_args sit beside the hand-written ones."""
-    from bedcosmo.util import get_experiment_config_path
-
-    return os.path.dirname(str(get_experiment_config_path("num_visits", "train_args.yaml")))
-
-
 def _designs_dir() -> str:
     scratch = os.environ.get("SCRATCH", "/pscratch/sd/a/ashandon")
     return os.path.join(scratch, "bedcosmo", "num_visits", "designs")
@@ -401,23 +352,13 @@ def main(argv: list[str] | None = None) -> np.ndarray:
     )
     parser.add_argument(
         "--name", default=None,
-        help="Names <name>.npy and, unless --yaml is given, design_args_<name>.yaml "
-             "(default: <bands>_<n>_<YYYYMMDD_HHMMSS>)",
-    )
-    parser.add_argument(
-        "--yaml", default=None,
-        help="File name for the design_args YAML in --out-dir, e.g. design_args_extreme.yaml "
-             "(default: design_args_<name>.yaml). Must not already exist",
-    )
-    parser.add_argument(
-        "--out-dir", default=None,
-        help="Dir for the design_args_*.yaml (default: experiment config dir)",
+        help="Names the design dir <name>/ (default: <bands>_<n>_<YYYYMMDD_HHMMSS>); "
+             "an existing dir is never overwritten",
     )
     parser.add_argument(
         "--designs-dir", default=None,
-        help="Dir for the design .npy (default: $SCRATCH/bedcosmo/num_visits/designs)",
+        help="Parent dir for the <name>/ design dir (default: $SCRATCH/bedcosmo/num_visits/designs)",
     )
-    parser.add_argument("--plot", default=None, help="Parallel-coordinates .png path (default: beside the .npy)")
     parser.add_argument("--n-target", type=int, default=100, help="Target number of designs")
     parser.add_argument("--ratio-min", type=float, default=0.75, help="Lower ratio limit (all bands)")
     parser.add_argument("--ratio-max", type=float, default=1.25, help="Upper ratio limit (all bands)")
@@ -426,10 +367,6 @@ def main(argv: list[str] | None = None) -> np.ndarray:
     parser.add_argument("--no-corners", action="store_true", help="Skip single-band floor/cap corners")
     argv = sys.argv[1:] if argv is None else argv
     args = parser.parse_args(argv)
-    if args.yaml is not None and (
-        os.path.basename(args.yaml) != args.yaml or not args.yaml.endswith(".yaml")
-    ):
-        parser.error(f"--yaml must be a bare *.yaml file name (use --out-dir for the dir), got {args.yaml}")
 
     bands = list(args.bands)
     nominal = nominal_visits(bands)
@@ -448,23 +385,25 @@ def main(argv: list[str] | None = None) -> np.ndarray:
     name = args.name or (
         f"{''.join(bands)}_{visits.shape[0]}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     )
-    npy_path, yaml_path = write_design_args(
-        visits,
-        bands,
+    lower, upper = ratio_bounds(nominal, args.ratio_min, args.ratio_max)
+    design_dir = write_design_dir(
+        args.designs_dir or _designs_dir(),
         name,
-        yaml_file=args.yaml or f"design_args_{name}.yaml",
-        out_dir=args.out_dir or _default_out_dir(),
-        designs_dir=args.designs_dir or _designs_dir(),
-        header=(
-            f"{visits.shape[0]} designs over {bands}, each summing to exactly {budget} "
-            f"visits, every band within {args.ratio_min:g}-{args.ratio_max:g}x nominal."
-        ),
-        command=f"python -m bedcosmo.num_visits.design {shlex.join(argv)}".rstrip(),
+        visits,
+        {
+            "generator": "bedcosmo.num_visits.design",
+            "command": f"python -m bedcosmo.num_visits.design {shlex.join(argv)}".rstrip(),
+            "args": vars(args),
+            "labels": bands,
+            "nominal": nominal.tolist(),
+            "budget": budget,
+            "lower": lower.tolist(),
+            "upper": upper.tolist(),
+        },
     )
 
-    lower, upper = ratio_bounds(nominal, args.ratio_min, args.ratio_max)
     print(f"bands: {bands}  nominal: {nominal.tolist()}")
-    print(f"wrote {visits.shape[0]} designs -> {npy_path}")
+    print(f"wrote {visits.shape[0]} designs -> {design_dir}")
     print(f"all sum to {budget}: {bool(np.all(visits.sum(1) == budget))}")
     print(f"ratio range [{args.ratio_min}, {args.ratio_max}]")
     print("per-band min:", visits.min(0).astype(int).tolist())
@@ -473,11 +412,11 @@ def main(argv: list[str] | None = None) -> np.ndarray:
     print("per-band upper bound:", upper.astype(int).tolist())
     print("nominal present:", any(np.all(visits == nominal, axis=1)))
 
-    plot_path = os.path.abspath(args.plot or os.path.splitext(npy_path)[0] + ".png")
+    plot_path = os.path.join(design_dir, DESIGN_PLOT_FILENAME)
     plot_designs(visits, bands, plot_path, ratio_min=args.ratio_min, ratio_max=args.ratio_max)
     print(f"wrote design-space plot -> {plot_path}")
-    print(f"\nwrote design_args -> {yaml_path}")
-    print(f"train with: --design-args-path {os.path.basename(yaml_path)}")
+    labels = "" if bands == BANDS else f" --design-labels [{','.join(bands)}]"
+    print(f"\ntrain with: --design-input-path {design_dir}{labels}")
     return visits
 
 

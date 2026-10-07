@@ -24,6 +24,7 @@ import inspect
 
 from bedcosmo.custom_dist import ConstrainedUniform2D, PresampledPrior
 from bedcosmo.profiling import profile_method
+from bedcosmo.artifacts import resolve_design_input_path
 from bedcosmo.util import (
     auto_seed,
     get_experiment_config_path,
@@ -246,10 +247,9 @@ class VariableRedshift(BaseExperiment, CosmologyMixin):
         """
         if labels is None:
             labels = [f"z_{i+1}" for i in range(self.n_redshifts)]
-        # If input_path is provided, load from path (assumed to be absolute)
+        # A design dir resolves to its designs.npy, for direct callers too.
+        input_path = resolve_design_input_path(input_path)
         if input_path is not None:
-            if not os.path.isabs(input_path):
-                raise ValueError(f"input_path must be an absolute path, got: {input_path}")
             if not os.path.exists(input_path):
                 raise FileNotFoundError(f"input_path not found: {input_path}")
             
