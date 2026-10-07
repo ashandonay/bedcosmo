@@ -126,3 +126,35 @@ def test_snapshot_design_args_rejects_unknown_override(tmp_path):
         snapshot_design_args_config(
             source_yaml, tmp_path / "artifacts" / "design_args.yaml", overrides={"sum_lowr": 6}
         )
+
+
+def test_resolve_design_input_path_accepts_old_key(tmp_path):
+    resolved = resolve_design_args_input_path(
+        {"input_type": "variable", "input_designs_path": "designs.npy"},
+        tmp_path / "design_args.yaml",
+    )
+
+    assert "input_designs_path" not in resolved
+    assert resolved["input_path"] == str((tmp_path / "designs.npy").resolve())
+
+
+def test_resolve_design_input_path_rejects_both_keys():
+    with pytest.raises(ValueError, match="both input_path"):
+        resolve_design_args_input_path({"input_path": None, "input_designs_path": None})
+
+
+def test_snapshot_old_key_yaml_accepts_input_path_override(tmp_path):
+    # A pre-rename YAML can still be submitted, including with --design-input-path.
+    source_yaml = tmp_path / "design_args.yaml"
+    source_yaml.write_text("input_type: variable\ninput_designs_path: null\nsum_lower: 10\n")
+    designs = np.ones((3, 2))
+    np.save(tmp_path / "cli.npy", designs)
+    destination_yaml = tmp_path / "artifacts" / "design_args.yaml"
+
+    snapshot_design_args_config(
+        source_yaml, destination_yaml, overrides={"input_path": str(tmp_path / "cli.npy")}
+    )
+
+    frozen = yaml.safe_load(destination_yaml.read_text())
+    assert "input_designs_path" not in frozen
+    np.testing.assert_array_equal(np.load(frozen["input_path"]), designs)

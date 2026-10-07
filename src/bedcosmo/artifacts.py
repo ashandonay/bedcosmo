@@ -26,11 +26,16 @@ def resolve_design_args_input_path(
 
     Environment variables and ``~`` are expanded. Relative paths are anchored
     to the directory containing the YAML file, or to the current directory when
-    the arguments were supplied directly as a dictionary.
+    the arguments were supplied directly as a dictionary. The pre-rename key
+    ``input_designs_path`` (old runs' artifacts and YAMLs) is read as ``input_path``.
     """
     if design_args is None:
         return None
     resolved = dict(design_args)
+    if "input_designs_path" in resolved:
+        if "input_path" in resolved:
+            raise ValueError("design_args sets both input_path and its old name input_designs_path")
+        resolved["input_path"] = resolved.pop("input_designs_path")
     raw = resolved.get("input_path")
     if raw in (None, ""):
         return resolved

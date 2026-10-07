@@ -34,7 +34,7 @@ Two facts drive everything downstream:
 |----------------------|-----------------|-------------|
 | `labels`             | list of strings | Target classes in the design, always `["BGS","LRG","ELG","QSO"]`. |
 | `input_type`         | string          | `"variable"` builds a grid (or loads a file); `"nominal"` uses the single DESI nominal split. |
-| `input_path` | string or null  | **Absolute** path to a `.npy` of explicit designs, shape `(n_designs, 4)` or `(4,)`. When set, every grid field below is ignored — the file *is* the design pool. |
+| `input_path` | string or null  | **Absolute** path to a `.npy` of explicit designs, shape `(n_designs, 4)` or `(4,)`. When set, every grid field below is ignored — the file *is* the design pool. The old name `input_designs_path` is still accepted. |
 | `step`               | float or list   | Per-class grid spacing. |
 | `lower`              | float or list   | Per-class lower bound (inclusive). |
 | `upper`              | float or list   | Per-class upper bound (**exclusive**, via `np.arange`). |

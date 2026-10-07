@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 One-off migration: rename ``input_designs_path`` -> ``input_path`` in the design_args.yaml
-artifacts of existing MLflow runs, so they still load after the design_args key rename.
+artifacts of existing MLflow runs. Optional: old keys are still read as ``input_path`` at load
+time; this just brings saved artifacts in line with the current name.
 
 Dry run by default (lists the files it would change); pass --apply to rewrite them.
 
