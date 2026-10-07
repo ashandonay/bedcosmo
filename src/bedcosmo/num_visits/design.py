@@ -342,8 +342,7 @@ def plot_designs(
     n_designs, n_dims = visits.shape
     x = np.arange(n_dims)
     nominal = nominal_visits(bands)
-    lower, cap = ratio_bounds(nominal, ratio_min, ratio_max)
-    cap = cap.astype(float)
+    cap = ratio_bounds(nominal, ratio_min, ratio_max)[1].astype(float)
 
     fig, ax = plt.subplots(figsize=(10, 6))
     norm = visits / cap[None, :]
@@ -365,8 +364,6 @@ def plot_designs(
     ax.set_ylabel(f"visits / ({ratio_max:.2f}x nominal)", fontsize=12)
     for xi in range(n_dims):
         ax.axvline(xi, color="0.85", linewidth=0.8, zorder=0)
-        ax.text(xi, 1.045, f"{int(cap[xi])}", ha="center", va="bottom", fontsize=8, color="0.4")
-        ax.text(xi, -0.055, f"{int(lower[xi])}", ha="center", va="top", fontsize=8, color="0.4")
 
     ax.set_title(
         f"NumVisits design space: {n_designs} designs, all summing to {int(nominal.sum())} visits",
