@@ -1,4 +1,4 @@
-"""Generate explicit num_tracers design arrays (``input_designs_path``).
+"""Generate explicit num_tracers design arrays (``input_path``).
 
 The num_tracers design vector is a per-class observation split ``[BGS, LRG, ELG, QSO]``
 whose *sum is the total-observation budget* (``total_obs_multiplier``; see
@@ -29,7 +29,7 @@ Outputs land in two places: the design array goes to
 ``$SCRATCH/bedcosmo/num_tracers/designs/<name>.npy`` (``--designs-dir``), matching
 ``bedcosmo.num_visits.design``, while the ``design_args_<name>.yaml`` that points at it
 goes to the experiment config dir (``--out-dir``) so ``--design-args-path`` can find it.
-The YAML stores an absolute ``input_designs_path``, so relocating the ``.npy`` afterwards
+The YAML stores an absolute ``input_path``, so relocating the ``.npy`` afterwards
 requires rewriting the YAML.
 """
 from __future__ import annotations
@@ -209,7 +209,7 @@ def write_design_args(
     the ``.npy`` is bulk data (``designs_dir``, default ``$SCRATCH/.../designs``, mirroring
     ``bedcosmo.num_visits.design``), while the YAML is config that ``--design-args-path``
     resolves against the experiment config dir (``out_dir``). The YAML always stores an
-    absolute ``input_designs_path``, so the two may live anywhere relative to each other --
+    absolute ``input_path``, so the two may live anywhere relative to each other --
     but moving the ``.npy`` afterwards breaks the YAML unless it is rewritten.
 
     ``name`` names the ``.npy`` (an explicit ``.npy`` suffix is accepted and stripped);
@@ -235,7 +235,7 @@ def write_design_args(
         # "variable" + an explicit path bypasses step/lower/upper/sum entirely;
         # the file *is* the design pool.
         "input_type": "variable",
-        "input_designs_path": npy_path,  # absolute path required by the loader
+        "input_path": npy_path,  # absolute path required by the loader
     }
     with open(yaml_path, "w") as f:
         f.write(f"# {header}\n")

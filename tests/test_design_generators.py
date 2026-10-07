@@ -40,8 +40,8 @@ def test_num_visits_main_writes_design_args(tmp_path):
     design_args = yaml.safe_load(text)
     assert design_args["labels"] == ["r", "i"]
     assert design_args["input_type"] == "variable"
-    assert design_args["input_designs_path"] == str(designs_dir / "ri_test.npy")
-    np.testing.assert_array_equal(np.load(design_args["input_designs_path"]), visits)
+    assert design_args["input_path"] == str(designs_dir / "ri_test.npy")
+    np.testing.assert_array_equal(np.load(design_args["input_path"]), visits)
     assert (designs_dir / "ri_test.png").exists()
 
 
@@ -59,7 +59,7 @@ def test_num_tracers_main_writes_design_args(tmp_path):
     assert "python -m bedcosmo.num_tracers.design --out-dir" in text
     design_args = yaml.safe_load(text)
     assert design_args["labels"] == tracers_design.LABELS
-    np.testing.assert_array_equal(np.load(design_args["input_designs_path"]), pool)
+    np.testing.assert_array_equal(np.load(design_args["input_path"]), pool)
 
 
 def test_num_visits_yaml_option_names_design_args(tmp_path):
@@ -73,7 +73,7 @@ def test_num_visits_yaml_option_names_design_args(tmp_path):
 
     assert [p.name for p in out_dir.iterdir()] == ["design_args_extreme.yaml"]
     design_args = yaml.safe_load((out_dir / "design_args_extreme.yaml").read_text())
-    assert design_args["input_designs_path"] == str(tmp_path / "designs" / "ri_test.npy")
+    assert design_args["input_path"] == str(tmp_path / "designs" / "ri_test.npy")
 
 
 def test_num_visits_yaml_option_rejects_paths(tmp_path):

@@ -171,6 +171,11 @@ CLI arguments override YAML defaults. Unprefixed args are assumed to be for trai
 # Override a single prior_args YAML field (applied before the config snapshot)
 ./submit.sh train num_visits empirical --prior-template-source eazy6 --prior-density-type kde
 
+# Override a design_args YAML field (value parsed as YAML; the field must already exist)
+./submit.sh train num_visits empirical --design-args-path design_args_ratio.yaml \
+    --design-input-path $SCRATCH/bedcosmo/num_visits/designs/my_designs.npy
+./submit.sh train num_visits empirical --design-lower [50,80,170,170,140,140]
+
 # Mix train and eval args
 ./submit.sh train num_tracers base --train-initial-lr 0.0001 --eval-grid --eval-param-pts 2000
 ```

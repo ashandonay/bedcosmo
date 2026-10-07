@@ -18,7 +18,7 @@ The code is `src/bedcosmo/variable_redshift/experiment.py` (`VariableRedshift`).
 |---|---|---|
 | `labels` | list of strings | One label per observed redshift, e.g. `["z_1", "z_2"]`. The length sets `n_redshifts`. |
 | `input_type` | string | `"variable"` builds a grid. |
-| `input_designs_path` | string or null | **Absolute** path to a `.npy` of explicit designs, shape `(n_designs, n_redshifts)`. When set, the grid fields are ignored. |
+| `input_path` | string or null | **Absolute** path to a `.npy` of explicit designs, shape `(n_designs, n_redshifts)`. When set, the grid fields are ignored. |
 | `step` | float | Grid spacing in `z`. |
 | `lower` | float | Lowest redshift in the grid. |
 | `upper` | float | Highest redshift. **Inclusive** here (`arange(lower, upper + step, step)`), unlike `num_tracers`. |

@@ -2129,7 +2129,7 @@ class TestPlotDesigns:
         np.save(designs_file, designs)
 
         design_args = {
-            'input_designs_path': str(designs_file),
+            'input_path': str(designs_file),
             'labels': ['dim1', 'dim2']
         }
 

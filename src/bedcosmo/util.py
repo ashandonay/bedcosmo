@@ -935,7 +935,7 @@ def load_experiment(run_id, cosmo_exp='num_tracers', device=None, checkpoint=Non
     scripts, typically).
 
     ``design_args`` defaults to None so ``init_experiment`` resolves it from the
-    run's own ``artifacts/design_args.yaml``, which pins ``input_designs_path``
+    run's own ``artifacts/design_args.yaml``, which pins ``input_path``
     to the frozen ``artifacts/designs.npy``. A run's designs must always come
     from its artifacts -- passing a repo YAML rebuilds the design grid from
     whatever that file says *now*, silently evaluating a different design set
@@ -1705,6 +1705,38 @@ def apply_prior_cli_overrides(prior_args: dict | None, overrides: dict | None) -
     return out
 
 
+# Top-level flags that start with design_ but are NOT design_args.yaml fields.
+_DESIGN_CLI_RESERVED = frozenset({"design_args_path", "design_chunk_size"})
+
+
+def parse_design_cli_overrides(argv) -> tuple[dict, list]:
+    """Split ``--design-*`` flags out of an argv list.
+
+    ``--design-sum-lower 1030`` → ``{"sum_lower": 1030}``. Values are parsed as
+    YAML so lists work (``--design-lower "[50, 80]"``). Reserved top-level flags
+    (``--design-args-path``, ``--design-chunk-size``) are left in ``remaining``.
+
+    Returns:
+        ``(overrides, remaining_argv)``
+    """
+    overrides: dict = {}
+    remaining: list = []
+    argv = list(argv or [])
+    i = 0
+    while i < len(argv):
+        arg = argv[i]
+        key = arg[len("--") :].replace("-", "_")
+        if not arg.startswith("--design-") or key in _DESIGN_CLI_RESERVED:
+            remaining.append(arg)
+            i += 1
+            continue
+        if i + 1 >= len(argv) or argv[i + 1].startswith("--"):
+            raise ValueError(f"{arg} needs a value")
+        overrides[key[len("design_") :]] = yaml.safe_load(argv[i + 1])
+        i += 2
+    return overrides, remaining
+
+
 def _coerce_train_arg_override(key, value, yaml_default):
     """Coerce a single train CLI override according to the YAML default type."""
     if isinstance(yaml_default, bool) and isinstance(value, bool):
@@ -1733,9 +1765,10 @@ def finalize_train_run_args(parsed_args, yaml_config, unknown_argv=None):
     Merge argparse output, train_args.yaml defaults, and extension CLI flags.
 
     Flags registered on the train parser override YAML when set. Extension flags
-    (not registered), including ``--central-param-<name>`` and ``--prior-<field>``,
-    are taken from ``unknown_argv`` — the return value of ``parse_known_args()`` —
-    and parsed via :func:`parse_extra_args` / :func:`parse_prior_cli_overrides`.
+    (not registered), including ``--central-param-<name>``, ``--prior-<field>`` and
+    ``--design-<field>``, are taken from ``unknown_argv`` — the return value of
+    ``parse_known_args()`` — and parsed via :func:`parse_extra_args` /
+    :func:`parse_prior_cli_overrides` / :func:`parse_design_cli_overrides`.
     """
     run_args = dict(parsed_args)
 
@@ -1748,6 +1781,9 @@ def finalize_train_run_args(parsed_args, yaml_config, unknown_argv=None):
 
     prior_overrides: dict = {}
     if unknown_argv:
+        design_overrides, unknown_argv = parse_design_cli_overrides(unknown_argv)
+        if design_overrides:
+            run_args["design_cli_overrides"] = design_overrides
         prior_from_argv, unknown_argv = parse_prior_cli_overrides(unknown_argv)
         prior_overrides.update(prior_from_argv)
         extra = parse_extra_args(unknown_argv)

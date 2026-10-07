@@ -22,7 +22,7 @@ def resolve_design_args_input_path(
     design_args: dict | None,
     config_path: str | Path | None = None,
 ) -> dict | None:
-    """Resolve ``input_designs_path`` from a design-arguments document.
+    """Resolve ``input_path`` from a design-arguments document.
 
     Environment variables and ``~`` are expanded. Relative paths are anchored
     to the directory containing the YAML file, or to the current directory when
@@ -31,43 +31,58 @@ def resolve_design_args_input_path(
     if design_args is None:
         return None
     resolved = dict(design_args)
-    raw = resolved.get("input_designs_path")
+    raw = resolved.get("input_path")
     if raw in (None, ""):
         return resolved
     expanded = os.path.expandvars(os.path.expanduser(os.fspath(raw)))
     if "$" in expanded:
         raise ValueError(
-            f"input_designs_path contains an undefined environment variable: {raw}"
+            f"input_path contains an undefined environment variable: {raw}"
         )
     path = Path(expanded)
     if not path.is_absolute():
         base = Path(config_path).expanduser().resolve().parent if config_path else Path.cwd()
         path = base / path
-    resolved["input_designs_path"] = str(path.resolve())
+    resolved["input_path"] = str(path.resolve())
     return resolved
 
 
 def snapshot_design_args_config(
     source_path: str | Path,
     destination_path: str | Path,
+    overrides: dict | None = None,
 ) -> dict:
-    """Freeze a design YAML and its referenced array into an artifact directory."""
+    """Freeze a design YAML and its referenced array into an artifact directory.
+
+    ``overrides`` (from ``--design-<field>`` CLI flags) replace existing YAML
+    fields before the freeze. An overridden relative ``input_path`` is
+    anchored to the current directory, not the YAML's.
+    """
     source_path = Path(source_path).expanduser().resolve()
     destination_path = Path(destination_path).expanduser().resolve()
     with source_path.open() as stream:
         design_args = yaml.safe_load(stream) or {}
     design_args = resolve_design_args_input_path(design_args, source_path)
+    if overrides:
+        unknown = sorted(set(overrides) - set(design_args))
+        if unknown:
+            raise ValueError(
+                f"--design-* overrides {unknown} are not fields of {source_path.name} "
+                f"(fields: {sorted(design_args)})"
+            )
+        design_args.update(overrides)
+        design_args = resolve_design_args_input_path(design_args)
 
-    input_path = design_args.get("input_designs_path")
+    input_path = design_args.get("input_path")
     if input_path is not None:
         input_path = Path(input_path)
         if not input_path.is_file():
-            raise FileNotFoundError(f"input_designs_path not found: {input_path}")
+            raise FileNotFoundError(f"input_path not found: {input_path}")
         frozen_path = destination_path.parent / "designs.npy"
         destination_path.parent.mkdir(parents=True, exist_ok=True)
         if input_path.resolve() != frozen_path.resolve():
             shutil.copy2(input_path, frozen_path)
-        design_args["input_designs_path"] = str(frozen_path.resolve())
+        design_args["input_path"] = str(frozen_path.resolve())
 
     destination_path.parent.mkdir(parents=True, exist_ok=True)
     with destination_path.open("w") as stream:

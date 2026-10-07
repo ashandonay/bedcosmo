@@ -223,7 +223,7 @@ class VariableRedshift(BaseExperiment, CosmologyMixin):
 
     @profile_method
     def init_designs(
-        self, input_designs=None, input_designs_path=None, 
+        self, input_designs=None, input_path=None, 
         step=0.1, lower=0.0, upper=5.0, perm_invar=True, 
         labels=None, input_type="variable"):
         """
@@ -238,7 +238,7 @@ class VariableRedshift(BaseExperiment, CosmologyMixin):
                   Examples: [2.0] for single redshift design with n_redshifts=1
                            [[2.0], [2.5]] for multiple single-redshift designs
                            [[2.0, 2.5]] for single design with n_redshifts=2
-            input_designs_path: Path to JSON file containing designs (overrides input_designs if provided)
+            input_path: Path to JSON file containing designs (overrides input_designs if provided)
             step: Step size for design grid (default: 0.1, ignored if input_design is provided)
             lower: Lower bound for redshift grid (default: 0.0, ignored if input_design is provided)
             upper: Upper bound for redshift grid (default: 5.0, ignored if input_design is provided)
@@ -246,16 +246,16 @@ class VariableRedshift(BaseExperiment, CosmologyMixin):
         """
         if labels is None:
             labels = [f"z_{i+1}" for i in range(self.n_redshifts)]
-        # If input_designs_path is provided, load from path (assumed to be absolute)
-        if input_designs_path is not None:
-            if not os.path.isabs(input_designs_path):
-                raise ValueError(f"input_designs_path must be an absolute path, got: {input_designs_path}")
-            if not os.path.exists(input_designs_path):
-                raise FileNotFoundError(f"input_designs_path not found: {input_designs_path}")
+        # If input_path is provided, load from path (assumed to be absolute)
+        if input_path is not None:
+            if not os.path.isabs(input_path):
+                raise ValueError(f"input_path must be an absolute path, got: {input_path}")
+            if not os.path.exists(input_path):
+                raise FileNotFoundError(f"input_path not found: {input_path}")
             
             if self.global_rank == 0:
-                print(f"Loading input designs from numpy file: {input_designs_path}")
-            input_designs_array = np.load(input_designs_path)
+                print(f"Loading input designs from numpy file: {input_path}")
+            input_designs_array = np.load(input_path)
             # Convert to tensor
             if isinstance(input_designs_array, torch.Tensor):
                 input_designs = input_designs_array.to(self.device, dtype=torch.float64)
