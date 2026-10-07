@@ -25,7 +25,7 @@ The Bayesian experimental design problem has three components:
 
 ## Design Space (`design_args.yaml`)
 
-The design configuration controls which filters are varied and how the grid of candidate designs is built.
+The design configuration controls which filters are varied and how the grid of candidate designs is built. The default `design_args.yaml` sets no grid: its `input_path` is the `ugrizy_100` design directory (100 designs summing to 1030 visits, each band within 0.75–1.25x nominal; see [Generating explicit design pools](#generating-explicit-design-pools-bedcosmonum_visitsdesign)). The grid fields below are used by the variant files.
 
 | Field                | Type              | Description |
 |----------------------|-------------------|-------------|
