@@ -183,14 +183,34 @@ class NumTracers(BaseExperiment, CosmologyMixin):
         self.likelihood_mode = likelihood_mode
         # Which cosmology the covariance emulators see. "cosmology": the sampled one, so
         # the covariance's own theta-dependence is information in the likelihood.
-        # "fiducial": the fiducial cosmology at the design's N_tracers, as a real analysis
-        # fixes its covariance; the design dependence (through N) is kept. The default
-        # stays "cosmology" because runs that predate this option don't record it and
-        # were trained that way; train_args.yaml selects "fiducial" for new runs.
-        if emulator_covariance not in ("cosmology", "fiducial"):
+        # "fiducial": the analysis's fiducial (_BAO_FIDUCIAL or _SHAPEFIT_FIDUCIAL), as a
+        # real analysis fixes its covariance; the design dependence (through N) is kept.
+        # A dict: fixed at the fiducial with those parameters overridden (BAO hrdrag in
+        # reported km/s units), to test how the design ranking depends on that choice.
+        # The default stays "cosmology" because runs that predate this option don't
+        # record it and were trained that way; train_args.yaml selects "fiducial".
+        # covariance_cosmology is None when the covariance follows theta, else the
+        # fixed {name: value} cosmology.
+        fiducial = self._SHAPEFIT_FIDUCIAL if self.analysis == "shapefit" else self._BAO_FIDUCIAL
+        if emulator_covariance == "cosmology":
+            self.covariance_cosmology = None
+        elif emulator_covariance == "fiducial":
+            self.covariance_cosmology = dict(fiducial)
+        elif isinstance(emulator_covariance, dict):
+            if likelihood_mode != "emulator":
+                raise ValueError(
+                    "A cosmology dict for emulator_covariance needs likelihood_mode='emulator'; "
+                    f"got {likelihood_mode!r}.")
+            unknown = sorted(set(emulator_covariance) - set(fiducial))
+            if unknown:
+                raise ValueError(
+                    f"emulator_covariance has unknown parameters {unknown} for analysis "
+                    f"{self.analysis!r}; expected a subset of {sorted(fiducial)}.")
+            self.covariance_cosmology = {**fiducial, **emulator_covariance}
+        else:
             raise ValueError(
-                f"emulator_covariance must be 'cosmology' or 'fiducial'; got {emulator_covariance!r}.")
-        self.emulator_covariance = emulator_covariance
+                "emulator_covariance must be 'cosmology', 'fiducial' or a {parameter: value} "
+                f"dict; got {emulator_covariance!r}.")
         if self.analysis == "shapefit":
             # ShapeFit has no DESI covariance to rescale and its emulators already
             # derive z_eff(N) internally, so the BAO-only switches have no meaning here.
@@ -238,10 +258,10 @@ class NumTracers(BaseExperiment, CosmologyMixin):
             raise ValueError(
                 f"emulator_sqrtn_ref must be None, 'sampled', or 'fiducial'; got {emulator_sqrtn_ref!r}."
             )
-        if emulator_sqrtn_ref == "sampled" and emulator_covariance == "fiducial":
+        if emulator_sqrtn_ref == "sampled" and self.covariance_cosmology is not None:
             raise ValueError(
                 "emulator_sqrtn_ref='sampled' evaluates the covariance at the sampled cosmology, "
-                "which contradicts emulator_covariance='fiducial'.")
+                "which contradicts a fixed emulator_covariance.")
         self.emulator_sqrtn_ref = emulator_sqrtn_ref
         # Which forecast space's BAO emulators to load (bao's emulators.yaml entries are
         # keyed by space). Unused by shapefit, which always loads both mean and covar.
@@ -988,10 +1008,11 @@ class NumTracers(BaseExperiment, CosmologyMixin):
         """
         if central and self.analysis == "shapefit":
             # Fixed fiducial mean (central_val); covariance from the emulators at the
-            # fiducial cosmology and this design's N_tracers.
+            # fixed covariance cosmology (the template fiducial if the covariance follows
+            # theta) and this design's N_tracers.
             n_tracers = self._shapefit_n_tracers(lexpand(tracer_ratio, num_samples))
             _, covariance_matrix = self._shapefit_likelihood(
-                n_tracers, self._shapefit_fiducial_parameters())
+                n_tracers, self._shapefit_parameters(self.covariance_cosmology or self._SHAPEFIT_FIDUCIAL))
             with pyro.plate("data", num_samples):
                 data_samples = pyro.sample(
                     self.observation_labels[0],
@@ -1769,7 +1790,7 @@ class NumTracers(BaseExperiment, CosmologyMixin):
                 (``pyro_model`` needs it for the plate shape), so it is passed in rather than
                 recomputed here.
             parameters: Dict of cosmological parameter tensors (from sample_parameters);
-                unused when ``emulator_covariance='fiducial'``.
+                unused when ``emulator_covariance`` fixes the cosmology.
 
         Returns:
             Tensor of shape (..., n_data, n_data) — block-diagonal covariance.
@@ -1813,12 +1834,8 @@ class NumTracers(BaseExperiment, CosmologyMixin):
         # => h*r_d = hrdrag_multiplier * hrdrag / 100  (= 100*hrdrag when mult=1e4).
         hrdrag_multiplier = getattr(self, "hrdrag_multiplier", 100.0)
         hrdrag_phys = hrdrag * hrdrag_multiplier / 100.0
-        if self.emulator_covariance == "fiducial":
-            Om = torch.tensor(self._BAO_FIDUCIAL_OM, device=self.device)
-            Ok = torch.tensor(FIDUCIAL_PARAMS["Ok"], device=self.device)
-            w0 = torch.tensor(FIDUCIAL_PARAMS["w0"], device=self.device)
-            wa = torch.tensor(FIDUCIAL_PARAMS["wa"], device=self.device)
-            hrdrag_phys = torch.tensor(self._BAO_FIDUCIAL_HRDRAG_PHYS, device=self.device)
+        if self.covariance_cosmology is not None:
+            Om, Ok, w0, wa, hrdrag_phys = self._bao_covariance_cosmology()
 
         # Normal path: emulator covariance at the actual design N and the cosmology
         # emulator_covariance selects.
@@ -1991,27 +2008,31 @@ class NumTracers(BaseExperiment, CosmologyMixin):
             }
         return self._sqrtn_n_ref_cache
 
-    # DESI 2024 fiducial cosmology the BAO covariance emulators are evaluated at for
-    # emulator_covariance='fiducial' and the 'fiducial' 1/sqrt(N) diagnostic. hrdrag is
-    # the PHYSICAL h*r_d (~99.08), i.e. bedcosmo raw 0.9908 x 100 (multiplier-independent
-    # at this point). Ok/w0/wa come from FIDUCIAL_PARAMS.
-    _BAO_FIDUCIAL_OM = 0.3152
-    _BAO_FIDUCIAL_HRDRAG_PHYS = 99.08
+    # DESI 2024 fiducial cosmology, BAO's covariance_cosmology for emulator_covariance=
+    # 'fiducial' (and the base a dict overrides; also the 'fiducial' 1/sqrt(N) diagnostic's). hrdrag is in reported units, H0*r_d in km/s (multiplier x raw),
+    # so it does not depend on the prior's hrdrag multiplier.
+    _BAO_FIDUCIAL = {"Om": 0.3152, "Ok": 0.0, "w0": -1.0, "wa": 0.0, "hrdrag": 9908.0}
+
+    def _bao_covariance_cosmology(self):
+        """(Om, Ok, w0, wa, h*r_d) scalar tensors at the fixed covariance cosmology.
+
+        That is ``covariance_cosmology``, or DESI's fiducial when the covariance follows
+        theta (the 'fiducial' 1/sqrt(N) reference still needs one). h*r_d is the emulators'
+        physical feature in Mpc (H0*r_d [km/s] / 100, ~99.08).
+        """
+        c = self.covariance_cosmology or self._BAO_FIDUCIAL
+        return tuple(torch.tensor(v, device=self.device) for v in
+                     (c["Om"], c["Ok"], c["w0"], c["wa"], c["hrdrag"] / 100.0))
 
     def _sqrtn_fiducial_cov_ref(self):
-        """Emulator covariance at nominal N and the DESI fiducial cosmology, cached once.
+        """Emulator covariance at nominal N and the fixed covariance cosmology, cached once.
 
         Used as the frozen reference for ``emulator_sqrtn_ref='fiducial'`` (cosmology-independent
-        1/sqrt(N) scaling). Om/hrdrag are the explicit DESI fiducial values (FIDUCIAL_PARAMS only
-        carries Ok/w0/wa); hrdrag is passed as the already-physical h*r_d.
+        1/sqrt(N) scaling).
         """
         if self._sqrtn_ref_cov_cache is None:
             n_ref = self._sqrtn_nominal_n_tracers()
-            Om = torch.tensor(self._BAO_FIDUCIAL_OM, device=self.device)
-            Ok = torch.tensor(FIDUCIAL_PARAMS["Ok"], device=self.device)
-            w0 = torch.tensor(FIDUCIAL_PARAMS["w0"], device=self.device)
-            wa = torch.tensor(FIDUCIAL_PARAMS["wa"], device=self.device)
-            hrdrag_phys = torch.tensor(self._BAO_FIDUCIAL_HRDRAG_PHYS, device=self.device)
+            Om, Ok, w0, wa, hrdrag_phys = self._bao_covariance_cosmology()
             self._sqrtn_ref_cov_cache = self._fill_emulator_blocks(
                 n_ref, Om, Ok, w0, wa, hrdrag_phys, batch_shape=()
             )
@@ -2242,7 +2263,7 @@ class NumTracers(BaseExperiment, CosmologyMixin):
         # design (a batch of one: the emulators' (1, in_dim) x_mu adds that dim anyway).
         n_nominal = self._shapefit_n_tracers(self.nominal_design.view(1, -1))
         fiducial_mean = torch.cat([
-            self._shapefit_predict("mean", tb, n_nominal[..., i], self._shapefit_fiducial_parameters())
+            self._shapefit_predict("mean", tb, n_nominal[..., i], self._shapefit_parameters(self._SHAPEFIT_FIDUCIAL))
             for i, tb in enumerate(self.shapefit_bins)], dim=-1)[0].reshape(len(self.shapefit_bins), -1)
         self.central_val = self._desi_shapefit_data_vector(fiducial_mean[:, names.index("f_sigmar")])
 
@@ -2291,10 +2312,11 @@ class NumTracers(BaseExperiment, CosmologyMixin):
         """Passed N_tracers per shapefit bin, shape (..., n_bins) in ``shapefit_bins`` order."""
         return tracer_ratio.to(torch.float64) @ self._shapefit_n_weights.T
 
-    def _shapefit_fiducial_parameters(self):
+    def _shapefit_parameters(self, values):
+        """``sample_parameters``-shaped (1,) tensors for a {name: value} cosmology."""
         return {
             name: torch.tensor([value], device=self.device, dtype=torch.float64)
-            for name, value in self._SHAPEFIT_FIDUCIAL.items()}
+            for name, value in values.items()}
 
     def _shapefit_predict(self, quantity, tracer_bin, n_tracers, parameters):
         """One shapefit emulator's physical targets at (N_tracers, cosmology).
@@ -2348,12 +2370,12 @@ class NumTracers(BaseExperiment, CosmologyMixin):
 
         Per bin, the mean emulator gives [qiso, qap, f_sigmar, m] at the bin's N_tracers and
         the sampled cosmology, and the covar emulator its 4x4 covariance at the same N and
-        the cosmology ``emulator_covariance`` selects. Bins are independent (distinct
-        redshift slices), so off-diagonal blocks are zero.
+        the cosmology ``emulator_covariance`` selects.
+        Bins are independent (distinct redshift slices), so off-diagonal blocks are zero.
         """
         n_q = len(self.shapefit_quantities)
-        cov_parameters = (parameters if self.emulator_covariance == "cosmology"
-                          else self._shapefit_fiducial_parameters())
+        cov_parameters = (parameters if self.covariance_cosmology is None
+                          else self._shapefit_parameters(self.covariance_cosmology))
         means, blocks = [], []
         for i, tracer_bin in enumerate(self.shapefit_bins):
             n = n_tracers[..., i]

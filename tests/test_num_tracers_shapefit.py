@@ -265,5 +265,18 @@ def test_bao_fiducial_covariance_ignores_cosmology_but_keeps_design():
 
 
 def test_sampled_sqrtn_reference_rejects_fiducial_covariance():
-    with pytest.raises(ValueError, match="contradicts emulator_covariance='fiducial'"):
+    with pytest.raises(ValueError, match="contradicts a fixed emulator_covariance"):
         _make_bao_emulator_exp(emulator_covariance="fiducial", emulator_sqrtn_ref="sampled")
+
+
+def test_cosmology_dict_moves_the_fixed_fiducial():
+    moved = _make_exp(emulator_covariance={"h": 0.70})
+    designs = moved.designs[:2].unsqueeze(0)                           # (1, design, 4)
+    n_tracers = moved._shapefit_n_tracers(designs)
+    params = {n: torch.full((1, 2, 1), v, dtype=torch.float64)
+              for n, v in {**moved._SHAPEFIT_FIDUCIAL, "h": 0.70}.items()}
+    _, cov_moved = moved._shapefit_likelihood(n_tracers, params)
+    _, cov_theta = _make_exp(emulator_covariance="cosmology")._shapefit_likelihood(n_tracers, params)
+    _, cov_fid = _make_exp(emulator_covariance="fiducial")._shapefit_likelihood(n_tracers, params)
+    assert torch.allclose(cov_moved, cov_theta)
+    assert not torch.allclose(cov_moved, cov_fid)
