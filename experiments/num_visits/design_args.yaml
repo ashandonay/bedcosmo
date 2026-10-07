@@ -1,7 +1,14 @@
 # Design arguments for num_visits experiment
+#
+# 100 designs over ugrizy, each summing to exactly 1030 visits, every band within
+# 0.75-1.25x nominal. Provenance: $SCRATCH/bedcosmo/num_visits/designs/ugrizy_100/provenance.json
+# Regenerate with:
+#   python -m bedcosmo.num_visits.design --name ugrizy_100
 labels: ["u", "g", "r", "i", "z", "y"]
 input_type: variable # variable or nominal
-input_path: null
+input_path: $SCRATCH/bedcosmo/num_visits/designs/ugrizy_100
+# Grid fields below are ignored when input_path is set (the diagnostic scripts in
+# scripts/ still build their design grid from them).
 step: [20.0, 20.0, 40.0, 40.0, 40.0, 40.0]
 lower: [50.0, 80.0, 170.0, 170.0, 140.0, 140.0]
 upper: [90.0, 120.0, 290.0, 290.0, 260.0, 260.0]
