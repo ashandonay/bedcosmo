@@ -34,7 +34,7 @@ Two facts drive everything downstream:
 |----------------------|-----------------|-------------|
 | `labels`             | list of strings | Target classes in the design, always `["BGS","LRG","ELG","QSO"]`. |
 | `input_type`         | string          | `"variable"` builds a grid (or loads a file); `"nominal"` uses the single DESI nominal split. |
-| `input_path` | string or null  | **Absolute** path to a `.npy` of explicit designs, shape `(n_designs, 4)` or `(4,)`. When set, every grid field below is ignored — the file *is* the design pool. The old name `input_designs_path` is still accepted. |
+| `input_path` | string or null  | **Absolute** path to a design directory (holding `designs.npy`, as written by `bedcosmo.num_tracers.design`) or to a `.npy` of explicit designs, shape `(n_designs, 4)` or `(4,)`. When set, every grid field below is ignored — the file *is* the design pool. The old name `input_designs_path` is still accepted. |
 | `step`               | float or list   | Per-class grid spacing. |
 | `lower`              | float or list   | Per-class lower bound (inclusive). |
 | `upper`              | float or list   | Per-class upper bound (**exclusive**, via `np.arange`). |
@@ -54,15 +54,14 @@ Two facts drive everything downstream:
 
 ## Creating design spaces
 
-Use `bedcosmo.num_tracers.design` (the num_tracers counterpart of `bedcosmo.num_visits.design`). It writes the design array plus a matching `design_args_*.yaml` that points at it:
+Use `bedcosmo.num_tracers.design` (the num_tracers counterpart of `bedcosmo.num_visits.design`). It writes a design directory plus a matching `design_args_*.yaml` whose `input_path` points at it:
 
-- `.npy` → `$SCRATCH/bedcosmo/num_tracers/designs/` (`--designs-dir`)
-- `design_args_*.yaml` → this directory (`--out-dir`), where `--design-args-path` resolves
-- `.png` → beside the `.npy` (`--plot` to relocate, `--no-plot` to skip)
+- design directory → `$SCRATCH/bedcosmo/num_tracers/designs/<name>/` (`--designs-dir`), holding `designs.npy`, a `designs.png` plot (`--no-plot` to skip) and `provenance.json` (command and parsed args, git commit and dirty flag, creation time, array shape and sha256). A design directory is never overwritten.
+- `design_args_*.yaml` → this directory (`--out-dir`), where `--design-args-path` resolves. Its header points at the `provenance.json`.
 
-The YAML header records the command that regenerates it.
+A training run copies `provenance.json` into its artifacts as `design_provenance.json`, beside the frozen `designs.npy`.
 
-Global flags (`--dataset`, `--out-dir`, `--designs-dir`, `--plot`, `--no-plot`) go **before** the subcommand; mode flags go after.
+Global flags (`--dataset`, `--out-dir`, `--designs-dir`, `--no-plot`) go **before** the subcommand; mode flags go after.
 
 ### `pool` — one multi-design pool (preferred)
 
@@ -82,7 +81,7 @@ python -m bedcosmo.num_tracers.design pool \
 | `--step/--lower/--upper` | Per-class grid, 4 values each in `[BGS, LRG, ELG, QSO]` order |
 | `--include-scales` | Force-add uniformly scaled nominal designs as within-pool reference points (they fall between grid nodes) |
 | `--n-target`, `--seed` | Cap pool size by seeded random subsample; pinned rows always survive |
-| `--name` | Filename for the `.npy` (`.npy` suffix optional). Omit for a date-stamped default |
+| `--name` | Names the design directory `<name>/` and `design_args_<name>.yaml`. Omit for a date-stamped default |
 | `--yaml` | YAML file name in `--out-dir`, e.g. `design_args_budget.yaml` (default `design_args_<name>.yaml`); refuses to overwrite an existing file |
 
 The generator reproduces the experiment's own grid exactly: the defaults give **287** designs at sum 1.0 and **2447** over [1.0, 1.2], matching `design_args_dr1.yaml` and `design_args_dr1_budget.yaml`.
@@ -93,7 +92,7 @@ The generator reproduces the experiment's own grid exactly: the defaults give **
 python -m bedcosmo.num_tracers.design scaled --scales 1.00 1.05 1.10 1.15 1.20 1.25
 ```
 
-Writes `nominal_scaled_pNN.npy` + `design_args_nominal_pNN.yaml` per scale — the nominal split times `s`, so the split is fixed and only the budget moves. Each file feeds one training run, contributing one point to `plotting.compare_increasing_design`.
+Writes a `nominal_scaled_pNN/` design directory + `design_args_nominal_pNN.yaml` per scale — the nominal split times `s`, so the split is fixed and only the budget moves. Each one feeds one training run, contributing one point to `plotting.compare_increasing_design`.
 
 ### Choosing between them
 

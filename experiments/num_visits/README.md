@@ -31,7 +31,7 @@ The design configuration controls which filters are varied and how the grid of c
 |----------------------|-------------------|-------------|
 | `labels`             | list of strings   | Filter bands in the experiment (e.g. `["u","g","r","i","z","y"]`), in design-column order. Filters not listed are not observed at all: the forward model, nominal design and flow context only cover the listed bands. |
 | `input_type`         | string            | `"variable"` builds a grid over the bands; `"nominal"` uses a single fixed design equal to the fiducial visit counts. |
-| `input_path` | string or null    | Absolute path to a `.npy` file of explicit design points (shape `(n_designs, n_filters)`). When set, the grid parameters below are ignored. The old name `input_designs_path` is still accepted. |
+| `input_path` | string or null    | Absolute path to a design directory (holding `designs.npy`, as written by the generator below) or to a `.npy` file of explicit design points (shape `(n_designs, n_filters)`). When set, the grid parameters below are ignored. The old name `input_designs_path` is still accepted. |
 | `step`               | float or list     | Grid spacing for each filter. A scalar applies to all filters; a list sets per-filter spacing. |
 | `lower`              | float or list     | Lower bound on visits for each filter (scalar or per-filter list). |
 | `upper`              | float or list     | Upper bound on visits for each filter (scalar or per-filter list). |
@@ -49,13 +49,19 @@ These are useful for low-dimensional visualization or faster exploratory runs.
 
 ### Generating explicit design pools (`bedcosmo.num_visits.design`)
 
-For a fixed-budget pool too sparse or too large for a Cartesian grid, generate explicit designs. The generator writes the `.npy` (plus a parallel-coordinates `.png`) to `$SCRATCH/bedcosmo/num_visits/designs/` and a matching `design_args_<name>.yaml` to this directory, ready for `--design-args-path`:
+For a fixed-budget pool too sparse or too large for a Cartesian grid, generate explicit designs. The generator writes a design directory `$SCRATCH/bedcosmo/num_visits/designs/<name>/` and a matching `design_args_<name>.yaml` to this directory, ready for `--design-args-path`. The YAML's `input_path` is the design directory, which holds:
+
+- `designs.npy`: the design array
+- `designs.png`: a parallel-coordinates plot
+- `provenance.json`: the command and parsed args, git commit and dirty flag, creation time, bands, nominal, budget, per-band bounds, array shape and sha256
+
+A training run copies `provenance.json` into its artifacts as `design_provenance.json`, beside the frozen `designs.npy`.
 
 ```bash
 python -m bedcosmo.num_visits.design --bands gri --n-target 100 --ratio-min 0.7 --ratio-max 1.3
 ```
 
-Every design sums to exactly the nominal total of the chosen bands, uses multiples of 10 visits, keeps each band within `[ratio_min, ratio_max] x nominal`, and includes the nominal design. The YAML's `labels` are the bands in array-column order, and its header records the command that regenerates it.
+Every design sums to exactly the nominal total of the chosen bands, uses multiples of 10 visits, keeps each band within `[ratio_min, ratio_max] x nominal`, and includes the nominal design. The YAML's `labels` are the bands in array-column order, and its header points at the `provenance.json`.
 
 | Flag | Default | Effect |
 |------|---------|--------|
@@ -65,9 +71,9 @@ Every design sums to exactly the nominal total of the chosen bands, uses multipl
 | `--n-levels` | 3 | Levels per band in the ratio grid |
 | `--seed` | 0 | RNG seed for random fill / subsample |
 | `--no-corners` | off | Skip single-band floor/cap corner designs |
-| `--name` | `<bands>_<n>_<YYYYMMDD_HHMMSS>` | Names `<name>.npy` and `design_args_<name>.yaml` |
+| `--name` | `<bands>_<n>_<YYYYMMDD_HHMMSS>` | Names the design directory `<name>/` and `design_args_<name>.yaml`; refuses to overwrite an existing directory |
 | `--yaml` | `design_args_<name>.yaml` | YAML file name in `--out-dir`, e.g. `design_args_extreme.yaml`; refuses to overwrite an existing file |
-| `--out-dir` / `--designs-dir` / `--plot` | this dir / `$SCRATCH/...` / beside `.npy` | Output locations |
+| `--out-dir` / `--designs-dir` | this dir / `$SCRATCH/bedcosmo/num_visits/designs` | Where the YAML / the design directory goes |
 
 ## Parameters (`prior_args.yaml`)
 

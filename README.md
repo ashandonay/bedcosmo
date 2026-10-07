@@ -173,7 +173,7 @@ CLI arguments override YAML defaults. Unprefixed args are assumed to be for trai
 
 # Override a design_args YAML field (value parsed as YAML; the field must already exist)
 ./submit.sh train num_visits empirical --design-args-path design_args_ratio.yaml \
-    --design-input-path $SCRATCH/bedcosmo/num_visits/designs/my_designs.npy
+    --design-input-path $SCRATCH/bedcosmo/num_visits/designs/my_designs
 ./submit.sh train num_visits empirical --design-lower [50,80,170,170,140,140]
 
 # Mix train and eval args
