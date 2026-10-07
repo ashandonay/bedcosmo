@@ -66,16 +66,33 @@ def write_design_dir(
     return design_dir
 
 
+def resolve_design_input_path(raw, config_path: str | Path | None = None) -> str | None:
+    """Resolve a design ``input_path`` to an absolute ``.npy`` path.
+
+    Environment variables and ``~`` are expanded. Relative paths are anchored to
+    the directory containing ``config_path`` (the YAML), or to the current
+    directory without one. A design directory resolves to its ``designs.npy``.
+    """
+    if raw in (None, ""):
+        return None
+    expanded = os.path.expandvars(os.path.expanduser(os.fspath(raw)))
+    if "$" in expanded:
+        raise ValueError(f"input_path contains an undefined environment variable: {raw}")
+    path = Path(expanded)
+    if not path.is_absolute():
+        base = Path(config_path).expanduser().resolve().parent if config_path else Path.cwd()
+        path = base / path
+    if path.is_dir():
+        path = path / DESIGNS_FILENAME
+    return str(path.resolve())
+
+
 def resolve_design_args_input_path(
     design_args: dict | None,
     config_path: str | Path | None = None,
 ) -> dict | None:
-    """Resolve ``input_path`` from a design-arguments document.
-
-    Environment variables and ``~`` are expanded. Relative paths are anchored
-    to the directory containing the YAML file, or to the current directory when
-    the arguments were supplied directly as a dictionary. A design directory
-    resolves to its ``designs.npy``. The pre-rename key ``input_designs_path``
+    """Resolve ``input_path`` in a design-arguments document (see
+    :func:`resolve_design_input_path`). The pre-rename key ``input_designs_path``
     (old runs' artifacts and YAMLs) is read as ``input_path``.
     """
     if design_args is None:
@@ -85,21 +102,8 @@ def resolve_design_args_input_path(
         if "input_path" in resolved:
             raise ValueError("design_args sets both input_path and its old name input_designs_path")
         resolved["input_path"] = resolved.pop("input_designs_path")
-    raw = resolved.get("input_path")
-    if raw in (None, ""):
-        return resolved
-    expanded = os.path.expandvars(os.path.expanduser(os.fspath(raw)))
-    if "$" in expanded:
-        raise ValueError(
-            f"input_path contains an undefined environment variable: {raw}"
-        )
-    path = Path(expanded)
-    if not path.is_absolute():
-        base = Path(config_path).expanduser().resolve().parent if config_path else Path.cwd()
-        path = base / path
-    if path.is_dir():
-        path = path / DESIGNS_FILENAME
-    resolved["input_path"] = str(path.resolve())
+    if resolved.get("input_path") not in (None, ""):
+        resolved["input_path"] = resolve_design_input_path(resolved["input_path"], config_path)
     return resolved
 
 

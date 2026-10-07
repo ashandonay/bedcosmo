@@ -23,6 +23,7 @@ import getdist
 import math
 import inspect
 from bedcosmo.profiling import profile_method
+from bedcosmo.artifacts import resolve_design_input_path
 from bedcosmo.util import (
     load_prior_flow_from_file,
     auto_seed,
@@ -409,12 +410,9 @@ class NumTracers(BaseExperiment, CosmologyMixin):
         if input_type == "nominal":
             design_pts = self.nominal_design.unsqueeze(0)  # Add batch dimension
         elif input_type == "variable":
-            # If input_path is provided, load from path (assumed to be absolute)
+            # A design dir resolves to its designs.npy, for direct callers too.
+            input_path = resolve_design_input_path(input_path)
             if input_path is not None:
-                if not os.path.isabs(input_path):
-                    raise ValueError(
-                        f"input_path must be an absolute path, got: {input_path}"
-                    )
                 if not os.path.exists(input_path):
                     raise FileNotFoundError(f"input_path not found: {input_path}")
 

@@ -19,6 +19,7 @@ from speclite import filters as speclite_filters
 from astropy.constants import h, c
 import getdist
 from bedcosmo.profiling import profile_method
+from bedcosmo.artifacts import resolve_design_input_path
 from bedcosmo.util import (
     _central_params_as_dict,
     get_experiment_config_path,
@@ -908,15 +909,10 @@ class NumVisits(BaseExperiment, CosmologyMixin):
             design_pts = self.nominal_design.unsqueeze(0)  # Add batch dimension
         elif input_type == "variable":
             # Config loading normally resolves this path relative to its YAML and
-            # snapshots the array. Expand variables here as well for direct callers.
+            # snapshots the array. Resolve here too (env vars, design dir ->
+            # designs.npy) for callers that construct the experiment directly.
+            input_path = resolve_design_input_path(input_path)
             if input_path is not None:
-                input_path = os.path.expandvars(
-                    os.path.expanduser(os.fspath(input_path))
-                )
-                if not os.path.isabs(input_path):
-                    raise ValueError(
-                        f"input_path must be an absolute path, got: {input_path}"
-                    )
                 if not os.path.exists(input_path):
                     raise FileNotFoundError(f"input_path not found: {input_path}")
 
