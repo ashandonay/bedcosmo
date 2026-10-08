@@ -2683,8 +2683,8 @@ def render_overlay(
                 **posterior_kwargs,
             )
         elif isinstance(plotter, RunPlotter) and nf_checkpoint_path is None:
-            # NF series come from the run's saved default-eval NPZ;
-            # guide_samples only sets the prior-contour sample count.
+            # NF series come from the run's saved default-eval NPZ (sampled from
+            # its flow only if it has none); guide_samples also sets the prior count.
             plotter.plot_posterior(
                 eval_step=eval_step,
                 device=device,

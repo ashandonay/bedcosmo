@@ -1005,6 +1005,56 @@ class BasePlotter:
             )
         return [by_name[name] for name in display]
 
+    def _run_nf_entries(self, experiment, run_obj, run_args, artifacts_dir, *, display,
+                        eval_step, step, guide_samples, transform_output, plot_prior,
+                        device, seed, global_rank=0):
+        """NF posterior entries for one run: its saved eval samples, else the flow's.
+
+        Uses the newest ``Evaluator.run`` NPZ under ``artifacts_dir`` that holds the
+        ``display`` series (at ``eval_step`` if given). Only rank 0's eval saves one, and
+        only when there is none does this load the ``step`` checkpoint and draw
+        ``guide_samples`` from the flow.
+
+        Returns:
+            (entries, step_label): entries ordered as ``display``; ``step_label`` is the
+            saved samples' step, or ``step`` when the flow was sampled.
+        """
+        display = validate_display(display)
+        if global_rank == 0:
+            try:
+                bundle = load_posterior_samples_file(
+                    artifacts_dir, step=eval_step, require_series=display,
+                    generated_by="Evaluator.run",
+                )
+            except FileNotFoundError as e:
+                print(f"  {e}; sampling the {step!r} checkpoint instead.")
+            else:
+                if bundle["meta"]["transform_output"] != transform_output:
+                    raise ValueError(
+                        f"Saved samples at {bundle['path']} have transform_output="
+                        f"{bundle['meta']['transform_output']}, requested {transform_output}.")
+                print(f"  Loaded posterior samples from {bundle['path']}")
+                entries = nf_entries_from_posterior_bundle(bundle, experiment)
+                return self._filter_nf_entries_by_display(entries, display), bundle["meta"]["step"]
+
+        posterior_flow, _ = load_model(
+            experiment, step, run_obj, run_args, device, global_rank=global_rank)
+        eig_data = None
+        try:
+            _, eig_data = self.load_eig_data_file(
+                artifacts_dir, eval_step=eval_step, eig_kind='variable')
+        except ValueError:
+            # Nominal-only comparisons can go without EIG legend values.
+            if 'optimal' in display:
+                raise
+        auto_seed(seed)
+        entries = nf_posterior_entries(
+            experiment, posterior_flow, eig_data, eval_step, display=display,
+            guide_samples=guide_samples, transform_output=transform_output,
+            plot_prior=plot_prior, device=device,
+        )
+        return entries, step
+
     def _prior_entropy_legend_suffix(self, prior_entropy=None):
         if prior_entropy is None:
             return ""
@@ -2005,16 +2055,22 @@ class RunPlotter(BasePlotter):
         artifacts_dir=None,
         posterior_samples_path=None,
         display=("nominal", "optimal"),
+        step="loss_best",
+        guide_samples=1000,
+        seed=1,
         **kwargs,
     ):
         """
-        Plot NF posterior for this run (no sampling).
+        Plot NF posterior for this run.
 
         Title, nominal grid EIG and prior entropy come from ``eig_data`` (loaded
         from the run's artifacts when omitted). ``experiment`` defaults to the
-        run's experiment. If ``nf_entries`` is omitted, load the newest
+        run's experiment. If ``nf_entries`` is omitted, plot the newest
         default-eval NPZ under the run's artifacts that contains the requested
-        ``display`` series. Pass ``nf_entries=[]`` for overlay-only figures.
+        ``display`` series (or ``posterior_samples_path``); if the run has none,
+        sample ``guide_samples`` draws from its ``step`` checkpoint instead.
+        ``guide_samples`` also sets the prior overlay's sample count. Pass
+        ``nf_entries=[]`` for overlay-only figures.
 
         Extra keyword arguments are forwarded to ``BasePlotter.plot_posterior``
         (e.g. ``plot_mcmc=False``, ``ranges``). To see the out-of-window samples
@@ -2050,8 +2106,21 @@ class RunPlotter(BasePlotter):
 
         kwargs.setdefault("nominal_grid_eig", nominal_grid_eig(eig_data, step_str))
 
-        if nf_entries is None and artifacts_dir is None and posterior_samples_path is None:
-            artifacts_dir = self._get_artifacts_dir()
+        if nf_entries is None and posterior_samples_path is None:
+            nf_entries, _ = self._run_nf_entries(
+                experiment,
+                self.run_data['run_obj'],
+                self.run_data['params'],
+                artifacts_dir or self._get_artifacts_dir(),
+                display=display,
+                eval_step=eval_step,
+                step=step,
+                guide_samples=guide_samples,
+                transform_output=kwargs.get("transform_output", True),
+                plot_prior=kwargs.get("plot_prior", False),
+                device=device,
+                seed=seed,
+            )
 
         return super().plot_posterior(
             experiment=experiment,
@@ -2059,10 +2128,11 @@ class RunPlotter(BasePlotter):
             title=title,
             experiment_id=self.experiment_id,
             run_id=self.run_id,
-            artifacts_dir=artifacts_dir,
             eval_step=eval_step,
             posterior_samples_path=posterior_samples_path,
             display=display,
+            guide_samples=guide_samples,
+            seed=seed,
             **kwargs,
         )
 
@@ -3356,7 +3426,7 @@ class ComparisonPlotter(BasePlotter):
         return group_key[:8] if isinstance(group_key, str) else str(group_key)[:8]
 
     def compare_posterior(self, var=None, guide_samples=10000, show_scatter=False,
-                         source='saved', step='loss_best', seed=1, device="cuda:0",
+                         step='loss_best', seed=1, device="cuda:0",
                          global_rank=0, levels=[0.68], width_inch=10,
                          colors=None, filter_string=None, filename=None, save_dir=None,
                          dpi=400, transform_output=True, display=('nominal', 'optimal'),
@@ -3364,25 +3434,21 @@ class ComparisonPlotter(BasePlotter):
         """
         Compare posterior distributions across multiple runs in a triangle plot.
 
-        For each run, plots the ``display`` designs' posteriors either from the samples its
-        eval saved (``source='saved'``) or by sampling its flow (``source='flow'``, via
-        :func:`bedcosmo.util.nf_posterior_entries`). For num_tracers the DESI MCMC
-        reference is drawn behind the runs.
+        For each run, plots the ``display`` designs' posteriors from the samples its eval
+        saved, sampling the run's flow only when it has none (see ``_run_nf_entries``).
+        For num_tracers the DESI MCMC reference is drawn behind the runs.
 
         Args:
             var (str or list, optional): Parameter(s) to group runs by.
                 Defaults to ``self.var`` from ``__init__`` when omitted.
-            guide_samples (int): Number of samples to draw from the posterior
-                (``source='flow'``) and from the prior overlay.
+            guide_samples (int): Number of samples to draw from the prior overlay, and
+                from a run's flow when it has no saved samples.
             show_scatter (bool): Whether to show scatter points.
-            source (str): ``'saved'`` loads each run's newest ``Evaluator.run`` posterior
-                NPZ (at ``eval_step`` if given), so no flow is sampled; ``'flow'`` loads
-                the ``step`` checkpoint and samples it.
-            step (str or int): Checkpoint to evaluate for the posterior flow
-                (``source='flow'`` only).
+            step (str or int): Checkpoint to sample when a run has no saved samples.
             seed (int): Random seed.
             device (str): Device to use.
-            global_rank (int or list): Global rank(s) to evaluate.
+            global_rank (int or list): Global rank(s) to evaluate. Only rank 0 has saved
+                samples; other ranks are sampled from their flows.
             levels (list): List of contour levels to plot.
             width_inch (float): Width of the triangle plot in inches.
             colors (list, optional): List of colors to use for each group.
@@ -3399,13 +3465,7 @@ class ComparisonPlotter(BasePlotter):
         """
         var = self._resolve_var(var)
         global_ranks = global_rank if isinstance(global_rank, list) else [global_rank]
-        if source not in ('saved', 'flow'):
-            raise ValueError(f"source must be 'saved' or 'flow'; got {source!r}.")
-        if source == 'saved' and global_ranks != [0]:
-            raise ValueError(
-                "source='saved' plots the samples the rank-0 eval saved; "
-                f"use source='flow' for global_rank={global_rank!r}.")
-        bundle_steps = set()
+        plotted_steps = set()
 
         display = validate_display(display)
 
@@ -3533,52 +3593,22 @@ class ComparisonPlotter(BasePlotter):
                             f"{self.storage_path}/mlruns/{exp_id}/"
                             f"{run_data_item['run_obj'].info.run_id}/artifacts"
                         )
-                        if source == 'saved':
-                            bundle = load_posterior_samples_file(
-                                artifacts_dir,
-                                step=eval_step,
-                                require_series=display,
-                                generated_by="Evaluator.run",
-                            )
-                            if bundle['meta']['transform_output'] != transform_output:
-                                raise ValueError(
-                                    f"saved samples at {bundle['path']} have transform_output="
-                                    f"{bundle['meta']['transform_output']}, requested "
-                                    f"{transform_output}; use source='flow'.")
-                            nf_entries = self._filter_nf_entries_by_display(
-                                nf_entries_from_posterior_bundle(bundle, experiment), display
-                            )
-                            bundle_steps.add(bundle['meta']['step'])
-                        else:
-                            posterior_flow, _ = load_model(
-                                experiment,
-                                step,
-                                run_data_item['run_obj'],
-                                run_data_item['params'],
-                                use_device,
-                                global_rank=rank,
-                            )
-                            eig_data = None
-                            try:
-                                _, eig_data = self.load_eig_data_file(
-                                    artifacts_dir, eval_step=eval_step, eig_kind='variable'
-                                )
-                            except ValueError:
-                                # Nominal-only comparisons can go without EIG legend values.
-                                if 'optimal' in display:
-                                    raise
-                            auto_seed(seed)
-                            nf_entries = nf_posterior_entries(
-                                experiment,
-                                posterior_flow,
-                                eig_data,
-                                eval_step,
-                                display=display,
-                                guide_samples=guide_samples,
-                                transform_output=transform_output,
-                                plot_prior=plot_prior,
-                                device=use_device,
-                            )
+                        nf_entries, step_label = self._run_nf_entries(
+                            experiment,
+                            run_data_item['run_obj'],
+                            run_data_item['params'],
+                            artifacts_dir,
+                            display=display,
+                            eval_step=eval_step,
+                            step=step,
+                            guide_samples=guide_samples,
+                            transform_output=transform_output,
+                            plot_prior=plot_prior,
+                            device=use_device,
+                            seed=seed,
+                            global_rank=rank,
+                        )
+                        plotted_steps.add(str(step_label))
                     except Exception as e:
                         print(
                             f"Warning: Could not get guide samples for run "
@@ -3745,7 +3775,7 @@ class ComparisonPlotter(BasePlotter):
                         color=color,
                     )
 
-        title_step = step if source == 'flow' else ", ".join(str(s) for s in sorted(bundle_steps))
+        title_step = ", ".join(sorted(plotted_steps))
         title = (
             f'Posterior Comparison ({", ".join(display)}), Step: {title_step}, '
             f'Levels: {self._format_contour_levels_list(levels)}'
