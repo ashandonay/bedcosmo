@@ -645,7 +645,7 @@ class TestComparisonPlotter:
             mock_gen_filename.return_value = "test.png"
 
             with patch('bedcosmo.plotting.os.makedirs'):
-                result = comparison_plotter.compare_posterior(var='pyro_seed')
+                result = comparison_plotter.compare_posterior(var='pyro_seed', source='flow')
 
                 assert result == mock_plotter
                 mock_plot_triangle.assert_called_once()
@@ -693,7 +693,7 @@ class TestComparisonPlotter:
             mock_plot_triangle.return_value = mock_plotter
 
             custom_colors = ['red', 'blue']
-            comparison_plotter.compare_posterior(colors=custom_colors)
+            comparison_plotter.compare_posterior(colors=custom_colors, source='flow')
 
             call_args = mock_plot_triangle.call_args
             assert 'colors' in call_args.kwargs or len(call_args[0]) > 1
@@ -751,7 +751,7 @@ class TestComparisonPlotter:
             mock_plotter.fig.legends = []
             mock_plot_triangle.return_value = mock_plotter
 
-            comparison_plotter.compare_posterior(var='pyro_seed', plot_prior=True)
+            comparison_plotter.compare_posterior(var='pyro_seed', plot_prior=True, source='flow')
 
             kwargs = mock_plot_triangle.call_args.kwargs
             assert kwargs['alpha'][-1] == 0.4
@@ -2207,3 +2207,89 @@ class TestPlot2dEig:
     def test_plot_2d_eig_with_options(self, mock_scratch_env, tmp_path):
         """Test plot_2d_eig with show_optimal, show_nominal, save_path, and dpi."""
         pass
+
+
+# ============================================================================
+# ComparisonPlotter.compare_posterior from saved eval samples
+# ============================================================================
+
+def _saved_comparison_runs(tmp_path, cosmo_exp, seed_offsets):
+    """Write one Evaluator.run posterior NPZ per run; return (run_data_list, nominal thetas)."""
+    from types import SimpleNamespace
+    from bedcosmo.artifacts import make_posterior_samples_path, save_posterior_samples
+
+    rng = np.random.default_rng(0)
+    runs, nominal = [], {}
+    for i, offset in enumerate(seed_offsets):
+        run_id = f"run_{i}"
+        theta = rng.normal(loc=offset, size=(2, 1, 50, 2))      # (series, data, guide, param)
+        artifacts = tmp_path / "bedcosmo" / cosmo_exp / "mlruns" / "exp_1" / run_id / "artifacts"
+        save_posterior_samples(
+            make_posterior_samples_path(str(artifacts), step=500),
+            theta=theta, y=np.zeros((2, 1, 3)), design=np.eye(2),
+            series_names=["nominal", "optimal"], param_names=["p0", "p1"],
+            meta={"status": "complete", "step": 500, "generated_by": "Evaluator.run",
+                  "transform_output": True},
+        )
+        nominal[run_id] = theta[0, 0]
+        runs.append({"run_id": run_id, "params": {"cosmo_model": "base"},
+                     "run_obj": SimpleNamespace(info=SimpleNamespace(run_id=run_id)),
+                     "exp_id": "exp_1"})
+    return runs, nominal
+
+
+def _fake_experiment(reference=None):
+    from types import SimpleNamespace
+    return SimpleNamespace(cosmo_params=["p0", "p1"], latex_labels=["p_0", "p_1"],
+                           device="cpu", central_params=None,
+                           get_nominal_samples=lambda transform_output: reference)
+
+
+def _run_compare(plotter, runs, experiment, **kwargs):
+    fake_g = MagicMock()
+    fake_g.fig.legends = []
+    fake_g.subplots = [[MagicMock()]]
+    with patch("bedcosmo.plotting.get_runs_data", return_value=(runs, "exp_1", "test")), \
+         patch("bedcosmo.plotting.init_experiment", return_value=experiment), \
+         patch("bedcosmo.plotting.load_model", side_effect=AssertionError("flow was sampled")), \
+         patch.object(plotter, "plot_triangle", return_value=fake_g) as mock_tri, \
+         patch.object(plotter, "save_figure"):
+        assert plotter.compare_posterior(display="nominal", plot_prior=False, **kwargs) is fake_g
+    return mock_tri.call_args
+
+
+def test_compare_posterior_saved_plots_each_runs_npz_without_sampling(tmp_path, monkeypatch):
+    monkeypatch.setenv("SCRATCH", str(tmp_path))
+    runs, nominal = _saved_comparison_runs(tmp_path, "test_exp", [0.0, 5.0])
+    plotter = ComparisonPlotter(cosmo_exp="test_exp", run_ids=[r["run_id"] for r in runs])
+
+    call = _run_compare(plotter, runs, _fake_experiment())
+
+    plotted = call.args[0]
+    assert len(plotted) == 2
+    for sample, run in zip(plotted, runs):
+        np.testing.assert_allclose(sample.samples, nominal[run["run_id"]])
+
+
+def test_compare_posterior_draws_desi_reference_behind_runs(tmp_path, monkeypatch):
+    monkeypatch.setenv("SCRATCH", str(tmp_path))
+    runs, _ = _saved_comparison_runs(tmp_path, "num_tracers", [0.0, 5.0])
+    plotter = ComparisonPlotter(cosmo_exp="num_tracers", run_ids=[r["run_id"] for r in runs])
+    reference = Mock(label="DESI")
+
+    call = _run_compare(plotter, runs, _fake_experiment(reference))
+
+    assert call.args[0][0] is reference                # first plotted = drawn underneath
+    assert call.kwargs["line_style"][0] == "--"
+    assert call.args[1][0] == "black"
+    assert len(call.args[0]) == 3
+
+
+@pytest.mark.parametrize("kwargs, match", [
+    ({"source": "npz"}, "source must be"),
+    ({"source": "saved", "global_rank": [0, 1]}, "rank-0 eval"),
+])
+def test_compare_posterior_source_validation(mock_scratch_env, kwargs, match):
+    plotter = ComparisonPlotter(cosmo_exp="test_exp", run_ids=["run_0"])
+    with pytest.raises(ValueError, match=match):
+        plotter.compare_posterior(**kwargs)
