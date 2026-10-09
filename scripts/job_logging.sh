@@ -25,3 +25,80 @@ print_bed_cli_overrides() {
         echo "CLI Overrides: ($empty_description)"
     fi
 }
+
+# Universal jobs log: one append-only file across all experiments. Each job gets a
+# QUEUED entry at submission (submit.sh command, optional --note, path of its full log
+# inside the MLflow run), a STARTED entry and one end entry
+# (COMPLETED / FAILED / STOPPED / SKIPPED).
+JOBS_LOG="${SCRATCH}/bedcosmo/jobs.log"
+
+# Usage: jobs_log_append EVENT SUMMARY [DETAIL_LINE...]
+# The entry is written with a single printf so concurrent jobs don't interleave lines.
+jobs_log_append() {
+    local entry line
+    entry=$(printf '[%s] %-9s %s' "$(date '+%Y-%m-%d %H:%M:%S')" "$1" "$2")
+    shift 2
+    for line in "$@"; do
+        entry+=$'\n'"    $line"
+    done
+    mkdir -p "$(dirname "$JOBS_LOG")"
+    printf '%s\n' "$entry" >> "$JOBS_LOG"
+}
+
+# Path of an MLflow run's directory (file store: mlruns/<exp_id>/<run_id>).
+# Usage: mlflow_run_dir COSMO_EXP RUN_ID
+mlflow_run_dir() {
+    local matches=("${SCRATCH}/bedcosmo/$1/mlruns/"*/"$2")
+    if [ ! -d "${matches[0]}" ]; then
+        echo "Error: MLflow run $2 not found under ${SCRATCH}/bedcosmo/$1/mlruns" >&2
+        return 1
+    fi
+    echo "${matches[0]}"
+}
+
+# Record a job's STARTED entry now and its end entry when the calling script exits.
+# BED_JOB_SUMMARY (set by submit.sh) labels both entries.
+# SIGTERM (scancel or the SLURM time limit) and SIGINT only set a flag, so the script
+# carries on to the EXIT trap once the running step returns. A job killed outright
+# (SIGKILL, node failure) never writes an end entry and stays STARTED.
+# Set JOB_SKIPPED="<reason>" before exiting to record SKIPPED instead of COMPLETED.
+# Under SLURM the STARTED entry also names the node, for matching against sacct.
+# Usage: jobs_log_track JOB_ID [DETAIL_LINE...]
+jobs_log_track() {
+    local job_id=$1 summary="$BED_JOB_SUMMARY job=$1"
+    shift
+    JOB_START=$(date +%s)
+    if [ -n "${SLURM_JOB_ID:-}" ]; then
+        summary+=" node=$(hostname)"
+    fi
+    jobs_log_append STARTED "$summary" "$@"
+    trap 'JOB_STOPPED=1' TERM INT
+    trap "_jobs_log_finish \$? $job_id" EXIT
+}
+
+_jobs_log_finish() {
+    local code=$1 status details=()
+    if [ -n "${JOB_SKIPPED:-}" ]; then
+        status=SKIPPED
+        details+=("reason: $JOB_SKIPPED")
+    elif [ -n "${JOB_STOPPED:-}" ]; then
+        status=STOPPED
+    elif [ "$code" -eq 0 ]; then
+        status=COMPLETED
+    else
+        status=FAILED
+    fi
+    jobs_log_append "$status" "$BED_JOB_SUMMARY job=$2 exit=$code elapsed=$(_jobs_log_duration)" "${details[@]}"
+}
+
+# Time since jobs_log_track as 45s, 12m or 4h18m.
+_jobs_log_duration() {
+    local s=$(( $(date +%s) - JOB_START ))
+    if [ "$s" -lt 60 ]; then
+        echo "${s}s"
+    elif [ "$s" -lt 3600 ]; then
+        echo "$((s / 60))m"
+    else
+        printf '%dh%02dm\n' $((s / 3600)) $((s % 3600 / 60))
+    fi
+}

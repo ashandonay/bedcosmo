@@ -49,14 +49,12 @@ if [ -z "$COSMO_EXP" ]; then
     exit 1
 fi
 
-# Set log directory based on cosmo_exp
-LOG_DIR="${SCRATCH}/bedcosmo/${COSMO_EXP}/logs"
-mkdir -p "$LOG_DIR"
-
-# Capture all stdout/stderr in a single log file.
-JOB_LOG="${LOG_DIR}/${SLURM_JOB_ID}_${SLURM_JOB_NAME}.log"
-touch "$JOB_LOG"
+# Capture all stdout/stderr in a single log file inside the MLflow run (BED_JOB_LOG_DIR
+# is set by submit.sh), and record start/end in the universal jobs log.
+mkdir -p "$BED_JOB_LOG_DIR"
+JOB_LOG="${BED_JOB_LOG_DIR}/${SLURM_JOB_NAME}_${SLURM_JOB_ID}.log"
 exec > >(tee -a "$JOB_LOG") 2>&1
+jobs_log_track "$SLURM_JOB_ID"
 
 # Print job information and CLI overrides
 echo "=========================================="

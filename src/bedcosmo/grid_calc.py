@@ -1699,6 +1699,13 @@ def main():
         help="MLflow run ID. If set, grid output is written into the run's artifacts dir.",
     )
     parser.add_argument(
+        "--out-dir",
+        type=str,
+        default=None,
+        help="Existing output directory (submit.sh creates it so the job log can go there "
+        "from the start). Default: a new $SCRATCH/bedcosmo/<cosmo_exp>/grid_calc/<timestamp>.",
+    )
+    parser.add_argument(
         "--eval-step",
         type=str,
         default=None,
@@ -1757,6 +1764,8 @@ def main():
 
     if "SCRATCH" not in os.environ:
         raise EnvironmentError("SCRATCH environment variable is required.")
+    if args.run_id and args.out_dir:
+        raise ValueError("--out-dir is for standalone runs; --run-id writes into the run's artifacts dir.")
 
     # Parse range args once (used by both modes)
     feature_ranges = {}
@@ -1813,21 +1822,26 @@ def main():
         **exp_kwargs,
     )
 
-    # Build output directory: $SCRATCH/bedcosmo/{exp_name}/grid_calc/{date}
-    # If a sibling job already grabbed this timestamp, append _1, _2, ... until we
-    # win an atomic mkdir. Race-safe: parallel jobs each get a unique directory.
-    date_str = datetime.now().strftime("%Y%m%d_%H%M%S")
-    base_dir = Path(os.environ["SCRATCH"]) / "bedcosmo" / args.cosmo_exp / "grid_calc"
-    base_dir.mkdir(parents=True, exist_ok=True)
-    out_dir = base_dir / date_str
-    suffix = 1
-    while True:
-        try:
-            out_dir.mkdir(exist_ok=False)
-            break
-        except FileExistsError:
-            out_dir = base_dir / f"{date_str}_{suffix}"
-            suffix += 1
+    if args.out_dir:
+        out_dir = Path(args.out_dir)
+        if not out_dir.is_dir():
+            raise FileNotFoundError(f"--out-dir does not exist: {out_dir}")
+    else:
+        # Build output directory: $SCRATCH/bedcosmo/{exp_name}/grid_calc/{date}
+        # If a sibling job already grabbed this timestamp, append _1, _2, ... until we
+        # win an atomic mkdir. Race-safe: parallel jobs each get a unique directory.
+        date_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+        base_dir = Path(os.environ["SCRATCH"]) / "bedcosmo" / args.cosmo_exp / "grid_calc"
+        base_dir.mkdir(parents=True, exist_ok=True)
+        out_dir = base_dir / date_str
+        suffix = 1
+        while True:
+            try:
+                out_dir.mkdir(exist_ok=False)
+                break
+            except FileExistsError:
+                out_dir = base_dir / f"{date_str}_{suffix}"
+                suffix += 1
 
     # Save all args (grid_calc + experiment) to args.yaml
     all_args = {

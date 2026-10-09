@@ -65,6 +65,7 @@ Run `./submit.sh` with no arguments for the full list of job types and flags.
 
 - `submit.sh` reads the `cosmo_model` block of `train_args.yaml` (or `eval_args.yaml` for eval) and turns each key into a `--kebab-case` flag. CLI flags replace the YAML values. The resulting argv is fixed when you submit.
 - For train jobs, `scripts/create_run.py` runs before submission. It pre-creates the MLflow run, tags it `queued`, and copies the referenced prior/design YAMLs and data files (emulator checkpoints, SED KDE, prior flow) into the run's artifacts. The job attaches to that run with `--attach-run-id`. Edits to those files while the job waits in the queue therefore don't affect it.
+- Restart jobs also get their new run pre-created, without a snapshot (the job copies config from the source run). So every job knows its MLflow run at submission, which is where its log goes (see [Job logs](#job-logs)).
 - The snapshot covers config and data only, **not code**. Jobs import `bedcosmo` from disk when the process starts, so editing `src/` while a job is queued or running changes what that job runs.
 
 ### Resuming/Restarting Training
@@ -83,7 +84,7 @@ Run `./submit.sh` with no arguments for the full list of job types and flags.
 
 ### Auto-Evaluation
 
-Evaluation runs automatically after train/restart/resume jobs complete. The eval job extracts the run ID from the training log and loads defaults from `eval_args.yaml`.
+Evaluation runs automatically after train/restart/resume jobs complete. The eval job gets the run ID from `submit.sh` and loads defaults from `eval_args.yaml`.
 
 Pass eval-specific arguments with the `--eval-` prefix:
 
@@ -100,7 +101,30 @@ Pass eval-specific arguments with the `--eval-` prefix:
 
 Auto-eval is disabled by default in `--debug` mode. Use `--auto-eval` to force it on.
 
-For SLURM, the eval job is submitted as a dependent job (`afterany`) and checks if training completed successfully before running. `scripts/slurm/eval.sh` looks for a line ending in `completed.` in the training log, then reads the run ID from the `MLFlow Run Info: <exp_id>/<run_id>` line. Update `eval.sh` if you change either line in `train.py`.
+For SLURM, the eval job is submitted as a dependent job (`afterany`) and checks if training completed successfully before running. `scripts/slurm/eval.sh` looks for a line ending in `completed.` in the training job's log (in the run's `artifacts/logs/`); if it's missing, the eval records `SKIPPED` in the jobs log and exits. Update `eval.sh` if you change that line in `train.py`.
+
+### Job logs
+
+Each job's full stdout/stderr goes into the run it belongs to: `<run>/artifacts/logs/{jobname}_{slurm_jobid}.log` (local: `{jobname}_{timestamp}.log`), where `jobname` is `train`, `resume`, `restart`, `debug`, `eval` or `grid`. A standalone grid job has no run, so its log goes into `<grid output dir>/logs/`.
+
+`$SCRATCH/bedcosmo/jobs.log` is one append-only record of every job across all experiments. Each job gets timestamped entries:
+
+```
+[2026-10-08 14:03:12] QUEUED    train num_visits/empirical run=3f2a9c1e job=41234567
+    note: bins16, compare to 38be41a6
+    cmd:  ./submit.sh train num_visits empirical --time 04:00
+    log:  $SCRATCH/bedcosmo/num_visits/mlruns/12/3f2a9c1e.../artifacts/logs/train_41234567.log
+[2026-10-08 14:03:12] QUEUED    eval num_visits/empirical run=3f2a9c1e job=41234568
+    auto-eval after train job 41234567
+    log:  .../artifacts/logs/eval_41234568.log
+[2026-10-08 15:10:02] STARTED   train num_visits/empirical run=3f2a9c1e job=41234567 node=nid001234
+[2026-10-08 19:28:44] COMPLETED train num_visits/empirical run=3f2a9c1e job=41234567 exit=0 elapsed=4h18m
+```
+
+- `--note "<text>"` adds a reminder to the job's first entry. `cmd` is the `submit.sh` invocation as typed; the fully resolved argv is printed at the top of the job log.
+- End states: `COMPLETED` (exit 0), `FAILED` (non-zero exit), `STOPPED` (SIGTERM/SIGINT: `scancel`, the SLURM time limit, or Ctrl-C locally), `SKIPPED` (auto-eval after a failed training job). A job killed outright (SIGKILL, node failure) never writes an end entry and stays `STARTED`; check `sacct -j <job>`.
+- `run=` shows the first 8 characters of the MLflow run ID; the `log:` path has the full ID. Debug jobs show as e.g. `train [debug]`.
+- Local jobs have no `QUEUED` entry; their note, cmd and log go on the `STARTED` entry, with `job=local-<pid>` and no `node=`.
 
 ### Manual Evaluation
 
@@ -205,9 +229,9 @@ Layout:
 ```
 $SCRATCH/bedcosmo/
   {cosmo_exp}/           # num_tracers, num_visits, variable_redshift
-    mlruns/              # MLflow runs; checkpoints and config snapshots are in each run's artifacts/
-    logs/                # job logs: {jobid}_{jobname}.log
-    grid_calc/           # grid EIG outputs, one directory per timestamp
+    mlruns/              # MLflow runs; checkpoints, config snapshots and job logs (logs/) are in each run's artifacts/
+    grid_calc/           # grid EIG outputs, one directory per timestamp (job log in logs/)
+  jobs.log               # universal jobs log: every job's queue/start/end entries (see Job logs)
   num_tracers/emulator/  # BAO emulator checkpoints
   num_visits/empirical_prior/  # empirical SED prior builds (see src/bedcosmo/num_visits/empirical/README.md)
   desi/, eazy/           # shared DESI spectra and EAZY templates for the SED prior
@@ -291,7 +315,7 @@ mypy .                      # Type checking
 
 ### Job Fails Immediately
 
-Check output logs in `$SCRATCH/bedcosmo/{cosmo_exp}/logs/`
+Find the job in `$SCRATCH/bedcosmo/jobs.log`; its entries link to the full log in the run's `artifacts/logs/`.
 
 ### Out of Memory
 
@@ -333,7 +357,7 @@ python -m bedcosmo.grid_calc num_visits \
     --param-pts 1000 --feature-pts 500
 ```
 
-Grid jobs are CPU-only. The SLURM log is automatically copied into the output directory alongside the results.
+Grid jobs are CPU-only. Via `submit.sh`, the output directory is created at submission and passed as `--out-dir`, so the job log is written to its `logs/` from the start. Run directly, `grid_calc` creates a new timestamped directory.
 
 Key CLI flags:
 
@@ -351,6 +375,7 @@ Key CLI flags:
 | `--feature-dense-fraction` | Fraction of feature grid points in the dense region (default 0.6) |
 | `--param-dense-fraction` | Fraction of parameter grid points in the dense region (default 0.6) |
 | `--no-plots` | Skip plot generation |
+| `--out-dir` | Existing output directory (`submit.sh` sets it). Not with `--run-id` |
 
 Outputs are saved to `$SCRATCH/bedcosmo/{cosmo_exp}/grid_calc/{timestamp}/` and include `eig_data_grid.json`, posterior and marginal plots, and the feature grid diagnostic.
 
