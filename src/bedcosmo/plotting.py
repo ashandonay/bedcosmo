@@ -267,7 +267,9 @@ def _extract_eig_values(eig_data, step_str, eig_kind, subset=None):
         subset (str or list, optional): Marginal parameter subset; required for marginal.
 
     Returns:
-        tuple: ``(designs, eigs_avg, eigs_std, label)`` with designs shape ``(n, d)``.
+        tuple: ``(designs, eigs_avg, eigs_std, nominal_eig, label)`` with designs shape
+        ``(n, d)``; ``nominal_eig`` is the nominal design's EIG (joint or the subset's
+        marginal), or None when the eig_data has none.
     """
     if eig_kind not in ("variable", "marginal"):
         raise ValueError(f"eig_kind must be 'variable' or 'marginal', got {eig_kind!r}")
@@ -287,6 +289,7 @@ def _extract_eig_values(eig_data, step_str, eig_kind, subset=None):
         if eigs_raw is None:
             raise ValueError(f"`eigs_avg` missing under {step_str}/variable")
         std_raw = block.get("eigs_std")
+        nominal_raw = (step_payload.get("nominal") or {}).get("eigs_avg")
         label = "variable"
     else:
         subset_id = _normalize_marginal_subset_id(subset)
@@ -301,6 +304,7 @@ def _extract_eig_values(eig_data, step_str, eig_kind, subset=None):
         if eigs_raw is None:
             raise ValueError(f"`eigs_avg` missing under {step_str}/marginal/{subset_id}")
         std_raw = block.get("eigs_std")
+        nominal_raw = (block.get("nominal") or {}).get("eigs_avg")
         label = f"marginal({subset_id})"
 
     eigs_avg = np.asarray(eigs_raw, dtype=float).reshape(-1)
@@ -315,7 +319,11 @@ def _extract_eig_values(eig_data, step_str, eig_kind, subset=None):
         if eigs_std.shape != eigs_avg.shape:
             raise ValueError("eigs_std shape does not match eigs_avg")
 
-    return designs, eigs_avg, eigs_std, label
+    if isinstance(nominal_raw, list):
+        nominal_raw = nominal_raw[0] if nominal_raw else None
+    nominal_eig = float(nominal_raw) if nominal_raw is not None else None
+
+    return designs, eigs_avg, eigs_std, nominal_eig, label
 
 
 def _weighted_pearson(x, y, weights):
@@ -427,8 +435,6 @@ def _eig_correlation_stats(eigs_x, eigs_y):
         "mean_offset": float(np.mean(eigs_y - eigs_x)),
         "top10_overlap": top10_overlap,
         "n_designs": int(eigs_x.size),
-        "rank_x": rank_x,
-        "rank_y": rank_y,
     }
 
 
@@ -4398,8 +4404,8 @@ class ComparisonPlotter(BasePlotter):
             axis_name (str): Label used in error messages (``'x'`` or ``'y'``).
 
         Returns:
-            dict: ``designs``, ``eigs``, ``eigs_std``, ``label``, ``run_id``,
-            ``design_labels``, ``step_str``, ``eig_data_path``.
+            dict: ``designs``, ``eigs``, ``eigs_std``, ``nominal_eig``, ``label``,
+            ``run_id``, ``design_labels``, ``step_str``, ``eig_data_path``.
         """
         if not isinstance(spec, dict):
             raise ValueError(f"{axis_name} must be a dict of axis options, got {type(spec)!r}")
@@ -4455,7 +4461,7 @@ class ComparisonPlotter(BasePlotter):
 
         _, step_str = resolve_eig_step(eig_data, eval_step)
 
-        designs, eigs, eigs_std, auto_label = _extract_eig_values(
+        designs, eigs, eigs_std, nominal_eig, auto_label = _extract_eig_values(
             eig_data, step_str, eig_kind, subset=subset
         )
         meta_labels = (eig_data.get("metadata") or {}).get("design_labels")
@@ -4474,6 +4480,7 @@ class ComparisonPlotter(BasePlotter):
             "designs": designs,
             "eigs": eigs,
             "eigs_std": eigs_std,
+            "nominal_eig": nominal_eig,
             "label": label,
             "run_id": run_id,
             "design_labels": list(meta_labels) if meta_labels is not None else None,
@@ -4592,80 +4599,120 @@ class ComparisonPlotter(BasePlotter):
         self,
         x=None,
         y=None,
-        figsize=(12.4, 6.0),
+        normalize=True,
+        colors=None,
+        figsize=(7.2, 7.2),
         title=None,
         xlabel=None,
-        ylabel=None,
-        show_errorbars=True,
+        show_errorbars=False,
         filename=None,
         save_dir=None,
         dpi=400,
     ):
-        """Scatter two per-design EIG maps with Pearson (value) and Spearman (rank).
+        """Scatter per-design EIG of one or more runs (``y``) against a reference (``x``).
 
-        Each of ``x`` / ``y`` is a dict selecting a source (default:
-        ``{"eig_kind": "variable"}`` — joint EIG, no subset):
+        Each axis is a dict selecting a source (default: ``{"eig_kind": "variable"}`` —
+        joint EIG, no subset):
 
         - ``eig_kind``: ``'variable'`` or ``'marginal'``
         - ``subset``: required for marginal (str or list of param names)
-        - ``run_id``: optional; defaults to ``run_ids[0]`` / ``run_ids[1]`` when the
-          plotter has exactly two runs
+        - ``run_id``: optional; ``x`` defaults to ``run_ids[0]`` and the k-th ``y`` to
+          ``run_ids[k + 1]``. With ``y`` omitted, every other run is plotted against ``x``.
         - ``eig_data_path``: optional pinned ``eig_data_*.json`` (skips latest-file lookup)
         - ``eval_step`` / ``label``: optional overrides
 
+        ``y`` is one axis dict or a list of them, all drawn on one panel against the 1:1
+        line, each labelled with its Pearson r against ``x``.
+
+        Args:
+            normalize (bool): Plot each run's ``100 * (EIG - EIG_nominal) / EIG_nominal``,
+                as :meth:`compare_eigs` does, so runs whose EIG differs by a constant
+                offset share axes. Pearson r is the same either way; this is the scale on
+                which the 1:1 line means "same gain over nominal". Needs each axis's
+                nominal EIG (joint, or the subset's marginal) in its eig_data.
+            colors (list, optional): One color per ``y`` axis (default: matplotlib cycle).
+            show_errorbars (bool): Draw each design's eval std as error bars.
+
         Returns:
-            tuple: ``(fig, (ax_value, ax_rank), stats)``
+            tuple: ``(fig, ax, stats)``; ``stats`` has one dict per ``y`` with
+            ``rho_pearson``, ``rho_spearman``, ``mean_offset`` (in the plotted units),
+            ``top10_overlap``, ``n_designs``, ``label_x`` and ``label_y``.
         """
-        axis_x, axis_y = self._load_eig_correlation_axes(x, y)
-        eigs_x = axis_x["eigs"]
-        eigs_y = axis_y["eigs"]
-        std_x = axis_x["eigs_std"]
-        std_y = axis_y["eigs_std"]
-        stats = _eig_correlation_stats(eigs_x, eigs_y)
-        rank_x = stats["rank_x"]
-        rank_y = stats["rank_y"]
+        run_ids = self.run_ids or []
+        if x is None:
+            x = self._default_eig_axis_spec()
+        if y is None:
+            y = [self._default_eig_axis_spec() for _ in run_ids[1:]]
+            if not y:
+                raise ValueError("y is required unless the plotter has at least two run_ids")
+        elif isinstance(y, dict):
+            y = [y]
+        axis_x = self._resolve_eig_axis(
+            x, default_run_id=run_ids[0] if run_ids else None, axis_name="x")
+        axes_y = [
+            self._resolve_eig_axis(
+                spec, default_run_id=run_ids[k + 1] if len(run_ids) > k + 1 else None,
+                axis_name=f"y[{k}]")
+            for k, spec in enumerate(y)
+        ]
+        for axis in axes_y:
+            if not np.allclose(axis_x["designs"], axis["designs"]):
+                raise ValueError(f"input_designs differ between x and {axis['label']}")
+        if colors is not None and len(colors) != len(axes_y):
+            raise ValueError(f"colors has {len(colors)} entries for {len(axes_y)} y axes")
 
+        def plotted(axis):
+            """(values, std) on the plotted scale."""
+            if not normalize:
+                return axis["eigs"], axis["eigs_std"]
+            nominal = axis["nominal_eig"]
+            if nominal is None or nominal == 0:
+                raise ValueError(
+                    f"{axis['label']}: normalize=True needs a nonzero nominal EIG in its "
+                    f"eig_data (got {nominal!r}); pass normalize=False to plot raw EIG")
+            return 100.0 * (axis["eigs"] - nominal) / nominal, 100.0 * axis["eigs_std"] / abs(nominal)
+
+        vals_x, std_x = plotted(axis_x)
+        series = [(axis, *plotted(axis)) for axis in axes_y]
+        unit = "EIG vs nominal [%]" if normalize else "EIG [bits]"
         x_label = xlabel if xlabel is not None else axis_x["label"]
-        y_label = ylabel if ylabel is not None else axis_y["label"]
 
-        fig, (ax_value, ax_rank) = plt.subplots(1, 2, figsize=figsize)
+        fig, ax = plt.subplots(figsize=figsize, constrained_layout=True)
+        markers = ["o", "^", "s", "D", "v"]
+        cycle = plt.rcParams["axes.prop_cycle"].by_key()["color"]
+        stats = []
+        for k, (axis, vals_y, std_y) in enumerate(series):
+            stat = _eig_correlation_stats(vals_x, vals_y)
+            color = colors[k] if colors is not None else cycle[k % len(cycle)]
+            label = f"{axis['label']}, r = {stat['rho_pearson']:.3f}"
+            if show_errorbars:
+                ax.errorbar(vals_x, vals_y, xerr=std_x, yerr=std_y, fmt=markers[k % len(markers)],
+                            ms=4, alpha=0.65, capsize=1.5, color=color, label=label, zorder=2)
+            else:
+                ax.scatter(vals_x, vals_y, s=20, marker=markers[k % len(markers)], color=color,
+                           alpha=0.65, edgecolor="none", label=label, zorder=2)
+            stats.append({**stat, "label_x": x_label, "label_y": axis["label"]})
 
-        if show_errorbars and (np.any(std_x > 0) or np.any(std_y > 0)):
-            ax_value.errorbar(
-                eigs_x, eigs_y, xerr=std_x, yerr=std_y,
-                fmt="o", ms=4.5, alpha=0.75, capsize=1.5,
-            )
-        else:
-            ax_value.scatter(eigs_x, eigs_y, s=28, alpha=0.75)
-        lo = float(min(eigs_x.min(), eigs_y.min()))
-        hi = float(max(eigs_x.max(), eigs_y.max()))
+        lo = float(min([vals_x.min()] + [v.min() for _, v, _ in series]))
+        hi = float(max([vals_x.max()] + [v.max() for _, v, _ in series]))
         pad = 0.05 * (hi - lo if hi > lo else 1.0)
         lim = (lo - pad, hi + pad)
-        ax_value.plot(lim, lim, "k--", lw=1, alpha=0.6)
-        ax_value.set_xlim(lim)
-        ax_value.set_ylim(lim)
-        ax_value.set_aspect("equal", adjustable="box")
-        ax_value.set_xlabel(x_label)
-        ax_value.set_ylabel(y_label)
-        ax_value.set_title(f"value  $\\rho={stats['rho_pearson']:.3f}$")
-
-        n = stats["n_designs"]
-        rlim = (0.5, n + 0.5)
-        ax_rank.scatter(rank_x, rank_y, s=28, alpha=0.75)
-        ax_rank.plot([1, n], [1, n], "k--", lw=1, alpha=0.6)
-        ax_rank.set_xlim(rlim)
-        ax_rank.set_ylim(rlim)
-        ax_rank.invert_xaxis()
-        ax_rank.invert_yaxis()
-        ax_rank.set_aspect("equal", adjustable="box")
-        ax_rank.set_xlabel(f"{x_label} rank (1 = highest)")
-        ax_rank.set_ylabel(f"{y_label} rank (1 = highest)")
-        ax_rank.set_title(f"rank  $\\rho={stats['rho_spearman']:.3f}$")
-
+        ax.plot(lim, lim, color="0.5", ls="--", lw=1, zorder=1)
+        if normalize:
+            ax.axhline(0, color="0.88", lw=0.8, zorder=0)
+            ax.axvline(0, color="0.88", lw=0.8, zorder=0)
+        ax.set_xlim(lim)
+        ax.set_ylim(lim)
+        ax.set_aspect("equal", adjustable="box")
+        ax.set_xlabel(f"{x_label}\n{unit}")
+        ax.set_ylabel(unit)
+        ax.grid(color="0.93")
+        ax.set_axisbelow(True)
+        ax.legend(loc="upper left", fontsize=9, frameon=False)
         if title is None:
-            title = "EIG correlation"
-        fig.suptitle(title, fontsize=14, weight="bold")
-        fig.tight_layout()
+            title = (f"Per-design EIG relative to each run's nominal ({len(vals_x)} designs)" if normalize
+                     else f"Per-design EIG ({len(vals_x)} designs)")
+        ax.set_title(title, fontsize=11)
 
         if filename is None:
             filename = "compare_eig_correlation"
@@ -4673,17 +4720,7 @@ class ComparisonPlotter(BasePlotter):
         if save_dir is None and experiment_id is not None:
             save_dir = self.get_save_dir(experiment_id=experiment_id, subdir="plots")
         self.save_figure(fig, filename=filename, save_dir=save_dir, dpi=dpi)
-
-        public_stats = {
-            "rho_pearson": stats["rho_pearson"],
-            "rho_spearman": stats["rho_spearman"],
-            "mean_offset": stats["mean_offset"],
-            "top10_overlap": stats["top10_overlap"],
-            "n_designs": stats["n_designs"],
-            "label_x": x_label,
-            "label_y": y_label,
-        }
-        return fig, (ax_value, ax_rank), public_stats
+        return fig, ax, stats
 
     def compare_eig_directional_correlation(
         self,
