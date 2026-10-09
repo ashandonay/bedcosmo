@@ -1529,8 +1529,13 @@ def _make_eig_data(
     status="complete",
     design_labels=None,
     step=50000,
+    nominal_eig=None,
+    marginal_nominal=None,
 ):
-    """Build a minimal complete eig_data dict for tests."""
+    """Build a minimal complete eig_data dict for tests.
+
+    ``nominal_eig`` / ``marginal_nominal`` ({subset: value}) add the nominal design's EIG.
+    """
     designs = np.asarray(designs, dtype=float)
     if designs.ndim == 1:
         designs = designs.reshape(-1, 1)
@@ -1542,6 +1547,8 @@ def _make_eig_data(
             "eigs_avg": variable_eigs.tolist(),
             "eigs_std": np.zeros_like(variable_eigs).tolist(),
         }
+    if nominal_eig is not None:
+        step_payload["nominal"] = {"eigs_avg": float(nominal_eig)}
     if marginal is not None:
         step_payload["marginal"] = {}
         for subset_id, eigs in marginal.items():
@@ -1551,6 +1558,9 @@ def _make_eig_data(
                 "eigs_std": np.zeros_like(eigs).tolist(),
                 "params": subset_id.split("+"),
             }
+            if marginal_nominal is not None and subset_id in marginal_nominal:
+                step_payload["marginal"][subset_id]["nominal"] = {
+                    "eigs_avg": float(marginal_nominal[subset_id])}
     data = {
         "status": status,
         "input_designs": designs.tolist(),
@@ -1578,12 +1588,13 @@ class TestEigCorrelationHelpers:
             marginal={"z": [0.1, 0.2, 0.3]},
             design_labels=["u", "g"],
         )
-        d, eigs, std, label = _extract_eig_values(data, "step_50000", "variable")
+        d, eigs, std, nominal, label = _extract_eig_values(data, "step_50000", "variable")
+        assert nominal is None
         assert label == "variable"
         assert eigs.tolist() == [1.0, 2.0, 3.0]
         assert d.shape == (3, 2)
 
-        d2, eigs2, _, label2 = _extract_eig_values(
+        d2, eigs2, _, _, label2 = _extract_eig_values(
             data, "step_50000", "marginal", subset="z"
         )
         assert label2 == "marginal(z)"
@@ -1665,17 +1676,18 @@ class TestCompareEigCorrelation:
                 "exp_1",
                 "test_exp",
             )
-            fig, axes, stats = plotter.compare_eig_correlation(
+            fig, ax, stats = plotter.compare_eig_correlation(
                 x={"eig_kind": "marginal", "subset": "z", "eig_data_path": str(path_x)},
                 y={"eig_kind": "variable", "eig_data_path": str(path_y)},
+                normalize=False,
                 save_dir=str(tmp_path / "plots"),
                 dpi=80,
             )
-        assert stats["rho_pearson"] == pytest.approx(1.0, abs=1e-6)
-        assert stats["rho_spearman"] == pytest.approx(1.0, abs=1e-6)
-        assert stats["n_designs"] == 4
-        assert axes[0] is not None and axes[1] is not None
-        assert fig is not None
+        assert len(stats) == 1
+        assert stats[0]["rho_pearson"] == pytest.approx(1.0, abs=1e-6)
+        assert stats[0]["rho_spearman"] == pytest.approx(1.0, abs=1e-6)
+        assert stats[0]["n_designs"] == 4
+        assert ax is not None and fig is not None
 
     def test_same_run_via_auto_load(self, mock_scratch_env, tmp_path):
         designs = [[0.0], [1.0], [2.0]]
@@ -1700,14 +1712,15 @@ class TestCompareEigCorrelation:
                 "exp_1",
                 "test_exp",
             )
-            fig, axes, stats = plotter.compare_eig_correlation(
+            fig, ax, stats = plotter.compare_eig_correlation(
                 x={"run_id": "run_same", "eig_kind": "marginal", "subset": ["z"]},
                 y={"run_id": "run_same", "eig_kind": "variable"},
+                normalize=False,
                 save_dir=str(tmp_path / "plots"),
                 dpi=80,
             )
-        assert stats["rho_pearson"] == pytest.approx(1.0)
-        assert "marginal(z)" in stats["label_x"]
+        assert stats[0]["rho_pearson"] == pytest.approx(1.0)
+        assert "marginal(z)" in stats[0]["label_x"]
 
     def test_design_mismatch(self, mock_scratch_env, tmp_path):
         path_x = self._write_eig_json(
@@ -1750,6 +1763,54 @@ class TestCompareEigCorrelation:
                     y={"eig_kind": "variable", "eig_data_path": str(path)},
                     save_dir=str(tmp_path / "plots"),
                 )
+
+    def _runs_with_nominal(self, tmp_path, eigs_by_run, nominal_by_run):
+        designs = [[float(i)] for i in range(len(next(iter(eigs_by_run.values()))))]
+        for run_id, eigs in eigs_by_run.items():
+            self._write_eig_json(
+                tmp_path / "mlruns" / "exp_1" / run_id / "artifacts" / "eig_data_20260101_1200.json",
+                _make_eig_data(designs, variable_eigs=eigs, nominal_eig=nominal_by_run.get(run_id)))
+        plotter = ComparisonPlotter(cosmo_exp="test_exp", run_ids=list(eigs_by_run))
+        plotter.storage_path = str(tmp_path)
+        runs = ([{"run_id": r, "exp_id": "exp_1"} for r in eigs_by_run], "exp_1", "test_exp")
+        return plotter, runs
+
+    def test_normalized_against_reference_with_several_runs(self, mock_scratch_env, tmp_path):
+        ref = np.array([7.0, 7.1, 6.9, 7.2])
+        plotter, runs = self._runs_with_nominal(
+            tmp_path,
+            {"ref": ref, "up": ref + 0.8, "down": 0.9 * ref},
+            {"ref": 7.0, "up": 7.8, "down": 6.3},
+        )
+        with patch.object(plotter, "_get_run_data_list", return_value=runs):
+            fig, ax, stats = plotter.compare_eig_correlation(
+                colors=["tab:blue", "tab:green"], save_dir=str(tmp_path / "plots"), dpi=60)
+        # y defaults to every run after run_ids[0], in order.
+        assert [s["label_y"] for s in stats] == ["variable [up]", "variable [down]"]
+        # Plotted values are % from each run's own nominal: "down" is a pure rescale, so it
+        # lands on 1:1; the constant +0.8 bit shift of "up" is shrunk by its larger nominal.
+        pct_ref = 100 * (ref - 7.0) / 7.0
+        np.testing.assert_allclose(ax.collections[1].get_offsets()[:, 1], pct_ref)
+        np.testing.assert_allclose(ax.collections[0].get_offsets()[:, 1], 100 * (ref + 0.8 - 7.8) / 7.8)
+        assert all(s["rho_pearson"] == pytest.approx(1.0) for s in stats)
+        assert stats[1]["mean_offset"] == pytest.approx(0.0, abs=1e-9)
+        assert "r = 1.000" in ax.get_legend().get_texts()[0].get_text()
+
+    def test_normalize_needs_nominal(self, mock_scratch_env, tmp_path):
+        plotter, runs = self._runs_with_nominal(
+            tmp_path, {"ref": [1.0, 2.0], "other": [1.5, 2.5]}, {"ref": 1.5})
+        with patch.object(plotter, "_get_run_data_list", return_value=runs):
+            with pytest.raises(ValueError, match="needs a nonzero nominal EIG"):
+                plotter.compare_eig_correlation(save_dir=str(tmp_path / "plots"))
+            # Raw EIG needs no nominal.
+            _, _, stats = plotter.compare_eig_correlation(
+                normalize=False, save_dir=str(tmp_path / "plots"), dpi=60)
+        assert stats[0]["mean_offset"] == pytest.approx(0.5)
+
+    def test_marginal_nominal_is_read(self):
+        data = _make_eig_data([[0.0], [1.0]], marginal={"z": [1.0, 2.0]}, marginal_nominal={"z": 1.5})
+        *_, nominal, label = _extract_eig_values(data, "step_50000", "marginal", subset="z")
+        assert nominal == 1.5 and label == "marginal(z)"
 
     def test_directional_prefers_agreeing_dim(self, mock_scratch_env, tmp_path):
         designs = [
