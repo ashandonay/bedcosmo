@@ -1111,19 +1111,17 @@ class Trainer:
 
             # Copy emulator checkpoints (artifacts/emulators/*.pt), if the restart run has them,
             # so the restart uses the same frozen emulators rather than re-resolving from emulators.yaml.
+            # log_artifacts copies straight from the source run: copying into artifacts_dir first
+            # and then logging that dir copies each file onto itself (shutil.SameFileError).
             restart_emulators_dir = f"{restart_artifacts_dir}/emulators"
             if os.path.isdir(restart_emulators_dir):
-                new_emulators_dir = f"{artifacts_dir}/emulators"
-                shutil.copytree(restart_emulators_dir, new_emulators_dir, dirs_exist_ok=True)
-                mlflow.log_artifacts(new_emulators_dir, artifact_path="emulators")
+                mlflow.log_artifacts(restart_emulators_dir, artifact_path="emulators")
                 if self.verbose:
                     print(f"Copied emulator checkpoints from restart run to new run artifacts")
 
             restart_empirical_dir = f"{restart_artifacts_dir}/empirical"
             if os.path.isdir(restart_empirical_dir):
-                new_empirical_dir = f"{artifacts_dir}/empirical"
-                shutil.copytree(restart_empirical_dir, new_empirical_dir, dirs_exist_ok=True)
-                mlflow.log_artifacts(new_empirical_dir, artifact_path="empirical")
+                mlflow.log_artifacts(restart_empirical_dir, artifact_path="empirical")
                 if self.verbose:
                     print("Copied empirical KDE artifacts from restart run")
         else:
@@ -1258,13 +1256,7 @@ class Trainer:
                 
                 if original_value != new_value:
                     changed_params[param] = (original_value, new_value)
-        
-        # Handle condition_design parameter
-        original_condition_design = self.run_args.get("condition_design")
-        self.run_args["condition_design"] = ref_run.data.params["condition_design"]
-        if original_condition_design != run_args["condition_design"]:
-            changed_params["condition_design"] = (original_condition_design, self.run_args["condition_design"])
-        
+
         # Log changes if any parameters were modified
         if changed_params and self.global_rank == 0:
             print("=== MODEL PARAMETERS OVERWRITTEN BY REFERENCE RUN ===")
