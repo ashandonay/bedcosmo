@@ -280,3 +280,40 @@ def test_cosmology_dict_moves_the_fixed_fiducial():
     _, cov_fid = _make_exp(emulator_covariance="fiducial")._shapefit_likelihood(n_tracers, params)
     assert torch.allclose(cov_moved, cov_theta)
     assert not torch.allclose(cov_moved, cov_fid)
+
+
+def test_desi_covariance_in_emulator_basis(exp):
+    from desilike_emulator.shapefit import desi_reference
+
+    from bedcosmo.num_tracers.covariance_fiducials import desi_covariance
+
+    cov = desi_covariance(exp)
+    assert cov.shape == (24, 24)
+    i = exp.shapefit_bins.index("LRG2")
+    block = cov[4 * i:4 * i + 4, 4 * i:4 * i + 4]
+    _, measured, desi = desi_reference.datavector("LRG2")
+    fid = desi_reference.published_fiducial("LRG2")
+    # q_iso = D_V / D_V,fid, so its sigma scales the same way; m is carried over unchanged.
+    assert np.sqrt(block[0, 0]) == pytest.approx(np.sqrt(desi[0, 0]) / fid["DV_over_rd"])
+    assert block[3, 3] == pytest.approx(desi[3, 3])
+    # A per-quantity rescaling leaves the correlations alone.
+    d, d_desi = np.sqrt(np.diag(block)), np.sqrt(np.diag(desi))
+    np.testing.assert_allclose(block / np.outer(d, d), desi / np.outer(d_desi, d_desi))
+    assert np.all(cov[4 * i:4 * i + 4, :4 * i] == 0)          # bins are independent
+
+
+def test_shapefit_covariance_fiducials_figure(tmp_path):
+    from bedcosmo.num_tracers.covariance_fiducials import main, nominal_covariances
+
+    fid = _make_exp()._SHAPEFIT_FIDUCIAL["omega_cdm"]
+    _, covs = nominal_covariances("shapefit", "omega_cdm", [0.0904, fid])
+    fixed = _make_exp(emulator_covariance="fiducial")
+    _, cov = fixed._shapefit_likelihood(
+        fixed._shapefit_n_tracers(fixed.nominal_design.double().view(1, -1)),
+        fixed._shapefit_parameters(fixed._SHAPEFIT_FIDUCIAL))
+    np.testing.assert_allclose(covs[fid], cov[0].numpy())
+    assert not np.allclose(covs[0.0904], covs[fid])
+
+    out = tmp_path / "cov.png"
+    main(["--analysis", "shapefit", "--values", "0.0904", str(fid), "--out", str(out)])
+    assert out.stat().st_size > 0
