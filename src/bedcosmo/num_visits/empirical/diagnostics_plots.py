@@ -35,6 +35,10 @@ def plot_coverage(training_matrix, prior_dir=None, redshift_bins=70, population_
         weights = data["relative_ivar"]
         valid = np.isfinite(weights) & (weights > 0)
         requested_bounds = data["prior_redshift_bounds"] if "prior_redshift_bounds" in data.files else None
+        original_bounds = (
+            data["original_supported_bounds_aa"]
+            if "original_supported_bounds_aa" in data.files else None
+        )
     if prior_dir is not None:
         meta = json.loads((prior_dir / "build_provenance.json").read_text())
         with np.load(prior_dir / "desi_basis.npz") as data:
@@ -88,23 +92,28 @@ def plot_coverage(training_matrix, prior_dir=None, redshift_bins=70, population_
             population_valid = np.isfinite(population_weights) & (population_weights > 0)
         if not np.all(np.isin(targetids, population_targetids)):
             raise ValueError("Heatmap population must contain every selected training target")
+    if original_bounds is not None and population_matrix is not None:
+        rows_by_id = {int(target): row for row, target in enumerate(population_targetids)}
+        population_rows = np.array([rows_by_id[int(target)] for target in targetids])
+        columns = np.searchsorted(population_wave, wave)
+        if np.any(columns >= len(population_wave)) or not np.array_equal(population_wave[columns], wave):
+            raise ValueError("Population grid must contain the training wavelength centers")
+        population_valid[np.ix_(population_rows, columns)] = valid
     edges = np.linspace(population_z.min(), population_z.max(), redshift_bins + 1)
     heat = contributor_density(population_valid, population_z, edges)
-    fig = plt.figure(figsize=(12, 15))
-    gs = fig.add_gridspec(
-        3,
-        2,
-        width_ratios=[1, 0.035],
-        height_ratios=[1.5, .85, 1],
-        hspace=0.37,
-        wspace=0.04,
+    fig = plt.figure(figsize=(24, 11))
+    layout = fig.add_gridspec(1, 2, width_ratios=[1.25, 1], wspace=.20)
+    coverage_grid = layout[0, 0].subgridspec(
+        2, 2, width_ratios=[1, .035], height_ratios=[1.4, 1], hspace=.32, wspace=.04
     )
-    ax = fig.add_subplot(gs[0, 0])
-    bottom = fig.add_subplot(gs[2, 0], sharex=ax)
-    buffer_grid = gs[1, 0].subgridspec(1, 2, wspace=0.20)
-    low_panel = fig.add_subplot(buffer_grid[0, 0])
-    high_panel = fig.add_subplot(buffer_grid[0, 1], sharey=low_panel)
-    cax = fig.add_subplot(gs[0, 1])
+    ax = fig.add_subplot(coverage_grid[0, 0])
+    bottom = fig.add_subplot(coverage_grid[1, 0], sharex=ax)
+    cax = fig.add_subplot(coverage_grid[0, 1])
+    buffer_grid = layout[0, 1].subgridspec(
+        3, 2, height_ratios=[.4, 1, .4], wspace=.22
+    )
+    low_panel = fig.add_subplot(buffer_grid[1, 0])
+    high_panel = fig.add_subplot(buffer_grid[1, 1], sharey=low_panel)
     wave_edges = np.r_[
         population_wave[0] - (population_wave[1] - population_wave[0]) / 2,
         (population_wave[:-1] + population_wave[1:]) / 2,
@@ -193,18 +202,26 @@ def plot_coverage(training_matrix, prior_dir=None, redshift_bins=70, population_
     baseline_train = inside_rows[np.random.default_rng(split_seed).permutation(len(inside_rows))[
         : int(train_fraction * len(inside_rows))
     ]]
-    baseline_counts = valid[baseline_train].sum(axis=0)
+    if original_bounds is None:
+        baseline_counts = valid[baseline_train].sum(axis=0)
+    else:
+        baseline_valid = valid & (wave[None, :] >= original_bounds[:, :1]) & (
+            wave[None, :] <= original_bounds[:, 1:]
+        )
+        baseline_counts = baseline_valid[train].sum(axis=0)
     bottom.plot(
         wave, valid.sum(axis=0), color=".6",
         label=f"Selected population, all splits (N={len(z):,})",
     )
     bottom.plot(
         wave, counts, color=buffer_color, ls="-", lw=1.8,
-        label=f"Extended z={z.min():.4f}–{z.max():.4f}: training N={len(train):,}",
+        label=(f"Extra edge extensions: training N={len(train):,}" if original_bounds is not None
+               else f"Extended z={z.min():.4f}–{z.max():.4f}: training N={len(train):,}"),
     )
     bottom.plot(
         wave, baseline_counts, color=prior_color, ls="-.", lw=1.4,
-        label=f"Requested z={lo:g}–{hi:g}: training N={len(baseline_train):,}",
+        label=(f"Per-galaxy LSST extensions only: z={lo:g}–{hi:g}" if original_bounds is not None
+               else f"Requested z={lo:g}–{hi:g}: training N={len(baseline_train):,}"),
     )
     bottom.axhline(
         threshold, color="tab:red", ls=":",
@@ -225,66 +242,91 @@ def plot_coverage(training_matrix, prior_dir=None, redshift_bins=70, population_
     bottom.grid(alpha=.18)
 
     required_columns = np.flatnonzero(lsst_required_mask(wave, np.array([lo, hi])))
-    training_z = z[train]
-    peak_count = threshold
-    for panel, prior_cut, buffer_cut, column, red_edge in (
-        (low_panel, lo, z.min(), required_columns[-1], True),
-        (high_panel, hi, z.max(), required_columns[0], False),
-    ):
-        # Hold membership of the final training split fixed while revealing its buffer.
-        candidates = np.sort(np.unique(np.r_[prior_cut, buffer_cut, training_z[
-            (training_z >= min(prior_cut, buffer_cut)) &
-            (training_z <= max(prior_cut, buffer_cut))
-        ]]))
-        contributors = valid[train, column]
-        totals = np.array([
-            np.count_nonzero(contributors & (training_z >= bound if red_edge else training_z <= bound))
-            for bound in candidates
-        ])
-        color = "tab:red" if red_edge else "tab:blue"
-        panel.step(candidates, totals, where="pre" if red_edge else "post", color=color, lw=2)
-        final_count = int(np.count_nonzero(contributors))
-        baseline_count = int(np.count_nonzero(
-            contributors & (training_z >= prior_cut if red_edge else training_z <= prior_cut)
-        ))
-        panel.axhline(threshold, color=".35", ls="--", lw=1.2)
-        panel.text(.03, .91, f"Required: {threshold}", transform=panel.transAxes, fontsize=10)
-        panel.axvline(prior_cut, color=prior_color, ls="-.", lw=1.5)
-        panel.axvline(buffer_cut, color=buffer_color, ls=":", lw=1.8)
-        panel.axvspan(prior_cut, buffer_cut, color=buffer_color, alpha=.08)
-        panel.scatter([prior_cut], [baseline_count], color=prior_color, s=40, zorder=5)
-        panel.annotate(
-            f"Chosen z={buffer_cut:.4f}\n{final_count} contributors",
-            xy=(buffer_cut, final_count), xytext=(-10, 20), textcoords="offset points",
-            ha="right", fontsize=10, color=buffer_color,
-        )
-        panel.annotate(
-            f"Start z={prior_cut:g}\n{baseline_count} contributors",
-            xy=(prior_cut, baseline_count), xytext=(10, 12), textcoords="offset points",
-            ha="left", fontsize=10, color=prior_color,
-        )
-        span = max(abs(buffer_cut - prior_cut), .001)
-        if red_edge:
-            panel.set_xlim(prior_cut + .06 * span, buffer_cut - .06 * span)
-        else:
-            panel.set_xlim(prior_cut - .06 * span, buffer_cut + .06 * span)
-        panel.set(
-            xlabel="Training lower bound z (decreases →)" if red_edge else "Training upper bound z (increases →)",
-            title=("Low-z buffer supplies the red edge" if red_edge else "High-z buffer supplies the blue edge")
-            + f"\nRequired rest wavelength: {wave[column]:,.0f} Å",
-        )
-        panel.ticklabel_format(axis="x", style="plain", useOffset=False)
-        panel.grid(alpha=.15)
-        peak_count = max(peak_count, final_count)
+    if original_bounds is not None:
+        peak_count = threshold
+        for panel, side, column in (
+            (low_panel, 1, required_columns[-1]),
+            (high_panel, 0, required_columns[0]),
+        ):
+            contributors = valid[train, column]
+            baseline = baseline_valid[train, column]
+            added = contributors & ~baseline
+            distance = np.abs(original_bounds[train, side] - wave[column])
+            distances = np.r_[0, np.unique(distance[added])]
+            totals = baseline.sum() + np.array([
+                np.count_nonzero(added & (distance <= d)) for d in distances
+            ])
+            panel.step(distances, totals, where="post", lw=2,
+                       color="tab:red" if side else "tab:blue")
+            panel.axhline(threshold, color=".35", ls="--", lw=1.2)
+            panel.annotate(
+                f"{totals[-1]} contributors\n{distances[-1]:g} Å extra",
+                xy=(distances[-1], totals[-1]), xytext=(-8, 18),
+                textcoords="offset points", ha="right", fontsize=10,
+            )
+            panel.set(
+                xlabel="Maximum extra rest-frame extension [Å]",
+                title=("Red-edge extension" if side else "Blue-edge extension")
+                + f"\nRequired rest wavelength: {wave[column]:,.0f} Å",
+                xlim=(0, max(distances[-1] * 1.12, 10)),
+            )
+            panel.grid(alpha=.15)
+            peak_count = max(peak_count, totals[-1])
+    else:
+        training_z = z[train]
+        peak_count = threshold
+        for panel, prior_cut, buffer_cut, column, red_edge in (
+            (low_panel, lo, z.min(), required_columns[-1], True),
+            (high_panel, hi, z.max(), required_columns[0], False),
+        ):
+            # Hold membership of the final training split fixed while revealing its buffer.
+            candidates = np.sort(np.unique(np.r_[prior_cut, buffer_cut, training_z[
+                (training_z >= min(prior_cut, buffer_cut)) &
+                (training_z <= max(prior_cut, buffer_cut))
+            ]]))
+            contributors = valid[train, column]
+            totals = np.array([
+                np.count_nonzero(contributors & (training_z >= bound if red_edge else training_z <= bound))
+                for bound in candidates
+            ])
+            color = "tab:red" if red_edge else "tab:blue"
+            panel.step(candidates, totals, where="pre" if red_edge else "post", color=color, lw=2)
+            final_count = int(np.count_nonzero(contributors))
+            baseline_count = int(np.count_nonzero(
+                contributors & (training_z >= prior_cut if red_edge else training_z <= prior_cut)
+            ))
+            panel.axhline(threshold, color=".35", ls="--", lw=1.2)
+            panel.text(.03, .91, f"Required: {threshold}", transform=panel.transAxes, fontsize=10)
+            panel.axvline(prior_cut, color=prior_color, ls="-.", lw=1.5)
+            panel.axvline(buffer_cut, color=buffer_color, ls=":", lw=1.8)
+            panel.axvspan(prior_cut, buffer_cut, color=buffer_color, alpha=.08)
+            panel.scatter([prior_cut], [baseline_count], color=prior_color, s=40, zorder=5)
+            panel.annotate(
+                f"Chosen z={buffer_cut:.4f}\n{final_count} contributors",
+                xy=(buffer_cut, final_count), xytext=(-10, 20), textcoords="offset points",
+                ha="right", fontsize=10, color=buffer_color,
+            )
+            panel.annotate(
+                f"Start z={prior_cut:g}\n{baseline_count} contributors",
+                xy=(prior_cut, baseline_count), xytext=(10, 12), textcoords="offset points",
+                ha="left", fontsize=10, color=prior_color,
+            )
+            span = max(abs(buffer_cut - prior_cut), .001)
+            if red_edge:
+                panel.set_xlim(prior_cut + .06 * span, buffer_cut - .06 * span)
+            else:
+                panel.set_xlim(prior_cut - .06 * span, buffer_cut + .06 * span)
+            panel.set(
+                xlabel="Training lower bound z (decreases →)" if red_edge else "Training upper bound z (increases →)",
+                title=("Low-z buffer" if red_edge else "High-z buffer")
+                + f"\nRequired rest wavelength: {wave[column]:,.0f} Å",
+            )
+            panel.ticklabel_format(axis="x", style="plain", useOffset=False)
+            panel.grid(alpha=.15)
+            peak_count = max(peak_count, final_count)
     low_panel.set(ylabel="Cumulative training contributors", ylim=(0, peak_count * 1.45))
     high_panel.tick_params(labelleft=False)
-    fig.text(
-        .495, .30,
-        "Final training split held fixed; curves reveal contributions as each buffer is included.\n"
-        "The build checks ≥100 contributors at every required wavelength, not only these endpoints.",
-        ha="center", fontsize=10, color=".3",
-    )
-    fig.subplots_adjust(left=0.10, right=0.89, top=0.92, bottom=0.06)
+    fig.subplots_adjust(left=0.045, right=0.98, top=0.90, bottom=0.085)
     return fig
 
 

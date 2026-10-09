@@ -714,7 +714,7 @@ def main() -> None:
                 "polish_updates": polish_updates,
                 "full_refit_updates": full_updates,
                 "required_wavelength_contributors": required,
-                "wavelength_support_policy": "require the contributor threshold throughout requested-prior LSST demand; train on buffered galaxies without narrowing the prior range",
+                "wavelength_support_policy": "require the contributor threshold throughout requested-prior LSST demand; use the selected wavelength or redshift support extensions without narrowing the prior range",
                 "minimum_retained_training_contributors": int(contributors[support].min()),
                 "test_metrics_before_full_refit": test_metrics,
                 **nearly_nmf_package_metadata(),

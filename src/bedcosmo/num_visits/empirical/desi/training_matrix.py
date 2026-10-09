@@ -460,8 +460,17 @@ def build_rest_frame_matrix(
     program: str = DEFAULT_PROGRAM,
     min_good_pixels: int = 100,
     edge_extrapolation: str = "constant",
+    extrapolation_bounds: np.ndarray | None = None,
 ) -> tuple[pd.DataFrame, np.ndarray, np.ndarray, np.ndarray]:
     """Read DESI coadds and return flux, relative inverse variance, and scales."""
+    if extrapolation_bounds is not None:
+        extrapolation_bounds = np.asarray(extrapolation_bounds, dtype=float)
+        if extrapolation_bounds.shape != (len(manifest), 2):
+            raise ValueError("Extrapolation bounds must have shape (n_spectra, 2)")
+        if not np.isfinite(extrapolation_bounds).all() or np.any(
+            extrapolation_bounds[:, 0] >= extrapolation_bounds[:, 1]
+        ):
+            raise ValueError("Extrapolation bounds must be finite and ordered")
     flux_matrix = np.zeros((len(manifest), len(rest_wave)), dtype=np.float32)
     weight_matrix = np.zeros_like(flux_matrix)
     observed_pixel_count = np.zeros(len(manifest), dtype=int)
@@ -508,7 +517,11 @@ def build_rest_frame_matrix(
                     values,
                     weights,
                     method=edge_extrapolation,
-                    bounds=(lsst_blue / (1 + item.z), lsst_red / (1 + item.z)),
+                    bounds=(
+                        (lsst_blue / (1 + item.z), lsst_red / (1 + item.z))
+                        if extrapolation_bounds is None
+                        else extrapolation_bounds[matrix_row]
+                    ),
                 )
                 flux_matrix[matrix_row] = values
                 weight_matrix[matrix_row] = weights

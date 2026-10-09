@@ -22,6 +22,7 @@ from .support import (
     lsst_demand_weighted_coverage,
     lsst_required_mask,
     lsst_support_limits,
+    plan_edge_extensions,
     select_training_redshift_buffer,
     select_wavelength_support,
 )
@@ -51,13 +52,22 @@ def parse_args() -> argparse.Namespace:
         "--z-min",
         type=float,
         default=None,
-        help="Final prior lower redshift bound; training buffer is automatic",
+        help="Final prior lower redshift bound; support extension is automatic",
     )
     parser.add_argument(
         "--z-max",
         type=float,
         default=None,
-        help="Final prior upper redshift bound; training buffer is automatic",
+        help="Final prior upper redshift bound; support extension is automatic",
+    )
+    parser.add_argument(
+        "--support-extension",
+        choices=("redshift", "wavelength"),
+        default="redshift",
+        help=(
+            "Meet LSST training support by extending in-range spectra farther (wavelength) "
+            "or adding nearby out-of-range galaxies to basis training (redshift)"
+        ),
     )
     parser.add_argument("--train-fraction", type=float, default=0.7)
     parser.add_argument("--split-seed", type=int, default=42)
@@ -198,17 +208,75 @@ def main() -> None:
     )
     if prior_bounds[0] >= prior_bounds[1]:
         raise ValueError("Available sample cannot support an ordered prior redshift interval")
-    selected = select_training_redshift_buffer(
-        wave,
-        weights,
-        redshift,
-        prior_bounds,
-        train_fraction=args.train_fraction,
-        split_seed=args.split_seed,
-        minimum_contributors=args.minimum_wavelength_contributors,
-    )
-    manifest = manifest.loc[selected].reset_index(drop=True)
-    flux, weights, scales = flux[selected], weights[selected], scales[selected]
+    if args.support_extension == "wavelength":
+        selected = (redshift >= prior_bounds[0]) & (redshift <= prior_bounds[1])
+        manifest = manifest.loc[selected].reset_index(drop=True)
+        flux, weights, scales = flux[selected], weights[selected], scales[selected]
+        train = np.random.default_rng(args.split_seed).permutation(len(manifest))[
+            : int(args.train_fraction * len(manifest))
+        ]
+        bounds, original_bounds = plan_edge_extensions(
+            wave, weights, prior_bounds, train, args.minimum_wavelength_contributors
+        )
+        changed = np.any(bounds != original_bounds, axis=1)
+        if np.any(changed):
+            affected = manifest.loc[changed].reset_index(drop=True)
+            rebuilt, extra_flux, extra_weights, extra_scales = build_rest_frame_matrix(
+                affected,
+                desi_dir=desi_dir,
+                rest_wave=wave,
+                min_good_pixels=args.min_good_pixels,
+                edge_extrapolation=args.edge_extrapolation,
+                extrapolation_bounds=bounds[changed],
+            )
+            if not np.array_equal(rebuilt["targetid"], affected["targetid"]):
+                raise ValueError("Rebuilding edge extensions changed the accepted galaxy sample")
+            retained = weights[changed] > 0
+            if not np.array_equal(
+                extra_flux[retained], flux[changed][retained]
+            ) or not np.array_equal(extra_weights[retained], weights[changed][retained]):
+                raise ValueError("Extra extrapolation changed previously retained pixels")
+            flux[changed], weights[changed], scales[changed] = (
+                extra_flux,
+                extra_weights,
+                extra_scales,
+            )
+        extra_distance = np.column_stack(
+            (original_bounds[:, 0] - bounds[:, 0], bounds[:, 1] - original_bounds[:, 1])
+        )
+        extension_arrays = {
+            "original_supported_bounds_aa": original_bounds,
+            "extra_edge_extension_aa": extra_distance,
+        }
+        extension_parameters = {
+            "edge_extension_selection": "shortest extra rest-wavelength distance first, fixed training split, no out-of-range galaxies",
+            "n_extra_extended_spectra": int(changed.sum()),
+            "n_extra_blue_spectra": int(np.count_nonzero(extra_distance[:, 0])),
+            "n_extra_red_spectra": int(np.count_nonzero(extra_distance[:, 1])),
+            "maximum_extra_extension_aa": extra_distance.max(axis=0).tolist(),
+        }
+    else:
+        selected = select_training_redshift_buffer(
+            wave,
+            weights,
+            redshift,
+            prior_bounds,
+            train_fraction=args.train_fraction,
+            split_seed=args.split_seed,
+            minimum_contributors=args.minimum_wavelength_contributors,
+        )
+        manifest = manifest.loc[selected].reset_index(drop=True)
+        flux, weights, scales = flux[selected], weights[selected], scales[selected]
+        selected_z = manifest["z"].to_numpy(float)
+        extension_arrays = {}
+        extension_parameters = {
+            "buffer_selection": "independent low/high growth using deficient wavelength coverage",
+            "n_buffer_spectra": int(
+                np.count_nonzero((selected_z < prior_bounds[0]) | (selected_z > prior_bounds[1]))
+            ),
+            "n_low_redshift_buffer_spectra": int(np.count_nonzero(selected_z < prior_bounds[0])),
+            "n_high_redshift_buffer_spectra": int(np.count_nonzero(selected_z > prior_bounds[1])),
+        }
     occupied = np.flatnonzero(np.any(weights > 0, axis=0))
     columns = slice(occupied[0], occupied[-1] + 1)
     wave, flux, weights = wave[columns], flux[:, columns], weights[:, columns]
@@ -223,11 +291,9 @@ def main() -> None:
         required_mask=lsst_required_mask(wave, prior_bounds),
     )
     redshift = manifest["z"].to_numpy(float)
-    n_padding = int(np.count_nonzero((redshift < prior_bounds[0]) | (redshift > prior_bounds[1])))
     print(
         f"Final prior z={prior_bounds[0]:.6f}–{prior_bounds[1]:.6f}; "
-        f"training z={redshift.min():.6f}–{redshift.max():.6f} "
-        f"({n_padding:,} buffer galaxies)",
+        f"{len(manifest):,} training-population galaxies; support extension={args.support_extension}",
         flush=True,
     )
     sample_manifest_path = output_dir / "desi_sample_manifest.csv"
@@ -243,6 +309,8 @@ def main() -> None:
         relative_ivar=weights,
         normalization_scale=scales,
         prior_redshift_bounds=prior_bounds,
+        support_extension=np.asarray(args.support_extension),
+        **extension_arrays,
     )
     pd.DataFrame(
         {
@@ -269,10 +337,7 @@ def main() -> None:
             "n_loaded_spectra": len(manifest),
             "prior_redshift_bounds": prior_bounds.tolist(),
             "training_redshift_bounds": [float(redshift.min()), float(redshift.max())],
-            "n_buffer_spectra": n_padding,
-            "buffer_selection": "independent low/high growth using deficient wavelength coverage",
-            "n_low_redshift_buffer_spectra": int(np.count_nonzero(redshift < prior_bounds[0])),
-            "n_high_redshift_buffer_spectra": int(np.count_nonzero(redshift > prior_bounds[1])),
+            **extension_parameters,
             "minimum_prior_training_contributors": int(
                 contributors[lsst_required_mask(wave, prior_bounds)].min()
             ),
@@ -282,7 +347,11 @@ def main() -> None:
             "wavelength_grid_rule": "union of valid DESI pixels and full tabulated LSST bandpasses over selected redshifts, rounded outward",
             "grid_redshift_min": grid_redshift_min,
             "grid_redshift_max": grid_redshift_max,
-            "extrapolation_extent": "per-galaxy full LSST bandpasses, with one bracketing grid center at each endpoint; measured DESI pixels preserved",
+            "extrapolation_extent": (
+                "per-galaxy LSST bandpasses plus shortest-first exterior extensions needed for requested-prior training support; measured DESI pixels preserved"
+                if args.support_extension == "wavelength"
+                else "per-galaxy full LSST bandpasses only, with bracketing grid centers; measured DESI pixels preserved"
+            ),
             "uses_eazy_selection": (False if sample_source == "direct_desi_redrock" else None),
             "selection_role": (
                 "Direct Redrock/FIBERMAP galaxy selection"

@@ -103,6 +103,51 @@ def select_training_redshift_buffer(
     )
 
 
+def plan_edge_extensions(wave, weights, prior_bounds, train, minimum_contributors):
+    """Extend nearest exterior tails until the fixed training split covers LSST.
+
+    Rank all galaxies by extra rest-wavelength distance, using row order to
+    break ties. Held-out rows follow the same geometric ordering; their fluxes
+    are never used. Interior masked gaps remain missing.
+    """
+    valid = np.isfinite(weights) & (weights > 0)
+    if np.any(~valid.any(axis=1)):
+        raise ValueError("Cannot extend a spectrum without a supported endpoint")
+    first = valid.argmax(axis=1)
+    last = len(wave) - 1 - valid[:, ::-1].argmax(axis=1)
+    original = np.column_stack((wave[first], wave[last]))
+    bounds = original.copy()
+    training = np.zeros(len(weights), dtype=bool)
+    training[train] = True
+    if len(train) < minimum_contributors:
+        raise ValueError("Too few training galaxies for the requested contributor threshold")
+    required = np.flatnonzero(lsst_required_mask(wave, np.asarray(prior_bounds)))
+    counts = valid[train].sum(axis=0)
+    # Work inward from both required endpoints; updates include the entire tail.
+    for column in list(required) + list(required[::-1]):
+        if counts[column] >= minimum_contributors:
+            continue
+        candidates = np.flatnonzero((first > column) | (last < column))
+        distance = np.maximum(first[candidates] - column, column - last[candidates])
+        for row in candidates[np.argsort(distance, kind="stable")]:
+            if first[row] > column:
+                added = slice(column, first[row])
+                first[row] = column
+            else:
+                added = slice(last[row] + 1, column + 1)
+                last[row] = column
+            if training[row]:
+                counts[added] += 1
+            if counts[column] >= minimum_contributors:
+                break
+        if counts[column] < minimum_contributors:
+            raise ValueError(
+                f"Cannot support wavelength {wave[column]:g} without filling interior gaps"
+            )
+    bounds[:, 0], bounds[:, 1] = wave[first], wave[last]
+    return bounds, original
+
+
 def select_wavelength_support(
     weights: np.ndarray,
     ranks: list[int] | tuple[int, ...] | np.ndarray,
