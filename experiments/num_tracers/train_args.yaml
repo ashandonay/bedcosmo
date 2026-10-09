@@ -45,7 +45,6 @@ base:
   verbose: true
   log_nominal_area: true
   include_D_M: true
-  condition_design: true
   likelihood_mode: emulator
   vary_z_eff: false
   vary_lya_qso: false
@@ -87,7 +86,6 @@ base_omegak:
   verbose: true
   log_nominal_area: true
   include_D_M: true
-  condition_design: true
   likelihood_mode: scaling
   vary_z_eff: false
   vary_lya_qso: false
@@ -129,7 +127,6 @@ base_w:
   verbose: true
   log_nominal_area: true
   include_D_M: true
-  condition_design: true
   likelihood_mode: scaling
   vary_z_eff: false
   vary_lya_qso: false
@@ -171,7 +168,6 @@ base_w_wa:
   verbose: true
   log_nominal_area: true
   include_D_M: true
-  condition_design: true
   likelihood_mode: scaling
   vary_z_eff: false
   vary_lya_qso: false
@@ -214,7 +210,6 @@ base_omegak_w_wa:
   verbose: true
   log_nominal_area: true
   include_D_M: true
-  condition_design: true
   likelihood_mode: emulator
   vary_z_eff: false
   vary_lya_qso: false

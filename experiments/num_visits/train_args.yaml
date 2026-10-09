@@ -39,7 +39,6 @@ bb:
   mag_err_cap: 10
   central_params:
     z: 1.0
-  condition_design: true
   log_nominal_area: false
   verbose: true
 
@@ -82,7 +81,6 @@ bbt:
   central_params:
     z: 1.0
     T: 7000
-  condition_design: true
   log_nominal_area: false
   verbose: true
 
@@ -124,7 +122,6 @@ bbtm:
     z: 1.0
     T: 7000
     M_ref: -21.0
-  condition_design: true
   log_nominal_area: false
   verbose: true
 
@@ -169,6 +166,5 @@ empirical:
   mag_err_cap: 10
   cdf_bins: 5000
   cdf_samples: 1000000
-  condition_design: true
   log_nominal_area: false
   verbose: true

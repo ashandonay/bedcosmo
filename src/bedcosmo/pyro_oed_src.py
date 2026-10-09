@@ -342,7 +342,6 @@ def posterior_loss(
     verbose_shapes=False,
     evaluation=False,
     analytic_prior=True,
-    condition_design=True,
     context=True,
     nominal_design=False,
 ):
@@ -364,7 +363,6 @@ def posterior_loss(
             design=expanded_design,
             y_dict=y_dict,
             observation_labels=experiment.observation_labels,
-            condition_design=condition_design,
         )
         evaluate_samples = torch.cat(
             [theta_dict[k].unsqueeze(dim=-1) for k in experiment.cosmo_params], dim=-1
@@ -732,18 +730,14 @@ def _safe_mean_terms(terms):
     return agg_loss, loss
 
 
-def _create_condition_input(design, y_dict, observation_labels, condition_design=True):
+def _create_condition_input(design, y_dict, observation_labels):
     ys = [design]
     for l in observation_labels:
         if y_dict[l].ndim == design.ndim:
             ys.append(y_dict[l])
         else:
             ys.append(y_dict[l].unsqueeze(dim=-1))
-
-    if condition_design:
-        return torch.cat(ys, dim=-1)
-    else:
-        return torch.cat(ys[1:], dim=-1)
+    return torch.cat(ys, dim=-1)
 
 
 class LikelihoodDataset(Dataset):
@@ -1009,7 +1003,6 @@ class LikelihoodDataset(Dataset):
             design=expanded_design,
             y_dict=y_dict,
             observation_labels=self.experiment.observation_labels,
-            condition_design=True,
         )
 
         if self.evaluation:
