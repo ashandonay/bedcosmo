@@ -1,6 +1,7 @@
 """Comprehensive unit tests for plotting.py module."""
 
 import os
+import re
 import json
 import pytest
 from unittest.mock import Mock, patch, MagicMock
@@ -141,6 +142,14 @@ class TestBasePlotter:
         assert len(parts[0]) == 8  # Date part
         assert len(parts[1]) == 6  # Time part
     
+    @pytest.mark.parametrize("prefix, expected", [
+        ("test.png", "test.png"),          # matching extension is not doubled
+        ("eig_z0.5", "eig_z0.5.png"),      # other dots are kept
+        ("test.pdf", "test.pdf.png"),      # only the suffix being added is stripped
+    ])
+    def test_generate_filename_strips_matching_extension(self, base_plotter, prefix, expected):
+        assert base_plotter.generate_filename(prefix, suffix="png", timestamp=False) == expected
+
     def test_generate_filename_without_timestamp(self, base_plotter):
         """Test filename generation without timestamp."""
         filename = base_plotter.generate_filename("test_plot", suffix="png", timestamp=False)
@@ -162,10 +171,10 @@ class TestBasePlotter:
                     display_fig=False
                 )
                 
-                # Check that file was created
-                expected_path = os.path.join(str(save_dir), "test.png")
-                assert os.path.exists(expected_path)
-                assert result == expected_path
+                # Saved as test_<timestamp>.png in save_dir
+                assert os.path.dirname(result) == str(save_dir)
+                assert re.fullmatch(r"test_\d{8}_\d{6}\.png", os.path.basename(result))
+                assert os.path.exists(result)
         finally:
             plt.close('all')
 
@@ -1347,7 +1356,7 @@ class TestSaveFigure:
         try:
             with patch.object(plotter, 'get_save_dir', return_value=str(tmp_path)):
                 plotter.save_figure(fig, "test.png", close_fig=True, display_fig=False)
-            assert os.path.exists(str(tmp_path / "test.png"))
+            assert len(list(tmp_path.glob("test_*.png"))) == 1
         finally:
             plt.close('all')
 
@@ -1358,7 +1367,7 @@ class TestSaveFigure:
         try:
             with patch.object(plotter, 'get_save_dir', return_value=str(tmp_path)):
                 plotter.save_figure(fig, "test2.png", close_fig=True, display_fig=False)
-            assert os.path.exists(str(tmp_path / "test2.png"))
+            assert len(list(tmp_path.glob("test2_*.png"))) == 1
         finally:
             plt.close('all')
 
