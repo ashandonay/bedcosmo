@@ -2207,3 +2207,147 @@ class TestPlot2dEig:
     def test_plot_2d_eig_with_options(self, mock_scratch_env, tmp_path):
         """Test plot_2d_eig with show_optimal, show_nominal, save_path, and dpi."""
         pass
+
+
+# ============================================================================
+# ComparisonPlotter.compare_posterior from saved eval samples
+# ============================================================================
+
+def _saved_comparison_runs(tmp_path, cosmo_exp, seed_offsets):
+    """Write one Evaluator.run posterior NPZ per run; return (run_data_list, nominal thetas)."""
+    from types import SimpleNamespace
+    from bedcosmo.artifacts import make_posterior_samples_path, save_posterior_samples
+
+    rng = np.random.default_rng(0)
+    runs, nominal = [], {}
+    for i, offset in enumerate(seed_offsets):
+        run_id = f"run_{i}"
+        theta = rng.normal(loc=offset, size=(2, 1, 50, 2))      # (series, data, guide, param)
+        artifacts = tmp_path / "bedcosmo" / cosmo_exp / "mlruns" / "exp_1" / run_id / "artifacts"
+        save_posterior_samples(
+            make_posterior_samples_path(str(artifacts), step=500),
+            theta=theta, y=np.zeros((2, 1, 3)), design=np.eye(2),
+            series_names=["nominal", "optimal"], param_names=["p0", "p1"],
+            meta={"status": "complete", "step": 500, "generated_by": "Evaluator.run",
+                  "transform_output": True},
+        )
+        nominal[run_id] = theta[0, 0]
+        runs.append({"run_id": run_id, "params": {"cosmo_model": "base"},
+                     "run_obj": SimpleNamespace(info=SimpleNamespace(run_id=run_id)),
+                     "exp_id": "exp_1"})
+    return runs, nominal
+
+
+def _fake_experiment(reference=None):
+    from types import SimpleNamespace
+    return SimpleNamespace(cosmo_params=["p0", "p1"], latex_labels=["p_0", "p_1"],
+                           device="cpu", central_params=None,
+                           get_nominal_samples=lambda transform_output: reference)
+
+
+def _run_compare(plotter, runs, experiment, **kwargs):
+    fake_g = MagicMock()
+    fake_g.fig.legends = []
+    fake_g.subplots = [[MagicMock()]]
+    with patch("bedcosmo.plotting.get_runs_data", return_value=(runs, "exp_1", "test")), \
+         patch("bedcosmo.plotting.init_experiment", return_value=experiment), \
+         patch("bedcosmo.plotting.load_model", side_effect=AssertionError("flow was sampled")), \
+         patch.object(plotter, "plot_triangle", return_value=fake_g) as mock_tri, \
+         patch.object(plotter, "save_figure"):
+        assert plotter.compare_posterior(display="nominal", plot_prior=False, **kwargs) is fake_g
+    return mock_tri.call_args
+
+
+def test_compare_posterior_saved_plots_each_runs_npz_without_sampling(tmp_path, monkeypatch):
+    monkeypatch.setenv("SCRATCH", str(tmp_path))
+    runs, nominal = _saved_comparison_runs(tmp_path, "test_exp", [0.0, 5.0])
+    plotter = ComparisonPlotter(cosmo_exp="test_exp", run_ids=[r["run_id"] for r in runs])
+
+    call = _run_compare(plotter, runs, _fake_experiment())
+
+    plotted = call.args[0]
+    assert len(plotted) == 2
+    for sample, run in zip(plotted, runs):
+        np.testing.assert_allclose(sample.samples, nominal[run["run_id"]])
+
+
+def test_compare_posterior_draws_desi_reference_behind_runs(tmp_path, monkeypatch):
+    monkeypatch.setenv("SCRATCH", str(tmp_path))
+    runs, _ = _saved_comparison_runs(tmp_path, "num_tracers", [0.0, 5.0])
+    plotter = ComparisonPlotter(cosmo_exp="num_tracers", run_ids=[r["run_id"] for r in runs])
+    reference = Mock(label="DESI")
+
+    call = _run_compare(plotter, runs, _fake_experiment(reference))
+
+    assert call.args[0][0] is reference                # first plotted = drawn underneath
+    assert call.kwargs["line_style"][0] == "--"
+    assert call.args[1][0] == "black"
+    assert len(call.args[0]) == 3
+
+
+def test_compare_posterior_samples_flow_only_without_saved_samples(tmp_path, monkeypatch):
+    """A run with saved samples is plotted from them; one without is sampled from its flow."""
+    monkeypatch.setenv("SCRATCH", str(tmp_path))
+    runs, nominal = _saved_comparison_runs(tmp_path, "test_exp", [0.0])
+    from types import SimpleNamespace
+    runs.append({"run_id": "run_unsaved", "params": {"cosmo_model": "base"},
+                 "run_obj": SimpleNamespace(info=SimpleNamespace(run_id="run_unsaved")),
+                 "exp_id": "exp_1"})
+    sampled = _make_flow_entry()
+    plotter = ComparisonPlotter(cosmo_exp="test_exp", run_ids=[r["run_id"] for r in runs])
+    fake_g = MagicMock()
+    fake_g.fig.legends = []
+    with patch("bedcosmo.plotting.get_runs_data", return_value=(runs, "exp_1", "test")), \
+         patch("bedcosmo.plotting.init_experiment", return_value=_fake_experiment()), \
+         patch("bedcosmo.plotting.load_model", return_value=(Mock(), "loss_best")) as mock_load, \
+         patch("bedcosmo.plotting.nf_posterior_entries", return_value=[sampled]), \
+         patch.object(plotter, "plot_triangle", return_value=fake_g) as mock_tri, \
+         patch.object(plotter, "save_figure"):
+        plotter.compare_posterior(display="nominal", plot_prior=False)
+
+    assert mock_load.call_count == 1
+    assert mock_load.call_args.args[2].info.run_id == "run_unsaved"
+    plotted = mock_tri.call_args.args[0]
+    np.testing.assert_allclose(plotted[0].samples, nominal["run_0"])
+    assert plotted[1] is sampled["samples"]
+
+
+def _make_flow_entry():
+    return {"samples": Mock(), "name": "nominal", "label": "Nominal Design (NF)",
+            "color": "tab:blue", "line_style": "-", "alpha": 1.0}
+
+
+def _run_plotter_for(tmp_path, monkeypatch, runs):
+    monkeypatch.setenv("SCRATCH", str(tmp_path))
+    plotter = RunPlotter(runs[0]["run_id"], cosmo_exp="test_exp")
+    plotter._run_data = runs[0]
+    plotter._experiment_id = "exp_1"
+    return plotter
+
+
+@pytest.mark.parametrize("saved", [True, False])
+def test_run_plot_posterior_prefers_saved_samples_then_samples_flow(tmp_path, monkeypatch, saved):
+    runs, nominal = _saved_comparison_runs(tmp_path, "test_exp", [0.0])
+    if not saved:
+        import shutil
+        shutil.rmtree(tmp_path / "bedcosmo" / "test_exp" / "mlruns" / "exp_1" / "run_0"
+                      / "artifacts" / "posterior_samples")
+    plotter = _run_plotter_for(tmp_path, monkeypatch, runs)
+    sampled = _make_flow_entry()
+    eig_data = {"step_500": {"nominal": {}, "variable": {}}}
+    with patch("bedcosmo.plotting.load_model", return_value=(Mock(), "loss_best")) as mock_load, \
+         patch("bedcosmo.plotting.nf_posterior_entries", return_value=[sampled]), \
+         patch("bedcosmo.plotting.parse_eig_for_posterior",
+               return_value=(None, None, None, {"nominal_prior_entropy": None})), \
+         patch("bedcosmo.plotting.nominal_grid_eig", return_value=None), \
+         patch.object(BasePlotter, "plot_posterior") as mock_base:
+        plotter.plot_posterior(experiment=_fake_experiment(), eig_data=eig_data,
+                               display="nominal", device="cpu")
+
+    entries = mock_base.call_args.kwargs["nf_entries"]
+    if saved:
+        mock_load.assert_not_called()
+        np.testing.assert_allclose(entries[0]["samples"].samples, nominal["run_0"])
+    else:
+        mock_load.assert_called_once()
+        assert entries == [sampled]
