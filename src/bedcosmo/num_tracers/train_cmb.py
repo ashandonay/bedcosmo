@@ -72,7 +72,6 @@ class FlowLikelihoodDataset(Dataset):
                 design=expanded_design,
                 y_dict=y_dict,
                 observation_labels=self.observation_labels,
-                condition_design=True
             )
 
         # Return everything on the appropriate device (GPU)

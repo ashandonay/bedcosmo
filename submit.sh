@@ -7,13 +7,13 @@ set -e  # Exit on error
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export BED_PROJECT_ROOT="$PROJECT_ROOT"
-source "$PROJECT_ROOT/scripts/job_logging.sh"
 
 # Ensure SCRATCH is set (used for MLflow storage, logs, etc.)
 if [ -z "${SCRATCH:-}" ]; then
     export SCRATCH="$HOME/scratch"
     echo "SCRATCH was unset; set to: $SCRATCH"
 fi
+source "$PROJECT_ROOT/scripts/job_logging.sh"
 
 # Check if job type is provided
 if [ $# -eq 0 ]; then
@@ -75,7 +75,12 @@ if [ $# -eq 0 ]; then
     echo "                        on the NF eval. Pass-through to evaluate.py."
     echo "  --grid-<arg> <val>  - Override args for the grid job only (wins over unprefixed --<arg>)"
     echo "  --grid-time <HH:MM> - SLURM time limit for sibling grid job (default: same as --time)"
+    echo "  --note \"<text>\"     - Reminder written with this job's entry in \$SCRATCH/bedcosmo/<cosmo_exp>/jobs.log"
     echo "  --log-usage, --profile, --restart-optimizer"
+    echo ""
+    echo "Logs: each job's full log goes to its MLflow run's artifacts/logs/ (standalone grid:"
+    echo "  <grid output dir>/logs/). \$SCRATCH/bedcosmo/<cosmo_exp>/jobs.log records every job's"
+    echo "  queue, start and end (COMPLETED/FAILED/STOPPED/SKIPPED) with the path to its full log."
     echo ""
     echo "Examples:"
     echo "  ./submit.sh train num_tracers base"
@@ -93,11 +98,24 @@ if [ $# -eq 0 ]; then
     echo "  ./submit.sh eval num_visits <run_id> --grid --grid-param-pts 2000 --grid-feature-pts 800"
     echo "  ./submit.sh eval num_visits <run_id> --marginal --marginal-eig-subsets '[[\"log_c_scale\",\"z\"]]'"
     echo "  ./submit.sh train num_tracers base_w_wa --initial-lr 0.0001 --log-usage"
+    echo "  ./submit.sh train num_visits empirical --note \"bins16, compare to 38be41a6\""
     exit 1
 fi
 
 JOB_TYPE=$1
 shift  # Remove job type from arguments
+
+# The invocation as typed, for the universal jobs log (--note is recorded on its own line).
+SUBMIT_CMD="./submit.sh $JOB_TYPE"
+NOTE=""
+_submit_args=("$@")
+for ((i=0; i<${#_submit_args[@]}; i++)); do
+    if [ "${_submit_args[$i]}" = "--note" ]; then
+        i=$((i+1))
+        continue
+    fi
+    SUBMIT_CMD+=" $(printf '%q' "${_submit_args[$i]}")"
+done
 
 # ──────────────────────────────────────────────────────────────────────
 # Mode detection (auto, --local, or --slurm)
@@ -228,6 +246,10 @@ while [[ $# -gt 0 ]]; do
         --restart-optimizer)
             RESTART_OPTIMIZER=true
             shift 1
+            ;;
+        --note)
+            NOTE="$2"
+            shift 2
             ;;
         --auto-eval)
             AUTO_EVAL=true
@@ -575,9 +597,22 @@ except Exception as e:
 fi
 
 # ──────────────────────────────────────────────────────────────────────
-# For eval --grid, look up MLflow experiment_id to derive linked output paths.
+# MLflow run directory of an existing run (eval / resume). train and restart get theirs
+# when the run is pre-created below. The job's full log goes into <run>/artifacts/logs/.
 # ──────────────────────────────────────────────────────────────────────
-GRID_EXP_ID=""
+JOB_RUN_ID=""
+JOB_RUN_DIR=""
+case "$JOB_TYPE" in
+    eval)   JOB_RUN_ID="$RUN_ID" ;;
+    resume) JOB_RUN_ID="$RESUME_ID" ;;
+esac
+if [ -n "$JOB_RUN_ID" ]; then
+    JOB_RUN_DIR=$(mlflow_run_dir "$COSMO_EXP" "$JOB_RUN_ID")
+fi
+
+# ──────────────────────────────────────────────────────────────────────
+# For eval --grid, derive the linked output paths in the run's artifacts.
+# ──────────────────────────────────────────────────────────────────────
 GRID_NF_PATH=""
 GRID_GRID_PATH=""
 if [ "$JOB_TYPE" = "eval" ] && [ "$GRID" = true ]; then
@@ -586,25 +621,8 @@ if [ "$JOB_TYPE" = "eval" ] && [ "$GRID" = true ]; then
         echo "       Drop --grid to overlay an existing grid eig_data file with a fresh NF eval."
         exit 1
     fi
-    echo "Looking up MLflow experiment_id for run ${RUN_ID}..."
-    GRID_EXP_ID=$(timeout 30 python3 -c "
-import mlflow, os, sys, warnings
-from mlflow.tracking import MlflowClient
-warnings.filterwarnings('ignore', category=FutureWarning)
-mlflow.set_tracking_uri('file:' + os.environ['SCRATCH'] + '/bedcosmo/${COSMO_EXP}/mlruns')
-try:
-    run = MlflowClient().get_run('${RUN_ID}')
-    print(run.info.experiment_id, flush=True)
-except Exception as e:
-    print(f'ERROR: {e}', file=sys.stderr)
-    sys.exit(1)
-" 2>/dev/null)
-    if [ -z "$GRID_EXP_ID" ]; then
-        echo "Error: Could not resolve MLflow experiment_id for run ${RUN_ID}; cannot submit sibling grid job"
-        exit 1
-    fi
     GRID_T=$(date +"%Y%m%d_%H%M%S")
-    GRID_ARTIFACTS_DIR="$SCRATCH/bedcosmo/$COSMO_EXP/mlruns/$GRID_EXP_ID/$RUN_ID/artifacts"
+    GRID_ARTIFACTS_DIR="$JOB_RUN_DIR/artifacts"
     mkdir -p "$GRID_ARTIFACTS_DIR"
     GRID_NF_PATH="$GRID_ARTIFACTS_DIR/eig_data_nf_${GRID_T}.json"
     GRID_GRID_PATH="$GRID_ARTIFACTS_DIR/eig_data_grid_${GRID_T}.json"
@@ -1051,12 +1069,13 @@ CLI_OVERRIDES_STR="${CLI_OVERRIDES_STR% }"
 export BED_CLI_OVERRIDES="$CLI_OVERRIDES_STR"
 
 # ──────────────────────────────────────────────────────────────────────
-# Pre-create the MLflow run at submission time (train only) and snapshot the
-# referenced config (prior_args/design_args/emulator .pt files) into its artifacts,
-# so editing those files while the job is queued cannot change what the job uses.
-# The training job attaches to this run via --attach-run-id (see bedcosmo.train).
+# Pre-create the MLflow run at submission time (train / restart). For train, also
+# snapshot the referenced config (prior_args/design_args/emulator .pt files) into its
+# artifacts, so editing those files while the job is queued cannot change what the job
+# uses; restart copies config from its source run at job start. The training job
+# attaches to this run via --attach-run-id (see bedcosmo.train).
 # ──────────────────────────────────────────────────────────────────────
-if [ "$JOB_TYPE" = "train" ]; then
+if [ "$JOB_TYPE" = "train" ] || [ "$JOB_TYPE" = "restart" ]; then
     echo "=========================================="
     echo "Pre-creating MLflow run and snapshotting config..."
     echo "=========================================="
@@ -1074,7 +1093,49 @@ if [ "$JOB_TYPE" = "train" ]; then
     echo "MLflow run path: $RUN_PATH"
     echo ""
     FINAL_ARGS+=("--attach-run-id" "$ATTACH_RUN_ID")
+    JOB_RUN_ID="$ATTACH_RUN_ID"
+    JOB_RUN_DIR="$RUN_PATH"
 fi
+
+# ──────────────────────────────────────────────────────────────────────
+# Job log location and universal jobs log entry. Every job's full log goes into its
+# MLflow run's artifacts/logs/; a standalone grid job has no run, so submit.sh creates
+# its output dir now and the log goes into <out_dir>/logs/.
+# ──────────────────────────────────────────────────────────────────────
+export BED_JOBS_LOG="$SCRATCH/bedcosmo/$COSMO_EXP/jobs.log"
+# The jobs log is per experiment, so summaries name only the model. A run is identified
+# by the first 8 chars of its id; the log path has the full id.
+RUN_TARGET="${COSMO_MODEL:+$COSMO_MODEL }run=${JOB_RUN_ID:0:8}"
+JOB_SUMMARY="$JOB_TYPE"
+if [ "$DEBUG" = true ]; then
+    JOB_SUMMARY+=" [debug]"
+fi
+if [ "$JOB_TYPE" = "grid" ]; then
+    GRID_OUT_BASE="$SCRATCH/bedcosmo/$COSMO_EXP/grid_calc"
+    mkdir -p "$GRID_OUT_BASE"
+    GRID_OUT_T=$(date +"%Y%m%d_%H%M%S")
+    GRID_OUT_DIR="$GRID_OUT_BASE/$GRID_OUT_T"
+    # Atomic mkdir: parallel submissions in the same second each get a unique dir.
+    suffix=1
+    until mkdir "$GRID_OUT_DIR" 2>/dev/null; do
+        GRID_OUT_DIR="$GRID_OUT_BASE/${GRID_OUT_T}_${suffix}"
+        suffix=$((suffix + 1))
+    done
+    FINAL_ARGS+=("--out-dir" "$GRID_OUT_DIR")
+    JOB_LOG_DIR="$GRID_OUT_DIR/logs"
+    JOB_SUMMARY+=" ${COSMO_MODEL:+$COSMO_MODEL }out=grid_calc/$(basename "$GRID_OUT_DIR")"
+else
+    JOB_LOG_DIR="$JOB_RUN_DIR/artifacts/logs"
+    JOB_SUMMARY+=" $RUN_TARGET"
+fi
+mkdir -p "$JOB_LOG_DIR"
+
+# Detail lines for this job's first jobs-log entry (QUEUED on SLURM, STARTED locally).
+SUBMIT_DETAILS=()
+if [ -n "$NOTE" ]; then
+    SUBMIT_DETAILS+=("note: $NOTE")
+fi
+SUBMIT_DETAILS+=("cmd:  $SUBMIT_CMD")
 
 # ======================================================================
 # EXECUTION
@@ -1133,6 +1194,7 @@ if [ "$EXECUTION_MODE" = "slurm" ]; then
         SBATCH_ARGS+=("--mail-type=NONE")
     fi
 
+    export BED_JOB_SUMMARY="$JOB_SUMMARY" BED_JOB_LOG_DIR="$JOB_LOG_DIR"
     TEMP_SBATCH_OUTPUT=$(mktemp)
     set +e
     sbatch "${SBATCH_ARGS[@]}" "$SLURM_SCRIPT_DIR/$SLURM_SCRIPT_FILE" "${FINAL_ARGS[@]}" > "$TEMP_SBATCH_OUTPUT" 2>&1
@@ -1172,6 +1234,11 @@ if [ "$EXECUTION_MODE" = "slurm" ]; then
     echo "$SBATCH_OUTPUT"
     echo ""
     echo "Check status with: squeue -u $USER"
+    MAIN_JOB_ID=$(echo "$SBATCH_OUTPUT" | grep -oP '\d+$')
+    jobs_log_append QUEUED "$JOB_SUMMARY job=$MAIN_JOB_ID" "${SUBMIT_DETAILS[@]}" \
+        "log:  $JOB_LOG_DIR/${LOG_NAME}_${MAIN_JOB_ID}.log"
+    echo "Job log:  $JOB_LOG_DIR/${LOG_NAME}_${MAIN_JOB_ID}.log"
+    echo "Jobs log: $BED_JOBS_LOG"
 
     # ──────────────────────────────────────────────────────────────
     # Sibling grid job (eval --grid): dispatch a CPU grid job that
@@ -1207,6 +1274,8 @@ if [ "$EXECUTION_MODE" = "slurm" ]; then
         done
         GRID_CLI_OVERRIDES_STR="${GRID_CLI_OVERRIDES_STR% }"
         export BED_CLI_OVERRIDES="$GRID_CLI_OVERRIDES_STR"
+        GRID_JOB_SUMMARY="grid $RUN_TARGET"
+        export BED_JOB_SUMMARY="$GRID_JOB_SUMMARY"
 
         TEMP_GRID_OUTPUT=$(mktemp)
         set +e
@@ -1223,6 +1292,9 @@ if [ "$EXECUTION_MODE" = "slurm" ]; then
             echo "$GRID_OUTPUT"
             echo ""
             echo "Grid job runs in parallel with eval; whichever finishes second renders overlay plots."
+            GRID_JOB_ID=$(echo "$GRID_OUTPUT" | grep -oP '\d+$')
+            jobs_log_append QUEUED "$GRID_JOB_SUMMARY job=$GRID_JOB_ID" \
+                "sibling grid of eval job $MAIN_JOB_ID" "log:  $JOB_LOG_DIR/grid_${GRID_JOB_ID}.log"
         fi
     fi
 
@@ -1230,7 +1302,7 @@ if [ "$EXECUTION_MODE" = "slurm" ]; then
     # Auto-eval: submit dependent eval job after training completes
     # ──────────────────────────────────────────────────────────────
     if [ "$AUTO_EVAL" = true ] && [[ "$JOB_TYPE" == "train" || "$JOB_TYPE" == "restart" || "$JOB_TYPE" == "resume" ]]; then
-        TRAIN_JOB_ID=$(echo "$SBATCH_OUTPUT" | grep -oP '\d+$')
+        TRAIN_JOB_ID="$MAIN_JOB_ID"
         if [ -z "$TRAIN_JOB_ID" ]; then
             echo "Warning: Could not parse train job ID from sbatch output. Skipping auto-eval."
         else
@@ -1250,7 +1322,7 @@ if [ "$EXECUTION_MODE" = "slurm" ]; then
 
             EVAL_SCRIPT="$PROJECT_ROOT/scripts/slurm/eval.sh"
             EVAL_SBATCH_ARGS=("--dependency=afterany:$TRAIN_JOB_ID" "--job-name=eval" "--time=$EVAL_TIME" "--qos=$SLURM_QUEUE" "--nodes=1")
-            EVAL_FINAL_ARGS=("--cosmo-exp" "$COSMO_EXP" "--train-job-id" "$TRAIN_JOB_ID" "${EVAL_EXTRA_ARGS[@]}")
+            EVAL_FINAL_ARGS=("--cosmo-exp" "$COSMO_EXP" "--run-id" "$JOB_RUN_ID" "--train-job-id" "$TRAIN_JOB_ID" "${EVAL_EXTRA_ARGS[@]}")
 
             # Build eval CLI overrides string for logging in eval job script
             EVAL_CLI_OVERRIDES_STR=""
@@ -1259,6 +1331,8 @@ if [ "$EXECUTION_MODE" = "slurm" ]; then
             done
             EVAL_CLI_OVERRIDES_STR="${EVAL_CLI_OVERRIDES_STR% }"
             export BED_CLI_OVERRIDES="$EVAL_CLI_OVERRIDES_STR"
+            EVAL_JOB_SUMMARY="eval $RUN_TARGET"
+            export BED_JOB_SUMMARY="$EVAL_JOB_SUMMARY"
 
             # Load eval_args.yaml for the cosmo_model if available
             EVAL_CONFIG_FILE="$PROJECT_ROOT/experiments/${COSMO_EXP}/eval_args.yaml"
@@ -1344,6 +1418,9 @@ for key, value in data.items():
                 echo "$EVAL_OUTPUT"
                 echo ""
                 echo "Eval job will run after train job $TRAIN_JOB_ID completes successfully."
+                EVAL_JOB_ID=$(echo "$EVAL_OUTPUT" | grep -oP '\d+$')
+                jobs_log_append QUEUED "$EVAL_JOB_SUMMARY job=$EVAL_JOB_ID" \
+                    "auto-eval after $JOB_TYPE job $TRAIN_JOB_ID" "log:  $JOB_LOG_DIR/eval_${EVAL_JOB_ID}.log"
             fi
         fi
     fi
@@ -1389,14 +1466,24 @@ else
     # Change to project root
     cd "$PROJECT_ROOT"
 
-    # Setup logging
-    SCRATCH_DIR="${SCRATCH:-$HOME/scratch}"
-    LOG_BASE_DIR="${SCRATCH_DIR}/bedcosmo/${COSMO_EXP}/logs"
-    mkdir -p "$LOG_BASE_DIR"
+    # Each local job runs in a subshell that records its STARTED/end entries in the
+    # jobs log (LOCAL_JOB_DETAILS go on the STARTED entry; there is no QUEUED entry).
+    # Usage: run_local_job LOG_FILE SUMMARY CMD...
+    run_local_job() {
+        local log_file=$1
+        BED_JOB_SUMMARY=$2
+        shift 2
+        (
+            jobs_log_track "local-$BASHPID" "${LOCAL_JOB_DETAILS[@]}"
+            "$@" >> "$log_file" 2>&1
+        )
+    }
+
     TIMESTAMP=$(date +"%Y-%m-%d_%H-%M-%S")
-    LOG_FILE="${LOG_BASE_DIR}/${TIMESTAMP}_${LOG_NAME}.log"
+    LOG_FILE="$JOB_LOG_DIR/${LOG_NAME}_${TIMESTAMP}.log"
 
     echo "Logging output to: $LOG_FILE"
+    echo "Jobs log: $BED_JOBS_LOG"
     echo ""
 
     {
@@ -1420,47 +1507,45 @@ else
 
     if [ "$JOB_TYPE" = "grid" ]; then
         # grid_calc: single-process python (no torchrun); use --node-type gpu for GPU SLURM nodes
-        echo "Executing: python -m $PYTHON_MODULE [${#FINAL_ARGS[@]} arguments]"
-        echo ""
-        python -m "$PYTHON_MODULE" "${FINAL_ARGS[@]}" >> "$LOG_FILE" 2>&1
-        TRAIN_EXIT_CODE=$?
-
-        # Copy the log into the grid_calc output directory
-        if [ $TRAIN_EXIT_CODE -eq 0 ]; then
-            OUT_DIR=$(grep "All outputs saved to:" "$LOG_FILE" | tail -n 1 | sed 's/.*All outputs saved to: //')
-            if [ -n "$OUT_DIR" ] && [ -d "$OUT_DIR" ]; then
-                cp "$LOG_FILE" "$OUT_DIR/local_run.log"
-                echo "Log copied to: $OUT_DIR/local_run.log"
-            fi
-        fi
+        JOB_CMD=(python -m "$PYTHON_MODULE" "${FINAL_ARGS[@]}")
     else
-        echo "Executing: torchrun --nproc_per_node=$GPUS -m $PYTHON_MODULE [${#FINAL_ARGS[@]} arguments]"
-        echo ""
-        torchrun --nproc_per_node=$GPUS -m "$PYTHON_MODULE" "${FINAL_ARGS[@]}" >> "$LOG_FILE" 2>&1 &
-        TRAIN_PID=$!
+        JOB_CMD=(torchrun --nproc_per_node=$GPUS -m "$PYTHON_MODULE" "${FINAL_ARGS[@]}")
+    fi
 
-        if [ "$JOB_TYPE" = "eval" ] && [ "$GRID" = true ]; then
-            GRID_LOG_FILE="${LOG_BASE_DIR}/${TIMESTAMP}_grid.log"
-            # Forward unprefixed --* args (CLI_ARGS_LIST) so they reach grid_calc too;
-            # GRID_EXTRA_ARGS comes last so --grid-* overrides any same-named unprefixed arg.
-            GRID_COSMO_MODEL_ARGS=()
-            if [ -n "$COSMO_MODEL" ]; then
-                GRID_COSMO_MODEL_ARGS=("--cosmo-model" "$COSMO_MODEL")
-            fi
-            GRID_FINAL_ARGS=("$COSMO_EXP" "--run-id" "$RUN_ID" \
-                "--nf-eig-data" "$GRID_NF_PATH" "--grid-eig-data" "$GRID_GRID_PATH" \
-                "${GRID_COSMO_MODEL_ARGS[@]}" "${CLI_ARGS_LIST[@]}" "--device" "cpu" "${GRID_EXTRA_ARGS[@]}")
-            echo "Executing sibling grid job: python -m bedcosmo.grid_calc [${#GRID_FINAL_ARGS[@]} arguments]"
-            echo "Grid log: $GRID_LOG_FILE"
-            python -m bedcosmo.grid_calc "${GRID_FINAL_ARGS[@]}" > "$GRID_LOG_FILE" 2>&1 &
-            GRID_PID=$!
-            wait "$GRID_PID"
-            GRID_EXIT_CODE=$?
-            echo "Sibling grid job exited with code $GRID_EXIT_CODE"
+    GRID_PID=""
+    if [ "$JOB_TYPE" = "eval" ] && [ "$GRID" = true ]; then
+        GRID_LOG_FILE="$JOB_LOG_DIR/grid_${TIMESTAMP}.log"
+        # Forward unprefixed --* args (CLI_ARGS_LIST) so they reach grid_calc too;
+        # GRID_EXTRA_ARGS comes last so --grid-* overrides any same-named unprefixed arg.
+        GRID_COSMO_MODEL_ARGS=()
+        if [ -n "$COSMO_MODEL" ]; then
+            GRID_COSMO_MODEL_ARGS=("--cosmo-model" "$COSMO_MODEL")
         fi
+        GRID_FINAL_ARGS=("$COSMO_EXP" "--run-id" "$RUN_ID" \
+            "--nf-eig-data" "$GRID_NF_PATH" "--grid-eig-data" "$GRID_GRID_PATH" \
+            "${GRID_COSMO_MODEL_ARGS[@]}" "${CLI_ARGS_LIST[@]}" "--device" "cpu" "${GRID_EXTRA_ARGS[@]}")
+        echo "Executing sibling grid job: python -m bedcosmo.grid_calc [${#GRID_FINAL_ARGS[@]} arguments]"
+        echo "Grid log: $GRID_LOG_FILE"
+        LOCAL_JOB_DETAILS=("sibling grid of local eval" "log:  $GRID_LOG_FILE")
+        run_local_job "$GRID_LOG_FILE" "grid $RUN_TARGET" \
+            python -m bedcosmo.grid_calc "${GRID_FINAL_ARGS[@]}" &
+        GRID_PID=$!
+    fi
 
-        wait "$TRAIN_PID"
-        TRAIN_EXIT_CODE=$?
+    echo "Executing: ${JOB_CMD[*]:0:3} ... [${#FINAL_ARGS[@]} arguments]"
+    echo ""
+    LOCAL_JOB_DETAILS=("${SUBMIT_DETAILS[@]}" "log:  $LOG_FILE")
+    set +e
+    run_local_job "$LOG_FILE" "$JOB_SUMMARY" "${JOB_CMD[@]}"
+    TRAIN_EXIT_CODE=$?
+    set -e
+
+    if [ -n "$GRID_PID" ]; then
+        set +e
+        wait "$GRID_PID"
+        GRID_EXIT_CODE=$?
+        set -e
+        echo "Sibling grid job exited with code $GRID_EXIT_CODE"
     fi
 
     # ──────────────────────────────────────────────────────────────
@@ -1472,21 +1557,13 @@ else
         echo "Training complete. Running auto-eval..."
         echo "==========================================="
 
-        # Extract run_id from training log
-        AUTO_RUN_ID=$(grep "MLFlow Run Info:" "$LOG_FILE" | head -n 1 | awk -F'/' '{print $NF}')
-        if [ -z "$AUTO_RUN_ID" ]; then
-            echo "Error: Could not extract run_id from training log $LOG_FILE"
-            echo "Skipping auto-eval."
-        else
-            echo "Extracted run_id: $AUTO_RUN_ID"
+        EVAL_LOG_FILE="$JOB_LOG_DIR/eval_${TIMESTAMP}.log"
+        EVAL_ARGS=("--cosmo-exp" "$COSMO_EXP" "--run-id" "$JOB_RUN_ID" "${EVAL_EXTRA_ARGS[@]}")
 
-            EVAL_LOG_FILE="${LOG_BASE_DIR}/${TIMESTAMP}_eval.log"
-            EVAL_ARGS=("--cosmo-exp" "$COSMO_EXP" "--run-id" "$AUTO_RUN_ID" "${EVAL_EXTRA_ARGS[@]}")
-
-            # Load eval_args.yaml for the cosmo_model if available
-            EVAL_CONFIG_FILE="$PROJECT_ROOT/experiments/${COSMO_EXP}/eval_args.yaml"
-            if [ -n "$COSMO_MODEL" ] && [ -f "$EVAL_CONFIG_FILE" ]; then
-                EVAL_YAML_OUTPUT=$(python3 -c "
+        # Load eval_args.yaml for the cosmo_model if available
+        EVAL_CONFIG_FILE="$PROJECT_ROOT/experiments/${COSMO_EXP}/eval_args.yaml"
+        if [ -n "$COSMO_MODEL" ] && [ -f "$EVAL_CONFIG_FILE" ]; then
+            EVAL_YAML_OUTPUT=$(python3 -c "
 import yaml, json, sys, warnings
 warnings.filterwarnings('ignore')
 try:
@@ -1503,32 +1580,32 @@ except Exception as e:
     print('{}', file=sys.stdout)
 " 2>/dev/null)
 
-                while IFS="=" read -r key value; do
-                    # Convert underscores to hyphens for CLI flags (POSIX convention)
-                    key="${key//_/-}"
+            while IFS="=" read -r key value; do
+                # Convert underscores to hyphens for CLI flags (POSIX convention)
+                key="${key//_/-}"
 
-                    # Skip keys that were explicitly provided via --eval-* args
-                    skip_key=false
-                    for ((ei=0; ei<${#EVAL_EXTRA_ARGS[@]}; ei++)); do
-                        if [[ "${EVAL_EXTRA_ARGS[$ei]}" == "--$key" ]]; then
-                            skip_key=true
-                            break
-                        fi
-                    done
-                    if [ "$skip_key" = true ]; then
-                        continue
+                # Skip keys that were explicitly provided via --eval-* args
+                skip_key=false
+                for ((ei=0; ei<${#EVAL_EXTRA_ARGS[@]}; ei++)); do
+                    if [[ "${EVAL_EXTRA_ARGS[$ei]}" == "--$key" ]]; then
+                        skip_key=true
+                        break
                     fi
-                    if [ "$value" = "null" ] || [ "$value" = "None" ] || [ -z "$value" ]; then
-                        continue
-                    fi
-                    if [ "$value" = "true" ]; then
-                        EVAL_ARGS+=("--$key")
-                    elif [ "$value" = "false" ]; then
-                        continue
-                    else
-                        EVAL_ARGS+=("--$key" "$value")
-                    fi
-                done < <(echo "$EVAL_YAML_OUTPUT" | python3 -c "
+                done
+                if [ "$skip_key" = true ]; then
+                    continue
+                fi
+                if [ "$value" = "null" ] || [ "$value" = "None" ] || [ -z "$value" ]; then
+                    continue
+                fi
+                if [ "$value" = "true" ]; then
+                    EVAL_ARGS+=("--$key")
+                elif [ "$value" = "false" ]; then
+                    continue
+                else
+                    EVAL_ARGS+=("--$key" "$value")
+                fi
+            done < <(echo "$EVAL_YAML_OUTPUT" | python3 -c "
 import json, sys
 data = json.load(sys.stdin)
 for key, value in data.items():
@@ -1548,13 +1625,16 @@ for key, value in data.items():
     else:
         print(f'{key}={value}')
 " 2>/dev/null)
-            fi
-
-            echo "Eval arguments: ${EVAL_ARGS[*]}"
-            echo "Logging eval output to: $EVAL_LOG_FILE"
-            echo ""
-            torchrun --nproc_per_node=1 -m bedcosmo.evaluate "${EVAL_ARGS[@]}" > "$EVAL_LOG_FILE" 2>&1
         fi
+
+        echo "Eval arguments: ${EVAL_ARGS[*]}"
+        echo "Logging eval output to: $EVAL_LOG_FILE"
+        echo ""
+        LOCAL_JOB_DETAILS=("auto-eval after local $JOB_TYPE" "log:  $EVAL_LOG_FILE")
+        set +e
+        run_local_job "$EVAL_LOG_FILE" "eval $RUN_TARGET" \
+            torchrun --nproc_per_node=1 -m bedcosmo.evaluate "${EVAL_ARGS[@]}"
+        set -e
     elif [ "$AUTO_EVAL" = true ] && [ $TRAIN_EXIT_CODE -ne 0 ]; then
         echo "Training failed (exit code: $TRAIN_EXIT_CODE). Skipping auto-eval."
     fi

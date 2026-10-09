@@ -51,54 +51,30 @@ while [[ $# -gt 0 ]]; do
 done
 
 # Validate required arguments
-if [ -z "$COSMO_EXP" ]; then
-    echo "Error: --cosmo-exp is required"
-    echo "Usage: sbatch eval.sh --cosmo-exp <value> --run-id <value> [additional args...]"
+if [ -z "$COSMO_EXP" ] || [ -z "$RUN_ID" ]; then
+    echo "Error: --cosmo-exp and --run-id are required"
+    echo "Usage: sbatch eval.sh --cosmo-exp <value> --run-id <value> [--train-job-id <id>] [additional args...]"
     exit 1
 fi
 
-# If --train-job-id is set, extract run_id from training log
-if [ -z "$RUN_ID" ] && [ -n "$TRAIN_JOB_ID" ]; then
-    TRAIN_LOG=$(ls "${SCRATCH}/bedcosmo/${COSMO_EXP}/logs/${TRAIN_JOB_ID}_"*.log 2>/dev/null | head -n 1)
-    if [ -z "$TRAIN_LOG" ] || [ ! -f "$TRAIN_LOG" ]; then
-        echo "Training job $TRAIN_JOB_ID did not produce a log file. Training likely failed."
-        echo "Skipping eval."
-        exit 0
-    fi
-
-    # Check if training completed successfully
-    if grep -q "completed\.$" "$TRAIN_LOG"; then
-        echo "Training job $TRAIN_JOB_ID completed successfully."
-    else
-        echo "Training job $TRAIN_JOB_ID did not complete successfully."
-        echo "Skipping eval."
-        exit 0
-    fi
-
-    echo "Extracting run_id from training log: $TRAIN_LOG"
-    RUN_ID=$(grep "MLFlow Run Info:" "$TRAIN_LOG" | head -n 1 | awk -F'/' '{print $NF}')
-    if [ -z "$RUN_ID" ]; then
-        echo "Error: Could not extract run_id from training log $TRAIN_LOG"
-        echo "Expected line format: 'MLFlow Run Info: <exp_id>/<run_id>'"
-        exit 0
-    fi
-    echo "Extracted run_id: $RUN_ID"
-fi
-
-if [ -z "$RUN_ID" ]; then
-    echo "Error: --run-id (or --train-job-id) is required"
-    echo "Usage: sbatch eval.sh --cosmo-exp <value> --run-id <value> [additional args...]"
-    exit 1
-fi
-
-# Set log directory based on cosmo_exp
-LOG_DIR="${SCRATCH}/bedcosmo/${COSMO_EXP}/logs"
-mkdir -p "$LOG_DIR"
-
-# Capture all stdout/stderr in a single log file.
-JOB_LOG="${LOG_DIR}/${SLURM_JOB_ID}_${SLURM_JOB_NAME}.log"
-touch "$JOB_LOG"
+# Capture all stdout/stderr in a single log file inside the MLflow run (BED_JOB_LOG_DIR
+# is set by submit.sh), and record start/end in the universal jobs log.
+mkdir -p "$BED_JOB_LOG_DIR"
+JOB_LOG="${BED_JOB_LOG_DIR}/${SLURM_JOB_NAME}_${SLURM_JOB_ID}.log"
 exec > >(tee -a "$JOB_LOG") 2>&1
+jobs_log_track "$SLURM_JOB_ID"
+
+# Auto-eval runs afterany the training job; only evaluate if training completed.
+# The training job logged into the same run's logs dir.
+if [ -n "$TRAIN_JOB_ID" ]; then
+    TRAIN_LOG=$(ls "$BED_JOB_LOG_DIR"/*_"${TRAIN_JOB_ID}".log 2>/dev/null | head -n 1)
+    if [ -z "$TRAIN_LOG" ] || ! grep -q "completed\.$" "$TRAIN_LOG"; then
+        echo "Training job $TRAIN_JOB_ID did not complete successfully. Skipping eval."
+        JOB_SKIPPED="training job $TRAIN_JOB_ID did not complete"
+        exit 0
+    fi
+    echo "Training job $TRAIN_JOB_ID completed successfully."
+fi
 
 # Print job information and CLI overrides
 echo "=========================================="

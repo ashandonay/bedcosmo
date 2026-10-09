@@ -21,7 +21,9 @@ Snapshotted artifacts:
   - empirical/sed_prior_kde_native.joblib  (num_visits empirical; loaded from artifacts/empirical/)
   - empirical/sed_prior_flow_*.pt   (num_visits empirical, density_type=flow; beside the KDE)
 
-Only the train flow uses this. resume/restart/eval/grid attach to runs derived from MLflow state.
+restart (``--restart-id``) also pre-creates its new run, so the job's log location is known at
+submission, but snapshots nothing: bedcosmo.train copies the config from the source run at job
+start. resume/eval/grid attach to existing runs.
 
 Usage (args mirror the resolved train argv; extras are ignored via parse_known_args):
     python create_run.py --cosmo-exp num_tracers --mlflow-exp base --cosmo-model base \
@@ -65,6 +67,7 @@ def _parse_args():
     parser.add_argument("--design-args-path", type=str, default=None)
     parser.add_argument("--prior-flow-path", type=str, default=None)
     parser.add_argument("--ref-cov", type=str, default=None)
+    parser.add_argument("--restart-id", type=str, default=None)
     args, unknown = parser.parse_known_args()
     args.design_cli_overrides, unknown = parse_design_cli_overrides(unknown)
     prior_overrides, _ = parse_prior_cli_overrides(unknown)
@@ -226,11 +229,12 @@ def main():
     artifacts_dir = artifact_uri[7:] if artifact_uri.startswith("file://") else artifact_uri
     os.makedirs(artifacts_dir, exist_ok=True)
 
-    _snapshot_prior_args(args, storage_path, artifacts_dir)
-    _snapshot_design_args(args, artifacts_dir)
-    _snapshot_ref_cov(args, artifacts_dir)
-    _snapshot_emulators(args, artifacts_dir)
-    _snapshot_sed_prior(args, artifacts_dir)
+    if not args.restart_id:
+        _snapshot_prior_args(args, storage_path, artifacts_dir)
+        _snapshot_design_args(args, artifacts_dir)
+        _snapshot_ref_cov(args, artifacts_dir)
+        _snapshot_emulators(args, artifacts_dir)
+        _snapshot_sed_prior(args, artifacts_dir)
 
     client.set_tag(run_id, "submit_status", "queued")
     client.set_tag(run_id, "submit_time", datetime.datetime.now().isoformat(timespec="seconds"))

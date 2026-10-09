@@ -51,14 +51,12 @@ if [ -z "$COSMO_EXP" ]; then
     exit 1
 fi
 
-# Set log directory based on cosmo_exp
-LOG_DIR="${SCRATCH}/bedcosmo/${COSMO_EXP}/logs"
-mkdir -p "$LOG_DIR"
-
-# Capture all stdout/stderr in a single log file.
-JOB_LOG="${LOG_DIR}/${SLURM_JOB_ID}_${SLURM_JOB_NAME}.log"
-touch "$JOB_LOG"
+# Capture all stdout/stderr in a single log file in the run or grid output dir
+# (BED_JOB_LOG_DIR is set by submit.sh), and record start/end in the universal jobs log.
+mkdir -p "$BED_JOB_LOG_DIR"
+JOB_LOG="${BED_JOB_LOG_DIR}/${SLURM_JOB_NAME}_${SLURM_JOB_ID}.log"
 exec > >(tee -a "$JOB_LOG") 2>&1
+jobs_log_track "$SLURM_JOB_ID"
 
 # Print job information and CLI overrides
 echo "=========================================="
@@ -115,16 +113,11 @@ fi
     done
 ) &
 MEM_LOGGER_PID=$!
-trap "kill $MEM_LOGGER_PID 2>/dev/null" EXIT
 
 export PYTHONUNBUFFERED=1
 srun python -u -m bedcosmo.grid_calc \
     "$COSMO_EXP" \
     "${EXTRA_ARGS[@]}"
-
-# Copy the SLURM log into the grid_calc output directory so everything is together
-OUT_DIR=$(grep "All outputs saved to:" "$JOB_LOG" | tail -n 1 | sed 's/.*All outputs saved to: //')
-if [ -n "$OUT_DIR" ] && [ -d "$OUT_DIR" ]; then
-    cp "$JOB_LOG" "$OUT_DIR/slurm_${SLURM_JOB_ID}.log"
-    echo "SLURM log copied to: $OUT_DIR/slurm_${SLURM_JOB_ID}.log"
-fi
+GRID_EXIT_CODE=$?
+kill "$MEM_LOGGER_PID" 2>/dev/null
+exit "$GRID_EXIT_CODE"
