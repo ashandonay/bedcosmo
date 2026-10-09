@@ -20,7 +20,12 @@ ENTRY = re.compile(r"^\[\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\] (\w+)\s+(.*)$")
 
 def _bash(script, scratch, **env_overrides):
     env = {k: v for k, v in os.environ.items() if k != "SLURM_JOB_ID"}
-    env.update(SCRATCH=str(scratch), BED_JOB_SUMMARY="train num_visits/bb run=abc", **env_overrides)
+    env.update(
+        SCRATCH=str(scratch),
+        BED_JOBS_LOG=str(scratch / "jobs.log"),
+        BED_JOB_SUMMARY="train bb run=abc",
+    )
+    env.update(env_overrides)
     return subprocess.run(
         ["bash", "-c", f'source "{HELPER}"\n{script}'], env=env, capture_output=True, text=True
     )
@@ -29,7 +34,7 @@ def _bash(script, scratch, **env_overrides):
 def _entries(scratch):
     """Parse jobs.log into [(event, summary, [detail lines])]."""
     entries = []
-    for line in (scratch / "bedcosmo" / "jobs.log").read_text().splitlines():
+    for line in (scratch / "jobs.log").read_text().splitlines():
         m = ENTRY.match(line)
         if m:
             entries.append((m.group(1), m.group(2), []))
@@ -50,6 +55,12 @@ def test_append_writes_entry_with_details(tmp_path):
     ]
 
 
+def test_append_requires_jobs_log_path(tmp_path):
+    result = _bash('jobs_log_append QUEUED "train x"', tmp_path, BED_JOBS_LOG="")
+    assert result.returncode != 0
+    assert "BED_JOBS_LOG is not set" in result.stderr
+
+
 @pytest.mark.parametrize(
     "body, status, code",
     [
@@ -64,18 +75,18 @@ def test_track_records_start_and_end_state(tmp_path, body, status, code):
     (start, start_summary, start_details), (end, end_summary, end_details) = _entries(tmp_path)
     assert (start, start_summary, start_details) == (
         "STARTED",
-        "train num_visits/bb run=abc job=42",
+        "train bb run=abc job=42",
         ["log:  /x.log"],
     )
     assert end == status
-    assert end_summary == f"train num_visits/bb run=abc job=42 exit={code} elapsed=0s"
+    assert end_summary == f"train bb run=abc job=42 exit={code} elapsed=0s"
     assert end_details == (["reason: train failed"] if status == "SKIPPED" else [])
 
 
 def test_track_names_node_under_slurm(tmp_path):
     _bash("jobs_log_track 42", tmp_path, SLURM_JOB_ID="42")
     (_, start_summary, start_details), _ = _entries(tmp_path)
-    assert start_summary == f"train num_visits/bb run=abc job=42 node={socket.gethostname()}"
+    assert start_summary == f"train bb run=abc job=42 node={socket.gethostname()}"
     assert start_details == []
 
 
@@ -90,9 +101,13 @@ def test_track_records_stopped_on_sigterm(tmp_path):
     # script's EXIT trap records STOPPED.
     proc = subprocess.Popen(
         ["bash", "-c", f'source "{HELPER}"\njobs_log_track 9\nsleep 30 & wait $!'],
-        env={**os.environ, "SCRATCH": str(tmp_path), "BED_JOB_SUMMARY": "grid x out=y"},
+        env={
+            **os.environ,
+            "BED_JOBS_LOG": str(tmp_path / "jobs.log"),
+            "BED_JOB_SUMMARY": "grid x out=y",
+        },
     )
-    log = tmp_path / "bedcosmo" / "jobs.log"
+    log = tmp_path / "jobs.log"
     for _ in range(100):
         if log.exists():
             break

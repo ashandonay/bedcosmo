@@ -75,12 +75,12 @@ if [ $# -eq 0 ]; then
     echo "                        on the NF eval. Pass-through to evaluate.py."
     echo "  --grid-<arg> <val>  - Override args for the grid job only (wins over unprefixed --<arg>)"
     echo "  --grid-time <HH:MM> - SLURM time limit for sibling grid job (default: same as --time)"
-    echo "  --note \"<text>\"     - Reminder written with this job's entry in \$SCRATCH/bedcosmo/jobs.log"
+    echo "  --note \"<text>\"     - Reminder written with this job's entry in \$SCRATCH/bedcosmo/<cosmo_exp>/jobs.log"
     echo "  --log-usage, --profile, --restart-optimizer"
     echo ""
     echo "Logs: each job's full log goes to its MLflow run's artifacts/logs/ (standalone grid:"
-    echo "  <grid output dir>/logs/). \$SCRATCH/bedcosmo/jobs.log records every job's queue, start"
-    echo "  and end (COMPLETED/FAILED/STOPPED/SKIPPED) with the path to its full log."
+    echo "  <grid output dir>/logs/). \$SCRATCH/bedcosmo/<cosmo_exp>/jobs.log records every job's"
+    echo "  queue, start and end (COMPLETED/FAILED/STOPPED/SKIPPED) with the path to its full log."
     echo ""
     echo "Examples:"
     echo "  ./submit.sh train num_tracers base"
@@ -1102,8 +1102,10 @@ fi
 # MLflow run's artifacts/logs/; a standalone grid job has no run, so submit.sh creates
 # its output dir now and the log goes into <out_dir>/logs/.
 # ──────────────────────────────────────────────────────────────────────
-# Summaries identify a run by the first 8 chars of its id; the log path has the full id.
-RUN_TARGET="$COSMO_EXP${COSMO_MODEL:+/$COSMO_MODEL} run=${JOB_RUN_ID:0:8}"
+export BED_JOBS_LOG="$SCRATCH/bedcosmo/$COSMO_EXP/jobs.log"
+# The jobs log is per experiment, so summaries name only the model. A run is identified
+# by the first 8 chars of its id; the log path has the full id.
+RUN_TARGET="${COSMO_MODEL:+$COSMO_MODEL }run=${JOB_RUN_ID:0:8}"
 JOB_SUMMARY="$JOB_TYPE"
 if [ "$DEBUG" = true ]; then
     JOB_SUMMARY+=" [debug]"
@@ -1121,7 +1123,7 @@ if [ "$JOB_TYPE" = "grid" ]; then
     done
     FINAL_ARGS+=("--out-dir" "$GRID_OUT_DIR")
     JOB_LOG_DIR="$GRID_OUT_DIR/logs"
-    JOB_SUMMARY+=" $COSMO_EXP${COSMO_MODEL:+/$COSMO_MODEL} out=grid_calc/$(basename "$GRID_OUT_DIR")"
+    JOB_SUMMARY+=" ${COSMO_MODEL:+$COSMO_MODEL }out=grid_calc/$(basename "$GRID_OUT_DIR")"
 else
     JOB_LOG_DIR="$JOB_RUN_DIR/artifacts/logs"
     JOB_SUMMARY+=" $RUN_TARGET"
@@ -1236,7 +1238,7 @@ if [ "$EXECUTION_MODE" = "slurm" ]; then
     jobs_log_append QUEUED "$JOB_SUMMARY job=$MAIN_JOB_ID" "${SUBMIT_DETAILS[@]}" \
         "log:  $JOB_LOG_DIR/${LOG_NAME}_${MAIN_JOB_ID}.log"
     echo "Job log:  $JOB_LOG_DIR/${LOG_NAME}_${MAIN_JOB_ID}.log"
-    echo "Jobs log: $JOBS_LOG"
+    echo "Jobs log: $BED_JOBS_LOG"
 
     # ──────────────────────────────────────────────────────────────
     # Sibling grid job (eval --grid): dispatch a CPU grid job that
@@ -1481,7 +1483,7 @@ else
     LOG_FILE="$JOB_LOG_DIR/${LOG_NAME}_${TIMESTAMP}.log"
 
     echo "Logging output to: $LOG_FILE"
-    echo "Jobs log:          $JOBS_LOG"
+    echo "Jobs log: $BED_JOBS_LOG"
     echo ""
 
     {

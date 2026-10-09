@@ -26,23 +26,23 @@ print_bed_cli_overrides() {
     fi
 }
 
-# Universal jobs log: one append-only file across all experiments. Each job gets a
-# QUEUED entry at submission (submit.sh command, optional --note, path of its full log
-# inside the MLflow run), a STARTED entry and one end entry
-# (COMPLETED / FAILED / STOPPED / SKIPPED).
-JOBS_LOG="${SCRATCH}/bedcosmo/jobs.log"
+# Jobs log: one append-only file per experiment, $SCRATCH/bedcosmo/{cosmo_exp}/jobs.log,
+# whose path submit.sh exports as BED_JOBS_LOG. Each job gets a QUEUED entry at
+# submission (submit.sh command, optional --note, path of its full log inside the
+# MLflow run), a STARTED entry and one end entry (COMPLETED / FAILED / STOPPED / SKIPPED).
 
 # Usage: jobs_log_append EVENT SUMMARY [DETAIL_LINE...]
 # The entry is written with a single printf so concurrent jobs don't interleave lines.
 jobs_log_append() {
+    : "${BED_JOBS_LOG:?BED_JOBS_LOG is not set (submit.sh sets it)}"
     local entry line
     entry=$(printf '[%s] %-9s %s' "$(date '+%Y-%m-%d %H:%M:%S')" "$1" "$2")
     shift 2
     for line in "$@"; do
         entry+=$'\n'"    $line"
     done
-    mkdir -p "$(dirname "$JOBS_LOG")"
-    printf '%s\n' "$entry" >> "$JOBS_LOG"
+    mkdir -p "$(dirname "$BED_JOBS_LOG")"
+    printf '%s\n' "$entry" >> "$BED_JOBS_LOG"
 }
 
 # Path of an MLflow run's directory (file store: mlruns/<exp_id>/<run_id>).

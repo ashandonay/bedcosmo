@@ -107,18 +107,18 @@ For SLURM, the eval job is submitted as a dependent job (`afterany`) and checks 
 
 Each job's full stdout/stderr goes into the run it belongs to: `<run>/artifacts/logs/{jobname}_{slurm_jobid}.log` (local: `{jobname}_{timestamp}.log`), where `jobname` is `train`, `resume`, `restart`, `debug`, `eval` or `grid`. A standalone grid job has no run, so its log goes into `<grid output dir>/logs/`.
 
-`$SCRATCH/bedcosmo/jobs.log` is one append-only record of every job across all experiments. Each job gets timestamped entries:
+`$SCRATCH/bedcosmo/{cosmo_exp}/jobs.log` is an append-only record of every job for that experiment. Each job gets timestamped entries:
 
 ```
-[2026-10-08 14:03:12] QUEUED    train num_visits/empirical run=3f2a9c1e job=41234567
+[2026-10-08 14:03:12] QUEUED    train empirical run=3f2a9c1e job=41234567
     note: bins16, compare to 38be41a6
     cmd:  ./submit.sh train num_visits empirical --time 04:00
     log:  $SCRATCH/bedcosmo/num_visits/mlruns/12/3f2a9c1e.../artifacts/logs/train_41234567.log
-[2026-10-08 14:03:12] QUEUED    eval num_visits/empirical run=3f2a9c1e job=41234568
+[2026-10-08 14:03:12] QUEUED    eval empirical run=3f2a9c1e job=41234568
     auto-eval after train job 41234567
     log:  .../artifacts/logs/eval_41234568.log
-[2026-10-08 15:10:02] STARTED   train num_visits/empirical run=3f2a9c1e job=41234567 node=nid001234
-[2026-10-08 19:28:44] COMPLETED train num_visits/empirical run=3f2a9c1e job=41234567 exit=0 elapsed=4h18m
+[2026-10-08 15:10:02] STARTED   train empirical run=3f2a9c1e job=41234567 node=nid001234
+[2026-10-08 19:28:44] COMPLETED train empirical run=3f2a9c1e job=41234567 exit=0 elapsed=4h18m
 ```
 
 - `--note "<text>"` adds a reminder to the job's first entry. `cmd` is the `submit.sh` invocation as typed; the fully resolved argv is printed at the top of the job log.
@@ -231,7 +231,7 @@ $SCRATCH/bedcosmo/
   {cosmo_exp}/           # num_tracers, num_visits, variable_redshift
     mlruns/              # MLflow runs; checkpoints, config snapshots and job logs (logs/) are in each run's artifacts/
     grid_calc/           # grid EIG outputs, one directory per timestamp (job log in logs/)
-  jobs.log               # universal jobs log: every job's queue/start/end entries (see Job logs)
+    jobs.log             # every job's queue/start/end entries (see Job logs)
   num_tracers/emulator/  # BAO emulator checkpoints
   num_visits/empirical_prior/  # empirical SED prior builds (see src/bedcosmo/num_visits/empirical/README.md)
   desi/, eazy/           # shared DESI spectra and EAZY templates for the SED prior
@@ -315,7 +315,7 @@ mypy .                      # Type checking
 
 ### Job Fails Immediately
 
-Find the job in `$SCRATCH/bedcosmo/jobs.log`; its entries link to the full log in the run's `artifacts/logs/`.
+Find the job in `$SCRATCH/bedcosmo/{cosmo_exp}/jobs.log`; its entries link to the full log in the run's `artifacts/logs/`.
 
 ### Out of Memory
 
