@@ -571,7 +571,8 @@ class BasePlotter:
         Generate a filename with optional timestamp.
         
         Args:
-            prefix (str): Filename prefix.
+            prefix (str): Filename prefix. A trailing ``.{suffix}`` is dropped, so
+                ``"test.png"`` gives ``test_<timestamp>.png``, not ``test.png_<timestamp>.png``.
             suffix (str): File extension (default: "png").
             timestamp (bool): Whether to include timestamp.
             
@@ -580,6 +581,8 @@ class BasePlotter:
         """
         if prefix is None:
             prefix = 'plot'
+        # Only the matching extension: a general split would cut prefixes like "eig_z0.5".
+        prefix = prefix.removesuffix(f".{suffix}")
         if timestamp:
             timestamp_str = datetime.now().strftime('%Y%m%d_%H%M%S')
             return f"{prefix}_{timestamp_str}.{suffix}"
