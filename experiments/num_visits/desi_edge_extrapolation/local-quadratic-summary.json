@@ -1,0 +1,40 @@
+{
+  "fixed_constant_100": {
+    "n": 100,
+    "median_mean_error": 0.08614154160022736,
+    "negative_prediction_galaxies": 1
+  },
+  "fixed_powerlaw_500": {
+    "n": 100,
+    "median_mean_error": 0.1238301901882827,
+    "negative_prediction_galaxies": 0
+  },
+  "selected_constant": {
+    "n": 100,
+    "median_mean_error": 0.09393498301506042,
+    "negative_prediction_galaxies": 0
+  },
+  "selected_local_quadratic": {
+    "n": 100,
+    "median_mean_error": 0.16751034520977748,
+    "negative_prediction_galaxies": 9
+  },
+  "selected_powerlaw": {
+    "n": 100,
+    "median_mean_error": 0.13485514584643027,
+    "negative_prediction_galaxies": 0
+  },
+  "details": {
+    "outer_observed_width_aa": 800,
+    "inner_blocks": 3,
+    "windows_rest_aa": [
+      100,
+      200,
+      300,
+      500,
+      800
+    ],
+    "selection_score": "inverse-variance-weighted squared residual of 50-rest-Angstrom mean-flux bins",
+    "failed_configurations": []
+  }
+}

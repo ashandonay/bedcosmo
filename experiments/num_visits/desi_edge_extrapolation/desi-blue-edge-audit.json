@@ -1,0 +1,140 @@
+[
+  {
+    "row": 8235,
+    "targetid": 2851358562582529,
+    "z": 0.0855089106947394,
+    "coadd": "/home/ashandonay/scratch/bedcosmo/desi/tiny_dr1/spectro/redux/iron/healpix/main/dark/272/27256/coadd-main-dark-27256.fits",
+    "scale": 21.326019287109375,
+    "saved_scale": 21.326019287109375,
+    "max_measured_flux_difference": 0.0,
+    "max_measured_weight_difference": 0.0,
+    "first_bin_rest_aa": 3320.0,
+    "first_bin_observed_center_aa": 3603.8895835065346,
+    "first_bin_saved_flux": 0.2919236123561859,
+    "first_bin_recomputed_flux": 0.29192359847611177,
+    "first_bin_sigma": 0.04307233016856673,
+    "native_first_bin_pixel_count": 12,
+    "native_first_bin_observed_min": 3600.0,
+    "native_first_bin_observed_max": 3608.800000000002,
+    "native_first_bin_flux_min_normalized": 0.01845994789497804,
+    "native_first_bin_flux_max_normalized": 0.6487627734823865,
+    "native_first_bin_masks": [
+      0
+    ]
+  },
+  {
+    "row": 8357,
+    "targetid": 39627835572224621,
+    "z": 0.376357385055546,
+    "coadd": "/home/ashandonay/scratch/bedcosmo/desi/tiny_dr1/spectro/redux/iron/healpix/main/dark/272/27256/coadd-main-dark-27256.fits",
+    "scale": 2.9783700704574585,
+    "saved_scale": 2.9783700704574585,
+    "max_measured_flux_difference": 0.0,
+    "max_measured_weight_difference": 0.0,
+    "first_bin_rest_aa": 2620.0,
+    "first_bin_observed_center_aa": 3606.0563488455305,
+    "first_bin_saved_flux": 0.33393624424934387,
+    "first_bin_recomputed_flux": 0.33393625672320804,
+    "first_bin_sigma": 0.274162989125309,
+    "native_first_bin_pixel_count": 17,
+    "native_first_bin_observed_min": 3600.0,
+    "native_first_bin_observed_max": 3612.800000000003,
+    "native_first_bin_flux_min_normalized": -2.233493656176125,
+    "native_first_bin_flux_max_normalized": 2.730424478431103,
+    "native_first_bin_masks": [
+      0
+    ]
+  },
+  {
+    "row": 3302,
+    "targetid": 39627823484241692,
+    "z": 0.5171755545004725,
+    "coadd": "/home/ashandonay/scratch/bedcosmo/desi/tiny_dr1/spectro/redux/iron/healpix/main/dark/272/27245/coadd-main-dark-27245.fits",
+    "scale": 1.5735825300216675,
+    "saved_scale": 1.5735825300216675,
+    "max_measured_flux_difference": 0.0,
+    "max_measured_weight_difference": 0.0,
+    "first_bin_rest_aa": 2370.0,
+    "first_bin_observed_center_aa": 3595.70606416612,
+    "first_bin_saved_flux": 1.5737286806106567,
+    "first_bin_recomputed_flux": 1.5737286893511764,
+    "first_bin_sigma": 1.1181319789028297,
+    "native_first_bin_pixel_count": 5,
+    "native_first_bin_observed_min": 3600.0,
+    "native_first_bin_observed_max": 3603.2000000000007,
+    "native_first_bin_flux_min_normalized": -0.26388688870375654,
+    "native_first_bin_flux_max_normalized": 5.321384797631727,
+    "native_first_bin_masks": [
+      0
+    ]
+  },
+  {
+    "row": 5285,
+    "targetid": 39627853683233487,
+    "z": 0.7363214343127377,
+    "coadd": "/home/ashandonay/scratch/bedcosmo/desi/tiny_dr1/spectro/redux/iron/healpix/main/dark/272/27259/coadd-main-dark-27259.fits",
+    "scale": 0.7236952781677246,
+    "saved_scale": 0.7236952781677246,
+    "max_measured_flux_difference": 0.0,
+    "max_measured_weight_difference": 0.0,
+    "first_bin_rest_aa": 2070.0,
+    "first_bin_observed_center_aa": 3594.185369027367,
+    "first_bin_saved_flux": -1.8283698558807373,
+    "first_bin_recomputed_flux": -1.8283698066040426,
+    "first_bin_sigma": 2.499352179761088,
+    "native_first_bin_pixel_count": 4,
+    "native_first_bin_observed_min": 3600.0,
+    "native_first_bin_observed_max": 3602.4000000000005,
+    "native_first_bin_flux_min_normalized": -4.012675438278604,
+    "native_first_bin_flux_max_normalized": 0.8522374990034256,
+    "native_first_bin_masks": [
+      0
+    ]
+  },
+  {
+    "row": 11428,
+    "targetid": 39627853670649454,
+    "z": 1.1128310687886696,
+    "coadd": "/home/ashandonay/scratch/bedcosmo/desi/tiny_dr1/spectro/redux/iron/healpix/main/dark/273/27344/coadd-main-dark-27344.fits",
+    "scale": 0.19038016349077225,
+    "saved_scale": 0.19038016349077225,
+    "max_measured_flux_difference": 0.0,
+    "max_measured_weight_difference": 0.0,
+    "first_bin_rest_aa": 1700.0,
+    "first_bin_observed_center_aa": 3591.8128169407387,
+    "first_bin_saved_flux": 15.808206558227539,
+    "first_bin_recomputed_flux": 15.808206105354104,
+    "first_bin_sigma": 8.719423992636743,
+    "native_first_bin_pixel_count": 3,
+    "native_first_bin_observed_min": 3600.0,
+    "native_first_bin_observed_max": 3601.6000000000004,
+    "native_first_bin_flux_min_normalized": 1.7123107021718083,
+    "native_first_bin_flux_max_normalized": 24.930248998596728,
+    "native_first_bin_masks": [
+      0
+    ]
+  },
+  {
+    "row": 7666,
+    "targetid": 39627835563837246,
+    "z": 1.367366779854688,
+    "coadd": "/home/ashandonay/scratch/bedcosmo/desi/tiny_dr1/spectro/redux/iron/healpix/main/dark/272/27256/coadd-main-dark-27256.fits",
+    "scale": 0.20694930851459503,
+    "saved_scale": 0.20694930851459503,
+    "max_measured_flux_difference": 0.0,
+    "max_measured_weight_difference": 0.0,
+    "first_bin_rest_aa": 1520.0,
+    "first_bin_observed_center_aa": 3598.397505379126,
+    "first_bin_saved_flux": -3.067628860473633,
+    "first_bin_recomputed_flux": -3.067628745232881,
+    "first_bin_sigma": 5.097514260171636,
+    "native_first_bin_pixel_count": 13,
+    "native_first_bin_observed_min": 3600.0,
+    "native_first_bin_observed_max": 3609.600000000002,
+    "native_first_bin_flux_min_normalized": -25.129957496806806,
+    "native_first_bin_flux_max_normalized": 20.49766545294461,
+    "native_first_bin_masks": [
+      0
+    ]
+  }
+]

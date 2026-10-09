@@ -1,0 +1,10 @@
+[
+  {
+    "row": 830,
+    "offset": 800,
+    "horizon": 800,
+    "window": 100,
+    "method": "powerlaw",
+    "error": "Power-law extrapolation produced nonfinite or nonpositive flux"
+  }
+]

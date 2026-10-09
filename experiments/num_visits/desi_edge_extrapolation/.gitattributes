@@ -1,0 +1,4 @@
+# Collapse recorded measurements and generated figures in PR diffs.
+*.csv linguist-generated=true
+*.json linguist-generated=true
+*.png linguist-generated=true

@@ -1,0 +1,38 @@
+{
+  "blue": {
+    "constant": {
+      "threshold": 0.0,
+      "run": 1,
+      "validation_median_band_error": 0.02126287050827333
+    },
+    "powerlaw": {
+      "threshold": 0.0,
+      "run": 1,
+      "validation_median_band_error": 0.01978040806467858
+    },
+    "regularized": {
+      "threshold": 0.0,
+      "run": 1,
+      "validation_median_band_error": 0.02413678944607202
+    },
+    "winner": "powerlaw"
+  },
+  "red": {
+    "constant": {
+      "threshold": 0.0,
+      "run": 1,
+      "validation_median_band_error": 0.013806147303468646
+    },
+    "powerlaw": {
+      "threshold": 0.1,
+      "run": 3,
+      "validation_median_band_error": 0.01692354822240668
+    },
+    "regularized": {
+      "threshold": 0.1,
+      "run": 3,
+      "validation_median_band_error": 0.017078081227600087
+    },
+    "winner": "constant"
+  }
+}

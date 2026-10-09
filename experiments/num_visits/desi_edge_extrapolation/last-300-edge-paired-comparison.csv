@@ -1,0 +1,5 @@
+side,method,median_error_difference_vs_constant,difference_ci_low,difference_ci_high,fraction_better_than_constant
+blue,constant,0.0,0.0,0.0,0.0
+blue,powerlaw,0.0386071828016088,-0.02862140530018291,0.10763772972660413,0.5125
+red,constant,0.0,0.0,0.0,0.0
+red,powerlaw,-0.0034194909655141936,-0.018403595609203637,0.015329004720681438,0.495

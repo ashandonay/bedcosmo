@@ -1,0 +1,66 @@
+{
+  "blue": {
+    "validation_winner": "powerlaw",
+    "n": 400,
+    "test_median_band_error": {
+      "no cut constant": 0.01777602036650635,
+      "trial cut constant": 0.01777602036650635,
+      "tuned constant": 0.01777602036650635,
+      "tuned powerlaw": 0.0183909204629197,
+      "tuned regularized": 0.02007167157393185
+    },
+    "test_median_difference_vs_no_cut_constant": 0.0006149000964133511,
+    "difference_95_bootstrap_ci": [
+      -0.002283178162658039,
+      0.002483042539058797
+    ],
+    "fraction_galaxies_winner_beats_constant": 0.4875,
+    "trial_cut_changed_test_predictions": 0,
+    "validation_cut_range_by_method": {
+      "constant": [
+        0.0212628705082733,
+        0.0212628705082733
+      ],
+      "powerlaw": [
+        0.0197804080646785,
+        0.0197804080646785
+      ],
+      "regularized": [
+        0.024136789446072,
+        0.024136789446072
+      ]
+    }
+  },
+  "red": {
+    "validation_winner": "constant",
+    "n": 400,
+    "test_median_band_error": {
+      "no cut constant": 0.01601929991285265,
+      "trial cut constant": 0.01601929991285265,
+      "tuned constant": 0.01601929991285265,
+      "tuned powerlaw": 0.016945508904821348,
+      "tuned regularized": 0.0200799483744179
+    },
+    "test_median_difference_vs_no_cut_constant": 0.0,
+    "difference_95_bootstrap_ci": [
+      0.0,
+      0.0
+    ],
+    "fraction_galaxies_winner_beats_constant": 0.0,
+    "trial_cut_changed_test_predictions": 0,
+    "validation_cut_range_by_method": {
+      "constant": [
+        0.0138061473034686,
+        0.0140007090255858
+      ],
+      "powerlaw": [
+        0.0169235482224066,
+        0.0170129503747132
+      ],
+      "regularized": [
+        0.0170780812276,
+        0.0172779221362473
+      ]
+    }
+  }
+}

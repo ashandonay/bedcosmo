@@ -1,0 +1,24 @@
+{
+  "n_galaxies": 100,
+  "seed": 42,
+  "heldout_observed_width_aa": {
+    "blue": 300,
+    "red": 800
+  },
+  "failures": [],
+  "metric": "absolute fractional error of inverse-variance-weighted mean flux; true mean must exceed 3 sigma",
+  "sides": {
+    "blue": {
+      "n_pairs": 61,
+      "constant_median_fractional_error": 0.23096026148494125,
+      "powerlaw_median_fractional_error": 0.20394755591374353,
+      "powerlaw_win_fraction": 0.4426229508196721
+    },
+    "red": {
+      "n_pairs": 100,
+      "constant_median_fractional_error": 0.08614155783678198,
+      "powerlaw_median_fractional_error": 0.12383015319109379,
+      "powerlaw_win_fraction": 0.3
+    }
+  }
+}

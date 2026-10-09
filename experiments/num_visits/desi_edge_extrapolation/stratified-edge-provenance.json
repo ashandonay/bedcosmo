@@ -1,0 +1,58 @@
+{
+  "seed": 20261008,
+  "n_per_bin": 100,
+  "redshift_bins": [
+    0,
+    0.6,
+    0.9,
+    1.2,
+    2
+  ],
+  "eligibility": "Measured mean of red holdout exceeds 3 sigma and sufficient measured bins for all inner validation fits",
+  "insufficient_inner_coverage_population": 4,
+  "populations": [
+    {
+      "z_min": 0,
+      "z_max": 0.6,
+      "eligible_population": 2173,
+      "selected": 100
+    },
+    {
+      "z_min": 0.6,
+      "z_max": 0.9,
+      "eligible_population": 3722,
+      "selected": 100
+    },
+    {
+      "z_min": 0.9,
+      "z_max": 1.2,
+      "eligible_population": 4260,
+      "selected": 100
+    },
+    {
+      "z_min": 1.2,
+      "z_max": 2,
+      "eligible_population": 2870,
+      "selected": 100
+    }
+  ],
+  "outer_width_observed_aa": 800,
+  "inner_blocks": 3,
+  "windows_rest_aa": [
+    100,
+    200,
+    300,
+    500,
+    800
+  ],
+  "prior_fractional_slope_std_per_100_rest_aa": [
+    0,
+    0.01,
+    0.03,
+    0.1,
+    0.3,
+    "infinity"
+  ],
+  "negativity": "No positivity constraint or clipping",
+  "purpose": "Exploratory stratified comparison, not a final independent test"
+}

@@ -1,0 +1,56 @@
+{
+  "constant": {
+    "n": 100,
+    "median_mean_error": 0.08614154160022736,
+    "p90_mean_error": 0.24689315110445054,
+    "negative_prediction_galaxies": 1
+  },
+  "local_quadratic": {
+    "n": 100,
+    "median_mean_error": 0.16751034520977748,
+    "p90_mean_error": 0.7352728184776209,
+    "negative_prediction_galaxies": 9
+  },
+  "powerlaw": {
+    "n": 100,
+    "median_mean_error": 0.1238301901882827,
+    "p90_mean_error": 0.35260250786315206,
+    "negative_prediction_galaxies": 0
+  },
+  "regularized": {
+    "n": 100,
+    "median_mean_error": 0.1363247920272585,
+    "p90_mean_error": 0.4587204053603231,
+    "negative_prediction_galaxies": 0
+  },
+  "comparison": {
+    "regularized_beats_constant_fraction": 0.3,
+    "regularized_beats_unregularized_fraction": 0.74,
+    "median_retained_slope_fraction": 0.005296902595798717,
+    "zero_slope_galaxies": 47,
+    "unregularized_galaxies": 4
+  },
+  "protocol": {
+    "seed": 42,
+    "outer_width_observed_aa": 800,
+    "inner_blocks": 3,
+    "window_candidates_rest_aa": [
+      100,
+      200,
+      300,
+      500,
+      800
+    ],
+    "prior_fractional_slope_std_per_100_rest_aa": [
+      0,
+      0.01,
+      0.03,
+      0.1,
+      0.3,
+      "infinity"
+    ],
+    "selection_score": "inverse-variance-weighted squared residual of 50-rest-Angstrom mean-flux bins",
+    "uncertainty": "approximate conditional slope uncertainty; excludes model/window-selection uncertainty",
+    "positivity": "no flux clipping or positivity constraint"
+  }
+}

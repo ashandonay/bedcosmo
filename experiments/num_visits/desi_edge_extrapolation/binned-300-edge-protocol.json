@@ -1,0 +1,43 @@
+{
+  "sample": "Same exploratory 400 galaxies; no additional exclusions",
+  "holdout_observed_aa": 300,
+  "slice_width_observed_aa": 100,
+  "slice_order": "Near to far from nominal cutoff: 0\u2013100, 100\u2013200, 200\u2013300 outward. Actual retained training edge can be further inward after quality trimming.",
+  "fit_windows_rest_aa": {
+    "constant": 100,
+    "powerlaw": 500
+  },
+  "quality": "Unchanged fixed production 5% cut, including training-only re-trim",
+  "reference": "Unsmoothed measured flux; unweighted mean within each slice",
+  "rms": "sqrt(mean of squared signed slice-mean errors)); each of three slices has equal weight",
+  "limits": "Reference noise and spectral features remain; slice means are not latent continuum truth. Reused exploratory sample, no full LSST-band validation.",
+  "verification": "1600 fits/4800 slice errors; all finite, no empty slices; whole-region predictions and means reproduce preceding 300-AA evaluation at 1e-10",
+  "summary": [
+    {
+      "side": "blue",
+      "constant_median": 0.8022393813293298,
+      "powerlaw_median": 0.8224363298736757,
+      "constant_p90": 2.487631692655634,
+      "powerlaw_p90": 2.5860161278704266,
+      "median_difference": 0.02019694854434584,
+      "difference_ci": [
+        -0.06395713291311805,
+        0.08999258940932774
+      ],
+      "powerlaw_win_fraction": 0.535
+    },
+    {
+      "side": "red",
+      "constant_median": 0.18359486917004614,
+      "powerlaw_median": 0.1828959727660615,
+      "constant_p90": 0.5454204095456434,
+      "powerlaw_p90": 0.6173097514856893,
+      "median_difference": -0.0006988964039846279,
+      "difference_ci": [
+        -0.017428264559555717,
+        0.015608419956656051
+      ],
+      "powerlaw_win_fraction": 0.51
+    }
+  ]
+}
