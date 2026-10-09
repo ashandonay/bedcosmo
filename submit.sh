@@ -1237,7 +1237,7 @@ if [ "$EXECUTION_MODE" = "slurm" ]; then
     MAIN_JOB_ID=$(echo "$SBATCH_OUTPUT" | grep -oP '\d+$')
     jobs_log_append QUEUED "$JOB_SUMMARY job=$MAIN_JOB_ID" "${SUBMIT_DETAILS[@]}" \
         "log:  $JOB_LOG_DIR/${LOG_NAME}_${MAIN_JOB_ID}.log"
-    echo "Job log:  $JOB_LOG_DIR/${LOG_NAME}_${MAIN_JOB_ID}.log"
+    echo "Log file: $JOB_LOG_DIR/${LOG_NAME}_${MAIN_JOB_ID}.log"
     echo "Jobs log: $BED_JOBS_LOG"
 
     # ──────────────────────────────────────────────────────────────
