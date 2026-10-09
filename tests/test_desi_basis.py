@@ -449,7 +449,7 @@ def test_candidate_grid_retains_supported_uv_below_1400(monkeypatch):
     assert wave[selected][-1] == 9120
 
 
-def test_grid_uses_selected_valid_pixels_and_rounds_outward(tmp_path, monkeypatch):
+def test_grid_covers_selected_valid_pixels_and_lsst_and_rounds_outward(tmp_path, monkeypatch):
     import pandas as pd
     from astropy.io import fits
 
@@ -488,16 +488,16 @@ def test_grid_uses_selected_valid_pixels_and_rounds_outward(tmp_path, monkeypatc
     manifest = pd.DataFrame({"targetid": [targetid], "healpix": [1], "z": [1.0]})
     grid = derive_rest_frame_grid(manifest, desi_dir=tmp_path, wave_step=10)
     assert grid[0] == 1330
-    assert grid[-1] == 3010
+    assert grid[-1] == 5500
     assert np.all(np.diff(grid) == 10)
     override = derive_rest_frame_grid(
-        manifest, desi_dir=tmp_path, wave_step=10, wave_min=1400, wave_max=2900
+        manifest, desi_dir=tmp_path, wave_step=10, wave_min=1200, wave_max=5605
     )
-    assert override[0] == 1400 and override[-1] == 2900
+    assert override[0] == 1200 and override[-1] == 5610
     population = pd.DataFrame({"targetid": [targetid, 2], "healpix": [1, 1], "z": [1.0, 0.0]})
     population_grid = derive_rest_frame_grid(population, desi_dir=tmp_path, wave_step=10)
     assert population_grid[0] == 1330
-    assert population_grid[-1] == 9000
+    assert population_grid[-1] == 10990
 
 
 def test_lsst_demand_coverage_is_unity_when_every_pixel_is_observed():

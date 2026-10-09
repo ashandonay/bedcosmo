@@ -16,7 +16,7 @@ from ..paths import (
     ZWARN_UNSTABLE_BIT,
     get_desi_candidate_manifest_path,
     get_desi_data_dir,
-    get_desi_training_data_dir,
+    get_num_visits_scratch,
 )
 from .support import lsst_demand_weighted_coverage
 from .training_matrix import (
@@ -56,13 +56,13 @@ def parse_args() -> argparse.Namespace:
         "--wave-min",
         type=float,
         default=None,
-        help="Override lower candidate bound; default derives it from valid DESI pixels",
+        help="Override lower candidate bound; default covers valid DESI pixels and LSST at all selected redshifts",
     )
     parser.add_argument(
         "--wave-max",
         type=float,
         default=None,
-        help="Override upper candidate bound; default derives it from valid DESI pixels",
+        help="Override upper candidate bound; default covers valid DESI pixels and LSST at all selected redshifts",
     )
     parser.add_argument("--wave-step", type=float, default=10.0)
     parser.add_argument(
@@ -82,7 +82,11 @@ def main() -> None:
     if args.z_max is not None and args.z_min is not None and args.z_min >= args.z_max:
         raise ValueError("--z-min must be below --z-max")
     desi_dir = Path(args.desi_dir or get_desi_data_dir()).expanduser().resolve()
-    output_dir = Path(args.output_dir or get_desi_training_data_dir()).expanduser().resolve()
+    output_dir = (
+        Path(args.output_dir or (get_num_visits_scratch() / "desi_training_data_extrapolated"))
+        .expanduser()
+        .resolve()
+    )
     output_dir.mkdir(parents=True, exist_ok=True)
 
     zwarn_forbid_mask = args.zwarn_forbid_mask
@@ -128,6 +132,8 @@ def main() -> None:
             .sort_values(["healpix", "targetid"])
             .reset_index(drop=True)
         )
+    grid_redshift_min = float(manifest["z"].min())
+    grid_redshift_max = float(manifest["z"].max())
     wave = derive_rest_frame_grid(
         manifest,
         desi_dir=desi_dir,
@@ -181,6 +187,9 @@ def main() -> None:
             "wave_min_aa": float(wave.min()),
             "wave_max_aa": float(wave.max()),
             "n_wavelength_bins": len(wave),
+            "wavelength_grid_rule": "union of valid DESI pixels and full tabulated LSST bandpasses over selected redshifts, rounded outward",
+            "grid_redshift_min": grid_redshift_min,
+            "grid_redshift_max": grid_redshift_max,
             "uses_eazy_selection": (False if sample_source == "direct_desi_redrock" else None),
             "selection_role": (
                 "Direct Redrock/FIBERMAP galaxy selection"

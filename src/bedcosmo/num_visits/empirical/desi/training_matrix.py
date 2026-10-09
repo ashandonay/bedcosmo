@@ -9,6 +9,7 @@ import pandas as pd
 from astropy.io import fits
 from scipy.ndimage import median_filter
 from scipy.optimize import least_squares
+from speclite import filters as speclite_filters
 
 from ..desi_data import get_local_desi_paths
 from ..paths import DEFAULT_PROGRAM, DEFAULT_SPECPROD, DEFAULT_SURVEY
@@ -380,9 +381,15 @@ def derive_rest_frame_grid(
     wave_min: float | None = None,
     wave_max: float | None = None,
 ) -> np.ndarray:
-    """Round selected coadds' valid rest-frame pixel endpoints outward."""
+    """Cover selected DESI pixels and full LSST bandpasses at every selected redshift."""
     if not np.isfinite(wave_step) or wave_step <= 0:
         raise ValueError("wave_step must be finite and positive")
+    redshift = manifest["z"].to_numpy(float)
+    if not len(redshift) or not np.all(np.isfinite(redshift)) or np.any(redshift < 0):
+        raise ValueError("Grid construction requires finite nonnegative galaxy redshifts")
+    filters = speclite_filters.load_filters("lsst2023-*")
+    lsst_lower = min(band.wavelength.min() for band in filters) / (1 + redshift.max())
+    lsst_upper = max(band.wavelength.max() for band in filters) / (1 + redshift.min())
     lower, upper = np.inf, -np.inf
     for healpix, patch in manifest.groupby("healpix", sort=True):
         coadd_path, _ = get_local_desi_paths(
@@ -413,11 +420,20 @@ def derive_rest_frame_grid(
                         upper = max(upper, float(rest.max()))
     if not np.isfinite(lower) or not np.isfinite(upper):
         raise ValueError("No valid DESI pixels available to derive wavelength grid")
+    lower = min(lower, lsst_lower)
+    upper = max(upper, lsst_upper)
     lower = np.floor(lower / wave_step) * wave_step if wave_min is None else wave_min
     upper = np.ceil(upper / wave_step) * wave_step if wave_max is None else wave_max
     if not np.isfinite(lower) or not np.isfinite(upper) or lower <= 0 or upper <= lower:
         raise ValueError("Candidate wavelength limits must be finite, positive and ordered")
-    return np.arange(lower, upper + 0.5 * wave_step, wave_step)
+    if lower > lsst_lower or upper < lsst_upper:
+        raise ValueError(
+            "Wavelength overrides exclude LSST coverage for selected redshifts: "
+            f"require wave_min <= {lsst_lower:g} and wave_max >= {lsst_upper:g} Angstrom"
+        )
+    # Round the last bin outward even when explicit bounds are not step-aligned.
+    count = int(np.ceil((upper - lower) / wave_step))
+    return lower + wave_step * np.arange(count + 1)
 
 
 def build_rest_frame_matrix(

@@ -63,15 +63,16 @@ loss to reduce the influence of spectral lines and outliers. The amplitude is
 parameterized as `exp(log_A)`; flux data are never log-transformed or clipped.
 The fitted continuum is continued into the missing wavelengths. Fit failures
 raise an error. After the quality cut, this option does not alter retained measured pixels or internal gaps.
-Use `--wave-min` and `--wave-max` when the desired LSST rest-frame limits extend
-beyond the default population-derived grid. Constant remains the default;
+The default grid covers full LSST bandpasses at every selected galaxy redshift.
+`--wave-min` and `--wave-max` can request broader bounds; bounds excluding that
+LSST coverage are rejected. Constant remains the default;
 power-law continuation is an extrapolation assumption to assess on held-out
 measured wavelength regions before a production NMF build.
 
 The default output is:
 
 ```text
-$SCRATCH/bedcosmo/num_visits/desi_training_data/
+$SCRATCH/bedcosmo/num_visits/desi_training_data_extrapolated/
 ├── desi_candidate_manifest.csv
 ├── desi_sample_manifest.csv
 ├── desi_rest_frame_training_matrix.npz
@@ -118,11 +119,16 @@ requires ten observed spectra per component, or 100 contributors per bin.
 Support is selected from the training split only; validation and test masks do
 not influence the fitted wavelength interval.
 
-The candidate rest-frame grid is derived from the selected coadds' valid pixels
-(finite wavelength, flux and positive inverse variance, with zero mask).
-Observed wavelengths are divided by each object's `1 + z`; the population's
-minimum and maximum are rounded outward to the 10 Angstrom bin spacing
-(`--wave-step`). `--wave-min` and `--wave-max` optionally override those bounds.
+The candidate rest-frame grid covers both the selected coadds' valid pixels
+(finite wavelength, flux and positive inverse variance, with zero mask) and
+all full tabulated LSST `ugrizy` bandpasses over the selected redshift range.
+For selected extrema `z_min` and `z_max`, the LSST requirements are
+`lambda_min <= lambda_LSST_blue / (1 + z_max)` and
+`lambda_max >= lambda_LSST_red / (1 + z_min)`. Taking the union with measured
+DESI coverage preserves the original data used to estimate endpoint levels.
+Bounds are rounded outward to the 10-Angstrom spacing (`--wave-step`).
+Explicit `--wave-min` and `--wave-max` overrides must still cover those LSST
+limits; nonaligned upper bounds are rounded outward to the next grid bin.
 Within that grid, missing bins outside each spectrum's measured endpoints are
 filled using the selected edge method. Internal masked gaps remain missing.
 The default constant endpoint level is the mean of a median-filtered spectrum
@@ -130,11 +136,10 @@ over the nearest 100 Angstroms. The optional linear mode fits a robust,
 inverse-variance-weighted continuum to 50-Angstrom median bins over the nearest
 500 Angstroms, with iterative outlier clipping. Inferred bins are downweighted
 to 10% of the measured edge window's median inverse variance. Minimum-good-pixel
-selection counts retained measured pixels only. The population grid endpoints
-still depend on valid DESI coverage;
-use `--wave-min` or `--wave-max` to request broader explicit bounds. Existing
+selection counts retained measured pixels only. The grid now includes LSST demand as well as valid DESI coverage. Existing
 saved matrices retain their original grid and values, so regenerate the matrix
-before building a basis with edge extrapolation.
+before building a basis with edge extrapolation. This includes matrices built
+with the earlier DESI-only default grid.
 
 The matrix's `rest_wavelength_coverage.csv` reports contributor counts, the
 catalog-wide observed fraction, and an LSST-demand-weighted conditional
@@ -155,7 +160,10 @@ interval derived directly from the retained support and the full tabulated
 LSST `ugrizy` bandpasses, without endpoint extrapolation:
 `z_min = max(0, lambda_LSST_red / lambda_support_max - 1)` and
 `z_max = lambda_LSST_blue / lambda_support_min - 1`.
-For support 1390–9120 Å this is approximately 0.205–1.301.
+For historical unextrapolated support 1390–9120 Å this is approximately
+0.205–1.301. The new default matrix spans LSST at all selected redshifts;
+if the factorizer retains that full support, this coverage check excludes none
+of those galaxies. It remains a guard if support is narrowed.
 `--prior-z-min` and `--prior-z-max` can narrow these limits; overrides outside
 the supported interval are rejected. Resolved bounds are printed and saved in
 build provenance; they select the coefficient rows used to fit the KDE.
