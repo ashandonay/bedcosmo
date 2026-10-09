@@ -155,7 +155,7 @@ def test_matrix_eligibility_counts_retained_measurements_before_extrapolation(
         for field in ["FLUX", "IVAR", "MASK"]:
             hdus.append(fits.ImageHDU(np.ones((1, 2)), name=f"{arm}_{field}"))
     fits.HDUList(hdus).writeto(coadd)
-    wave = np.arange(3500.0, 4510.0, 10.0)
+    wave = np.arange(3000.0, 11010.0, 10.0)
     weights = np.zeros(len(wave))
     weights[10:91] = 100.0
     weights[10:12] = 1.0
@@ -177,7 +177,9 @@ def test_matrix_eligibility_counts_retained_measurements_before_extrapolation(
         manifest, desi_dir=tmp_path, rest_wave=wave, min_good_pixels=77
     )
     assert len(accepted) == 1
-    assert np.count_nonzero(extended_weights) == len(wave)
+    assert np.count_nonzero(extended_weights) < len(wave)
+    assert extended_weights[0, 0] == 0
+    assert extended_weights[0, -1] == 0
 
 
 def test_edge_extrapolation_uses_smoothed_100_angstrom_means():

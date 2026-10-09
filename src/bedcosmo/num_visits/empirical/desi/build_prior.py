@@ -31,7 +31,7 @@ from .evaluate_factorization_methods import (
     nearly_nmf_package_metadata,
     shared_initialization,
 )
-from .support import lsst_support_limits, select_wavelength_support
+from .support import lsst_required_mask, lsst_support_limits, select_wavelength_support
 from .weighted_nmf import infer_coefficients
 
 KDE_MODULE = "bedcosmo.num_visits.empirical.fit_sed_prior_kde"
@@ -244,13 +244,13 @@ def parse_args() -> argparse.Namespace:
         "--prior-z-min",
         type=float,
         default=None,
-        help="Override lower redshift cut; default derives it from retained support",
+        help="Override lower prior redshift bound; default uses the saved requested range",
     )
     parser.add_argument(
         "--prior-z-max",
         type=float,
         default=None,
-        help="Override upper redshift cut; default derives it from retained support",
+        help="Override upper prior redshift bound; default uses the saved requested range",
     )
     parser.add_argument("--max-chi2-dof", type=float, default=1.5)
     parser.add_argument("--norm-min", type=float, default=3600.0)
@@ -398,7 +398,9 @@ def rebuild_prior(args, output_dir):
             raise ValueError("Exported template bank does not match saved basis")
     rank = basis.shape[0]
     prior_z_min, prior_z_max = resolve_prior_redshift_limits(
-        wave, args.prior_z_min, args.prior_z_max
+        wave,
+        metadata["selection"]["prior_z_min"] if args.prior_z_min is None else args.prior_z_min,
+        metadata["selection"]["prior_z_max"] if args.prior_z_max is None else args.prior_z_max,
     )
     table = make_prior_table(
         manifest,
@@ -488,7 +490,15 @@ def main() -> None:
     flux_all = data["flux"].astype(float)
     weights_all = data["relative_ivar"].astype(float)
     normalization_scale = data["normalization_scale"].astype(float)
+    requested_bounds = data["prior_redshift_bounds"]
+    if args.prior_z_min is None:
+        args.prior_z_min = float(requested_bounds[0])
+    if args.prior_z_max is None:
+        args.prior_z_max = float(requested_bounds[1])
 
+    args.prior_z_min, args.prior_z_max = resolve_prior_redshift_limits(
+        wave_all, args.prior_z_min, args.prior_z_max
+    )
     rng = np.random.default_rng(args.split_seed)
     permutation = rng.permutation(len(manifest))
     train_stop = int(args.train_fraction * len(manifest))
@@ -502,6 +512,7 @@ def main() -> None:
         observations_per_component=args.observations_per_component,
         minimum_contributors=args.minimum_wavelength_contributors,
         support_rank=args.wavelength_support_rank,
+        required_mask=lsst_required_mask(wave_all, np.array([args.prior_z_min, args.prior_z_max])),
     )
     if np.count_nonzero(support) < 20:
         raise ValueError(f"Too few wavelength bins have at least {required} contributors")
@@ -703,6 +714,8 @@ def main() -> None:
                 "polish_updates": polish_updates,
                 "full_refit_updates": full_updates,
                 "required_wavelength_contributors": required,
+                "wavelength_support_policy": "require the contributor threshold throughout requested-prior LSST demand; train on buffered galaxies without narrowing the prior range",
+                "minimum_retained_training_contributors": int(contributors[support].min()),
                 "test_metrics_before_full_refit": test_metrics,
                 **nearly_nmf_package_metadata(),
             },

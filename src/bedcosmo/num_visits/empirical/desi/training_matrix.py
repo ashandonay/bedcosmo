@@ -221,6 +221,7 @@ def extrapolate_spectrum_edges(
     continuum_window_aa: float = 500.0,
     median_width: int = 5,
     method: str = "constant",
+    bounds: tuple[float, float] | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Extend spectrum edges with a constant level or robust broadband continuum."""
     wave = np.asarray(rest_wave, dtype=float)
@@ -238,6 +239,19 @@ def extrapolate_spectrum_edges(
         raise ValueError("median_width must be a positive odd integer")
     if method not in {"constant", "linear", "powerlaw"}:
         raise ValueError("method must be 'constant', 'linear', or 'powerlaw'")
+    allowed = np.ones(len(wave), dtype=bool)
+    if bounds is not None:
+        lower, upper = bounds
+        if not np.isfinite(bounds).all() or not 0 < lower < upper:
+            raise ValueError("Extrapolation bounds must be finite, positive and ordered")
+        if lower < wave[0] or upper > wave[-1]:
+            raise ValueError("Wavelength grid does not cover requested extrapolation bounds")
+        # Retain one bracketing grid center outside each exact filter endpoint
+        # so interpolation covers the full tabulated bandpass.
+        first = max(0, np.searchsorted(wave, lower, side="right") - 1)
+        last = min(len(wave) - 1, np.searchsorted(wave, upper, side="left"))
+        allowed[:first] = False
+        allowed[last + 1 :] = False
     observed = np.flatnonzero((ivar > 0) & np.isfinite(ivar) & np.isfinite(values))
     if len(observed) < 2:
         return values, ivar
@@ -253,8 +267,8 @@ def extrapolate_spectrum_edges(
         wave[observed] >= wave[red] - edge_window,
     )
     for indices, target in zip(edge_windows, (blue, red), strict=True):
-        tail = slice(None, blue) if target == blue else slice(red + 1, None)
-        if not len(wave[tail]):
+        tail = allowed & ((wave < wave[blue]) if target == blue else (wave > wave[red]))
+        if not np.any(tail):
             continue
         edge_wave = wave[observed[indices]]
         edge_flux = smoothed[indices]
@@ -451,6 +465,9 @@ def build_rest_frame_matrix(
     flux_matrix = np.zeros((len(manifest), len(rest_wave)), dtype=np.float32)
     weight_matrix = np.zeros_like(flux_matrix)
     observed_pixel_count = np.zeros(len(manifest), dtype=int)
+    filters = speclite_filters.load_filters("lsst2023-*")
+    lsst_blue = min(band.wavelength.min() for band in filters)
+    lsst_red = max(band.wavelength.max() for band in filters)
     scales = np.full(len(manifest), np.nan, dtype=float)
     found = np.zeros(len(manifest), dtype=bool)
 
@@ -487,7 +504,11 @@ def build_rest_frame_matrix(
                 values, weights = trim_spectrum_edges(rest_wave, values, weights, float(item.z))
                 observed_pixel_count[matrix_row] = np.count_nonzero(weights > 0)
                 values, weights = extrapolate_spectrum_edges(
-                    rest_wave, values, weights, method=edge_extrapolation
+                    rest_wave,
+                    values,
+                    weights,
+                    method=edge_extrapolation,
+                    bounds=(lsst_blue / (1 + item.z), lsst_red / (1 + item.z)),
                 )
                 flux_matrix[matrix_row] = values
                 weight_matrix[matrix_row] = weights
