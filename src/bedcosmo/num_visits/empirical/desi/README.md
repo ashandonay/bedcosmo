@@ -14,12 +14,15 @@ The training path:
 1. reads DESI flux, inverse variance, and masks from the coadds;
 2. shifts valid pixels to the rest frame and bins them by inverse variance;
 3. removes one robust multiplicative scale per object;
-4. preserves inverse variance in those normalized-flux units so high-S/N
+4. extends each spectrum beyond its measured blue and red endpoints using a
+   selected edge method; inferred bins receive 10% of the endpoint window's
+   median weight;
+5. preserves inverse variance in those normalized-flux units so high-S/N
    spectra determine component shapes more strongly than noisy spectra;
-5. fits nonnegative components with alternating weighted NNLS while treating
+6. fits nonnegative components with alternating weighted NNLS while treating
    unobserved wavelengths as missing, not zero;
-6. evaluates reconstruction on a fixed held-out galaxy sample; and
-7. saves simplex-normalized component coefficients for eventual prior fitting.
+7. evaluates reconstruction on a fixed held-out galaxy sample; and
+8. saves simplex-normalized component coefficients for eventual prior fitting.
 
 First create the direct-DESI sample manifests and rest-frame matrix. This is
 the only step `build_prior` depends on; it has no rank argument:
@@ -28,6 +31,28 @@ the only step `build_prior` depends on; it has no rank argument:
 python -m bedcosmo.num_visits.empirical.desi.build_matrix \
   --max-spectra 0
 ```
+
+`--edge-extrapolation constant` (the default) extends each endpoint with the
+mean of the median-smoothed spectrum over the nearest 100 Angstroms.
+`--edge-extrapolation linear` estimates the broadband continuum over the
+nearest 500 Angstroms: it median-smooths the spectrum, takes 50-Angstrom median
+bins, and fits a weighted line while iteratively clipping outlying bins. It
+then continues that local continuum beyond the DESI edge. Long extrapolations
+remain uncertain, so inspect the output before using it for factorization. The
+selected method is recorded in `desi_training_matrix_provenance.json`.
+
+`--edge-extrapolation powerlaw` fits a positive continuum
+`f_lambda = A * (lambda / lambda_edge)**alpha` separately at each edge, over
+the nearest 500 rest-frame Angstroms. It fits measured flux directly, including
+negative measurements, with inverse-variance weighting and a soft-L1 robust
+loss to reduce the influence of spectral lines and outliers. The amplitude is
+parameterized as `exp(log_A)`; flux data are never log-transformed or clipped.
+The fitted continuum is continued into the missing wavelengths. Fit failures
+raise an error. This option does not alter measured pixels or internal gaps.
+Use `--wave-min` and `--wave-max` when the desired LSST rest-frame limits extend
+beyond the default population-derived grid. Constant remains the default;
+power-law continuation is an extrapolation assumption to assess on held-out
+measured wavelength regions before a production NMF build.
 
 The default output is:
 
@@ -84,21 +109,25 @@ The candidate rest-frame grid is derived from the selected coadds' valid pixels
 Observed wavelengths are divided by each object's `1 + z`; the population's
 minimum and maximum are rounded outward to the 10 Angstrom bin spacing
 (`--wave-step`). `--wave-min` and `--wave-max` optionally override those bounds.
-The same training-contributor threshold then selects both retained endpoints.
-LSST coverage is handled later by the prior redshift selection. Existing saved
-matrices retain their original grid: regenerate the training matrix before
-building a basis with expanded UV support.
+Within that grid, missing bins outside each spectrum's measured endpoints are
+filled using the selected edge method. Internal masked gaps remain missing.
+The default constant endpoint level is the mean of a median-filtered spectrum
+over the nearest 100 Angstroms. The optional linear mode fits a robust,
+inverse-variance-weighted continuum to 50-Angstrom median bins over the nearest
+500 Angstroms, with iterative outlier clipping. Inferred bins are downweighted
+to 10% of the measured edge window's median inverse variance. Minimum-good-pixel
+selection counts measured pixels only. The population grid endpoints still depend on valid DESI coverage;
+use `--wave-min` or `--wave-max` to request broader explicit bounds. Existing
+saved matrices retain their original grid and values, so regenerate the matrix
+before building a basis with edge extrapolation.
 
 The matrix's `rest_wavelength_coverage.csv` reports contributor counts, the
 catalog-wide observed fraction, and an LSST-demand-weighted conditional
 coverage evaluated at each object's redshift. `compare_ranks` writes its
 training-split contributor counts and selected support separately.
-Missing pixels always retain zero
-weight during factorization. These components must not be extrapolated by
-silently clamping their endpoint values. The production prior therefore
-excludes redshifts for which its learned rest-frame support cannot cover the
-full tabulated LSST `ugrizy` bandpasses; extending to those redshifts would
-require an explicit external spectral anchor.
+Internal missing pixels retain zero weight during factorization. The prior
+redshift selection still checks that the learned rest-frame grid spans the
+full tabulated LSST `ugrizy` bandpasses.
 
 ## Build a rank-K NumVisits prior
 

@@ -1,0 +1,161 @@
+{
+  "selection": "One seeded random galaxy from the upper quartile of median measured inverse variance in each of six redshift bins; selected before fitting",
+  "lsst_observed_bounds_aa": [
+    3199.0000000000446,
+    10990.000000001815
+  ],
+  "regularized_selection": "Three inner blocks, each as wide as the required extension at that edge; blue axis reflected; fit final model to all measured data",
+  "measured_data": "All valid bins retained unchanged; no outer holdout; no flux clipping",
+  "examples": [
+    {
+      "row": 8235,
+      "targetid": 2851358562582529,
+      "redshift": 0.0855089106947394,
+      "measured_observed_bounds": [
+        3603.8895835065346,
+        9823.855641787392
+      ],
+      "edges": {
+        "blue": {
+          "required_rest_width_aa": 372.9951726028262,
+          "selected_window_rest_aa": 800,
+          "retained_slope_fraction": 0.8810524538183184,
+          "prior_fractional_slope_std_per_100_aa": 0.1,
+          "regularized_min_flux": 0.10250774317118855
+        },
+        "red": {
+          "required_rest_width_aa": 1074.283542700794,
+          "selected_window_rest_aa": 800,
+          "retained_slope_fraction": 0.0,
+          "prior_fractional_slope_std_per_100_aa": 0.0,
+          "regularized_min_flux": 1.0742316346898324
+        }
+      }
+    },
+    {
+      "row": 8357,
+      "targetid": 39627835572224621,
+      "redshift": 0.376357385055546,
+      "measured_observed_bounds": [
+        3606.0563488455305,
+        9827.191729296597
+      ],
+      "edges": {
+        "blue": {
+          "required_rest_width_aa": 295.74902075964656,
+          "selected_window_rest_aa": 500,
+          "retained_slope_fraction": 0.0004140174056559192,
+          "prior_fractional_slope_std_per_100_aa": 0.03,
+          "regularized_min_flux": 0.05094764265946444
+        },
+        "red": {
+          "required_rest_width_aa": 844.8447208050466,
+          "selected_window_rest_aa": 200,
+          "retained_slope_fraction": 0.007942040614787722,
+          "prior_fractional_slope_std_per_100_aa": 0.01,
+          "regularized_min_flux": 0.9768651586999578
+        }
+      }
+    },
+    {
+      "row": 3302,
+      "targetid": 39627823484241692,
+      "redshift": 0.5171755545004725,
+      "measured_observed_bounds": [
+        3595.70606416612,
+        9831.297593163063
+      ],
+      "edges": {
+        "blue": {
+          "required_rest_width_aa": 261.4767045180147,
+          "selected_window_rest_aa": 800,
+          "retained_slope_fraction": 1.0,
+          "prior_fractional_slope_std_per_100_aa": null,
+          "regularized_min_flux": 0.03031848832985278
+        },
+        "red": {
+          "required_rest_width_aa": 763.723356470935,
+          "selected_window_rest_aa": 800,
+          "retained_slope_fraction": 0.3148346347746465,
+          "prior_fractional_slope_std_per_100_aa": 0.01,
+          "regularized_min_flux": 1.0639286778738526
+        }
+      }
+    },
+    {
+      "row": 5285,
+      "targetid": 39627853683233487,
+      "redshift": 0.7363214343127377,
+      "measured_observed_bounds": [
+        3594.185369027367,
+        9827.579318210095
+      ],
+      "edges": {
+        "blue": {
+          "required_rest_width_aa": 227.59919978972243,
+          "selected_window_rest_aa": 300,
+          "retained_slope_fraction": 0.0,
+          "prior_fractional_slope_std_per_100_aa": 0.0,
+          "regularized_min_flux": -0.8108701304786371
+        },
+        "red": {
+          "required_rest_width_aa": 669.4732086008171,
+          "selected_window_rest_aa": 100,
+          "retained_slope_fraction": 0.02835026258565543,
+          "prior_fractional_slope_std_per_100_aa": 0.1,
+          "regularized_min_flux": 0.9888485777535082
+        }
+      }
+    },
+    {
+      "row": 11428,
+      "targetid": 39627853670649454,
+      "redshift": 1.1128310687886696,
+      "measured_observed_bounds": [
+        3591.8128169407387,
+        9824.664469867315
+      ],
+      "edges": {
+        "blue": {
+          "required_rest_width_aa": 185.91775875669123,
+          "selected_window_rest_aa": 800,
+          "retained_slope_fraction": 0.0,
+          "prior_fractional_slope_std_per_100_aa": 0.0,
+          "regularized_min_flux": 2.2301680206314103
+        },
+        "red": {
+          "required_rest_width_aa": 551.5516821714536,
+          "selected_window_rest_aa": 500,
+          "retained_slope_fraction": 0.022551538629940613,
+          "prior_fractional_slope_std_per_100_aa": 0.03,
+          "regularized_min_flux": 0.8101797661652614
+        }
+      }
+    },
+    {
+      "row": 7666,
+      "targetid": 39627835563837246,
+      "redshift": 1.367366779854688,
+      "measured_observed_bounds": [
+        3598.397505379126,
+        9824.572136396955
+      ],
+      "edges": {
+        "blue": {
+          "required_rest_width_aa": 168.70960122351494,
+          "selected_window_rest_aa": 800,
+          "retained_slope_fraction": 0.564588083639307,
+          "prior_fractional_slope_std_per_100_aa": 0.1,
+          "regularized_min_flux": 3.3625071552756847
+        },
+        "red": {
+          "required_rest_width_aa": 492.28867851072755,
+          "selected_window_rest_aa": 100,
+          "retained_slope_fraction": 0.06897829375346172,
+          "prior_fractional_slope_std_per_100_aa": 0.3,
+          "regularized_min_flux": 1.7169876650013975
+        }
+      }
+    }
+  ]
+}

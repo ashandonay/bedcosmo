@@ -65,6 +65,12 @@ def parse_args() -> argparse.Namespace:
         help="Override upper candidate bound; default derives it from valid DESI pixels",
     )
     parser.add_argument("--wave-step", type=float, default=10.0)
+    parser.add_argument(
+        "--edge-extrapolation",
+        choices=("constant", "linear", "powerlaw"),
+        default="constant",
+        help="Edge treatment for missing rest-frame coverage",
+    )
     parser.add_argument("--seed", type=int, default=42, help="Seed for the --max-spectra subset")
     return parser.parse_args()
 
@@ -134,6 +140,7 @@ def main() -> None:
         desi_dir=desi_dir,
         rest_wave=wave,
         min_good_pixels=args.min_good_pixels,
+        edge_extrapolation=args.edge_extrapolation,
     )
     sample_manifest_path = output_dir / "desi_sample_manifest.csv"
     manifest.to_csv(sample_manifest_path, index=False)

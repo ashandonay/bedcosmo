@@ -1,0 +1,12 @@
+{
+  "reference": "Median positive inverse variance 50\u2013300 observed Angstroms inward from original edge",
+  "thresholds": [
+    0.01,
+    0.05,
+    0.1,
+    0.2
+  ],
+  "edge_requirement": "Three consecutive 10-rest-Angstrom grid bins passing threshold; discard bins exterior to that endpoint",
+  "scope": "Existing saved matrix only; no production changes",
+  "n_spectra": 13070
+}
