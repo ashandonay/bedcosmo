@@ -30,7 +30,9 @@ the only step `build_prior` depends on; it has no rank argument:
 
 ```bash
 python -m bedcosmo.num_visits.empirical.desi.build_matrix \
-  --max-spectra 0
+  --max-spectra 0 \
+  --edge-extrapolation constant \
+  --output-dir "$SCRATCH/bedcosmo/num_visits/desi_training_data_extrapolated"
 ```
 
 Before fitting either edge, matrix building applies a fixed permissive quality
@@ -205,8 +207,11 @@ python -m bedcosmo.num_visits.empirical.desi.build_prior \
   --rank 8
 ```
 
-With no `--training-matrix` override, this reads
-`$SCRATCH/bedcosmo/num_visits/desi_training_data/desi_rest_frame_training_matrix.npz`.
+With no `--training-matrix` override, a full build reads
+`$SCRATCH/bedcosmo/num_visits/desi_training_data_extrapolated/desi_rest_frame_training_matrix.npz`.
+Build that matrix with the command above. The original `desi_training_data`
+matrix is preserved; pass `--training-matrix` explicitly to use it.
+`--prior-only` continues to use the matrix recorded in the existing basis provenance.
 
 `--rank` controls both the number of learned spectral components and the
 dimension of the generated prior. Because the default build name is `desi8`,

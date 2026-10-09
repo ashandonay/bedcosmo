@@ -1,0 +1,52 @@
+{
+  "selection": "Five previously shown examples, spaced across redshift, not selected on extrapolation results",
+  "quality_cut": "production trim_spectrum_edges: 5% local median ivar and three consecutive bins",
+  "lsst_observed_bounds_aa": [
+    3199.0000000000446,
+    10990.000000001815
+  ],
+  "holdout": false,
+  "methods": [
+    "constant",
+    "powerlaw"
+  ],
+  "constant_window_rest_aa": 100,
+  "powerlaw_window_rest_aa": 500,
+  "examples": [
+    {
+      "row": 8235,
+      "targetid": 2851358562582529,
+      "redshift": 0.0855089106947394,
+      "blue_trim_observed_aa": 0.0,
+      "red_trim_observed_aa": 0.0
+    },
+    {
+      "row": 3302,
+      "targetid": 39627823484241692,
+      "redshift": 0.5171755545004725,
+      "blue_trim_observed_aa": 15.171755545004725,
+      "red_trim_observed_aa": 0.0
+    },
+    {
+      "row": 5285,
+      "targetid": 39627853683233487,
+      "redshift": 0.7363214343127377,
+      "blue_trim_observed_aa": 17.363214343127375,
+      "red_trim_observed_aa": 0.0
+    },
+    {
+      "row": 11428,
+      "targetid": 39627853670649454,
+      "redshift": 1.1128310687886696,
+      "blue_trim_observed_aa": 21.128310687886696,
+      "red_trim_observed_aa": 0.0
+    },
+    {
+      "row": 7666,
+      "targetid": 39627835563837246,
+      "redshift": 1.367366779854688,
+      "blue_trim_observed_aa": 0.0,
+      "red_trim_observed_aa": 0.0
+    }
+  ]
+}

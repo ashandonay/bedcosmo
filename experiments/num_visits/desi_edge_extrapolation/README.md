@@ -24,13 +24,15 @@ robust linear, and robust power-law edge extrapolation through
 `desi.build_matrix --edge-extrapolation`. Measured bins and internal gaps are
 preserved, and inferred tails receive downweighted fitting weights.
 
-The regularized tangent and adaptive-window studies in this directory are
-exploratory only. Matrix building now uses a fixed permissive 5% relative-ivar /
+The active comparison uses constant and power-law continuation. Regularized
+slope has been dropped from consideration; its scripts and results remain here
+as historical research records. The regularized tangent and adaptive-window
+studies were exploratory only. Matrix building now uses a fixed permissive 5% relative-ivar /
 three-consecutive-bin endpoint cut, with a 50–300 observed-Angstrom reference
 window. The historical 10% trial and tuning results below remain archived as
 original measurements; they do not establish an optimal threshold.
 The unregularized tangent appears in historical comparisons but is omitted
-from the final three-method comparison.
+from the historical three-method comparison.
 
 ## Reproducing the study
 
@@ -63,3 +65,32 @@ study (`check_edge_ivar.py`) produces a full-population per-object CSV
 `edge-ivar-threshold-diagnostic.csv`, omitted here because it is 17 MB; its
 aggregate summary and protocol are included, and the script regenerates it.
 The remaining scripts preserve the preceding comparisons and example plots.
+
+## Current constant versus power-law comparison
+
+Constant remains the pipeline default. The latest diagnostic holds out the
+outer 300 observed-frame Angstroms on each side of the same 400 galaxies and
+compares constant (100 rest-frame Angstrom window) with power law (500).
+The [three-slice comparison](binned-300-edge-error-distributions.png) scores
+three 100-observed-Angstrom means and their RMS, preventing cancellation
+between slices. Neither method has a clear median advantage. Reference noise
+remains, particularly at blue wavelengths; this reused exploratory sample does
+not validate full LSST extrapolation or downstream NMF performance.
+
+[Five actual extensions](five-desi-lsst-extrapolation-methods.png),
+[whole-region errors](last-300-edge-error-distributions.png), and
+[500 versus 1000 Angstrom power-law windows](powerlaw-1000-window-error-distributions.png)
+are saved with their CSV measurements and JSON protocols.
+
+To reproduce the current diagnostics in a writable copy:
+
+```bash
+python evaluate_last_300_edges.py
+python plot_last_300_error_distributions.py
+python evaluate_binned_300_edges.py
+python plot_five_desi_lsst_extensions.py
+```
+
+New production matrices are built separately in `desi_training_data_extrapolated`;
+full `desi.build_prior` builds now default to that matrix. The original
+`desi_training_data` matrix is preserved. See the package DESI README for commands.
