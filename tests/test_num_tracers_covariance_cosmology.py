@@ -7,6 +7,7 @@ Needs the BAO fourier emulator checkpoints under $SCRATCH; skipped when they are
 """
 import os
 
+import numpy as np
 import pytest
 import torch
 
@@ -59,3 +60,25 @@ def test_cli_parses_a_cosmology_dict_and_keeps_the_strings():
     run_args = finalize_train_run_args({"emulator_covariance": '{"Om": 0.28, "hrdrag": 10180}'}, yaml)
     assert run_args["emulator_covariance"] == {"Om": 0.28, "hrdrag": 10180}
     assert finalize_train_run_args({"emulator_covariance": "cosmology"}, yaml)["emulator_covariance"] == "cosmology"
+
+
+def test_covariance_fiducials_figure(tmp_path):
+    from bedcosmo.num_tracers.covariance_fiducials import main, nominal_covariances
+    from bedcosmo.num_tracers.experiment import NumTracers
+
+    fid = NumTracers._BAO_FIDUCIAL["Om"]
+    _, covs = nominal_covariances("bao", "Om", [0.25, fid])
+    fixed = _make_exp(emulator_covariance="fiducial")
+    passed = fixed.calc_passed(fixed.nominal_design.double().view(1, -1))
+    np.testing.assert_allclose(covs[fid], fixed._build_emulator_covariance(passed, {})[0].numpy())
+    # Lower Om gives tighter emulated errors; Lya (no emulator) is unchanged.
+    assert np.all(np.diag(covs[0.25]) <= np.diag(covs[fid]))
+
+    out = tmp_path / "cov.png"
+    main(["--values", "0.25", str(fid), "--out", str(out)])
+    assert out.stat().st_size > 0
+    for argv in (["--values", "0.25", "0.4"],                      # fiducial missing
+                 ["--param", "omega_cdm"],                          # not a BAO parameter
+                 ["--param", "hrdrag"]):                            # non-default param needs --values
+        with pytest.raises(SystemExit):
+            main(argv + ["--out", str(out)])

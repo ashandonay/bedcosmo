@@ -166,6 +166,8 @@ With `vary_lya_qso: false` (default) the Lya QSO rows are pinned at their nomina
   ```bash
   ./submit.sh train num_tracers base --emulator-covariance '{"Om": 0.28}'
   ```
+
+  To see what a choice does to the covariance itself, `python -m bedcosmo.num_tracers.covariance_fiducials --out cov.png [--analysis shapefit] [--param P --values ...]` plots the nominal-design emulator covariance at each value against DESI DR1's published covariance, and each row relative to the emulator at the fiducial. BAO varies Ω_m by default (0.25, 0.3152, 0.40) and shows D_M–D_H ellipses, the D_V-only bins and each row's error as a fraction of the DESI central values. ShapeFit varies ω_cdm by default (0.0904, 0.12, 0.1585, the same Ω_m at the template's h and ω_b) and shows q_iso–q_ap ellipses and absolute errors, since m's central value is ≈0; DESI's covariance is converted to the (q_iso, q_ap, f_σr, m) basis as the data are. `--values` must include the fiducial.
 - **`cosmology`** evaluates them at the sampled cosmology, so the covariance's own cosmology dependence becomes information in the likelihood. A Gaussian likelihood with a θ-dependent covariance double-counts that information (Carron 2013), and here it rides on the emulators' derivatives. It is the constructor default because runs from before this option don't record it and were trained this way.
 - `emulator_sqrtn_ref: sampled` needs `cosmology`, because it evaluates the reference covariance at the sampled cosmology.
 
