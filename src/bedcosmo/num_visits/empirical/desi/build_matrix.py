@@ -18,7 +18,13 @@ from ..paths import (
     get_desi_data_dir,
     get_num_visits_scratch,
 )
-from .support import lsst_demand_weighted_coverage
+from .support import (
+    lsst_demand_weighted_coverage,
+    lsst_required_mask,
+    lsst_support_limits,
+    select_training_redshift_buffer,
+    select_wavelength_support,
+)
 from .training_matrix import (
     build_rest_frame_matrix,
     derive_rest_frame_grid,
@@ -41,8 +47,21 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", type=Path, default=None)
     parser.add_argument("--healpix", type=int, nargs="+", default=list(DEFAULT_HEALPIX))
     parser.add_argument("--target-spectype", default="GALAXY")
-    parser.add_argument("--z-min", type=float, default=0.01)
-    parser.add_argument("--z-max", type=float, default=None)
+    parser.add_argument(
+        "--z-min",
+        type=float,
+        default=None,
+        help="Final prior lower redshift bound; training buffer is automatic",
+    )
+    parser.add_argument(
+        "--z-max",
+        type=float,
+        default=None,
+        help="Final prior upper redshift bound; training buffer is automatic",
+    )
+    parser.add_argument("--train-fraction", type=float, default=0.7)
+    parser.add_argument("--split-seed", type=int, default=42)
+    parser.add_argument("--minimum-wavelength-contributors", type=int, default=100)
     parser.add_argument("--allow-nonzero-zwarn", action="store_true")
     parser.add_argument("--zwarn-forbid-mask", type=int, default=None, metavar="BITS")
     parser.add_argument(
@@ -81,6 +100,13 @@ def main() -> None:
         raise ValueError("--min-good-pixels must be positive")
     if args.z_max is not None and args.z_min is not None and args.z_min >= args.z_max:
         raise ValueError("--z-min must be below --z-max")
+    if not 0 < args.train_fraction < 1:
+        raise ValueError("--train-fraction must lie between zero and one")
+    if args.minimum_wavelength_contributors < 1:
+        raise ValueError("--minimum-wavelength-contributors must be positive")
+    for bound in (args.z_min, args.z_max):
+        if bound is not None and (not np.isfinite(bound) or bound < 0):
+            raise ValueError("Prior redshift bounds must be finite and nonnegative")
     desi_dir = Path(args.desi_dir or get_desi_data_dir()).expanduser().resolve()
     output_dir = (
         Path(args.output_dir or (get_num_visits_scratch() / "desi_training_data_extrapolated"))
@@ -109,8 +135,8 @@ def main() -> None:
             args.healpix,
             desi_dir=desi_dir,
             target_spectype=args.target_spectype,
-            z_min=args.z_min,
-            z_max=args.z_max,
+            z_min=0.01,
+            z_max=None,
             allow_nonzero_zwarn=args.allow_nonzero_zwarn,
             zwarn_forbid_mask=zwarn_forbid_mask,
         )
@@ -148,6 +174,62 @@ def main() -> None:
         min_good_pixels=args.min_good_pixels,
         edge_extrapolation=args.edge_extrapolation,
     )
+    redshift = manifest["z"].to_numpy(float)
+    permutation = np.random.default_rng(args.split_seed).permutation(len(manifest))
+    train = permutation[: int(args.train_fraction * len(manifest))]
+    ordinary_support, _, _ = select_wavelength_support(
+        weights[train],
+        [1],
+        support_rank=1,
+        minimum_contributors=args.minimum_wavelength_contributors,
+    )
+    if not np.any(ordinary_support):
+        raise ValueError(
+            "Available sample has no wavelength interval meeting the contributor threshold"
+        )
+    _, _, supported_min, supported_max = lsst_support_limits(
+        wave[ordinary_support][0], wave[ordinary_support][-1]
+    )
+    prior_bounds = np.array(
+        [
+            max(supported_min, redshift.min()) if args.z_min is None else args.z_min,
+            min(supported_max, redshift.max()) if args.z_max is None else args.z_max,
+        ]
+    )
+    if prior_bounds[0] >= prior_bounds[1]:
+        raise ValueError("Available sample cannot support an ordered prior redshift interval")
+    selected = select_training_redshift_buffer(
+        wave,
+        weights,
+        redshift,
+        prior_bounds,
+        train_fraction=args.train_fraction,
+        split_seed=args.split_seed,
+        minimum_contributors=args.minimum_wavelength_contributors,
+    )
+    manifest = manifest.loc[selected].reset_index(drop=True)
+    flux, weights, scales = flux[selected], weights[selected], scales[selected]
+    occupied = np.flatnonzero(np.any(weights > 0, axis=0))
+    columns = slice(occupied[0], occupied[-1] + 1)
+    wave, flux, weights = wave[columns], flux[:, columns], weights[:, columns]
+    train = np.random.default_rng(args.split_seed).permutation(len(manifest))[
+        : int(args.train_fraction * len(manifest))
+    ]
+    _, contributors, _ = select_wavelength_support(
+        weights[train],
+        [1],
+        support_rank=1,
+        minimum_contributors=args.minimum_wavelength_contributors,
+        required_mask=lsst_required_mask(wave, prior_bounds),
+    )
+    redshift = manifest["z"].to_numpy(float)
+    n_padding = int(np.count_nonzero((redshift < prior_bounds[0]) | (redshift > prior_bounds[1])))
+    print(
+        f"Final prior z={prior_bounds[0]:.6f}–{prior_bounds[1]:.6f}; "
+        f"training z={redshift.min():.6f}–{redshift.max():.6f} "
+        f"({n_padding:,} buffer galaxies)",
+        flush=True,
+    )
     sample_manifest_path = output_dir / "desi_sample_manifest.csv"
     manifest.to_csv(sample_manifest_path, index=False)
     matrix_path = output_dir / "desi_rest_frame_training_matrix.npz"
@@ -160,6 +242,7 @@ def main() -> None:
         flux=flux,
         relative_ivar=weights,
         normalization_scale=scales,
+        prior_redshift_bounds=prior_bounds,
     )
     pd.DataFrame(
         {
@@ -184,12 +267,22 @@ def main() -> None:
             "output_dir": str(output_dir),
             "n_candidate_spectra": n_candidates,
             "n_loaded_spectra": len(manifest),
+            "prior_redshift_bounds": prior_bounds.tolist(),
+            "training_redshift_bounds": [float(redshift.min()), float(redshift.max())],
+            "n_buffer_spectra": n_padding,
+            "buffer_selection": "independent low/high growth using deficient wavelength coverage",
+            "n_low_redshift_buffer_spectra": int(np.count_nonzero(redshift < prior_bounds[0])),
+            "n_high_redshift_buffer_spectra": int(np.count_nonzero(redshift > prior_bounds[1])),
+            "minimum_prior_training_contributors": int(
+                contributors[lsst_required_mask(wave, prior_bounds)].min()
+            ),
             "wave_min_aa": float(wave.min()),
             "wave_max_aa": float(wave.max()),
             "n_wavelength_bins": len(wave),
             "wavelength_grid_rule": "union of valid DESI pixels and full tabulated LSST bandpasses over selected redshifts, rounded outward",
             "grid_redshift_min": grid_redshift_min,
             "grid_redshift_max": grid_redshift_max,
+            "extrapolation_extent": "per-galaxy full LSST bandpasses, with one bracketing grid center at each endpoint; measured DESI pixels preserved",
             "uses_eazy_selection": (False if sample_source == "direct_desi_redrock" else None),
             "selection_role": (
                 "Direct Redrock/FIBERMAP galaxy selection"
