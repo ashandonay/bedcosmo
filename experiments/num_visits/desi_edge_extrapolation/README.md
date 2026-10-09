@@ -4,6 +4,11 @@ This directory preserves the exploratory scripts, sample IDs, measurements, and
 figures used to compare constant, power-law, and regularized-slope continuation
 of DESI galaxy spectra toward the LSST wavelength limits.
 
+The [physical endpoint quality-cut comparison](quality-cut-native-endpoint-comparison.png)
+and [validation-error comparison](quality-cut-validation-comparison.png) show
+the threshold/run-count study (the outlined 10% cell is the historical trial).
+Regenerate them with `python experiments/num_visits/desi_edge_extrapolation/plot_quality_cut_comparison.py`.
+
 Start with [the final tuning report](edge-tuning-report.md) and
 [the separate-test redshift comparison](edge-tuning-test-redshift.png).
 Constant has the lowest aggregate median test broadband error on both sides;
@@ -19,8 +24,11 @@ robust linear, and robust power-law edge extrapolation through
 `desi.build_matrix --edge-extrapolation`. Measured bins and internal gaps are
 preserved, and inferred tails receive downweighted fitting weights.
 
-The regularized tangent, adaptive-window studies, and ivar endpoint cut in
-this directory are exploratory only. They are not wired into matrix building.
+The regularized tangent and adaptive-window studies in this directory are
+exploratory only. Matrix building now uses a fixed permissive 5% relative-ivar /
+three-consecutive-bin endpoint cut, with a 50–300 observed-Angstrom reference
+window. The historical 10% trial and tuning results below remain archived as
+original measurements; they do not establish an optimal threshold.
 The unregularized tangent appears in historical comparisons but is omitted
 from the final three-method comparison.
 

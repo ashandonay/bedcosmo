@@ -162,6 +162,55 @@ def bin_rest_frame_spectrum(
     return values, weights, scale
 
 
+def trim_spectrum_edges(
+    rest_wave: np.ndarray,
+    flux: np.ndarray,
+    weights: np.ndarray,
+    redshift: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Discard unsupported exterior bins using a permissive relative-ivar cut."""
+    wave = np.asarray(rest_wave, dtype=float)
+    values = np.asarray(flux).copy()
+    ivar = np.asarray(weights).copy()
+    if wave.ndim != 1 or values.shape != wave.shape or ivar.shape != wave.shape:
+        raise ValueError("Wavelength, flux, and weight arrays must be matching 1D arrays")
+    if not np.isfinite(redshift) or redshift < 0:
+        raise ValueError("Redshift must be finite and nonnegative")
+    if not np.all(np.isfinite(wave)) or np.any(np.diff(wave) <= 0):
+        raise ValueError("Wavelengths must be finite and strictly increasing")
+    if not np.all(np.isfinite(ivar)) or np.any(ivar < 0):
+        raise ValueError("Weights must be finite and nonnegative")
+    observed = np.flatnonzero(ivar > 0)
+    if not len(observed):
+        return values, ivar
+
+    # Select both endpoints from the original data so one cut cannot affect
+    # the other side's reference window. Distances are in observed Angstroms.
+    endpoints = [int(observed[0]), int(observed[-1])]
+    for side, direction in enumerate((1, -1)):
+        distance = direction * (wave - wave[endpoints[side]]) * (1 + redshift)
+        reference = (ivar > 0) & (distance >= 50) & (distance <= 300)
+        # Without a supported reference, retain the edge rather than infer
+        # a threshold from too few bins. Matrix eligibility is checked later.
+        if np.count_nonzero(reference) < 3:
+            continue
+        adequate = (ivar > 0) & (ivar >= 0.05 * np.median(ivar[reference]))
+        candidates = observed if side == 0 else observed[::-1]
+        for index in candidates:
+            run = index + direction * np.arange(3)
+            if np.all((run >= 0) & (run < len(wave))) and np.all(adequate[run]):
+                endpoints[side] = int(index)
+                break
+        else:
+            # A spectrum with no supported endpoint cannot seed extrapolation.
+            return np.zeros_like(values), np.zeros_like(ivar)
+
+    keep = (np.arange(len(wave)) >= endpoints[0]) & (np.arange(len(wave)) <= endpoints[1])
+    values[~keep] = 0
+    ivar[~keep] = 0
+    return values, ivar
+
+
 def extrapolate_spectrum_edges(
     rest_wave: np.ndarray,
     flux: np.ndarray,
@@ -419,6 +468,7 @@ def build_rest_frame_matrix(
                 values, weights, scale = bin_rest_frame_spectrum(
                     wave, flux, ivar, mask, float(item.z), rest_wave
                 )
+                values, weights = trim_spectrum_edges(rest_wave, values, weights, float(item.z))
                 observed_pixel_count[matrix_row] = np.count_nonzero(weights > 0)
                 values, weights = extrapolate_spectrum_edges(
                     rest_wave, values, weights, method=edge_extrapolation

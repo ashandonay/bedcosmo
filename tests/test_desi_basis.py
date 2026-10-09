@@ -30,6 +30,7 @@ from bedcosmo.num_visits.empirical.desi.training_matrix import (
     derive_rest_frame_grid,
     discover_desi_manifest,
     extrapolate_spectrum_edges,
+    trim_spectrum_edges,
 )
 from bedcosmo.num_visits.empirical.desi.weighted_nmf import (
     fit_weighted_nmf,
@@ -65,6 +66,118 @@ def test_rest_frame_binning_combines_pixels_and_masks_bad_data():
     assert values[0] == 3.0 / scale
     assert weights[1] == 0
     assert values[2] == 8.0 / scale
+
+
+def test_edge_quality_cut_discards_only_unsupported_exterior_bins():
+    wave = np.arange(3500.0, 4510.0, 10.0)
+    flux = np.arange(len(wave), dtype=float) - 40
+    weights = np.zeros(len(wave))
+    weights[10:91] = 100.0
+    weights[10:12] = 1.0
+    weights[89:91] = 1.0
+    weights[50] = 0.0
+    weights[60] = 0.01
+    original_flux, original_weights = flux.copy(), weights.copy()
+
+    trimmed, trimmed_weights = trim_spectrum_edges(wave, flux, weights, 0.5)
+
+    assert np.all(trimmed_weights[:12] == 0)
+    assert np.all(trimmed_weights[89:] == 0)
+    np.testing.assert_array_equal(trimmed[12:89], flux[12:89])
+    np.testing.assert_array_equal(trimmed_weights[12:89], weights[12:89])
+    np.testing.assert_array_equal(flux, original_flux)
+    np.testing.assert_array_equal(weights, original_weights)
+
+
+def test_edge_quality_cut_is_permissive_and_requires_consecutive_grid_bins():
+    wave = np.arange(3500.0, 4510.0, 10.0)
+    flux = np.ones(len(wave))
+    weights = np.zeros(len(wave))
+    weights[10:91] = 100.0
+    weights[10] = 5.0  # Exactly the 5% threshold is retained.
+    _, retained_weights = trim_spectrum_edges(wave, flux, weights, 0.0)
+    assert retained_weights[10] == 5.0
+
+    weights[11] = 0.0
+    _, retained_weights = trim_spectrum_edges(wave, flux, weights, 0.0)
+    assert retained_weights[10] == 0.0
+    assert retained_weights[12] == 100.0
+
+
+def test_edge_quality_reference_window_uses_observed_wavelengths():
+    wave = np.arange(1000.0, 1510.0, 10.0)
+    flux = np.ones(len(wave))
+    weights = np.ones(len(wave))
+    weights[0] = 1.0
+    weights[3:16] = 10.0
+    weights[16:31] = 100.0
+
+    _, low_z = trim_spectrum_edges(wave, flux, weights, 0.0)
+    _, high_z = trim_spectrum_edges(wave, flux, weights, 1.0)
+
+    assert low_z[0] == 0.0  # Reference median is 100 at z=0.
+    assert high_z[0] == 1.0  # Reference median is 10 at z=1.
+
+
+def test_edge_quality_cut_retains_edges_without_enough_reference_bins():
+    wave = np.array([4000.0, 4010.0, 4020.0])
+    flux = np.array([-1.0, 2.0, 3.0])
+    weights = np.ones(3)
+    trimmed, trimmed_weights = trim_spectrum_edges(wave, flux, weights, 0.5)
+    np.testing.assert_array_equal(trimmed, flux)
+    np.testing.assert_array_equal(trimmed_weights, weights)
+
+
+def test_edge_quality_cut_rejects_spectra_without_a_supported_run():
+    wave = np.arange(3500.0, 4510.0, 10.0)
+    weights = np.zeros(len(wave))
+    weights[::4] = 100.0
+    trimmed, trimmed_weights = trim_spectrum_edges(wave, np.ones(len(wave)), weights, 0.0)
+    assert not np.any(trimmed_weights)
+    assert not np.any(trimmed)
+
+
+def test_matrix_eligibility_counts_retained_measurements_before_extrapolation(
+    monkeypatch, tmp_path
+):
+    import pandas as pd
+    from astropy.io import fits
+
+    from bedcosmo.num_visits.empirical.desi.training_matrix import build_rest_frame_matrix
+
+    coadd = tmp_path / "coadd.fits"
+    hdus = [
+        fits.PrimaryHDU(),
+        fits.BinTableHDU(np.array([(1,)], dtype=[("TARGETID", "i8")]), name="FIBERMAP"),
+    ]
+    for arm in "BRZ":
+        hdus.append(fits.ImageHDU(np.array([4000.0, 4010.0]), name=f"{arm}_WAVELENGTH"))
+        for field in ["FLUX", "IVAR", "MASK"]:
+            hdus.append(fits.ImageHDU(np.ones((1, 2)), name=f"{arm}_{field}"))
+    fits.HDUList(hdus).writeto(coadd)
+    wave = np.arange(3500.0, 4510.0, 10.0)
+    weights = np.zeros(len(wave))
+    weights[10:91] = 100.0
+    weights[10:12] = 1.0
+    weights[89:91] = 1.0
+    monkeypatch.setattr(
+        "bedcosmo.num_visits.empirical.desi.training_matrix.get_local_desi_paths",
+        lambda *args: (coadd, coadd),
+    )
+    monkeypatch.setattr(
+        "bedcosmo.num_visits.empirical.desi.training_matrix.bin_rest_frame_spectrum",
+        lambda *args: (np.ones(len(wave)), weights.copy(), 1.0),
+    )
+    manifest = pd.DataFrame({"targetid": [1], "healpix": [1], "z": [0.0]})
+    rejected, *_ = build_rest_frame_matrix(
+        manifest, desi_dir=tmp_path, rest_wave=wave, min_good_pixels=78
+    )
+    assert rejected.empty  # 81 raw bins become 77 retained measured bins.
+    accepted, _, extended_weights, _ = build_rest_frame_matrix(
+        manifest, desi_dir=tmp_path, rest_wave=wave, min_good_pixels=77
+    )
+    assert len(accepted) == 1
+    assert np.count_nonzero(extended_weights) == len(wave)
 
 
 def test_edge_extrapolation_uses_smoothed_100_angstrom_means():

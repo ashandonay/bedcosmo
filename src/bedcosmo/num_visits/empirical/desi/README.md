@@ -14,7 +14,8 @@ The training path:
 1. reads DESI flux, inverse variance, and masks from the coadds;
 2. shifts valid pixels to the rest frame and bins them by inverse variance;
 3. removes one robust multiplicative scale per object;
-4. extends each spectrum beyond its measured blue and red endpoints using a
+4. trims unsupported exterior bins with a permissive 5% relative-ivar cut,
+   then extends each spectrum beyond its retained blue and red endpoints using a
    selected edge method; inferred bins receive 10% of the endpoint window's
    median weight;
 5. preserves inverse variance in those normalized-flux units so high-S/N
@@ -32,7 +33,18 @@ python -m bedcosmo.num_visits.empirical.desi.build_matrix \
   --max-spectra 0
 ```
 
-`--edge-extrapolation constant` (the default) extends each endpoint with the
+Before fitting either edge, matrix building applies a fixed permissive quality
+cut: use 5% of the median positive inverse variance 50–300 **observed-frame**
+Angstroms inward from the original endpoint, and retain the first run of three
+consecutive grid bins passing that threshold. Trim only bins outside the
+resulting endpoints. Retained fluxes, weights, and internal gaps are unchanged.
+If fewer than three reference bins exist, retain that endpoint; if a supported
+reference exists but no three-bin run passes, reject the spectrum. Apply the
+minimum-good-pixel requirement after trimming and before extrapolation.
+The rule is recorded as `edge_quality_cut` in matrix provenance. It is a
+conservative working choice, not an optimized or validated extrapolation cut.
+
+`--edge-extrapolation constant` (the default) extends each retained endpoint with the
 mean of the median-smoothed spectrum over the nearest 100 Angstroms.
 `--edge-extrapolation linear` estimates the broadband continuum over the
 nearest 500 Angstroms: it median-smooths the spectrum, takes 50-Angstrom median
@@ -48,7 +60,7 @@ negative measurements, with inverse-variance weighting and a soft-L1 robust
 loss to reduce the influence of spectral lines and outliers. The amplitude is
 parameterized as `exp(log_A)`; flux data are never log-transformed or clipped.
 The fitted continuum is continued into the missing wavelengths. Fit failures
-raise an error. This option does not alter measured pixels or internal gaps.
+raise an error. After the quality cut, this option does not alter retained measured pixels or internal gaps.
 Use `--wave-min` and `--wave-max` when the desired LSST rest-frame limits extend
 beyond the default population-derived grid. Constant remains the default;
 power-law continuation is an extrapolation assumption to assess on held-out
@@ -116,7 +128,8 @@ over the nearest 100 Angstroms. The optional linear mode fits a robust,
 inverse-variance-weighted continuum to 50-Angstrom median bins over the nearest
 500 Angstroms, with iterative outlier clipping. Inferred bins are downweighted
 to 10% of the measured edge window's median inverse variance. Minimum-good-pixel
-selection counts measured pixels only. The population grid endpoints still depend on valid DESI coverage;
+selection counts retained measured pixels only. The population grid endpoints
+still depend on valid DESI coverage;
 use `--wave-min` or `--wave-max` to request broader explicit bounds. Existing
 saved matrices retain their original grid and values, so regenerate the matrix
 before building a basis with edge extrapolation.

@@ -188,6 +188,13 @@ def main() -> None:
                 else "Explicit user-supplied manifest override"
             ),
             "desi_flux_unit_scale_cgs": 1e-17,
+            "edge_quality_cut": {
+                "relative_ivar_threshold": 0.05,
+                "consecutive_bins": 3,
+                "reference_observed_aa": [50, 300],
+                "minimum_reference_bins": 3,
+                "insufficient_reference": "retain endpoint",
+            },
         }
     )
     for key, value in list(parameters.items()):
