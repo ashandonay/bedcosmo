@@ -16,7 +16,9 @@ The training path:
 3. removes one robust multiplicative scale per object;
 4. trims unsupported exterior bins with a permissive 5% relative-ivar cut,
    then extends each spectrum beyond its retained blue and red endpoints using a
-   selected edge method, only to that galaxy’s LSST limits at its redshift;
+   selected edge method to that galaxy’s LSST limits at its redshift, followed
+   then supplies deficient training support through extra wavelength extensions
+   or additional galaxies, according to `--support-extension`;
    inferred bins receive 10% of the endpoint window's
    median weight;
 5. preserves inverse variance in those normalized-flux units so high-S/N
@@ -114,31 +116,53 @@ DESI rest-frame wavelength support is strongly redshift-dependent. By default,
 the usual contributor threshold is sized for rank 10 with ten spectra per
 component (100 per wavelength bin). `--minimum-wavelength-contributors`
 overrides that count. `build_matrix --z-min 0.3 --z-max 1.4` requests the
-**final prior** interval, not a hard training-catalog cut. The builder starts
-with galaxies in that interval and grows the low- and high-redshift buffers
-independently. At each step it adds a batch of nearby galaxies on the side
-covering the most currently deficient wavelength columns, rechecking the exact
-planned training split. The final batch is refined galaxy by galaxy. It stops
-when all required LSST wavelength bins have at least 100 training contributors;
-the two buffers need not have the same redshift width. Those additional galaxies train the NMF basis but are excluded
-from the prior population. Each galaxy still receives only its own LSST edge
-extensions; the buffer does not extend every spectrum to a common rectangle.
+**final prior** interval. Choose how to supply enough training contributors with
+`--support-extension`:
+
+- `wavelength`: restrict the training population to the requested
+  redshift interval. After each galaxy is extended to its own LSST limits,
+  select spectra requiring the shortest extra rest-frame extension to cover
+  deficient exterior columns. The training split is fixed; all splits follow
+  the same geometric ordering without using held-out flux values. Rebuild
+  affected spectra from measured coadds using `--edge-extrapolation`, preserving
+  previously retained fluxes and weights exactly. Internal gaps remain missing.
+- `redshift` (default): add nearby galaxies outside the requested interval for basis
+  training. Grow low/high buffers independently according to deficient
+  wavelength coverage, rechecking the planned split and refining the final
+  batch galaxy by galaxy. Each galaxy receives only its own LSST extensions.
+  Out-of-range galaxies train the basis but are excluded from the final prior.
+  This requires enough eligible candidates outside the requested interval;
+  otherwise building fails rather than silently switching methods.
+
+For example, use either of these with the matrix-building command above:
+
+```bash
+--support-extension wavelength --edge-extrapolation constant
+--support-extension redshift --edge-extrapolation constant
+```
+
+`--support-extension` chooses the source of additional contributors;
+`--edge-extrapolation` independently chooses the continuum model for synthetic
+edges. Both strategies must meet the threshold throughout the requested LSST
+interval. Contributor counts can include synthetic flux in either mode.
 
 `--train-fraction` (0.7), `--split-seed` (42), and
 `--minimum-wavelength-contributors` (100) control this support planning.
-The matrix stores `prior_redshift_bounds`; provenance records the actual
-training bounds, buffer size, and minimum contributor count. If either prior
-bound is omitted, it is inferred from threshold-supported coverage of the
-available candidate sample, bounded by its measured redshift range. A manifest
-or pilot sample must include enough galaxies outside an explicit requested
-interval to supply the buffer. Insufficient available coverage raises an error;
-the requested prior interval is never silently narrowed. Contributor counts
-include both measured and downweighted extrapolated bins. Fluxes in the
-validation/test splits are not used to learn templates.
+The matrix stores `prior_redshift_bounds` and `support_extension`. Wavelength
+mode also stores `original_supported_bounds_aa` and `extra_edge_extension_aa`
+(one blue/red pair per galaxy); its provenance records extension counts and
+maximum extra distances. Redshift mode records low/high buffer sizes and actual
+training bounds. Both record the minimum training contributor count.
+If either prior bound is omitted, it is inferred from threshold-supported
+coverage of the available candidate sample, bounded by its redshift range.
+Insufficient training population or gaps that exterior extensions cannot cover
+raise an error; the requested prior interval is never silently narrowed.
+Contributor counts include downweighted synthetic bins and therefore do not
+represent independent measured support at the extended endpoints.
 
 `build_prior` reads the saved requested bounds by default and rechecks coverage
 on its actual training split and contributor threshold. Changing those settings
-can require rebuilding the matrix with a different buffer.
+can require rebuilding the matrix with different edge extensions.
 
 The candidate rest-frame grid covers both the selected coadds' valid pixels
 (finite wavelength, flux and positive inverse variance, with zero mask) and
@@ -154,7 +178,8 @@ Within that common grid, missing exterior bins are filled only over each
 individual galaxy's LSST interval, from `lambda_LSST_blue / (1 + z)` to
 `lambda_LSST_red / (1 + z)`. One grid center bracketing each exact endpoint is
 included so interpolation covers the whole filter. Exterior bins beyond that
-interval retain zero weight. Measured DESI pixels outside LSST demand remain
+interval retain zero weight except for the selected extra extensions needed to
+meet requested-prior support. Measured DESI pixels outside LSST demand remain
 measured, and internal masked gaps remain missing.
 The default constant endpoint level is the mean of a median-filtered spectrum
 over the nearest 100 Angstroms. The optional linear mode fits a robust,
@@ -179,7 +204,8 @@ full tabulated LSST `ugrizy` bandpasses.
 `build_prior` performs the production build in one command. It selects the best
 of several Nearly-NMF initializations on validation spectra, reports the result
 on an untouched test split, and then refits the selected basis on all spectra.
-The basis is learned from the full buffered, quality-selected DESI population.
+The basis is learned from the quality-selected training population, including
+out-of-range buffer galaxies when `--support-extension redshift` was selected.
 Only coefficient/redshift rows inside the requested matrix
 `prior_redshift_bounds` are used to fit the prior. The learned wavelength support
 must span all full tabulated LSST bandpasses throughout that exact interval.
@@ -332,30 +358,22 @@ selects one initialization for each method and rank; only that selected solution
 is evaluated on the test spectra. Held-out coefficients are always inferred by
 the same SciPy NNLS solver so the comparison isolates the learned bases.
 
-### Plot matrix coverage and the redshift buffer
+### Plot matrix coverage and edge extensions
 
 ```bash
 python -m bedcosmo.num_visits.empirical.diagnostics_plots coverage \
-  --training-matrix "$SCRATCH/bedcosmo/num_visits/desi_training_data_extrapolated/desi_rest_frame_training_matrix.npz" \
+  --training-matrix /path/to/desi_rest_frame_training_matrix.npz \
   --output /path/to/desi-coverage.png
 ```
 
-The heatmap marks requested prior bounds and actual buffered training bounds,
-with labels showing each redshift extension and its galaxy count. The bottom
-panel compares wavelength contributor counts for the requested range (purple
-dash-dot), the extended range in the training split (green solid), and all
-selected splits (gray). Both range labels give their redshift bounds. The
-requested-only comparison uses its own split with the same seed and training
-fraction. The middle panels show how the low-redshift buffer supplies the required red wavelength
-endpoint and how the high-redshift buffer supplies the blue endpoint. They hold
-the final training split fixed and accumulate contributors as each buffer is
-included, with the threshold and selected redshift bounds marked. These curves
-explain the final sample, rather than replaying the search (which recomputes the
-split). The build checks every required wavelength, not only the endpoints.
-Counts include measured and downweighted extrapolated bins.
+The left panels show contributor density and wavelength support. The lower
+panel compares training counts before (purple) and after (green) the extra edge
+extensions, with all selected splits in gray. The two right panels show how
+many training spectra cover each required endpoint as the allowed extra
+rest-frame extension increases. The build checks every required column, not
+only the endpoints. Counts include downweighted synthetic flux.
 
-Use `--population-matrix /path/to/full_population_matrix.npz` to show the full
-quality-selected DESI population in the heatmap, including galaxies outside the
-buffer. The requested and buffered boundaries remain overlaid; lower-panel
-counts continue to use only the selected training matrix. Without this argument,
-the heatmap shows the training matrix population.
+Use `--population-matrix /path/to/full_population_matrix.npz` to keep the full
+DESI population in the heatmap; selected rows are updated with their additional
+extensions. Requested redshift bounds remain marked. Matrices built with `--support-extension redshift` show the redshift-buffer
+diagnostic panels instead.
