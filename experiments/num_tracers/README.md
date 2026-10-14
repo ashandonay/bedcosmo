@@ -168,12 +168,14 @@ With `vary_lya_qso: false` (default) the Lya QSO rows are pinned at their nomina
   ```
 
   To see what a choice does to the covariance itself, `python -m bedcosmo.num_tracers.covariance_fiducials --out cov.png [--analysis shapefit] [--param P --values ...]` plots the nominal-design emulator covariance at each value against DESI DR1's published covariance, and each row relative to the emulator at the fiducial. BAO varies Ω_m by default (0.25, 0.3152, 0.40) and shows D_M–D_H ellipses, the D_V-only bins and each row's error as a fraction of the DESI central values. ShapeFit varies ω_cdm by default (0.0904, 0.12, 0.1585, the same Ω_m at the template's h and ω_b) and shows q_iso–q_ap ellipses and absolute errors, since m's central value is ≈0; DESI's covariance is converted to the (q_iso, q_ap, f_σr, m) basis as the data are. `--values` must include the fiducial.
-- **`cosmology`** evaluates them at the sampled cosmology, so the covariance's own cosmology dependence becomes information in the likelihood. A Gaussian likelihood with a θ-dependent covariance double-counts that information (Carron 2013), and here it rides on the emulators' derivatives. It is the constructor default because runs from before this option don't record it and were trained this way.
+- **`cosmology`** evaluates them at the sampled cosmology, so the covariance's own cosmology dependence becomes information in the likelihood. Every sampled parameter must then be an emulator input; NumTracers raises otherwise, which rules it out for the extended models until they have their own emulators (see below). A Gaussian likelihood with a θ-dependent covariance double-counts that information (Carron 2013), and here it rides on the emulators' derivatives. It is the constructor default because runs from before this option don't record it and were trained this way.
 - `emulator_sqrtn_ref: sampled` needs `cosmology`, because it evaluates the reference covariance at the sampled cosmology.
 
 Emulator bins map to data rows as `BGS, LRG1, LRG2, LRG3_ELG1 -> "LRG3+ELG1", ELG2, QSO, Lya_QSO`. A `null` checkpoint falls back to the fixed nominal covariance.
 
 `emulators.yaml` is keyed `<analysis>: <dataset>: <cosmo_model>: <quantity>: <tracer_bin>`, mirroring `$SCRATCH/bedcosmo/num_tracers/emulator/{analysis}/models/{dataset}/{cosmo_model}/`. For bao, `<quantity>` is the forecast space (`config` | `fourier`) and `emulator_space` picks one per run. At submission the checkpoints are copied into the run's `artifacts/emulators/<tracer_bin>.pt`.
+
+The extended BAO models (`base_omegak`, `base_w`, `base_w_wa`, `base_omegak_w_wa`) point at `base`'s checkpoints (`../base/...`; relative paths are normalised, so no `models/dr1/<cosmo_model>/` directory has to exist). Those take `(N_tracers, Om, hrdrag)`, which is exact under `fiducial`: the covariance is fixed at flat ΛCDM, as DESI fixes its BAO covariance whatever model it fits, and `Ok`, `w0` and `wa` only enter the mean. A dict may move `Om` and `hrdrag`. `cosmology` needs emulators trained on the extended model and is refused until those exist.
 
 ## ShapeFit analysis (`analysis: shapefit`)
 
