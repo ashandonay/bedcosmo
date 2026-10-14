@@ -311,6 +311,15 @@ class NumTracers(BaseExperiment, CosmologyMixin):
             self.prior_flow_metadata,
         ) = self.init_prior(**self.prior_args)
         self.cosmo_params = list(self.prior.keys())
+        if self.analysis != "shapefit" and self.likelihood_mode == "emulator" and self.covariance_cosmology is None:
+            for tracer_bin, emu in self._emulators.items():
+                ignored = [p for p in self.cosmo_params if p not in emu["param_names"]]
+                if ignored:
+                    raise ValueError(
+                        f"emulator_covariance='cosmology' makes the covariance follow the sampled "
+                        f"{ignored}, but the {tracer_bin} emulator takes only {emu['param_names']} "
+                        f"and would ignore them. Use emulator_covariance='fiducial', or train "
+                        f"{self.cosmo_model} emulators.")
         if self.analysis == "shapefit":
             self._omega_m_log_acceptance = self._omega_m_domain_log_acceptance()
 
@@ -1516,8 +1525,11 @@ class NumTracers(BaseExperiment, CosmologyMixin):
 
         base_dir = os.path.join(
             storage_path, "emulator", analysis, "models", dataset, cosmo_model)
+        # normpath resolves "../base/..." lexically: the extended models point at base's
+        # checkpoints, and the OS cannot traverse a models/<dataset>/<cosmo_model>/ that
+        # was never created.
         return {
-            tb: (None if p is None else (p if os.path.isabs(p) else os.path.join(base_dir, p)))
+            tb: (None if p is None else (p if os.path.isabs(p) else os.path.normpath(os.path.join(base_dir, p))))
             for tb, p in entry.items()
         }
 

@@ -21,10 +21,10 @@ pytestmark = pytest.mark.skipif(
     not os.path.isdir(_CKPT_DIR), reason="bao dr1/base fourier emulator checkpoints not available")
 
 
-def _make_exp(**overrides):
+def _make_exp(cosmo_model="base", **overrides):
     return init_experiment(cosmo_exp="num_tracers", prior_args_path="prior_args_hrdrag.yaml",
                            design_args_path="design_args_dr1.yaml", dataset="dr1", analysis="bao",
-                           cosmo_model="base", likelihood_mode="emulator", emulator_space="fourier",
+                           cosmo_model=cosmo_model, likelihood_mode="emulator", emulator_space="fourier",
                            device="cpu", mode="eval", **overrides)
 
 
@@ -82,3 +82,27 @@ def test_covariance_fiducials_figure(tmp_path):
                  ["--param", "hrdrag"]):                            # non-default param needs --values
         with pytest.raises(SystemExit):
             main(argv + ["--out", str(out)])
+
+
+_EXTENDED = ["base_omegak", "base_w", "base_w_wa", "base_omegak_w_wa"]
+
+
+@pytest.mark.parametrize("cosmo_model", _EXTENDED)
+def test_extended_models_use_base_emulators_at_the_fiducial(cosmo_model):
+    from bedcosmo.num_tracers.experiment import NumTracers
+
+    base = _make_exp(emulator_covariance="fiducial")
+    ext = _make_exp(cosmo_model=cosmo_model, emulator_covariance="fiducial")
+    for space in ("config", "fourier"):
+        assert (NumTracers.resolve_emulator_checkpoints("bao", cosmo_model, "dr1", space)
+                == NumTracers.resolve_emulator_checkpoints("bao", "base", "dr1", space))
+    designs = base.designs[:2].double().unsqueeze(0)
+    passed = base.calc_passed(designs)
+    torch.testing.assert_close(ext._build_emulator_covariance(passed, {}),
+                               base._build_emulator_covariance(passed, {}))
+
+
+@pytest.mark.parametrize("cosmo_model", _EXTENDED)
+def test_cosmology_covariance_needs_every_sampled_parameter(cosmo_model):
+    with pytest.raises(ValueError, match="would ignore them"):
+        _make_exp(cosmo_model=cosmo_model, emulator_covariance="cosmology")
