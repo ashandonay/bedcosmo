@@ -1372,8 +1372,9 @@ class BasePlotter:
                 If a single float is provided, it is converted to a list.
                 If None, the default GetDist settings are used. Each level is the
                 fraction of *all* of a series' samples enclosed: contours are smoothed
-                from in-window samples, with thresholds corrected for the masked ones
-                (raises if a level exceeds the in-window fraction).
+                from in-window samples, with thresholds corrected for the masked ones.
+                A series whose in-window fraction is below the highest level is drawn
+                unfenced, from all its samples, with a warning.
             width_inch (float): Width of the plot in inches. Higher values increase resolution.
             ranges (dict, optional): ``{param: (min, max)}`` display window, which is
                 also the outlier fence. Params not in ``ranges`` use GetDist's own
@@ -1416,8 +1417,7 @@ class BasePlotter:
             legend_labels = [legend_labels]
 
         colors = [convert_color(c) for c in colors]
-        if fenced is None:
-            fenced = [True] * len(samples)
+        fenced = [True] * len(samples) if fenced is None else list(fenced)
 
         # The displayed window is the outlier fence: GetDist smooths only the
         # in-window samples, and the rest are marked and counted below. Per param
@@ -1440,6 +1440,19 @@ class BasePlotter:
                     col = arr[:, names.index(p)]
                     mask &= (col >= lo) & (col <= hi)
             in_window.append(mask)
+        # A series with less of its mass in the window than the widest contour (an
+        # untrained flow against a posterior-sized window) cannot be fenced: draw it
+        # from all its samples, as an unfenced prior overlay is.
+        if levels is not None:
+            top = float(np.max(levels))
+            for k, mask in enumerate(in_window):
+                if fenced[k] and mask.mean() < top:
+                    warnings.warn(
+                        f"Only {mask.mean():.2%} of {full_samples[k].label!r} lies inside the "
+                        f"plot window, less than its {top:.0%} contour; drawing it unfenced."
+                    )
+                    fenced[k] = False
+                    in_window[k] = np.ones(len(mask), dtype=bool)
         samples = [
             sample if mask.all() else _subset_mcsamples(sample, mask)
             for sample, mask in zip(full_samples, in_window)
