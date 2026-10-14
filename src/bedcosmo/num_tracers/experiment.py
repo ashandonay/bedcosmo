@@ -1525,9 +1525,6 @@ class NumTracers(BaseExperiment, CosmologyMixin):
 
         base_dir = os.path.join(
             storage_path, "emulator", analysis, "models", dataset, cosmo_model)
-        # normpath resolves "../base/..." lexically: the extended models point at base's
-        # checkpoints, and the OS cannot traverse a models/<dataset>/<cosmo_model>/ that
-        # was never created.
         return {
             tb: (None if p is None else (p if os.path.isabs(p) else os.path.normpath(os.path.join(base_dir, p))))
             for tb, p in entry.items()
