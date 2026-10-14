@@ -966,12 +966,22 @@ class TestPlotTriangleContourCoverage:
         assert np.mean(inside) == pytest.approx(0.95, abs=0.005)
         plt.close(g.fig)
 
-    def test_unreachable_level_raises(self):
+    def test_unreachable_level_draws_the_series_unfenced(self):
+        """A series the window cannot hold at its widest level is smoothed whole."""
         arr = self._with_outliers(0.10)  # 10% outside the window
-        with pytest.raises(ValueError, match="95% contour of all samples"):
-            BasePlotter(cosmo_exp="test_exp").plot_triangle(
-                [_gd_samples(arr, "s")], ["tab:blue"], levels=[0.68, 0.95], ranges=self.RANGES
+        series = _gd_samples(arr, "s")
+        plotter = BasePlotter(cosmo_exp="test_exp")
+        with patch.object(plots.GetDistPlotter, "triangle_plot", autospec=True,
+                          side_effect=plots.GetDistPlotter.triangle_plot) as tri, \
+                pytest.warns(UserWarning, match="90.00% of 's' lies inside the plot window"):
+            g = plotter.plot_triangle(
+                [series], ["tab:blue"], levels=[0.68, 0.95], ranges=self.RANGES,
+                show_outliers=False,
             )
+        smoothed = tri.call_args.args[1][0]
+        assert smoothed is series                      # not subset to the window
+        assert smoothed.contours == pytest.approx([0.68, 0.95])  # uncorrected levels
+        plt.close(g.fig)
 
 
 class TestPlotTriangleFence:
