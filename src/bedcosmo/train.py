@@ -403,7 +403,12 @@ class Trainer:
                             levels=[0.68], 
                             width_inch=12, 
                             show_scatter=plot_scatter,
-                            ranges=ranges
+                            ranges=ranges,
+                            # The NF is unfenced: early in training (just after warmup) it can
+                            # be wider than the fixed window, and a fenced series raises when
+                            # under 68% of its samples are in-window. Its contour then comes
+                            # from all samples, clipped to the window.
+                            fenced=[False] + [True] * (len(plot_samples) - 1),
                             )
                         plt.savefig(f"{self.run_path}/artifacts/plots/rank_{self.global_rank}/posterior/{current_step}.png", dpi=400)
                         plt.close('all')

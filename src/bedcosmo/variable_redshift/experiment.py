@@ -30,6 +30,7 @@ from bedcosmo.util import (
     get_experiment_config_path,
     load_prior_flow_from_file,
     parse_json_object,
+    sample_guide,
  )
 from bedcosmo.base import BaseExperiment
 from bedcosmo.cosmology import CosmologyMixin, _interp1
@@ -606,8 +607,7 @@ class VariableRedshift(BaseExperiment, CosmologyMixin):
         if context is None:
             context = self.nominal_context
         
-        with torch.no_grad():
-            param_samples = guide(context.squeeze()).sample((num_samples,))
+        param_samples = sample_guide(guide, context.squeeze(), num_samples)
         
         if self.transform_input and transform_output:
             param_samples = self.params_from_unconstrained(param_samples)
