@@ -182,7 +182,7 @@ def test_matrix_eligibility_counts_retained_measurements_before_extrapolation(
     assert extended_weights[0, -1] == 0
 
 
-def test_edge_extrapolation_uses_smoothed_100_angstrom_means():
+def test_edge_extrapolation_uses_ivar_weighted_100_angstrom_means():
     wave = np.arange(1000.0, 1510.0, 10.0)
     flux = np.zeros(len(wave))
     flux[10:41] = 2.0
@@ -190,11 +190,15 @@ def test_edge_extrapolation_uses_smoothed_100_angstrom_means():
     flux[40] = 50.0
     weights = np.zeros(len(wave))
     weights[10:41] = 20.0
+    weights[10] = 0.02
+    weights[40] = 0.04
 
     extended, extended_weights = extrapolate_spectrum_edges(wave, flux, weights)
 
-    assert np.all(extended[:10] == pytest.approx(2.0))
-    assert np.all(extended[41:] == pytest.approx(2.0))
+    blue_mean = np.average(flux[10:21], weights=weights[10:21])
+    red_mean = np.average(flux[30:41], weights=weights[30:41])
+    assert np.all(extended[:10] == pytest.approx(blue_mean))
+    assert np.all(extended[41:] == pytest.approx(red_mean))
     assert np.all(extended_weights[:10] == pytest.approx(2.0))
     assert np.all(extended_weights[41:] == pytest.approx(2.0))
     assert np.all(extended[10:41] == flux[10:41])
@@ -451,7 +455,7 @@ def test_candidate_grid_retains_supported_uv_below_1400(monkeypatch):
     assert wave[selected][-1] == 9120
 
 
-def test_grid_covers_selected_valid_pixels_and_lsst_and_rounds_outward(tmp_path, monkeypatch):
+def test_grid_covers_selected_valid_pixels_and_rounds_outward(tmp_path, monkeypatch):
     import pandas as pd
     from astropy.io import fits
 
@@ -490,7 +494,7 @@ def test_grid_covers_selected_valid_pixels_and_lsst_and_rounds_outward(tmp_path,
     manifest = pd.DataFrame({"targetid": [targetid], "healpix": [1], "z": [1.0]})
     grid = derive_rest_frame_grid(manifest, desi_dir=tmp_path, wave_step=10)
     assert grid[0] == 1330
-    assert grid[-1] == 5500
+    assert grid[-1] == 3010
     assert np.all(np.diff(grid) == 10)
     override = derive_rest_frame_grid(
         manifest, desi_dir=tmp_path, wave_step=10, wave_min=1200, wave_max=5605
@@ -499,7 +503,7 @@ def test_grid_covers_selected_valid_pixels_and_lsst_and_rounds_outward(tmp_path,
     population = pd.DataFrame({"targetid": [targetid, 2], "healpix": [1, 1], "z": [1.0, 0.0]})
     population_grid = derive_rest_frame_grid(population, desi_dir=tmp_path, wave_step=10)
     assert population_grid[0] == 1330
-    assert population_grid[-1] == 10990
+    assert population_grid[-1] == 9000
 
 
 def test_lsst_demand_coverage_is_unity_when_every_pixel_is_observed():

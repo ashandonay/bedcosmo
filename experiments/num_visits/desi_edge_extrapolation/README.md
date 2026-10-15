@@ -91,6 +91,7 @@ python evaluate_binned_300_edges.py
 python plot_five_desi_lsst_extensions.py
 ```
 
-New production matrices are built separately in `desi_training_data_extrapolated`;
-full `desi.build_prior` builds now default to that matrix. The original
-`desi_training_data` matrix is preserved. See the package DESI README for commands.
+These diagnostics evaluated extrapolation of individual spectra. The production
+pipeline now builds measured-only matrices in `desi_training_data`
+and extrapolates finished templates after NMF. Previously generated matrices
+are preserved. See the package DESI README for current commands.
