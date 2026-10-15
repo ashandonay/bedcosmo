@@ -58,6 +58,7 @@ base_omegak:
   nf_seed: 1
   prior_args_path: prior_args_hrdrag.yaml
   dataset: dr1
+  analysis: bao
   emulator_space: fourier
   emulator_covariance: fiducial
   flow_type: NAF
@@ -101,6 +102,7 @@ base_w:
   nf_seed: 1
   prior_args_path: prior_args_hrdrag.yaml
   dataset: dr1
+  analysis: bao
   emulator_space: fourier
   emulator_covariance: fiducial
   flow_type: NAF
@@ -144,6 +146,7 @@ base_w_wa:
   nf_seed: 1
   prior_args_path: prior_args_hrdrag.yaml
   dataset: dr1
+  analysis: bao
   emulator_space: fourier
   emulator_covariance: fiducial
   flow_type: NAF
@@ -187,6 +190,7 @@ base_omegak_w_wa:
   nf_seed: 1
   prior_args_path: prior_args_hrdrag.yaml
   dataset: dr1
+  analysis: bao
   emulator_space: fourier
   # base's emulators (Om, hrdrag inputs) serve this model only with the covariance fixed;
   # 'cosmology' would need emulators trained on Ok, w0, wa (NumTracers refuses it).

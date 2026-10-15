@@ -2010,7 +2010,7 @@ class RunPlotter(BasePlotter):
                     try:
                         nominal_samples, target_labels, latex_labels = load_nominal_samples(
                             run_params['cosmo_exp'], run_params['cosmo_model'], dataset=run_params['dataset'],
-                            analysis=run_params.get('analysis'))
+                            analysis=run_params.get('analysis', 'bao'))
                         with contextlib.redirect_stdout(io.StringIO()):
                             nominal_samples_gd = ReferenceChain(samples=nominal_samples, names=target_labels, labels=latex_labels, settings=GETDIST_CHAIN_SETTINGS)
                         param1, param2 = split_param_pair(pair_name, target_labels)
@@ -5778,7 +5778,7 @@ class ComparisonPlotter(BasePlotter):
 
                         # Get nominal samples and area for comparison
                         try:
-                            nominal_samples, target_labels, latex_labels = load_nominal_samples(run_params['cosmo_exp'], run_params['cosmo_model'], dataset=run_params['dataset'], analysis=run_params.get('analysis'))
+                            nominal_samples, target_labels, latex_labels = load_nominal_samples(run_params['cosmo_exp'], run_params['cosmo_model'], dataset=run_params['dataset'], analysis=run_params.get('analysis', 'bao'))
                             with contextlib.redirect_stdout(io.StringIO()):
                                 nominal_samples_gd = ReferenceChain(samples=nominal_samples, names=target_labels, labels=latex_labels, settings=GETDIST_CHAIN_SETTINGS)
                             nominal_area = get_contour_area([nominal_samples_gd], 0.68, param1, param2)[0]["nominal_area_"+f"{param1}_{param2}"]
