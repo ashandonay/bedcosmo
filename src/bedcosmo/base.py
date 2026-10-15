@@ -21,6 +21,7 @@ from bedcosmo.custom_dist import EmpiricalPrior
 from bedcosmo.profiling import profile_method
 from bedcosmo.util import (
     GETDIST_SETTINGS,
+    sample_guide,
 )
 
 
@@ -732,8 +733,7 @@ class BaseExperiment(ABC):
         if context is None:
             context = self.nominal_context
 
-        with torch.no_grad():
-            param_samples = guide(context.squeeze()).sample((num_samples,))
+        param_samples = sample_guide(guide, context.squeeze(), num_samples)
 
         # The guide outputs one column per inferred (target) param, in
         # target_params order. For a default run this is all cosmo_params; for a

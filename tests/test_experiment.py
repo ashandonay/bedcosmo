@@ -539,3 +539,44 @@ class TestExactPriorMarginals:
             param_constraints={"high_z_matter_dom": {"affected_parameters": ["w0", "wa"]}}
         )
         assert VariableRedshift.exact_prior_marginals(exp) == {"Om", "Ok", "hrdrag"}
+
+
+class TestSampleGuide:
+    """util.sample_guide: one batch when it fits, halving chunks on CUDA OOM."""
+
+    class _Posterior:
+        def __init__(self, max_batch):
+            self.max_batch = max_batch
+            self.batches = []
+
+        def sample(self, shape):
+            n = shape[0]
+            if n > self.max_batch:
+                raise torch.OutOfMemoryError("CUDA out of memory")
+            self.batches.append(n)
+            return torch.arange(sum(self.batches) - n, sum(self.batches), dtype=torch.float32)[:, None]
+
+    def _guide(self, posterior):
+        return lambda context: posterior
+
+    def test_single_batch_when_it_fits(self):
+        from bedcosmo.util import sample_guide
+        posterior = self._Posterior(max_batch=1000)
+        out = sample_guide(self._guide(posterior), torch.zeros(3), 1000)
+        assert posterior.batches == [1000]
+        assert out.shape == (1000, 1)
+
+    def test_chunks_after_oom(self, capsys):
+        from bedcosmo.util import sample_guide
+        posterior = self._Posterior(max_batch=300)
+        out = sample_guide(self._guide(posterior), torch.zeros(3), 1000)
+        # 1000 and 500 fail; 250-sample chunks fit.
+        assert posterior.batches == [250, 250, 250, 250]
+        assert out.shape == (1000, 1)
+        torch.testing.assert_close(out[:, 0], torch.arange(1000, dtype=torch.float32))
+        assert "retrying in chunks of 500" in capsys.readouterr().out
+
+    def test_raises_when_a_single_sample_does_not_fit(self):
+        from bedcosmo.util import sample_guide
+        with pytest.raises(torch.OutOfMemoryError):
+            sample_guide(self._guide(self._Posterior(max_batch=0)), torch.zeros(3), 10)
