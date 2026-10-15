@@ -986,6 +986,29 @@ class TestPlotTriangleFence:
     def _legend_texts(self, g):
         return [t.get_text() for t in g.fig.legends[0].get_texts()]
 
+    def _mostly_outside(self):
+        """An early-training NF posterior: well under 1% of samples inside RANGES."""
+        rng = np.random.default_rng(4)
+        return _gd_samples(rng.normal([0.3, 10000.0], [1.5, 3e5], size=(10000, 2)), None)
+
+    def test_fenced_series_mostly_outside_window_raises(self):
+        with pytest.raises(ValueError, match="lie inside the plot window"):
+            BasePlotter(cosmo_exp="test_exp").plot_triangle(
+                [self._mostly_outside()], ["tab:blue"], levels=[0.68], ranges=self.RANGES,
+            )
+
+    def test_unfenced_series_mostly_outside_window_plots(self):
+        """The checkpoint diagnostic's call: unfenced NF beside a fenced reference."""
+        reference = _gd_samples(_bulk_with_outliers(), "DESI")
+        g = BasePlotter(cosmo_exp="test_exp").plot_triangle(
+            [self._mostly_outside(), reference], ["tab:blue", "black"],
+            legend_labels=["NF", "DESI"], levels=[0.68], ranges=self.RANGES,
+            show_scatter=[True, False], fenced=[False, True],
+        )
+        assert g.subplots[1, 0].get_xlim() == pytest.approx(self.RANGES["Om"])
+        assert g.subplots[1, 0].get_ylim() == pytest.approx(self.RANGES["hrdrag"])
+        plt.close(g.fig)
+
     def test_window_fence_counts_marks_and_trims(self):
         post = _gd_samples(_bulk_with_outliers(), "Nominal")
         prior = _gd_samples(
