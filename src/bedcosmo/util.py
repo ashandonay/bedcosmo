@@ -1118,6 +1118,30 @@ def load_model(experiment, step, run_obj, run_args, device, global_rank=0):
     return posterior_flow, selected_step
 
 
+def sample_guide(guide, context, num_samples):
+    """Draw ``num_samples`` from ``guide(context)`` without gradients.
+
+    The draw is a single batch when it fits. On CUDA out-of-memory it is retried in
+    chunks, halving the chunk size until each chunk fits, so a large ``num_samples``
+    costs time instead of failing.
+    """
+    with torch.no_grad():
+        posterior = guide(context)
+        chunk = num_samples
+        while True:
+            try:
+                return torch.cat([
+                    posterior.sample((min(chunk, num_samples - start),))
+                    for start in range(0, num_samples, chunk)
+                ])
+            except torch.OutOfMemoryError:
+                if chunk == 1:
+                    raise
+                torch.cuda.empty_cache()
+                chunk = (chunk + 1) // 2
+                print(f"Out of memory drawing {num_samples} guide samples; retrying in chunks of {chunk}.")
+
+
 def sample_nf(
     experiment,
     posterior_flow,
