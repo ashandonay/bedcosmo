@@ -296,7 +296,36 @@ class TestRunPlotter:
             assert fig is not None
             assert axes is not None
             plt.close(fig)
-    
+
+    def test_plot_training_area_ratio_without_logged_analysis(self, run_plotter):
+        """A run that never logged 'analysis' is BAO (the experiment default), so its
+        area panel is still normalised by the DESI reference rather than left raw."""
+        run_plotter._run_data = {'run_id': 'test_run_123', 'params': {
+            'cosmo_exp': 'num_tracers', 'cosmo_model': 'base', 'dataset': 'dr1',
+            'log_nominal_area': 'True'}}
+        point = Mock(step=100, value=2.0)
+        mock_client = Mock()
+        mock_client.get_metric_history.return_value = [point]
+        mock_client.get_run.return_value.data.metrics = {'nominal_area_avg_Om_hrdrag': 2.0}
+        run_plotter._client = mock_client
+        run_plotter._mlflow_uri_set = True
+
+        with patch.object(BasePlotter, 'save_figure'), \
+             patch('bedcosmo.plotting.load_nominal_samples') as mock_load_nominal, \
+             patch('bedcosmo.plotting.ReferenceChain'), \
+             patch('bedcosmo.plotting.get_contour_area') as mock_get_area, \
+             patch('bedcosmo.plotting.os.makedirs'):
+            mock_load_nominal.return_value = (np.random.randn(100, 2), ['Om', 'hrdrag'], ['\\Omega_m', 'h r_d'])
+            mock_get_area.return_value = [{'nominal_area_Om_hrdrag': 4.0}]
+
+            fig, axes = run_plotter.plot_training(show_lr=False)
+
+        assert mock_load_nominal.call_args.kwargs['analysis'] == 'bao'
+        ratio_line = axes[1].get_lines()[0]
+        assert ratio_line.get_label() == 'Om, hrdrag'
+        np.testing.assert_allclose(ratio_line.get_ydata(), [0.5])
+        plt.close(fig)
+
     def test_plot_posterior_full_range(self, run_plotter, tmp_path):
         """Full range: GetDist contours from in-window samples over every sample as
         a faint dot, log-count 1D panels."""
