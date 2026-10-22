@@ -6212,12 +6212,12 @@ class ComparisonPlotter(BasePlotter):
 # ============================================================================
 
 def _load_increasing_design_runs(mlflow_exp, run_ids, excluded_runs, cosmo_exp, storage_path,
-                                 eval_step, include_nominal):
+                                 eval_step):
     """Optimal design and EIG per run, from each run's latest completed eig_data file.
 
     Returns a dict with ``run_data_list``, ``found_run_ids``, ``optimal_designs``,
-    ``optimal_eigs``, ``optimal_eig_stds``, ``design_labels`` and (with
-    ``include_nominal``) the first run's ``nominal_eig`` / ``nominal_eig_std``.
+    ``optimal_eigs``, ``optimal_eig_stds``, ``design_labels`` and the first run's
+    ``nominal_eig`` / ``nominal_eig_std``.
     """
     # Get run data - can use either mlflow_exp or run_ids
     run_data_list, experiment_id_for_save_path, actual_mlflow_exp_for_title = get_runs_data(
@@ -6313,26 +6313,21 @@ def _load_increasing_design_runs(mlflow_exp, run_ids, excluded_runs, cosmo_exp, 
                 optimal_eig_stds.append(optimal_eig_std_value)
                 found_run_ids.append(run_id)
                 
-                # Get design labels from experiment (will be initialized later if needed)
-                # For now, we'll get them from the experiment initialization below
-                
-                # Extract nominal_eig from first run's data (for scatter plot in compare_increasing_design)
-                # Only do this in compare_increasing_design - check if include_nominal is in scope
-                if include_nominal:
-                    nominal_eig_val = nominal_data.get('eigs_avg')
-                    if nominal_eig_val is not None:
-                        if isinstance(nominal_eig_val, list) and len(nominal_eig_val) > 0:
-                            nominal_eig_val = nominal_eig_val[0]
-                        if isinstance(nominal_eig_val, (int, float)):
-                            if nominal_eig is None:
-                                nominal_eig = nominal_eig_val
-                    nominal_eig_std_val = nominal_data.get('eigs_std')
-                    if nominal_eig_std_val is not None:
-                        if isinstance(nominal_eig_std_val, list) and len(nominal_eig_std_val) > 0:
-                            nominal_eig_std_val = nominal_eig_std_val[0]
-                        if isinstance(nominal_eig_std_val, (int, float)):
-                            if nominal_eig_std is None:
-                                nominal_eig_std = nominal_eig_std_val
+                # The first run's nominal-design EIG (a reference run is a single run).
+                nominal_eig_val = nominal_data.get('eigs_avg')
+                if nominal_eig_val is not None:
+                    if isinstance(nominal_eig_val, list) and len(nominal_eig_val) > 0:
+                        nominal_eig_val = nominal_eig_val[0]
+                    if isinstance(nominal_eig_val, (int, float)):
+                        if nominal_eig is None:
+                            nominal_eig = nominal_eig_val
+                nominal_eig_std_val = nominal_data.get('eigs_std')
+                if nominal_eig_std_val is not None:
+                    if isinstance(nominal_eig_std_val, list) and len(nominal_eig_std_val) > 0:
+                        nominal_eig_std_val = nominal_eig_std_val[0]
+                    if isinstance(nominal_eig_std_val, (int, float)):
+                        if nominal_eig_std is None:
+                            nominal_eig_std = nominal_eig_std_val
             else:
                 print(f"Warning: No optimal_design data found in {json_path} for {step_str}, skipping...")
                 continue
@@ -6350,8 +6345,12 @@ def _load_increasing_design_runs(mlflow_exp, run_ids, excluded_runs, cosmo_exp, 
     }
 
 
-def _plot_increasing_design_groups(groups, ref_optimal_eig, figsize, dpi, save_path):
-    """EIG vs % increase in total observations, one line (plus dashed linear fit) per group."""
+def _plot_increasing_design_groups(groups, refs, figsize, dpi, save_path):
+    """EIG vs % increase in total observations, one line (plus dashed linear fit) per group.
+
+    ``refs`` maps a group to its reference run's loaded data; that run's optimal EIG is a
+    dotted line in the group's color, with the % increase where the group's fit reaches it.
+    """
     group_colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
     fig2, ax2 = plt.subplots(figsize=figsize)
     for k, (group, loaded) in enumerate(groups.items()):
@@ -6365,13 +6364,45 @@ def _plot_increasing_design_groups(groups, ref_optimal_eig, figsize, dpi, save_p
         pct, eig, std = pct[order], eig[order], std[order]
         ax2.errorbar(pct, eig, yerr=std, color=color, marker='o', markersize=8, linewidth=2,
                      capsize=4, label=group)
+        slope = None
         if len(pct) >= 2:
             slope, intercept = np.polyfit(pct, eig, 1)
             ax2.plot(pct, slope * pct + intercept, '--', color=color, linewidth=1.2, alpha=0.7)
-    if ref_optimal_eig is not None:
-        ax2.axhline(y=ref_optimal_eig, color='gray', linestyle=':', linewidth=1.5,
-                    label='Optimal Design')
-    ax2.legend(loc='best', fontsize=12, framealpha=0.9)
+        if group in refs:
+            if not refs[group]["optimal_eigs"]:
+                raise ValueError(f"Reference run for {group!r} has no completed eig_data file")
+            ref = refs[group]
+            ref_eig = ref["optimal_eigs"][0]
+            ref_pct = (np.sum(ref["optimal_designs"][0]) - 1.0) * 100.0
+            ax2.axhline(y=ref_eig, color=color, linestyle=':', linewidth=1.5)
+            # The reference flow's own nominal and optimal EIGs, as separate points.
+            if ref["nominal_eig"] is not None:
+                ax2.errorbar(ref_pct, ref["nominal_eig"], yerr=ref["nominal_eig_std"], color=color,
+                             marker='s', markersize=10, markeredgecolor='black', markeredgewidth=1.2,
+                             linestyle='none', capsize=4)
+            ax2.errorbar(ref_pct, ref_eig, yerr=ref["optimal_eig_stds"][0], color=color,
+                         marker='*', markersize=16, markeredgecolor='black', linestyle='none',
+                         capsize=4)
+            if slope:
+                x_cross = (ref_eig - intercept) / slope
+                ax2.axvline(x_cross, color=color, linestyle=':', linewidth=1.0, alpha=0.6)
+                ax2.text(x_cross, ref_eig, f' {x_cross:+.1f}%', color=color, fontsize=13,
+                         fontweight='bold', ha='right', va='bottom',
+                         bbox=dict(facecolor='white', edgecolor='none', alpha=0.7, pad=0.3))
+    # Color names the group; marker shape, shown once, names the kind of flow. With one
+    # group the color says nothing, so the key alone is the legend, in that group's color.
+    handles, legend_labels = ax2.get_legend_handles_labels()
+    if refs:
+        key_color = group_colors[0] if len(groups) == 1 else 'gray'
+        if len(groups) == 1:
+            handles, legend_labels = [], []
+        key = dict(color=key_color, linestyle='none', markeredgecolor='black')
+        handles += [Line2D([], [], marker='o', markersize=8, **key),
+                    Line2D([], [], marker='s', markersize=10, **key),
+                    Line2D([], [], marker='*', markersize=16, **key)]
+        legend_labels += ['Single Design-space', 'Full Design-space: nominal',
+                          'Full Design-space: optimal']
+    ax2.legend(handles, legend_labels, loc='best', fontsize=12, framealpha=0.9)
     ax2.set_xlabel('Percentage Increase in Total Observations', fontsize=12, weight='bold')
     ax2.set_ylabel('Expected Information Gain [bits]', fontsize=12, weight='bold')
     ax2.set_title('EIG of Uniformly Increasing Observations', fontsize=16, weight='bold', pad=20)
@@ -6402,7 +6433,8 @@ def compare_increasing_design(
         use_fractional=False,
         include_nominal=False,
         ref_id=None,
-        run_groups=None
+        run_groups=None,
+        ref_ids=None
     ):
     """
     Compare increasing quantities for fixed design.
@@ -6417,151 +6449,56 @@ def compare_increasing_design(
         save_path (str, optional): Path to save the comparison plot. If None, doesn't save
         figsize (tuple): Figure size (width, height)
         dpi (int): Resolution for saved figure
-        colors (list, optional): Colors for each run. If None, uses a continuous colormap for increasing designs
+        colors (list, optional): Colors for each run's design bars. If None, uses a continuous colormap
         title (str, optional): Custom title for the plot. If None, generates default title
         log_scale (bool): Whether to use log scale for y-axis (default: True)
         use_fractional (bool): Whether to plot fractional values or absolute quantities (default: False)
         include_nominal (bool): Whether to include nominal design bars on the left (default: False)
-        ref_id (str, optional): Reference run ID to use for nominal design, nominal EIG, and optimal EIG
+        ref_id (str, optional): Reference run for ``mlflow_exp``/``run_ids`` (``ref_ids`` for groups):
+            e.g. a flow trained over the full design space at budget 1.0. Its nominal-design EIG
+            (square) and optimal-design EIG (star) are points, and its optimal EIG a dotted line
+            marked with the % increase at which the fit reaches it.
         run_groups (dict, optional): ``{label: [run_id, ...]}``, e.g. one group per likelihood
             mode. Replaces ``mlflow_exp``/``run_ids``: the EIG figure draws each group as its own
-            line with a linear fit, and the design bars come from the first group.
+            line with a linear fit (a single run set is one such group), and the design bars come
+            from the first group.
+        ref_ids (dict, optional): ``{label: run_id}`` with ``run_groups``: each group's reference
+            run, drawn in the group's color as ``ref_id`` is.
     
     Returns:
         fig, ax: Matplotlib figure and axes objects
     """
+    if run_groups is not None:
+        if mlflow_exp is not None or run_ids is not None or ref_id is not None:
+            raise ValueError("run_groups replaces mlflow_exp/run_ids and takes ref_ids, not ref_id")
+        if ref_ids is not None and not set(ref_ids) <= set(run_groups):
+            raise ValueError(f"ref_ids keys {sorted(set(ref_ids) - set(run_groups))} are not run_groups labels")
+    elif ref_ids is not None:
+        raise ValueError("ref_ids needs run_groups")
+
     # Set MLflow tracking URI
     storage_path = os.environ["SCRATCH"] + f"/bedcosmo/{cosmo_exp}"
     
-    # Load reference run data if ref_id is provided
-    ref_nominal_design = None
-    ref_nominal_eig = None
-    ref_nominal_eig_std = None
-    ref_optimal_eig = None
-    ref_optimal_eig_std = None
-    ref_optimal_design = None
-    ref_run_data_list = []
-    if ref_id is not None:
-        try:
-            # Get reference run's experiment ID
-            ref_run_data_list, _, _ = get_runs_data(
-                run_ids=[ref_id],
-                parse_params=True,
-                cosmo_exp=cosmo_exp
-            )
-            if not ref_run_data_list:
-                print(f"Warning: Reference run {ref_id} not found, skipping reference data...")
-            else:
-                ref_run_data = ref_run_data_list[0]
-                ref_run_id = ref_run_data['run_id']
-                ref_exp_id = ref_run_data['exp_id']
-                ref_artifacts_dir = f"{storage_path}/mlruns/{ref_exp_id}/{ref_run_id}/artifacts"
-                
-                if os.path.exists(ref_artifacts_dir):
-                    # Load completed reference eig_data file
-                    try:
-                        ref_json_path, ref_data = load_eig_data_file(
-                            ref_artifacts_dir, eval_step=None, eig_kind='variable'
-                        )
-                        if ref_data is not None:
-                            print(f"Loaded reference EIG data from {ref_json_path}")
-                            
-                            # Determine which step to use
-                            if eval_step is not None:
-                                step_str = f"step_{eval_step}"
-                            else:
-                                # Find the highest available step key
-                                step_keys = [k for k in ref_data.keys() if k.startswith('step_')]
-                                if step_keys:
-                                    # Extract step numbers and find the highest
-                                    step_numbers = []
-                                    for k in step_keys:
-                                        try:
-                                            step_num = int(k.split('_')[1])
-                                            step_numbers.append((step_num, k))
-                                        except (ValueError, IndexError):
-                                            continue
-                                    if step_numbers:
-                                        step_str = max(step_numbers, key=lambda x: x[0])[1]
-                                    else:
-                                        step_str = step_keys[0]  # Fallback to first if parsing fails
-                                else:
-                                    print(f"Warning: No step data found in reference file {ref_json_path}")
-                                    step_str = None
-                            
-                            if step_str and step_str in ref_data:
-                                step_data = ref_data[step_str]
-                                
-                                # Access nested structure
-                                variable_data = step_data.get('variable', {})
-                                nominal_data = step_data.get('nominal', {})
-                                
-                                # Extract nominal_eig from nominal subdict (scalar value from eigs_avg)
-                                nominal_eig_val = nominal_data.get('eigs_avg')
-                                if nominal_eig_val is not None:
-                                    if isinstance(nominal_eig_val, list) and len(nominal_eig_val) > 0:
-                                        nominal_eig_val = nominal_eig_val[0]
-                                    if isinstance(nominal_eig_val, (int, float)):
-                                        ref_nominal_eig = nominal_eig_val
-                                
-                                nominal_eig_std_val = nominal_data.get('eigs_std')
-                                if nominal_eig_std_val is not None:
-                                    if isinstance(nominal_eig_std_val, list) and len(nominal_eig_std_val) > 0:
-                                        nominal_eig_std_val = nominal_eig_std_val[0]
-                                    if isinstance(nominal_eig_std_val, (int, float)):
-                                        ref_nominal_eig_std = nominal_eig_std_val
-                                
-                                if 'optimal_eig' in variable_data:
-                                    ref_optimal_eig = variable_data['optimal_eig']
-                                
-                                if 'optimal_eig_std' in variable_data and isinstance(variable_data['optimal_eig_std'], (int, float)):
-                                    ref_optimal_eig_std = variable_data['optimal_eig_std']
-                                
-                                if 'optimal_design' in variable_data:
-                                    ref_optimal_design = np.array(variable_data['optimal_design'])
-                                
-                                # Use nominal_design stored in the reference eig_data without initializing an experiment
-                                if include_nominal:
-                                    if 'nominal_design' in ref_data:
-                                        ref_nominal_design = np.array(ref_data['nominal_design'])
-                        else:
-                            print(f"Warning: No completed reference eig_data file found, skipping reference data...")
-                            ref_data = None
-                    except ValueError as e:
-                        print(f"Warning: {e}, skipping reference data...")
-                        ref_data = None
-                else:
-                    print(f"Warning: Artifacts directory not found for reference run {ref_id}")
-        except (ValueError, OSError, KeyError) as e:
-            # Expected "reference data is missing/malformed" cases -> skip the
-            # reference overlay. Programming errors (NameError, TypeError, ...)
-            # deliberately propagate instead of being masked as a warning.
-            print(f"Warning: Error loading reference run {ref_id}: {e}")
-    
-    if run_groups is not None:
-        if mlflow_exp is not None or run_ids is not None or include_nominal:
-            raise ValueError(
-                "run_groups replaces mlflow_exp/run_ids, and include_nominal does not apply: "
-                "a scaled run's nominal EIG scores its flow at a design it never trained on."
-            )
+    if run_groups is None:
+        group = mlflow_exp or 'Increasing design'
+        groups = {group: _load_increasing_design_runs(
+            mlflow_exp, run_ids, excluded_runs, cosmo_exp, storage_path, eval_step)}
+        ref_ids = {group: ref_id} if ref_id is not None else {}
+    else:
         groups = {
             group: _load_increasing_design_runs(
-                None, ids, excluded_runs, cosmo_exp, storage_path, eval_step, False)
+                None, ids, excluded_runs, cosmo_exp, storage_path, eval_step)
             for group, ids in run_groups.items()
         }
-        # Designs (the bar chart) come from the first group; groups share the budget axis.
-        loaded = next(iter(groups.values()))
-    else:
-        loaded = _load_increasing_design_runs(
-            mlflow_exp, run_ids, excluded_runs, cosmo_exp, storage_path, eval_step, include_nominal)
-    run_data_list = loaded["run_data_list"]
+    refs = {
+        group: _load_increasing_design_runs(None, [rid], excluded_runs, cosmo_exp, storage_path, eval_step)
+        for group, rid in (ref_ids or {}).items()
+    }
+    # Designs (the bar chart) come from the first group; groups share the budget axis.
+    loaded = next(iter(groups.values()))
     found_run_ids = loaded["found_run_ids"]
     optimal_designs = loaded["optimal_designs"]
-    optimal_eigs = loaded["optimal_eigs"]
-    optimal_eig_stds = loaded["optimal_eig_stds"]
     design_labels = loaded["design_labels"]
-    nominal_eig = loaded["nominal_eig"]
-    nominal_eig_std = loaded["nominal_eig_std"]
 
     if len(optimal_designs) == 0:
         raise ValueError("No valid optimal design data found to compare")
@@ -6595,18 +6532,12 @@ def compare_increasing_design(
     nominal_design = None
     experiment = None
     
-    # Use reference nominal design if ref_id is provided
-    if ref_id is not None and ref_nominal_design is not None:
-        nominal_design = ref_nominal_design
-    
     # Always initialize if use_fractional=False (need nominal_total_obs for conversion), design_labels missing, or include_nominal=True (and we don't have ref data)
     if not use_fractional or design_labels is None or (include_nominal and nominal_design is None):
         try:
-            # Use ref run data if available, otherwise use first run
-            if ref_id is not None and len(ref_run_data_list) > 0:
-                run_data_for_init = ref_run_data_list[0]
-            else:
-                run_data_for_init = run_data_list[0]
+            # The first reference run if any, otherwise the first run
+            first_ref = next(iter(refs.values()), None)
+            run_data_for_init = (first_ref or loaded)["run_data_list"][0]
             
             device = "cuda:0"
             # The run's own design_args snapshot: an empty dict builds a default grid,
@@ -6649,10 +6580,6 @@ def compare_increasing_design(
         is_1d = (n_dims == 1)
     else:
         is_1d = False
-    
-    # Store fractional designs before conversion (needed for scatter plot % increase calculation)
-    fractional_optimal_designs = [np.array(design).copy() for design in optimal_designs]
-    fractional_nominal_design = np.array(nominal_design).copy() if nominal_design is not None else None
     
     # Convert fractional values to absolute quantities if needed
     # Note: nominal_design is stored as fractional (like optimal_designs), so convert it too
@@ -6754,178 +6681,7 @@ def compare_increasing_design(
         fig.savefig(save_path, dpi=dpi)
         print(f"Saved comparison plot to {save_path}")
     
-    if run_groups is not None:
-        ref_eig = ref_optimal_eig if ref_id is not None else None
-        _plot_increasing_design_groups(groups, ref_eig, figsize, dpi, save_path)
-        return fig, ax
-
-    # Create second scatter plot: EIG vs % increase
-    # Calculate % increase from fractional designs (sum of fractions - 1)
-    scatter_x = []  # % increase (sum of fractions - 1)
-    scatter_y = []  # EIG values
-    scatter_yerr = []  # EIG std
-    scatter_colors = []
-    scatter_edgecolors = []
-    scatter_labels = []
-    
-    # Use reference EIG values if ref_id is provided, otherwise use values from first run
-    eig_to_use_for_nominal = ref_nominal_eig if (ref_id is not None and ref_nominal_eig is not None) else nominal_eig
-    std_to_use_for_nominal = ref_nominal_eig_std if (ref_id is not None and ref_nominal_eig_std is not None) else nominal_eig_std
-    
-    # Track which points are from bar chart (nominal + increasing designs) for fitted line
-    bar_chart_x = []  # % increase for bar chart points
-    bar_chart_y = []  # EIG for bar chart points
-    
-    # Add nominal design point if requested
-    if include_nominal and fractional_nominal_design is not None and eig_to_use_for_nominal is not None:
-        nominal_sum = np.sum(fractional_nominal_design)
-        nominal_pct_increase = (nominal_sum - 1.0) * 100.0
-        scatter_x.append(nominal_pct_increase)
-        scatter_y.append(eig_to_use_for_nominal)
-        scatter_yerr.append(std_to_use_for_nominal if isinstance(std_to_use_for_nominal, (int, float)) else None)
-        scatter_colors.append('tab:blue')
-        scatter_edgecolors.append('none')
-        scatter_labels.append('Nominal Design')
-        # Track for fitted line
-        bar_chart_x.append(nominal_pct_increase)
-        bar_chart_y.append(eig_to_use_for_nominal)
-    
-    # Add increasing design points (these are the bar chart points)
-    for i, (design, eig, eig_std, color) in enumerate(zip(fractional_optimal_designs, optimal_eigs, optimal_eig_stds, colors)):
-        if eig is not None:  # Only plot if EIG is available
-            design_sum = np.sum(design)
-            pct_increase = (design_sum - 1.0) * 100.0
-            scatter_x.append(pct_increase)
-            scatter_y.append(eig)
-            scatter_yerr.append(eig_std if isinstance(eig_std, (int, float)) else None)
-            scatter_colors.append(color)
-            scatter_edgecolors.append('black')
-            scatter_labels.append(labels[i] if labels else found_run_ids[i][:8])
-            # Track for fitted line
-            bar_chart_x.append(pct_increase)
-            bar_chart_y.append(eig)
-    
-    # Add reference optimal EIG point if ref_id is provided
-    if ref_id is not None and ref_optimal_eig is not None and ref_optimal_design is not None:
-        # Calculate % increase for reference optimal design
-        ref_design_sum = np.sum(ref_optimal_design)
-        ref_pct_increase = (ref_design_sum - 1.0) * 100.0
-        scatter_x.append(ref_pct_increase)
-        scatter_y.append(ref_optimal_eig)
-        scatter_yerr.append(ref_optimal_eig_std if isinstance(ref_optimal_eig_std, (int, float)) else None)
-        scatter_colors.append('tab:orange')  # Different color to distinguish from nominal
-        scatter_edgecolors.append('none')  # No outline for ref optimal
-        scatter_labels.append(f'Optimal Design')
-    
-    # Create scatter plot figure
-    if len(scatter_x) > 0 and any(y is not None for y in scatter_y):
-        fig2, ax2 = plt.subplots(figsize=figsize)
-        
-        # Filter out None values for plotting
-        valid_indices = [i for i, y in enumerate(scatter_y) if y is not None]
-        plot_x = [scatter_x[i] for i in valid_indices]
-        plot_y = [scatter_y[i] for i in valid_indices]
-        plot_yerr = [scatter_yerr[i] for i in valid_indices]
-        plot_colors = [scatter_colors[i] for i in valid_indices]
-        plot_edgecolors = [scatter_edgecolors[i] for i in valid_indices]
-        plot_labels = [scatter_labels[i] for i in valid_indices]
-        
-        # Plot scatter points with same color coding and edge styles as bars
-        legend_handles = {}
-        legend_order = []
-        for x, y, yerr, color, edgecolor, label in zip(plot_x, plot_y, plot_yerr, plot_colors, plot_edgecolors, plot_labels):
-            # Only add label to legend if we haven't seen it before
-            label_to_use = label if label not in legend_handles else ""
-            handle = ax2.scatter(x, y, c=[color], s=100, alpha=0.7, edgecolors=edgecolor, 
-                                 linewidths=1.5, label=label_to_use)
-            if label_to_use:
-                legend_handles[label_to_use] = handle
-                legend_order.append(label_to_use)
-            if yerr is not None and isinstance(yerr, (int, float)) and yerr > 0:
-                ax2.errorbar(x, y, yerr=yerr, fmt='none', ecolor=color, elinewidth=1.2, capsize=4, alpha=0.8)
-        
-        # Add horizontal orange dotted line for ref optimal eig
-        if ref_id is not None and ref_optimal_eig is not None:
-            ax2.axhline(y=ref_optimal_eig, color='tab:orange', linestyle='--', 
-                       linewidth=1.5, alpha=0.7)
-        
-        # Add black dotted fitted line for bar chart points (nominal + increasing designs)
-        coeffs = None
-        if len(bar_chart_x) >= 2 and len(bar_chart_y) >= 2:
-            # Fit a line to the bar chart points
-            bar_chart_x_arr = np.array(bar_chart_x)
-            bar_chart_y_arr = np.array(bar_chart_y)
-            # Fit polynomial (degree 1 = linear fit)
-            coeffs = np.polyfit(bar_chart_x_arr, bar_chart_y_arr, 1)
-            poly = np.poly1d(coeffs)
-            # Generate x values for the line
-            x_line = np.linspace(min(bar_chart_x_arr), max(bar_chart_x_arr), 100)
-            y_line = poly(x_line)
-            ax2.plot(x_line, y_line, 'k--', linewidth=1.5, alpha=0.7)
-        elif len(bar_chart_x) == 1:
-            # If only one point, just draw a horizontal line
-            ax2.axhline(y=bar_chart_y[0], color='black', linestyle='--', 
-                       linewidth=1.5, alpha=0.7)
-        
-        # Add vertical intersection line between ref optimal eig and fitted line when available
-        if (
-            ref_id is not None
-            and ref_optimal_eig is not None
-            and coeffs is not None
-            and len(coeffs) >= 2
-            and coeffs[0] != 0
-        ):
-            x_intersection = (ref_optimal_eig - coeffs[1]) / coeffs[0]
-            if np.isfinite(x_intersection):
-                ax2.axvline(x_intersection, color='gray', linestyle=':', linewidth=1.2, alpha=0.8)
-                x_pct = x_intersection
-                # Place text slightly above the intersection point
-                ax2.text(
-                    x_intersection,
-                    ref_optimal_eig,
-                    f'{x_pct:+.1f}%',
-                    color='red',
-                    fontsize=17,
-                    fontweight='bold',
-                    ha='left',
-                    va='bottom',
-                    bbox=dict(facecolor='white', edgecolor='none', alpha=0.6, pad=0.3)
-                )
-        
-        # Build ordered legend handles (Nominal first, Ref Optimal second)
-        ordered_labels = []
-        if 'Nominal Design' in legend_handles:
-            ordered_labels.append('Nominal Design')
-        for label in legend_order:
-            if label.startswith('Optimal Design') and label not in ordered_labels:
-                ordered_labels.append(label)
-        for label in legend_order:
-            if label not in ordered_labels:
-                ordered_labels.append(label)
-        if ordered_labels:
-            ordered_handles = [legend_handles[label] for label in ordered_labels]
-            ax2.legend(ordered_handles, ordered_labels, loc='best', fontsize=12, framealpha=0.9)
-        
-        ax2.set_xlabel('Percentage Increase in Total Observations', fontsize=12, weight='bold')
-        ax2.set_ylabel('Expected Information Gain [bits]', fontsize=12, weight='bold')
-        ax2.set_title('EIG of Uniformly Increasing Observations', fontsize=16, weight='bold', pad=20)
-        ax2.grid(True, alpha=0.3)
-        
-        plt.tight_layout()
-        
-        # Save scatter plot if save_path provided
-        if save_path is not None:
-            # Modify save path to add _scatter suffix
-            scatter_save_path = save_path.replace('.png', '_scatter.png').replace('.pdf', '_scatter.pdf')
-            if scatter_save_path == save_path:  # If no extension found, just append
-                scatter_save_path = save_path + '_scatter'
-            os.makedirs(os.path.dirname(scatter_save_path) if os.path.dirname(scatter_save_path) else '.', exist_ok=True)
-            fig2.savefig(scatter_save_path, dpi=dpi)
-            print(f"Saved scatter plot to {scatter_save_path}")
-    else:
-        fig2 = None
-        ax2 = None
-    
+    _plot_increasing_design_groups(groups, refs, figsize, dpi, save_path)
     return fig, ax
     
 def compare_contours(
