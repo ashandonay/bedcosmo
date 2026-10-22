@@ -6379,21 +6379,26 @@ def _plot_increasing_design_groups(groups, refs, figsize, dpi, save_path):
             if ref["nominal_eig"] is not None:
                 ax2.errorbar(ref_pct, ref["nominal_eig"], yerr=ref["nominal_eig_std"], color=color,
                              marker='s', markersize=10, markeredgecolor='black', markeredgewidth=1.2,
-                             linestyle='none', capsize=4, label=f'{group}: nominal design')
+                             linestyle='none', capsize=4)
             ax2.errorbar(ref_pct, ref_eig, yerr=ref["optimal_eig_stds"][0], color=color,
                          marker='*', markersize=16, markeredgecolor='black', linestyle='none',
-                         capsize=4, label=f'{group}: optimal design')
+                         capsize=4)
             if slope:
                 x_cross = (ref_eig - intercept) / slope
                 ax2.axvline(x_cross, color=color, linestyle=':', linewidth=1.0, alpha=0.6)
                 ax2.text(x_cross, ref_eig, f' {x_cross:+.1f}%', color=color, fontsize=13,
                          fontweight='bold', ha='right', va='bottom',
                          bbox=dict(facecolor='white', edgecolor='none', alpha=0.7, pad=0.3))
-    # Data series first, then their reference points.
+    # Color names the group; marker shape, shown once in gray, names the kind of flow.
     handles, legend_labels = ax2.get_legend_handles_labels()
-    order = sorted(range(len(legend_labels)), key=lambda i: ': ' in legend_labels[i])
-    ax2.legend([handles[i] for i in order], [legend_labels[i] for i in order],
-               loc='best', fontsize=12, framealpha=0.9)
+    if refs:
+        key = dict(color='gray', linestyle='none', markeredgecolor='black')
+        handles += [Line2D([], [], marker='o', markersize=8, **key),
+                    Line2D([], [], marker='s', markersize=10, **key),
+                    Line2D([], [], marker='*', markersize=16, **key)]
+        legend_labels += ['Single-design flows', 'Design-space flow: nominal',
+                          'Design-space flow: optimal']
+    ax2.legend(handles, legend_labels, loc='best', fontsize=12, framealpha=0.9)
     ax2.set_xlabel('Percentage Increase in Total Observations', fontsize=12, weight='bold')
     ax2.set_ylabel('Expected Information Gain [bits]', fontsize=12, weight='bold')
     ax2.set_title('EIG of Uniformly Increasing Observations', fontsize=16, weight='bold', pad=20)

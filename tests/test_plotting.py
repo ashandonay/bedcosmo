@@ -2149,9 +2149,11 @@ class TestCompareIncreasingDesign:
         assert [(ln.get_xdata()[0], ln.get_ydata()[0]) for ln in stars] == [(0.0, 7.10), (0.0, 7.25)]
         np.testing.assert_allclose([ln.get_ydata()[0] for ln in squares], [7.00, 7.15])
         assert [ln.get_color() for ln in stars] == colors
-        legend = [t.get_text() for t in ax2.get_legend().get_texts()]
-        assert legend[:2] == ["Emulator", "Scaling"]
-        assert {"Emulator: optimal design", "Emulator: nominal design"} <= set(legend)
+        # Colors name the groups; the marker key (once, not per group) names the kind of flow.
+        assert [t.get_text() for t in ax2.get_legend().get_texts()] == [
+            "Emulator", "Scaling",
+            "Single-design flows", "Design-space flow: nominal", "Design-space flow: optimal",
+        ]
         plt.close("all")
 
     @pytest.mark.parametrize("extra", [{"run_ids": ["a"]}, {"mlflow_exp": "x"}, {"ref_id": "r"}])
