@@ -1,7 +1,7 @@
 """Config-space ground-truth sigma generator (runs in the `emulator` conda env).
 
 Standalone helper for ``compare_config_space_vs_emulator.py``. It imports the
-desilike-emulator config-space pipeline (``bao/config_space.py``) and, for each
+tracer-forecast-emulator config-space pipeline (``bao/config_space.py``) and, for each
 requested tracer bin, evaluates the first-principles Grieb/Fisher
 sigma(D_H/rd, D_M/rd, D_V/rd) at the supplied N_tracers and cosmology -- the
 exact quantity the NN covariance emulator was trained to reproduce.
@@ -25,7 +25,8 @@ import sys
 
 def main():
     req_path, out_path = sys.argv[1], sys.argv[2]
-    emu_dir = sys.argv[3] if len(sys.argv) > 3 else os.path.expanduser("~/desilike-emulator")
+    emu_dir = (sys.argv[3] if len(sys.argv) > 3
+               else os.path.expanduser("~/tracer-forecast-emulator"))
 
     bao_dir = os.path.join(emu_dir, "bao")
     # config_space uses sibling imports (`import core`, `from util import ...`),

@@ -1,7 +1,7 @@
 """Regression tests for NumTracers passed N_tracers (calc_passed + _passed_ratio_to_n_tracers).
 
 The BAO emulator's ``N_tracers`` feature is the redshift-confirmed *passed* count
-(desilike_emulator ``_get_ntracers`` reads the ``passed`` column). bedcosmo must feed
+(tracer_forecast_emulator ``_get_ntracers`` reads the ``passed`` column). bedcosmo must feed
 the emulator passed counts, not observed. The passed *ratio* comes from the single shared
 ``calc_passed`` computation (``passed = observed * efficiency``); ``_passed_ratio_to_n_tracers``
 converts that ratio to an absolute per-bin count with ``* nominal_total_obs``.

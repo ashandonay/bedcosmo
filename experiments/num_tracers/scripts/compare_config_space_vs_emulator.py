@@ -2,7 +2,7 @@
 
 The covariance emulators used by ``NumTracers`` (likelihood_mode='emulator') were
 trained to reproduce the first-principles config-space (xi) Grieb/Fisher
-sigma(D_H/rd, D_M/rd, D_V/rd) produced by ``~/desilike-emulator``'s
+sigma(D_H/rd, D_M/rd, D_V/rd) produced by ``~/tracer-forecast-emulator``'s
 ``bao/config_space.py``. This script checks that the experiment is wired up
 correctly by comparing, at the NOMINAL DESI design + FIDUCIAL cosmology and
 matched N_tracers, the per-bin errors from two independent paths:
@@ -41,7 +41,7 @@ HRD_PHYS_FID = 99.08          # physical h*r_d
 HRD_RAW_FID = HRD_PHYS_FID / 100.0
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-EMU_DIR = os.path.expanduser("~/desilike-emulator")
+EMU_DIR = os.path.expanduser("~/tracer-forecast-emulator")
 QUANTS = ("DH_over_rs", "DM_over_rs", "DV_over_rs")
 
 
