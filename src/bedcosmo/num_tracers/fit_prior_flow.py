@@ -7,8 +7,11 @@ held out of the fit for validation:
 
 * marginals: KS statistic between flow draws and held-out samples, per parameter;
 * calibration: importance weights ``w = p_target / q_flow`` on flow draws, with
-  ``p_target = pi_box * L^(1/T)`` from ``TemperedDR1Posterior``. Their effective
-  sample size fraction is 1 for a perfect flow;
+  ``p_target = pi_box * L^(1/T)`` from ``TemperedDR1Posterior``: the KL divergence
+  from flow to target, the mass with ``|log w| > 1``, and the effective sample size
+  fraction (1 for a perfect flow, but set by a few far-tail draws);
+* coverage: ``log(p_target / q_flow)`` on held-out samples, against its median. A
+  large tail means the flow misses target mass, which flow draws cannot reveal;
 * leakage: flow mass outside the box and constraints (``NumTracers`` truncates it);
 * a triangle plot of flow draws over held-out samples.
 
@@ -62,6 +65,14 @@ def validate(pf, target, held_out, scale, n_flow=200_000, seed=1):
     log_w = log_p - log_q
     w = np.exp(log_w - log_w.max())
     ess_fraction = w.sum() ** 2 / (w**2).sum() / len(w)
+    # log of the target's normalizer relative to q; with it, log_w - log_z = log(p_normalized / q).
+    log_z = float(np.log(w.mean()) + log_w.max())
+
+    held = torch.as_tensor(held_out, dtype=torch.float64)
+    coverage = target.log_prob(held).numpy() - (
+        pf.log_prob(held_out / to_sampler) + math.log(scale) - math.log(inside.mean())
+    )
+    coverage -= np.median(coverage)
 
     ks = {n: float(ks_2samp(draws[:, i], held_out[:, i]).statistic) for i, n in enumerate(names)}
     return {
@@ -69,6 +80,10 @@ def validate(pf, target, held_out, scale, n_flow=200_000, seed=1):
         "ks_max": max(ks.values()),
         "importance_ess_fraction": float(ess_fraction),
         "log_weight_std": float(log_w.std()),
+        "kl_flow_to_target_nats": float(log_z - log_w.mean()),
+        "frac_abs_log_ratio_gt_1": float(np.mean(np.abs(log_w - log_z) > 1)),
+        "coverage_log_ratio_q999": float(np.quantile(coverage, 0.999)),
+        "coverage_frac_gt_3": float(np.mean(coverage > 3)),
         "leak_fraction": float(leak),
         "n_flow_draws": n_flow,
     }, draws
@@ -123,6 +138,12 @@ def main(argv=None):
         "--out", default=None, help="Flow .pt (default: <samples>_flow.pt beside the samples)."
     )
     ap.add_argument("--held-out", type=float, default=0.2)
+    ap.add_argument(
+        "--early-stop-fraction",
+        type=float,
+        default=0.1,
+        help="Share of the fit samples train_prior_flow keeps for early stopping.",
+    )
     ap.add_argument("--epochs", type=int, default=300)
     ap.add_argument("--transforms", type=int, default=6)
     ap.add_argument("--bins", type=int, default=16)
@@ -152,6 +173,7 @@ def main(argv=None):
     out = Path(args.out).expanduser() if args.out else path.with_name(path.stem + "_flow.pt")
     pf = train_prior_flow(
         fit * to_target,
+        n_train=int((1 - args.early_stop_fraction) * len(fit)),
         space=SPACE_NATIVE,
         feature_names=names,
         epochs=args.epochs,
