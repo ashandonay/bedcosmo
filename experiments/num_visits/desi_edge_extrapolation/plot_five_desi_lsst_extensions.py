@@ -3,7 +3,8 @@ from pathlib import Path
 import json
 import numpy as np
 from speclite import filters
-from bedcosmo.num_visits.empirical.desi.training_matrix import trim_spectrum_edges,extrapolate_spectrum_edges,_extrapolate_powerlaw
+from bedcosmo.num_visits.empirical.desi.training_matrix import trim_spectrum_edges
+from bedcosmo.num_visits.empirical.desi.extrapolation import extrapolate_spectrum_edges, _extrapolate_powerlaw
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt

@@ -5,7 +5,7 @@ import pandas as pd
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-from bedcosmo.num_visits.empirical.desi.training_matrix import extrapolate_spectrum_edges, _extrapolate_powerlaw
+from bedcosmo.num_visits.empirical.desi.extrapolation import extrapolate_spectrum_edges, _extrapolate_powerlaw
 
 out=Path(__file__).parent
 d=np.load('/home/ashandonay/scratch/bedcosmo/num_visits/desi_training_data/desi_rest_frame_training_matrix.npz')

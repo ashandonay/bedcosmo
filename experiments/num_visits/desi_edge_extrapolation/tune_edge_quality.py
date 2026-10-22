@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 from scipy.ndimage import median_filter
 from speclite import filters
-from bedcosmo.num_visits.empirical.desi.training_matrix import _extrapolate_powerlaw
+from bedcosmo.num_visits.empirical.desi.extrapolation import _extrapolate_powerlaw
 OUT=Path(__file__).parent
 # Reuse precisely the earlier experimental regularized estimator, without running its driver.
 source=(OUT/'try_regularized_slope.py').read_text()

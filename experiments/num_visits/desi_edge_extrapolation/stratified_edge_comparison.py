@@ -4,7 +4,7 @@ import json
 import numpy as np
 import pandas as pd
 from scipy.ndimage import median_filter
-from bedcosmo.num_visits.empirical.desi.training_matrix import _extrapolate_powerlaw
+from bedcosmo.num_visits.empirical.desi.extrapolation import _extrapolate_powerlaw
 OUT=Path(__file__).parent
 WIDTHS=[100,200,300,500,800]
 TAUS=[0.,.01,.03,.1,.3,float('inf')]

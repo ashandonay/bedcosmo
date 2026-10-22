@@ -8,8 +8,6 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from matplotlib.colors import LogNorm
-from matplotlib.lines import Line2D
-from matplotlib.patches import Patch
 from speclite.filters import load_filters
 
 from .desi.support import lsst_support_limits, select_wavelength_support
@@ -137,127 +135,6 @@ def plot_coverage(training_matrix, prior_dir=None, redshift_bins=70, population_
     )
     bottom.legend(fontsize=9)
     bottom.grid(alpha=0.18)
-    return fig
-
-
-def plot_template_extrapolation(prior_dir):
-    """Plot exported tails and conditional template errors; skip unextended banks."""
-    prior_dir = Path(prior_dir)
-    with np.load(prior_dir / "desi_basis.npz") as saved:
-        wave = saved["wave_rest_aa"]
-        basis = saved["basis"]
-        exported_wave = saved["export_wave_rest_aa"]
-        exported_basis = saved["export_basis"]
-        blue = exported_wave < wave[0]
-        red = exported_wave > wave[-1]
-        if not np.any(blue | red):
-            return None
-        ivar = saved["estimated_template_ivar"]
-    if basis.shape != ivar.shape or exported_basis.shape != (len(basis), len(exported_wave)):
-        raise ValueError("Learned/exported template and estimated IVAR dimensions do not match")
-    if not np.isfinite(ivar).all() or np.any(ivar < 0):
-        raise ValueError("Estimated template IVAR must be finite and nonnegative")
-    columns = np.searchsorted(exported_wave, wave)
-    if np.any(columns >= len(exported_wave)) or not np.array_equal(exported_wave[columns], wave):
-        raise ValueError("Exported grid does not contain the learned template grid")
-    if not np.array_equal(exported_basis[:, columns], basis):
-        raise ValueError("Exported templates changed learned wavelength values")
-    if not np.isfinite(exported_basis).all() or np.any(exported_basis.mean(axis=1) <= 0):
-        raise ValueError("Exported templates must be finite with positive mean flux")
-    metadata = json.loads((prior_dir / "build_provenance.json").read_text())
-    method = metadata["template"]["edge_extrapolation"]
-    extrapolation_label = {
-        "constant": "Constant extrapolation",
-        "powerlaw": "Power-law extrapolation",
-    }[method]
-    selection = metadata["selection"]
-    learned = (exported_wave >= wave[0]) & (exported_wave <= wave[-1])
-    edges = []
-    if np.any(blue):
-        edges.append(
-            ("Blue", blue, wave[0], wave[0] - exported_wave[0], exported_wave <= wave[0] + 180)
-        )
-    if np.any(red):
-        edges.append(
-            ("Red", red, wave[-1], exported_wave[-1] - wave[-1], exported_wave >= wave[-1] - 180)
-        )
-    ncols = min(4, len(basis))
-    nrows = int(np.ceil(len(basis) / ncols))
-    fig = plt.figure(figsize=(4.5 * ncols, 6 * nrows + 1))
-    fig.subplots_adjust(left=0.06, right=0.99, top=0.90, bottom=0.09)
-    outer = fig.add_gridspec(nrows, ncols, hspace=0.30, wspace=0.30)
-    for row, component in enumerate(exported_basis):
-        grid = outer[row // ncols, row % ncols].subgridspec(
-            2, len(edges), height_ratios=[2, 1], hspace=0.50, wspace=0.50
-        )
-        full = fig.add_subplot(grid[0, :])
-        panels = [(full, np.ones(len(exported_wave), dtype=bool))]
-        for edge_index, (name, _, _, distance, window) in enumerate(edges):
-            zoom = fig.add_subplot(grid[1, edge_index])
-            zoom.set_title(f"{name} edge: +{distance:g} Å", fontsize=10)
-            zoom.set_xlabel("Rest wavelength [Å]", fontsize=9)
-            zoom.locator_params(axis="x", nbins=3)
-            panels.append((zoom, window))
-        scale = component.mean()
-        flux = component / scale
-        sigma = np.full(len(exported_wave), np.nan)
-        sigma[columns] = (
-            np.divide(1.0, np.sqrt(ivar[row]), out=np.full(len(wave), np.nan), where=ivar[row] > 0)
-            / scale
-        )
-        for panel, window in panels:
-            selected = learned & window
-            panel.fill_between(
-                exported_wave[selected],
-                (flux - sigma)[selected],
-                (flux + sigma)[selected],
-                color="#2767c5",
-                alpha=0.20,
-                linewidth=0,
-                zorder=1,
-            )
-            panel.plot(exported_wave[selected], flux[selected], color="#2767c5", lw=1.2, zorder=3)
-            for _, tail, boundary, _, _ in edges:
-                selected_tail = tail & window
-                if np.any(selected_tail):
-                    # Include the adjacent learned endpoint to show the saved bank's
-                    # interpolation without creating a one-bin gap between colors.
-                    connected = selected_tail | ((exported_wave == boundary) & window)
-                    panel.plot(
-                        exported_wave[connected], flux[connected], color="#e68117", lw=2.2, zorder=4
-                    )
-                    panel.axvspan(
-                        min(exported_wave[selected_tail].min(), boundary),
-                        max(exported_wave[selected_tail].max(), boundary),
-                        color="#e68117",
-                        alpha=0.1,
-                    )
-                    panel.axvline(boundary, color=".45", ls=":", lw=0.9)
-            limits = exported_wave[window]
-            panel.set_xlim(limits[0], limits[-1])
-            panel.grid(alpha=0.16)
-            panel.tick_params(labelsize=9)
-        full.set_title(f"B{row + 1}")
-        full.locator_params(axis="x", nbins=4)
-        if row % ncols == 0:
-            full.set_ylabel("Mean-normalized template flux")
-    fig.suptitle(
-        f"Rank-{len(basis)} templates: prior z={selection['prior_z_min']:g}–{selection['prior_z_max']:g}\n"
-        f"{extrapolation_label} to {exported_wave[0]:,.0f}–{exported_wave[-1]:,.0f} Å\n"
-        "blue shading = conditional ±1σ from estimated template IVAR",
-        fontsize=15,
-    )
-    fig.legend(
-        handles=[
-            Line2D([], [], color="#2767c5", lw=2, label="Learned template"),
-            Line2D([], [], color="#e68117", lw=2, label=extrapolation_label),
-            Line2D([], [], color=".45", ls=":", label="Learned-support boundary"),
-            Patch(facecolor="#2767c5", alpha=0.20, label="±1σ = 1 / √(estimated template IVAR)"),
-        ],
-        loc="lower center",
-        bbox_to_anchor=(0.5, 0.01),
-        ncol=2,
-    )
     return fig
 
 

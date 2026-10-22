@@ -2,7 +2,7 @@ from pathlib import Path
 import numpy as np
 import matplotlib.pyplot as plt
 from speclite import filters
-from bedcosmo.num_visits.empirical.desi.training_matrix import extrapolate_spectrum_edges, _extrapolate_powerlaw
+from bedcosmo.num_visits.empirical.desi.extrapolation import extrapolate_spectrum_edges, _extrapolate_powerlaw
 
 matrix = np.load('/home/ashandonay/scratch/bedcosmo/num_visits/desi_training_data/desi_rest_frame_training_matrix.npz')
 wave = matrix['wave_rest_aa']

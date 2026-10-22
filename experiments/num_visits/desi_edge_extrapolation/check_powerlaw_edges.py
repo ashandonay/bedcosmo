@@ -2,7 +2,7 @@ import json
 from pathlib import Path
 import numpy as np
 import pandas as pd
-from bedcosmo.num_visits.empirical.desi.training_matrix import extrapolate_spectrum_edges
+from bedcosmo.num_visits.empirical.desi.extrapolation import extrapolate_spectrum_edges
 
 out = Path('/home/ashandonay/.codex/visualizations/2026/10/07/01a118ba-2514-7622-b640-68ff1ec126ec')
 d = np.load('/home/ashandonay/scratch/bedcosmo/num_visits/desi_training_data/desi_rest_frame_training_matrix.npz')

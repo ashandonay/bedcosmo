@@ -20,6 +20,7 @@ from bedcosmo.num_visits.empirical.desi.evaluate_factorization_methods import (
     fit_anls,
     shared_initialization,
 )
+from bedcosmo.num_visits.empirical.desi.extrapolation import extrapolate_spectrum_edges
 from bedcosmo.num_visits.empirical.desi.support import (
     largest_contiguous_region,
     lsst_demand_weighted_coverage,
@@ -29,7 +30,6 @@ from bedcosmo.num_visits.empirical.desi.training_matrix import (
     bin_rest_frame_spectrum,
     derive_rest_frame_grid,
     discover_desi_manifest,
-    extrapolate_spectrum_edges,
     trim_spectrum_edges,
 )
 from bedcosmo.num_visits.empirical.desi.weighted_nmf import (

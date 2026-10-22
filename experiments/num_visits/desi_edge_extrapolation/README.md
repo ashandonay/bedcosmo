@@ -19,10 +19,10 @@ and the visit prior have not been validated.
 
 ## Implementation versus experiments
 
-The package implementation in `training_matrix.py` offers constant (default),
-robust linear, and robust power-law edge extrapolation through
-`desi.build_matrix --edge-extrapolation`. Measured bins and internal gaps are
-preserved, and inferred tails receive downweighted fitting weights.
+The package implementation in `desi/extrapolation.py` offers constant (default),
+robust linear, and robust power-law edge fits. Production `desi.build_prior
+--edge-extrapolation` extends finished templates; matrix construction is
+measured-only. Retained values and internal gaps are preserved.
 
 The active comparison uses constant and power-law continuation. Regularized
 slope has been dropped from consideration; its scripts and results remain here
@@ -95,3 +95,14 @@ These diagnostics evaluated extrapolation of individual spectra. The production
 pipeline now builds measured-only matrices in `desi_training_data`
 and extrapolates finished templates after NMF. Previously generated matrices
 are preserved. See the package DESI README for current commands.
+
+## Template comparisons in magnitude space
+
+The current template-level comparison and plotting functions live in
+`src/bedcosmo/num_visits/empirical/desi/extrapolation.py`. They supersede the
+chat-local scripts for actual template overlays, the 300 rest-frame Å hidden-edge
+comparison, and the constant / PL100 / PL500 magnitude distributions.
+Use its `compare` and `plot` commands; see the package DESI README for flags,
+output formats, conditional IVAR error bars, and evaluation limitations.
+The individual-spectrum scripts above remain historical studies, with imports
+updated to the dedicated extrapolation module.

@@ -15,7 +15,7 @@ import numpy as np
 import pandas as pd
 import yaml
 
-from ..diagnostics_plots import plot_template_extrapolation, plot_template_redshifts
+from ..diagnostics_plots import plot_template_redshifts
 from ..paths import (
     BUILD_PROVENANCE_FILENAME,
     SED_PRIOR_KDE_NATIVE_FILENAME,
@@ -31,8 +31,8 @@ from .evaluate_factorization_methods import (
     nearly_nmf_package_metadata,
     shared_initialization,
 )
+from .extrapolation import extend_basis_for_lsst, plot_template_extrapolation
 from .support import lsst_support_limits, select_wavelength_support
-from .training_matrix import extrapolate_spectrum_edges
 from .weighted_nmf import infer_coefficients
 
 KDE_MODULE = "bedcosmo.num_visits.empirical.fit_sed_prior_kde"
@@ -95,46 +95,6 @@ def estimate_template_ivar(coefficients, weights):
     if not np.isfinite(precision).all():
         raise ValueError("Template uncertainty estimation produced nonfinite precision")
     return precision.T
-
-
-def extend_basis_for_lsst(wave, basis, template_ivar, prior_bounds, *, method="constant"):
-    """Extend finished components, preserving every learned wavelength value."""
-    template_ivar = np.asarray(template_ivar, dtype=float)
-    if (
-        template_ivar.shape != basis.shape
-        or not np.isfinite(template_ivar).all()
-        or np.any(template_ivar < 0)
-    ):
-        raise ValueError(
-            "Estimated template IVAR must match the basis and be finite and nonnegative"
-        )
-    lower, upper = np.asarray(prior_bounds, dtype=float)
-    if not np.isfinite([lower, upper]).all() or not 0 <= lower < upper:
-        raise ValueError("Prior redshift bounds must be finite, nonnegative and ordered")
-    blue, red, _, _ = lsst_support_limits(wave[0], wave[-1])
-    step = float(np.median(np.diff(wave)))
-    if not np.allclose(np.diff(wave), step, rtol=0, atol=1e-7):
-        raise ValueError("Template extension requires a uniformly spaced learned grid")
-    first = min(0, int(np.floor((blue / (1 + upper) - wave[0]) / step)))
-    last = max(len(wave) - 1, int(np.ceil((red / (1 + lower) - wave[0]) / step)))
-    extended_wave = wave[0] + step * np.arange(first, last + 1)
-    learned_columns = slice(-first, -first + len(wave))
-    extended_basis = np.zeros((len(basis), len(extended_wave)), dtype=float)
-    for row, component in enumerate(basis):
-        values = np.zeros(len(extended_wave), dtype=float)
-        values[learned_columns] = component
-        weights = np.zeros(len(extended_wave), dtype=float)
-        weights[learned_columns] = template_ivar[row]
-        extended_basis[row], _ = extrapolate_spectrum_edges(
-            extended_wave,
-            values,
-            weights,
-            method=method,
-            edge_indices=(-first, -first + len(wave) - 1),
-        )
-    if not np.isfinite(extended_basis).all() or np.any(extended_basis < 0):
-        raise ValueError("Exported template values must be finite and nonnegative")
-    return extended_wave, extended_basis
 
 
 def normalize_basis_for_export(
