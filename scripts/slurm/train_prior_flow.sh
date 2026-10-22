@@ -1,7 +1,7 @@
 #!/bin/bash
 # Train the empirical SED prior normalizing flow(s) on a compute node.
 #
-# Wraps `python -m bedcosmo.num_visits.empirical.prior_flow`. NSF training
+# Wraps `python -m bedcosmo.num_visits.empirical.train_sed_prior_flow`. NSF training
 # is CPU-heavy, so we grab a full node and let torch use all its cores rather
 # than thrash a thread-capped login node. Writes sed_prior_flow_native.pt and
 # sed_prior_flow_gaussianized.pt beside the KDE

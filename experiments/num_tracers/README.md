@@ -138,6 +138,17 @@ Each entry under `parameters` defines a `distribution` (type + bounds), optional
 | `prior_args_shapefit.yaml` | `analysis: shapefit`; omega-basis cosmology matching the emulators' training box, plus the `omega_m_domain` constraint |
 | `prior_args_posterior*.yaml` | Posterior-informed priors, per model/dataset |
 
+### Flow priors (`prior_flow_path`)
+
+`prior_flow_path` (absolute) replaces the box with a normalizing flow, in one of two formats:
+
+- **A conditional bedcosmo posterior checkpoint** (`checkpoint_*.pt` from an earlier run), evaluated at the nominal context. The `prior_args_posterior*.yaml` files use this format.
+- **An unconditional `bedcosmo.prior_flow.PriorFlow`** (`train_prior_flow`, also used by num_visits' SED prior), fit over the model's parameters in `models.yaml` order and in the YAML's raw units (`hrdrag` before its `multiplier`). Its `feature_names` must match the model's parameters. The `parameters` box and the `constraints` still apply: the flow is truncated to them. Samples come from rejection, and the EIG's prior log-density is the flow's minus the log of its mass inside the support, estimated from 10⁶ flow draws at start-up. `analysis: bao` only.
+
+### Tempered DESI DR1 posterior (`prior.py`)
+
+`python -m bedcosmo.num_tracers.prior --cosmo-model <model> --temperature T --out <file>.npz` samples `π_box(θ) · L_DR1(θ)^(1/T)`. `π_box` is a `prior_args` YAML's box and constraints (default `prior_args.yaml`, the bounds of the cobaya configs in `cobaya/mcmc/`). `L_DR1` is the Gaussian likelihood of DESI's compressed DR1 BAO data (`~/data/desi/bao_dr1/desi_2024_gaussian_bao_ALL_GCcomb_{mean,cov}.txt`, cobaya's `desi_bao_all`), computed with bedcosmo's distances at the cobaya configs' fixed h = 0.6736, N_eff = 3.044 and Σm_ν = 0.06 eV. Near-Gaussian widths scale by √T. The sampler is a vectorized affine-invariant ensemble MCMC. The second half of the run is kept and thinned by the autocorrelation time, and the run fails if that half spans fewer than 50 autocorrelation times. The `.npz` holds `samples` (N, D) and a JSON `metadata` string: T, the file hashes, the sampler diagnostics and the bedcosmo commit. At T = 1, `base` reproduces DESI 2024 VI (Ωm = 0.2947 ± 0.0147, h·r_d = 101.89 ± 1.28 Mpc) and the local DR1 chain `~/data/desi/bao_dr1/mcmc_samples/base.npy`.
+
 ## Likelihood Model
 
 `pyro_model` samples parameters from the prior, computes BAO means, and draws features from a multivariate normal. Means are identical in both modes — `D_H/rd`, `D_M/rd`, `D_V/rd` at each bin's effective redshift. The modes differ only in the **covariance**:
