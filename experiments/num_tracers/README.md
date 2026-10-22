@@ -137,6 +137,7 @@ Each entry under `parameters` defines a `distribution` (type + bounds), optional
 | `prior_args_small.yaml` | Narrowed ranges for fast tests |
 | `prior_args_shapefit.yaml` | `analysis: shapefit`; omega-basis cosmology matching the emulators' training box, plus the `omega_m_domain` constraint |
 | `prior_args_posterior*.yaml` | Posterior-informed priors, per model/dataset |
+| `prior_args_dr1_tempered_<model>.yaml` | `prior_args_hrdrag.yaml`'s box and constraints plus a `PriorFlow` fit to the tempered DESI DR1 BAO posterior (see below), one per BAO model |
 
 ### Flow priors (`prior_flow_path`)
 
@@ -148,6 +149,22 @@ Each entry under `parameters` defines a `distribution` (type + bounds), optional
 ### Tempered DESI DR1 posterior (`prior.py`)
 
 `python -m bedcosmo.num_tracers.prior --cosmo-model <model> --temperature T --out <file>.npz` samples `π_box(θ) · L_DR1(θ)^(1/T)`. `π_box` is a `prior_args` YAML's box and constraints (default `prior_args.yaml`, the bounds of the cobaya configs in `cobaya/mcmc/`). `L_DR1` is the Gaussian likelihood of DESI's compressed DR1 BAO data (`~/data/desi/bao_dr1/desi_2024_gaussian_bao_ALL_GCcomb_{mean,cov}.txt`, cobaya's `desi_bao_all`), computed with bedcosmo's distances at the cobaya configs' fixed h = 0.6736, N_eff = 3.044 and Σm_ν = 0.06 eV. Near-Gaussian widths scale by √T. The sampler is a vectorized affine-invariant ensemble MCMC. The second half of the run is kept and thinned by the autocorrelation time, and the run fails if that half spans fewer than 50 autocorrelation times. The `.npz` holds `samples` (N, D) and a JSON `metadata` string: T, the file hashes, the sampler diagnostics and the bedcosmo commit. At T = 1, `base` reproduces DESI 2024 VI (Ωm = 0.2947 ± 0.0147, h·r_d = 101.89 ± 1.28 Mpc) and the local DR1 chain `~/data/desi/bao_dr1/mcmc_samples/base.npy`.
+
+`python -m bedcosmo.num_tracers.fit_prior_flow <samples>.npz --prior-args prior_args_hrdrag.yaml` fits a `PriorFlow` to those samples in the target YAML's raw units, rescaling `hrdrag` between multipliers, and writes `<samples>_flow.pt` with a validation triangle plot. It holds 20% of the samples out of the fit and records three checks in the flow's `meta["validation"]`:
+
+- **Marginals:** the KS statistic per parameter, flow draws against held-out samples.
+- **Calibration:** the effective sample size fraction of importance weights `π_box · L^(1/T) / q_flow`, which is 1 for a perfect flow.
+- **Leakage:** the flow's mass outside the box and constraints.
+
+The `prior_args_dr1_tempered_<model>.yaml` files point at flows in `$SCRATCH/bedcosmo/num_tracers/priors/dr1_tempered/`, so they work only where those exist. Each model's T keeps the prior shaped by DR1 rather than by the box, with little mass below Ωm = 0.1:
+
+| Model | T | Ωm, h·r_d widths vs DR1 | Limited by |
+|---|---|---|---|
+| `base` | 16 | ~4× | nothing within T ≤ 25 |
+| `base_w` | 4 | ~2.2× | the Ωm–w0–h·r_d ridge toward low Ωm |
+| `base_omegak` | 4 | ~1.8× | Ωk filling its ±0.3 box |
+| `base_w_wa` | 2 | ~1.3× | wa is the box at any T; low-Ωm ridge |
+| `base_omegak_w_wa` | 2 | ~1.4× | as `base_w_wa`, and Ωk's box |
 
 ## Likelihood Model
 
