@@ -7,9 +7,6 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from astropy.io import fits
-from scipy.ndimage import median_filter
-from scipy.optimize import least_squares
-from speclite import filters as speclite_filters
 
 from ..desi_data import get_local_desi_paths
 from ..paths import DEFAULT_PROGRAM, DEFAULT_SPECPROD, DEFAULT_SURVEY
@@ -203,188 +200,13 @@ def trim_spectrum_edges(
                 endpoints[side] = int(index)
                 break
         else:
-            # A spectrum with no supported endpoint cannot seed extrapolation.
+            # A spectrum with no supported endpoint fails the exterior quality cut.
             return np.zeros_like(values), np.zeros_like(ivar)
 
     keep = (np.arange(len(wave)) >= endpoints[0]) & (np.arange(len(wave)) <= endpoints[1])
     values[~keep] = 0
     ivar[~keep] = 0
     return values, ivar
-
-
-def extrapolate_spectrum_edges(
-    rest_wave: np.ndarray,
-    flux: np.ndarray,
-    weights: np.ndarray,
-    *,
-    window_aa: float = 100.0,
-    continuum_window_aa: float = 500.0,
-    median_width: int = 5,
-    method: str = "constant",
-    bounds: tuple[float, float] | None = None,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Extend spectrum edges with a constant level or robust broadband continuum."""
-    wave = np.asarray(rest_wave, dtype=float)
-    values = np.asarray(flux, dtype=float).copy()
-    ivar = np.asarray(weights, dtype=float).copy()
-    if wave.ndim != 1 or values.shape != wave.shape or ivar.shape != wave.shape:
-        raise ValueError("Wavelength, flux, and weight arrays must be matching 1D arrays")
-    if not np.all(np.isfinite(wave)) or np.any(wave <= 0) or np.any(np.diff(wave) <= 0):
-        raise ValueError("Wavelengths must be finite, positive, and strictly increasing")
-    if not np.isfinite(window_aa) or window_aa <= 0:
-        raise ValueError("window_aa must be finite and positive")
-    if not np.isfinite(continuum_window_aa) or continuum_window_aa <= 0:
-        raise ValueError("continuum_window_aa must be finite and positive")
-    if median_width <= 0 or median_width % 2 == 0:
-        raise ValueError("median_width must be a positive odd integer")
-    if method not in {"constant", "linear", "powerlaw"}:
-        raise ValueError("method must be 'constant', 'linear', or 'powerlaw'")
-    allowed = np.ones(len(wave), dtype=bool)
-    if bounds is not None:
-        lower, upper = bounds
-        if not np.isfinite(bounds).all() or not 0 < lower < upper:
-            raise ValueError("Extrapolation bounds must be finite, positive and ordered")
-        if lower < wave[0] or upper > wave[-1]:
-            raise ValueError("Wavelength grid does not cover requested extrapolation bounds")
-        # Retain one bracketing grid center outside each exact filter endpoint
-        # so interpolation covers the full tabulated bandpass.
-        first = max(0, np.searchsorted(wave, lower, side="right") - 1)
-        last = min(len(wave) - 1, np.searchsorted(wave, upper, side="left"))
-        allowed[:first] = False
-        allowed[last + 1 :] = False
-    observed = np.flatnonzero((ivar > 0) & np.isfinite(ivar) & np.isfinite(values))
-    if len(observed) < 2:
-        return values, ivar
-
-    blue = observed[0]
-    red = observed[-1]
-    available_width = len(observed) if len(observed) % 2 else len(observed) - 1
-    filter_width = min(median_width, available_width)
-    smoothed = median_filter(values[observed], size=filter_width, mode="reflect")
-    edge_window = window_aa if method == "constant" else continuum_window_aa
-    edge_windows = (
-        wave[observed] <= wave[blue] + edge_window,
-        wave[observed] >= wave[red] - edge_window,
-    )
-    for indices, target in zip(edge_windows, (blue, red), strict=True):
-        tail = allowed & ((wave < wave[blue]) if target == blue else (wave > wave[red]))
-        if not np.any(tail):
-            continue
-        edge_wave = wave[observed[indices]]
-        edge_flux = smoothed[indices]
-        value = float(np.mean(edge_flux))
-        weight = float(np.median(ivar[observed[indices]])) * 0.1
-        if method == "powerlaw":
-            values[tail] = _extrapolate_powerlaw(
-                edge_wave,
-                values[observed[indices]],
-                ivar[observed[indices]],
-                wave[target],
-                wave[tail],
-            )
-        elif method == "constant" or len(edge_wave) < 2:
-            values[tail] = value
-        else:
-            values[tail] = _fit_edge_continuum(
-                edge_wave,
-                edge_flux,
-                ivar[observed[indices]],
-                wave[target],
-                direction=1 if target == blue else -1,
-                fit_window_aa=continuum_window_aa,
-            )(wave[tail])
-        ivar[tail] = weight
-    return values, ivar
-
-
-def _extrapolate_powerlaw(
-    wave: np.ndarray,
-    flux: np.ndarray,
-    ivar: np.ndarray,
-    edge_wave: float,
-    target_wave: np.ndarray,
-) -> np.ndarray:
-    """Fit A (lambda / lambda_edge)**alpha in flux space, retaining signed data."""
-    if len(wave) < 3:
-        raise ValueError("Power-law extrapolation requires at least three measured edge bins")
-    log_ratio = np.log(wave / edge_wave)
-    root_weight = np.sqrt(ivar)
-    initial_amplitude = max(float(np.median(flux)), float(np.median(1 / root_weight)))
-
-    def residual(parameters):
-        prediction = np.exp(parameters[0] + parameters[1] * log_ratio)
-        return (prediction - flux) * root_weight
-
-    result = least_squares(
-        residual,
-        [np.log(initial_amplitude), 0.0],
-        loss="soft_l1",
-        max_nfev=2000,
-    )
-    if not result.success:
-        raise ValueError(f"Power-law continuum fit failed: {result.message}")
-    prediction = np.exp(result.x[0] + result.x[1] * np.log(target_wave / edge_wave))
-    if not np.all(np.isfinite(prediction)) or np.any(prediction <= 0):
-        raise ValueError("Power-law extrapolation produced nonfinite or nonpositive flux")
-    return prediction
-
-
-def _fit_edge_continuum(
-    wave: np.ndarray,
-    flux: np.ndarray,
-    weights: np.ndarray,
-    edge_wave: float,
-    *,
-    direction: int,
-    fit_window_aa: float = 500.0,
-    bin_width_aa: float = 50.0,
-):
-    """Fit a clipped weighted line to median-flux bins near one spectrum edge."""
-    distance = direction * (wave - edge_wave)
-    inside = (distance >= 0) & (distance <= fit_window_aa)
-    distance, flux, weights = distance[inside], flux[inside], weights[inside]
-    bin_index = np.floor(distance / bin_width_aa).astype(int)
-    centers, levels, bin_weights = [], [], []
-    for index in np.unique(bin_index):
-        select = bin_index == index
-        centers.append(float(np.median(distance[select])))
-        levels.append(float(np.median(flux[select])))
-        bin_weights.append(float(np.median(weights[select])))
-    centers = np.asarray(centers)
-    levels = np.asarray(levels)
-    bin_weights = np.asarray(bin_weights)
-    if len(centers) < 3:
-        slope, intercept = np.polyfit(distance, flux, 1)
-        return lambda target: slope * (direction * (target - edge_wave)) + intercept
-
-    design = np.column_stack((np.ones(len(centers)), centers / fit_window_aa))
-    relative_weights = bin_weights / np.median(bin_weights)
-    keep = np.ones(len(centers), dtype=bool)
-    for _ in range(5):
-        root_weight = np.sqrt(relative_weights[keep])
-        coefficients = np.linalg.lstsq(
-            design[keep] * root_weight[:, None], levels[keep] * root_weight, rcond=None
-        )[0]
-        standardized_residual = (levels - design @ coefficients) * np.sqrt(relative_weights)
-        residual_center = float(np.median(standardized_residual[keep]))
-        residual_scale = 1.4826 * float(
-            np.median(np.abs(standardized_residual[keep] - residual_center))
-        )
-        if residual_scale == 0:
-            break
-        updated = np.abs(standardized_residual - residual_center) <= 3.5 * residual_scale
-        if np.count_nonzero(updated) < 3 or np.array_equal(updated, keep):
-            break
-        keep = updated
-
-    def continuum(target: np.ndarray) -> np.ndarray:
-        target_distance = direction * (np.asarray(target) - edge_wave)
-        target_design = np.column_stack(
-            (np.ones(len(target_distance)), target_distance / fit_window_aa)
-        )
-        return target_design @ coefficients
-
-    return continuum
 
 
 def derive_rest_frame_grid(
@@ -395,15 +217,12 @@ def derive_rest_frame_grid(
     wave_min: float | None = None,
     wave_max: float | None = None,
 ) -> np.ndarray:
-    """Cover selected DESI pixels and full LSST bandpasses at every selected redshift."""
+    """Cover selected valid DESI pixels without imposing LSST wavelength limits."""
     if not np.isfinite(wave_step) or wave_step <= 0:
         raise ValueError("wave_step must be finite and positive")
     redshift = manifest["z"].to_numpy(float)
     if not len(redshift) or not np.all(np.isfinite(redshift)) or np.any(redshift < 0):
         raise ValueError("Grid construction requires finite nonnegative galaxy redshifts")
-    filters = speclite_filters.load_filters("lsst2023-*")
-    lsst_lower = min(band.wavelength.min() for band in filters) / (1 + redshift.max())
-    lsst_upper = max(band.wavelength.max() for band in filters) / (1 + redshift.min())
     lower, upper = np.inf, -np.inf
     for healpix, patch in manifest.groupby("healpix", sort=True):
         coadd_path, _ = get_local_desi_paths(
@@ -434,17 +253,10 @@ def derive_rest_frame_grid(
                         upper = max(upper, float(rest.max()))
     if not np.isfinite(lower) or not np.isfinite(upper):
         raise ValueError("No valid DESI pixels available to derive wavelength grid")
-    lower = min(lower, lsst_lower)
-    upper = max(upper, lsst_upper)
     lower = np.floor(lower / wave_step) * wave_step if wave_min is None else wave_min
     upper = np.ceil(upper / wave_step) * wave_step if wave_max is None else wave_max
     if not np.isfinite(lower) or not np.isfinite(upper) or lower <= 0 or upper <= lower:
         raise ValueError("Candidate wavelength limits must be finite, positive and ordered")
-    if lower > lsst_lower or upper < lsst_upper:
-        raise ValueError(
-            "Wavelength overrides exclude LSST coverage for selected redshifts: "
-            f"require wave_min <= {lsst_lower:g} and wave_max >= {lsst_upper:g} Angstrom"
-        )
     # Round the last bin outward even when explicit bounds are not step-aligned.
     count = int(np.ceil((upper - lower) / wave_step))
     return lower + wave_step * np.arange(count + 1)
@@ -459,24 +271,11 @@ def build_rest_frame_matrix(
     survey: str = DEFAULT_SURVEY,
     program: str = DEFAULT_PROGRAM,
     min_good_pixels: int = 100,
-    edge_extrapolation: str = "constant",
-    extrapolation_bounds: np.ndarray | None = None,
 ) -> tuple[pd.DataFrame, np.ndarray, np.ndarray, np.ndarray]:
     """Read DESI coadds and return flux, relative inverse variance, and scales."""
-    if extrapolation_bounds is not None:
-        extrapolation_bounds = np.asarray(extrapolation_bounds, dtype=float)
-        if extrapolation_bounds.shape != (len(manifest), 2):
-            raise ValueError("Extrapolation bounds must have shape (n_spectra, 2)")
-        if not np.isfinite(extrapolation_bounds).all() or np.any(
-            extrapolation_bounds[:, 0] >= extrapolation_bounds[:, 1]
-        ):
-            raise ValueError("Extrapolation bounds must be finite and ordered")
     flux_matrix = np.zeros((len(manifest), len(rest_wave)), dtype=np.float32)
     weight_matrix = np.zeros_like(flux_matrix)
     observed_pixel_count = np.zeros(len(manifest), dtype=int)
-    filters = speclite_filters.load_filters("lsst2023-*")
-    lsst_blue = min(band.wavelength.min() for band in filters)
-    lsst_red = max(band.wavelength.max() for band in filters)
     scales = np.full(len(manifest), np.nan, dtype=float)
     found = np.zeros(len(manifest), dtype=bool)
 
@@ -512,17 +311,6 @@ def build_rest_frame_matrix(
                 )
                 values, weights = trim_spectrum_edges(rest_wave, values, weights, float(item.z))
                 observed_pixel_count[matrix_row] = np.count_nonzero(weights > 0)
-                values, weights = extrapolate_spectrum_edges(
-                    rest_wave,
-                    values,
-                    weights,
-                    method=edge_extrapolation,
-                    bounds=(
-                        (lsst_blue / (1 + item.z), lsst_red / (1 + item.z))
-                        if extrapolation_bounds is None
-                        else extrapolation_bounds[matrix_row]
-                    ),
-                )
                 flux_matrix[matrix_row] = values
                 weight_matrix[matrix_row] = weights
                 scales[matrix_row] = scale

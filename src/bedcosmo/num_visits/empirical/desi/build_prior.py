@@ -19,7 +19,7 @@ from ..diagnostics_plots import plot_template_redshifts
 from ..paths import (
     BUILD_PROVENANCE_FILENAME,
     SED_PRIOR_KDE_NATIVE_FILENAME,
-    get_num_visits_scratch,
+    get_desi_training_data_dir,
     get_prior_build_dir,
 )
 from ..provenance import write_provenance
@@ -31,7 +31,8 @@ from .evaluate_factorization_methods import (
     nearly_nmf_package_metadata,
     shared_initialization,
 )
-from .support import lsst_required_mask, lsst_support_limits, select_wavelength_support
+from .extrapolation import extend_basis_for_lsst, plot_template_extrapolation
+from .support import lsst_support_limits, select_wavelength_support
 from .weighted_nmf import infer_coefficients
 
 KDE_MODULE = "bedcosmo.num_visits.empirical.fit_sed_prior_kde"
@@ -59,6 +60,41 @@ def resolve_prior_redshift_limits(wave, prior_z_min=None, prior_z_max=None):
             f"[{supported_min:g}, {supported_max:g}]"
         )
     return lower, upper
+
+
+def estimate_template_ivar(coefficients, weights):
+    """Conditional linearized template precision, holding galaxy coefficients fixed.
+
+    For wavelength j, Cov(B[:, j]) = inv(C.T @ diag(ivar[:, j]) @ C).
+    Component correlations enter the inversion. Null-space components receive
+    zero precision rather than the spuriously finite variance of a pseudoinverse.
+    """
+    coefficients = np.asarray(coefficients, dtype=float)
+    weights = np.asarray(weights, dtype=float)
+    if coefficients.ndim != 2 or weights.ndim != 2 or len(coefficients) != len(weights):
+        raise ValueError("Coefficients and weights must be 2D with matching galaxy rows")
+    if not np.isfinite(coefficients).all() or not np.isfinite(weights).all():
+        raise ValueError("Coefficients and measurement weights must be finite")
+    if np.any(coefficients < 0) or np.any(weights < 0):
+        raise ValueError("Coefficients and measurement weights must be nonnegative")
+    scales = np.sqrt(np.sum(coefficients**2, axis=0))
+    scales[scales == 0] = 1.0
+    design = coefficients / scales
+    information = np.einsum("nk,nl,nj->jkl", design, design, weights, optimize=True)
+    eigenvalues, vectors = np.linalg.eigh(information)
+    constrained = eigenvalues > eigenvalues[:, -1:] * 1e-12
+    inverse = np.divide(1.0, eigenvalues, out=np.zeros_like(eigenvalues), where=constrained)
+    variances = np.sum(vectors**2 * inverse[:, None, :], axis=2)
+    null_fraction = np.sum(vectors**2 * (~constrained)[:, None, :], axis=2)
+    precision = np.divide(
+        scales[None, :] ** 2,
+        variances,
+        out=np.zeros_like(variances),
+        where=(variances > 0) & (null_fraction < 1e-10),
+    )
+    if not np.isfinite(precision).all():
+        raise ValueError("Template uncertainty estimation produced nonfinite precision")
+    return precision.T
 
 
 def normalize_basis_for_export(
@@ -232,25 +268,34 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help=(
             "Rest-frame matrix (default: "
-            "<num_visits>/desi_training_data_extrapolated/desi_rest_frame_training_matrix.npz)."
+            "<num_visits>/desi_training_data/desi_rest_frame_training_matrix.npz)."
         ),
     )
     parser.add_argument("--rank", type=int, default=8)
-    parser.add_argument("--build-name", default="desi8",
-                        help="Build name below num_visits/empirical_prior (not a path)")
+    parser.add_argument(
+        "--build-name",
+        default="desi8",
+        help="Build name below num_visits/empirical_prior (not a path)",
+    )
     parser.add_argument("--output-dir", type=Path, default=None)
     parser.add_argument("--template-param", type=Path, default=None)
     parser.add_argument(
         "--prior-z-min",
         type=float,
         default=None,
-        help="Override lower prior redshift bound; default uses the saved requested range",
+        help="Override lower prior redshift bound; default uses the training population range (saved request for --prior-only)",
     )
     parser.add_argument(
         "--prior-z-max",
         type=float,
         default=None,
-        help="Override upper prior redshift bound; default uses the saved requested range",
+        help="Override upper prior redshift bound; default uses the training population range (saved request for --prior-only)",
+    )
+    parser.add_argument(
+        "--edge-extrapolation",
+        choices=("constant", "powerlaw"),
+        default="constant",
+        help="Extend finished templates to prior LSST demand; powerlaw fixes the local 100 Å IVAR-weighted amplitude and fits a slope over 500 Å",
     )
     parser.add_argument("--max-chi2-dof", type=float, default=1.5)
     parser.add_argument("--norm-min", type=float, default=3600.0)
@@ -314,7 +359,8 @@ def finish_prior_build(args, output_dir, weights_table):
     """Write runtime config and fit KDEs for either a fresh or reused basis."""
     weights_path = output_dir / "desi_eazy_empirical_weights.csv"
     provenance_path = output_dir / BUILD_PROVENANCE_FILENAME
-    template = json.loads(provenance_path.read_text())["template"]
+    metadata = json.loads(provenance_path.read_text())
+    template = metadata["template"]
     prior_args_path = write_prior_args(
         output_dir / "prior_args.yaml",
         prior_dir=output_dir,
@@ -331,6 +377,15 @@ def finish_prior_build(args, output_dir, weights_table):
     figure.savefig(plot_path, dpi=180)
     plt.close(figure)
     print(f"Wrote template redshift diagnostic to {plot_path}")
+    figure = plot_template_extrapolation(output_dir)
+    if figure is not None:
+        for extension in ("png", "pdf"):
+            plot_path = output_dir / f"template_extrapolation.{extension}"
+            figure.savefig(plot_path, dpi=180)
+            metadata["outputs"][f"template_extrapolation_{extension}"] = str(plot_path)
+            print(f"Wrote template extrapolation diagnostic to {plot_path}")
+        plt.close(figure)
+        write_provenance(provenance_path, metadata)
     if args.skip_kde:
         return
 
@@ -368,11 +423,17 @@ def rebuild_prior(args, output_dir):
     if training_matrix_sha256(matrix_path) != expected_digest:
         raise ValueError("Training-matrix fingerprint does not match saved coefficients")
     with np.load(output_dir / "desi_basis.npz") as saved:
+        if not {"export_wave_rest_aa", "export_basis"}.issubset(saved.files):
+            raise ValueError(
+                "Saved basis predates template-stage extrapolation; run a new full build"
+            )
         wave = saved["wave_rest_aa"]
         basis = saved["basis"]
         coefficients = saved["coefficients"]
         targetids = saved["targetid"]
         support = saved["support_mask"]
+        exported_wave_saved = saved["export_wave_rest_aa"]
+        exported_basis_saved = saved["export_basis"]
     with np.load(matrix_path) as data:
         if not np.array_equal(targetids, data["targetid"]):
             raise ValueError("Training-matrix target IDs/order do not match saved coefficients")
@@ -390,15 +451,15 @@ def rebuild_prior(args, output_dir):
     paths = read_template_param(template_dir / template_param)
     if len(paths) != basis.shape[0] or coefficients.shape != (len(manifest), basis.shape[0]):
         raise ValueError("Saved template/basis/coefficient dimensions do not match")
-    for component, filename in zip(basis, paths):
+    for component, filename in zip(exported_basis_saved, paths):
         exported_wave, exported_flux = load_two_column_template(template_dir / filename)
-        if not np.allclose(exported_wave, wave, rtol=0, atol=1e-7) or not np.allclose(
-            exported_flux, component, rtol=1e-10, atol=1e-15
-        ):
+        if not np.allclose(
+            exported_wave, exported_wave_saved, rtol=0, atol=1e-7
+        ) or not np.allclose(exported_flux, component, rtol=1e-10, atol=1e-15):
             raise ValueError("Exported template bank does not match saved basis")
     rank = basis.shape[0]
     prior_z_min, prior_z_max = resolve_prior_redshift_limits(
-        wave,
+        exported_wave_saved,
         metadata["selection"]["prior_z_min"] if args.prior_z_min is None else args.prior_z_min,
         metadata["selection"]["prior_z_max"] if args.prior_z_max is None else args.prior_z_max,
     )
@@ -444,8 +505,12 @@ def rebuild_prior(args, output_dir):
 
 def main() -> None:
     args = parse_args()
-    if (not args.build_name or args.build_name in {".", ".."}
-            or "/" in args.build_name or "\\" in args.build_name):
+    if (
+        not args.build_name
+        or args.build_name in {".", ".."}
+        or "/" in args.build_name
+        or "\\" in args.build_name
+    ):
         raise ValueError("--build-name must be a single directory name; use --output-dir for paths")
     output_dir = (
         args.output_dir.expanduser().resolve()
@@ -458,11 +523,7 @@ def main() -> None:
     args.training_matrix = (
         args.training_matrix.expanduser().resolve()
         if args.training_matrix is not None
-        else (
-            get_num_visits_scratch()
-            / "desi_training_data_extrapolated"
-            / "desi_rest_frame_training_matrix.npz"
-        )
+        else (get_desi_training_data_dir() / "desi_rest_frame_training_matrix.npz")
     )
     if args.rank < 2:
         raise ValueError("The ILR prior requires a basis rank of at least two")
@@ -479,6 +540,10 @@ def main() -> None:
 
     args.training_matrix_sha256 = training_matrix_sha256(args.training_matrix)
     data = np.load(args.training_matrix)
+    if "coverage_kind" not in data.files or data["coverage_kind"].item() != "measured":
+        raise ValueError(
+            "NMF requires a measured-only matrix; regenerate it with desi.build_matrix"
+        )
     manifest = pd.DataFrame(
         {
             "targetid": data["targetid"].astype(np.int64),
@@ -490,15 +555,16 @@ def main() -> None:
     flux_all = data["flux"].astype(float)
     weights_all = data["relative_ivar"].astype(float)
     normalization_scale = data["normalization_scale"].astype(float)
-    requested_bounds = data["prior_redshift_bounds"]
     if args.prior_z_min is None:
-        args.prior_z_min = float(requested_bounds[0])
+        args.prior_z_min = float(manifest["z"].min())
     if args.prior_z_max is None:
-        args.prior_z_max = float(requested_bounds[1])
-
-    args.prior_z_min, args.prior_z_max = resolve_prior_redshift_limits(
-        wave_all, args.prior_z_min, args.prior_z_max
-    )
+        args.prior_z_max = float(manifest["z"].max())
+    if not np.isfinite([args.prior_z_min, args.prior_z_max]).all() or not (
+        0 <= args.prior_z_min < args.prior_z_max
+    ):
+        raise ValueError("Prior redshift bounds must be finite, nonnegative and ordered")
+    if not manifest["z"].between(args.prior_z_min, args.prior_z_max).any():
+        raise ValueError("No training galaxies lie in the requested prior interval")
     rng = np.random.default_rng(args.split_seed)
     permutation = rng.permutation(len(manifest))
     train_stop = int(args.train_fraction * len(manifest))
@@ -512,15 +578,15 @@ def main() -> None:
         observations_per_component=args.observations_per_component,
         minimum_contributors=args.minimum_wavelength_contributors,
         support_rank=args.wavelength_support_rank,
-        required_mask=lsst_required_mask(wave_all, np.array([args.prior_z_min, args.prior_z_max])),
     )
     if np.count_nonzero(support) < 20:
         raise ValueError(f"Too few wavelength bins have at least {required} contributors")
     wave = wave_all[support]
-    args.prior_z_min, args.prior_z_max = resolve_prior_redshift_limits(
-        wave, args.prior_z_min, args.prior_z_max
-    )
-    print(f"LSST-supported prior redshift cut: {args.prior_z_min:.6f}–{args.prior_z_max:.6f}")
+    if not np.isfinite([args.norm_min, args.norm_max]).all() or not (
+        wave[0] <= args.norm_min < args.norm_max <= wave[-1]
+    ):
+        raise ValueError("Normalization bounds must lie within the measured NMF support")
+    print(f"Requested prior redshift range: {args.prior_z_min:.6f}–{args.prior_z_max:.6f}")
     flux = flux_all[:, support]
     weights = weights_all[:, support]
     require_compatible_checkpoints(output_dir, args, wave, required)
@@ -643,12 +709,21 @@ def main() -> None:
         norm_min=args.norm_min,
         norm_max=args.norm_max,
     )
-    # Re-solve once against the exact exported bank; this is also insensitive to
+    # Re-solve against the normalized learned bank; this is also insensitive to
     # the arbitrary scale convention used internally by Nearly-NMF.
     all_coefficients = infer_coefficients(flux, weights, final_basis)
 
+    template_ivar = estimate_template_ivar(all_coefficients, weights)
+    export_wave, export_basis = extend_basis_for_lsst(
+        wave,
+        final_basis,
+        template_ivar,
+        [args.prior_z_min, args.prior_z_max],
+        method=args.edge_extrapolation,
+    )
+    resolve_prior_redshift_limits(export_wave, args.prior_z_min, args.prior_z_max)
     param_path, component_paths = write_template_bank(
-        template_dir, relative_param, wave, final_basis
+        template_dir, relative_param, export_wave, export_basis
     )
     weights_table = make_prior_table(
         manifest,
@@ -661,12 +736,19 @@ def main() -> None:
         prior_z_max=args.prior_z_max,
         max_chi2_dof=args.max_chi2_dof,
     )
+    if not weights_table["quality_pass"].any():
+        raise ValueError(
+            "No quality-passing measured spectra remain in the requested prior interval"
+        )
     weights_path = output_dir / "desi_eazy_empirical_weights.csv"
     weights_table.to_csv(weights_path, index=False)
     np.savez_compressed(
         output_dir / "desi_basis.npz",
         wave_rest_aa=wave,
         basis=final_basis,
+        estimated_template_ivar=template_ivar,
+        export_wave_rest_aa=export_wave,
+        export_basis=export_basis,
         coefficients=all_coefficients,
         targetid=manifest["targetid"].to_numpy(np.int64),
         support_mask=support,
@@ -689,18 +771,40 @@ def main() -> None:
                     "wave_max_aa": args.norm_max,
                 },
                 "component_integrals_before_normalization": component_integrals.tolist(),
-                "wave_min_aa": float(wave.min()),
-                "wave_max_aa": float(wave.max()),
+                "wave_min_aa": float(export_wave.min()),
+                "wave_max_aa": float(export_wave.max()),
+                "learned_wave_min_aa": float(wave.min()),
+                "learned_wave_max_aa": float(wave.max()),
+                "edge_extrapolation": args.edge_extrapolation,
+                "edge_amplitude_window_rest_aa": 100.0,
+                "edge_slope_window_rest_aa": (
+                    500.0 if args.edge_extrapolation == "powerlaw" else None
+                ),
+                "edge_fit_weighting": "estimated template IVAR (conditional on fitted galaxy coefficients)",
+                "uncertainty": {
+                    "saved_array": "estimated_template_ivar",
+                    "method": "conditional linearized weighted least squares",
+                    "formula": "estimated_template_ivar[k,j] = 1 / diag(inv(C.T @ diag(measurement_ivar[:,j]) @ C))[k]",
+                    "conditions": "fitted normalized galaxy coefficients held fixed; component correlations included; NMF positivity constraints ignored",
+                    "excludes": "coefficient-estimation uncertainty, NMF solution variability, spectral model mismatch and extrapolation uncertainty",
+                    "rank_tolerance": 1e-12,
+                    "unidentifiable_components": "zero inverse variance",
+                },
+                "edge_extrapolation_stage": "after NMF; synthetic values never enter factorization or coefficient fits",
+                "blue_extension_aa": float(wave.min() - export_wave.min()),
+                "red_extension_aa": float(export_wave.max() - wave.max()),
             },
             "selection": {
                 "population": "all quality-selected DESI spectra in training matrix",
                 "n_total": len(manifest),
+                "training_z_min": float(manifest["z"].min()),
+                "training_z_max": float(manifest["z"].max()),
                 "n_supported_redshift": len(weights_table),
                 "n_prior_quality_pass": int(weights_table["quality_pass"].sum()),
                 "prior_z_min": args.prior_z_min,
                 "prior_z_max": args.prior_z_max,
                 "max_chi2_dof": args.max_chi2_dof,
-                "reason": "complete LSST ugrizy support without endpoint extrapolation",
+                "reason": "requested prior range covered by exported templates after endpoint extrapolation",
             },
             "factorization": {
                 "method": "Nearly-NMF",
@@ -714,7 +818,7 @@ def main() -> None:
                 "polish_updates": polish_updates,
                 "full_refit_updates": full_updates,
                 "required_wavelength_contributors": required,
-                "wavelength_support_policy": "require the contributor threshold throughout requested-prior LSST demand; use the selected wavelength or redshift support extensions without narrowing the prior range",
+                "wavelength_support_policy": "fit only the longest contiguous interval meeting the measured contributor threshold; extrapolate finished templates to requested-prior LSST demand",
                 "minimum_retained_training_contributors": int(contributors[support].min()),
                 "test_metrics_before_full_refit": test_metrics,
                 **nearly_nmf_package_metadata(),

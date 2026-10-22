@@ -18,6 +18,14 @@ Runtime selection discovers direct-DESI builds from their
 builds such as `desi4`, `desi6`, and `desi8` can be selected without adding
 their names to the package.
 KDE, flow, simplex, template-loading, and runtime code remains shared here.
+Direct-DESI matrices now contain measured pixels only. Training redshift cuts
+(`desi.build_matrix --z-min/--z-max`) are independent of the target prior range
+(`desi.build_prior --prior-z-min/--prior-z-max`). NMF learns on sufficiently
+measured wavelength support; only finished templates are extrapolated to LSST
+coverage. See the [DESI build guide](desi/README.md) for commands and provenance.
+When template edges are extended, DESI builds also save `template_extrapolation.png`
+and `.pdf` with edge close-ups and uncertainty bands, including with `--skip-kde`.
+
 
 **Production parameterization:** isometric log-ratios (ILR) — the centered
 log-ratios \(f_k^{\mathrm{clr}} = \log a_k -
@@ -90,6 +98,44 @@ bank to `num_visits/empirical_prior/desi8/templates/`. See
 [`desi/README.md`](desi/README.md) for the split, support, factorization, and
 held-out evaluation details. Neither source builder trains the prior flow;
 that is the separate [prior-flow step](#step-3-prior-normalizing-flow-prior_flowpy).
+
+### DESI extrapolation and performance diagnostics
+
+The current implementation lives in [`desi/extrapolation.py`](desi/extrapolation.py).
+NMF and coefficient fitting use measured data. Finished templates are then
+extended to cover LSST over the requested prior redshift range; constant is
+the production default, using the estimated-template-IVAR-weighted mean of
+the nearest 100 rest-frame Å. The
+[DESI implementation map](desi/README.md#implementation-map) lists the source
+files, saved arrays, normalization and conditional template-IVAR calculation.
+
+After completing a build, regenerate actual template-extension overlays and
+evaluate constant against anchored power-law windows with:
+
+```bash
+python -m bedcosmo.num_visits.empirical.desi.extrapolation extend \
+  --prior-dir "$SCRATCH/bedcosmo/num_visits/empirical_prior/desi8" \
+  --output-dir ./desi_extrapolation_comparison \
+  --powerlaw-windows 500 2000
+
+python -m bedcosmo.num_visits.empirical.desi.extrapolation response-compare \
+  --prior-dir "$SCRATCH/bedcosmo/num_visits/empirical_prior/desi8" \
+  --output-dir ./desi_extrapolation_comparison \
+  --response-fractions 0.1 0.25 0.5 \
+  --powerlaw-windows 500 2000
+
+python -m bedcosmo.num_visits.empirical.desi.extrapolation response-plot \
+  --output-dir ./desi_extrapolation_comparison
+```
+
+`extend` refits actual tails without hiding learned data. `response-compare`
+hides known template values in the blue u/red y wings and measures the effect
+on whole-band AB magnitudes, using identical prior draws for each method.
+`response-plot` redraws saved evaluation results without fitting or sampling.
+These commands preserve the source build and write banks, paired errors,
+summaries, provenance and PNG/PDF plots to the comparison directory. See the
+[evaluation protocol and output list](desi/README.md#evaluate-hidden-uy-filter-response)
+for band-specific coverage, failure accounting and limitations.
 
 ### Resume / partial runs
 
@@ -177,7 +223,7 @@ that the parameter file exists under that build's `templates/` directory.
 | Spectral template banks | `num_visits/empirical_prior/<source>/templates/` |
 | DESI tiny DR1 | `desi/tiny_dr1/` |
 | Empirical-prior variants | `num_visits/empirical_prior/<source>/` (including `desi4`, `desi6`, `desi8`, EAZY, and reduced EAZY builds) |
-| Shared DESI training data | `num_visits/desi_training_data/` |
+| Shared DESI training data (measured-only; 5% IVAR exterior quality cut) | `num_visits/desi_training_data/` |
 | **Configured prior build** | `num_visits/empirical_prior/desi8/` |
 | Per-patch fits | `num_visits/empirical_prior/eazy12/healpix/hp{HEALPIX}/` |
 | Combined weights | `num_visits/empirical_prior/eazy12/desi_eazy_empirical_weights.csv` |

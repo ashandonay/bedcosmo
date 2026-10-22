@@ -20,6 +20,7 @@ from bedcosmo.num_visits.empirical.desi.evaluate_factorization_methods import (
     fit_anls,
     shared_initialization,
 )
+from bedcosmo.num_visits.empirical.desi.extrapolation import extrapolate_edge
 from bedcosmo.num_visits.empirical.desi.support import (
     largest_contiguous_region,
     lsst_demand_weighted_coverage,
@@ -29,7 +30,6 @@ from bedcosmo.num_visits.empirical.desi.training_matrix import (
     bin_rest_frame_spectrum,
     derive_rest_frame_grid,
     discover_desi_manifest,
-    extrapolate_spectrum_edges,
     trim_spectrum_edges,
 )
 from bedcosmo.num_visits.empirical.desi.weighted_nmf import (
@@ -182,85 +182,85 @@ def test_matrix_eligibility_counts_retained_measurements_before_extrapolation(
     assert extended_weights[0, -1] == 0
 
 
-def test_edge_extrapolation_uses_smoothed_100_angstrom_means():
+@pytest.mark.parametrize("side,edge", [("blue", 1100.0), ("red", 1400.0)])
+def test_edge_extrapolation_uses_ivar_weighted_100_angstrom_means(side, edge):
     wave = np.arange(1000.0, 1510.0, 10.0)
-    flux = np.zeros(len(wave))
-    flux[10:41] = 2.0
-    flux[10] = 100.0
-    flux[40] = 50.0
+    flux = np.full(len(wave), 2.0)
+    flux[10], flux[40] = 100.0, 50.0
     weights = np.zeros(len(wave))
     weights[10:41] = 20.0
+    weights[10], weights[40] = 0.02, 0.04
+    targets = np.array([1000.0, edge]) if side == "blue" else np.array([edge, 1500.0])
+    local = (
+        (wave >= edge) & (wave <= edge + 100)
+        if side == "blue"
+        else (wave >= edge - 100) & (wave <= edge)
+    )
+    original_flux, original_weights = flux.copy(), weights.copy()
+    extended = extrapolate_edge(wave, flux, weights, edge, targets, side=side)
+    np.testing.assert_allclose(extended, np.average(flux[local], weights=weights[local]))
+    np.testing.assert_array_equal(flux, original_flux)
+    np.testing.assert_array_equal(weights, original_weights)
 
-    extended, extended_weights = extrapolate_spectrum_edges(wave, flux, weights)
 
-    assert np.all(extended[:10] == pytest.approx(2.0))
-    assert np.all(extended[41:] == pytest.approx(2.0))
-    assert np.all(extended_weights[:10] == pytest.approx(2.0))
-    assert np.all(extended_weights[41:] == pytest.approx(2.0))
-    assert np.all(extended[10:41] == flux[10:41])
-    assert np.all(extended_weights[10:41] == weights[10:41])
-
-
-def test_linear_edge_extrapolation_continues_broadband_slope():
+@pytest.mark.parametrize("side,edge", [("blue", 1200.0), ("red", 1800.0)])
+@pytest.mark.parametrize("window_aa", [500.0, 2000.0])
+def test_powerlaw_uses_same_local_amplitude_as_constant(side, edge, window_aa):
     wave = np.arange(1000.0, 2010.0, 10.0)
-    flux = 2.0 + 0.001 * (wave - 1500.0)
-    weights = np.zeros(len(wave))
-    weights[20:81] = 20.0
-    flux[20] = 100.0
-    flux[80] = 80.0
-
-    extended, _ = extrapolate_spectrum_edges(wave, flux, weights, method="linear")
-
-    continuum = 2.0 + 0.001 * (wave - 1500.0)
-    np.testing.assert_allclose(extended[:20], continuum[:20], atol=0.02)
-    np.testing.assert_allclose(extended[81:], continuum[81:], atol=0.02)
+    flux = 2.0 + 0.003 * (wave - 1500.0)
+    weights = np.full(len(wave), 20.0)
+    # Hidden values must have no influence even if supplied with high weights.
+    hidden = wave < edge if side == "blue" else wave > edge
+    target = np.array([edge - 100, edge]) if side == "blue" else np.array([edge, edge + 100])
+    anchored = extrapolate_edge(
+        wave, flux, weights, edge, target, side=side, method="powerlaw", window_aa=window_aa
+    )
+    constant = extrapolate_edge(wave, flux, weights, edge, np.array([edge]), side=side)
+    assert anchored[1 if side == "blue" else 0] == pytest.approx(constant[0])
+    flux[hidden], weights[hidden] = 1e10, 1e10
+    np.testing.assert_array_equal(
+        anchored,
+        extrapolate_edge(
+            wave, flux, weights, edge, target, side=side, method="powerlaw", window_aa=window_aa
+        ),
+    )
 
 
 @pytest.mark.parametrize("slope", [-4.0, 0.0, 3.0])
-def test_powerlaw_recovers_continuum_with_signed_outliers_and_missing_pixels(slope):
+@pytest.mark.parametrize("side,edge", [("blue", 3600.0), ("red", 9820.0)])
+def test_powerlaw_recovers_continuum_with_signed_outliers_and_missing_pixels(slope, side, edge):
     wave = np.arange(3000.0, 12010.0, 10.0)
     continuum = 2.0 * (wave / 6000.0) ** slope
     flux = continuum.copy()
     measured = (wave >= 3600) & (wave <= 9820)
     weights = np.where(measured, 10000.0, 0.0)
     weights[wave == 6000] = 0.0
-    flux[wave == 3600] = -10.0
-    flux[wave == 9820] = -10.0
-    flux[(wave >= 3800) & (wave <= 3820)] += 20.0
-    original_flux = flux.copy()
-    original_weights = weights.copy()
-
-    extended, extended_weights = extrapolate_spectrum_edges(wave, flux, weights, method="powerlaw")
-
-    np.testing.assert_allclose(extended[~measured], continuum[~measured], rtol=0.05)
-    assert np.all(extended[~measured] > 0)
-    assert np.all(extended_weights[~measured] > 0)
-    assert extended_weights[wave == 6000] == 0
-    np.testing.assert_array_equal(extended[measured], original_flux[measured])
-    np.testing.assert_array_equal(flux, original_flux)
-    np.testing.assert_array_equal(weights, original_weights)
+    distance = wave - edge if side == "blue" else edge - wave
+    # Isolate slope recovery: the only measured anchor sample is exactly at the edge.
+    weights[(distance > 0) & (distance <= 100)] = 0
+    flux[(distance >= 200) & (distance <= 220)] = -10.0
+    flux[(distance >= 300) & (distance <= 320)] += 20.0
+    targets = wave[wave < edge] if side == "blue" else wave[wave > edge]
+    expected = continuum[wave < edge] if side == "blue" else continuum[wave > edge]
+    result = extrapolate_edge(wave, flux, weights, edge, targets, side=side, method="powerlaw")
+    np.testing.assert_allclose(result, expected, rtol=0.05)
 
 
-def test_powerlaw_uses_inverse_variance_with_negative_measurements():
+@pytest.mark.parametrize("side,edge", [("blue", 3600.0), ("red", 9820.0)])
+def test_powerlaw_uses_inverse_variance_with_negative_measurements(side, edge):
     wave = np.arange(3000.0, 12010.0, 10.0)
     continuum = (wave / 6000.0) ** -2.0
     flux = continuum.copy()
     measured = (wave >= 3600) & (wave <= 9820)
     weights = np.where(measured, 1e6, 0.0)
-    noisy = measured & ((wave < 3800) | (wave > 9600))
-    flux[noisy] = -5.0
-    weights[noisy] = 1e-6
-
-    extended, _ = extrapolate_spectrum_edges(wave, flux, weights, method="powerlaw")
-
-    np.testing.assert_allclose(extended[~measured], continuum[~measured], rtol=0.001)
-
-
-def test_matrix_cli_accepts_powerlaw(monkeypatch):
-    from bedcosmo.num_visits.empirical.desi.build_matrix import parse_args
-
-    monkeypatch.setattr("sys.argv", ["build_matrix", "--edge-extrapolation", "powerlaw"])
-    assert parse_args().edge_extrapolation == "powerlaw"
+    distance = wave - edge if side == "blue" else edge - wave
+    # Keep an exact, high-precision edge anchor among low-precision negative samples.
+    noisy = measured & (distance > 0) & (distance <= 200)
+    flux[noisy], weights[noisy] = -5.0, 1e-6
+    targets = wave[wave < edge] if side == "blue" else wave[wave > edge]
+    expected = continuum[wave < edge] if side == "blue" else continuum[wave > edge]
+    result = extrapolate_edge(wave, flux, weights, edge, targets, side=side, method="powerlaw")
+    np.testing.assert_allclose(result, expected, rtol=0.001)
 
 
 def test_direct_manifest_selects_quality_redrock_galaxies(
@@ -451,7 +451,7 @@ def test_candidate_grid_retains_supported_uv_below_1400(monkeypatch):
     assert wave[selected][-1] == 9120
 
 
-def test_grid_covers_selected_valid_pixels_and_lsst_and_rounds_outward(tmp_path, monkeypatch):
+def test_grid_covers_selected_valid_pixels_and_rounds_outward(tmp_path, monkeypatch):
     import pandas as pd
     from astropy.io import fits
 
@@ -490,7 +490,7 @@ def test_grid_covers_selected_valid_pixels_and_lsst_and_rounds_outward(tmp_path,
     manifest = pd.DataFrame({"targetid": [targetid], "healpix": [1], "z": [1.0]})
     grid = derive_rest_frame_grid(manifest, desi_dir=tmp_path, wave_step=10)
     assert grid[0] == 1330
-    assert grid[-1] == 5500
+    assert grid[-1] == 3010
     assert np.all(np.diff(grid) == 10)
     override = derive_rest_frame_grid(
         manifest, desi_dir=tmp_path, wave_step=10, wave_min=1200, wave_max=5605
@@ -499,7 +499,7 @@ def test_grid_covers_selected_valid_pixels_and_lsst_and_rounds_outward(tmp_path,
     population = pd.DataFrame({"targetid": [targetid, 2], "healpix": [1, 1], "z": [1.0, 0.0]})
     population_grid = derive_rest_frame_grid(population, desi_dir=tmp_path, wave_step=10)
     assert population_grid[0] == 1330
-    assert population_grid[-1] == 10990
+    assert population_grid[-1] == 9000
 
 
 def test_lsst_demand_coverage_is_unity_when_every_pixel_is_observed():

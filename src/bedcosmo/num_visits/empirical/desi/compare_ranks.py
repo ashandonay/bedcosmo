@@ -187,7 +187,8 @@ def main() -> None:
     matrix_path = (
         Path(
             args.training_matrix
-            or get_desi_training_data_dir() / "desi_rest_frame_training_matrix.npz"
+            or get_desi_training_data_dir()
+            / "desi_rest_frame_training_matrix.npz"
         )
         .expanduser()
         .resolve()

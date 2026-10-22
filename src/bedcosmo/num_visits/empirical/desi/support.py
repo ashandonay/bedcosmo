@@ -32,122 +32,6 @@ def largest_contiguous_region(mask: np.ndarray) -> np.ndarray:
     return selected
 
 
-def lsst_required_mask(wave: np.ndarray, redshift: np.ndarray) -> np.ndarray:
-    """Common LSST demand with grid centers bracketing its exact endpoints."""
-    blue, red, _, _ = lsst_support_limits(wave[0], wave[-1])
-    lower = blue / (1 + np.max(redshift))
-    upper = red / (1 + np.min(redshift))
-    if lower < wave[0] or upper > wave[-1]:
-        raise ValueError("Training matrix does not span LSST for every selected redshift")
-    first = max(0, np.searchsorted(wave, lower, side="right") - 1)
-    last = min(len(wave) - 1, np.searchsorted(wave, upper, side="left"))
-    selected = np.zeros(len(wave), dtype=bool)
-    selected[first : last + 1] = True
-    return selected
-
-
-def select_training_redshift_buffer(
-    wave, weights, redshift, prior_bounds, *, train_fraction, split_seed, minimum_contributors
-):
-    """Grow low/high buffers independently to cover deficient training wavelengths."""
-    lower, upper = prior_bounds
-    required = lsst_required_mask(wave, np.asarray(prior_bounds))
-    inside = (redshift >= lower) & (redshift <= upper)
-    if not np.any(inside):
-        raise ValueError("No usable galaxies lie in the requested prior redshift interval")
-    low_rows = np.flatnonzero(redshift < lower)
-    high_rows = np.flatnonzero(redshift > upper)
-    sides = [
-        low_rows[np.argsort(-redshift[low_rows], kind="stable")],
-        high_rows[np.argsort(redshift[high_rows], kind="stable")],
-    ]
-    added = [0, 0]
-    valid = np.isfinite(weights[:, required]) & (weights[:, required] > 0)
-
-    def coverage():
-        selected = inside.copy()
-        for rows, count in zip(sides, added):
-            selected[rows[:count]] = True
-        rows = np.flatnonzero(selected)
-        train = np.random.default_rng(split_seed).permutation(len(rows))[
-            : int(train_fraction * len(rows))
-        ]
-        counts = valid[rows[train]].sum(axis=0)
-        return selected, counts < minimum_contributors
-
-    selected, missing = coverage()
-    while np.any(missing):
-        available = [i for i in range(2) if added[i] < len(sides[i])]
-        if not available:
-            break
-        # Grow only the side whose next nearby galaxies best cover deficient columns.
-        scores = [valid[sides[i][added[i] : added[i] + 25]][:, missing].sum() for i in available]
-        if not any(scores):
-            scores = [valid[sides[i][added[i] :]][:, missing].sum() for i in available]
-        side = available[int(np.argmax(scores))]
-        previous = added[side]
-        added[side] = min(previous + 25, len(sides[side]))
-        selected, missing = coverage()
-        if not np.any(missing):
-            # Refine the last batch against the exact saved-row split.
-            for count in range(previous + 1, added[side] + 1):
-                added[side] = count
-                selected, missing = coverage()
-                if not np.any(missing):
-                    return selected
-    if not np.any(missing):
-        return selected
-    raise ValueError(
-        f"Available galaxies cannot supply {minimum_contributors} training contributors "
-        f"throughout LSST coverage for prior z={lower:g}–{upper:g}"
-    )
-
-
-def plan_edge_extensions(wave, weights, prior_bounds, train, minimum_contributors):
-    """Extend nearest exterior tails until the fixed training split covers LSST.
-
-    Rank all galaxies by extra rest-wavelength distance, using row order to
-    break ties. Held-out rows follow the same geometric ordering; their fluxes
-    are never used. Interior masked gaps remain missing.
-    """
-    valid = np.isfinite(weights) & (weights > 0)
-    if np.any(~valid.any(axis=1)):
-        raise ValueError("Cannot extend a spectrum without a supported endpoint")
-    first = valid.argmax(axis=1)
-    last = len(wave) - 1 - valid[:, ::-1].argmax(axis=1)
-    original = np.column_stack((wave[first], wave[last]))
-    bounds = original.copy()
-    training = np.zeros(len(weights), dtype=bool)
-    training[train] = True
-    if len(train) < minimum_contributors:
-        raise ValueError("Too few training galaxies for the requested contributor threshold")
-    required = np.flatnonzero(lsst_required_mask(wave, np.asarray(prior_bounds)))
-    counts = valid[train].sum(axis=0)
-    # Work inward from both required endpoints; updates include the entire tail.
-    for column in list(required) + list(required[::-1]):
-        if counts[column] >= minimum_contributors:
-            continue
-        candidates = np.flatnonzero((first > column) | (last < column))
-        distance = np.maximum(first[candidates] - column, column - last[candidates])
-        for row in candidates[np.argsort(distance, kind="stable")]:
-            if first[row] > column:
-                added = slice(column, first[row])
-                first[row] = column
-            else:
-                added = slice(last[row] + 1, column + 1)
-                last[row] = column
-            if training[row]:
-                counts[added] += 1
-            if counts[column] >= minimum_contributors:
-                break
-        if counts[column] < minimum_contributors:
-            raise ValueError(
-                f"Cannot support wavelength {wave[column]:g} without filling interior gaps"
-            )
-    bounds[:, 0], bounds[:, 1] = wave[first], wave[last]
-    return bounds, original
-
-
 def select_wavelength_support(
     weights: np.ndarray,
     ranks: list[int] | tuple[int, ...] | np.ndarray,
@@ -155,17 +39,16 @@ def select_wavelength_support(
     observations_per_component: int = 10,
     minimum_contributors: int | None = None,
     support_rank: int = 10,
-    required_mask: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, int]:
-    """Select a sufficiently populated interval containing all required LSST columns.
+    """Select the longest contiguous interval with enough measured contributors.
 
     Each wavelength column contains ``max(ranks)`` unknown basis values.  The
     default is sized for a rank-10 basis and requires ten observed spectra per
     unknown at every retained wavelength.  This is independent of the total
     catalog size, unlike a global population-fraction cutoff, and keeps the
     support fixed while comparing or incrementally adding ranks up to ten.
-    Required LSST columns must meet the same threshold; insufficient coverage
-    raises an error rather than silently narrowing the selected redshift range.
+    Wavelength support is independent of the requested prior redshift range;
+    finished templates are extrapolated to cover its LSST bandpasses.
     """
     weights = np.asarray(weights)
     if weights.ndim != 2:
@@ -187,26 +70,6 @@ def select_wavelength_support(
         raise ValueError("minimum contributors cannot be smaller than the largest rank")
     contributors = np.sum(np.isfinite(weights) & (weights > 0), axis=0)
     selected = largest_contiguous_region(contributors >= required)
-    if required_mask is not None:
-        if len(weights) < required:
-            raise ValueError(f"Need at least {required} training spectra to retain LSST support")
-        required_mask = np.asarray(required_mask, dtype=bool)
-        if required_mask.shape != contributors.shape:
-            raise ValueError("Required wavelength mask must match the matrix columns")
-        insufficient = required_mask & (contributors < required)
-        if np.any(insufficient):
-            raise ValueError(
-                f"{np.count_nonzero(insufficient)} LSST-required wavelength bins have fewer "
-                f"than {required} training contributors (minimum "
-                f"{contributors[required_mask].min()}); use a larger training sample "
-                "or revise the selected redshift range"
-            )
-        selected |= required_mask
-        if np.any(selected):
-            first, last = np.flatnonzero(selected)[[0, -1]]
-            selected[first : last + 1] = True
-        if np.any(selected & (contributors < required)):
-            raise ValueError("Required LSST support is separated by underpopulated columns")
     return selected, contributors, required
 
 
