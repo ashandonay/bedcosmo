@@ -2177,6 +2177,12 @@ class TestCompareIncreasingDesign:
         assert markers["s"].get_markerfacecolor() == markers["*"].get_markerfacecolor() == color
         assert markers["s"].get_markeredgecolor() == markers["*"].get_markeredgecolor() == "black"
         assert [t.get_text().strip() for t in ax2.texts] == ["+16.0%"]
+        # One group: no group entry, and the marker key is drawn in the group's color.
+        legend = ax2.get_legend()
+        assert [t.get_text() for t in legend.get_texts()] == [
+            "Single Design-space", "Full Design-space: nominal", "Full Design-space: optimal",
+        ]
+        assert {h.get_color() for h in legend.legend_handles} == {color}
         plt.close("all")
 
     def test_ref_ids_need_matching_run_groups(self, mock_scratch_env):

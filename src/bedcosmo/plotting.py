@@ -6389,10 +6389,14 @@ def _plot_increasing_design_groups(groups, refs, figsize, dpi, save_path):
                 ax2.text(x_cross, ref_eig, f' {x_cross:+.1f}%', color=color, fontsize=13,
                          fontweight='bold', ha='right', va='bottom',
                          bbox=dict(facecolor='white', edgecolor='none', alpha=0.7, pad=0.3))
-    # Color names the group; marker shape, shown once in gray, names the kind of flow.
+    # Color names the group; marker shape, shown once, names the kind of flow. With one
+    # group the color says nothing, so the key alone is the legend, in that group's color.
     handles, legend_labels = ax2.get_legend_handles_labels()
     if refs:
-        key = dict(color='gray', linestyle='none', markeredgecolor='black')
+        key_color = group_colors[0] if len(groups) == 1 else 'gray'
+        if len(groups) == 1:
+            handles, legend_labels = [], []
+        key = dict(color=key_color, linestyle='none', markeredgecolor='black')
         handles += [Line2D([], [], marker='o', markersize=8, **key),
                     Line2D([], [], marker='s', markersize=10, **key),
                     Line2D([], [], marker='*', markersize=16, **key)]
