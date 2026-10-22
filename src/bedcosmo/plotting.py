@@ -4847,6 +4847,7 @@ class ComparisonPlotter(BasePlotter):
         cmap='viridis',
         nominal_design=None,
         var=None,
+        show_eigs=True,
         filename=None,
         save_dir=None,
         dpi=400
@@ -4855,14 +4856,16 @@ class ComparisonPlotter(BasePlotter):
         Compare optimal designs (or top N best designs) across multiple runs.
         
         When top_n=1 (default), displays optimal designs as bar charts (1D) or grouped bar charts (multi-dimensional).
-        When top_n>1, displays top N designs per run as a heatmap with visual separation between runs.
+        When top_n>1, displays each run's own top N designs as a heatmap (cells labelled with the
+        design values), with visual separation between runs, under a panel of their EIGs ± std
+        (``show_eigs``). Runs need not share a design pool.
         
         Args:
             eval_step (str or int, optional): Which step to use. If None, finds most recent eig_data file
             top_n (int): Number of designs to plot from each run (default: 1). When top_n=1, uses bar chart. When top_n>1, uses heatmap.
             figsize (tuple): Figure size (width, height)
             dpi (int): Resolution for saved figure
-            colors (list, optional): Colors for each run. If None, uses default color cycle (only used for top_n=1)
+            colors (list, optional): Colors for each run (bars for top_n=1, EIG points for top_n>1). If None, uses default color cycle
             title (str, optional): Custom title for the plot. If None, generates default title
             log_scale (bool): Whether to use log scale for y-axis (default: True, only used for top_n=1)
             display_mode (str): How to display design values for top_n=1. Options: 'absolute', 'fractional', or 'ratio' (default: 'absolute')
@@ -4871,6 +4874,8 @@ class ComparisonPlotter(BasePlotter):
             nominal_design (list, optional): Nominal design as a list of floats for top_n>1. If provided, colors will be plotted as ratios relative to this nominal design.
             var (str or list, optional): Parameter(s) from MLflow run params to include in the label.
                 Defaults to ``self.var`` from ``__init__`` when omitted.
+            show_eigs (bool): For top_n>1, draw each top design's EIG ± std in a panel above the
+                heatmap (default: True).
         
         Returns:
             fig, ax: Matplotlib figure and axes objects
@@ -5196,6 +5201,8 @@ class ComparisonPlotter(BasePlotter):
             
             # Find and load JSON files for each run
             all_run_top_designs = []
+            all_run_top_eigs = []
+            all_run_top_eig_stds = []
             found_run_ids = []
             run_boundaries = []
             
@@ -5257,6 +5264,7 @@ class ComparisonPlotter(BasePlotter):
                     
                     designs = np.array(data['input_designs'])
                     eigs = np.array(variable_data['eigs_avg'])
+                    eig_stds = np.array(variable_data.get('eigs_std', np.full(len(eigs), np.nan)))
                     
                     if len(designs) != len(eigs):
                         print(f"Warning: Mismatch - {len(designs)} designs but {len(eigs)} EIG values for run {run_id}")
@@ -5270,6 +5278,8 @@ class ComparisonPlotter(BasePlotter):
                         top_designs = top_designs.reshape(1, -1)
                     
                     all_run_top_designs.append(top_designs)
+                    all_run_top_eigs.append(eigs[top_n_indices])
+                    all_run_top_eig_stds.append(eig_stds[top_n_indices])
                     found_run_ids.append(run_id)
                         
                 except Exception as e:
@@ -5286,6 +5296,9 @@ class ComparisonPlotter(BasePlotter):
                 order = [id_to_idx[rid] for rid in sorted_ids]
                 found_run_ids = [found_run_ids[i] for i in order]
                 all_run_top_designs = [all_run_top_designs[i] for i in order]
+                all_run_top_eigs = [all_run_top_eigs[i] for i in order]
+                all_run_top_eig_stds = [all_run_top_eig_stds[i] for i in order]
+            run_color_map = self._resolve_run_color_map(run_data_list, found_run_ids, colors=colors)
             
             # Combine all designs into a single array
             combined_designs = np.concatenate(all_run_top_designs, axis=0)
@@ -5352,11 +5365,33 @@ class ComparisonPlotter(BasePlotter):
                 use_relative_colors = True
                 cmap = 'RdBu'
             
-            # Create figure with space for colorbar
+            # The colorbar gets its own column beside the heatmap only. With show_eigs, an EIG
+            # panel sits above the heatmap, sharing its columns, over an empty colorbar slot.
             fig = plt.figure(figsize=figsize)
-            fig.subplots_adjust(left=0.06, right=0.99)
-            
-            ax = fig.add_subplot(111)
+            if show_eigs:
+                grid = fig.add_gridspec(2, 2, height_ratios=[1, 2.2], width_ratios=[1, 0.025],
+                                        hspace=0.06, wspace=0.03)
+                ax_eig = fig.add_subplot(grid[0, 0])
+                ax = fig.add_subplot(grid[1, 0], sharex=ax_eig)
+                cax = fig.add_subplot(grid[1, 1])
+                ax_eig.tick_params(labelbottom=False)
+                for k, (start_idx, end_idx) in enumerate(run_boundaries):
+                    x = np.arange(start_idx, end_idx)
+                    eig, std = all_run_top_eigs[k], all_run_top_eig_stds[k]
+                    ax_eig.errorbar(x, eig, yerr=std, color=run_color_map[found_run_ids[k]], marker='o',
+                                    markersize=7, linestyle='none', capsize=3)
+                    for xi, yi, si in zip(x, eig, std):
+                        ax_eig.annotate(f'{yi:.3f}', (xi, yi + (si if np.isfinite(si) else 0)),
+                                        textcoords='offset points', xytext=(0, 4), ha='center', fontsize=9)
+                    if start_idx > 0:
+                        ax_eig.axvline(start_idx - 0.5, color='gray', linewidth=1, alpha=0.5)
+                ax_eig.set_ylabel('EIG [bits]', fontsize=12, weight='bold')
+                ax_eig.grid(True, axis='y', alpha=0.3)
+                ax_eig.margins(y=0.25)
+            else:
+                grid = fig.add_gridspec(1, 2, width_ratios=[1, 0.025], wspace=0.03)
+                ax = fig.add_subplot(grid[0, 0])
+                cax = fig.add_subplot(grid[0, 1])
             
             # Plot heatmap using imshow
             if use_relative_colors:
@@ -5367,6 +5402,13 @@ class ComparisonPlotter(BasePlotter):
                 im = ax.imshow(plot_data.T, aspect='auto', cmap=cmap, norm=norm)
             else:
                 im = ax.imshow(plot_data.T, aspect='auto', cmap=cmap)
+            
+            # Each cell shows its design value; dark cells get light text
+            for col, design in enumerate(combined_designs):
+                for row, value in enumerate(design):
+                    shade = im.norm(plot_data[col, row])
+                    ax.text(col, row, f'{value:.3g}', ha='center', va='center', fontsize=9,
+                            color='white' if abs(shade - 0.5) > 0.3 else 'black')
             
             # Add vertical lines to separate runs
             for start_idx, end_idx in run_boundaries:
@@ -5390,17 +5432,13 @@ class ComparisonPlotter(BasePlotter):
             ax.set_xticklabels(x_tick_labels)
             ax.set_xlim(-0.5, len(combined_designs) - 0.5)
             
-            # Add colorbar
-            cbar = fig.colorbar(im, ax=ax, fraction=0.03, pad=0.02)
+            cbar = fig.colorbar(im, cax=cax)
             if use_relative_colors:
                 cbar.set_label('Ratio to Nominal Design', labelpad=10, fontsize=12, weight='bold')
             else:
                 cbar.set_label('Design Value', labelpad=10, fontsize=12, weight='bold')
             
             # Configure axis appearance
-            ax.spines['top'].set_visible(False)
-            ax.spines['right'].set_visible(True)
-            ax.spines['left'].set_visible(True)
             ax.tick_params(axis='y', length=0)
             ax.margins(x=0)
             
@@ -5412,9 +5450,10 @@ class ComparisonPlotter(BasePlotter):
                     title = f'Top {top_n} Designs Comparison - {self.mlflow_exp}'
                 else:
                     title = f'Top {top_n} Designs Comparison Across Runs'
-            ax.set_title(title, fontsize=14, weight='bold', pad=20)
+            (ax_eig if show_eigs else ax).set_title(title, fontsize=14, weight='bold', pad=20)
         
-        plt.tight_layout()
+        if top_n == 1:
+            plt.tight_layout()
         
         # Save figure depending on filename/save_dir in kwargs
         if filename is None:
