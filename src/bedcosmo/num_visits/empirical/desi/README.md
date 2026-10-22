@@ -336,185 +336,111 @@ training population's redshift bounds. `--population-matrix` can show the full
 measured DESI population in the heatmap while contributor counts use only the
 selected training population; that matrix must also be measured-only.
 
-## Extrapolation implementation and comparisons
+## Extrapolation and performance comparisons
 
-`desi/extrapolation.py` owns the edge fits, `extend_basis_for_lsst`, the automatic
-`plot_template_extrapolation` diagnostic, and the template comparison workflow.
-`build_prior` calls these functions after learning the basis and estimating its
-conditional template IVAR. Matrix construction remains measured-only.
+`desi/extrapolation.py` owns the edge fits, actual LSST template extension,
+automatic build diagnostic, and matched-filter-response evaluation. Both the
+actual extensions and artificial holdouts call `extrapolate_edge`; there is
+one implementation of each fit. No synthetic IVAR is assigned to tails.
 
-Compare constant (100 Å fit) with anchored power laws fitted over 100 and 500 rest-frame Å:
+Constant is the production default. Its amplitude is the raw estimated-IVAR-
+weighted mean of the nearest 100 rest-frame Å. Power-law comparison curves
+fix their amplitude to the same local mean and fit only their slope with a
+robust, IVAR-weighted flux-space loss. The default comparison windows are
+500 and 2000 rest-frame Å. Plot labels omit “anchored”; fits remain anchored.
+The production `--edge-extrapolation powerlaw` option retains its free-amplitude
+500 Å fit; it is not the anchored comparison variant.
 
-```bash
-python -m bedcosmo.num_visits.empirical.desi.extrapolation compare \
-  --prior-dir "$SCRATCH/bedcosmo/num_visits/empirical_prior/desi8_z0.2_1.6_powerlaw" \
-  --output-dir ./extrapolation_comparison \
-  --powerlaw-windows 100 500 \
-  --holdout-aa 300
-```
-
-This reads an existing completed build's learned templates, estimated template
-IVAR, provenance and native KDE. It compares actual LSST extensions and separately
-hides the outer `--holdout-aa` rest-frame Å on both sides of the learned bank.
-Hidden values and their weights are excluded from the fits. All methods use
-identical joint coefficient/redshift draws; retained values and normalization
-are unchanged. Neither NMF nor the coefficient prior is refitted. Production
-files are preserved: use a separate output directory.
-
-The default `--n-draws 60000`, `--max-samples-per-band 2000` and
-`--seed 20261015` reproduce the sampling used in the window comparison. Each band
-selects only draws with full tabulated learned-reference coverage and geometric
-overlap with the relevant hidden edge. AB magnitudes integrate the full
-`lsst2023-u` and `lsst2023-y` responses. Δmag is reconstructed minus reference;
-negative values mean too bright. The r/g control bands include the filters'
-small out-of-band responses, which can matter for runaway extrapolations.
-
-Outputs are `comparison.npz` (banks, IVAR, masks and prior draws),
-`comparison.json` (protocol and summaries), `magnitude_errors.csv`,
-`magnitude_summary.csv`, and PNG/PDF versions of `templates_actual`,
-`templates_hidden`, and the 2×3 `magnitudes` figure. Template edge plots keep
-conditional ±1σ error bars from estimated template IVAR; full panels use shading.
-Full-spectrum panels use limits derived from learned flux and its uncertainty,
-so extreme tails can be clipped in the overview. Edge close-ups cap runaway
-positive tails at ten times the local learned flux/uncertainty scale and label
-curves exceeding the range. Saved predictions are unchanged. These are
-learned-template recovery diagnostics, not independent galaxy truth.
-The artificial boundaries differ from actual missing tails, and equal holdout
-widths do not imply equal missing u/y band flux. In particular the 300 Å y
-holdout is weak for this build. Prior draws share one fixed learned bank.
-
-Redraw saved comparisons, optionally selecting a subset of fitted windows:
+### Regenerate the actual template extensions
 
 ```bash
-python -m bedcosmo.num_visits.empirical.desi.extrapolation plot \
-  --output-dir ./extrapolation_comparison \
-  --powerlaw-windows 100 500
-```
-
-`plot` uses saved results without resampling or refitting; it replaces the PNG/PDF
-figures. `compare` replaces its diagnostic files in the chosen output directory.
-The production default remains constant; its optional power-law fit still uses
-500 Å. Comparison windows do not change that default. A steep declining power-law tail
-may underflow numerically to zero; finite zero flux is retained, while nonfinite
-predictions still raise an error.
-
-Inspect a blue-edge power law inside its fitting window, with learned template
-uncertainty bars, continuation and relative fit weights (including soft-L1
-robust-loss downweighting):
-
-```bash
-python -m bedcosmo.num_visits.empirical.desi.extrapolation fit-window \
+python -m bedcosmo.num_visits.empirical.desi.extrapolation extend \
   --prior-dir "$SCRATCH/bedcosmo/num_visits/empirical_prior/desi8_full_redshift" \
-  --components 1 7 --window-aa 500 \
-  --output ./extrapolation_comparison/blue_fit_windows.png
+  --output-dir ./extrapolation_comparison \
+  --powerlaw-windows 500 2000
 ```
 
-Component numbers are one-based. This diagnostic reads saved arrays and does
-not change the template bank. The in-window panel excludes the exterior rise
-from its axis limits; the continuation panel shows that rise in full.
+This reads the completed build's learned basis, estimated template IVAR and
+prior redshift bounds and refits constant and anchored power-law tails for the
+actual full LSST demand. It does not remove any learned wavelengths, refit NMF,
+resample the prior, or change production files. Use a separate output directory.
 
-`extrapolation compare` evaluates constant against anchored power laws for every
-requested window. Non-anchored fits are omitted from the evaluation comparison.
-Their amplitude at the
-learned boundary is fixed to the same raw, estimated-IVAR-weighted local mean
-used by constant over the nearest 100 rest-frame Å; only the slope is fitted
-with the robust flux-space loss over the wider window. A zero anchor gives a
-zero tail. This anchors a local continuum estimate, not the exact last pixel,
-so a smaller endpoint jump can remain. Slopes are still unconstrained. The
-production build choices and defaults are unchanged; anchoring is used by the
-comparison workflow. Constant is the baseline to beat.
+Outputs are `template_extensions.npz` (learned arrays, exported wavelength grid,
+and each extended bank), `template_extensions.json` (input basis SHA-256,
+redshift bounds and fit settings), and `templates_actual.png/.pdf`.
+Template edge plots retain conditional ±1σ bars from estimated template IVAR.
+Full-spectrum panels use learned-flux/uncertainty limits. Edge close-ups cap
+runaway positive tails at ten times the local learned flux/uncertainty scale
+and label curves exceeding the range. Saved predictions are never clipped.
+A steep declining power law may underflow to finite zero flux, which is accepted;
+nonfinite predictions fail.
 
-### Match hidden filter response across redshift and band
-
-For a comparison with comparable missing filter coverage in u and y, use:
+### Evaluate hidden u/y filter response
 
 ```bash
 python -m bedcosmo.num_visits.empirical.desi.extrapolation response-compare \
   --prior-dir "$SCRATCH/bedcosmo/num_visits/empirical_prior/desi8_full_redshift" \
-  --output-dir ./response_comparison \
+  --output-dir ./extrapolation_comparison \
   --response-fractions 0.1 0.25 0.5 \
-  --powerlaw-windows 500 1000 2000
+  --powerlaw-windows 500 2000
 ```
 
-Each target fraction defines an observed-frame response quantile: blue wing for
-u, red wing for y. Response means the normalized integral of `lambda * R(lambda)`
-(the photon-counting kernel for flat f_lambda). This uses only filter transmission,
-not hidden spectral flux. Divide the quantile wavelength by each sampled `(1+z)`
-to get a continuous rest-frame cutoff; there is no template-grid rounding.
-Only the relevant wing is hidden. All inward fit/anchor samples lie on the
-retained side. Constant uses the nearest 100 rest-frame Å IVAR-weighted mean;
-anchored power laws fix their amplitude to that same mean and fit only slope.
+For each fraction, hide the blue wing of u or red wing of y containing that
+fraction of the normalized photon-response integral `lambda * R(lambda)`.
+The cutoff uses filter response only, not hidden spectral flux. Divide its
+observed wavelength by each sampled `(1+z)` to get a continuous rest-frame
+boundary; there is no template-grid snapping. Each component is fitted using
+only retained values and their IVAR, then mixed using identical coefficients.
+Compare reconstructed and reference **whole-band** AB magnitudes, not only
+flux inside the hidden region. Δmag is reconstructed minus reference; negative
+errors mean too bright. Numerical integration resolves the boundary jump.
 
-Coverage is band-specific. `--response-tail-fraction 0.001` discards 0.05% of
-photon response from each tail, defining a central 99.9% response interval.
-Both reference and reconstructed AB magnitudes use the **same cropped filter**;
-these are explicitly cropped-band magnitudes, not exact full-tabulated-band
-magnitudes. The omitted response fraction does not bound omitted galaxy flux.
-No values outside learned template support are filled to form the reference.
-Use `--response-tail-fraction 0` for full tabulated filter coverage.
+`--response-tail-fraction 0.001` defines each band by its central 99.9% photon
+response, discarding 0.05% from each tail. Reference and reconstruction use the
+same cropped filter, so these are cropped-band magnitudes rather than exact
+full-tabulated-band magnitudes. The discarded response fraction does not bound
+omitted galaxy flux. Use zero for full tabulated filter coverage.
 
-By default, `--n-draws 60000`, `--max-samples 1000`, and `--seed 20261015`
-select a separate eligible cohort for each band, requiring cropped reference
-coverage and complete inward coverage for the largest fitting window. Within
-each band, the same joint coefficients/redshifts are used for all methods and
-hidden fractions. u/y cohorts can differ; aggregate band errors therefore use
-different galaxy populations. Coverage eligibility counts and response bounds
-are saved for all candidate draws. No NMF, coefficient or prior refit occurs.
-The numerical integration resolves any boundary amplitude jump separately.
+Defaults `--n-draws 60000`, `--max-samples 1000`, and `--seed 20261015` select
+separate eligible u/y cohorts. Full cropped reference coverage and complete
+inward coverage for the largest fit window are required. No extrapolated
+values enter the reference. Within each band, the same joint coefficient/redshift
+draws are used across methods and hidden fractions. Different band cohorts
+mean aggregate u/y results describe different galaxy populations.
 
-Outputs: `response_errors.csv` (paired magnitudes, signed errors, continuous
-cutoffs, target/realized response fractions, actual hidden spectral-flux
-fractions and numerical failure statuses), `response_summary.csv`,
-`response_samples.npz`, and `response_comparison.json` (selection and protocol).
-Plots `response_scatter`, `response_errors` and `response_redshift` are saved
-as PNG/PDF: rows are u/y, columns are hidden response fractions. Scatter panels
-show signed magnitude error versus reference magnitude or redshift, with a
-linear scale within ±0.1 mag and logarithmic tails. Error distributions are
-cumulative absolute-error curves on a logarithmic x axis; their denominators
-include failed draws, so the curves stop below one when failures occur. Numerical fit
-or photometry failures remain in the CSV and failure/outlier rates; plotted
-finite-error distributions show failure counts when nonzero. Median and
-percentile errors describe finite cases and must be read with those counts.
+Outputs:
 
-Redraw without fitting or sampling:
+- `response_errors.csv`: paired magnitudes/errors, target and realized response
+  fractions, true hidden spectral-flux fractions, cutoffs, redshifts and failures.
+- `response_summary.csv`: per-band/fraction/method metrics. Failed fits are
+  included in the failure-or-|Δmag|>0.1 rate; medians/p95 use finite cases.
+- `response_samples.npz`: paired samples per band and all candidate redshifts.
+- `response_comparison.json`: cohort eligibility, settings, input basis/KDE
+  SHA-256 fingerprints, protocol, limitations and summaries.
+- `response_comparison_10pct`, `response_comparison_25pct`, and
+  `response_comparison_50pct` PNG/PDF: u/y rows, signed-error histogram and
+  error-versus-true-hidden-flux-percentage columns. Symmetric logarithmic axes
+  retain all finite tails; histogram counts are logarithmic. Failed counts are
+  annotated. The main title gives hidden response and per-band sample count.
+- `response_holdout_regions.png/.pdf`: shaded u/y holdouts at the saved cutoffs,
+  with main-band zooms and weak cropped-filter tails included in the fractions.
+- `response_coverage.png/.pdf`: all candidate redshifts versus band eligibility.
+- `response_redshift_summary.csv` and `.png/.pdf`: counts and errors in 0.2-wide
+  redshift bins, including failures in the outlier rates and displaying counts.
+
+Redraw all evaluation figures without fitting or sampling:
 
 ```bash
 python -m bedcosmo.num_visits.empirical.desi.extrapolation response-plot \
-  --output-dir ./response_comparison
+  --output-dir ./extrapolation_comparison
 ```
 
-Matching response fractions does not match actual hidden galaxy-flux fractions,
-continuum complexity or extrapolation distances. References are still learned
-mixtures rather than independent observed galaxies. These comparisons improve
-coverage balance across redshift/band but cannot validate unknown physical tails.
-Existing fixed-width comparisons remain available through `compare`.
+These are recovery tests of a fixed learned template bank, not independent
+observed galaxy truth. Matching response fractions does not equalize hidden
+galaxy flux, extrapolation distance or continuum complexity. The template IVAR
+is conditional on fixed galaxy coefficients, not a full NMF posterior.
 
-Matched-response comparisons also save `response_comparison_10pct`,
-`response_comparison_25pct`, and `response_comparison_50pct` PNG/PDF figures
-(for the default fractions), using a 2×2 layout: u/y rows, and
-signed-error histogram and error
-versus actual hidden spectral-flux percentage columns. The hidden-response
-percentage and per-band sample counts appear in the main figure title. Histograms annotate failed
-fits. Both error panels retain all finite outliers using
-symmetric logarithmic axes; histogram counts use a logarithmic scale. Equal
-response fractions do not imply equal hidden spectral-flux fractions. These
-figures are regenerated by `response-plot` without fitting or resampling.
-Power-law plot labels use `PL <window> Å`; these comparison fits remain anchored
-to the local 100 Å weighted mean.
-
-`response_holdout_regions.png/.pdf` shows the saved 10%, 25%, and 50% boundaries
-on the observed-frame u/y photon-response curves, shading the hidden wings.
-Panels zoom to the main bands; percentages include weak tails inside the
-retained 99.9% response interval. The same observed boundary applies at every
-redshift, with rest wavelength obtained by dividing by `(1+z)`. Both
-`response-compare` and `response-plot` save this supporting figure.
-
-Band-specific coverage runs also save `response_coverage.png/.pdf` showing all
-candidate prior redshifts versus eligible draws for each band, and
-`response_redshift_summary.csv` with counts, failures, median/p95 absolute
-errors and failure-or-error-above-0.1 rates in 0.2-wide redshift bins.
-`response_redshift_summary.png/.pdf` plots those rates and labels each bin's
-paired sample count. Sparse bins remain visible with their counts. The summary
-and selection plots are regenerated by `response-plot`. Coverage metadata and
-sample arrays now record separate u/y cohorts; old joint-cohort outputs must be
-regenerated for these updated plotting commands.
+The earlier fixed-width evaluation, linear/median-filter fit, fit-window
+investigation and overlapping scatter/CDF layouts have been retired. Their
+source and historical per-spectrum studies remain recoverable at Git commit
+`4c04491`; no compatibility commands or old-format readers are retained.

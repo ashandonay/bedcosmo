@@ -3,118 +3,70 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 from pathlib import Path
 
 import numpy as np
-from scipy.ndimage import median_filter
 from scipy.optimize import least_squares
 
 from .support import lsst_support_limits
 
 
-def extrapolate_spectrum_edges(
-    rest_wave: np.ndarray,
-    flux: np.ndarray,
-    weights: np.ndarray,
-    *,
-    window_aa: float = 100.0,
-    continuum_window_aa: float = 500.0,
-    median_width: int = 5,
-    method: str = "constant",
-    bounds: tuple[float, float] | None = None,
-    edge_indices: tuple[int, int] | None = None,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Extend spectrum edges with a constant level or robust broadband continuum."""
-    wave = np.asarray(rest_wave, dtype=float)
-    values = np.asarray(flux, dtype=float).copy()
-    ivar = np.asarray(weights, dtype=float).copy()
-    if wave.ndim != 1 or values.shape != wave.shape or ivar.shape != wave.shape:
-        raise ValueError("Wavelength, flux, and weight arrays must be matching 1D arrays")
-    if not np.all(np.isfinite(wave)) or np.any(wave <= 0) or np.any(np.diff(wave) <= 0):
-        raise ValueError("Wavelengths must be finite, positive, and strictly increasing")
+def extrapolate_edge(
+    wave, flux, ivar, edge_wave, target_wave, *, side, method="constant", window_aa=500.0
+):
+    """Continue one edge using retained samples and their measurement precision.
+
+    The local amplitude uses the nearest 100 rest-frame Å. Power-law slopes
+    use window_aa. No uncertainty is assigned to the predicted tail.
+    """
+    wave, flux, ivar = (np.asarray(a, dtype=float) for a in (wave, flux, ivar))
+    target_wave = np.asarray(target_wave, dtype=float)
+    if wave.ndim != 1 or flux.shape != wave.shape or ivar.shape != wave.shape:
+        raise ValueError("Wavelength, flux and IVAR must be matching 1D arrays")
+    if (
+        not np.isfinite(wave).all()
+        or np.any(wave <= 0)
+        or np.any(np.diff(wave) <= 0)
+        or not np.isfinite(flux).all()
+        or not np.isfinite(ivar).all()
+        or np.any(ivar < 0)
+        or not np.isfinite(edge_wave)
+        or edge_wave <= 0
+        or target_wave.ndim != 1
+        or not np.isfinite(target_wave).all()
+        or np.any(target_wave <= 0)
+    ):
+        raise ValueError("Invalid edge-fit wavelengths, flux or IVAR")
+    if side not in {"blue", "red"}:
+        raise ValueError("side must be 'blue' or 'red'")
+    if method not in {"constant", "powerlaw", "powerlaw_anchored"}:
+        raise ValueError("Unknown edge extrapolation method")
     if not np.isfinite(window_aa) or window_aa <= 0:
         raise ValueError("window_aa must be finite and positive")
-    if not np.isfinite(continuum_window_aa) or continuum_window_aa <= 0:
-        raise ValueError("continuum_window_aa must be finite and positive")
-    if median_width <= 0 or median_width % 2 == 0:
-        raise ValueError("median_width must be a positive odd integer")
-    if method not in {"constant", "linear", "powerlaw", "powerlaw_anchored"}:
-        raise ValueError("Unknown edge extrapolation method")
-    allowed = np.ones(len(wave), dtype=bool)
-    if bounds is not None:
-        lower, upper = bounds
-        if not np.isfinite(bounds).all() or not 0 < lower < upper:
-            raise ValueError("Extrapolation bounds must be finite, positive and ordered")
-        if lower < wave[0] or upper > wave[-1]:
-            raise ValueError("Wavelength grid does not cover requested extrapolation bounds")
-        # Retain one bracketing grid center outside each exact filter endpoint
-        # so interpolation covers the full tabulated bandpass.
-        first = max(0, np.searchsorted(wave, lower, side="right") - 1)
-        last = min(len(wave) - 1, np.searchsorted(wave, upper, side="left"))
-        allowed[:first] = False
-        allowed[last + 1 :] = False
-    observed = np.flatnonzero((ivar > 0) & np.isfinite(ivar) & np.isfinite(values))
-    if edge_indices is None:
-        if len(observed) < 2:
-            return values, ivar
-        blue, red = observed[0], observed[-1]
-    else:
-        blue, red = edge_indices
-        if not 0 <= blue < red < len(wave):
-            raise ValueError("Template edge indices must be ordered and inside the grid")
-        if len(observed) < 2:
-            raise ValueError("Template edge fit needs at least two bins with positive IVAR")
-        if observed[0] < blue or observed[-1] > red:
-            raise ValueError("Positive template weights must lie within the learned edges")
-    available_width = len(observed) if len(observed) % 2 else len(observed) - 1
-    filter_width = min(median_width, available_width)
-    smoothed = median_filter(values[observed], size=filter_width, mode="reflect")
-    edge_window = window_aa if method == "constant" else continuum_window_aa
-    edge_windows = (
-        wave[observed] <= wave[blue] + edge_window,
-        wave[observed] >= wave[red] - edge_window,
+    distance = wave - edge_wave if side == "blue" else edge_wave - wave
+    outside = target_wave <= edge_wave if side == "blue" else target_wave >= edge_wave
+    if not np.all(outside):
+        raise ValueError("Target wavelengths must lie outside the retained edge")
+    available = (distance >= 0) & (ivar > 0)
+    fit = available & (distance <= window_aa)
+    if method == "powerlaw":
+        return _extrapolate_powerlaw(wave[fit], flux[fit], ivar[fit], edge_wave, target_wave)
+    local = available & (distance <= 100)
+    if not np.any(local):
+        raise ValueError("Local anchor window has no positive template IVAR")
+    amplitude = float(np.average(flux[local], weights=ivar[local]))
+    if method == "constant":
+        return np.full(target_wave.shape, amplitude)
+    return _extrapolate_powerlaw(
+        wave[fit],
+        flux[fit],
+        ivar[fit],
+        edge_wave,
+        target_wave,
+        anchor_amplitude=amplitude,
     )
-    for indices, target in zip(edge_windows, (blue, red), strict=True):
-        tail = allowed & ((wave < wave[blue]) if target == blue else (wave > wave[red]))
-        if not np.any(tail):
-            continue
-        if not np.any(indices):
-            raise ValueError("No positive-IVAR samples in the chosen extrapolation edge window")
-        edge_wave = wave[observed[indices]]
-        edge_flux = smoothed[indices]
-        value = float(np.average(values[observed[indices]], weights=ivar[observed[indices]]))
-        weight = float(np.median(ivar[observed[indices]])) * 0.1
-        if method in {"powerlaw", "powerlaw_anchored"}:
-            amplitude = None
-            if method == "powerlaw_anchored":
-                local = np.abs(wave[observed] - wave[target]) <= window_aa
-                if not np.any(local):
-                    raise ValueError("No positive-IVAR samples in the amplitude anchor window")
-                amplitude = float(
-                    np.average(values[observed[local]], weights=ivar[observed[local]])
-                )
-            values[tail] = _extrapolate_powerlaw(
-                edge_wave,
-                values[observed[indices]],
-                ivar[observed[indices]],
-                wave[target],
-                wave[tail],
-                anchor_amplitude=amplitude,
-            )
-        elif method == "constant" or len(edge_wave) < 2:
-            values[tail] = value
-        else:
-            values[tail] = _fit_edge_continuum(
-                edge_wave,
-                edge_flux,
-                ivar[observed[indices]],
-                wave[target],
-                direction=1 if target == blue else -1,
-                fit_window_aa=continuum_window_aa,
-            )(wave[tail])
-        ivar[tail] = weight
-    return values, ivar
 
 
 def _extrapolate_powerlaw(
@@ -163,64 +115,6 @@ def _extrapolate_powerlaw(
     return prediction
 
 
-def _fit_edge_continuum(
-    wave: np.ndarray,
-    flux: np.ndarray,
-    weights: np.ndarray,
-    edge_wave: float,
-    *,
-    direction: int,
-    fit_window_aa: float = 500.0,
-    bin_width_aa: float = 50.0,
-):
-    """Fit a clipped weighted line to median-flux bins near one spectrum edge."""
-    distance = direction * (wave - edge_wave)
-    inside = (distance >= 0) & (distance <= fit_window_aa)
-    distance, flux, weights = distance[inside], flux[inside], weights[inside]
-    bin_index = np.floor(distance / bin_width_aa).astype(int)
-    centers, levels, bin_weights = [], [], []
-    for index in np.unique(bin_index):
-        select = bin_index == index
-        centers.append(float(np.median(distance[select])))
-        levels.append(float(np.median(flux[select])))
-        bin_weights.append(float(np.median(weights[select])))
-    centers = np.asarray(centers)
-    levels = np.asarray(levels)
-    bin_weights = np.asarray(bin_weights)
-    if len(centers) < 3:
-        slope, intercept = np.polyfit(distance, flux, 1)
-        return lambda target: slope * (direction * (target - edge_wave)) + intercept
-
-    design = np.column_stack((np.ones(len(centers)), centers / fit_window_aa))
-    relative_weights = bin_weights / np.median(bin_weights)
-    keep = np.ones(len(centers), dtype=bool)
-    for _ in range(5):
-        root_weight = np.sqrt(relative_weights[keep])
-        coefficients = np.linalg.lstsq(
-            design[keep] * root_weight[:, None], levels[keep] * root_weight, rcond=None
-        )[0]
-        standardized_residual = (levels - design @ coefficients) * np.sqrt(relative_weights)
-        residual_center = float(np.median(standardized_residual[keep]))
-        residual_scale = 1.4826 * float(
-            np.median(np.abs(standardized_residual[keep] - residual_center))
-        )
-        if residual_scale == 0:
-            break
-        updated = np.abs(standardized_residual - residual_center) <= 3.5 * residual_scale
-        if np.count_nonzero(updated) < 3 or np.array_equal(updated, keep):
-            break
-        keep = updated
-
-    def continuum(target: np.ndarray) -> np.ndarray:
-        target_distance = direction * (np.asarray(target) - edge_wave)
-        target_design = np.column_stack(
-            (np.ones(len(target_distance)), target_distance / fit_window_aa)
-        )
-        return target_design @ coefficients
-
-    return continuum
-
-
 def extend_basis_for_lsst(
     wave, basis, template_ivar, prior_bounds, *, method="constant", continuum_window_aa=500.0
 ):
@@ -247,18 +141,20 @@ def extend_basis_for_lsst(
     learned_columns = slice(-first, -first + len(wave))
     extended_basis = np.zeros((len(basis), len(extended_wave)), dtype=float)
     for row, component in enumerate(basis):
-        values = np.zeros(len(extended_wave), dtype=float)
-        values[learned_columns] = component
-        weights = np.zeros(len(extended_wave), dtype=float)
-        weights[learned_columns] = template_ivar[row]
-        extended_basis[row], _ = extrapolate_spectrum_edges(
-            extended_wave,
-            values,
-            weights,
-            method=method,
-            continuum_window_aa=continuum_window_aa,
-            edge_indices=(-first, -first + len(wave) - 1),
-        )
+        extended_basis[row, learned_columns] = component
+        for side, edge in (("blue", wave[0]), ("red", wave[-1])):
+            tail = extended_wave < edge if side == "blue" else extended_wave > edge
+            if np.any(tail):
+                extended_basis[row, tail] = extrapolate_edge(
+                    wave,
+                    component,
+                    template_ivar[row],
+                    edge,
+                    extended_wave[tail],
+                    side=side,
+                    method=method,
+                    window_aa=continuum_window_aa,
+                )
     if not np.isfinite(extended_basis).all() or np.any(extended_basis < 0):
         raise ValueError("Exported template values must be finite and nonnegative")
     return extended_wave, extended_basis
@@ -394,27 +290,13 @@ def plot_template_extrapolation(prior_dir):
     return fig
 
 
-def compare_template_edges(
-    prior_dir,
-    output_dir,
-    *,
-    powerlaw_windows=(100.0, 500.0),
-    holdout_aa=300.0,
-    n_draws=60000,
-    max_samples_per_band=2000,
-    seed=20261015,
-):
-    """Recover hidden learned edges and score paired prior mixtures in AB magnitudes.
+def compare_template_extensions(prior_dir, output_dir, *, powerlaw_windows=(500.0, 2000.0)):
+    """Refit actual LSST tails from a completed learned bank; preserve source files."""
+    import matplotlib.pyplot as plt
 
-    The reference is the learned bank, never a previously extrapolated tail.
-    This tests template recovery, not agreement with independent galaxy truth.
-    """
-    import pandas as pd
-    from speclite.filters import load_filter
-
-    from ..fit_sed_prior_kde import load_sed_prior_kde, sample_sed_prior
-    from ..simplex import split_feature_matrix
-
+    prior_dir, output_dir = Path(prior_dir), Path(output_dir)
+    if prior_dir.resolve() == output_dir.resolve():
+        raise ValueError("Use a separate extension-comparison output directory")
     windows = tuple(float(w) for w in powerlaw_windows)
     if (
         not windows
@@ -422,220 +304,72 @@ def compare_template_edges(
         or not np.isfinite(windows).all()
         or min(windows) <= 0
     ):
-        raise ValueError("Power-law windows must be unique finite positive widths")
-    if not np.isfinite(holdout_aa) or holdout_aa <= 0 or n_draws < 1 or max_samples_per_band < 1:
-        raise ValueError("Holdout width and sample counts must be positive")
-    prior_dir, output_dir = Path(prior_dir), Path(output_dir)
-    if prior_dir.resolve() == output_dir.resolve():
-        raise ValueError("Use a separate comparison output directory to preserve the source build")
+        raise ValueError("Power-law windows must be unique, finite and positive")
     with np.load(prior_dir / "desi_basis.npz") as saved:
         wave, basis, ivar = saved["wave_rest_aa"], saved["basis"], saved["estimated_template_ivar"]
-    if (
-        wave.ndim != 1
-        or basis.ndim != 2
-        or basis.shape[1] != len(wave)
-        or basis.shape != ivar.shape
-        or not len(basis)
-        or len(wave) < 3
-        or not np.isfinite(basis).all()
-        or np.any(basis < 0)
-        or np.any(basis.mean(axis=1) <= 0)
-    ):
-        raise ValueError(
-            "Comparison needs finite nonnegative learned templates with positive means and matching IVAR"
-        )
-    metadata = json.loads((prior_dir / "build_provenance.json").read_text())
-    bounds = (metadata["selection"]["prior_z_min"], metadata["selection"]["prior_z_max"])
+    provenance = json.loads((prior_dir / "build_provenance.json").read_text())
+    bounds = [provenance["selection"]["prior_z_min"], provenance["selection"]["prior_z_max"]]
     methods = {"constant": 100.0, **{f"powerlaw_{w:g}_anchored": w for w in windows}}
-    keep = (wave >= wave[0] + holdout_aa) & (wave <= wave[-1] - holdout_aa)
-    indices = np.flatnonzero(keep)
-    if len(indices) < 3 or wave[indices[-1]] - wave[indices[0]] < max(windows):
-        raise ValueError("Holdout leaves too little learned support for the requested fit windows")
-    first, last = indices[[0, -1]]
-    banks, actual = {"reference": basis}, {}
-    for method, width in methods.items():
-        fit_method = "constant" if method == "constant" else "powerlaw_anchored"
-        values, weights = basis.copy(), ivar.copy()
-        values[:, ~keep], weights[:, ~keep] = 0, 0
-        banks[method] = np.stack(
-            [
-                extrapolate_spectrum_edges(
-                    wave,
-                    b,
-                    w,
-                    method=fit_method,
-                    continuum_window_aa=width,
-                    edge_indices=(first, last),
-                )[0]
-                for b, w in zip(values, weights, strict=True)
-            ]
-        )
-        if not np.array_equal(banks[method][:, keep], basis[:, keep]):
-            raise ValueError("Extrapolation changed retained template values")
-        actual_wave, actual[method] = extend_basis_for_lsst(
+    banks = {}
+    for name, width in methods.items():
+        export_wave, banks[name] = extend_basis_for_lsst(
             wave,
             basis,
             ivar,
             bounds,
-            method=fit_method,
+            method="constant" if name == "constant" else "powerlaw_anchored",
             continuum_window_aa=width,
         )
-    kde = load_sed_prior_kde(prior_dir / "sed_prior_kde_native.joblib")
-    features = sample_sed_prior(kde, n_draws, seed=seed)
-    fractions, log_scale, redshift = split_feature_matrix(
-        features,
-        len(basis),
-        parameterization=kde["parameterization"],
-    )
-    coefficients = np.exp(log_scale)[:, None] * fractions
-    rng = np.random.default_rng(seed)
-    records, coverage = [], {}
-    for band, control in (("u", "r"), ("y", "g")):
-        filt, ctrl = load_filter("lsst2023-" + band), load_filter("lsst2023-" + control)
-        low, high = filt.wavelength[0] / (1 + redshift), filt.wavelength[-1] / (1 + redshift)
-        eligible = (low >= wave[0]) & (high <= wave[-1])
-        active = (low < wave[first]) if band == "u" else (high > wave[last])
-        candidates = np.flatnonzero(eligible & active)
-        if not len(candidates):
-            raise ValueError(
-                f"No prior draws with full reference coverage and a hidden {band} edge"
-            )
-        chosen = rng.choice(candidates, min(max_samples_per_band, len(candidates)), replace=False)
-        coverage[band] = {"available": len(candidates), "used": len(chosen)}
-        obs = np.unique(
-            np.r_[filt.wavelength, np.arange(filt.wavelength[0], filt.wavelength[-1], 2.0)]
-        )
-        ctrl_obs = np.unique(
-            np.r_[ctrl.wavelength, np.arange(ctrl.wavelength[0], ctrl.wavelength[-1], 2.0)]
-        )
-        for idx in chosen:
-            z, coeff = redshift[idx], coefficients[idx]
-            query, ctrl_query = obs / (1 + z), ctrl_obs / (1 + z)
-            if ctrl_query.min() < wave[0] or ctrl_query.max() > wave[-1]:
-                raise ValueError("Control band lacks learned reference coverage")
-            magnitudes, controls = {}, {}
-            for name, bank in banks.items():
-                flux = coeff @ np.stack([np.interp(query, wave, b) for b in bank]) * 1e-17 / (1 + z)
-                maggies = float(filt.get_ab_maggies(flux, obs))
-                ctrl_flux = (
-                    coeff
-                    @ np.stack([np.interp(ctrl_query, wave, b) for b in bank])
-                    * 1e-17
-                    / (1 + z)
-                )
-                ctrl_maggies = float(ctrl.get_ab_maggies(ctrl_flux, ctrl_obs))
-                if (
-                    not np.isfinite([maggies, ctrl_maggies]).all()
-                    or min(maggies, ctrl_maggies) <= 0
-                ):
-                    raise ValueError(
-                        "Cannot calculate AB magnitudes from nonpositive or nonfinite band flux"
-                    )
-                magnitudes[name], controls[name] = -2.5 * np.log10(maggies), -2.5 * np.log10(
-                    ctrl_maggies
-                )
-                if name == "reference":
-                    hidden = (query < wave[first]) if band == "u" else (query > wave[last])
-                    hidden_fraction = np.trapz(flux * obs * filt(obs) * hidden, obs) / np.trapz(
-                        flux * obs * filt(obs), obs
-                    )
-            for method in methods:
-                records.append(
-                    {
-                        "draw_index": int(idx),
-                        "band": band,
-                        "method": method,
-                        "z": z,
-                        "reference_mag": magnitudes["reference"],
-                        "reconstructed_mag": magnitudes[method],
-                        "delta_mag": magnitudes[method] - magnitudes["reference"],
-                        "reference_flux_fraction_hidden": hidden_fraction,
-                        "control_band": control,
-                        "control_delta_mag": controls[method] - controls["reference"],
-                    }
-                )
-    errors = pd.DataFrame(records)
-    summaries = []
-    for (band, method), group in errors.groupby(["band", "method"]):
-        delta = group.delta_mag.to_numpy()
-        summaries.append(
-            {
-                "band": band,
-                "method": method,
-                "n": len(group),
-                "median_delta_mag": float(np.median(delta)),
-                "median_abs_delta_mag": float(np.median(abs(delta))),
-                "p95_abs_delta_mag": float(np.quantile(abs(delta), 0.95)),
-                "fraction_abs_above_0.1": float(np.mean(abs(delta) > 0.1)),
-                "max_abs_control_delta_mag": float(abs(group.control_delta_mag).max()),
-            }
-        )
     output_dir.mkdir(parents=True, exist_ok=True)
-    errors.to_csv(output_dir / "magnitude_errors.csv", index=False)
-    pd.DataFrame(summaries).to_csv(output_dir / "magnitude_summary.csv", index=False)
     np.savez_compressed(
-        output_dir / "comparison.npz",
+        output_dir / "template_extensions.npz",
         wave=wave,
         basis=basis,
         estimated_template_ivar=ivar,
-        retained_mask=keep,
-        export_wave=actual_wave,
-        feature_rows=features,
-        coefficient_fractions=fractions,
-        log_c_scale=log_scale,
-        redshifts=redshift,
-        **{f"hidden_{m}": banks[m] for m in methods},
-        **{f"actual_{m}": actual[m] for m in methods},
+        export_wave=export_wave,
+        **{f"actual_{name}": bank for name, bank in banks.items()},
     )
-    protocol = {
+    metadata = {
         "prior_dir": str(prior_dir.resolve()),
-        "seed": seed,
-        "n_draws": n_draws,
-        "holdout_rest_aa": holdout_aa,
-        "fit_windows_rest_aa": methods,
-        "anchored_amplitude_window_rest_aa": 100.0,
-        "coverage": coverage,
+        "basis_sha256": hashlib.sha256((prior_dir / "desi_basis.npz").read_bytes()).hexdigest(),
         "prior_bounds": bounds,
-        "summary": summaries,
-        "metric": "Full-filter AB magnitude: reconstructed minus learned reference; negative means too bright",
-        "procedure": "Hide both learned edges before IVAR-weighted fitting; identical joint prior draws and normalization for all banks; no NMF or coefficient refit",
-        "limitations": [
-            "Learned mixtures are not independent galaxy truth.",
-            "Artificial cutoffs probe different wavelengths from real unknown tails.",
-            "u/y hidden-flux fractions and selected redshift populations differ.",
-            "Full tabulated responses include out-of-band leaks, including in controls.",
-            "Draws share one fixed learned bank, not independent template uncertainty.",
-        ],
+        "fit_windows_rest_aa": methods,
+        "amplitude_window_rest_aa": 100.0,
+        "learned_bounds_rest_aa": [float(wave[0]), float(wave[-1])],
+        "export_bounds_rest_aa": [float(export_wave[0]), float(export_wave[-1])],
+        "description": "Actual full-prior LSST extension; no artificial holdout, no NMF or coefficient-prior refit; learned values preserved exactly.",
     }
-    (output_dir / "comparison.json").write_text(json.dumps(protocol, indent=2) + "\n")
-    return errors
+    (output_dir / "template_extensions.json").write_text(json.dumps(metadata, indent=2) + "\n")
+    fig = _plot_template_comparison(
+        export_wave,
+        banks,
+        wave,
+        basis,
+        ivar,
+        wave[0],
+        wave[-1],
+        f"DESI templates: actual LSST extension for z={bounds[0]:.4f}–{bounds[1]:.4f}",
+    )
+    fig.savefig(output_dir / "templates_actual.png", dpi=170)
+    fig.savefig(output_dir / "templates_actual.pdf")
+    plt.close(fig)
+    return export_wave, banks
 
 
 def _comparison_labels(methods):
     palette = ["#269763", "#df761b", "#8c4ab0", "#c54d52", "#8a6846"]
     colors, labels = {"constant": "#2868bd"}, {"constant": "Constant (100 Å)"}
     for index, method in enumerate(m for m in methods if m != "constant"):
-        colors[method] = {
-            "powerlaw_100": "#269763",
-            "powerlaw_200": "#8c4ab0",
-            "powerlaw_300": "#c54d52",
-            "powerlaw_500": "#df761b",
-            "powerlaw_1000": "#8c4ab0",
-            "powerlaw_2000": "#c54d52",
-        }.get(method, palette[index % len(palette)])
         labels[method] = f"PL {method.split('_')[1]} Å"
-        if method.endswith("_anchored"):
-            colors[method] = {
-                "500": "#269763",
-                "1000": "#df761b",
-                "2000": "#8c4ab0",
-            }.get(method.split("_")[1], palette[index % len(palette)])
+        colors[method] = {
+            "500": "#269763",
+            "1000": "#df761b",
+            "2000": "#8c4ab0",
+        }.get(method.split("_")[1], palette[index % len(palette)])
     return colors, labels
 
 
-def _plot_template_comparison(
-    wave, banks, reference_wave, reference, ivar, first, last, title, *, heldout=False
-):
+def _plot_template_comparison(wave, banks, reference_wave, reference, ivar, first, last, title):
     import matplotlib.pyplot as plt
     from matplotlib.lines import Line2D
 
@@ -662,7 +396,7 @@ def _plot_template_comparison(
             ax.plot(
                 reference_wave,
                 reference[k] / norm[k],
-                color=".65" if heldout else "#39434d",
+                color="#39434d",
                 lw=0.85,
                 zorder=2,
             )
@@ -687,15 +421,6 @@ def _plot_template_comparison(
                     elinewidth=0.8,
                     capsize=1.5,
                     zorder=1,
-                )
-            if heldout:
-                retained = (reference_wave >= first) & (reference_wave <= last)
-                ax.plot(
-                    reference_wave[retained],
-                    reference[k, retained] / norm[k],
-                    color="#39434d",
-                    lw=0.9,
-                    zorder=3,
                 )
             for method in methods:
                 color = colors[method]
@@ -764,250 +489,12 @@ def _plot_template_comparison(
     return fig
 
 
-def plot_magnitude_comparison(errors):
-    """Show reference/reconstructed magnitudes, error distributions and hidden flux."""
-    import matplotlib.pyplot as plt
-
-    df = errors
-    methods = list(df.method.unique())
-    colors, labels = _comparison_labels(methods)
-    fig, axes = plt.subplots(2, 3, figsize=(19, 10))
-    for row, band in enumerate(["u", "y"]):
-        data = df[df.band == band]
-        ax = axes[row, 0]
-        allmag = np.r_[data.reference_mag, data.reconstructed_mag]
-        lo, hi = allmag.min(), allmag.max()
-        pad = 0.04 * (hi - lo)
-        ax.plot([lo - pad, hi + pad], [lo - pad, hi + pad], color=".4", lw=1, ls="--")
-        for method in colors:
-            g = data[data.method == method]
-            ax.scatter(
-                g.reference_mag,
-                g.reconstructed_mag,
-                s=9,
-                alpha=0.3,
-                color=colors[method],
-                label=labels[method],
-            )
-        ax.set(
-            xlim=(lo - pad, hi + pad),
-            ylim=(lo - pad, hi + pad),
-            xlabel=f"Reference {band} magnitude [AB]",
-            ylabel=f"Reconstructed {band} magnitude [AB]",
-            title=f"{band} band: n={len(data)//len(methods)}, z={data.z.min():.3f}–{data.z.max():.3f}",
-        )
-        ax.legend()
-        ax = axes[row, 1]
-        span = data.delta_mag.max() - data.delta_mag.min()
-        bins = np.linspace(
-            data.delta_mag.min() - 0.03 * span, data.delta_mag.max() + 0.03 * span, 65
-        )
-        for method in colors:
-            g = data[data.method == method]
-            ax.hist(
-                g.delta_mag,
-                bins=bins,
-                histtype="step",
-                lw=1.8,
-                color=colors[method],
-                label=labels[method],
-            )
-        ax.axvline(0, color=".4", lw=1, ls="--")
-        ax.set(xlabel="Δmag = reconstructed − reference", ylabel="Number of prior draws")
-        ax.legend()
-        ax = axes[row, 2]
-        for method in colors:
-            g = data[data.method == method]
-            ax.scatter(
-                100 * g.reference_flux_fraction_hidden,
-                g.delta_mag,
-                s=10,
-                alpha=0.35,
-                color=colors[method],
-                label=labels[method],
-            )
-        ax.axhline(0, color=".4", lw=1, ls="--")
-        ax.set(
-            xlabel=f"Reference {band}-band flux from hidden region [%]",
-            ylabel="Δmag = reconstructed − reference",
-        )
-        ax.legend()
-    for ax in axes.flat:
-        ax.grid(alpha=0.15)
-    fig.suptitle(
-        "Power-law fitting windows: LSST magnitude recovery\nPaired learned-reference mixtures; identical coefficients and redshifts",
-        fontsize=16,
-    )
-    fig.tight_layout(rect=(0, 0, 1, 0.94))
-    return fig
-
-
-def plot_comparison(output_dir, *, powerlaw_windows=None):
-    """Redraw actual/hidden-edge template overlays and a 2x3 magnitude diagnostic."""
-    import matplotlib.pyplot as plt
-    import pandas as pd
-
-    output_dir = Path(output_dir)
-    metadata = json.loads((output_dir / "comparison.json").read_text())
-    available = [
-        m for m in metadata["fit_windows_rest_aa"] if m == "constant" or m.endswith("_anchored")
-    ]
-    methods = (
-        available
-        if powerlaw_windows is None
-        else [m for m in available if m == "constant" or float(m.split("_")[1]) in powerlaw_windows]
-    )
-    if len(set(methods)) != len(methods) or (
-        powerlaw_windows is not None
-        and (
-            len(set(powerlaw_windows)) != len(powerlaw_windows)
-            or any(f"powerlaw_{float(w):g}_anchored" not in available for w in powerlaw_windows)
-        )
-    ):
-        raise ValueError(
-            "Requested plotting windows must be unique and present in the saved comparison"
-        )
-    with np.load(output_dir / "comparison.npz") as saved:
-        wave, basis, ivar = saved["wave"], saved["basis"], saved["estimated_template_ivar"]
-        export_wave, keep = saved["export_wave"], saved["retained_mask"]
-        actual = {m: saved[f"actual_{m}"] for m in methods}
-        hidden = {m: saved[f"hidden_{m}"] for m in methods}
-    errors = pd.read_csv(output_dir / "magnitude_errors.csv")
-    errors = errors[errors.method.isin(methods)]
-    bounds = metadata["prior_bounds"]
-    actual_fig = _plot_template_comparison(
-        export_wave,
-        actual,
-        wave,
-        basis,
-        ivar,
-        wave[0],
-        wave[-1],
-        f"DESI templates: actual LSST extension for z={bounds[0]:g}–{bounds[1]:g}",
-    )
-    hidden_fig = _plot_template_comparison(
-        wave,
-        hidden,
-        wave,
-        basis,
-        ivar,
-        wave[keep][0],
-        wave[keep][-1],
-        f"DESI templates: {metadata['holdout_rest_aa']:g} Å hidden-edge recovery",
-        heldout=True,
-    )
-    magnitude_fig = plot_magnitude_comparison(errors)
-    for name, fig in (
-        ("templates_actual", actual_fig),
-        ("templates_hidden", hidden_fig),
-        ("magnitudes", magnitude_fig),
-    ):
-        fig.savefig(output_dir / f"{name}.png", dpi=170)
-        fig.savefig(output_dir / f"{name}.pdf")
-        plt.close(fig)
-
-
-def plot_powerlaw_fit_windows(prior_dir, *, components=(1, 7), window_aa=500.0):
-    """Inspect learned blue-edge values, fitted continuation and fit weights."""
-    import matplotlib.pyplot as plt
-
-    with np.load(Path(prior_dir) / "desi_basis.npz") as saved:
-        wave, basis, ivar = saved["wave_rest_aa"], saved["basis"], saved["estimated_template_ivar"]
-        export_wave = saved["export_wave_rest_aa"]
-    if not components or any(k < 1 or k > len(basis) for k in components):
-        raise ValueError("Component numbers must lie between 1 and the saved rank")
-    if not np.isfinite(window_aa) or window_aa <= 0:
-        raise ValueError("Fit-window width must be finite and positive")
-    fig, axes = plt.subplots(len(components), 3, figsize=(17, 4 * len(components)), squeeze=False)
-    edge = wave[0]
-    target = np.linspace(min(export_wave[0], edge), min(wave[-1], edge + window_aa), 1000)
-    for row, number in enumerate(components):
-        k = number - 1
-        fit = (wave <= edge + window_aa) & (ivar[k] > 0)
-        prediction = _extrapolate_powerlaw(wave[fit], basis[k, fit], ivar[k, fit], edge, target)
-        at_bins = _extrapolate_powerlaw(wave[fit], basis[k, fit], ivar[k, fit], edge, wave[fit])
-        alpha = np.log(at_bins[-1] / at_bins[0]) / np.log(wave[fit][-1] / wave[fit][0])
-        scale = basis[k].mean()
-        visible = wave <= edge + window_aa
-        valid = visible & (ivar[k] > 0)
-        sigma = 1 / np.sqrt(ivar[k, valid]) / scale
-        for col in (0, 1):
-            ax = axes[row, col]
-            ax.errorbar(
-                wave[valid],
-                basis[k, valid] / scale,
-                yerr=sigma,
-                color="#39434d",
-                ecolor="#88a9ce",
-                lw=1,
-                elinewidth=0.8,
-                capsize=2,
-                label="Learned template ±1σ",
-            )
-            ax.plot(
-                target,
-                prediction / scale,
-                color="#df761b",
-                lw=2,
-                label=f"PL {window_aa:g} Å, α={alpha:.2f}",
-            )
-            ax.axvline(edge, color=".45", ls=":", lw=1)
-            ax.set(xlabel="Rest wavelength [Å]", ylabel="Flux / mean learned flux")
-            ax.grid(alpha=0.15)
-        axes[row, 0].set(
-            xlim=(edge, edge + window_aa), title=f"B{number}: inside the fitting window"
-        )
-        axes[row, 1].set(xlim=(target[0], edge + 150), title=f"B{number}: blue-edge continuation")
-        axes[row, 1].axvspan(target[0], edge, color="#df761b", alpha=0.09)
-        # Fit-window limits exclude the exterior rise, which has its own panel.
-        limits = np.r_[
-            basis[k, valid] / scale - sigma, basis[k, valid] / scale + sigma, at_bins / scale
-        ]
-        padding = 0.08 * (limits.max() - limits.min())
-        axes[row, 0].set_ylim(min(0, limits.min() - padding), limits.max() + padding)
-        axes[row, 0].legend(fontsize=9)
-        weight_ax = axes[row, 2]
-        weights = ivar[k, fit]
-        weight_ax.plot(
-            wave[fit],
-            weights / weights.max(),
-            color="#2868bd",
-            lw=1.5,
-            label="Estimated template IVAR",
-        )
-        residual = (at_bins - basis[k, fit]) * np.sqrt(weights)
-        effective = weights / np.sqrt(1 + residual**2)
-        weight_ax.plot(
-            wave[fit],
-            effective / weights.max(),
-            color="#df761b",
-            lw=1.5,
-            label="After robust-loss downweighting",
-        )
-        weight_ax.set(
-            xlim=(edge, edge + window_aa),
-            xlabel="Rest wavelength [Å]",
-            ylabel="Weight / maximum input IVAR",
-            title=f"B{number}: relative fit weights",
-        )
-        weight_ax.grid(alpha=0.15)
-        weight_ax.legend(fontsize=9)
-    fig.suptitle(
-        "Blue-edge power-law fits: "
-        + ", ".join(f"B{k}" for k in components)
-        + "\nSame production fit; uncertainty from estimated template IVAR",
-        fontsize=16,
-    )
-    fig.tight_layout(rect=(0, 0, 1, 0.92))
-    return fig
-
-
 def compare_filter_response_holdouts(
     prior_dir,
     output_dir,
     *,
     response_fractions=(0.1, 0.25, 0.5),
-    powerlaw_windows=(500.0, 1000.0, 2000.0),
+    powerlaw_windows=(500.0, 2000.0),
     response_tail_fraction=0.001,
     n_draws=60000,
     max_samples=1000,
@@ -1167,33 +654,23 @@ def compare_filter_response_holdouts(
                 flux_fraction = np.trapz((reference_flux * response)[wing], obs[wing]) / np.trapz(
                     reference_flux * response, obs
                 )
-                available = wave >= edge if band == "u" else wave <= edge
-                local = available & (np.abs(wave - edge) <= 100)
-                anchors = []
-                for k in range(len(basis)):
-                    local_valid = local & (ivar[k] > 0)
-                    if not np.any(local_valid):
-                        raise ValueError("Local anchor window has no positive template IVAR")
-                    anchors.append(
-                        float(np.average(basis[k, local_valid], weights=ivar[k, local_valid]))
-                    )
                 for method, width in methods.items():
                     reconstructed = reference_components.copy()
                     status, failure = "ok", ""
-                    for k, amplitude in enumerate(anchors):
-                        if method == "constant":
-                            reconstructed[k, wing] = amplitude
-                            continue
-                        fit = available & (np.abs(wave - edge) <= width) & (ivar[k] > 0)
+                    for k in range(len(basis)):
                         try:
                             with np.errstate(over="ignore", under="ignore", invalid="ignore"):
-                                reconstructed[k, wing] = _extrapolate_powerlaw(
-                                    wave[fit],
-                                    basis[k, fit],
-                                    ivar[k, fit],
+                                reconstructed[k, wing] = extrapolate_edge(
+                                    wave,
+                                    basis[k],
+                                    ivar[k],
                                     edge,
                                     query[wing],
-                                    anchor_amplitude=amplitude,
+                                    side="blue" if band == "u" else "red",
+                                    method=(
+                                        "constant" if method == "constant" else "powerlaw_anchored"
+                                    ),
+                                    window_aa=width,
                                 )
                         except ValueError as exc:
                             message = str(exc)
@@ -1311,6 +788,10 @@ def compare_filter_response_holdouts(
     pd.DataFrame(binned).to_csv(output_dir / "response_redshift_summary.csv", index=False)
     protocol = {
         "prior_dir": str(prior_dir.resolve()),
+        "basis_sha256": hashlib.sha256((prior_dir / "desi_basis.npz").read_bytes()).hexdigest(),
+        "kde_sha256": hashlib.sha256(
+            (prior_dir / "sed_prior_kde_native.joblib").read_bytes()
+        ).hexdigest(),
         "seed": seed,
         "candidate_draws": n_draws,
         "coverage": coverage,
@@ -1411,102 +892,6 @@ def plot_filter_response_holdouts(output_dir):
 
 
 def plot_filter_response_comparison(output_dir):
-    """Show paired errors and their full tails for every band/response fraction."""
-    import matplotlib.pyplot as plt
-    import pandas as pd
-    from matplotlib.lines import Line2D
-
-    output_dir = Path(output_dir)
-    metadata = json.loads((output_dir / "response_comparison.json").read_text())
-    errors = pd.read_csv(output_dir / "response_errors.csv")
-    levels = metadata["response_fractions"]
-    methods = list(metadata["fit_windows_rest_aa"])
-    colors, labels = _comparison_labels(methods)
-    for kind in ("scatter", "errors", "redshift"):
-        fig, axes = plt.subplots(2, len(levels), figsize=(6 * len(levels), 9), squeeze=False)
-        for row, band in enumerate(("u", "y")):
-            for col, level in enumerate(levels):
-                ax = axes[row, col]
-                panel = errors[
-                    (errors.band == band) & np.isclose(errors.target_response_fraction, level)
-                ]
-                finite = panel[panel.status == "ok"]
-                if finite.empty:
-                    ax.text(0.5, 0.5, "All fits failed", transform=ax.transAxes, ha="center")
-                    continue
-                if kind == "errors":
-                    ax.axvline(0.1, color=".5", ls=":", lw=1)
-                    ax.set(
-                        xlabel="Absolute magnitude error [mag]",
-                        ylabel="Fraction of all draws with error ≤ x",
-                        xscale="log",
-                        ylim=(0, 1.025),
-                    )
-                else:
-                    ax.axhline(0, color=".5", ls="--", lw=1)
-                    ax.set(
-                        xlabel=(
-                            f"Reference {band} magnitude [AB]"
-                            if kind == "scatter"
-                            else "Sampled redshift"
-                        ),
-                        ylabel="Δmag = reconstructed − reference",
-                        yscale="symlog",
-                    )
-                    ax.set_yscale("symlog", linthresh=0.1, linscale=1)
-                failures = []
-                for method in methods:
-                    group = panel[panel.method == method]
-                    valid = group[group.status == "ok"]
-                    if kind == "errors":
-                        # Failed fits never enter the finite-error CDF; the denominator
-                        # includes them, so its endpoint exposes the failure fraction.
-                        ordered = np.sort(valid.delta_mag.abs().to_numpy())
-                        ax.step(
-                            np.maximum(ordered, 1e-12),
-                            np.arange(1, len(ordered) + 1) / len(group),
-                            where="post",
-                            color=colors[method],
-                            lw=1.6,
-                        )
-                    else:
-                        x = valid.reference_mag if kind == "scatter" else valid.z
-                        ax.scatter(x, valid.delta_mag, color=colors[method], s=9, alpha=0.35)
-                    count = int((group.status != "ok").sum())
-                    if count:
-                        failures.append(f"{labels[method]}: {count} failed")
-                if failures:
-                    ax.text(
-                        0.02,
-                        0.98,
-                        "\n".join(failures),
-                        transform=ax.transAxes,
-                        va="top",
-                        fontsize=8,
-                    )
-                ax.set_title(
-                    f"{band}: {level:.0%} hidden response; n={metadata['n_paired_draws_per_panel'][band]}"
-                )
-                ax.grid(alpha=0.15)
-        subtitle = (
-            "Cumulative error distributions; dotted line = 0.1 mag"
-            if kind == "errors"
-            else "Linear error scale within ±0.1 mag, logarithmic beyond; all finite tails shown"
-        )
-        fig.suptitle("Extrapolation at matched hidden filter response\n" + subtitle, fontsize=16)
-        fig.legend(
-            handles=[Line2D([], [], color=colors[m], lw=2, label=labels[m]) for m in methods],
-            loc="lower center",
-            ncol=len(methods),
-            fontsize=10,
-        )
-        fig.tight_layout(rect=(0, 0.055, 1, 0.92))
-        fig.savefig(output_dir / f"response_{kind}.png", dpi=170)
-        fig.savefig(output_dir / f"response_{kind}.pdf")
-        plt.close(fig)
-
-
-def plot_filter_response_previous_layout(output_dir):
     """Show error distributions and dependence on hidden flux for each holdout."""
     import matplotlib.pyplot as plt
     import pandas as pd
@@ -1716,48 +1101,38 @@ def plot_filter_response_redshift_summary(output_dir):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
-    compare = commands.add_parser(
-        "compare", help="Compare constant with anchored power-law windows on a completed build"
+    extend = commands.add_parser(
+        "extend", help="Regenerate actual constant and power-law template tails"
     )
-    compare.add_argument("--prior-dir", type=Path, required=True)
-    compare.add_argument("--output-dir", type=Path, required=True)
-    compare.add_argument("--powerlaw-windows", type=float, nargs="+", default=[100, 500])
-    compare.add_argument("--holdout-aa", type=float, default=300)
-    compare.add_argument("--n-draws", type=int, default=60000)
-    compare.add_argument("--max-samples-per-band", type=int, default=2000)
-    compare.add_argument("--seed", type=int, default=20261015)
-    plot = commands.add_parser("plot", help="Redraw a saved comparison without sampling or fitting")
-    plot.add_argument("--output-dir", type=Path, required=True)
-    plot.add_argument("--powerlaw-windows", type=float, nargs="+")
-    fit_window = commands.add_parser(
-        "fit-window", help="Inspect power-law fits inside their blue-edge window"
-    )
-    fit_window.add_argument("--prior-dir", type=Path, required=True)
-    fit_window.add_argument("--output", type=Path, required=True)
-    fit_window.add_argument("--components", type=int, nargs="+", default=[1, 7])
-    fit_window.add_argument("--window-aa", type=float, default=500)
+    extend.add_argument("--prior-dir", type=Path, required=True)
+    extend.add_argument("--output-dir", type=Path, required=True)
+    extend.add_argument("--powerlaw-windows", type=float, nargs="+", default=[500, 2000])
     response = commands.add_parser(
-        "response-compare",
-        help="Match hidden u/y photon-response fractions at each sampled redshift",
+        "response-compare", help="Evaluate matched hidden u/y filter response"
     )
     response.add_argument("--prior-dir", type=Path, required=True)
     response.add_argument("--output-dir", type=Path, required=True)
     response.add_argument("--response-fractions", type=float, nargs="+", default=[0.1, 0.25, 0.5])
-    response.add_argument("--powerlaw-windows", type=float, nargs="+", default=[500, 1000, 2000])
+    response.add_argument("--powerlaw-windows", type=float, nargs="+", default=[500, 2000])
     response.add_argument(
         "--response-tail-fraction",
         type=float,
         default=0.001,
-        help="Total photon response discarded from two tails when defining band coverage",
+        help="Total photon response discarded from both tails for band coverage",
     )
     response.add_argument("--n-draws", type=int, default=60000)
     response.add_argument("--max-samples", type=int, default=1000)
     response.add_argument("--seed", type=int, default=20261015)
-    response_plot = commands.add_parser(
-        "response-plot", help="Redraw a saved matched-response comparison"
+    redraw = commands.add_parser(
+        "response-plot", help="Redraw saved response comparisons without fitting"
     )
-    response_plot.add_argument("--output-dir", type=Path, required=True)
+    redraw.add_argument("--output-dir", type=Path, required=True)
     args = parser.parse_args(argv)
+    if args.command == "extend":
+        compare_template_extensions(
+            args.prior_dir, args.output_dir, powerlaw_windows=args.powerlaw_windows
+        )
+        return
     if args.command == "response-compare":
         compare_filter_response_holdouts(
             args.prior_dir,
@@ -1769,37 +1144,9 @@ def main(argv=None):
             max_samples=args.max_samples,
             seed=args.seed,
         )
-        plot_filter_response_holdouts(args.output_dir)
-        plot_filter_response_comparison(args.output_dir)
-        plot_filter_response_previous_layout(args.output_dir)
-        plot_filter_response_redshift_summary(args.output_dir)
-    elif args.command == "response-plot":
-        plot_filter_response_holdouts(args.output_dir)
-        plot_filter_response_comparison(args.output_dir)
-        plot_filter_response_previous_layout(args.output_dir)
-        plot_filter_response_redshift_summary(args.output_dir)
-    elif args.command == "compare":
-        compare_template_edges(
-            args.prior_dir,
-            args.output_dir,
-            powerlaw_windows=args.powerlaw_windows,
-            holdout_aa=args.holdout_aa,
-            n_draws=args.n_draws,
-            max_samples_per_band=args.max_samples_per_band,
-            seed=args.seed,
-        )
-        plot_comparison(args.output_dir)
-    elif args.command == "plot":
-        plot_comparison(args.output_dir, powerlaw_windows=args.powerlaw_windows)
-    else:
-        import matplotlib.pyplot as plt
-
-        figure = plot_powerlaw_fit_windows(
-            args.prior_dir, components=args.components, window_aa=args.window_aa
-        )
-        args.output.parent.mkdir(parents=True, exist_ok=True)
-        figure.savefig(args.output, dpi=170)
-        plt.close(figure)
+    plot_filter_response_holdouts(args.output_dir)
+    plot_filter_response_comparison(args.output_dir)
+    plot_filter_response_redshift_summary(args.output_dir)
 
 
 if __name__ == "__main__":
