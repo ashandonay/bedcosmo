@@ -2077,7 +2077,7 @@ class TestCompareIncreasingDesign:
                 artifacts.mkdir(parents=True)
                 (artifacts / "eig_data_20261021_0000.json").write_text(json.dumps({
                     "status": "complete",
-                    "step_150000": {"variable": {
+                    "step_150000": {"nominal": {"eigs_avg": [eig - 0.1], "eigs_std": [0.02]}, "variable": {
                         "eigs_avg": [eig], "optimal_eig": eig, "optimal_eig_std": 0.01,
                         "optimal_design": (scale * self.NOMINAL).tolist(),
                     }},
@@ -2143,7 +2143,15 @@ class TestCompareIncreasingDesign:
         assert [ln.get_color() for ln in refs_drawn] == colors
         # Fits: emulator +0.5 bits per 100%, scaling +1.0 -> reaches its reference at +20% / +25%.
         assert [t.get_text().strip() for t in ax2.texts] == ["+20.0%", "+25.0%"]
-        assert "Emulator: optimal design" in [t.get_text() for t in ax2.get_legend().get_texts()]
+        # The reference flow's optimal (star) and nominal (square) EIGs are their own points at 0%.
+        stars = [ln for ln in ax2.get_lines() if ln.get_marker() == "*"]
+        squares = [ln for ln in ax2.get_lines() if ln.get_marker() == "s"]
+        assert [(ln.get_xdata()[0], ln.get_ydata()[0]) for ln in stars] == [(0.0, 7.10), (0.0, 7.25)]
+        np.testing.assert_allclose([ln.get_ydata()[0] for ln in squares], [7.00, 7.15])
+        assert [ln.get_color() for ln in stars] == colors
+        legend = [t.get_text() for t in ax2.get_legend().get_texts()]
+        assert legend[:2] == ["Emulator", "Scaling"]
+        assert {"Emulator: optimal design", "Emulator: nominal design"} <= set(legend)
         plt.close("all")
 
     @pytest.mark.parametrize("extra", [

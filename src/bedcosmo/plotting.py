@@ -6376,18 +6376,27 @@ def _plot_increasing_design_groups(groups, refs, figsize, dpi, save_path):
         if group in refs:
             if not refs[group]["optimal_eigs"]:
                 raise ValueError(f"Reference run for {group!r} has no completed eig_data file")
-            ref_eig = refs[group]["optimal_eigs"][0]
-            ax2.axhline(y=ref_eig, color=color, linestyle=':', linewidth=1.5,
-                        label=f'{group}: optimal design')
+            ref = refs[group]
+            ref_eig = ref["optimal_eigs"][0]
+            ref_pct = (np.sum(ref["optimal_designs"][0]) - 1.0) * 100.0
+            ax2.axhline(y=ref_eig, color=color, linestyle=':', linewidth=1.5)
+            # The reference flow's own nominal and optimal EIGs, as separate points.
+            if ref["nominal_eig"] is not None:
+                ax2.errorbar(ref_pct, ref["nominal_eig"], yerr=ref["nominal_eig_std"], color=color,
+                             marker='s', markersize=9, markerfacecolor='white', markeredgewidth=2,
+                             linestyle='none', capsize=4, label=f'{group}: nominal design')
+            ax2.errorbar(ref_pct, ref_eig, yerr=ref["optimal_eig_stds"][0], color=color,
+                         marker='*', markersize=16, markeredgecolor='black', linestyle='none',
+                         capsize=4, label=f'{group}: optimal design')
             if slope:
                 x_cross = (ref_eig - intercept) / slope
                 ax2.axvline(x_cross, color=color, linestyle=':', linewidth=1.0, alpha=0.6)
                 ax2.text(x_cross, ref_eig, f' {x_cross:+.1f}%', color=color, fontsize=13,
                          fontweight='bold', ha='right', va='bottom',
                          bbox=dict(facecolor='white', edgecolor='none', alpha=0.7, pad=0.3))
-    # Data series first, then their reference lines.
+    # Data series first, then their reference points.
     handles, legend_labels = ax2.get_legend_handles_labels()
-    order = sorted(range(len(legend_labels)), key=lambda i: legend_labels[i].endswith(': optimal design'))
+    order = sorted(range(len(legend_labels)), key=lambda i: ': ' in legend_labels[i])
     ax2.legend([handles[i] for i in order], [legend_labels[i] for i in order],
                loc='best', fontsize=12, framealpha=0.9)
     ax2.set_xlabel('Percentage Increase in Total Observations', fontsize=12, weight='bold')
@@ -6786,7 +6795,7 @@ def compare_increasing_design(
     if run_groups is not None:
         refs = {
             group: _load_increasing_design_runs(
-                None, [rid], excluded_runs, cosmo_exp, storage_path, eval_step, False)
+                None, [rid], excluded_runs, cosmo_exp, storage_path, eval_step, True)
             for group, rid in (ref_ids or {}).items()
         }
         _plot_increasing_design_groups(groups, refs, figsize, dpi, save_path)
