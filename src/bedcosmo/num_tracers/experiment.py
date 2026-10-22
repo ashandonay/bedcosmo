@@ -85,7 +85,7 @@ class NumTracers(BaseExperiment, CosmologyMixin):
 
         self.name = "num_tracers"
         self.dataset = dataset
-        # Same values as desilike-emulator's --analysis: they select the tracer bins
+        # Same values as tracer-forecast-emulator's --analysis: they select the tracer bins
         # (util.tracers_for), the emulators.yaml subtree and the models.yaml block.
         if analysis not in ("bao", "shapefit"):
             raise ValueError(f"analysis must be 'bao' or 'shapefit'; got {analysis!r}.")
@@ -224,30 +224,30 @@ class NumTracers(BaseExperiment, CosmologyMixin):
                 if value:
                     raise ValueError(f"{name} is BAO-only; got {name}={value!r} with analysis='shapefit'.")
         # Optionally inflate the emulator's statistical covariance by DESI's measured
-        # per-tracer systematic budget (desilike_emulator desi_reference.apply_desi_syst).
+        # per-tracer systematic budget (tracer_forecast_emulator desi_reference.apply_desi_syst).
         self.apply_desi_syst = apply_desi_syst
         self._desi_syst_factors_cache = None
         # Evaluate the BAO means at each tracer bin's effective redshift for the
-        # design's N_tracers (desilike_emulator util.effective_redshift, DESI 2024 III
+        # design's N_tracers (tracer_forecast_emulator util.effective_redshift, DESI 2024 III
         # Eq. 2.1 in the fiducial frame) instead of desi_data.csv's fixed DR1 z. The
-        # emulator's sigma labels are defined at z_eff(N) (desilike-emulator shapefit
+        # emulator's sigma labels are defined at z_eff(N) (tracer-forecast-emulator shapefit
         # CHANGELOG §159), so this makes mean and covariance describe the same
         # redshift. Emulator mode only: scaling-mode sigmas are DESI's, measured at
-        # DESI's z. DR1 only: desilike-emulator ships DR1 n(z) tables. Off by default.
+        # DESI's z. DR1 only: tracer-forecast-emulator ships DR1 n(z) tables. Off by default.
         if vary_z_eff and likelihood_mode != "emulator":
             raise ValueError(
                 "vary_z_eff requires likelihood_mode='emulator': scaling-mode sigmas "
                 "are DESI's own, measured at desi_data.csv's fixed z.")
         if vary_z_eff and dataset != "dr1":
             raise ValueError(
-                f"vary_z_eff is DR1-only (desilike-emulator has no {dataset} n(z) "
+                f"vary_z_eff is DR1-only (tracer-forecast-emulator has no {dataset} n(z) "
                 "tables); got dataset={dataset!r}.")
         self.vary_z_eff = bool(vary_z_eff)
         self._effective_redshift = None
         if self.vary_z_eff:
-            # Import now so a missing or pre-#37 desilike_emulator fails at
+            # Import now so a missing or pre-#37 tracer_forecast_emulator fails at
             # construction, not at the first likelihood call of a queued job.
-            from desilike_emulator.util import effective_redshift
+            from tracer_forecast_emulator.util import effective_redshift
             self._effective_redshift = effective_redshift
         self._init_mean_z_eff_rows()
         # Diagnostic: replace the emulator's nonlinear N-dependence with pure 1/sqrt(N)
@@ -1398,7 +1398,7 @@ class NumTracers(BaseExperiment, CosmologyMixin):
         return parameters
 
     # Fixed neutrino density of the DESI fiducial (one massive neutrino, 0.06 eV), as in
-    # desilike_emulator bao/core.py _OMEGA_NU_FID. Enters the derived Omega_m that bounds
+    # tracer_forecast_emulator bao/core.py _OMEGA_NU_FID. Enters the derived Omega_m that bounds
     # the shapefit emulators' training domain.
     _OMEGA_NU_FID = 0.06 / 93.14
 
@@ -1434,7 +1434,7 @@ class NumTracers(BaseExperiment, CosmologyMixin):
 
         The shapefit training generator rejects samples whose derived
         Omega_m = (omega_cdm + omega_b + omega_nu) / h^2 falls outside
-        [lower, upper] (desilike_emulator shapefit/core.py _check_omega_m; ~62% of the
+        [lower, upper] (tracer_forecast_emulator shapefit/core.py _check_omega_m; ~62% of the
         raw prior box), so the emulators are only valid inside it. The
         ``omega_m_domain`` constraint carries those bounds; rejected rows are redrawn
         jointly from the prior until every row is inside. The other parameters are
@@ -1477,7 +1477,7 @@ class NumTracers(BaseExperiment, CosmologyMixin):
 
         Emulator checkpoints live in emulators.yaml under
         <analysis>.<dataset>.<cosmo_model>.<quantity>, mirroring the storage path
-        models/{dataset}/{cosmo_model}/{quantity}/. ``quantity`` is desilike-emulator's
+        models/{dataset}/{cosmo_model}/{quantity}/. ``quantity`` is tracer-forecast-emulator's
         ``--quantity``: the forecast space for bao (config | fourier, one per run, set by
         ``emulator_space``), and mean or covar for shapefit (both loaded together).
         Relative paths resolve against
@@ -1555,7 +1555,7 @@ class NumTracers(BaseExperiment, CosmologyMixin):
 
     def _load_emulator(self, ckpt_path):
         """Load one emulator checkpoint into the dict ``_emulator_predict`` consumes."""
-        from desilike_emulator.util import DEFAULT_SIGMA_FLOOR, load_model, model_label
+        from tracer_forecast_emulator.util import DEFAULT_SIGMA_FLOOR, load_model, model_label
 
         # Sigma clamps passed to decode_and_unscale. The floor is the
         # emulator's own convention (single-sourced from util, so it can't drift
@@ -1659,7 +1659,7 @@ class NumTracers(BaseExperiment, CosmologyMixin):
             ``target_names``. Checkpoints trained on scale_data.py-rewritten
             labels are unscaled here via ``decode_and_unscale``.
         """
-        from desilike_emulator.util import decode_and_unscale
+        from tracer_forecast_emulator.util import decode_and_unscale
 
         model_dtype = next(emu["model"].parameters()).dtype
         x = emulator_input.to(model_dtype)
@@ -1727,7 +1727,7 @@ class NumTracers(BaseExperiment, CosmologyMixin):
 
         ``calc_passed`` is the single source of the passed-tracer computation (shared with
         scaling mode) and returns a passed fraction per desi_data row. The emulator's
-        ``N_tracers`` feature is an absolute redshift-confirmed count (desilike_emulator
+        ``N_tracers`` feature is an absolute redshift-confirmed count (tracer_forecast_emulator
         ``_get_ntracers`` reads the ``passed`` column), so this helper does just the final
         conversion: scale by ``self.nominal_total_obs`` and remap rows onto emulator-bin keys
         via ``_EMULATOR_TRACER_TO_DESI``.
@@ -1979,7 +1979,7 @@ class NumTracers(BaseExperiment, CosmologyMixin):
                         f"Tracer '{tracer_bin}' anisotropic layout requires emulator "
                         f"targets {sorted(required)}; got {sorted(emu_targets)}."
                     )
-                from desilike_emulator.util import cov_block_from_marginals
+                from tracer_forecast_emulator.util import cov_block_from_marginals
 
                 c11, c12, c22 = cov_block_from_marginals(
                     sig["sigma_DH_over_rd"],
@@ -2059,7 +2059,7 @@ class NumTracers(BaseExperiment, CosmologyMixin):
     def _desi_syst_factors(self):
         """Per-data-row σ inflation factors R from DESI's systematic budget.
 
-        Uses desilike_emulator's apply_desi_syst to map each
+        Uses tracer_forecast_emulator's apply_desi_syst to map each
         emulator tracer bin's frozen DESI_SYST_INFLATION factors onto the
         desi_data row layout. Cached after first build. Rows not covered by an
         emulator bin (or absent from the table) get 1.0.
@@ -2067,7 +2067,7 @@ class NumTracers(BaseExperiment, CosmologyMixin):
         if self._desi_syst_factors_cache is not None:
             return self._desi_syst_factors_cache
 
-        from desilike_emulator.bao.desi_syst import apply_desi_syst
+        from tracer_forecast_emulator.bao.desi_syst import apply_desi_syst
 
         factors = torch.ones(len(self.desi_data), device=self.device, dtype=torch.float64)
         unit = {"DH_over_rs": 1.0, "DM_over_rs": 1.0, "DV_over_rs": 1.0}
@@ -2162,7 +2162,7 @@ class NumTracers(BaseExperiment, CosmologyMixin):
         if not self.vary_z_eff:
             return {q: z for q, (z, _) in self._mean_z_eff_rows.items()}
         if self._effective_redshift is None:  # flag switched on after construction
-            from desilike_emulator.util import effective_redshift
+            from tracer_forecast_emulator.util import effective_redshift
             self._effective_redshift = effective_redshift
 
         n_tracers = self._passed_ratio_to_n_tracers(passed_ratio)
@@ -2183,7 +2183,7 @@ class NumTracers(BaseExperiment, CosmologyMixin):
         return out
 
     _SHAPEFIT_QUANTITIES = ("mean", "covar")
-    # DESI template fiducial (AbacusSummit c000): desilike_emulator shapefit/core.py
+    # DESI template fiducial (AbacusSummit c000): tracer_forecast_emulator shapefit/core.py
     # FIDUCIAL_SAMPLE, the cosmology the mean labels are measured against. Copied rather
     # than imported because that module needs desilike, which this env does not install.
     _SHAPEFIT_FIDUCIAL = {
@@ -2195,14 +2195,14 @@ class NumTracers(BaseExperiment, CosmologyMixin):
     }
     # Eigenvalue floor for each tracer's 4x4 ShapeFit correlation matrix. The covar
     # emulator predicts the six rho independently, and the tanh decode only keeps each
-    # 2x2 block PD, so the 4x4 needs a nearest-PD projection (desilike-emulator
+    # 2x2 block PD, so the 4x4 needs a nearest-PD projection (tracer-forecast-emulator
     # shapefit/README "Target contract"). Blocks already above the floor are unchanged.
     _SHAPEFIT_CORR_EIG_FLOOR = 1e-6
 
     def _init_shapefit(self, emu_dir):
         """Tracer bins, N_tracers weights, both emulator sets and the central data vector.
 
-        Bins are desilike-emulator's ``tracers_for("shapefit")``: the 0.8-1.1 bin is
+        Bins are tracer-forecast-emulator's ``tracers_for("shapefit")``: the 0.8-1.1 bin is
         LRG3 alone, not BAO's LRG3+ELG1 (ELG1 is excluded from full shape, DESI 2024 V
         Sec 2). A bin's passed count sums its ``components`` (default: the bin itself)
         in desi_tracers.csv, as ``util.ntracers`` does:
@@ -2213,7 +2213,7 @@ class NumTracers(BaseExperiment, CosmologyMixin):
         which is ``calc_passed``'s split and efficiency per sub-sample, stored as one
         (n_bins, n_design_labels) matrix so ``_shapefit_n_tracers`` is a matmul.
         """
-        from desilike_emulator.util import get_tracer_config, tracers_for
+        from tracer_forecast_emulator.util import get_tracer_config, tracers_for
 
         self.shapefit_bins = tracers_for("shapefit")
         tracers = self.desi_tracers.set_index("tracer")
@@ -2244,7 +2244,7 @@ class NumTracers(BaseExperiment, CosmologyMixin):
                 tb: self._load_emulator(paths[tb]) for tb in self.shapefit_bins}
 
         # Target contract: mean -> the physical parameters, covar -> their sigma_* then the
-        # upper-triangle rho_*, row-major (desilike_emulator shapefit/core.py TARGET_NAMES).
+        # upper-triangle rho_*, row-major (tracer_forecast_emulator shapefit/core.py TARGET_NAMES).
         self.shapefit_quantities = self._shapefit_emulators["mean"][self.shapefit_bins[0]]["target_names"]
         names = self.shapefit_quantities
         covar_names = [f"sigma_{n}" for n in names] + [
@@ -2284,7 +2284,7 @@ class NumTracers(BaseExperiment, CosmologyMixin):
         if self.shapefit_quantities != ["qiso", "qap", "f_sigmar", "m"]:
             raise ValueError(f"desi_shapefit_to_targets assumes [qiso, qap, f_sigmar, m]; "
                              f"the mean emulators give {self.shapefit_quantities}.")
-        from desilike_emulator.shapefit import desi_reference
+        from tracer_forecast_emulator.shapefit import desi_reference
 
         rows = []
         for i, tracer_bin in enumerate(self.shapefit_bins):
@@ -2303,7 +2303,7 @@ class NumTracers(BaseExperiment, CosmologyMixin):
 
         - qiso, qap: the measured distance ratios over their fiducial values.
         - f_sigmar: the mean emulator's labels are in DESI's own Eq. (4.10) convention,
-          m-dependence included (desilike_emulator fix_desilike_fsigmar), so DESI's
+          m-dependence included (tracer_forecast_emulator fix_desilike_fsigmar), so DESI's
           f sigma_s8 carries over unchanged, as a fraction of the fiducial: the <=4.4%
           offset between our fiducial f_sigmar and Table 11's is not read as a measurement.
         """

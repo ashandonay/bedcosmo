@@ -1,7 +1,7 @@
 """NumTracers with analysis='shapefit': per-tracer mean + covar emulators.
 
 Locks in:
-  1. N_tracers per bin follows desilike-emulator's shapefit bins: at the nominal design
+  1. N_tracers per bin follows tracer-forecast-emulator's shapefit bins: at the nominal design
      it equals ``util.ntracers(bin)``, and LRG3 is LRG-only (no ELG1 contribution).
   2. The likelihood is a 24-dim Gaussian (6 bins x [qiso, qap, f_sigmar, m]) with a
      block-diagonal, positive-definite covariance.
@@ -55,7 +55,7 @@ def test_bins_and_context(exp):
 
 
 def test_desi_conversion_null_case():
-    from desilike_emulator.shapefit import desi_reference
+    from tracer_forecast_emulator.shapefit import desi_reference
 
     from bedcosmo.num_tracers.experiment import NumTracers
 
@@ -69,7 +69,7 @@ def test_desi_conversion_null_case():
 
 
 def test_central_val_is_desi_measurement(exp):
-    from desilike_emulator.shapefit import desi_reference
+    from tracer_forecast_emulator.shapefit import desi_reference
 
     _, measured, _ = desi_reference.datavector("BGS")
     fid = desi_reference.published_fiducial("BGS")
@@ -81,7 +81,7 @@ def test_central_val_is_desi_measurement(exp):
 
 
 def test_nominal_n_tracers_match_desilike(exp):
-    from desilike_emulator.util import ntracers
+    from tracer_forecast_emulator.util import ntracers
 
     n = exp._shapefit_n_tracers(exp.nominal_design.view(1, -1))[0]
     for i, tracer_bin in enumerate(exp.shapefit_bins):
@@ -283,7 +283,7 @@ def test_cosmology_dict_moves_the_fixed_fiducial():
 
 
 def test_desi_covariance_in_emulator_basis(exp):
-    from desilike_emulator.shapefit import desi_reference
+    from tracer_forecast_emulator.shapefit import desi_reference
 
     from bedcosmo.num_tracers.covariance_fiducials import desi_covariance
 

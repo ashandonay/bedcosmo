@@ -75,7 +75,7 @@ def desi_covariance(experiment):
     """DESI DR1's published covariance in the experiment's data basis."""
     if experiment.analysis == "bao":
         return experiment.ref_cov
-    from desilike_emulator.shapefit import desi_reference
+    from tracer_forecast_emulator.shapefit import desi_reference
 
     # desi_shapefit_to_targets rescales each of DESI's (D_V/r_d, D_H/D_M, f sigma_s8, m)
     # and keeps m, so the covariance transforms by that diagonal Jacobian. f_sigmar's
@@ -95,7 +95,7 @@ def _rows(experiment):
     if experiment.analysis == "bao":
         dd = experiment.desi_data
         return list(zip(dd["tracer"].values, dd["quantity"].values, dd["z"].values))
-    from desilike_emulator.shapefit import desi_reference
+    from tracer_forecast_emulator.shapefit import desi_reference
 
     return [(tb, q, desi_reference.datavector(tb)[0])
             for tb in experiment.shapefit_bins for q in experiment.shapefit_quantities]

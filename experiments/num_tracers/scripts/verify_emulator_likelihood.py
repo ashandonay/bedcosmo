@@ -9,7 +9,7 @@ resulting data values + errors against the real DESI measurements:
     full emulator covariance           vs  desi_cov.npy (nominal)
 
 At nominal design the per-bin N_tracers == the DESI passed (redshift-confirmed)
-counts the emulators were trained around (desilike_emulator _get_ntracers reads
+counts the emulators were trained around (tracer_forecast_emulator _get_ntracers reads
 the 'passed' column), so a well-behaved emulator likelihood should reproduce the
 DESI errors closely. Bins with a null checkpoint (Lya_QSO in base) fall back to
 the fixed DESI nominal covariance by construction.

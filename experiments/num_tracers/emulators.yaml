@@ -1,6 +1,6 @@
 # Emulator checkpoint paths: <analysis>: <dataset>: <cosmo_model>: <quantity>: <tracer_bin>: <path>
 # Nesting mirrors the storage path $SCRATCH/bedcosmo/num_tracers/emulator/{analysis}/models/{dataset}/{cosmo_model}/
-# <analysis> and <quantity> are desilike-emulator's --analysis and --quantity:
+# <analysis> and <quantity> are tracer-forecast-emulator's --analysis and --quantity:
 #   bao:      config | fourier (one forecast space per run, chosen by emulator_space)
 #   shapefit: mean and covar (both loaded; tracer bins are tracers_for("shapefit"), LRG3 not LRG3_ELG1)
 # Relative paths resolve against it; absolute paths are used verbatim; null means "no checkpoint -> fall back to the

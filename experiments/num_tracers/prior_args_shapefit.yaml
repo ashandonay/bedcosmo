@@ -1,5 +1,5 @@
 # ShapeFit (analysis: shapefit) cosmology prior. Distributions match the emulators'
-# training box (desilike_emulator shapefit/core.py DEFAULT_PRIORS); a wider prior would
+# training box (tracer_forecast_emulator shapefit/core.py DEFAULT_PRIORS); a wider prior would
 # evaluate the emulators outside what they were trained on.
 parameters:
   # Cold dark matter density parameter (ω_cdm = Ω_cdm * h^2)
@@ -63,7 +63,7 @@ parameters:
 # Parameter constraints
 constraints:
   # Derived Omega_m = (omega_cdm + omega_b + omega_nu) / h^2 must lie in the emulators'
-  # training domain (desilike_emulator shapefit/core.py _check_omega_m). Rejects ~58% of
+  # training domain (tracer_forecast_emulator shapefit/core.py _check_omega_m). Rejects ~58% of
   # the raw omega_cdm x h box; rejected draws are resampled.
   omega_m_domain:
     affected_parameters: ["omega_cdm", "omega_b", "h"]

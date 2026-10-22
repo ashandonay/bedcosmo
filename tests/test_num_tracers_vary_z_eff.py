@@ -1,7 +1,7 @@
 """NumTracers ``vary_z_eff``: BAO means at the design's effective redshift.
 
 With ``vary_z_eff`` the mean of each tracer bin is evaluated at
-``desilike_emulator.util.effective_redshift(bin, N)`` for the design's passed
+``tracer_forecast_emulator.util.effective_redshift(bin, N)`` for the design's passed
 ``N_tracers``, rather than at desi_data.csv's fixed DR1 ``z``. The emulator's sigma
 labels are defined at that redshift, so this keeps mean and covariance consistent.
 
@@ -46,7 +46,7 @@ def _make_exp(**overrides):
 def exp():
     if not _has_dataset("dr1"):
         pytest.skip("desi dataset bao_dr1 not available")
-    pytest.importorskip("desilike_emulator.util")
+    pytest.importorskip("tracer_forecast_emulator.util")
     e = _make_exp()
     e.vary_z_eff = True
     return e
@@ -81,7 +81,7 @@ def test_nominal_design_reproduces_desi_z(exp, quantity):
 
 @pytest.mark.parametrize("quantity", QUANTITIES)
 def test_matches_effective_redshift_off_nominal(exp, quantity):
-    from desilike_emulator.util import effective_redshift
+    from tracer_forecast_emulator.util import effective_redshift
 
     passed = _passed(exp, scale=0.6)
     z = exp._mean_z_eff(passed)[quantity]
