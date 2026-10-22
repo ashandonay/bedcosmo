@@ -2154,12 +2154,28 @@ class TestCompareIncreasingDesign:
         assert {"Emulator: optimal design", "Emulator: nominal design"} <= set(legend)
         plt.close("all")
 
-    @pytest.mark.parametrize("extra", [
-        {"run_ids": ["a"]}, {"mlflow_exp": "x"}, {"include_nominal": True}, {"ref_id": "r"},
-    ])
+    @pytest.mark.parametrize("extra", [{"run_ids": ["a"]}, {"mlflow_exp": "x"}, {"ref_id": "r"}])
     def test_run_groups_rejects_conflicting_args(self, mock_scratch_env, extra):
         with pytest.raises(ValueError, match="run_groups replaces"):
             compare_increasing_design(run_groups={"g": ["a"]}, **extra)
+
+    def test_single_run_set_is_one_group(self, tmp_path, monkeypatch):
+        """run_ids + ref_id draws as one colored group: no per-run color gradient."""
+        runs = [("r0", 1.0, 7.00), ("r1", 1.1, 7.05), ("r2", 1.2, 7.10)]
+        get_runs, init_exp = self._fake_runs(tmp_path, monkeypatch, {"g": runs + [("ref", 1.0, 7.08)]})
+        with get_runs, init_exp:
+            compare_increasing_design(run_ids=["r0", "r1", "r2"], ref_id="ref")
+        ax2 = plt.figure(plt.get_fignums()[-1]).axes[0]
+        data_lines = [ln for ln in ax2.get_lines() if ln.get_linestyle() == "-"]
+        assert len(data_lines) == 1
+        np.testing.assert_allclose(data_lines[0].get_ydata(), [7.00, 7.05, 7.10])
+        color = data_lines[0].get_color()
+        # Reference points are filled in the group's color with a black outline.
+        markers = {ln.get_marker(): ln for ln in ax2.get_lines() if ln.get_marker() in ("s", "*")}
+        assert markers["s"].get_markerfacecolor() == markers["*"].get_markerfacecolor() == color
+        assert markers["s"].get_markeredgecolor() == markers["*"].get_markeredgecolor() == "black"
+        assert [t.get_text().strip() for t in ax2.texts] == ["+16.0%"]
+        plt.close("all")
 
     def test_ref_ids_need_matching_run_groups(self, mock_scratch_env):
         with pytest.raises(ValueError, match="ref_ids needs run_groups"):
