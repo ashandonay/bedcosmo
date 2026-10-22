@@ -216,9 +216,10 @@ The `shapefit` analysis has one model, `base`: `omega_cdm`, `omega_b`, `h`, `ln1
 # Default dr1 grid
 ./submit.sh train num_tracers base
 
-# A generated pool, sized to it
+# A generated pool (the `pool` example above), sized to it
 ./submit.sh train num_tracers base \
-    --design-args-path design_args_budget_1p0_1p25.yaml \
+    --design-args-path design_args_dr1.yaml \
+    --design-input-path $SCRATCH/bedcosmo/num_tracers/designs/budget_1p0_1p25 \
     --n-particles-per-device 29
 
 # One budget point, scaling mode (x1.0: --design-args-path design_args_nominal.yaml instead)

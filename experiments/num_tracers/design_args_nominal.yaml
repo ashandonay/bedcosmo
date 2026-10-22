@@ -1,0 +1,6 @@
+# Design arguments for num_tracers experiment
+# Nominal design: a single fixed design point (the DESI nominal tracer split),
+# computed internally from the DESI data. No grid or input_path needed.
+labels: ["BGS", "LRG", "ELG", "QSO"]
+input_type: nominal # variable or nominal
+input_path: null

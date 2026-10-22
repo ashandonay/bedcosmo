@@ -1,0 +1,23 @@
+# Design arguments for num_tracers: dr1 design space spanning a *range* of total-observation
+# budgets (design sum), rather than pinning the budget to nominal.
+#
+# The design sum is the total-observation budget as a fraction of nominal, so
+# sum in [1.0, 1.2] spans nominal -> +20% observations. This yields 2447 designs (vs 287 at
+# sum == 1.0), letting a single amortized flow measure EIG across the whole budget axis --
+# so budget comparisons happen *inside one flow*, where fit quality is common-mode.
+#
+# Sizing: training batch = n_particles_per_device * n_designs. To match the proven
+# 28,700/device footprint of the sum==1.0 grid run (287 designs x npd 100), use npd ~= 12:
+#   ./submit.sh train num_tracers base \
+#       --design-args-path design_args_dr1_budget.yaml --n-particles-per-device 12
+#
+# Per-bin bounds are unchanged from design_args_dr1.yaml; their sum caps the reachable
+# budget at 1.23, so 1.2 is inside the feasible region.
+labels: ["BGS", "LRG", "ELG", "QSO"]
+input_type: variable # variable or nominal
+input_path: null
+step: [0.01, 0.02, 0.02, 0.01]
+lower: [0.02, 0.1, 0.1, 0.1]
+upper: [0.0585, 0.3820, 0.5, 0.3291]
+sum_lower: 1.0
+sum_upper: 1.2
