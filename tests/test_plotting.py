@@ -2226,6 +2226,59 @@ class TestCompareBestDesigns:
             with pytest.raises(ValueError, match="No runs found"):
                 plotter.compare_optimal_designs(top_n=2)
 
+    def _two_pools(self, tmp_path, monkeypatch):
+        """Two runs with different design pools; returns (plotter, patches)."""
+        monkeypatch.setenv("SCRATCH", str(tmp_path))
+        pools = {  # run_id -> (designs, eigs)
+            "emu": ([[0.04, 0.38, 0.48, 0.10], [0.03, 0.38, 0.46, 0.13], [0.10, 0.30, 0.30, 0.30]],
+                    [7.12, 7.10, 6.90]),
+            "sca": ([[0.05, 0.38, 0.46, 0.11], [0.05, 0.38, 0.42, 0.15]], [7.25, 7.24]),
+        }
+        run_data = []
+        for run_id, (designs, eigs) in pools.items():
+            artifacts = tmp_path / "bedcosmo" / "num_tracers" / "mlruns" / "1" / run_id / "artifacts"
+            artifacts.mkdir(parents=True)
+            (artifacts / "eig_data_20261022_0000.json").write_text(json.dumps({
+                "status": "complete", "input_designs": designs,
+                "step_1000": {"variable": {"eigs_avg": eigs, "eigs_std": [0.01] * len(eigs)}},
+            }))
+            run_data.append({"run_id": run_id, "exp_id": "1", "run_obj": None, "params": {}})
+        experiment = SimpleNamespace(design_labels=["BGS", "LRG", "ELG", "QSO"],
+                                     nominal_design=torch.tensor([0.04, 0.26, 0.41, 0.29]))
+        plotter = ComparisonPlotter(cosmo_exp="num_tracers", run_ids=list(pools),
+                                    colors=["tab:blue", "tab:orange"])
+        return plotter, (patch("bedcosmo.plotting.get_runs_data", return_value=(run_data, "1", None)),
+                         patch("bedcosmo.plotting.init_experiment", return_value=experiment),
+                         patch.object(plotter, "save_figure"))
+
+    def test_heatmap_shows_each_runs_top_eigs_and_design_values(self, tmp_path, monkeypatch):
+        """Each run keeps its own pool; the EIG panel shows its top-N EIGs, best first."""
+        plotter, (get_runs, init_exp, save) = self._two_pools(tmp_path, monkeypatch)
+        with get_runs, init_exp, save:
+            fig, ax = plotter.compare_optimal_designs(top_n=2)
+        ax_eig = fig.axes[0]
+        points = [ln for ln in ax_eig.get_lines() if ln.get_marker() == "o"]
+        assert [list(ln.get_ydata()) for ln in points] == [[7.12, 7.10], [7.25, 7.24]]
+        assert [ln.get_color() for ln in points] == ["tab:blue", "tab:orange"]
+        assert [t.get_text() for t in ax_eig.texts] == ["7.120", "7.100", "7.250", "7.240"]
+        # Heatmap cells carry the design values of those top designs (4 dims x 4 columns).
+        assert [t.get_text() for t in ax.texts][:4] == ["0.04", "0.38", "0.48", "0.1"]
+        assert len(ax.texts) == 16
+        # The colorbar spans the heatmap only.
+        cax = fig.axes[-1]
+        assert cax.get_position().y0 == pytest.approx(ax.get_position().y0)
+        assert cax.get_position().y1 == pytest.approx(ax.get_position().y1)
+        plt.close(fig)
+
+    def test_heatmap_without_eigs(self, tmp_path, monkeypatch):
+        plotter, (get_runs, init_exp, save) = self._two_pools(tmp_path, monkeypatch)
+        with get_runs, init_exp, save:
+            fig, ax = plotter.compare_optimal_designs(top_n=2, show_eigs=False)
+        assert fig.axes == [ax, fig.axes[-1]]  # heatmap + colorbar, no EIG panel
+        assert len(ax.texts) == 16
+        assert ax.get_title() == "Top 2 Designs Comparison Across Runs"
+        plt.close(fig)
+
 
 # ============================================================================
 # Design Plotting Functions Tests
