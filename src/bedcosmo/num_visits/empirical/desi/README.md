@@ -149,6 +149,16 @@ least-squares covariance construction described in the
 The constant estimator uses unsmoothed flux because median filtering would
 change the errors and introduce correlations not represented by these weights.
 
+At each learned wavelength, write the normalized galaxy measurements as
+`X_lambda ≈ C @ B_lambda`, where `C` has shape `(N_galaxies, K)` and
+`B_lambda` contains the `K` template amplitudes. With the diagonal measurement
+precision `W_lambda = diag(relative_ivar[:, lambda])`, the conditional information
+matrix is `H_lambda = C.T @ W_lambda @ C`. In the unconstrained, fixed-coefficient
+linear model, the covariance is `inv(H_lambda)`. The saved template IVAR is the
+reciprocal of each diagonal entry of that covariance, not the diagonal of `H`.
+Missing pixels have zero measurement weight. Covariance between different
+wavelengths is not estimated. No residual-based variance inflation is applied.
+
 Existing datasets and templates are not modified automatically. `--prior-only`
 reuses a completed measured-data build's saved coefficients and exported bank.
 It can change prior bounds within that bank's LSST coverage but cannot enlarge
@@ -338,6 +348,35 @@ selected training population; that matrix must also be measured-only.
 
 ## Extrapolation and performance comparisons
 
+### Implementation map
+
+| File | Responsibility |
+|---|---|
+| [training_matrix.py](training_matrix.py) | Native coadd binning, normalization, fixed exterior quality cut, measured-only arrays |
+| [build_matrix.py](build_matrix.py) | Training-population selection and matrix CLI |
+| [support.py](support.py) | Contributor-based learned support and LSST wavelength demand |
+| [weighted_nmf.py](weighted_nmf.py) | Weighted coefficient inference and reconstruction error |
+| [evaluate_factorization_methods.py](evaluate_factorization_methods.py) | Factorization, validation and test metrics |
+| [build_prior.py](build_prior.py) | Production NMF/prior build, export normalization and `estimate_template_ivar` |
+| [extrapolation.py](extrapolation.py) | Edge fits, finished-template extensions and response-holdout diagnostics |
+| [../diagnostics_plots.py](../diagnostics_plots.py) | Measured contributor coverage and coefficient-weighted template redshifts |
+
+The production build saves these arrays in `desi_basis.npz`:
+
+| Array | Shape | Meaning |
+|---|---|---|
+| `wave_rest_aa` | `(L,)` | Learned rest wavelengths |
+| `basis` | `(K, L)` | Learned templates in export normalization |
+| `coefficients` | `(N_galaxies, K)` | Fitted weights for the normalized measured spectra |
+| `estimated_template_ivar` | `(K, L)` | Conditional precision on learned template values |
+| `export_wave_rest_aa` | `(L_export,)` | Learned grid plus the actual LSST extensions |
+| `export_basis` | `(K, L_export)` | Finished bank used by template `.dat` files |
+
+`build_provenance.json` records the training-matrix fingerprint, training and
+prior redshift bounds, learned/exported wavelength limits, fit method, IVAR
+assumptions and output paths. Read these saved bounds for a particular build;
+they depend on its training population and requested prior range.
+
 `desi/extrapolation.py` owns the edge fits, actual LSST template extension,
 automatic build diagnostic, and matched-filter-response evaluation. Both the
 actual extensions and artificial holdouts call `extrapolate_edge`; there is
@@ -439,8 +478,3 @@ These are recovery tests of a fixed learned template bank, not independent
 observed galaxy truth. Matching response fractions does not equalize hidden
 galaxy flux, extrapolation distance or continuum complexity. The template IVAR
 is conditional on fixed galaxy coefficients, not a full NMF posterior.
-
-The earlier fixed-width evaluation, linear/median-filter fit, fit-window
-investigation and overlapping scatter/CDF layouts have been retired. Their
-source and historical per-spectrum studies remain recoverable at Git commit
-`4c04491`; no compatibility commands or old-format readers are retained.

@@ -99,6 +99,44 @@ bank to `num_visits/empirical_prior/desi8/templates/`. See
 held-out evaluation details. Neither source builder trains the prior flow;
 that is the separate [prior-flow step](#step-3-prior-normalizing-flow-prior_flowpy).
 
+### DESI extrapolation and performance diagnostics
+
+The current implementation lives in [`desi/extrapolation.py`](desi/extrapolation.py).
+NMF and coefficient fitting use measured data. Finished templates are then
+extended to cover LSST over the requested prior redshift range; constant is
+the production default, using the estimated-template-IVAR-weighted mean of
+the nearest 100 rest-frame Å. The
+[DESI implementation map](desi/README.md#implementation-map) lists the source
+files, saved arrays, normalization and conditional template-IVAR calculation.
+
+After completing a build, regenerate actual template-extension overlays and
+evaluate constant against anchored power-law windows with:
+
+```bash
+python -m bedcosmo.num_visits.empirical.desi.extrapolation extend \
+  --prior-dir "$SCRATCH/bedcosmo/num_visits/empirical_prior/desi8" \
+  --output-dir ./desi_extrapolation_comparison \
+  --powerlaw-windows 500 2000
+
+python -m bedcosmo.num_visits.empirical.desi.extrapolation response-compare \
+  --prior-dir "$SCRATCH/bedcosmo/num_visits/empirical_prior/desi8" \
+  --output-dir ./desi_extrapolation_comparison \
+  --response-fractions 0.1 0.25 0.5 \
+  --powerlaw-windows 500 2000
+
+python -m bedcosmo.num_visits.empirical.desi.extrapolation response-plot \
+  --output-dir ./desi_extrapolation_comparison
+```
+
+`extend` refits actual tails without hiding learned data. `response-compare`
+hides known template values in the blue u/red y wings and measures the effect
+on whole-band AB magnitudes, using identical prior draws for each method.
+`response-plot` redraws saved evaluation results without fitting or sampling.
+These commands preserve the source build and write banks, paired errors,
+summaries, provenance and PNG/PDF plots to the comparison directory. See the
+[evaluation protocol and output list](desi/README.md#evaluate-hidden-uy-filter-response)
+for band-specific coverage, failure accounting and limitations.
+
 ### Resume / partial runs
 
 Existing outputs are skipped unless `--force-desi` or `--force-fit` is set.
