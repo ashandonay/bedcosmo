@@ -6211,6 +6211,181 @@ class ComparisonPlotter(BasePlotter):
 # Standalone Plotting Functions (for backward compatibility and utilities)
 # ============================================================================
 
+def _load_increasing_design_runs(mlflow_exp, run_ids, excluded_runs, cosmo_exp, storage_path,
+                                 eval_step, include_nominal):
+    """Optimal design and EIG per run, from each run's latest completed eig_data file.
+
+    Returns a dict with ``run_data_list``, ``found_run_ids``, ``optimal_designs``,
+    ``optimal_eigs``, ``optimal_eig_stds``, ``design_labels`` and (with
+    ``include_nominal``) the first run's ``nominal_eig`` / ``nominal_eig_std``.
+    """
+    # Get run data - can use either mlflow_exp or run_ids
+    run_data_list, experiment_id_for_save_path, actual_mlflow_exp_for_title = get_runs_data(
+        mlflow_exp=mlflow_exp,
+        run_ids=run_ids,
+        excluded_runs=excluded_runs,
+        parse_params=True,
+        cosmo_exp=cosmo_exp
+    )
+    if not run_data_list:
+        raise ValueError(f"No runs found in experiment {cosmo_exp}")
+    
+    # Extract run_ids from run_data_list
+    run_ids = [run_data['run_id'] for run_data in run_data_list]
+    
+    # Build a map from run_id to exp_id
+    run_id_to_exp_id = {run_data['run_id']: run_data['exp_id'] for run_data in run_data_list}
+    
+    # Find and load JSON files for each run
+    optimal_designs = []
+    optimal_eigs = []
+    optimal_eig_stds = []
+    found_run_ids = []
+    design_labels = None
+    nominal_eig = None  # Store nominal_eig from first run's data (for scatter plot)
+    nominal_eig_std = None
+    
+    for run_id in run_ids:
+        if run_id not in run_id_to_exp_id:
+            print(f"Warning: Run {run_id} not found in experiment {cosmo_exp}, skipping...")
+            continue
+        
+        exp_id = run_id_to_exp_id[run_id]
+        artifacts_dir = f"{storage_path}/mlruns/{exp_id}/{run_id}/artifacts"
+        
+        # Load completed eig_data file
+        try:
+            json_path, data = load_eig_data_file(
+                artifacts_dir, eval_step=None, eig_kind='variable'
+            )
+            if data is None:
+                print(f"Warning: No completed eig_data file found for run {run_id}, skipping...")
+                continue
+            print(f"Loaded EIG data from {json_path}")
+        except ValueError as e:
+            print(f"Warning: {e}, skipping run {run_id}...")
+            continue
+        
+        try:
+            
+            # Determine which step to use
+            if eval_step is not None:
+                step_str = f"step_{eval_step}"
+            else:
+                # Find the highest available step key
+                step_keys = [k for k in data.keys() if k.startswith('step_')]
+                if step_keys:
+                    # Extract step numbers and find the highest
+                    step_numbers = []
+                    for k in step_keys:
+                        try:
+                            step_num = int(k.split('_')[1])
+                            step_numbers.append((step_num, k))
+                        except (ValueError, IndexError):
+                            continue
+                    if step_numbers:
+                        step_str = max(step_numbers, key=lambda x: x[0])[1]
+                    else:
+                        step_str = step_keys[0]  # Fallback to first if parsing fails
+                else:
+                    print(f"Warning: No step data found in {json_path}, skipping...")
+                    continue
+            
+            if step_str not in data:
+                print(f"Warning: Step {step_str} not found in {json_path}, skipping...")
+                continue
+            
+            step_data = data[step_str]
+            
+            # Access nested structure
+            variable_data = step_data.get('variable', {})
+            nominal_data = step_data.get('nominal', {})
+                
+            # Extract optimal design and EIG from variable subdict
+            if 'optimal_design' in variable_data and 'optimal_eig' in variable_data:
+                optimal_design = np.array(variable_data['optimal_design'])
+                optimal_eig_value = variable_data.get('optimal_eig', None)
+                optimal_eig_std_value = variable_data.get('optimal_eig_std', None)
+                if not isinstance(optimal_eig_std_value, (int, float)):
+                    optimal_eig_std_value = None
+                optimal_designs.append(optimal_design)
+                optimal_eigs.append(optimal_eig_value)
+                optimal_eig_stds.append(optimal_eig_std_value)
+                found_run_ids.append(run_id)
+                
+                # Get design labels from experiment (will be initialized later if needed)
+                # For now, we'll get them from the experiment initialization below
+                
+                # Extract nominal_eig from first run's data (for scatter plot in compare_increasing_design)
+                # Only do this in compare_increasing_design - check if include_nominal is in scope
+                if include_nominal:
+                    nominal_eig_val = nominal_data.get('eigs_avg')
+                    if nominal_eig_val is not None:
+                        if isinstance(nominal_eig_val, list) and len(nominal_eig_val) > 0:
+                            nominal_eig_val = nominal_eig_val[0]
+                        if isinstance(nominal_eig_val, (int, float)):
+                            if nominal_eig is None:
+                                nominal_eig = nominal_eig_val
+                    nominal_eig_std_val = nominal_data.get('eigs_std')
+                    if nominal_eig_std_val is not None:
+                        if isinstance(nominal_eig_std_val, list) and len(nominal_eig_std_val) > 0:
+                            nominal_eig_std_val = nominal_eig_std_val[0]
+                        if isinstance(nominal_eig_std_val, (int, float)):
+                            if nominal_eig_std is None:
+                                nominal_eig_std = nominal_eig_std_val
+            else:
+                print(f"Warning: No optimal_design data found in {json_path} for {step_str}, skipping...")
+                continue
+                
+        except Exception as e:
+            print(f"Warning: Error loading {json_path}: {e}, skipping...")
+            continue
+    
+
+    return {
+        "run_data_list": run_data_list, "found_run_ids": found_run_ids,
+        "optimal_designs": optimal_designs, "optimal_eigs": optimal_eigs,
+        "optimal_eig_stds": optimal_eig_stds, "design_labels": design_labels,
+        "nominal_eig": nominal_eig, "nominal_eig_std": nominal_eig_std,
+    }
+
+
+def _plot_increasing_design_groups(groups, ref_optimal_eig, figsize, dpi, save_path):
+    """EIG vs % increase in total observations, one line (plus dashed linear fit) per group."""
+    group_colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
+    fig2, ax2 = plt.subplots(figsize=figsize)
+    for k, (group, loaded) in enumerate(groups.items()):
+        if not loaded["optimal_eigs"]:
+            raise ValueError(f"Group {group!r} has no runs with a completed eig_data file")
+        color = group_colors[k % len(group_colors)]
+        pct = np.array([(np.sum(d) - 1.0) * 100.0 for d in loaded["optimal_designs"]])
+        eig = np.array(loaded["optimal_eigs"], dtype=float)
+        std = np.array([s if isinstance(s, (int, float)) else np.nan for s in loaded["optimal_eig_stds"]])
+        order = np.argsort(pct)
+        pct, eig, std = pct[order], eig[order], std[order]
+        ax2.errorbar(pct, eig, yerr=std, color=color, marker='o', markersize=8, linewidth=2,
+                     capsize=4, label=group)
+        if len(pct) >= 2:
+            slope, intercept = np.polyfit(pct, eig, 1)
+            ax2.plot(pct, slope * pct + intercept, '--', color=color, linewidth=1.2, alpha=0.7)
+    if ref_optimal_eig is not None:
+        ax2.axhline(y=ref_optimal_eig, color='gray', linestyle=':', linewidth=1.5,
+                    label='Optimal Design')
+    ax2.legend(loc='best', fontsize=12, framealpha=0.9)
+    ax2.set_xlabel('Percentage Increase in Total Observations', fontsize=12, weight='bold')
+    ax2.set_ylabel('Expected Information Gain [bits]', fontsize=12, weight='bold')
+    ax2.set_title('EIG of Uniformly Increasing Observations', fontsize=16, weight='bold', pad=20)
+    ax2.grid(True, alpha=0.3)
+    plt.tight_layout()
+    if save_path is not None:
+        scatter_save_path = save_path.replace('.png', '_scatter.png').replace('.pdf', '_scatter.pdf')
+        if scatter_save_path == save_path:
+            scatter_save_path = save_path + '_scatter'
+        os.makedirs(os.path.dirname(scatter_save_path) or '.', exist_ok=True)
+        fig2.savefig(scatter_save_path, dpi=dpi)
+        print(f"Saved scatter plot to {scatter_save_path}")
+
+
 def compare_increasing_design(
         mlflow_exp=None,
         run_ids=None,
@@ -6226,7 +6401,8 @@ def compare_increasing_design(
         log_scale=True,
         use_fractional=False,
         include_nominal=False,
-        ref_id=None
+        ref_id=None,
+        run_groups=None
     ):
     """
     Compare increasing quantities for fixed design.
@@ -6247,6 +6423,9 @@ def compare_increasing_design(
         use_fractional (bool): Whether to plot fractional values or absolute quantities (default: False)
         include_nominal (bool): Whether to include nominal design bars on the left (default: False)
         ref_id (str, optional): Reference run ID to use for nominal design, nominal EIG, and optimal EIG
+        run_groups (dict, optional): ``{label: [run_id, ...]}``, e.g. one group per likelihood
+            mode. Replaces ``mlflow_exp``/``run_ids``: the EIG figure draws each group as its own
+            line with a linear fit, and the design bars come from the first group.
     
     Returns:
         fig, ax: Matplotlib figure and axes objects
@@ -6359,128 +6538,31 @@ def compare_increasing_design(
             # deliberately propagate instead of being masked as a warning.
             print(f"Warning: Error loading reference run {ref_id}: {e}")
     
-    # Get run data - can use either mlflow_exp or run_ids
-    run_data_list, experiment_id_for_save_path, actual_mlflow_exp_for_title = get_runs_data(
-        mlflow_exp=mlflow_exp,
-        run_ids=run_ids,
-        excluded_runs=excluded_runs,
-        parse_params=True,
-        cosmo_exp=cosmo_exp
-    )
-    if not run_data_list:
-        raise ValueError(f"No runs found in experiment {cosmo_exp}")
-    
-    # Extract run_ids from run_data_list
-    run_ids = [run_data['run_id'] for run_data in run_data_list]
-    
-    # Build a map from run_id to exp_id
-    run_id_to_exp_id = {run_data['run_id']: run_data['exp_id'] for run_data in run_data_list}
-    
-    # Find and load JSON files for each run
-    optimal_designs = []
-    optimal_eigs = []
-    optimal_eig_stds = []
-    found_run_ids = []
-    design_labels = None
-    nominal_eig = None  # Store nominal_eig from first run's data (for scatter plot)
-    nominal_eig_std = None
-    
-    for run_id in run_ids:
-        if run_id not in run_id_to_exp_id:
-            print(f"Warning: Run {run_id} not found in experiment {cosmo_exp}, skipping...")
-            continue
-        
-        exp_id = run_id_to_exp_id[run_id]
-        artifacts_dir = f"{storage_path}/mlruns/{exp_id}/{run_id}/artifacts"
-        
-        # Load completed eig_data file
-        try:
-            json_path, data = load_eig_data_file(
-                artifacts_dir, eval_step=None, eig_kind='variable'
+    if run_groups is not None:
+        if mlflow_exp is not None or run_ids is not None or include_nominal:
+            raise ValueError(
+                "run_groups replaces mlflow_exp/run_ids, and include_nominal does not apply: "
+                "a scaled run's nominal EIG scores its flow at a design it never trained on."
             )
-            if data is None:
-                print(f"Warning: No completed eig_data file found for run {run_id}, skipping...")
-                continue
-            print(f"Loaded EIG data from {json_path}")
-        except ValueError as e:
-            print(f"Warning: {e}, skipping run {run_id}...")
-            continue
-        
-        try:
-            
-            # Determine which step to use
-            if eval_step is not None:
-                step_str = f"step_{eval_step}"
-            else:
-                # Find the highest available step key
-                step_keys = [k for k in data.keys() if k.startswith('step_')]
-                if step_keys:
-                    # Extract step numbers and find the highest
-                    step_numbers = []
-                    for k in step_keys:
-                        try:
-                            step_num = int(k.split('_')[1])
-                            step_numbers.append((step_num, k))
-                        except (ValueError, IndexError):
-                            continue
-                    if step_numbers:
-                        step_str = max(step_numbers, key=lambda x: x[0])[1]
-                    else:
-                        step_str = step_keys[0]  # Fallback to first if parsing fails
-                else:
-                    print(f"Warning: No step data found in {json_path}, skipping...")
-                    continue
-            
-            if step_str not in data:
-                print(f"Warning: Step {step_str} not found in {json_path}, skipping...")
-                continue
-            
-            step_data = data[step_str]
-            
-            # Access nested structure
-            variable_data = step_data.get('variable', {})
-            nominal_data = step_data.get('nominal', {})
-                
-            # Extract optimal design and EIG from variable subdict
-            if 'optimal_design' in variable_data and 'optimal_eig' in variable_data:
-                optimal_design = np.array(variable_data['optimal_design'])
-                optimal_eig_value = variable_data.get('optimal_eig', None)
-                optimal_eig_std_value = variable_data.get('optimal_eig_std', None)
-                if not isinstance(optimal_eig_std_value, (int, float)):
-                    optimal_eig_std_value = None
-                optimal_designs.append(optimal_design)
-                optimal_eigs.append(optimal_eig_value)
-                optimal_eig_stds.append(optimal_eig_std_value)
-                found_run_ids.append(run_id)
-                
-                # Get design labels from experiment (will be initialized later if needed)
-                # For now, we'll get them from the experiment initialization below
-                
-                # Extract nominal_eig from first run's data (for scatter plot in compare_increasing_design)
-                # Only do this in compare_increasing_design - check if include_nominal is in scope
-                if 'include_nominal' in locals() and include_nominal:
-                    nominal_eig_val = nominal_data.get('eigs_avg')
-                    if nominal_eig_val is not None:
-                        if isinstance(nominal_eig_val, list) and len(nominal_eig_val) > 0:
-                            nominal_eig_val = nominal_eig_val[0]
-                        if isinstance(nominal_eig_val, (int, float)):
-                            if nominal_eig is None:
-                                nominal_eig = nominal_eig_val
-                    nominal_eig_std_val = nominal_data.get('eigs_std')
-                    if nominal_eig_std_val is not None:
-                        if isinstance(nominal_eig_std_val, list) and len(nominal_eig_std_val) > 0:
-                            nominal_eig_std_val = nominal_eig_std_val[0]
-                        if isinstance(nominal_eig_std_val, (int, float)):
-                            if nominal_eig_std is None:
-                                nominal_eig_std = nominal_eig_std_val
-            else:
-                print(f"Warning: No optimal_design data found in {json_path} for {step_str}, skipping...")
-                continue
-                
-        except Exception as e:
-            print(f"Warning: Error loading {json_path}: {e}, skipping...")
-            continue
-    
+        groups = {
+            group: _load_increasing_design_runs(
+                None, ids, excluded_runs, cosmo_exp, storage_path, eval_step, False)
+            for group, ids in run_groups.items()
+        }
+        # Designs (the bar chart) come from the first group; groups share the budget axis.
+        loaded = next(iter(groups.values()))
+    else:
+        loaded = _load_increasing_design_runs(
+            mlflow_exp, run_ids, excluded_runs, cosmo_exp, storage_path, eval_step, include_nominal)
+    run_data_list = loaded["run_data_list"]
+    found_run_ids = loaded["found_run_ids"]
+    optimal_designs = loaded["optimal_designs"]
+    optimal_eigs = loaded["optimal_eigs"]
+    optimal_eig_stds = loaded["optimal_eig_stds"]
+    design_labels = loaded["design_labels"]
+    nominal_eig = loaded["nominal_eig"]
+    nominal_eig_std = loaded["nominal_eig_std"]
+
     if len(optimal_designs) == 0:
         raise ValueError("No valid optimal design data found to compare")
     
@@ -6527,12 +6609,12 @@ def compare_increasing_design(
                 run_data_for_init = run_data_list[0]
             
             device = "cuda:0"
-            # We don't need to initialize designs, just need the experiment object
+            # The run's own design_args snapshot: an empty dict builds a default grid,
+            # which fails for num_tracers.
             experiment = init_experiment(
                 run_data_for_init['run_obj'],
                 run_data_for_init['params'],
                 device=device,
-                design_args={},
                 global_rank=0,
                 verbose=False,
             )
@@ -6672,6 +6754,11 @@ def compare_increasing_design(
         fig.savefig(save_path, dpi=dpi)
         print(f"Saved comparison plot to {save_path}")
     
+    if run_groups is not None:
+        ref_eig = ref_optimal_eig if ref_id is not None else None
+        _plot_increasing_design_groups(groups, ref_eig, figsize, dpi, save_path)
+        return fig, ax
+
     # Create second scatter plot: EIG vs % increase
     # Calculate % increase from fractional designs (sum of fractions - 1)
     scatter_x = []  # % increase (sum of fractions - 1)

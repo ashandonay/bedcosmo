@@ -6,6 +6,7 @@ import json
 import pytest
 from unittest.mock import Mock, patch, MagicMock
 from datetime import datetime
+from types import SimpleNamespace
 import numpy as np
 import torch
 
@@ -1030,11 +1031,13 @@ class TestPlotTriangleFence:
         rng = np.random.default_rng(4)
         return _gd_samples(rng.normal([0.3, 10000.0], [1.5, 3e5], size=(10000, 2)), None)
 
-    def test_fenced_series_mostly_outside_window_raises(self):
-        with pytest.raises(ValueError, match="lie inside the plot window"):
-            BasePlotter(cosmo_exp="test_exp").plot_triangle(
+    def test_fenced_series_mostly_outside_window_is_drawn_unfenced(self):
+        with pytest.warns(UserWarning, match="drawing it unfenced"):
+            g = BasePlotter(cosmo_exp="test_exp").plot_triangle(
                 [self._mostly_outside()], ["tab:blue"], levels=[0.68], ranges=self.RANGES,
             )
+        assert g.subplots[1, 0].get_xlim() == pytest.approx(self.RANGES["Om"])
+        plt.close(g.fig)
 
     def test_unfenced_series_mostly_outside_window_plots(self):
         """The checkpoint diagnostic's call: unfenced NF beside a fenced reference."""
@@ -2061,6 +2064,70 @@ class TestCompareIncreasingDesign:
                     ref_id='ref_run',
                     include_nominal=True
                 )
+
+    NOMINAL = np.array([0.04, 0.26, 0.41, 0.29])
+
+    def _fake_runs(self, tmp_path, monkeypatch, groups):
+        """eig_data files for ``{group: [(run_id, scale, eig)]}`` under a fake SCRATCH."""
+        monkeypatch.setenv("SCRATCH", str(tmp_path))
+        run_data = {}
+        for runs in groups.values():
+            for run_id, scale, eig in runs:
+                artifacts = tmp_path / "bedcosmo" / "num_tracers" / "mlruns" / "1" / run_id / "artifacts"
+                artifacts.mkdir(parents=True)
+                (artifacts / "eig_data_20261021_0000.json").write_text(json.dumps({
+                    "status": "complete",
+                    "step_150000": {"variable": {
+                        "eigs_avg": [eig], "optimal_eig": eig, "optimal_eig_std": 0.01,
+                        "optimal_design": (scale * self.NOMINAL).tolist(),
+                    }},
+                }))
+                run_data[run_id] = {"run_id": run_id, "exp_id": "1", "run_obj": None, "params": {}}
+
+        def get_runs_data(run_ids=None, **kwargs):
+            return [run_data[r] for r in run_ids], "1", "exp"
+
+        experiment = SimpleNamespace(nominal_total_obs=1000, design_labels=["BGS", "LRG", "ELG", "QSO"])
+        return (patch("bedcosmo.plotting.get_runs_data", side_effect=get_runs_data),
+                patch("bedcosmo.plotting.init_experiment", return_value=experiment))
+
+    def test_run_groups_one_line_and_fit_per_group(self, tmp_path, monkeypatch):
+        groups = {
+            "Emulator": [("e0", 1.0, 7.00), ("e3", 1.3, 7.16), ("e1", 1.1, 7.06)],
+            "Scaling": [("s0", 1.0, 7.04), ("s1", 1.1, 7.12), ("s3", 1.3, 7.26)],
+        }
+        get_runs, init_exp = self._fake_runs(tmp_path, monkeypatch, groups)
+        with get_runs, init_exp:
+            compare_increasing_design(
+                run_groups={g: [r for r, _, _ in runs] for g, runs in groups.items()},
+                save_path=str(tmp_path / "out.png"), dpi=50,
+            )
+        assert (tmp_path / "out.png").exists() and (tmp_path / "out_scatter.png").exists()
+        ax2 = plt.figure(plt.get_fignums()[-1]).axes[0]  # the EIG figure is drawn last
+        assert [t.get_text() for t in ax2.get_legend().get_texts()] == ["Emulator", "Scaling"]
+        # Each group: a data line through its points sorted by budget, plus a dashed fit.
+        data_lines = [ln for ln in ax2.get_lines() if ln.get_linestyle() == "-"]
+        fits = [ln for ln in ax2.get_lines() if ln.get_linestyle() == "--"]
+        assert len(fits) == 2
+        np.testing.assert_allclose(data_lines[0].get_xdata(), [0.0, 10.0, 30.0], atol=1e-9)
+        np.testing.assert_allclose(data_lines[0].get_ydata(), [7.00, 7.06, 7.16])
+        np.testing.assert_allclose(data_lines[1].get_ydata(), [7.04, 7.12, 7.26])
+        plt.close("all")
+
+    def test_run_groups_bars_use_run_design_snapshot(self, tmp_path, monkeypatch):
+        groups = {"Emulator": [("e0", 1.0, 7.0)], "Scaling": [("s0", 1.0, 7.04)]}
+        get_runs, init_exp = self._fake_runs(tmp_path, monkeypatch, groups)
+        with get_runs, init_exp as init:
+            fig, ax = compare_increasing_design(run_groups={g: [r for r, _, _ in runs] for g, runs in groups.items()})
+        assert "design_args" not in init.call_args.kwargs
+        assert [t.get_text() for t in ax.get_xticklabels()] == ["BGS", "LRG", "ELG", "QSO"]
+        np.testing.assert_allclose([p.get_height() for p in ax.patches], 1000 * self.NOMINAL)
+        plt.close("all")
+
+    @pytest.mark.parametrize("extra", [{"run_ids": ["a"]}, {"mlflow_exp": "x"}, {"include_nominal": True}])
+    def test_run_groups_rejects_conflicting_args(self, mock_scratch_env, extra):
+        with pytest.raises(ValueError, match="run_groups replaces"):
+            compare_increasing_design(run_groups={"g": ["a"]}, **extra)
 
 
 class TestCompareOptimalDesigns:
