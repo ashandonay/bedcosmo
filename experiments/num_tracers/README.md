@@ -50,7 +50,7 @@ Two facts drive everything downstream:
 | `design_args_nominal.yaml` | 1.0 | 1 | The DESI nominal split, computed internally |
 | `design_args_unconstrained.yaml` | 1.0 (pinned) | 560 | Coarse step, bounds opened to 1.0 |
 | `design_args_dr1_budget.yaml` | [1.0, 1.2] | 2447 | Budget as an axis inside one flow |
-| `design_args_nominal_p{00..25}.yaml` | 1.00 … 1.25 | 1 each | Uniformly scaled nominal, one file per budget |
+| `design_args_dr1.yaml` + `--design-input-path …/nominal_scaled_pNN` | 1.05 … 1.30 | 1 each | Uniformly scaled nominal, one design directory per budget (see [`scaled`](#scaled--one-single-design-pool-per-budget)) |
 
 ## Creating design spaces
 
@@ -221,12 +221,13 @@ The `shapefit` analysis has one model, `base`: `omega_cdm`, `omega_b`, `h`, `ln1
     --design-args-path design_args_budget_1p0_1p25.yaml \
     --n-particles-per-device 29
 
-# One budget point, scaling mode
+# One budget point, scaling mode (x1.0: --design-args-path design_args_nominal.yaml instead)
 ./submit.sh train num_tracers base \
-    --mlflow-exp uniform_increase_base_scaling \
+    --mlflow-exp uniform_increasing_design_scaling \
     --likelihood-mode scaling \
-    --design-args-path design_args_nominal_p25.yaml \
-    --n-particles-per-device 5000 --time 05:00 --queue regular
+    --design-args-path design_args_dr1.yaml \
+    --design-input-path $SCRATCH/bedcosmo/num_tracers/designs/nominal_scaled_p20 \
+    --n-particles-per-device 4000 --total-steps 150000 --time 04:00
 ```
 
 ```bash
