@@ -6350,8 +6350,12 @@ def _load_increasing_design_runs(mlflow_exp, run_ids, excluded_runs, cosmo_exp, 
     }
 
 
-def _plot_increasing_design_groups(groups, ref_optimal_eig, figsize, dpi, save_path):
-    """EIG vs % increase in total observations, one line (plus dashed linear fit) per group."""
+def _plot_increasing_design_groups(groups, refs, figsize, dpi, save_path):
+    """EIG vs % increase in total observations, one line (plus dashed linear fit) per group.
+
+    ``refs`` maps a group to its reference run's loaded data; that run's optimal EIG is a
+    dotted line in the group's color, with the % increase where the group's fit reaches it.
+    """
     group_colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
     fig2, ax2 = plt.subplots(figsize=figsize)
     for k, (group, loaded) in enumerate(groups.items()):
@@ -6365,13 +6369,27 @@ def _plot_increasing_design_groups(groups, ref_optimal_eig, figsize, dpi, save_p
         pct, eig, std = pct[order], eig[order], std[order]
         ax2.errorbar(pct, eig, yerr=std, color=color, marker='o', markersize=8, linewidth=2,
                      capsize=4, label=group)
+        slope = None
         if len(pct) >= 2:
             slope, intercept = np.polyfit(pct, eig, 1)
             ax2.plot(pct, slope * pct + intercept, '--', color=color, linewidth=1.2, alpha=0.7)
-    if ref_optimal_eig is not None:
-        ax2.axhline(y=ref_optimal_eig, color='gray', linestyle=':', linewidth=1.5,
-                    label='Optimal Design')
-    ax2.legend(loc='best', fontsize=12, framealpha=0.9)
+        if group in refs:
+            if not refs[group]["optimal_eigs"]:
+                raise ValueError(f"Reference run for {group!r} has no completed eig_data file")
+            ref_eig = refs[group]["optimal_eigs"][0]
+            ax2.axhline(y=ref_eig, color=color, linestyle=':', linewidth=1.5,
+                        label=f'{group}: optimal design')
+            if slope:
+                x_cross = (ref_eig - intercept) / slope
+                ax2.axvline(x_cross, color=color, linestyle=':', linewidth=1.0, alpha=0.6)
+                ax2.text(x_cross, ref_eig, f' {x_cross:+.1f}%', color=color, fontsize=13,
+                         fontweight='bold', ha='right', va='bottom',
+                         bbox=dict(facecolor='white', edgecolor='none', alpha=0.7, pad=0.3))
+    # Data series first, then their reference lines.
+    handles, legend_labels = ax2.get_legend_handles_labels()
+    order = sorted(range(len(legend_labels)), key=lambda i: legend_labels[i].endswith(': optimal design'))
+    ax2.legend([handles[i] for i in order], [legend_labels[i] for i in order],
+               loc='best', fontsize=12, framealpha=0.9)
     ax2.set_xlabel('Percentage Increase in Total Observations', fontsize=12, weight='bold')
     ax2.set_ylabel('Expected Information Gain [bits]', fontsize=12, weight='bold')
     ax2.set_title('EIG of Uniformly Increasing Observations', fontsize=16, weight='bold', pad=20)
@@ -6402,7 +6420,8 @@ def compare_increasing_design(
         use_fractional=False,
         include_nominal=False,
         ref_id=None,
-        run_groups=None
+        run_groups=None,
+        ref_ids=None
     ):
     """
     Compare increasing quantities for fixed design.
@@ -6426,10 +6445,25 @@ def compare_increasing_design(
         run_groups (dict, optional): ``{label: [run_id, ...]}``, e.g. one group per likelihood
             mode. Replaces ``mlflow_exp``/``run_ids``: the EIG figure draws each group as its own
             line with a linear fit, and the design bars come from the first group.
+        ref_ids (dict, optional): ``{label: run_id}`` with ``run_groups``: each run's optimal EIG
+            (e.g. a flow trained over the full design space at budget 1.0) is drawn as a dotted
+            line in its group's color, marked where that group's fit reaches it.
     
     Returns:
         fig, ax: Matplotlib figure and axes objects
     """
+    if run_groups is not None:
+        if mlflow_exp is not None or run_ids is not None or include_nominal or ref_id is not None:
+            raise ValueError(
+                "run_groups replaces mlflow_exp/run_ids and takes ref_ids, not ref_id; "
+                "include_nominal does not apply: a scaled run's nominal EIG scores its flow "
+                "at a design it never trained on."
+            )
+        if ref_ids is not None and not set(ref_ids) <= set(run_groups):
+            raise ValueError(f"ref_ids keys {sorted(set(ref_ids) - set(run_groups))} are not run_groups labels")
+    elif ref_ids is not None:
+        raise ValueError("ref_ids needs run_groups")
+
     # Set MLflow tracking URI
     storage_path = os.environ["SCRATCH"] + f"/bedcosmo/{cosmo_exp}"
     
@@ -6539,11 +6573,6 @@ def compare_increasing_design(
             print(f"Warning: Error loading reference run {ref_id}: {e}")
     
     if run_groups is not None:
-        if mlflow_exp is not None or run_ids is not None or include_nominal:
-            raise ValueError(
-                "run_groups replaces mlflow_exp/run_ids, and include_nominal does not apply: "
-                "a scaled run's nominal EIG scores its flow at a design it never trained on."
-            )
         groups = {
             group: _load_increasing_design_runs(
                 None, ids, excluded_runs, cosmo_exp, storage_path, eval_step, False)
@@ -6755,8 +6784,12 @@ def compare_increasing_design(
         print(f"Saved comparison plot to {save_path}")
     
     if run_groups is not None:
-        ref_eig = ref_optimal_eig if ref_id is not None else None
-        _plot_increasing_design_groups(groups, ref_eig, figsize, dpi, save_path)
+        refs = {
+            group: _load_increasing_design_runs(
+                None, [rid], excluded_runs, cosmo_exp, storage_path, eval_step, False)
+            for group, rid in (ref_ids or {}).items()
+        }
+        _plot_increasing_design_groups(groups, refs, figsize, dpi, save_path)
         return fig, ax
 
     # Create second scatter plot: EIG vs % increase

@@ -2124,10 +2124,40 @@ class TestCompareIncreasingDesign:
         np.testing.assert_allclose([p.get_height() for p in ax.patches], 1000 * self.NOMINAL)
         plt.close("all")
 
-    @pytest.mark.parametrize("extra", [{"run_ids": ["a"]}, {"mlflow_exp": "x"}, {"include_nominal": True}])
+    def test_ref_ids_draw_one_reference_per_group(self, tmp_path, monkeypatch):
+        groups = {
+            "Emulator": [("e0", 1.0, 7.00), ("e3", 1.3, 7.15)],
+            "Scaling": [("s0", 1.0, 7.00), ("s3", 1.3, 7.30)],
+        }
+        refs = {"refs": [("eref", 1.0, 7.10), ("sref", 1.0, 7.25)]}
+        get_runs, init_exp = self._fake_runs(tmp_path, monkeypatch, {**groups, **refs})
+        with get_runs, init_exp:
+            compare_increasing_design(
+                run_groups={g: [r for r, _, _ in runs] for g, runs in groups.items()},
+                ref_ids={"Emulator": "eref", "Scaling": "sref"},
+            )
+        ax2 = plt.figure(plt.get_fignums()[-1]).axes[0]
+        colors = [ln.get_color() for ln in ax2.get_lines() if ln.get_linestyle() == "--"]
+        refs_drawn = [ln for ln in ax2.get_lines() if ln.get_linestyle() == ":" and ln.get_ydata()[0] == ln.get_ydata()[1]]
+        assert [ln.get_ydata()[0] for ln in refs_drawn] == [7.10, 7.25]
+        assert [ln.get_color() for ln in refs_drawn] == colors
+        # Fits: emulator +0.5 bits per 100%, scaling +1.0 -> reaches its reference at +20% / +25%.
+        assert [t.get_text().strip() for t in ax2.texts] == ["+20.0%", "+25.0%"]
+        assert "Emulator: optimal design" in [t.get_text() for t in ax2.get_legend().get_texts()]
+        plt.close("all")
+
+    @pytest.mark.parametrize("extra", [
+        {"run_ids": ["a"]}, {"mlflow_exp": "x"}, {"include_nominal": True}, {"ref_id": "r"},
+    ])
     def test_run_groups_rejects_conflicting_args(self, mock_scratch_env, extra):
         with pytest.raises(ValueError, match="run_groups replaces"):
             compare_increasing_design(run_groups={"g": ["a"]}, **extra)
+
+    def test_ref_ids_need_matching_run_groups(self, mock_scratch_env):
+        with pytest.raises(ValueError, match="ref_ids needs run_groups"):
+            compare_increasing_design(run_ids=["a"], ref_ids={"g": "r"})
+        with pytest.raises(ValueError, match=r"\['other'\] are not run_groups labels"):
+            compare_increasing_design(run_groups={"g": ["a"]}, ref_ids={"other": "r"})
 
 
 class TestCompareOptimalDesigns:
