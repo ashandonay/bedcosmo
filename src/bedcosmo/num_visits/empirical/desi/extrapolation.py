@@ -18,8 +18,9 @@ def extrapolate_edge(
 ):
     """Continue one edge using retained samples and their measurement precision.
 
-    The local amplitude uses the nearest 100 rest-frame Å. Power-law slopes
-    use window_aa. No uncertainty is assigned to the predicted tail.
+    Both methods fix the amplitude to the IVAR-weighted mean of the nearest
+    100 rest-frame Å. Power-law slopes use window_aa. No uncertainty is
+    assigned to the predicted tail.
     """
     wave, flux, ivar = (np.asarray(a, dtype=float) for a in (wave, flux, ivar))
     target_wave = np.asarray(target_wave, dtype=float)
@@ -41,7 +42,7 @@ def extrapolate_edge(
         raise ValueError("Invalid edge-fit wavelengths, flux or IVAR")
     if side not in {"blue", "red"}:
         raise ValueError("side must be 'blue' or 'red'")
-    if method not in {"constant", "powerlaw", "powerlaw_anchored"}:
+    if method not in {"constant", "powerlaw"}:
         raise ValueError("Unknown edge extrapolation method")
     if not np.isfinite(window_aa) or window_aa <= 0:
         raise ValueError("window_aa must be finite and positive")
@@ -51,8 +52,6 @@ def extrapolate_edge(
         raise ValueError("Target wavelengths must lie outside the retained edge")
     available = (distance >= 0) & (ivar > 0)
     fit = available & (distance <= window_aa)
-    if method == "powerlaw":
-        return _extrapolate_powerlaw(wave[fit], flux[fit], ivar[fit], edge_wave, target_wave)
     local = available & (distance <= 100)
     if not np.any(local):
         raise ValueError("Local anchor window has no positive template IVAR")
@@ -76,38 +75,27 @@ def _extrapolate_powerlaw(
     edge_wave: float,
     target_wave: np.ndarray,
     *,
-    anchor_amplitude: float | None = None,
+    anchor_amplitude: float,
 ) -> np.ndarray:
-    """Fit A (lambda / lambda_edge)**alpha in flux space, retaining signed data."""
+    """Fit only alpha in A (lambda / lambda_edge)**alpha with fixed local A."""
     if len(wave) < 3:
         raise ValueError("Power-law extrapolation requires at least three measured edge bins")
     log_ratio = np.log(wave / edge_wave)
     root_weight = np.sqrt(ivar)
-    initial_amplitude = max(float(np.median(flux)), float(np.median(1 / root_weight)))
-
-    if anchor_amplitude is not None:
-        if not np.isfinite(anchor_amplitude) or anchor_amplitude < 0:
-            raise ValueError("Power-law anchor amplitude must be finite and nonnegative")
-        if anchor_amplitude == 0:
-            return np.zeros_like(target_wave, dtype=float)
-        log_amplitude = np.log(anchor_amplitude)
-        initial = [0.0]
-    else:
-        log_amplitude = None
-        initial = [np.log(initial_amplitude), 0.0]
+    if not np.isfinite(anchor_amplitude) or anchor_amplitude < 0:
+        raise ValueError("Power-law anchor amplitude must be finite and nonnegative")
+    if anchor_amplitude == 0:
+        return np.zeros_like(target_wave, dtype=float)
+    log_amplitude = np.log(anchor_amplitude)
 
     def residual(parameters):
-        intercept = parameters[0] if log_amplitude is None else log_amplitude
-        slope = parameters[1] if log_amplitude is None else parameters[0]
-        prediction = np.exp(intercept + slope * log_ratio)
+        prediction = np.exp(log_amplitude + parameters[0] * log_ratio)
         return (prediction - flux) * root_weight
 
-    result = least_squares(residual, initial, loss="soft_l1", max_nfev=2000)
+    result = least_squares(residual, [0.0], loss="soft_l1", max_nfev=2000)
     if not result.success:
         raise ValueError(f"Power-law continuum fit failed: {result.message}")
-    intercept = result.x[0] if log_amplitude is None else log_amplitude
-    slope = result.x[1] if log_amplitude is None else result.x[0]
-    prediction = np.exp(intercept + slope * np.log(target_wave / edge_wave))
+    prediction = np.exp(log_amplitude + result.x[0] * np.log(target_wave / edge_wave))
     # A steep declining tail can underflow to zero at long extension distances.
     # Zero is a valid nonnegative template flux; overflowing fits still fail.
     if not np.all(np.isfinite(prediction)) or np.any(prediction < 0):
@@ -317,7 +305,7 @@ def compare_template_extensions(prior_dir, output_dir, *, powerlaw_windows=(500.
             basis,
             ivar,
             bounds,
-            method="constant" if name == "constant" else "powerlaw_anchored",
+            method="constant" if name == "constant" else "powerlaw",
             continuum_window_aa=width,
         )
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -667,9 +655,7 @@ def compare_filter_response_holdouts(
                                     edge,
                                     query[wing],
                                     side="blue" if band == "u" else "red",
-                                    method=(
-                                        "constant" if method == "constant" else "powerlaw_anchored"
-                                    ),
+                                    method=("constant" if method == "constant" else "powerlaw"),
                                     window_aa=width,
                                 )
                         except ValueError as exc:

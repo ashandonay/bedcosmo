@@ -111,10 +111,12 @@ prior interval contribute to the coefficient prior: extending templates cannot
 create missing galaxy populations outside the available data.
 
 `--edge-extrapolation constant` is the default. It fills each template's
-exterior tails with its mean weighted by estimated template IVAR of the unsmoothed learned values
-over the nearest 100 rest-frame Å. Zero-IVAR samples contribute no weight. `--edge-extrapolation powerlaw` instead robustly fits a positive
-power law over the nearest 500 Å, using the same estimated template IVAR weights, and continues it beyond the learned edge. These are assumptions about
-unmeasured template shapes; synthetic values never enter the NMF objective.
+exterior tails with the estimated-template-IVAR-weighted mean of unsmoothed
+learned values over the nearest 100 rest-frame Å. Zero-IVAR samples contribute
+no weight. `--edge-extrapolation powerlaw` fixes the amplitude at the edge to
+that same local mean, robustly fits only the slope over the nearest 500 Å using
+estimated template IVAR weights, and continues it beyond the learned edge.
+These are assumptions about unmeasured template shapes; synthetic values never enter the NMF objective.
 The exported grid includes the learned interval and LSST demand
 `[lambda_LSST_blue / (1 + prior_z_max), lambda_LSST_red / (1 + prior_z_min)]`,
 rounded outward to the native grid spacing. Learned template values and their
@@ -387,8 +389,8 @@ weighted mean of the nearest 100 rest-frame Å. Power-law comparison curves
 fix their amplitude to the same local mean and fit only their slope with a
 robust, IVAR-weighted flux-space loss. The default comparison windows are
 500 and 2000 rest-frame Å. Plot labels omit “anchored”; fits remain anchored.
-The production `--edge-extrapolation powerlaw` option retains its free-amplitude
-500 Å fit; it is not the anchored comparison variant.
+The production `--edge-extrapolation powerlaw` option uses this same anchored
+fit with a 500 Å slope window.
 
 ### Regenerate the actual template extensions
 

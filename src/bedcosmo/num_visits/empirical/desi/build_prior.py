@@ -295,7 +295,7 @@ def parse_args() -> argparse.Namespace:
         "--edge-extrapolation",
         choices=("constant", "powerlaw"),
         default="constant",
-        help="Extrapolate finished templates beyond measured NMF support to cover prior LSST demand",
+        help="Extend finished templates to prior LSST demand; powerlaw fixes the local 100 Å IVAR-weighted amplitude and fits a slope over 500 Å",
     )
     parser.add_argument("--max-chi2-dof", type=float, default=1.5)
     parser.add_argument("--norm-min", type=float, default=3600.0)
@@ -776,6 +776,10 @@ def main() -> None:
                 "learned_wave_min_aa": float(wave.min()),
                 "learned_wave_max_aa": float(wave.max()),
                 "edge_extrapolation": args.edge_extrapolation,
+                "edge_amplitude_window_rest_aa": 100.0,
+                "edge_slope_window_rest_aa": (
+                    500.0 if args.edge_extrapolation == "powerlaw" else None
+                ),
                 "edge_fit_weighting": "estimated template IVAR (conditional on fitted galaxy coefficients)",
                 "uncertainty": {
                     "saved_array": "estimated_template_ivar",

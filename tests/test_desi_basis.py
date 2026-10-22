@@ -204,7 +204,8 @@ def test_edge_extrapolation_uses_ivar_weighted_100_angstrom_means(side, edge):
 
 
 @pytest.mark.parametrize("side,edge", [("blue", 1200.0), ("red", 1800.0)])
-def test_anchored_powerlaw_uses_same_local_amplitude_as_constant(side, edge):
+@pytest.mark.parametrize("window_aa", [500.0, 2000.0])
+def test_powerlaw_uses_same_local_amplitude_as_constant(side, edge, window_aa):
     wave = np.arange(1000.0, 2010.0, 10.0)
     flux = 2.0 + 0.003 * (wave - 1500.0)
     weights = np.full(len(wave), 20.0)
@@ -212,14 +213,16 @@ def test_anchored_powerlaw_uses_same_local_amplitude_as_constant(side, edge):
     hidden = wave < edge if side == "blue" else wave > edge
     target = np.array([edge - 100, edge]) if side == "blue" else np.array([edge, edge + 100])
     anchored = extrapolate_edge(
-        wave, flux, weights, edge, target, side=side, method="powerlaw_anchored"
+        wave, flux, weights, edge, target, side=side, method="powerlaw", window_aa=window_aa
     )
     constant = extrapolate_edge(wave, flux, weights, edge, np.array([edge]), side=side)
     assert anchored[1 if side == "blue" else 0] == pytest.approx(constant[0])
     flux[hidden], weights[hidden] = 1e10, 1e10
     np.testing.assert_array_equal(
         anchored,
-        extrapolate_edge(wave, flux, weights, edge, target, side=side, method="powerlaw_anchored"),
+        extrapolate_edge(
+            wave, flux, weights, edge, target, side=side, method="powerlaw", window_aa=window_aa
+        ),
     )
 
 
@@ -232,8 +235,11 @@ def test_powerlaw_recovers_continuum_with_signed_outliers_and_missing_pixels(slo
     measured = (wave >= 3600) & (wave <= 9820)
     weights = np.where(measured, 10000.0, 0.0)
     weights[wave == 6000] = 0.0
-    flux[(wave == 3600) | (wave == 9820)] = -10.0
-    flux[(wave >= 3800) & (wave <= 3820)] += 20.0
+    distance = wave - edge if side == "blue" else edge - wave
+    # Isolate slope recovery: the only measured anchor sample is exactly at the edge.
+    weights[(distance > 0) & (distance <= 100)] = 0
+    flux[(distance >= 200) & (distance <= 220)] = -10.0
+    flux[(distance >= 300) & (distance <= 320)] += 20.0
     targets = wave[wave < edge] if side == "blue" else wave[wave > edge]
     expected = continuum[wave < edge] if side == "blue" else continuum[wave > edge]
     result = extrapolate_edge(wave, flux, weights, edge, targets, side=side, method="powerlaw")
@@ -247,7 +253,9 @@ def test_powerlaw_uses_inverse_variance_with_negative_measurements(side, edge):
     flux = continuum.copy()
     measured = (wave >= 3600) & (wave <= 9820)
     weights = np.where(measured, 1e6, 0.0)
-    noisy = measured & ((wave < 3800) | (wave > 9600))
+    distance = wave - edge if side == "blue" else edge - wave
+    # Keep an exact, high-precision edge anchor among low-precision negative samples.
+    noisy = measured & (distance > 0) & (distance <= 200)
     flux[noisy], weights[noisy] = -5.0, 1e-6
     targets = wave[wave < edge] if side == "blue" else wave[wave > edge]
     expected = continuum[wave < edge] if side == "blue" else continuum[wave > edge]

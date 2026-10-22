@@ -8,7 +8,7 @@ import pytest
 from bedcosmo.num_visits.empirical.desi import extrapolation
 
 
-@pytest.mark.parametrize("method", ["constant", "powerlaw", "powerlaw_anchored"])
+@pytest.mark.parametrize("method", ["constant", "powerlaw"])
 def test_actual_extension_preserves_learned_values_and_weights(method):
     wave = np.arange(1390.0, 9130.0, 10.0)
     basis = np.stack([np.ones(len(wave)), 2 * (wave / 4000) ** -0.5])
@@ -49,7 +49,7 @@ def test_zero_weight_anchor_rejected_and_zero_flux_anchor_retained():
         1000,
         target,
         side="blue",
-        method="powerlaw_anchored",
+        method="powerlaw",
     )
     np.testing.assert_array_equal(values, np.zeros(1))
 
@@ -84,6 +84,55 @@ def test_extension_workflow_saves_actual_banks_and_preserves_source(tmp_path):
     assert (output / "template_extensions.npz").is_file()
     assert (output / "templates_actual.png").is_file()
     assert (output / "templates_actual.pdf").is_file()
+
+
+def test_production_powerlaw_matches_template_comparison(tmp_path, monkeypatch):
+    from bedcosmo.num_visits.empirical.desi import build_prior
+
+    prior = tmp_path / "prior"
+    prior.mkdir()
+    wave = np.arange(1390.0, 9130.0, 10.0)
+    # Curved continua expose a free-amplitude fit drifting away from the local anchor.
+    basis = np.array([1 + ((wave - 5000) / 3000) ** 2])
+    ivar = np.linspace(1, 10, len(wave))[None, :]
+    bounds = (0.0117, 1.6971)
+    np.savez(
+        prior / "desi_basis.npz",
+        wave_rest_aa=wave,
+        basis=basis,
+        estimated_template_ivar=ivar,
+    )
+    (prior / "build_provenance.json").write_text(
+        json.dumps(
+            {
+                "selection": {"prior_z_min": bounds[0], "prior_z_max": bounds[1]},
+            }
+        )
+    )
+    monkeypatch.setattr("sys.argv", ["build_prior", "--edge-extrapolation", "powerlaw"])
+    args = build_prior.parse_args()
+    production_wave, production_bank = build_prior.extend_basis_for_lsst(
+        wave, basis, ivar, bounds, method=args.edge_extrapolation
+    )
+    comparison_wave, banks = extrapolation.compare_template_extensions(
+        prior, tmp_path / "comparison", powerlaw_windows=(500,)
+    )
+    np.testing.assert_array_equal(production_wave, comparison_wave)
+    np.testing.assert_array_equal(production_bank, banks["powerlaw_500_anchored"])
+    for side, edge in (("blue", wave[0]), ("red", wave[-1])):
+        distance = wave - edge if side == "blue" else edge - wave
+        local = (distance >= 0) & (distance <= 100)
+        amplitude = np.average(basis[0, local], weights=ivar[0, local])
+        prediction = extrapolation.extrapolate_edge(
+            wave,
+            basis[0],
+            ivar[0],
+            edge,
+            np.array([edge]),
+            side=side,
+            method=args.edge_extrapolation,
+        )
+        np.testing.assert_allclose(prediction, amplitude)
 
 
 @pytest.mark.parametrize("failed_powerlaw", [False, True])
@@ -121,7 +170,7 @@ def test_response_holdouts_are_paired_and_count_numerical_failures(
     real_fit = extrapolation.extrapolate_edge
 
     def edge_fit(*args, **kwargs):
-        if failed_powerlaw and kwargs["method"] == "powerlaw_anchored":
+        if failed_powerlaw and kwargs["method"] == "powerlaw":
             raise ValueError("Power-law continuum fit failed: synthetic numerical failure")
         return real_fit(*args, **kwargs)
 
