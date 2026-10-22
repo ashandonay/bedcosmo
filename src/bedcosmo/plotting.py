@@ -6396,8 +6396,8 @@ def _plot_increasing_design_groups(groups, refs, figsize, dpi, save_path):
         handles += [Line2D([], [], marker='o', markersize=8, **key),
                     Line2D([], [], marker='s', markersize=10, **key),
                     Line2D([], [], marker='*', markersize=16, **key)]
-        legend_labels += ['Single-design flows', 'Design-space flow: nominal',
-                          'Design-space flow: optimal']
+        legend_labels += ['Single Design-space', 'Full Design-space: nominal',
+                          'Full Design-space: optimal']
     ax2.legend(handles, legend_labels, loc='best', fontsize=12, framealpha=0.9)
     ax2.set_xlabel('Percentage Increase in Total Observations', fontsize=12, weight='bold')
     ax2.set_ylabel('Expected Information Gain [bits]', fontsize=12, weight='bold')

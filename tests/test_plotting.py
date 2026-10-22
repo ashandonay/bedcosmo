@@ -2152,7 +2152,7 @@ class TestCompareIncreasingDesign:
         # Colors name the groups; the marker key (once, not per group) names the kind of flow.
         assert [t.get_text() for t in ax2.get_legend().get_texts()] == [
             "Emulator", "Scaling",
-            "Single-design flows", "Design-space flow: nominal", "Design-space flow: optimal",
+            "Single Design-space", "Full Design-space: nominal", "Full Design-space: optimal",
         ]
         plt.close("all")
 
