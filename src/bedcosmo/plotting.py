@@ -3844,6 +3844,7 @@ class ComparisonPlotter(BasePlotter):
         sort_reference=None,
         normalize=False,
         show_errorbars=True,
+        scatter=True,
         design_labels=None,
         show_ratio_to_nominal=True,
         filename=None,
@@ -3873,10 +3874,14 @@ class ComparisonPlotter(BasePlotter):
                 mean EIG across runs (symmetric). Pass ``sort_reference`` to sort by one run instead.
             sort_reference (str, optional): Run ID or label whose EIG defines the sort order.
                 When omitted and ``sort=True``, designs are sorted by the cross-run mean EIG.
-            normalize (bool): If True, plot percent difference vs each run's nominal EIG:
-                                    ``100 * (EIG - EIG_nominal) / EIG_nominal``.
-            show_errorbars (bool): If True, draw the filled std bands for each run.
-                                    Only plots if they match the evaluation designs. Default False.
+            normalize (False, "percent" or "bits"): Plot each run's EIG relative to its
+                nominal EIG, as ``100 * (EIG - EIG_nominal) / EIG_nominal`` ("percent") or
+                ``EIG - EIG_nominal`` ("bits"). "bits" keeps runs with different nominal EIGs
+                (e.g. different priors) on the same scale of gain over nominal.
+            show_errorbars (bool): If True, draw each run's eval std (bands, or error bars
+                                    with ``scatter``).
+            scatter (bool): Draw each run as markers, offset side by side at each design
+                (default). False draws each run as a line with a filled std band.
             design_labels (list, optional): Custom labels for each design dimension. Must be the same length as the number of design dimensions.
                                     If omitted, tries eig_data metadata, then the sort-reference (or first) run's
                                     ``design_args.yaml`` / ``experiment.design_labels``.
@@ -4050,15 +4055,20 @@ class ComparisonPlotter(BasePlotter):
         is_1d_design = (num_dims == 1)
 
         # Per-run plot values (normalized or raw) for the average line and optional mean sort.
+        if normalize not in (False, "percent", "bits"):
+            raise ValueError(f"normalize must be False, 'percent' or 'bits', got {normalize!r}")
         plot_eigs_per_run = []
         for record in run_records:
             if normalize:
                 nominal_eig = record['nominal_eig']
                 if nominal_eig is None:
-                    raise ValueError(f"normalize=True requires nominal_eig for run {record['run_id']}")
+                    raise ValueError(f"normalize={normalize!r} requires nominal_eig for run {record['run_id']}")
+                if normalize == "bits":
+                    plot_eigs_per_run.append(record['eigs_avg'] - nominal_eig)
+                    continue
                 if nominal_eig == 0:
                     raise ValueError(
-                        f"normalize=True cannot divide by nominal_eig=0 for run {record['run_id']}"
+                        f"normalize='percent' cannot divide by nominal_eig=0 for run {record['run_id']}"
                     )
                 plot_eigs_per_run.append(
                     100.0 * (record['eigs_avg'] - nominal_eig) / nominal_eig
@@ -4230,14 +4240,19 @@ class ComparisonPlotter(BasePlotter):
                     label='Average', zorder=3,
                 )[0]
 
-        for record, plot_eigs in zip(run_records, plot_eigs_per_run):
+        # Side-by-side offsets (in design-index units) for scatter mode.
+        index_axis = not (is_1d_design and not sort)
+        dodge = min(0.25, 0.8 / len(run_records)) if scatter and index_axis else 0.0
+
+        for i_run, (record, plot_eigs) in enumerate(zip(run_records, plot_eigs_per_run)):
             sort_idx = global_sort_idx
 
             eig_std_vals = record['eigs_std'][sort_idx]
             color = record['color']
             eig_vals_plot = plot_eigs[sort_idx]
+            run_x = x_vals + dodge * (i_run - (len(run_records) - 1) / 2)
 
-            if normalize:
+            if normalize == "percent":
                 nominal_eig = record['nominal_eig']
                 eig_std_vals_plot = 100.0 * eig_std_vals / abs(nominal_eig)
             else:
@@ -4245,13 +4260,19 @@ class ComparisonPlotter(BasePlotter):
 
             # Determine if single point or line
             num_points = len(eig_vals_plot)
-            if num_points == 1:
+            if scatter and num_points > 1:
+                yerr = eig_std_vals_plot if show_errorbars and np.any(eig_std_vals_plot > 0) else None
+                line = ax_line.errorbar(
+                    run_x, eig_vals_plot, yerr=yerr, fmt='o', ms=4, color=color,
+                    elinewidth=1, zorder=4, label=record['run_label'],
+                )
+            elif num_points == 1:
                 line = ax_line.scatter(x_vals, eig_vals_plot, color=color, zorder=5, label=record['run_label'])
             else:
                 line = ax_line.plot(x_vals, eig_vals_plot, color=color, linewidth=2, label=record['run_label'])[0]
                 
             handles_for_legend.append(line)
-            if show_errorbars and np.any(eig_std_vals_plot > 0):
+            if not scatter and show_errorbars and np.any(eig_std_vals_plot > 0):
                 if num_points == 1:
                     ax_line.errorbar(x_vals, eig_vals_plot, yerr=eig_std_vals_plot, color=color, zorder=5, fmt='o', capsize=5, label=record['run_label'])
                 else:
@@ -4286,12 +4307,12 @@ class ComparisonPlotter(BasePlotter):
                             break
                     if optimal_idx is not None:
                         sorted_pos = np.where(sort_idx == optimal_idx)[0][0]
-                        point_x = x_vals[sorted_pos]
+                        point_x = run_x[sorted_pos]
                         point_y = eig_vals_plot[sorted_pos]
 
                 if (point_x is None or point_y is None) and is_reference_run:
                     extremum_idx = np.argmax(eig_vals_plot)
-                    point_x = x_vals[extremum_idx]
+                    point_x = run_x[extremum_idx]
                     point_y = eig_vals_plot[extremum_idx]
 
                 if point_x is not None and point_y is not None:
@@ -4305,8 +4326,10 @@ class ComparisonPlotter(BasePlotter):
                     )
 
         y_label = 'Expected Information Gain [bits]'
-        if normalize:
+        if normalize == "percent":
             y_label = r'EIG Difference from Nominal [%]'
+        elif normalize == "bits":
+            y_label = r'EIG $-$ EIG(nominal) [bits]'
         ax_line.set_ylabel(y_label, fontsize=12, weight='bold')
         ax_line.grid(True, alpha=0.3)
         legend_handles = []

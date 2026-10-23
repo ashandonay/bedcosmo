@@ -1564,6 +1564,7 @@ class TestCompareEigs:
             ]
             fig, (ax_line, ax_heat) = plotter.compare_eigs(
                 sort=True,
+                scatter=False,
                 design_labels=["d"],
                 show_ratio_to_nominal=False,
                 save_dir=str(tmp_path / "plots"),
@@ -1585,6 +1586,49 @@ class TestCompareEigs:
         assert ax_heat is not None
         assert "mean EIG" in (ax_heat.get_xlabel() or "")
         plt.close(fig)
+
+    def test_compare_eigs_scatter_bits(self, mock_scratch_env, tmp_path):
+        """normalize='bits' plots EIG - nominal (in bits); scatter draws offset error-bar markers."""
+        designs = [[0.0], [1.0], [2.0]]
+        data_a = _make_eig_data(designs, variable_eigs=[5.0, 6.0, 7.0], design_labels=["d"], nominal_eig=5.0)
+        data_b = _make_eig_data(designs, variable_eigs=[2.0, 3.5, 4.0], design_labels=["d"], nominal_eig=2.0)
+        plotter = ComparisonPlotter(
+            cosmo_exp="test_exp", run_ids=["run_aaaa", "run_bbbb"], run_labels=["A", "B"],
+            colors=["#ff0000", "#0000ff"],
+        )
+        with patch.object(plotter, "_get_run_data_list") as mock_runs, \
+             patch.object(plotter, "load_eig_data_file") as mock_load, \
+             patch.object(plotter, "save_figure"):
+            mock_runs.return_value = (
+                [
+                    {"run_id": "run_aaaa", "exp_id": "exp_1", "params": {}, "run_obj": None},
+                    {"run_id": "run_bbbb", "exp_id": "exp_1", "params": {}, "run_obj": None},
+                ],
+                "exp_1",
+                "test_exp",
+            )
+            mock_load.side_effect = [("/fake/a.json", data_a), ("/fake/b.json", data_b)]
+            fig, (ax_line, _) = plotter.compare_eigs(
+                sort=False, normalize="bits", design_labels=["d"],
+                show_ratio_to_nominal=False, save_dir=str(tmp_path / "plots"), dpi=80,
+            )
+        markers = {c.get_label(): c.lines[0] for c in ax_line.containers}
+        np.testing.assert_allclose(markers["A"].get_ydata(), [0.0, 1.0, 2.0])
+        np.testing.assert_allclose(markers["B"].get_ydata(), [0.0, 1.5, 2.0])
+        assert "bits" in ax_line.get_ylabel()
+        plt.close(fig)
+
+    def test_compare_eigs_rejects_unknown_normalize(self, mock_scratch_env):
+        data = _make_eig_data([[0.0], [1.0]], variable_eigs=[1.0, 2.0], design_labels=["d"], nominal_eig=1.0)
+        plotter = ComparisonPlotter(cosmo_exp="test_exp", run_ids=["run_aaaa"], run_labels=["A"])
+        with patch.object(plotter, "_get_run_data_list") as mock_runs, \
+             patch.object(plotter, "load_eig_data_file") as mock_load:
+            mock_runs.return_value = (
+                [{"run_id": "run_aaaa", "exp_id": "exp_1", "params": {}, "run_obj": None}], "exp_1", "test_exp",
+            )
+            mock_load.return_value = ("/fake/a.json", data)
+            with pytest.raises(ValueError, match="normalize must be"):
+                plotter.compare_eigs(normalize=True, design_labels=["d"], show_ratio_to_nominal=False)
 
 
 def _make_eig_data(
