@@ -142,7 +142,56 @@ not need the radial quadrature required to evaluate the exact reflected and
 normalized **KDE** density. Its density is a learned approximation to that KDE,
 so fresh-sample validation remains necessary.
 
-## Running the new NF stage
+## Building the complete alternative prior
+
+To rebuild all statistical prior stages together, using the existing DESI fits
+and extrapolated templates as shared fixed inputs:
+
+```bash
+OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=2 \
+python scripts/build_joint_empirical_prior.py \
+  --prior-dir "$SCRATCH/bedcosmo/num_visits/empirical_prior/desi8_full_redshift" \
+  --output-dir "$SCRATCH/bedcosmo/num_visits/empirical_prior/desi8_full_redshift_joint_v2" \
+  --bandwidth 0.1 --n-samples 120000 --epochs 150 \
+  --validation-samples 20000 --plot-samples 2000 --threads 2 --seed 23
+```
+
+These are the command's defaults. Output must be a new directory outside the
+source build. Training uses the standalone NF stage's default architecture,
+batch size and early-stopping patience. The builder selects the source build's
+recorded quality/redshift population and verifies its size. No old ILR KDE is
+loaded or refitted. No NMF, spectral fitting or template extrapolation is rerun:
+keeping those inputs fixed isolates the prior-construction method comparison.
+
+The complete directory contains:
+
+- `templates/`, the original coefficient CSV and `prior_training_table.csv`;
+- `source_build_provenance.json` and `source_prior_args.yaml` for upstream history;
+- `build_provenance.json`, `request.json`, `build.log` and `README.md` for this build;
+- `joint_kde_fit.npz` (reconstruct with `JointPatternMixture`) and `joint_kde_metadata.json`;
+- `joint_prior_flow.pt`, partial checkpoints and `training.json`;
+- `training_samples_triangle.png`, `kde_samples_triangle.png`, and `nf_samples_triangle.png`;
+- `gaussianized_by_active_count/` with separate KDE/training Gaussian triangles;
+- `kde_samples_gaussianized_triangle.png` and `training_gaussianized_triangle.png`
+  showing the most populous continuous active-count group, explicitly labeled;
+- `validation/` with fresh samples, NF/KDE/DESI metrics, Gaussian Q–Q plots and
+  round-trip/Jacobian/moment/KS/covariance checks;
+- `lsst_photometry_samples.npz` and `lsst_colors.png`, computed through the copied bank.
+
+The Gaussian plots cannot combine different dimensional faces into a single
+fixed-dimensional array; singleton atoms have no continuous coordinates. Fitted
+rows at continuous auxiliary bounds have infinite logits, so only those rows
+are excluded from the Gaussian training plots, with counts recorded in provenance.
+They remain in the physical KDE training population. An ILR triangle is not
+applicable to this method.
+
+Template extrapolation plots and the basis archive are copied when available.
+Source fingerprints and output SHA-256 hashes are recorded in the final build
+provenance, also embedded in the completed NF (its own hash is sidecar-only).
+The source YAML remains a historical record; the new representation still needs
+posterior/EIG integration before it can be selected by the production backend.
+
+## Running the new NF stage separately
 
 ```bash
 OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=2 \

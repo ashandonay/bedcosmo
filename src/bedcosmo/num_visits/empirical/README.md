@@ -997,6 +997,33 @@ approximation quality or posterior/EIG sensitivity.
 
 ### Pattern-preserving joint NF prior
 
+For a self-contained build of the alternative method, reuse an existing
+direct-DESI build's fitted coefficients and extrapolated templates:
+
+```bash
+OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=2 \
+python scripts/build_joint_empirical_prior.py \
+  --prior-dir "$SCRATCH/bedcosmo/num_visits/empirical_prior/desi8_full_redshift" \
+  --output-dir "$SCRATCH/bedcosmo/num_visits/empirical_prior/desi8_full_redshift_joint_v2"
+```
+
+This rebuilds the joint KDE, trains the NF, exposes its Gaussianization, validates
+fresh draws and LSST photometry, and creates physical and conditional-Gaussian
+sample triangles. It snapshots the coefficient table, template bank and upstream
+provenance; writes its own `build_provenance.json`, `request.json` and `build.log`;
+and fingerprints source and output artifacts. The output must be new and outside
+the source build. It does not rerun NMF, coefficient fitting or template extension.
+`source_prior_args.yaml` preserves the upstream ILR configuration as history;
+it is not a runtime configuration for the alternative method.
+
+Defaults are bandwidth 0.1, 120,000 NF training draws, 150 epochs per group,
+20,000 fresh draws per validation population, 2,000 draws per triangle plot,
+two CPU threads and seed 23. Set these with `--bandwidth`, `--n-samples`,
+`--epochs`, `--validation-samples`, `--plot-samples`, `--threads`, and `--seed`.
+The shared NF architecture and checkpoint-selection settings match the defaults
+of the standalone flow stage below. This command runs locally on CPU, without
+SLURM, GPU allocation or MLflow writes.
+
 The new NF stage retains empirical activation-pattern probabilities, trains
 conditional spline flows on the active simplex faces, and preserves singleton
 patterns as explicit point masses. It uses stick-breaking and bounded auxiliary
