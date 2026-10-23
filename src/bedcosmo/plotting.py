@@ -31,7 +31,7 @@ import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 from matplotlib.lines import Line2D
 from matplotlib.path import Path
-from matplotlib.patches import Rectangle
+from matplotlib.patches import Patch, Rectangle
 from scipy.spatial import ConvexHull
 from scipy.interpolate import griddata
 import matplotlib.colors
@@ -4423,6 +4423,176 @@ class ComparisonPlotter(BasePlotter):
         self.save_figure(fig, filename=filename, save_dir=save_dir, dpi=dpi)
    
         return fig, (ax_line, ax_heat)
+
+    def compare_priors(
+        self,
+        num_samples=200_000,
+        show_reference=True,
+        param_limits=None,
+        bins=80,
+        colors=None,
+        figsize=None,
+        title=None,
+        filename=None,
+        save_dir=None,
+        dpi=200,
+    ):
+        """
+        Triangle plot of the priors the runs trained on, one color per run.
+
+        Each run's experiment is rebuilt from its MLflow run and sampled with
+        ``get_prior_samples``, so the plot shows exactly the prior it trained on
+        (box and constraints, or flow), in physical units. Diagonal panels are
+        normalized marginal densities on a log scale, so a uniform prior is a step
+        whose height compares directly with peaked priors. Off-diagonal panels draw
+        a uniform prior as its filled support (credible contours of a flat density
+        are noise) and any other prior as 68/95% contours smoothed by getdist with
+        the posterior plots' settings (``GETDIST_SETTINGS``; ``GETDIST_CHAIN_SETTINGS``
+        for the reference chain).
+
+        Args:
+            num_samples (int): Prior draws per run.
+            show_reference (bool): Overlay the experiment's reference posterior
+                (``load_nominal_samples``, e.g. DESI DR1 BAO for num_tracers) in black.
+            param_limits (dict, optional): ``{param: (lo, hi)}`` axis ranges. Defaults
+                to the union of every prior's (and the reference's) 0.1-99.9% range.
+            bins (int): Histogram bins per axis.
+            colors (list, optional): One color per run, as in :meth:`compare_eigs`.
+            figsize (tuple, optional): Figure size; default scales with the number of
+                parameters.
+            title (str, optional): Figure title.
+            filename (str, optional): Filename for the plot (default ``compare_priors``).
+            save_dir (str, optional): Directory to save the plot.
+            dpi (int, optional): DPI for the plot.
+
+        Returns:
+            tuple: ``(fig, axes)`` with ``axes`` the (D, D) array; the upper triangle is hidden.
+        """
+        run_data_list, _, _ = self._get_run_data_list(parse_params=True)
+        if not run_data_list:
+            raise ValueError(f"No runs found in experiment {self.cosmo_exp}")
+        run_ids = [run["run_id"] for run in run_data_list]
+        run_labels = self._resolve_run_labels(run_data_list, run_ids)
+        color_map = self._resolve_run_color_map(run_data_list, run_ids, colors=colors)
+
+        priors = []
+        for run, label in zip(run_data_list, run_labels):
+            experiment = init_experiment(
+                run["run_obj"], run["params"].copy(), device="cpu",
+                design_args=None, global_rank=0, verbose=False,
+            )
+            samples_gd = experiment.get_prior_samples(num_samples=num_samples)
+            uniform = experiment.prior_flow is None and all(
+                isinstance(d, torch.distributions.Uniform) for d in experiment.prior.values()
+            )
+            priors.append({
+                "label": label, "color": color_map[run["run_id"]], "uniform": uniform,
+                "names": list(experiment.cosmo_params), "latex": list(experiment.latex_labels),
+                "x": np.asarray(samples_gd.samples, dtype=float),
+            })
+        names, latex = priors[0]["names"], priors[0]["latex"]
+        for prior in priors[1:]:
+            if prior["names"] != names:
+                raise ValueError(f"Runs sample different parameters: {names} vs {prior['names']}")
+
+        reference = None
+        if show_reference:
+            params = run_data_list[0]["params"]
+            ref_samples, ref_names, _ = load_nominal_samples(
+                params["cosmo_exp"], params["cosmo_model"], dataset=params["dataset"],
+                analysis=params.get("analysis", "bao"),
+            )
+            if list(ref_names) != names:
+                raise ValueError(f"Reference samples have {list(ref_names)}, the runs {names}")
+            reference = np.asarray(ref_samples, dtype=float)
+
+        dim = len(names)
+        # (samples, color, uniform, getdist samples for smoothed contours or None)
+        sets = []
+        with contextlib.redirect_stdout(io.StringIO()):
+            for p in priors:
+                gd = None if p["uniform"] else getdist.MCSamples(
+                    samples=p["x"], names=names, labels=latex, settings=GETDIST_SETTINGS)
+                sets.append((p["x"], p["color"], p["uniform"], gd))
+            if reference is not None:
+                sets.append((reference, "black", False, ReferenceChain(
+                    samples=reference, names=names, labels=latex, settings=GETDIST_CHAIN_SETTINGS)))
+        limits = dict(param_limits or {})
+        for i, name in enumerate(names):
+            if name not in limits:
+                lo = min(np.quantile(x[:, i], 0.001) for x, *_ in sets)
+                hi = max(np.quantile(x[:, i], 0.999) for x, *_ in sets)
+                limits[name] = (lo, hi)
+        edges = [np.linspace(*limits[n], bins + 1) for n in names]
+
+        fig, axes = plt.subplots(dim, dim, figsize=figsize or (3.2 * dim + 1, 3.2 * dim + 1), squeeze=False)
+        for i in range(dim):
+            for j in range(dim):
+                ax = axes[i, j]
+                if j > i:
+                    ax.set_visible(False)
+                    continue
+                if i == j:
+                    width = edges[i][1] - edges[i][0]
+                    for x, color, *_ in sets:
+                        counts, _ = np.histogram(x[:, i], bins=edges[i])
+                        # Normalized to all draws, so a zoomed range keeps true densities.
+                        density = counts / (len(x) * width)
+                        ax.stairs(np.where(density > 0, density, np.nan), edges[i], color=color, lw=1.8)
+                    ax.set_yscale("log")
+                    ax.set_ylabel("density" if i == 0 else "")
+                else:
+                    for x, color, uniform, gd in sets:
+                        if uniform:
+                            # Support on bins spanning the prior's own range (a zoomed window would
+                            # leave most bins empty), padded by one empty cell so the 0.5 contour
+                            # falls on the support's edge.
+                            own = [np.linspace(x[:, k].min(), x[:, k].max(), bins + 1) for k in (j, i)]
+                            counts, _, _ = np.histogram2d(x[:, j], x[:, i], bins=own)
+                            centers = []
+                            for e in own:
+                                w = e[1] - e[0]
+                                c = 0.5 * (e[1:] + e[:-1])
+                                centers.append(np.concatenate([[c[0] - w], c, [c[-1] + w]]))
+                            support = np.pad((counts > 0).T.astype(float), 1)
+                            ax.contourf(*centers, support, levels=[0.5, 1.5], colors=[color], alpha=0.2)
+                            ax.contour(*centers, support, levels=[0.5], colors=[color], linewidths=1.2)
+                            continue
+                        with contextlib.redirect_stdout(io.StringIO()):
+                            density = gd.get2DDensityGridData(names[j], names[i], num_plot_contours=2)
+                        levels = np.sort(density.contours)  # 95%, 68%
+                        if color != "black":
+                            ax.contourf(density.x, density.y, density.P, levels=[levels[0], density.P.max() + 1],
+                                        colors=[color], alpha=0.2)
+                        ax.contour(density.x, density.y, density.P, levels=levels, colors=[color],
+                                   linewidths=[1.0, 1.8], linestyles="solid")
+                    ax.set_ylim(*limits[names[i]])
+                ax.set_xlim(*limits[names[j]])
+                ax.set_xlabel(f"${latex[j]}$" if i == dim - 1 else "")
+                if j == 0 and i > 0:
+                    ax.set_ylabel(f"${latex[i]}$")
+                if i < dim - 1:
+                    ax.tick_params(labelbottom=False)
+                if 0 < j < i:
+                    ax.tick_params(labelleft=False)
+
+        handles = [Patch(fc=p["color"], alpha=0.35, ec=p["color"], lw=1.5,
+                         label=p["label"] + (" (uniform)" if p["uniform"] else ""))
+                   for p in priors]
+        if reference is not None:
+            handles.append(Line2D([], [], color="black", lw=2, label="reference posterior"))
+        fig.suptitle(title or "Prior comparison", fontsize=15, weight="bold")
+        fig.tight_layout(rect=(0, 0, 1, 0.96))
+        if dim > 1:
+            # The hidden upper-right panel holds the legend.
+            corner = axes[0, dim - 1]
+            corner.set_visible(True)
+            corner.axis("off")
+            corner.legend(handles=handles, loc="upper right", bbox_to_anchor=(1.0, 1.0), fontsize=9, framealpha=0.9)
+        else:
+            axes[0, 0].legend(handles=handles, fontsize=10)
+        self.save_figure(fig, filename=filename or "compare_priors", save_dir=save_dir, dpi=dpi)
+        return fig, axes
 
     def _default_eig_axis_run_ids(self):
         """Return ``(run_id_x, run_id_y)`` defaults when exactly two run_ids are set."""
