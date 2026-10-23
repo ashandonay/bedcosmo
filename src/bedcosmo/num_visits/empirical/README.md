@@ -31,8 +31,8 @@ and `.pdf` with edge close-ups and uncertainty bands, including with `--skip-kde
 observed template activation patterns and smooths coefficients, scale and redshift
 together. Run the [coefficient-first comparison](#coefficient-first-validation-and-production-verification)
 with one command to get held-out fidelity metrics, fit-plus-sampling timings,
-and a Markdown summary. The comparison is offline; the joint method does not yet
-supply an NF prior or integrate with BED/EIG.
+and a Markdown summary. The comparison is offline; a pattern-preserving NF prior is available as an
+experimental next stage. BED posterior/EIG integration remains separate.
 
 **Production parameterization:** isometric log-ratios (ILR) — the centered
 log-ratios \(f_k^{\mathrm{clr}} = \log a_k -
@@ -994,6 +994,20 @@ JSON/NPZ files with all three index sets and generated/test physical rows, and
 `coefficient_quality.png/.pdf`. The outer test rows never choose bandwidth,
 feature scaling or kernel length. These tests do not establish prior-flow
 approximation quality or posterior/EIG sensitivity.
+
+### Pattern-preserving joint NF prior
+
+The new NF stage retains empirical activation-pattern probabilities, trains
+conditional spline flows on the active simplex faces, and preserves singleton
+patterns as explicit point masses. It uses stick-breaking and bounded auxiliary
+logits for the NF coordinates, without CLR/ILR or empirical gaussianization.
+Networks are shared by active-template count and conditioned on the full mask.
+
+See [the detailed methods comparison](../../../../experiments/num_visits/empirical_prior_methods.md)
+for the complete old/new pipelines, an explicit stick-breaking example, density
+Jacobians, training and validation commands, defaults, output artifacts, and
+remaining posterior/EIG work. The NF prior can be saved, sampled and scored
+independently; it is not yet selected by `NumVisits`' existing flow backend.
 
 ## `NumVisits` integration (`empirical`)
 

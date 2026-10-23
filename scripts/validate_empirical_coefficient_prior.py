@@ -344,7 +344,7 @@ def run(prior_dir, output_dir, mlruns_dir=None, *, n_samples=4000):
         "",
         "Joint patterns preserve exact zeros. ILR has no exact-zero atoms, so its pattern-TV score must be interpreted separately from agreement of small coefficient values.",
         "",
-        "The fixed NMF bank predates these splits. This evaluates the prior conditional on that bank; NF-prior and EIG integration of the joint method remain unfinished.",
+        "The fixed NMF bank predates these splits. This evaluates the prior conditional on that bank; A separate experimental pattern NF is available; BED posterior/EIG integration remains unfinished.",
         "",
         "[Full metrics and protocol](coefficient_validation.json) · [Coefficient comparison figure](coefficient_quality.png)",
     ]
