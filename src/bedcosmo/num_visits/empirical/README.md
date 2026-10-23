@@ -27,6 +27,13 @@ When template edges are extended, DESI builds also save `template_extrapolation.
 and `.pdf` with edge close-ups and uncertainty bands, including with `--skip-kde`.
 
 
+**Compare the alternative joint-pattern prior with ILR:** the new method models
+observed template activation patterns and smooths coefficients, scale and redshift
+together. Run the [coefficient-first comparison](#coefficient-first-validation-and-production-verification)
+with one command to get held-out fidelity metrics, fit-plus-sampling timings,
+and a Markdown summary. The comparison is offline; the joint method does not yet
+supply an NF prior or integrate with BED/EIG.
+
 **Production parameterization:** isometric log-ratios (ILR) — the centered
 log-ratios \(f_k^{\mathrm{clr}} = \log a_k -
 \mathrm{mean}_j\log a_j\) expressed in an orthonormal basis of their sum-zero
@@ -700,6 +707,293 @@ python -m bedcosmo.num_visits.empirical.diagnostic_plots clr-triangle \
 ```
 
 ---
+
+## Offline sparse-mixture prototype
+
+[`scripts/prototype_empirical_mixture.py`](../../../../scripts/prototype_empirical_mixture.py)
+implements the [P0 + bounded-KDE proposal](https://app.notion.com/p/3ada57f3be184b3b83121160e6ef4e71)
+as an offline experiment on the fitted normalized coefficients `a1`…`aK`.
+It reads a completed build's coefficient CSV and native KDE, and verifies that
+CSV selection reproduces the existing KDE training rows before comparing draws.
+It does not refit the templates, modify the source build, or write MLflow state.
+
+```bash
+python scripts/prototype_empirical_mixture.py \
+  --prior-dir "$SCRATCH/bedcosmo/num_visits/empirical_prior/desi8_full_redshift" \
+  --output-dir experiments/num_visits/plots/mixture_prototype \
+  --n-samples 10000 --seed 7 --bandwidth 0.03 --zero-threshold 0
+```
+
+For each component, estimate the fraction at or below `--zero-threshold`
+(default 0, exact zeros) and fit the remaining fractions with a Gaussian KDE.
+`--bandwidth` is an absolute standard deviation in coefficient-fraction units;
+Gaussian draws reflect repeatedly at the threshold and 1 to remain bounded.
+Independent zero/positive indicators are conditioned on at least one positive
+component; sampled rows are then normalized to sum to one. Conditioning changes
+the zero probabilities (the report includes the conditional values), and
+normalization changes the positive marginal densities. The threshold applies
+before normalization; positive final fractions can fall below it.
+Scale and redshift are bootstrapped as empirical pairs, independently of the
+coefficient draws. This preserves their mutual dependence but loses their
+relationship with the coefficients, as well as joint coefficient activation
+and amplitude structure. This is a sampling prototype; its atoms on simplex
+faces cannot be substituted into continuous ILR/flow entropy calculations.
+
+The output directory must be outside the source build; use a fresh directory
+for each comparison. Outputs include `samples.npz` (training, mixture and ILR
+KDE draws with named physical features), `mixture_fit.npz` (raw training weights,
+fitted P0, bandwidth and threshold), `comparison.json` (input fingerprints,
+settings, zero fractions, active counts, KS statistics, correlation errors and
+unseen support patterns), and `marginals.png` / `correlations.png`.
+Reload the saved fit with `numpy.load`, reconstruct `CoefficientMixture` from
+`training_weights`, `bandwidth`, and `zero_threshold`, then call `.sample`.
+Diagnostics are descriptive comparisons on the fitted population, not held-out
+validation. Exact-zero KS statistics penalize the smooth ILR baseline by
+construction; assess dependence and positive marginals alongside zero recovery.
+
+Plot specific dependence failures from the saved draws, without resampling:
+
+```bash
+python scripts/plot_empirical_mixture_failures.py \
+  --samples-path experiments/num_visits/plots/mixture_prototype/samples.npz \
+  --output-dir experiments/num_visits/plots/mixture_prototype/failures
+```
+
+This writes `dependence_failures.png/.pdf`: coefficient-pair and coefficient–redshift
+histograms with shared axes, population-normalized bin probabilities, Pearson
+correlations and conditional means (bins with at least 30 objects).
+`zeros_and_positive_values.png/.pdf` compares exact-zero frequencies and
+positive-value empirical CDFs for a1/a7. These examples require those named
+features in the saved sample file. The ILR positive CDF includes its smoothed
+near-zero values, so it is not conditioned on the original fitted active mask.
+
+### Joint activation-pattern experiment
+
+The independent sampler above is a deliberately limited baseline, not a test of
+whether all zero-mass mixture priors are suitable. The joint experiment retains
+observed template activation patterns and smooths complete coefficient/scale/
+redshift rows without CLR, ILR, a gaussianizer or a prior normalizing flow:
+
+```bash
+python scripts/prototype_joint_empirical_mixture.py \
+  --samples-path experiments/num_visits/plots/mixture_prototype/samples.npz \
+  --prior-dir "$SCRATCH/bedcosmo/num_visits/empirical_prior/desi8_full_redshift" \
+  --output-dir experiments/num_visits/plots/joint_mixture_prototype \
+  --bandwidth 0.3 --seed 17 --n-samples 10000
+```
+
+This reads the raw fitted population saved by the first experiment, splits it
+80/20 using `--seed`, and fits all three models on the training rows only. The
+existing ILR KDE is refitted for this comparison; its original artifact has
+already seen the held-out rows. The independent baseline retains its original
+0.03 absolute coefficient bandwidth; the ILR baseline uses 0.3 standardized units.
+Held-out DESI fits are the reference, with a joint empirical bootstrap as a
+no-smoothing control. This is a random galaxy split, not independent sky-region
+validation.
+
+The joint model samples an observed activation pattern with its empirical
+frequency, then chooses a complete fitted row uniformly within that pattern.
+This row is the shared center of a product Gaussian KDE kernel across active
+fractions, `log_c_scale`, and `z`. Kernel widths are `--bandwidth` times each
+feature's within-pattern population standard deviation. This is a joint KDE:
+independent noise within a kernel does not make its joint donor coordinates
+independent. Coefficients reflect into [0,1], auxiliary coordinates reflect
+into global training bounds, inactive coefficients remain exactly zero, and
+fractions are normalized. These boundary operations change the raw kernel
+density. Singletons and constant coordinates have zero smoothing; `--bandwidth 0` gives a joint empirical bootstrap. Patterns absent from training have zero
+probability, including any unseen patterns in the held-out set. No merging or
+fallback density is hidden behind sparse patterns. The report lists pattern
+counts and the population mass in singleton and fewer-than-20-row patterns;
+20 is a descriptive sparsity marker, not a validated sufficiency threshold.
+
+The experiment loads the selected build's actual exported template files from
+`prior_args.yaml` and synthesizes noiseless ugrizy AB magnitudes with the full
+native `lsst2023` response curves. It uses the DESI flux unit (`1e-17`) and
+`f_lambda = exp(log_c_scale) * sum(a_k * template_k) / (1+z)`. Missing wavelength
+coverage or nonpositive photometric flux raises an error. LSST colors provide a
+physical comparison to the fitted population through the same template bank;
+they do not establish agreement with independent observed LSST galaxies.
+
+Use a fresh output directory outside the source build. Outputs are
+`comparison.json` (split, input hashes, pattern counts and held-out coefficient/
+color diagnostics), `samples.npz` (physical rows and split indices),
+`joint_fit.npz` (training rows and bandwidth), `photometry.npz` (ugrizy magnitudes),
+and PNG/PDF figures `relationships`, `lsst_colors`, and `pattern_coverage`.
+Reconstruct `JointPatternMixture(training_rows, bandwidth=...)` from
+`joint_fit.npz` to draw more samples. Neither source artifacts nor MLflow state
+are modified. This remains an offline generative sampler: it supplies no scored
+simplex density or entropy/EIG integration for BED.
+
+### View the output priors in physical coordinates
+
+```bash
+python scripts/plot_empirical_output_priors.py \
+  --comparison-dir experiments/num_visits/plots/joint_mixture_bandwidth01 \
+  --output-dir experiments/num_visits/plots/output_prior_comparison
+```
+
+This reads the saved joint samples, matched ILR h=0.3 samples, held-out fitted
+rows, and training rows from a joint experiment. It also refits ILR at h=0.05
+on those same training rows, using the saved split seed. No source prior or
+normalizing flow is modified. Choose a fresh output directory.
+
+Outputs are `physical_marginals.png/.pdf` (all template fractions, log scale,
+and redshift; y-axis is population percentage per equal-width bin),
+`physical_corner.png/.pdf` (a3, a6, log scale and redshift with approximate
+68%/95% sample contours), and `zero_structure.png/.pdf` (exact-zero frequencies
+and the number of nonzero template fractions). All histograms include every
+sample; the first fraction bin includes exact zeros and small positive weights.
+The separate zero plot distinguishes these. Corner contours use identical
+0.7-bin Gaussian smoothing for display only and do not change prior samples.
+This is a KDE-stage comparison before any trained prior-flow approximation.
+`physical_prior_samples.npz` and `plot_metadata.json` record physical draws,
+labels, bandwidths, and population sizes. Bandwidth units differ between the
+joint and ILR models.
+
+### Joint-color robustness and density audit
+
+Run the broader comparison with:
+
+```bash
+python scripts/validate_joint_empirical_mixture.py \
+  --samples-path experiments/num_visits/plots/mixture_prototype/samples.npz \
+  --prior-dir "$SCRATCH/bedcosmo/num_visits/empirical_prior/desi8_full_redshift" \
+  --output-dir experiments/num_visits/plots/joint_mixture_validation \
+  --n-samples 1000
+```
+
+The fixed protocol uses fresh random 80/20 split seeds 37, 71, and 109, plus
+leave-one-region-out for the three most populated HEALPix regions in the source
+CSV. It verifies that the saved raw population matches that CSV's quality
+selection. Both joint-mixture and ILR KDE models are refitted on each training
+subset at bandwidths 0.05, 0.1, 0.3, and 0.6; these numbers have different
+coordinate units in the two families. Every bandwidth is reported. This is an
+exploratory sweep, not nested bandwidth selection followed by an untouched final
+test. The NMF template bank was learned earlier and is shared, so the region
+holdouts test the coefficient prior rather than an independent end-to-end NMF
+pipeline.
+
+Full five-dimensional color structure is measured with RBF MMD squared and
+sliced Wasserstein distance over 64 fixed random directions. Scales and kernel
+length are determined from training colors only. These joint metrics use equal
+subsamples of at most 500 objects per population, with identical reference
+subsamples and directions within each split. The nonnegative biased MMD
+estimator has a finite-sample floor; a matched empirical-bootstrap control
+provides context. Marginal color KS, color correlation error and coefficient
+correlation error are also reported. Differences are descriptive, not formal
+significance claims.
+
+Outputs are `validation.json`, per-split JSON reports and NPZ color draws/split
+indices, `reference.npz` containing full raw fitted rows and synthetic
+photometry, and `robustness.png/.pdf` plus `color_color.png/.pdf`. Source files
+remain read-only. All output directories must be new and outside the source
+prior build.
+
+Audit continuous-pattern density evaluation separately:
+
+```bash
+python scripts/audit_empirical_mixture_density.py \
+  --fit-path experiments/num_visits/plots/joint_mixture_bandwidth01/joint_fit.npz \
+  --output-dir experiments/num_visits/plots/joint_mixture_density_audit_refined
+```
+
+The fit path selects the previously saved joint model; the example uses its
+0.1-bandwidth sensitivity run. For a pattern with m active fractions,
+pre-normalized reflected coefficients satisfy `x_i = t*a_i`. The induced density
+in the first m−1 active-fraction coordinates integrates the product kernel
+against `t**(m-1)` over `0 < t < 1/max(a)`, then multiplies by the scale/redshift
+kernels. Summing donor contributions with weight `1/N` includes the discrete
+pattern probability. This radial integration is necessary: evaluating the raw
+Gaussian KDE at normalized fractions gives the wrong density.
+
+The audit checks numerical convergence at quadrature orders 128, 256, 512,
+and 1024 on 24 sampled eligible rows, and independently checks normalization
+on a two-component simplex. Outputs are `density_audit.json` and
+`density_queries.npz`. Exact unseen patterns receive zero density. Patterns
+with zero-width auxiliary kernels or degenerate coefficient kernels deliberately
+raise an error; atoms are never replaced with arbitrary finite densities.
+The audit reports their population mass. A one-component active simplex is
+zero-dimensional and its coefficient mass is handled explicitly.
+
+This is not a complete EIG implementation. The reference measure counts
+activation patterns and uses continuous fraction coordinates within each
+nondegenerate face. Singleton and other singular components need additional
+measure-aware treatment. The current all-parameter posterior flow uses
+continuous ILR coordinates, in which exact-zero faces have no finite
+coordinates. Prior and posterior densities must share a compatible measure
+before their entropy terms can be combined. Numerical density convergence on
+a small subset is not evidence of correct prior entropy or EIG.
+
+### Coefficient-first validation and production verification
+
+For the primary goal of recovering the fitted DESI coefficient population,
+compare priors directly in `(a1,...,aK,log_c_scale,z)` rather than choosing a
+method by its color agreement:
+
+```bash
+python scripts/validate_empirical_coefficient_prior.py \
+  --prior-dir "$SCRATCH/bedcosmo/num_visits/empirical_prior/desi8_full_redshift" \
+  --output-dir experiments/num_visits/plots/coefficient_prior_validation \
+  --n-samples 4000
+```
+
+Use `--prior-dir .../desi8` and a different new output directory to check the
+currently configured production source. Add optional
+`--mlruns-dir "$SCRATCH/bedcosmo/num_visits/mlruns"` to audit frozen run settings
+and initialization logs alongside the comparison. The command reads existing data only;
+it does not submit training, alter prior builds, or update MLflow. It audits
+frozen run artifacts directly from the local tracking directory, avoiding
+tracking-client calls that could write metadata. `production_audit.json`
+records the KDE object's actual kernel/bandwidth, parameterization, source,
+training count, snapshot hash, and prior-pool initialization log evidence when
+available. A configured flow backend means the frozen native prior flow
+supplies the actual prior pool; the KDE is its target distribution. The flow
+approximation itself is not evaluated by this coefficient-KDE comparison.
+
+The fixed outer protocol uses random seeds 503, 811, and 1297 for 80/20
+train-development/test splits, plus three leave-one-region-out tests for the
+most populated HEALPix regions. Each development subset reserves 20% for
+bandwidth selection, giving approximately 64/16/20 fit/validation/test for
+random splits. Each method searches `[0.01,0.025,0.05,0.1,0.2,0.3,0.6]` using
+mean validation RBF MMD squared across metric seeds 304, 401, and 509.
+The selected bandwidth is then refitted on the complete development subset
+and evaluated once on the outer test set. Selection at the grid's lowest
+value is a boundary result, not proof of a global bandwidth optimum.
+
+The primary coordinates are physical fractions plus natural-log scale and
+redshift, standardized using the fitting subset only during selection, and
+the development subset only during testing. RBF kernel length is also estimated
+from those training coordinates. Secondary metrics use raw coefficients
+`c_k=exp(log_c_scale)*a_k` together with redshift. Both spaces report joint
+MMD squared, sliced Wasserstein distance (128 directions), correlation error,
+and marginal KS. Discrete pattern total variation and exact-zero probability
+errors are reported separately so they do not masquerade as continuous density
+agreement. ILR has no exact-zero coefficient atoms by construction.
+
+All candidates use equal metric subsamples of at most 700 objects. Three metric
+subsamples average sampling variation but are not independent experimental
+replicates. A paired empirical-bootstrap control and ILR h=0.3 reference are
+also scored on every outer split. MMD is the biased nonnegative estimator with
+a finite-sample floor; differences are descriptive, not significance claims.
+The fixed NMF bank was learned before these splits, so this evaluates the prior
+fit conditional on that bank, not an independent NMF training pipeline or the
+accuracy of its extrapolated tails.
+
+The comparison records fit-plus-sampling wall time for each candidate, including
+coordinate preprocessing and boundary handling. Outer test timings are measured
+after validation has warmed imports and exclude file reads, metric calculations,
+plotting, density scoring and prior-NF training. The report records Python,
+NumPy and platform details. Use the same machine and thread settings for timing
+comparisons, for example `OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1`. These timings
+measure the offline prior sampler rather than end-to-end BED performance.
+
+Outputs are `comparison.md` (mean outer-test fidelity and runtime, selected
+bandwidths and limitations), `coefficient_validation.json`, optional
+`production_audit.json` when `--mlruns-dir` is supplied, per-split
+JSON/NPZ files with all three index sets and generated/test physical rows, and
+`coefficient_quality.png/.pdf`. The outer test rows never choose bandwidth,
+feature scaling or kernel length. These tests do not establish prior-flow
+approximation quality or posterior/EIG sensitivity.
 
 ## `NumVisits` integration (`empirical`)
 
