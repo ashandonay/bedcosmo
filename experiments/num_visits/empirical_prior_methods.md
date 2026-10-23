@@ -182,6 +182,8 @@ flow = JointPriorFlow.load(
 )
 rows = flow.sample(1000, seed=42)  # a1..a8, log_c_scale, z
 log_prob = flow.log_prob(rows)
+pattern_ids, gaussian_groups, log_abs_det = flow.gaussianize(rows)
+restored = flow.degaussianize(pattern_ids, gaussian_groups)
 PYTHON
 ```
 
@@ -190,6 +192,48 @@ and convergence plots. It checks valid simplex rows, exact support masks and
 finite scores on fresh target draws. Reported distribution discrepancies and
 runtime measurements are descriptive; they are not formal significance tests
 or guarantees of performance in rare patterns.
+
+### Gaussian coordinates from the trained NF
+
+The saved flow also provides an invertible Gaussianization without retraining:
+physical row → stick/aux logits → saved standardization → conditional spline
+transform → standard Gaussian base coordinates. The inverse follows the same
+steps in reverse. This uses the learned joint transform, rather than fitting
+empirical marginal CDF tables as in the existing pipeline.
+
+`gaussianize(rows)` returns `(pattern_ids, gaussian_groups, log_abs_det)`.
+The IDs retain input row order. `gaussian_groups[m]` has shape `(n_m, m+1)`,
+in the input order of non-atomic rows with `m` active templates. The returned
+log Jacobian includes the physical chart, standardization and spline transform.
+`degaussianize(pattern_ids, gaussian_groups)` restores physical rows, including
+exact inactive zeros and singleton points. IDs are local to the saved artifact.
+Singleton atoms have no Gaussian coordinates and have zero log Jacobian.
+
+Conditioned on any continuous pattern, NF-generated rows have a standard
+Gaussian base law by construction. Fresh KDE draws become only approximately
+Gaussian, to the accuracy of the NF fit. Their physical log density is
+`log P(pattern) + log Normal(base; 0,I) + log_abs_det`; singleton rows instead
+retain their pattern probability masses. The discrete pattern cannot itself
+be mapped invertibly to a continuous Gaussian. This representation consequently
+does not yet supply the fixed-dimensional posterior required by the current
+BED runtime.
+
+The validation command above also writes `gaussianization.json`,
+`gaussian_coordinates.npz`, and `gaussianization_qq.png/.pdf`. It checks inverse
+accuracy, exact masks, and the density/Jacobian identity for independent KDE
+and NF draws. It reports per-coordinate means, standard deviations and KS
+distances to a standard Gaussian, plus covariance departures from identity,
+pooled by active count. These pooled checks do not establish Gaussianity for
+every individual pattern or joint independence beyond second moments.
+
+On 20,000 fresh draws from each distribution, maximum physical round-trip
+error was below `8e-6` for every feature, with exact mask preservation; maximum
+log-density identity error was below `8e-6`. For KDE draws in the common
+`m=4,...,8` groups, largest marginal KS distances ranged from 0.038 to 0.052.
+The `m=2` KDE group had only 18 draws, insufficient for a useful Gaussianity
+assessment. Q–Q curves near the diagonal indicate approximately Gaussian
+marginals; residual departures measure the learned NF's approximation to its
+KDE target. These checks did not retrain or change the prior artifact.
 
 ## What changes and what stays shared
 

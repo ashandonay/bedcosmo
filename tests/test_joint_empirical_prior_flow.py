@@ -8,7 +8,7 @@ import pytest
 import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-from joint_empirical_prior_flow import JointPriorFlow, decode_rows, encode_rows, train
+from joint_empirical_prior_flow import JointPriorFlow, build_flow, decode_rows, encode_rows, train
 from prototype_joint_empirical_mixture import JointPatternMixture
 
 
@@ -71,6 +71,25 @@ def test_train_reload_sample_and_mixed_scoring(tmp_path):
     loaded = JointPriorFlow.load(tmp_path / "flow.pt")
     np.testing.assert_array_equal(draws, loaded.sample(2000, seed=9))
     np.testing.assert_array_equal(model.log_prob(draws), loaded.log_prob(draws))
+    for physical in [draws, target.sample(2000, seed=43), atomic]:
+        ids, groups, jac = loaded.gaussianize(physical)
+        restored = loaded.degaussianize(ids, groups)
+        np.testing.assert_allclose(restored, physical, atol=2e-5, rtol=2e-5)
+        np.testing.assert_array_equal(restored[:, :-2] == 0, physical[:, :-2] == 0)
+        base_score = np.log(loaded.probabilities[ids])
+        for m, z in groups.items():
+            selected = (~loaded.metadata["atomic"][ids]) & (loaded.patterns[ids].sum(axis=1) == m)
+            base_score[selected] += -0.5 * (z**2 + np.log(2 * np.pi)).sum(axis=1)
+        np.testing.assert_allclose(base_score + jac, loaded.log_prob(physical), atol=3e-6)
+    ids, groups, _ = loaded.gaussianize(atomic)
+    assert groups == {}
+    np.testing.assert_array_equal(loaded.degaussianize(ids, groups), atomic)
+    with pytest.raises(ValueError, match="modeled support"):
+        loaded.gaussianize(np.array([[1, 0, 0, 4, 0.7]]))
+    with pytest.raises(ValueError, match="pattern IDs"):
+        loaded.degaussianize(np.array([-1]), {})
+    with pytest.raises(ValueError, match="must match"):
+        loaded.degaussianize(ids, {2: np.zeros((1, 3))})
     from validate_joint_empirical_prior_flow import validate
 
     np.savez_compressed(
@@ -80,6 +99,8 @@ def test_train_reload_sample_and_mixed_scoring(tmp_path):
     assert report["finite_score_fraction"] == 1
     assert report["number_of_flow_groups"] == 1
     assert (tmp_path / "validation" / "nf_prior_marginals.png").is_file()
+    assert (tmp_path / "validation" / "gaussianization_qq.png").is_file()
+    assert report["gaussianization"]["kde"]["max_log_density_identity_error"] < 1e-5
     JointPriorFlow(model.metadata, {}).save(tmp_path / "partial.pt")
     with pytest.raises(ValueError, match="Incomplete"):
         JointPriorFlow.load(tmp_path / "partial.pt")
@@ -92,3 +113,44 @@ def test_invalid_continuous_boundary_fails_instead_of_epsilon_clipping():
         encode_rows(
             np.array([[0.3, 0.7, 3, 0.4], [1, 0, 3, 0.4]]), np.array([0, 0]), np.array([10, 2])
         )
+
+
+def test_gaussian_coordinates_with_interleaved_counts_masks_and_atoms():
+    torch.set_num_threads(1)
+    config = {"hidden": [8, 8], "transforms": 2, "bins": 4}
+    metadata = {
+        "patterns": np.array([[1, 0, 0], [1, 1, 0], [0, 1, 1], [1, 1, 1], [0, 0, 1]], dtype=bool),
+        "counts": np.array([10, 20, 30, 40, 1]),
+        "atomic": np.array([False, False, False, False, True]),
+        "atomic_rows": np.array([[0, 0, 0, 0, 0]] * 4 + [[0, 0, 1, 5, 1]]),
+        "lower": np.array([0, 0]),
+        "upper": np.array([10, 2]),
+    }
+    model = JointPriorFlow(
+        metadata,
+        {
+            m: {
+                "flow": build_flow(m + 1, 3, config).eval(),
+                "mu": np.zeros(m + 1),
+                "std": np.ones(m + 1),
+            }
+            for m in [1, 2, 3]
+        },
+    )
+    ids = np.random.default_rng(12).integers(0, 5, 500)
+    continuous = ~metadata["atomic"][ids]
+    counts = model.patterns[ids].sum(axis=1)
+    groups = {
+        m: np.random.default_rng(m).normal(size=(np.sum(continuous & (counts == m)), m + 1))
+        for m in [1, 2, 3]
+    }
+    rows = model.degaussianize(ids, groups)
+    restored_ids, restored_groups, _ = model.gaussianize(rows)
+    np.testing.assert_array_equal(restored_ids, ids)
+    for m, values in groups.items():
+        np.testing.assert_allclose(restored_groups[m], values, atol=2e-5, rtol=2e-5)
+    np.testing.assert_array_equal(
+        rows[~continuous], np.tile([0, 0, 1, 5, 1], (np.sum(~continuous), 1))
+    )
+    with pytest.raises(ValueError, match="invalid shape"):
+        model.degaussianize(ids, {**groups, 2: np.zeros((1, 3))})

@@ -14,7 +14,80 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from joint_empirical_prior_flow import JointPriorFlow
 from prototype_joint_empirical_mixture import JointPatternMixture
+from scipy.stats import kstest, norm
 from validate_empirical_coefficient_prior import averaged_metrics, support_metrics
+
+
+def validate_gaussianization(flow, datasets, output_dir):
+    """Check held-out KDE Gaussianity separately from the NF's own base law."""
+    report, arrays = {}, {}
+    fig, axes = plt.subplots(2, 4, figsize=(15, 8), layout="constrained")
+    for label, rows in datasets.items():
+        ids, groups, jac = flow.gaussianize(rows)
+        restored = flow.degaussianize(ids, groups)
+        if not np.array_equal(restored[:, :-2] == 0, rows[:, :-2] == 0):
+            raise ValueError("Gaussian round trip changed an activation mask")
+        base_score = np.log(flow.probabilities[ids])
+        continuous = ~flow.metadata["atomic"][ids]
+        stats = {}
+        arrays[f"{label}_pattern_ids"] = ids
+        arrays[f"{label}_log_jacobian"] = jac
+        for ax, m in zip(axes.flat, sorted(flow.groups)):
+            if m not in groups:
+                continue
+            values = groups[m]
+            selected = continuous & (flow.patterns[ids].sum(axis=1) == m)
+            base_score[selected] += -0.5 * (values**2 + np.log(2 * np.pi)).sum(axis=1)
+            arrays[f"{label}_active_{m}"] = values
+            stats[str(m)] = {
+                "n": len(values),
+                "mean": values.mean(axis=0).tolist(),
+                "std": values.std(axis=0).tolist(),
+                "ks_vs_standard_normal": [
+                    float(kstest(column, "norm").statistic) for column in values.T
+                ],
+            }
+            if len(values) > 1:
+                stats[str(m)]["max_covariance_error"] = float(
+                    np.abs(np.cov(values, rowvar=False) - np.eye(m + 1)).max()
+                )
+            quantiles = np.linspace(0.01, 0.99, 99)
+            color = "#168556" if label == "kde" else "#b14988"
+            for j, column in enumerate(values.T):
+                ax.plot(
+                    norm.ppf(quantiles),
+                    np.quantile(column, quantiles),
+                    color=color,
+                    alpha=0.5,
+                    label=label if j == 0 else None,
+                )
+        report[label] = {
+            "max_roundtrip_error_by_feature": np.abs(restored - rows).max(axis=0).tolist(),
+            "max_log_density_identity_error": float(
+                np.abs(flow.log_prob(rows) - base_score - jac).max()
+            ),
+            "groups": stats,
+        }
+    for ax, m in zip(axes.flat, sorted(flow.groups)):
+        ax.plot([-3, 3], [-3, 3], "k:", label="Standard Gaussian")
+        ax.set(
+            title=f"{m} active templates",
+            xlabel="Standard Gaussian quantile",
+            ylabel="Transformed sample quantile",
+        )
+        ax.grid(alpha=0.15)
+        ax.legend(fontsize=8)
+    for ax in axes.flat[len(flow.groups) :]:
+        ax.set_visible(False)
+    fig.suptitle(
+        "NF Gaussianization: one Q–Q curve per continuous coordinate\nFresh joint-KDE target (green); fresh NF draws (pink). Patterns and atoms stay discrete."
+    )
+    for ext in ["png", "pdf"]:
+        fig.savefig(output_dir / f"gaussianization_qq.{ext}", dpi=170)
+    plt.close(fig)
+    np.savez_compressed(output_dir / "gaussian_coordinates.npz", **arrays)
+    (output_dir / "gaussianization.json").write_text(json.dumps(report, indent=2, allow_nan=False))
+    return report
 
 
 def validate(flow_path, output_dir, *, n_samples=20000, seed=991):
@@ -62,6 +135,7 @@ def validate(flow_path, output_dir, *, n_samples=20000, seed=991):
         "atomic_mass": float(flow.probabilities[flow.metadata["atomic"]].sum()),
         "number_of_patterns": len(flow.patterns),
         "number_of_flow_groups": len(flow.groups),
+        "gaussianization": validate_gaussianization(flow, {"kde": kde, "nf": nf}, output_dir),
         "notes": [
             "Fresh target and NF samples use different seeds and were not used for NF checkpoint selection.",
             "Scores include pattern probabilities and the stick/aux Jacobian on continuous faces, and singleton probability masses for atomic patterns.",

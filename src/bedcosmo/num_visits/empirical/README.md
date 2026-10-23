@@ -1008,6 +1008,12 @@ for the complete old/new pipelines, an explicit stick-breaking example, density
 Jacobians, training and validation commands, defaults, output artifacts, and
 remaining posterior/EIG work. The NF prior can be saved, sampled and scored
 independently; it is not yet selected by `NumVisits`' existing flow backend.
+The same saved NF provides `gaussianize(rows)` and
+`degaussianize(pattern_ids, gaussian_groups)` without retraining. These map
+continuous faces to/from Gaussian base coordinates while retaining discrete
+patterns and singleton atoms. Validation also writes Gaussian Q–Q plots,
+moment/KS/covariance diagnostics, inverse errors and Jacobian checks; see the
+methods comparison for the representation and its limits.
 
 ## `NumVisits` integration (`empirical`)
 

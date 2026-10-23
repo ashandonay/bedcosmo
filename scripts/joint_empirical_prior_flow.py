@@ -170,6 +170,82 @@ class JointPriorFlow:
                     )
         return result
 
+    def gaussianize(self, rows):
+        """Return pattern IDs, Gaussian arrays by active count, and log Jacobians.
+
+        Each array keeps the input order within its non-atomic active-count
+        group. Atoms have no continuous coordinates and a zero log Jacobian.
+        """
+        import torch
+
+        rows = np.asarray(rows, dtype=float)
+        if not np.isfinite(self.log_prob(rows)).all():
+            raise ValueError("Gaussianization requires rows on the modeled support")
+        ids = np.array([self.lookup[tuple(row[:-2] > 0)] for row in rows], dtype=int)
+        masks = self.patterns[ids]
+        continuous = ~self.metadata["atomic"][ids]
+        groups, jacobian = {}, np.zeros(len(rows))
+        for m, group in self.groups.items():
+            indices = np.flatnonzero(continuous & (masks.sum(axis=1) == m))
+            if len(indices) == 0:
+                continue
+            values = np.empty((len(indices), m + 1))
+            with torch.no_grad():
+                for start in range(0, len(indices), 2048):
+                    idx = indices[start : start + 2048]
+                    features, jac = encode_rows(
+                        rows[idx], self.metadata["lower"], self.metadata["upper"]
+                    )
+                    x = torch.as_tensor(
+                        (features - group["mu"]) / group["std"], dtype=torch.float32
+                    )
+                    context = torch.as_tensor(masks[idx], dtype=torch.float32)
+                    z, ladj = group["flow"](context).transform.call_and_ladj(x)
+                    values[start : start + len(idx)] = z.numpy()
+                    jacobian[idx] = jac - np.log(group["std"]).sum() + ladj.numpy()
+            groups[m] = values
+        return ids, groups, jacobian
+
+    def degaussianize(self, pattern_ids, gaussian_groups):
+        """Invert Gaussian arrays, restoring exact masks and singleton atoms."""
+        import torch
+
+        ids = np.asarray(pattern_ids)
+        if (
+            ids.ndim != 1
+            or not np.issubdtype(ids.dtype, np.integer)
+            or np.any(ids < 0)
+            or np.any(ids >= len(self.patterns))
+        ):
+            raise ValueError("Expected valid integer pattern IDs")
+        masks = self.patterns[ids]
+        atomic = self.metadata["atomic"][ids]
+        counts = masks.sum(axis=1)
+        required = set(counts[~atomic].astype(int))
+        if set(gaussian_groups) != required:
+            raise ValueError("Gaussian groups must match non-atomic active counts")
+        rows = np.empty((len(ids), masks.shape[1] + 2))
+        rows[atomic] = self.metadata["atomic_rows"][ids[atomic]]
+        for m in required:
+            indices = np.flatnonzero((~atomic) & (counts == m))
+            values = np.asarray(gaussian_groups[m], dtype=float)
+            if values.shape != (len(indices), m + 1) or not np.isfinite(values).all():
+                raise ValueError("Gaussian group has invalid shape or non-finite coordinates")
+            group = self.groups[m]
+            with torch.no_grad():
+                for start in range(0, len(indices), 2048):
+                    idx = indices[start : start + 2048]
+                    z = torch.as_tensor(values[start : start + len(idx)], dtype=torch.float32)
+                    context = torch.as_tensor(masks[idx], dtype=torch.float32)
+                    x = group["flow"](context).transform.inv(z).numpy()
+                    rows[idx] = decode_rows(
+                        x * group["std"] + group["mu"],
+                        masks[idx],
+                        self.metadata["lower"],
+                        self.metadata["upper"],
+                    )
+        return rows
+
     def save(self, path):
         import torch
 
