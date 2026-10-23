@@ -250,6 +250,38 @@ are fit to the DESI/EAZY template weights by `src/bedcosmo/num_visits/empirical/
 
 Either way, training draws from a GPU-resident pool of prior samples (drawn from the flow, or KDE samples) and integrates the template SEDs on the GPU. See [`empirical/README.md`](../../src/bedcosmo/num_visits/empirical/README.md).
 
+### Joint-pattern empirical alternative
+
+`prior_args_joint.yaml` selects the full-redshift joint-pattern NF build using
+`density_type: joint_pattern_flow`. Its public parameters are the physical
+fractions `a1..a8`, `log_c_scale`, and `z`; exact inactive zeros and singleton
+atoms are preserved. This backend requires `flow_type: PatternNSF`, all target
+parameters, and `transform_input: false`:
+
+```bash
+./submit.sh train num_visits empirical \
+  --prior-args-path prior_args_joint.yaml \
+  --flow-type PatternNSF --transform-input false \
+  --total-steps 88000 --n-particles-per-device 25
+```
+
+The posterior learns a categorical activation-pattern distribution conditioned
+on photometry and visits, plus conditional spline flows within each continuous
+face. Those flows use the saved prior's Gaussian coordinates internally; the
+external `transform_input` switch stays off to avoid applying an ILR transform.
+Singleton-pattern posterior probabilities are categorical masses at their exact
+saved points. Prior and posterior physical scores use the same pattern/face/atom
+measure and Jacobians for joint EIG. Both frozen prior and learned posterior
+weights, masks, bounds and normalization constants are embedded in checkpoints.
+The run also snapshots the source prior, KDE inputs, build provenance and bank
+under `artifacts/empirical/`.
+
+This is an alternative backend; the existing ILR configuration remains the
+default. Its mixed categorical/continuous posterior architecture differs from
+the ordinary ILR flow. The older continuous k-NN marginal-EIG estimator is not
+applicable to this backend's atoms and simplex faces. Use joint EIG for these
+initial comparisons.
+
 ## Marginal EIG over parameter subsets (`eval_args.yaml`)
 
 In addition to the joint EIG over all cosmological parameters, evaluation can

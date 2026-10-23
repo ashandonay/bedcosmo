@@ -810,6 +810,11 @@ class Evaluator:
         """
         if not subsets:
             return []
+        if getattr(self.experiment, "prior_args", {}).get("density_type") == "joint_pattern_flow":
+            raise ValueError(
+                "Continuous k-NN marginal EIG is not defined for the joint-pattern "
+                "prior's atoms and faces; use joint EIG"
+            )
         # A flat list of strings is treated as a single subset.
         if all(isinstance(s, str) for s in subsets):
             subsets = [subsets]

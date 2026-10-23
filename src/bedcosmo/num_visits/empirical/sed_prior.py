@@ -27,11 +27,11 @@ SED_PRIOR_KDE_FILENAMES = {
 
 PRIOR_SOURCE_KDE = "kde"
 PRIOR_SOURCE_FLOW = "flow"
-VALID_PRIOR_SOURCES = (PRIOR_SOURCE_KDE, PRIOR_SOURCE_FLOW)
+VALID_PRIOR_SOURCES = (PRIOR_SOURCE_KDE, PRIOR_SOURCE_FLOW, "joint_pattern_flow")
 
 
 def normalize_prior_source(value: Any) -> str:
-    """Validate ``density_type`` to exactly {'kde','flow'}; raise otherwise.
+    """Validate the KDE, ILR-flow or joint-pattern-flow density backend.
 
     An absent / null / empty value defaults to ``'kde'``; any other unrecognized
     value (e.g. a typo) is a loud ``ValueError`` rather than a silent KDE fallback.
@@ -145,7 +145,9 @@ def resolve_runtime_prior_root(
     """
     if artifacts_dir is not None:
         frozen_root = Path(artifacts_dir) / EMPIRICAL_ARTIFACT_DIR
-        if (frozen_root / SED_PRIOR_KDE_NATIVE_FILENAME).is_file():
+        if (frozen_root / SED_PRIOR_KDE_NATIVE_FILENAME).is_file() or (
+            frozen_root / "joint_prior_flow.pt"
+        ).is_file():
             return frozen_root.resolve()
     return resolve_prior_dir(prior_dir=prior_dir)
 
@@ -160,11 +162,12 @@ def snapshot_sed_prior(
 ) -> dict[str, Any]:
     """Freeze the empirical prior into ``artifacts/empirical/``.
 
-    Always copies ``sed_prior_kde_native.joblib`` and ``templates/`` from
+    ILR builds copy ``sed_prior_kde_native.joblib`` and ``templates/`` from
     ``prior_dir``. When
     ``density_type == 'flow'`` also copies ``sed_prior_flow_*.pt`` from the same
     directory. Resolves ``template_source`` / ``reduced_templates`` into
     ``prior_dir`` / ``template_param`` / ``parameters`` before copying.
+    Joint-pattern builds copy their NF, KDE inputs, build provenance and bank.
     """
     if cosmo_exp != "num_visits" or not prior_args:
         return prior_args
@@ -178,6 +181,15 @@ def snapshot_sed_prior(
         )
     )
     prior_root = resolve_prior_dir(out)
+    if normalize_prior_source(config_density_type(out)) == "joint_pattern_flow":
+        dest = Path(artifacts_dir) / EMPIRICAL_ARTIFACT_DIR
+        dest.mkdir(parents=True, exist_ok=True)
+        for name in ["joint_prior_flow.pt", "joint_kde_fit.npz", "build_provenance.json"]:
+            shutil.copy2(prior_root / name, dest / name)
+        shutil.copytree(
+            prior_root / TEMPLATE_BANK_SUBDIR, dest / TEMPLATE_BANK_SUBDIR, dirs_exist_ok=True
+        )
+        return out
     src = prior_root / SED_PRIOR_KDE_NATIVE_FILENAME
     if not src.is_file():
         raise FileNotFoundError(f"prior KDE not found: {src}")
@@ -378,6 +390,38 @@ class EmpiricalSedPrior:
         self.feature_names = list(artifact["feature_names"])
         self.n_templates = int(artifact["n_templates"])
         self.parameterization = artifact.get("parameterization", "weights")
+
+    @classmethod
+    def from_joint_path(cls, path, *, pool_size, pool_seed=7, device="cpu"):
+        """Load the pattern-preserving NF and populate physical coefficient rows."""
+        from .joint_prior_flow import JointPriorFlow
+
+        if pool_size <= 0:
+            raise ValueError("pool_size must be positive")
+        path = Path(path).resolve()
+        flow = JointPriorFlow.load(path)
+        names = flow.metadata["feature_names"]
+        k = len(names) - 2
+        rows = flow.sample(int(pool_size), seed=int(pool_seed))
+        lower = np.r_[np.zeros(k), flow.metadata["lower"]]
+        upper = np.r_[np.ones(k), flow.metadata["upper"]]
+        pool = EmpiricalPriorPool(
+            pool=torch.tensor(rows, device=device, dtype=torch.float64),
+            feature_names=names,
+            n_templates=k,
+            bounds_min=torch.tensor(lower, device=device, dtype=torch.float64),
+            bounds_max=torch.tensor(upper, device=device, dtype=torch.float64),
+        )
+        artifact = {
+            "parameterization": "weights",
+            "feature_names": names,
+            "n_templates": k,
+            "metadata": {"build_provenance": flow.metadata["build_provenance"]},
+        }
+        result = cls(artifact, pool, path=path)
+        result.native_flow = flow
+        result.prior_source = "flow"
+        return result
 
     @classmethod
     def from_kde_path(
