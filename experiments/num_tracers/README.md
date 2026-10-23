@@ -154,6 +154,8 @@ factor_i = sqrt(nominal_passed_ratio_i / passed_ratio_i)
 
 With `vary_lya_qso: false` (default) the Lya QSO rows are pinned at their nominal error.
 
+The reference covariance is `ref_cov` (default `desi_cov.npy`): the published DESI 2024 BAO result, built on the **v1.2** clustering catalogs. The DR1 `full-shape-bao-clustering` VAC also ships per-tracer BAO likelihoods for the **v1.5** catalogs (DESI's default, used in DR1 full-shape), which differ by up to ±11% per row. `scripts/num_tracers/generate_ref_cov_vac.py --catalog {v1.5,v1.2}` (repo root) builds a drop-in `ref_cov` from them: the VAC's fractional (q_iso or q_∥, q_⊥) covariance placed on the `desi_data.csv` rows, Lya QSO kept from `desi_cov.npy`. `experiments/num_tracers/scripts/generate_ref_cov.py` builds one from the emulators instead. No v1.5 BAO-only DESI posterior exists, so the reference samples (`mcmc_samples/`) stay v1.2.
+
 ### `likelihood_mode: emulator`
 
 `_build_emulator_covariance` evaluates per-bin neural emulators (checkpoints in `emulators.yaml`) on the passed tracer counts and the cosmology `emulator_covariance` selects, giving a learned BAO forecast rather than an idealization. Dense bins saturate well short of `1/sqrt(N)`: at 1.2x nominal the measured sigma ratios are BGS 0.955, LRG1 0.966, LRG2 0.961, LRG3_ELG1 0.944, ELG2 0.906, QSO 0.895, versus `1/sqrt(1.2) = 0.913`. This mode never calls `sigma_scaling_factor`.
