@@ -34,6 +34,7 @@ from bedcosmo.util import (
     sample_guide,
 )
 from bedcosmo.transform import Bijector
+from bedcosmo.prior_flow import PriorFlow, is_prior_flow_file
 from bedcosmo.custom_dist import ConstrainedUniform2D, PresampledPrior
 from bedcosmo.base import BaseExperiment
 from bedcosmo.cosmology import CosmologyMixin, FIDUCIAL_PARAMS
@@ -324,6 +325,9 @@ class NumTracers(BaseExperiment, CosmologyMixin):
         if self.analysis == "shapefit":
             self._omega_m_log_acceptance = self._omega_m_domain_log_acceptance()
 
+        if isinstance(self.prior_flow, PriorFlow):
+            self.prior_flow_metadata["log_acceptance"] = self._prior_flow_log_acceptance()
+
         # Extract prior_flow settings for use in _sample_prior_flow
         if self.prior_flow_metadata is not None:
             self.prior_flow_transform_input = self.prior_flow_metadata.get("transform_input", False)
@@ -535,8 +539,11 @@ class NumTracers(BaseExperiment, CosmologyMixin):
                 - multiplier: optional multiplier for the parameter
             constraints (dict, optional): Dictionary defining parameter constraints.
                 Keys are constraint names, values are dicts with 'affected_parameters' and 'bounds'.
-            prior_flow_path (str, optional): Absolute path to prior flow checkpoint file.
-                Must be an absolute path. Required if using a trained posterior as prior.
+            prior_flow_path (str, optional): Absolute path to a flow used as the prior:
+                either a conditional bedcosmo posterior checkpoint, evaluated at the
+                nominal context, or an unconditional ``bedcosmo.prior_flow.PriorFlow``
+                over the model's parameters in their raw (pre-multiplier) units. The
+                PriorFlow is truncated to ``parameters`` and ``constraints``.
             **kwargs: Additional arguments (ignored, for compatibility with YAML structure).
 
         Returns:
@@ -562,19 +569,33 @@ class NumTracers(BaseExperiment, CosmologyMixin):
                     "Relative paths are not supported."
                 )
 
-            prior_flow, prior_flow_metadata = load_prior_flow_from_file(
-                prior_flow_path, self.device, self.global_rank
-            )
-            prior_flow_metadata["nominal_context"] = (
-                self.nominal_context.to(self.device)
-                if prior_flow_metadata["nominal_context"] is None
-                else prior_flow_metadata["nominal_context"]
-            )
-
-            if self.global_rank == 0:
-                print(
-                    "Using trained posterior model as prior for parameter sampling (loaded from prior_args.yaml)"
+            if is_prior_flow_file(prior_flow_path):
+                if self.analysis != "bao":
+                    raise NotImplementedError(
+                        f"An unconditional PriorFlow prior supports analysis='bao' only, got {self.analysis!r}"
+                    )
+                prior_flow = PriorFlow.load(prior_flow_path)
+                prior_flow_metadata = {
+                    "transform_input": False,
+                    "nominal_context": None,
+                    "bijector_state": None,
+                }
+                if self.global_rank == 0:
+                    print(f"Using unconditional prior flow {prior_flow_path} as the prior")
+            else:
+                prior_flow, prior_flow_metadata = load_prior_flow_from_file(
+                    prior_flow_path, self.device, self.global_rank
                 )
+                prior_flow_metadata["nominal_context"] = (
+                    self.nominal_context.to(self.device)
+                    if prior_flow_metadata["nominal_context"] is None
+                    else prior_flow_metadata["nominal_context"]
+                )
+
+                if self.global_rank == 0:
+                    print(
+                        "Using trained posterior model as prior for parameter sampling (loaded from prior_args.yaml)"
+                    )
         else:
             prior_flow = None
             prior_flow_metadata = None
@@ -592,6 +613,11 @@ class NumTracers(BaseExperiment, CosmologyMixin):
 
         model_parameters = cosmo_models[self.analysis][self.cosmo_model]["parameters"]
         latex_labels = cosmo_models[self.analysis][self.cosmo_model]["latex_labels"]
+        if isinstance(prior_flow, PriorFlow) and prior_flow.feature_names != model_parameters:
+            raise ValueError(
+                f"Prior flow {prior_flow_path} models {prior_flow.feature_names}, but "
+                f"cosmo_model {self.cosmo_model!r} samples {model_parameters}"
+            )
 
         # Process constraints if provided
         if constraints is not None:
@@ -1303,6 +1329,56 @@ class NumTracers(BaseExperiment, CosmologyMixin):
         y = context[..., self.nominal_design.shape[-1]:]
         capped = (y.abs() > 1e-2 * self._SIGMA_CEILING).any(-1)
         return {"frac_sigma_ceiling": capped.double().mean().item()}
+
+    def _in_prior_support(self, samples):
+        """Mask of rows inside the uniform bounds and the sum constraints; samples (..., n_params)."""
+        inside = torch.ones(samples.shape[:-1], dtype=torch.bool, device=samples.device)
+        for i, name in enumerate(self.cosmo_params):
+            if isinstance(self.prior[name], dist.Uniform):
+                inside &= (samples[..., i] > self.prior[name].low) & (samples[..., i] < self.prior[name].high)
+        for constraint in self.param_constraints.values():
+            total = sum(samples[..., self.cosmo_params.index(p)] for p in constraint["affected_parameters"])
+            bounds = constraint["bounds"]
+            if "lower" in bounds:
+                inside &= total > bounds["lower"]
+            if "upper" in bounds:
+                inside &= total < bounds["upper"]
+        return inside
+
+    def _prior_flow_log_acceptance(self, n_samples=1_000_000):
+        """Log of the PriorFlow's mass inside the prior support, which normalizes its truncation."""
+        x = torch.as_tensor(self.prior_flow.sample(n_samples), device=self.device)
+        n_inside = int(self._in_prior_support(x).sum())
+        if n_inside == 0:
+            raise ValueError(
+                "No prior-flow sample lies inside the prior support. Check that the flow was fit "
+                "in the prior_args' raw parameter units."
+            )
+        if self.global_rank == 0:
+            print(f"Prior flow: {n_inside / n_samples:.5f} of its mass lies inside the prior support")
+        return math.log(n_inside / n_samples)
+
+    def _sample_prior_flow(self, total_samples):
+        if not isinstance(self.prior_flow, PriorFlow):
+            return super()._sample_prior_flow(total_samples)
+        # The flow's density spills past the box and constraints; truncate it by rejection.
+        batch_size = max(self.prior_flow_batch_size, total_samples)
+        kept, n_kept = [], 0
+        while n_kept < total_samples:
+            x = torch.as_tensor(self.prior_flow.sample(batch_size), device=self.device)
+            x = x[self._in_prior_support(x)]
+            kept.append(x)
+            n_kept += len(x)
+        return torch.cat(kept)[:total_samples]
+
+    def prior_flow_log_prob(self, samples):
+        """Log-density of the truncated PriorFlow prior in raw parameter units; samples (..., n_params)."""
+        flat = samples.reshape(-1, samples.shape[-1])
+        log_prob = torch.as_tensor(
+            self.prior_flow.log_prob(flat.detach().cpu().numpy()), device=samples.device
+        ) - self.prior_flow_metadata["log_acceptance"]
+        log_prob = torch.where(self._in_prior_support(flat), log_prob, -math.inf)
+        return log_prob.reshape(samples.shape[:-1])
 
     @profile_method
     def sample_parameters(self, sample_shape, prior=None, use_prior_flow=True):

@@ -137,6 +137,47 @@ Each entry under `parameters` defines a `distribution` (type + bounds), optional
 | `prior_args_small.yaml` | Narrowed ranges for fast tests |
 | `prior_args_shapefit.yaml` | `analysis: shapefit`; omega-basis cosmology matching the emulators' training box, plus the `omega_m_domain` constraint |
 | `prior_args_posterior*.yaml` | Posterior-informed priors, per model/dataset |
+| `prior_args_dr1_tempered_<model>.yaml` | `prior_args_hrdrag.yaml`'s box and constraints plus a `PriorFlow` fit to the tempered DESI DR1 BAO posterior (see below), one per BAO model |
+
+### Flow priors (`prior_flow_path`)
+
+`prior_flow_path` (absolute) replaces the box with a normalizing flow, in one of two formats:
+
+- **A conditional bedcosmo posterior checkpoint** (`checkpoint_*.pt` from an earlier run), evaluated at the nominal context. The `prior_args_posterior*.yaml` files use this format.
+- **An unconditional `bedcosmo.prior_flow.PriorFlow`** (`train_prior_flow`, also used by num_visits' SED prior), fit over the model's parameters in `models.yaml` order and in the YAML's raw units (`hrdrag` before its `multiplier`). Its `feature_names` must match the model's parameters. The `parameters` box and the `constraints` still apply: the flow is truncated to them. Samples come from rejection, and the EIG's prior log-density is the flow's minus the log of its mass inside the support, estimated from 10⁶ flow draws at start-up. `analysis: bao` only.
+
+### Tempered DESI DR1 posterior (`prior.py`)
+
+`python -m bedcosmo.num_tracers.prior --cosmo-model <model> --temperature T --out <file>.npz` samples `π_box(θ) · L_DR1(θ)^(1/T)`. `π_box` is a `prior_args` YAML's box and constraints (default `prior_args.yaml`, the bounds of the cobaya configs in `cobaya/mcmc/`). `L_DR1` is the Gaussian likelihood of DESI's compressed DR1 BAO data (`~/data/desi/bao_dr1/desi_2024_gaussian_bao_ALL_GCcomb_{mean,cov}.txt`, cobaya's `desi_bao_all`), computed with bedcosmo's distances at the cobaya configs' fixed h = 0.6736, N_eff = 3.044 and Σm_ν = 0.06 eV. Near-Gaussian widths scale by √T. The sampler is a vectorized affine-invariant ensemble MCMC. The second half of the run is kept and thinned by the autocorrelation time, and the run fails if that half spans fewer than 50 autocorrelation times. The `.npz` holds `samples` (N, D) and a JSON `metadata` string: T, the file hashes, the sampler diagnostics and the bedcosmo commit. At T = 1, `base` reproduces DESI 2024 VI (Ωm = 0.2947 ± 0.0147, h·r_d = 101.89 ± 1.28 Mpc) and the local DR1 chain `~/data/desi/bao_dr1/mcmc_samples/base.npy`.
+
+`python -m bedcosmo.num_tracers.fit_prior_flow <samples>.npz --prior-args prior_args_hrdrag.yaml` fits a `PriorFlow` to those samples in the target YAML's raw units, rescaling `hrdrag` between multipliers, and writes `<samples>_flow.pt` with a validation triangle plot. It holds 20% of the samples out of the fit (and `train_prior_flow` keeps 10% of the rest for early stopping, `--early-stop-fraction`) and records these checks in the flow's `meta["validation"]`:
+
+- **Marginals:** the KS statistic per parameter, flow draws against held-out samples.
+- **Calibration on flow draws:** with `log w = log(π_box · L^(1/T) / q_flow)`, the KL divergence from flow to target in nats, the fraction of flow mass with `|log w| > 1` against its normalizer, and the importance ESS fraction. The ESS is dominated by a few draws ~5σ out and swings between seeds, so read it after the KL.
+- **Coverage on held-out target samples:** `log(p/q)` against its median, as its 99.9% quantile and the fraction above 3. Flow draws cannot show target mass the flow misses; this does.
+- **Leakage:** the flow's mass outside the box and constraints.
+
+The `prior_args_dr1_tempered_<model>.yaml` files point at flows in `$SCRATCH/bedcosmo/num_tracers/priors/dr1_tempered/`, so they work only where those exist. Each model's T keeps the prior shaped by DR1 rather than by the box, with little mass below Ωm = 0.1:
+
+| Model | T | Ωm, h·r_d widths vs DR1 | Limited by |
+|---|---|---|---|
+| `base` | 16 | ~4× | nothing within T ≤ 25 |
+| `base_w` | 4 | ~2.2× | the Ωm–w0–h·r_d ridge toward low Ωm |
+| `base_omegak` | 4 | ~1.8× | Ωk filling its ±0.3 box |
+| `base_w_wa` | 2 | ~1.3× | wa is the box at any T; low-Ωm ridge |
+| `base_omegak_w_wa` | 2 | ~1.4× | as `base_w_wa`, and Ωk's box |
+
+Validation of the flows the YAMLs point at:
+
+| Model | T | worst KS | KL (nats) | `|log w|>1` | coverage 99.9% | coverage >3 | leakage |
+|---|---|---|---|---|---|---|---|
+| `base` | 16 | 0.015 | 0.004 | 0.04% | 0.6 | 0.03% | 0.00% |
+| `base_w` | 4 | 0.013 | 0.013 | 0.10% | 12.5 | 0.30% | 0.00% |
+| `base_omegak` | 4 | 0.007 | 0.009 | 0.07% | 1.0 | 0.01% | 0.07% |
+| `base_w_wa` | 2 | 0.009 | 0.023 | 0.30% | 2.3 | 0.09% | 0.26% |
+| `base_omegak_w_wa` | 2 | 0.013 | 0.075 | 0.48% | 1.9 | 0.02% | 0.31% |
+
+`base_w`'s flow under-covers ~0.3% of its target, at the thin low-Ωm tip of its Ωm–w0–h·r_d ridge (median Ωm ≈ 0.09, w0 at its upper cutoff), in every variant tried: more capacity, decorrelating the inputs, and logit-mapping the box edges (the last two made coverage worse for every model). That region is mostly Ωm < 0.1, which the prior is meant to keep small anyway. Leakage is truncated at runtime.
 
 ## Likelihood Model
 

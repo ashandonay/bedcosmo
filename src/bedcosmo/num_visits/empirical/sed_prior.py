@@ -11,6 +11,8 @@ from typing import Any, Callable, Sequence
 import numpy as np
 import torch
 
+from bedcosmo.prior_flow import SPACE_GAUSSIANIZED, SPACE_NATIVE, PriorFlow
+
 from .fit_sed_prior_kde import load_sed_prior_kde, sample_sed_prior
 from .paths import (
     SED_PRIOR_KDE_GAUSSIANIZED_FILENAME,
@@ -23,6 +25,10 @@ EMPIRICAL_ARTIFACT_DIR = "empirical"
 SED_PRIOR_KDE_FILENAMES = {
     "native": SED_PRIOR_KDE_NATIVE_FILENAME,
     "gaussianized": SED_PRIOR_KDE_GAUSSIANIZED_FILENAME,
+}
+SED_PRIOR_FLOW_FILENAMES = {
+    SPACE_NATIVE: "sed_prior_flow_native.pt",
+    SPACE_GAUSSIANIZED: "sed_prior_flow_gaussianized.pt",
 }
 
 PRIOR_SOURCE_KDE = "kde"
@@ -101,8 +107,6 @@ def sed_prior_kde_artifact_path(
 
 def sed_prior_flow_artifact_path(artifacts_dir: str | Path, space: str) -> Path:
     """Frozen prior-flow ``.pt`` path (``space`` in native/gaussianized) in run artifacts."""
-    from .prior_flow import SED_PRIOR_FLOW_FILENAMES
-
     return Path(artifacts_dir) / EMPIRICAL_ARTIFACT_DIR / SED_PRIOR_FLOW_FILENAMES[space]
 
 
@@ -216,13 +220,11 @@ def _snapshot_sed_prior_flows(
     src_dir: Path,
 ) -> None:
     """Copy the native (+ gaussianized) prior-flow ``.pt`` into ``artifacts/empirical/``."""
-    from .prior_flow import SED_PRIOR_FLOW_FILENAMES, SPACE_NATIVE
-
     native_src = src_dir / SED_PRIOR_FLOW_FILENAMES[SPACE_NATIVE]
     if not native_src.is_file():
         raise FileNotFoundError(
             f"density_type='flow' but native flow not found: {native_src}. Train it with "
-            "python -m bedcosmo.num_visits.empirical.prior_flow --space both."
+            "python -m bedcosmo.num_visits.empirical.train_sed_prior_flow --space both."
         )
     dest_dir = Path(artifacts_dir) / EMPIRICAL_ARTIFACT_DIR
     dest_dir.mkdir(parents=True, exist_ok=True)
@@ -371,7 +373,7 @@ class EmpiricalSedPrior:
         # attached native PriorFlow (see build_pool_from_flow) and scores entropy
         # with the same flow (native) / gaussianized_flow (transform_input).
         self.prior_source = "kde"
-        # Trained PriorFlows (see prior_flow.PriorFlow): native_flow models the
+        # Trained PriorFlows (see bedcosmo.prior_flow.PriorFlow): native_flow models the
         # native/ILR density; gaussianized_flow models the NF-coordinate density.
         self.native_flow: Any | None = None
         self.gaussianized_flow: Any | None = None
@@ -408,8 +410,6 @@ class EmpiricalSedPrior:
         (``use_flow=True``); a ``gaussianized`` flow for
         :meth:`log_prob_gaussianized_from_native`.
         """
-        from .prior_flow import SPACE_GAUSSIANIZED, SPACE_NATIVE
-
         space = getattr(flow, "space", None)
         if space == SPACE_NATIVE:
             self.native_flow = flow
@@ -420,8 +420,6 @@ class EmpiricalSedPrior:
 
     def attach_flow_from_path(self, path: str | Path) -> None:
         """Load a ``PriorFlow`` from ``path`` and attach it (see :meth:`attach_flow`)."""
-        from .prior_flow import PriorFlow
-
         self.attach_flow(PriorFlow.load(path))
 
     def has_native_flow(self) -> bool:
@@ -448,8 +446,6 @@ class EmpiricalSedPrior:
         when present (needed for ``transform_input=True`` entropy). Returns the paths
         that were loaded.
         """
-        from .prior_flow import SED_PRIOR_FLOW_FILENAMES, SPACE_GAUSSIANIZED, SPACE_NATIVE
-
         if self.path is None and flow_dir is None:
             raise RuntimeError("enable_flow_prior needs flow_dir or a KDE path on the prior")
         root = Path(flow_dir).expanduser() if flow_dir is not None else Path(self.path).parent
@@ -457,7 +453,7 @@ class EmpiricalSedPrior:
         if not native_path.is_file():
             raise FileNotFoundError(
                 f"density_type='flow' requires a native flow at {native_path}. Train it with "
-                "python -m bedcosmo.num_visits.empirical.prior_flow --space both."
+                "python -m bedcosmo.num_visits.empirical.train_sed_prior_flow --space both."
             )
         self.attach_flow_from_path(native_path)
         if self.native_flow.dim != len(self.feature_names):
