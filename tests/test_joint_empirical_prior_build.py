@@ -12,7 +12,8 @@ import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 from build_joint_empirical_prior import build
-from joint_empirical_prior_flow import JointPriorFlow
+
+from bedcosmo.num_visits.empirical.joint_prior_flow import JointPriorFlow
 
 
 def test_complete_joint_build_from_fitted_population(tmp_path):
@@ -54,7 +55,7 @@ def test_complete_joint_build_from_fitted_population(tmp_path):
         source, out, n_samples=1000, epochs=2, validation_samples=1000, plot_samples=80, threads=1
     )
     assert report["status"] == "complete"
-    assert report["runtime"]["bed_supported"] is False
+    assert report["runtime"]["bed_supported"] is True
     assert report["diagnostics"]["training_aux_boundary_rows_excluded_from_gaussian_plots"] == 4
     for name, contents in before.items():
         assert (source / name).read_bytes() == contents

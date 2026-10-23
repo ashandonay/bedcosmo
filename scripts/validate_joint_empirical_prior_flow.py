@@ -12,10 +12,11 @@ import numpy as np
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from joint_empirical_prior_flow import JointPriorFlow
 from prototype_joint_empirical_mixture import JointPatternMixture
 from scipy.stats import kstest, norm
 from validate_empirical_coefficient_prior import averaged_metrics, support_metrics
+
+from bedcosmo.num_visits.empirical.joint_prior_flow import JointPriorFlow
 
 
 def validate_gaussianization(flow, datasets, output_dir):

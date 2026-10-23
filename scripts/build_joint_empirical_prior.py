@@ -18,12 +18,12 @@ import yaml
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from joint_empirical_prior_flow import JointPriorFlow, train
 from prototype_joint_empirical_mixture import JointPatternMixture, lsst_magnitudes
 from validate_joint_empirical_prior_flow import validate
 
 from bedcosmo.num_visits.empirical.eazy.fit_eazy_weights_to_desi import save_triangle_plot
 from bedcosmo.num_visits.empirical.fit_sed_prior_kde import load_prior_training_table
+from bedcosmo.num_visits.empirical.joint_prior_flow import JointPriorFlow, train
 from bedcosmo.num_visits.empirical.templates import load_two_column_template, read_template_param
 
 
@@ -106,8 +106,10 @@ def build(
         },
         "gaussianization": "Trained conditional NF transform to standard Gaussian bases; patterns and singleton atoms remain discrete.",
         "runtime": {
-            "bed_supported": False,
-            "loader": "scripts/joint_empirical_prior_flow.py:JointPriorFlow.load",
+            "bed_supported": True,
+            "density_type": "joint_pattern_flow",
+            "posterior_flow_type": "PatternNSF",
+            "loader": "bedcosmo.num_visits.empirical.joint_prior_flow:JointPriorFlow.load",
         },
         "software": {
             "python": platform.python_version(),
@@ -280,7 +282,7 @@ def build(
             "This build reuses the source DESI coefficient fits and extrapolated template bank, "
             "then rebuilds the joint KDE, conditional NF, Gaussianization and diagnostics.\n\n"
             "Load `joint_prior_flow.pt` with `JointPriorFlow.load` from "
-            "`scripts/joint_empirical_prior_flow.py`. Reconstruct the joint KDE from "
+            "`bedcosmo.num_visits.empirical.joint_prior_flow`. Reconstruct the joint KDE from "
             "`joint_kde_fit.npz` using `JointPatternMixture(training_rows, bandwidth=bandwidth)`.\n\n"
             "`build_provenance.json` records this build; `source_build_provenance.json` "
             "and `source_prior_args.yaml` preserve upstream history. The source YAML "
@@ -292,7 +294,8 @@ def build(
             "No ILR triangle is applicable to this method.\n\n"
             "`validation/` includes NF/KDE/DESI comparisons, Gaussianization diagnostics "
             "and fresh samples. `lsst_colors.png` checks photometry through the copied bank. "
-            "BED posterior/EIG integration is not yet implemented.\n"
+            "BED full-parameter training and joint EIG use density_type=joint_pattern_flow "
+            "with flow_type=PatternNSF and transform_input=false.\n"
         )
         provenance["outputs"] = {
             str(p.relative_to(out)): hashlib.sha256(p.read_bytes()).hexdigest()

@@ -32,7 +32,8 @@ observed template activation patterns and smooths coefficients, scale and redshi
 together. Run the [coefficient-first comparison](#coefficient-first-validation-and-production-verification)
 with one command to get held-out fidelity metrics, fit-plus-sampling timings,
 and a Markdown summary. The comparison is offline; a pattern-preserving NF prior is available as an
-experimental next stage. BED posterior/EIG integration remains separate.
+experimental next stage. Full-parameter BED training and joint EIG are available
+through the separate `joint_pattern_flow` / `PatternNSF` backend described below.
 
 **Production parameterization:** isometric log-ratios (ILR) — the centered
 log-ratios \(f_k^{\mathrm{clr}} = \log a_k -
@@ -1033,14 +1034,38 @@ Networks are shared by active-template count and conditioned on the full mask.
 See [the detailed methods comparison](../../../../experiments/num_visits/empirical_prior_methods.md)
 for the complete old/new pipelines, an explicit stick-breaking example, density
 Jacobians, training and validation commands, defaults, output artifacts, and
-remaining posterior/EIG work. The NF prior can be saved, sampled and scored
-independently; it is not yet selected by `NumVisits`' existing flow backend.
+posterior representation. The NF prior can be saved, sampled and scored
+independently, or used by `NumVisits` with `density_type: joint_pattern_flow`
+and `flow_type: PatternNSF`. The ordinary `flow` backend continues to use ILR.
 The same saved NF provides `gaussianize(rows)` and
 `degaussianize(pattern_ids, gaussian_groups)` without retraining. These map
 continuous faces to/from Gaussian base coordinates while retaining discrete
 patterns and singleton atoms. Validation also writes Gaussian Q–Q plots,
 moment/KS/covariance diagnostics, inverse errors and Jacobian checks; see the
 methods comparison for the representation and its limits.
+
+For full-parameter training with the complete scratch build:
+
+```bash
+./submit.sh train num_visits empirical \
+  --prior-args-path prior_args_joint.yaml \
+  --flow-type PatternNSF --transform-input false \
+  --total-steps 88000 --n-particles-per-device 25
+```
+
+`prior_args_joint.yaml` explicitly selects the joint NF build, physical
+`a1..a8, log_c_scale, z` parameter names and template normalization. The
+posterior predicts a categorical pattern and a conditional Gaussian-coordinate
+flow for each active count; singleton patterns retain exact point masses.
+Gaussianization is internal to this posterior, so `transform_input` must stay
+false and `target_params` must include the complete row. A fixed visits/magnitude
+normalization conditions the networks; it does not alter parameter densities.
+The prior is sampled from its saved NF into the GPU pool, and both prior and
+posterior are scored in the same physical mixed measure for joint EIG. The
+continuous k-NN marginal-EIG estimator is unsupported for this backend.
+Frozen source artifacts live under each run's `artifacts/empirical/`;
+posterior checkpoints include the prior transform weights and geometry, making
+guide reconstruction independent of external prior files.
 
 ## `NumVisits` integration (`empirical`)
 

@@ -8,8 +8,15 @@ import pytest
 import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-from joint_empirical_prior_flow import JointPriorFlow, build_flow, decode_rows, encode_rows, train
 from prototype_joint_empirical_mixture import JointPatternMixture
+
+from bedcosmo.num_visits.empirical.joint_prior_flow import (
+    JointPriorFlow,
+    build_flow,
+    decode_rows,
+    encode_rows,
+    train,
+)
 
 
 def test_stick_roundtrip_and_physical_jacobian():

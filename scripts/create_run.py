@@ -204,8 +204,9 @@ def _snapshot_sed_prior(args, artifacts_dir):
     prior_args = snapshot_sed_prior(prior_args, artifacts_dir, cosmo_exp=args.cosmo_exp)
     with open(prior_path, "w") as f:
         yaml.dump(prior_args, f, default_flow_style=False, sort_keys=False)
-    with_flow = normalize_prior_source(config_density_type(prior_args)) == PRIOR_SOURCE_FLOW
-    kind = "KDE + prior flow(s)" if with_flow else "KDE"
+    density = normalize_prior_source(config_density_type(prior_args))
+    kind = {"kde": "KDE", PRIOR_SOURCE_FLOW: "KDE + prior flow(s)",
+            "joint_pattern_flow": "joint-pattern NF + KDE inputs + provenance"}[density]
     print(
         f"Snapshotted empirical prior ({kind}) -> "
         f"{sed_prior_kde_artifact_path(artifacts_dir).parent}",

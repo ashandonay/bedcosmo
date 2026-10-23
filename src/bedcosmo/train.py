@@ -94,12 +94,24 @@ class Trainer:
         n_targets = getattr(
             self.experiment, "n_targets", len(self.experiment.cosmo_params)
         )
+        nf_kwargs = {}
+        if self.cosmo_exp == "num_visits" and self.experiment.prior_args.get("density_type") == "joint_pattern_flow":
+            from bedcosmo.num_visits.empirical.pattern_posterior import pattern_prior_spec
+
+            if self.run_args["flow_type"] != "PatternNSF":
+                raise ValueError("joint_pattern_flow requires flow_type=PatternNSF")
+            prior = self.experiment.sed_prior.native_flow
+            self.run_args["pattern_prior_spec"] = pattern_prior_spec(prior)
+            nf_kwargs["pattern_prior"] = prior
+        elif self.run_args["flow_type"] == "PatternNSF":
+            raise ValueError("PatternNSF requires a num_visits joint_pattern_flow prior")
         self.posterior_flow = init_nf(
             self.run_args,
             n_targets,
             self.experiment.context_dim,
             device=self.device,
-            seed=self.run_args["nf_seed"]
+            seed=self.run_args["nf_seed"],
+            **nf_kwargs,
         )
         if self.global_rank == 0:
             if not self.run_args.get("resume_id", None) and not self.run_args.get("restart_id", None):
@@ -1526,9 +1538,8 @@ if __name__ == '__main__':
         arg_type = type(value)
         cli_key = key.replace("_", "-")
         if isinstance(value, bool):
-            parser.add_argument(f'--{cli_key}', action='store_true', help=f'Enable {key}')
-            # Set default explicitly for bools, action handles the logic
-            parser.set_defaults(**{key: value})
+            parser.add_argument(f'--{cli_key}', type=parse_bool_arg, nargs='?', const=True,
+                                default=value, help=f'Set {key} true/false (default: {value})')
         elif isinstance(value, (int, float, str)):
             parser.add_argument(f'--{cli_key}', type=arg_type, default=None, help=f'Override {key} (default: {value})')
         elif isinstance(value, list):
