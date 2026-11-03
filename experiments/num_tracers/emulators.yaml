@@ -1,7 +1,7 @@
 # Emulator checkpoint paths: <analysis>: <dataset>: <cosmo_model>: <quantity>: <tracer_bin>: <path>
 # Nesting mirrors the storage path $SCRATCH/bedcosmo/num_tracers/emulator/{analysis}/models/{dataset}/{cosmo_model}/
 # <analysis> and <quantity> are tracer-forecast-emulator's --analysis and --quantity:
-#   bao:      config | fourier (one forecast space per run, chosen by emulator_space)
+#   bao:      config | fourier | fourier_fidcoords (one per run, chosen by emulator_space)
 #   shapefit: mean and covar (both loaded; tracer bins are tracers_for("shapefit"), LRG3 not LRG3_ELG1)
 # Relative paths resolve against it; absolute paths are used verbatim; null means "no checkpoint -> fall back to the
 # fixed DESI nominal covariance" (bao only; every shapefit bin needs both checkpoints).
@@ -98,6 +98,17 @@ bao:
         LRG3_ELG1: ../base/fourier/v3_sigma_hrdrag_scaled/LRG3_ELG1.pt
         ELG2: ../base/fourier/v3_sigma_hrdrag_scaled/ELG2.pt
         QSO: ../base/fourier/v3_sigma_hrdrag_scaled/QSO.pt
+        Lya_QSO: null
+      # Native extended-model emulator: Fourier labels in DESI's fiducial coordinates, trained on
+      # (N_tracers, Om, Ok, w0, wa, hrdrag), so it follows the sampled Ok/w0/wa under
+      # emulator_covariance 'cosmology' too.
+      fourier_fidcoords:
+        BGS: fourier_fidcoords/v1_sigma_hrdrag_scaled/BGS.pt
+        LRG1: fourier_fidcoords/v1_sigma_hrdrag_scaled/LRG1.pt
+        LRG2: fourier_fidcoords/v1_sigma_hrdrag_scaled/LRG2.pt
+        LRG3_ELG1: fourier_fidcoords/v1_sigma_hrdrag_scaled/LRG3_ELG1.pt
+        ELG2: fourier_fidcoords/v1_sigma_hrdrag_scaled/ELG2.pt
+        QSO: fourier_fidcoords/v1_sigma_hrdrag_scaled/QSO.pt
         Lya_QSO: null
 shapefit:
   dr1:
