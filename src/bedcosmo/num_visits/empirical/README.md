@@ -97,7 +97,7 @@ This writes the prior to `num_visits/empirical_prior/desi8/` and its template
 bank to `num_visits/empirical_prior/desi8/templates/`. See
 [`desi/README.md`](desi/README.md) for the split, support, factorization, and
 held-out evaluation details. Neither source builder trains the prior flow;
-that is the separate [prior-flow step](#step-3-prior-normalizing-flow-prior_flowpy).
+that is the separate [prior-flow step](#step-3-prior-normalizing-flow-train_sed_prior_flowpy).
 
 ### DESI extrapolation and performance diagnostics
 
@@ -204,7 +204,7 @@ that the parameter file exists under that build's `templates/` directory.
 | `eazy/fit_eazy_weights_to_desi.py` | Per-galaxy NNLS template fit → weights CSV + fit diagnostics |
 | `eazy/combine_healpix_weights.py` | Concatenate per-patch CSVs into one training table |
 | `fit_sed_prior_kde.py` | Train KDE + gaussianizer (+ offline y-KDE diagnostic) → `sed_prior_kde_native.joblib` |
-| `prior_flow.py` | Train native and gaussianized normalizing flows over the prior → `sed_prior_flow_*.pt` (used by configured `density_type: flow`) |
+| `train_sed_prior_flow.py` | Train native and gaussianized normalizing flows over the prior → `sed_prior_flow_*.pt` (used by configured `density_type: flow`). The flow itself (`PriorFlow`, `train_prior_flow`) is the shared `bedcosmo.prior_flow` |
 | `validate_prior_flow.py` | A/B the trained flow(s) against the KDE (panels + getdist triangles, both spaces) |
 | `eazy/run_healpix_fits.sh` | Batch EAZY fits only (no combine/KDE) |
 | `eazy/run_healpix_diagnostic_plots.sh` | Per-patch `--plot-only` triangles + cross-patch comparison |
@@ -486,7 +486,7 @@ a, log_s, z = samples_to_coeffs(x, n, parameterization="ilr")
 
 ---
 
-## Step 3: Prior normalizing flow (`prior_flow.py`)
+## Step 3: Prior normalizing flow (`train_sed_prior_flow.py`)
 
 The checked-in configuration uses `density_type: flow`: the empirical prior
 pool is drawn from a trained zuko NSF rather than directly from the KDE. Train
@@ -524,7 +524,7 @@ sbatch scripts/slurm/train_prior_flow.sh \
   --n 100000 --epochs 400
 
 # or run the module directly (cap threads on a login node)
-python -m bedcosmo.num_visits.empirical.prior_flow \
+python -m bedcosmo.num_visits.empirical.train_sed_prior_flow \
   --kde-path "$SCRATCH/bedcosmo/num_visits/empirical_prior/desi8/sed_prior_kde_native.joblib" \
   --out-dir "$SCRATCH/bedcosmo/num_visits/empirical_prior/desi8" \
   --space both --threads 8
@@ -731,7 +731,7 @@ snapshotted into the run's `artifacts/empirical/` alongside the KDE. The native
 flow drives the prior pool; the density is scored by the native flow without
 input transformation or by the gaussianized flow with `transform_input: true`.
 Set `density_type: kde` for the pre-flow KDE baseline. See [Step
-3](#step-3-prior-normalizing-flow-prior_flowpy) to train and validate both flow
+3](#step-3-prior-normalizing-flow-train_sed_prior_flowpy) to train and validate both flow
 spaces.
 
 - **Training:** [`train_args.yaml`](../../../../experiments/num_visits/train_args.yaml) `empirical` block:

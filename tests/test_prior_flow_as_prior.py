@@ -11,12 +11,12 @@ import numpy as np
 import pytest
 import torch
 
-from bedcosmo.num_visits.empirical.prior_flow import (
+from bedcosmo.num_visits.empirical.sed_prior import EmpiricalPriorPool, EmpiricalSedPrior
+from bedcosmo.prior_flow import (
     SPACE_GAUSSIANIZED,
     SPACE_NATIVE,
     train_prior_flow,
 )
-from bedcosmo.num_visits.empirical.sed_prior import EmpiricalPriorPool, EmpiricalSedPrior
 
 FEATURES = ["f1", "f2", "log_c_scale", "z"]
 
@@ -120,7 +120,7 @@ def test_build_pool_from_flow_rejects_samples_outside_training_support():
 
 def test_enable_flow_prior_loads_native_and_gaussianized(tmp_path):
     """enable_flow_prior attaches both flows and rebuilds the pool from native."""
-    from bedcosmo.num_visits.empirical.prior_flow import SED_PRIOR_FLOW_FILENAMES
+    from bedcosmo.num_visits.empirical.sed_prior import SED_PRIOR_FLOW_FILENAMES
 
     flow_dir = tmp_path / "flows"
     flow_dir.mkdir()
@@ -187,12 +187,8 @@ def test_use_flow_requires_native_flow_attached():
 
 def test_snapshot_copies_flows_into_artifacts(tmp_path):
     """density_type=flow freezes the .pt files into artifacts/empirical/ beside the KDE."""
-    from bedcosmo.num_visits.empirical.prior_flow import (
-        SED_PRIOR_FLOW_FILENAMES,
-        SPACE_GAUSSIANIZED,
-        SPACE_NATIVE,
-    )
     from bedcosmo.num_visits.empirical.sed_prior import (
+        SED_PRIOR_FLOW_FILENAMES,
         sed_prior_flow_artifact_path,
         sed_prior_kde_artifact_path,
         snapshot_sed_prior,

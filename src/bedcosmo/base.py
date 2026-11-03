@@ -1062,7 +1062,10 @@ class BaseExperiment(ABC):
         """
         total_samples = int(np.prod(sample_shape)) if isinstance(sample_shape, tuple) else int(sample_shape)
 
-        use_cache = getattr(self, "prior_flow_use_cache", True)
+        # A request larger than the cache (e.g. the bijector's 1e7 CDF samples) draws fresh.
+        use_cache = getattr(self, "prior_flow_use_cache", True) and total_samples <= getattr(
+            self, "prior_flow_cache_size", 100000
+        )
 
         if use_cache:
             # Initialize cache if needed

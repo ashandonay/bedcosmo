@@ -181,7 +181,7 @@ python -m bedcosmo.num_visits.empirical.desi.build_prior \
   --build-name desi8 \
   --prior-only
 
-python -m bedcosmo.num_visits.empirical.prior_flow \
+python -m bedcosmo.num_visits.empirical.train_sed_prior_flow \
   --kde-path "$SCRATCH/bedcosmo/num_visits/empirical_prior/desi8/sed_prior_kde_native.joblib" \
   --out-dir "$SCRATCH/bedcosmo/num_visits/empirical_prior/desi8" \
   --space both

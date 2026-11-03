@@ -2709,3 +2709,48 @@ def test_run_plot_posterior_prefers_saved_samples_then_samples_flow(tmp_path, mo
     else:
         mock_load.assert_called_once()
         assert entries == [sampled]
+
+
+class TestComparePriors:
+    """ComparisonPlotter.compare_priors: a triangle of each run's prior."""
+
+    @staticmethod
+    def _stub_experiment(samples, uniform):
+        exp = Mock()
+        exp.cosmo_params = ["a", "b"]
+        exp.latex_labels = ["a", "b"]
+        exp.prior_flow = None if uniform else object()
+        exp.prior = {"a": torch.distributions.Uniform(0.0, 1.0), "b": torch.distributions.Uniform(0.0, 1.0)}
+        exp.get_prior_samples.return_value = Mock(samples=samples)
+        return exp
+
+    def _plot(self, tmp_path, experiments, **kwargs):
+        runs = [{"run_id": f"run_{k}", "exp_id": "exp_1", "params": {}, "run_obj": None} for k in range(len(experiments))]
+        plotter = ComparisonPlotter(cosmo_exp="test_exp", run_ids=[r["run_id"] for r in runs],
+                                    run_labels=[f"P{k}" for k in range(len(runs))])
+        with patch.object(plotter, "_get_run_data_list", return_value=(runs, "exp_1", "test_exp")), \
+             patch("bedcosmo.plotting.init_experiment", side_effect=experiments), \
+             patch.object(plotter, "save_figure"):
+            return plotter.compare_priors(num_samples=5000, show_reference=False, bins=30,
+                                          save_dir=str(tmp_path), **kwargs)
+
+    def test_uniform_and_flow_priors(self, mock_scratch_env, tmp_path):
+        rng = np.random.default_rng(0)
+        box = rng.uniform(0, 1, size=(20_000, 2))
+        peaked = rng.normal([0.5, 0.5], 0.1, size=(20_000, 2))
+        fig, axes = self._plot(tmp_path, [self._stub_experiment(box, True), self._stub_experiment(peaked, False)])
+        assert axes.shape == (2, 2)
+        assert axes[0, 0].get_yscale() == "log" and axes[1, 1].get_yscale() == "log"
+        # The box's diagonal density is ~1 (its height compares across priors); the peaked prior's is higher.
+        box_step, peaked_step = [c for c in axes[0, 0].patches]
+        assert np.nanmedian(box_step.get_data().values) == pytest.approx(1.0, rel=0.15)
+        assert np.nanmax(peaked_step.get_data().values) > 3
+        assert [t.get_text() for t in axes[0, 1].get_legend().get_texts()] == ["P0 (uniform)", "P1"]
+        plt.close(fig)
+
+    def test_runs_with_different_parameters_raise(self, mock_scratch_env, tmp_path):
+        a = self._stub_experiment(np.zeros((10, 2)), True)
+        b = self._stub_experiment(np.zeros((10, 2)), True)
+        b.cosmo_params = ["a", "c"]
+        with pytest.raises(ValueError, match="different parameters"):
+            self._plot(tmp_path, [a, b])
