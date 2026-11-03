@@ -114,3 +114,16 @@ def test_flow_over_other_parameters_raises(tmp_path):
     path = _flow_file(tmp_path, ["Om", "w0", "hrdrag"], [0.3, -1.0, 100.0], [0.02, 0.1, 1.0])
     with pytest.raises(ValueError, match="samples"):
         _experiment("base", path)
+
+
+def test_flow_path_expands_environment_variables(tmp_path, monkeypatch):
+    path = _flow_file(tmp_path, ["Om", "hrdrag"], [0.3, 100.0], [0.02, 1.0])
+    monkeypatch.setenv("PRIOR_FLOW_DIR", str(tmp_path))
+    exp = _experiment("base", "$PRIOR_FLOW_DIR/" + os.path.basename(path))
+    assert exp.prior_flow_metadata["log_acceptance"] == pytest.approx(0.0, abs=0.01)
+
+
+def test_flow_path_with_unset_variable_raises(monkeypatch):
+    monkeypatch.delenv("PRIOR_FLOW_DIR", raising=False)
+    with pytest.raises(ValueError, match="unset environment variable"):
+        _experiment("base", "$PRIOR_FLOW_DIR/prior_flow.pt")

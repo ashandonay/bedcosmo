@@ -539,7 +539,8 @@ class NumTracers(BaseExperiment, CosmologyMixin):
                 - multiplier: optional multiplier for the parameter
             constraints (dict, optional): Dictionary defining parameter constraints.
                 Keys are constraint names, values are dicts with 'affected_parameters' and 'bounds'.
-            prior_flow_path (str, optional): Absolute path to a flow used as the prior:
+            prior_flow_path (str, optional): Absolute path to a flow used as the prior, with
+                environment variables such as ``$SCRATCH`` expanded:
                 either a conditional bedcosmo posterior checkpoint, evaluated at the
                 nominal context, or an unconditional ``bedcosmo.prior_flow.PriorFlow``
                 over the model's parameters in their raw (pre-multiplier) units. The
@@ -563,6 +564,10 @@ class NumTracers(BaseExperiment, CosmologyMixin):
 
         # Load prior flow if specified
         if prior_flow_path:
+            # $SCRATCH and other env vars let a prior_args YAML work on any machine
+            prior_flow_path = os.path.expandvars(prior_flow_path)
+            if "$" in prior_flow_path:
+                raise ValueError(f"prior_flow_path '{prior_flow_path}' references an unset environment variable")
             if not os.path.isabs(prior_flow_path):
                 raise ValueError(
                     f"prior_flow path '{prior_flow_path}' must be an absolute path. "

@@ -141,7 +141,7 @@ Each entry under `parameters` defines a `distribution` (type + bounds), optional
 
 ### Flow priors (`prior_flow_path`)
 
-`prior_flow_path` (absolute) replaces the box with a normalizing flow, in one of two formats:
+`prior_flow_path` (absolute; environment variables such as `$SCRATCH` are expanded) replaces the box with a normalizing flow, in one of two formats:
 
 - **A conditional bedcosmo posterior checkpoint** (`checkpoint_*.pt` from an earlier run), evaluated at the nominal context. The `prior_args_posterior*.yaml` files use this format.
 - **An unconditional `bedcosmo.prior_flow.PriorFlow`** (`train_prior_flow`, also used by num_visits' SED prior), fit over the model's parameters in `models.yaml` order and in the YAML's raw units (`hrdrag` before its `multiplier`). Its `feature_names` must match the model's parameters. The `parameters` box and the `constraints` still apply: the flow is truncated to them. Samples come from rejection, and the EIG's prior log-density is the flow's minus the log of its mass inside the support, estimated from 10⁶ flow draws at start-up. `analysis: bao` only.
@@ -157,7 +157,7 @@ Each entry under `parameters` defines a `distribution` (type + bounds), optional
 - **Coverage on held-out target samples:** `log(p/q)` against its median, as its 99.9% quantile and the fraction above 3. Flow draws cannot show target mass the flow misses; this does.
 - **Leakage:** the flow's mass outside the box and constraints.
 
-The `prior_args_dr1_tempered_<model>.yaml` files point at flows in `$SCRATCH/bedcosmo/num_tracers/priors/dr1_tempered/`, so they work only where those exist. Each model's T keeps the prior shaped by DR1 rather than by the box, with little mass below Ωm = 0.1:
+The `prior_args_dr1_tempered_<model>.yaml` files point at flows in `$SCRATCH/bedcosmo/num_tracers/priors/dr1_tempered/`, so they work on any machine where those files have been copied. Each model's T keeps the prior shaped by DR1 rather than by the box, with little mass below Ωm = 0.1:
 
 | Model | T | Ωm, h·r_d widths vs DR1 | Limited by |
 |---|---|---|---|

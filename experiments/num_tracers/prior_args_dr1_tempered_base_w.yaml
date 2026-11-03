@@ -77,4 +77,4 @@ constraints:
     bounds:
       upper: 0
     
-prior_flow_path: /home/ashandonay/scratch/bedcosmo/num_tracers/priors/dr1_tempered/base_w_T4_flow.pt
+prior_flow_path: $SCRATCH/bedcosmo/num_tracers/priors/dr1_tempered/base_w_T4_flow.pt
