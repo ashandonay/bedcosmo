@@ -130,27 +130,32 @@ def sample_ensemble(log_prob, x0, n_steps, generator, a=2.0):
     """Goodman & Weare stretch-move ensemble MCMC; returns the chain (n_steps, W, D) and acceptance.
 
     Each half of the ensemble moves against the other half, so all walkers update in
-    one vectorized ``log_prob`` call per half-step.
+    one vectorized ``log_prob`` call per half-step. ``generator`` is a CPU generator on any
+    device: draws are moved to ``x0``'s device, so a seed gives the same chain on CPU and GPU.
     """
     x = x0.clone()
     lp = log_prob(x)
     if not torch.isfinite(lp).all():
         raise ValueError("every starting walker must lie inside the support")
     n_walkers, dim = x.shape
-    halves = (torch.arange(n_walkers // 2), torch.arange(n_walkers // 2, n_walkers))
+    device = x.device
+    halves = (
+        torch.arange(n_walkers // 2, device=device),
+        torch.arange(n_walkers // 2, n_walkers, device=device),
+    )
     chain = torch.empty(n_steps, n_walkers, dim, dtype=x.dtype)
     n_accepted = 0
     for step in range(n_steps):
         for moving, fixed in (halves, halves[::-1]):
-            u = torch.rand(len(moving), generator=generator, dtype=x.dtype)
+            u = torch.rand(len(moving), generator=generator, dtype=x.dtype).to(device)
             z = ((a - 1.0) * u + 1.0) ** 2 / a
-            partner = fixed[torch.randint(len(fixed), (len(moving),), generator=generator)]
+            pick = torch.randint(len(fixed), (len(moving),), generator=generator).to(device)
+            partner = fixed[pick]
             proposal = x[partner] + z[:, None] * (x[moving] - x[partner])
             lp_proposal = log_prob(proposal)
             log_ratio = (dim - 1) * torch.log(z) + lp_proposal - lp[moving]
-            accept = (
-                torch.log(torch.rand(len(moving), generator=generator, dtype=x.dtype)) < log_ratio
-            )
+            accept_u = torch.rand(len(moving), generator=generator, dtype=x.dtype).to(device)
+            accept = torch.log(accept_u) < log_ratio
             x[moving[accept]] = proposal[accept]
             lp[moving[accept]] = lp_proposal[accept]
             n_accepted += int(accept.sum())

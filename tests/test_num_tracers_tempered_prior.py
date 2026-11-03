@@ -34,6 +34,35 @@ def test_ensemble_recovers_a_correlated_gaussian():
     torch.testing.assert_close(torch.cov(x.T), cov, atol=0.05, rtol=0)
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")
+def test_ensemble_gives_the_same_chain_on_gpu():
+    precision = torch.linalg.inv(torch.tensor([[1.0, 0.9], [0.9, 1.0]], dtype=torch.float64))
+
+    def run(device):
+        p = precision.to(device)
+        x0 = 0.1 * torch.randn(
+            64, 2, generator=torch.Generator().manual_seed(1), dtype=torch.float64
+        )
+        generator = torch.Generator().manual_seed(0)
+        return sample_ensemble(
+            lambda x: -0.5 * torch.einsum("ni,ij,nj->n", x, p, x), x0.to(device), 50, generator
+        )
+
+    chain_cpu, acceptance_cpu = run("cpu")
+    chain_gpu, acceptance_gpu = run("cuda")
+    torch.testing.assert_close(chain_gpu, chain_cpu)
+    assert acceptance_gpu == acceptance_cpu
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")
+@pytest.mark.skipif(not os.path.isdir(_DATA), reason="desi bao_dr1 data not available")
+def test_tempered_target_on_gpu_matches_cpu():
+    theta = torch.tensor([[0.30, -0.8, -0.5, 100.0], [0.35, -0.5, -1.5, 98.0]], dtype=torch.float64)
+    lp_cpu = TemperedDR1Posterior("base_w_wa", 4).log_prob(theta)
+    lp_gpu = TemperedDR1Posterior("base_w_wa", 4, device="cuda").log_prob(theta.to("cuda"))
+    torch.testing.assert_close(lp_gpu.cpu(), lp_cpu)
+
+
 def test_autocorr_time_of_ar1():
     # x_t = phi x_{t-1} + noise has tau = (1 + phi) / (1 - phi) = 9 for phi = 0.8.
     rng = np.random.default_rng(0)
