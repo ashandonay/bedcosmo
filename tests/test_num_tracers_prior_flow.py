@@ -87,6 +87,21 @@ def test_samples_stay_inside_support(base_experiment):
     assert om.mean() > 0.05  # rejection lifted the mass cut below Om = 0.01
 
 
+def test_rejection_draws_scale_with_the_acceptance(base_experiment, monkeypatch):
+    # A top-up draw sized to the shortfall, not to the request: the bijector's 1e7
+    # request at ~0.3% rejection once drew 2e7.
+    exp = base_experiment
+    drawn = []
+    sample_tensor = exp.prior_flow.sample_tensor
+    monkeypatch.setattr(
+        exp.prior_flow, "sample_tensor", lambda n: drawn.append(n) or sample_tensor(n)
+    )
+    n = 200_000
+    assert len(exp._sample_prior_flow(n)) == n
+    expected = n / np.exp(exp.prior_flow_metadata["log_acceptance"])
+    assert sum(drawn) < 1.25 * expected
+
+
 def test_eig_prior_log_prob_scores_the_truncated_flow(base_experiment):
     exp = base_experiment
     samples = exp._sample_prior_flow(3000).reshape(1000, 3, 2)

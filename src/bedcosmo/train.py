@@ -61,6 +61,8 @@ class Trainer:
         self._init_device_settings(device)
         self._init_run()
         self.experiment = init_experiment(self.run_obj, self.run_args, checkpoint=self.checkpoint, device=self.device, global_rank=self.global_rank, design_args=self.design_args, profile=self.profile)
+        if tdist.is_initialized():
+            self._sync_prior_state()
 
         # Print design information in verbose mode
         if self.global_rank == 0 and self.verbose:
@@ -641,6 +643,28 @@ class Trainer:
         torch.save(checkpoint, filepath)
         if artifact_path:
             mlflow.log_artifact(filepath, artifact_path)
+
+    def _sync_prior_state(self):
+        """Give every rank rank 0's parameter bijector and prior-flow log-acceptance.
+
+        CDF tables built from prior draws (every parameter under a prior flow, the
+        constrained ones otherwise), the joint whitening and the log-acceptance come
+        from each rank's own unseeded draws, so they differ by Monte Carlo noise; the
+        checkpoint saves rank 0's, which eval then uses.
+        """
+        bijector = getattr(self.experiment, "param_bijector", None)
+        metadata = getattr(self.experiment, "prior_flow_metadata", None) or {}
+        state = [None]
+        if self.global_rank == 0:
+            state = [{
+                "bijector": bijector.get_state() if bijector is not None else None,
+                "log_acceptance": metadata.get("log_acceptance"),
+            }]
+        tdist.broadcast_object_list(state, src=0)
+        if bijector is not None:
+            bijector.set_state(state[0]["bijector"], device=self.device)
+        if state[0]["log_acceptance"] is not None:
+            metadata["log_acceptance"] = state[0]["log_acceptance"]
 
     @profile_method
     def _init_device_settings(self, device):

@@ -579,7 +579,7 @@ class NumTracers(BaseExperiment, CosmologyMixin):
                     raise NotImplementedError(
                         f"An unconditional PriorFlow prior supports analysis='bao' only, got {self.analysis!r}"
                     )
-                prior_flow = PriorFlow.load(prior_flow_path)
+                prior_flow = PriorFlow.load(prior_flow_path).to(self.device)
                 prior_flow_metadata = {
                     "transform_input": False,
                     "nominal_context": None,
@@ -1352,7 +1352,7 @@ class NumTracers(BaseExperiment, CosmologyMixin):
 
     def _prior_flow_log_acceptance(self, n_samples=1_000_000):
         """Log of the PriorFlow's mass inside the prior support, which normalizes its truncation."""
-        x = torch.as_tensor(self.prior_flow.sample(n_samples), device=self.device)
+        x = self.prior_flow.sample_tensor(n_samples)
         n_inside = int(self._in_prior_support(x).sum())
         if n_inside == 0:
             raise ValueError(
@@ -1367,10 +1367,13 @@ class NumTracers(BaseExperiment, CosmologyMixin):
         if not isinstance(self.prior_flow, PriorFlow):
             return super()._sample_prior_flow(total_samples)
         # The flow's density spills past the box and constraints; truncate it by rejection.
-        batch_size = max(self.prior_flow_batch_size, total_samples)
+        # Each draw covers the shortfall at the known acceptance (10% spare), so the
+        # bijector's 1e7 request does not redraw 1e7 to top up a 0.3% rejection.
+        acceptance = math.exp(self.prior_flow_metadata["log_acceptance"])
         kept, n_kept = [], 0
         while n_kept < total_samples:
-            x = torch.as_tensor(self.prior_flow.sample(batch_size), device=self.device)
+            n_draw = math.ceil(1.1 * (total_samples - n_kept) / acceptance)
+            x = self.prior_flow.sample_tensor(max(self.prior_flow_batch_size, n_draw))
             x = x[self._in_prior_support(x)]
             kept.append(x)
             n_kept += len(x)
@@ -1379,9 +1382,7 @@ class NumTracers(BaseExperiment, CosmologyMixin):
     def prior_flow_log_prob(self, samples):
         """Log-density of the truncated PriorFlow prior in raw parameter units; samples (..., n_params)."""
         flat = samples.reshape(-1, samples.shape[-1])
-        log_prob = torch.as_tensor(
-            self.prior_flow.log_prob(flat.detach().cpu().numpy()), device=samples.device
-        ) - self.prior_flow_metadata["log_acceptance"]
+        log_prob = self.prior_flow.log_prob_tensor(flat) - self.prior_flow_metadata["log_acceptance"]
         log_prob = torch.where(self._in_prior_support(flat), log_prob, -math.inf)
         return log_prob.reshape(samples.shape[:-1])
 
