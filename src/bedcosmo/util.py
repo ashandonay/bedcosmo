@@ -306,6 +306,25 @@ def init_nf(
     """
     with temporary_seed(seed):
         flow_type = run_args.get("flow_type")
+        if flow_type == "PatternNSF":
+            from bedcosmo.num_visits.empirical.pattern_posterior import PatternPosterior
+
+            if run_args.get("transform_input", False):
+                raise ValueError(
+                    "PatternNSF handles Gaussianization internally; set transform_input=False"
+                )
+            spec = run_args["pattern_prior_spec"]
+            if input_dim != len(spec["patterns"][0]) + 2:
+                raise ValueError("PatternNSF must infer the complete physical coefficient row")
+            return PatternPosterior(
+                spec,
+                context_dim,
+                hidden=int(run_args.get("cond_hidden_size", 128)),
+                layers=int(run_args.get("cond_n_layers", 3)),
+                transforms=int(run_args.get("n_transforms", 4)),
+                bins=int(run_args.get("spline_bins", 16)),
+                prior=kwargs.pop("pattern_prior", None),
+            ).to(device)
         n_transforms = int(run_args.get("n_transforms", 2))
         cond_n_layers = int(run_args.get("cond_n_layers", 2))
         cond_hidden_size = int(run_args.get("cond_hidden_size", 64))
@@ -486,6 +505,8 @@ def build_nf_init_config_from_run_args(run_args: dict) -> dict:
     for k in ("mnn_signal", "mnn_hidden_size", "mnn_n_layers"):
         if cfg[k] is not None:
             cfg[k] = int(cfg[k])
+    if cfg["flow_type"] == "PatternNSF":
+        cfg["pattern_prior_spec"] = run_args["pattern_prior_spec"]
     return cfg
 
 
@@ -1785,6 +1806,15 @@ def _coerce_train_arg_override(key, value, yaml_default):
     if not isinstance(yaml_default, float):
         return value
     return value
+
+
+def parse_bool_arg(value):
+    """Strict CLI boolean, including explicit false for true YAML defaults."""
+    if isinstance(value, bool):
+        return value
+    if str(value).lower() in ("true", "false"):
+        return str(value).lower() == "true"
+    raise argparse.ArgumentTypeError(f"Expected true or false, got {value!r}")
 
 
 def finalize_train_run_args(parsed_args, yaml_config, unknown_argv=None):

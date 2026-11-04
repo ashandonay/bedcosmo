@@ -206,6 +206,10 @@ CLI arguments override YAML defaults. Unprefixed args are assumed to be for trai
 
 ### Key Training Parameters
 
+Boolean training flags accept an explicit value, including overrides of true
+YAML defaults: `--transform-input false`, `--verbose false`. A bare boolean
+flag still enables it (for example `--transform-input`).
+
 | Parameter | Description | Default |
 |-----------|-------------|---------|
 | `total_steps` | Total training iterations | 200000 |
