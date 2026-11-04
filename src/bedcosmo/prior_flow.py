@@ -71,30 +71,44 @@ class PriorFlow:
     def dim(self) -> int:
         return int(self.meta["dim"])
 
-    def log_prob(self, x: np.ndarray, *, batch_size: int = 8192) -> np.ndarray:
-        """Log density (nats, raw-variable units) for rows ``x`` of shape ``(N, D)``."""
+    def to(self, device) -> PriorFlow:
+        """Move the flow to ``device``, where :meth:`log_prob_tensor` and :meth:`sample_tensor` run."""
+        self.flow.to(device)
+        return self
+
+    def log_prob_tensor(self, x, *, batch_size: int = 2**17):
+        """Log density (nats, raw-variable units) for rows ``x`` of shape ``(N, D)``.
+
+        Runs on the flow's device; returns float64 ``(N,)`` on ``x``'s device. The
+        default batch is large because GPU throughput keeps rising up to ~1e5 rows.
+        """
         import torch
 
-        x = np.asarray(x, dtype=np.float64)
         if x.ndim != 2 or x.shape[1] != self.dim:
-            raise ValueError(f"expected (N, {self.dim}) rows, got {x.shape}")
-        mu = self.meta["standardize"]["mu"]
-        std = self.meta["standardize"]["std"]
-        log_std_sum = float(np.sum(np.log(std)))
-        z = (x - mu) / std
+            raise ValueError(f"expected (N, {self.dim}) rows, got {tuple(x.shape)}")
+        device = next(self.flow.parameters()).device
+        mu = torch.as_tensor(self.meta["standardize"]["mu"], dtype=torch.float64, device=device)
+        std = torch.as_tensor(self.meta["standardize"]["std"], dtype=torch.float64, device=device)
+        z = ((x.to(device, torch.float64) - mu) / std).to(torch.float32)
         self.flow.eval()
-        out = np.empty(x.shape[0], dtype=np.float64)
         with torch.no_grad():
-            for start in range(0, x.shape[0], batch_size):
-                zt = torch.as_tensor(z[start : start + batch_size], dtype=torch.float32)
-                out[start : start + batch_size] = self.flow().log_prob(zt).cpu().numpy()
-        return out - log_std_sum
+            out = torch.cat(
+                [self.flow().log_prob(zb).to(torch.float64) for zb in z.split(batch_size)]
+            )
+        return (out - torch.log(std).sum()).to(x.device)
 
-    def sample(self, n: int, *, seed: int | None = None, batch_size: int = 8192) -> np.ndarray:
-        """Draw ``n`` rows in raw-variable units; shape ``(n, D)``.
+    def log_prob(self, x: np.ndarray, *, batch_size: int = 8192) -> np.ndarray:
+        """Numpy :meth:`log_prob_tensor`: float64 ``(N,)`` for rows ``x`` of shape ``(N, D)``."""
+        import torch
 
-        Exact inverse of :meth:`log_prob`'s standardization: sample the flow in
-        standardized coordinates, then de-standardize ``x = z*std + mu``. Only a
+        x = torch.as_tensor(np.asarray(x, dtype=np.float64))
+        return self.log_prob_tensor(x, batch_size=batch_size).numpy()
+
+    def sample_tensor(self, n: int, *, seed: int | None = None, batch_size: int = 2**17):
+        """Draw ``n`` rows in raw-variable units: float64 ``(n, D)`` on the flow's device.
+
+        Exact inverse of :meth:`log_prob_tensor`'s standardization: sample the flow
+        in standardized coordinates, then de-standardize ``x = z*std + mu``. Only a
         native-space flow may sample -- a gaussianized flow generates ``y``, and
         recovering physical rows from it needs the (tail-sensitive) bijector
         inverse, which this class deliberately does not perform.
@@ -105,20 +119,20 @@ class PriorFlow:
             raise ValueError(f"sample() requires a {SPACE_NATIVE!r}-space flow, got {self.space!r}")
         if int(n) <= 0:
             raise ValueError("n must be positive")
-        mu = self.meta["standardize"]["mu"]
-        std = self.meta["standardize"]["std"]
+        device = next(self.flow.parameters()).device
+        mu = torch.as_tensor(self.meta["standardize"]["mu"], dtype=torch.float64, device=device)
+        std = torch.as_tensor(self.meta["standardize"]["std"], dtype=torch.float64, device=device)
         if seed is not None:
             torch.manual_seed(int(seed))
         self.flow.eval()
-        out = np.empty((int(n), self.dim), dtype=np.float64)
+        sizes = [min(batch_size, int(n) - start) for start in range(0, int(n), batch_size)]
         with torch.no_grad():
-            filled = 0
-            while filled < n:
-                b = min(batch_size, n - filled)
-                z = self.flow().sample((b,)).cpu().numpy().astype(np.float64)
-                out[filled : filled + b] = z * std + mu
-                filled += b
-        return out
+            z = torch.cat([self.flow().sample((b,)).to(torch.float64) for b in sizes])
+        return z * std + mu
+
+    def sample(self, n: int, *, seed: int | None = None, batch_size: int = 8192) -> np.ndarray:
+        """Numpy :meth:`sample_tensor`: ``n`` rows in raw-variable units, shape ``(n, D)``."""
+        return self.sample_tensor(n, seed=seed, batch_size=batch_size).cpu().numpy()
 
     def save(self, path: str | Path) -> Path:
         import torch

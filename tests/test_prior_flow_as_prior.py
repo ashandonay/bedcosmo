@@ -78,6 +78,29 @@ def test_sample_reproducible_with_seed():
     assert np.array_equal(a, b)
 
 
+def test_tensor_methods_match_numpy():
+    pf = _tiny_flow(SPACE_NATIVE)
+    x = pf.sample_tensor(300, seed=7, batch_size=128)
+    assert x.dtype == torch.float64
+    assert np.array_equal(x.numpy(), pf.sample(300, seed=7, batch_size=128))
+    lp = pf.log_prob_tensor(x)
+    assert lp.dtype == torch.float64 and lp.shape == (300,)
+    np.testing.assert_array_equal(lp.numpy(), pf.log_prob(x.numpy()))
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")
+def test_flow_on_gpu_matches_cpu():
+    pf = _tiny_flow(SPACE_NATIVE)
+    x = pf.sample_tensor(1000, seed=2)
+    lp_cpu = pf.log_prob_tensor(x)
+    pf.to("cuda")
+    assert pf.sample_tensor(10).device.type == "cuda"
+    lp_gpu = pf.log_prob_tensor(x)  # returned on x's device
+    assert lp_gpu.device.type == "cpu"
+    torch.testing.assert_close(lp_gpu, lp_cpu, atol=1e-4, rtol=0)
+    np.testing.assert_allclose(pf.log_prob(x.numpy()), lp_cpu.numpy(), atol=1e-4)
+
+
 def test_build_pool_from_flow_flips_source_and_samples():
     pf = _tiny_flow(SPACE_NATIVE)
     prior = _prior_with_pool()
