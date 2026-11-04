@@ -8,7 +8,8 @@
 bao:
   dr1:
     base:
-      # bao has TWO forecast spaces and both have trained emulators, so this entry carries a space level (config | fourier)
+      # bao has several forecast spaces with trained emulators, so this entry carries a space level
+      # (config | fourier | fourier_fidcoords)
       # Select with `emulator_space` in train_args.yaml or --emulator-space on the command line.
       config:
         BGS: config/v6_sigma_hrdrag_scaled/BGS.pt
@@ -25,6 +26,14 @@ bao:
         LRG3_ELG1: fourier/v3_sigma_hrdrag_scaled/LRG3_ELG1.pt
         ELG2: fourier/v3_sigma_hrdrag_scaled/ELG2.pt
         QSO: fourier/v3_sigma_hrdrag_scaled/QSO.pt
+        Lya_QSO: null
+      fourier_fidcoords:
+        BGS: fourier_fidcoords/v1_sigma_hrdrag_scaled/BGS.pt
+        LRG1: fourier_fidcoords/v1_sigma_hrdrag_scaled/LRG1.pt
+        LRG2: fourier_fidcoords/v1_sigma_hrdrag_scaled/LRG2.pt
+        LRG3_ELG1: fourier_fidcoords/v1_sigma_hrdrag_scaled/LRG3_ELG1.pt
+        ELG2: fourier_fidcoords/v1_sigma_hrdrag_scaled/ELG2.pt
+        QSO: fourier_fidcoords/v1_sigma_hrdrag_scaled/QSO.pt
         Lya_QSO: null
     # The extended models reuse base's checkpoints, which take (N_tracers, Om, hrdrag). That is exact under
     # emulator_covariance 'fiducial' (or a dict that moves only Om/hrdrag): the covariance is then fixed at a
