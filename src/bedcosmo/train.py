@@ -647,8 +647,10 @@ class Trainer:
     def _sync_prior_state(self):
         """Give every rank rank 0's parameter bijector and prior-flow log-acceptance.
 
-        Each rank builds them from its own random prior draws, so they differ by
-        Monte Carlo noise; the checkpoint saves rank 0's, which eval then uses.
+        CDF tables built from prior draws (every parameter under a prior flow, the
+        constrained ones otherwise), the joint whitening and the log-acceptance come
+        from each rank's own unseeded draws, so they differ by Monte Carlo noise; the
+        checkpoint saves rank 0's, which eval then uses.
         """
         bijector = getattr(self.experiment, "param_bijector", None)
         metadata = getattr(self.experiment, "prior_flow_metadata", None) or {}
