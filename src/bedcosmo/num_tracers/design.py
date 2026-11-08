@@ -87,6 +87,7 @@ def budget_pool(
     upper: Sequence[float] = DEFAULT_UPPER,
     dataset: str = "dr1",
     include_nominal_scales: Iterable[float] | None = None,
+    include: Iterable[Sequence[float]] | None = None,
     n_target: int | None = None,
     seed: int = 0,
 ) -> np.ndarray:
@@ -100,12 +101,15 @@ def budget_pool(
 
     ``include_nominal_scales`` force-adds the uniformly scaled nominal designs (which
     generally fall between grid nodes) so the pool contains the exact points the ``scaled``
-    mode would have produced -- useful as within-pool reference designs.
+    mode would have produced -- useful as within-pool reference designs. ``include``
+    force-adds arbitrary designs ``[BGS, LRG, ELG, QSO]`` (e.g. a previous run's optimum),
+    which need not lie on the grid or inside ``lower``/``upper``; only the sum constraint
+    applies to them.
 
     ``n_target`` caps the pool size by random subsample. Since the training batch is
     ``n_particles_per_device * n_designs``, pool size sets the memory/data footprint;
     this is the lever for hitting a target footprint without coarsening ``step``. Pinned
-    rows (nominal and any ``include_nominal_scales``) always survive the subsample.
+    rows (``include_nominal_scales`` and ``include``) always survive the subsample.
 
     Note ``np.arange`` excludes the endpoint, so ``upper`` is exclusive -- matching
     ``NumTracers``, which builds its axes the same way.
@@ -127,20 +131,43 @@ def budget_pool(
     keep = (total >= sum_lower - TOL) & (total <= sum_upper + TOL)
     pool = flat[keep]
 
-    pinned = np.empty((0, len(LABELS)), dtype=np.float64)
-    if include_nominal_scales:
-        v0 = nominal_vector(dataset)
-        pinned = np.array([uniform_scaled(v0, s) for s in include_nominal_scales])
-        pool = np.vstack([pool, pinned])
+    pinned = pinned_designs(include_nominal_scales, include, dataset)
+    pool = np.vstack([pool, pinned])
 
     # Stable, de-duplicated ordering so a rebuild is reproducible.
     pool = np.unique(np.round(pool, 12), axis=0)
 
     if n_target is not None and pool.shape[0] > n_target:
-        pool = _subsample(pool, np.round(pinned, 12), n_target, seed)
+        pool = _subsample(pool, pinned, n_target, seed)
 
     _validate_pool(pool, sum_lower, sum_upper)
     return pool
+
+
+def pinned_designs(
+    include_nominal_scales: Iterable[float] | None,
+    include: Iterable[Sequence[float]] | None,
+    dataset: str = "dr1",
+) -> np.ndarray:
+    """The rows ``budget_pool`` force-adds, rounded as they appear in the pool: (n, 4)."""
+    rows = []
+    if include_nominal_scales:
+        v0 = nominal_vector(dataset)
+        rows += [uniform_scaled(v0, s) for s in include_nominal_scales]
+    for design in include or ():
+        if len(design) != len(LABELS):
+            raise ValueError(
+                f"included design must have {len(LABELS)} entries ({LABELS}), got {len(design)}"
+            )
+        rows.append(np.asarray(design, dtype=np.float64))
+    return np.round(np.array(rows, dtype=np.float64).reshape(-1, len(LABELS)), 12)
+
+
+def is_pinned(pool: np.ndarray, pinned: np.ndarray) -> np.ndarray:
+    """Boolean mask over ``pool`` rows that are in ``pinned``."""
+    if not pinned.size:
+        return np.zeros(pool.shape[0], dtype=bool)
+    return (pool[:, None, :] == pinned[None, :, :]).all(-1).any(1)
 
 
 def _validate_axis_spec(
@@ -164,17 +191,14 @@ def _subsample(
     pool: np.ndarray, pinned: np.ndarray, n_target: int, seed: int
 ) -> np.ndarray:
     """Randomly thin ``pool`` to ``n_target`` rows, always keeping ``pinned`` rows."""
-    if pinned.size:
-        is_pinned = (pool[:, None, :] == pinned[None, :, :]).all(-1).any(1)
-    else:
-        is_pinned = np.zeros(pool.shape[0], dtype=bool)
-    keep_rows = pool[is_pinned]
+    mask = is_pinned(pool, pinned)
+    keep_rows = pool[mask]
     if keep_rows.shape[0] >= n_target:
         raise ValueError(
             f"n_target ({n_target}) is below the {keep_rows.shape[0]} pinned designs; "
-            "raise n_target or drop some include_nominal_scales"
+            "raise n_target or pin fewer designs"
         )
-    other = pool[~is_pinned]
+    other = pool[~mask]
     rng = np.random.default_rng(seed)
     pick = rng.choice(other.shape[0], size=n_target - keep_rows.shape[0], replace=False)
     out = np.vstack([keep_rows, other[pick]])
@@ -198,9 +222,17 @@ def _validate_pool(pool: np.ndarray, sum_lower: float, sum_upper: float) -> None
 
 
 def plot_designs(
-    designs: np.ndarray, out_path: str, cmap: str = "viridis", title: str = ""
+    designs: np.ndarray,
+    out_path: str,
+    cmap: str = "viridis",
+    title: str = "",
+    pinned: np.ndarray | None = None,
 ) -> None:
     """Parallel-coordinates view of the design pool, colored by total budget.
+
+    ``pinned`` is a boolean mask over ``designs``; those rows (forced-in reference designs,
+    which may sit off the grid or outside its bounds) are drawn on top in a contrasting
+    color so they stand apart from the grid.
 
     Handles a single-row ``designs`` (one plot per scaled design), in which case the
     budget colorbar is dropped and each class is annotated with its ratio to nominal.
@@ -246,10 +278,18 @@ def plot_designs(
     else:
         msize, lw, alpha = 1.5, 0.8, 0.35
 
-    for i in range(n_designs):
+    if pinned is None:
+        pinned = np.zeros(n_designs, dtype=bool)
+    for i in np.flatnonzero(~pinned):
         ax.plot(
             x, norm[i], color=colors[i], alpha=alpha, linewidth=lw,
             marker="o", markersize=msize, zorder=1,
+        )
+    for k, i in enumerate(np.flatnonzero(pinned)):
+        ax.plot(
+            x, norm[i], color="tab:red", alpha=0.95, linewidth=1.8,
+            marker="D", markersize=5, zorder=2,
+            label=f"Pinned designs ({int(pinned.sum())})" if k == 0 else None,
         )
 
     if v0 is not None:
@@ -271,13 +311,15 @@ def plot_designs(
             fontsize=13,
         )
     else:
-        # Single design (or one shared budget): annotate the value instead of a range,
-        # and pad the y-range so a flat line is not drawn on top of the axis.
+        # One shared budget: give the value instead of a range.
         ax.set_title(
             f"{title or 'NumTracers design'}: {n_designs} design"
             f"{'s' if n_designs != 1 else ''}, budget {cmin:.3f}x nominal",
             fontsize=13,
         )
+    if n_designs == 1:
+        # Single design: annotate each class's ratio, and pad the y-range so a flat line
+        # is not drawn on top of the axis.
         lo, hi = min(1.0, norm.min()), max(1.0, norm.max())
         pad = max(0.05, 0.35 * (hi - lo))
         ax.set_ylim(lo - pad, hi + pad)
@@ -287,7 +329,7 @@ def plot_designs(
                 xytext=(0, 9), ha="center", fontsize=9, color="0.25",
             )
 
-    if v0 is not None:
+    if v0 is not None or pinned.any():
         ax.legend(loc="upper right", fontsize=10)
 
     if spread > 1e-12:
@@ -327,7 +369,7 @@ def _cmd_scaled(args: argparse.Namespace) -> np.ndarray:
               f"design={np.round(design, 4).tolist()}")
         print(f"           wrote {design_dir}")
         # One plot per design, in its own design dir.
-        args._plots.append((design_dir, design.reshape(1, -1), f"Nominal x{s:g}"))
+        args._plots.append((design_dir, design.reshape(1, -1), f"Nominal x{s:g}", None))
     return np.array(rows)
 
 
@@ -341,9 +383,11 @@ def _cmd_pool(args: argparse.Namespace) -> np.ndarray:
         upper=args.upper,
         dataset=args.dataset,
         include_nominal_scales=scales,
+        include=args.include,
         n_target=args.n_target,
         seed=args.seed,
     )
+    pinned = is_pinned(pool, pinned_designs(scales, args.include, args.dataset))
     # Date-stamp the default so repeated builds accumulate instead of overwriting
     # (mirrors bedcosmo.num_visits.design). An explicit --name opts out.
     if args.name:
@@ -364,12 +408,21 @@ def _cmd_pool(args: argparse.Namespace) -> np.ndarray:
     print("per-class max:", np.round(pool.max(0), 4).tolist())
     if scales:
         print(f"forced nominal scales present: {list(scales)}")
+    if pinned.any():
+        grid_rows = pool[~pinned]
+        lo, hi = grid_rows.min(0), grid_rows.max(0)
+        print(f"pinned designs: {int(pinned.sum())} (grid spans {np.round(lo, 4).tolist()} "
+              f"to {np.round(hi, 4).tolist()})")
+        for row in pool[pinned]:
+            outside = [LABELS[i] for i in range(len(LABELS)) if not lo[i] <= row[i] <= hi[i]]
+            note = f"  outside the grid in {', '.join(outside)}" if outside else ""
+            print(f"  {np.round(row, 4).tolist()}{note}")
     # Training batch = n_particles_per_device * n_designs; match a proven footprint.
     print(
         f"\nsizing: batch = npd x {pool.shape[0]}; for the 28,700/device footprint "
         f"use --n-particles-per-device {max(1, round(28700 / pool.shape[0]))}"
     )
-    args._plots.append((design_dir, pool, ""))
+    args._plots.append((design_dir, pool, "", pinned))
     return pool
 
 
@@ -408,6 +461,12 @@ def main(argv: list[str] | None = None) -> np.ndarray:
         help="Force-add uniformly scaled nominal designs as within-pool reference points",
     )
     p_pool.add_argument(
+        "--include", type=float, nargs=4, action="append", default=None,
+        metavar=tuple(LABELS),
+        help="Force-add one design [BGS LRG ELG QSO] (repeatable). It need not lie on the "
+             "grid or inside --lower/--upper; only the sum range applies",
+    )
+    p_pool.add_argument(
         "--step", type=float, nargs=4, default=DEFAULT_STEP,
         metavar=tuple(LABELS),
         help=f"Per-class grid step (default: {DEFAULT_STEP})",
@@ -440,14 +499,14 @@ def main(argv: list[str] | None = None) -> np.ndarray:
     if args.designs_dir is None:
         args.designs_dir = _designs_dir()
 
-    args._plots: list[tuple[str, np.ndarray, str]] = []
+    args._plots: list[tuple[str, np.ndarray, str, np.ndarray | None]] = []
     designs = args.func(args)
 
     # Render a design plot into each design dir (as num_visits.design does), unless suppressed.
     if not args.no_plot:
-        for design_dir, arr, title in args._plots:
+        for design_dir, arr, title, pinned in args._plots:
             plot_path = os.path.join(design_dir, DESIGN_PLOT_FILENAME)
-            plot_designs(arr, plot_path, title=title)
+            plot_designs(arr, plot_path, title=title, pinned=pinned)
             print(f"wrote design plot -> {plot_path}")
     return designs
 
