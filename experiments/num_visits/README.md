@@ -302,7 +302,7 @@ CLI override (manual eval, or `--eval-`-prefixed for auto-eval):
 
 Results are written into the same `eig_data` JSON under
 `step_{N}["marginal"][subset_id]` (where `subset_id = "+".join(params)`), with
-per-design `eigs_avg`/`eigs_std`, the nominal-design value, and the marginal
-prior entropy. Evaluation also produces `eig_designs_marginal_<subset_id>` (EIG
+per-design `eigs_avg`/`eigs_std` (the nominal design's value is
+`eigs_avg[nominal_index]`) and the marginal prior entropy. Evaluation also produces `eig_designs_marginal_<subset_id>` (EIG
 vs design for the subset, over all input designs) and
 `posterior_marginal_<subset_id>` (triangle plot restricted to the subset).

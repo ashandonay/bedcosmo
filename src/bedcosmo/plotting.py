@@ -24,6 +24,7 @@ from bedcosmo.artifacts import (
     resolve_eig_step,
     parse_eig_for_posterior,
     nominal_grid_eig,
+    nominal_value,
     _eig_data_has_variable_eigs,
     _eig_data_has_marginal_eigs,
 )
@@ -289,7 +290,7 @@ def _extract_eig_values(eig_data, step_str, eig_kind, subset=None):
         if eigs_raw is None:
             raise ValueError(f"`eigs_avg` missing under {step_str}/variable")
         std_raw = block.get("eigs_std")
-        nominal_raw = (step_payload.get("nominal") or {}).get("eigs_avg")
+        legacy_nominal = step_payload.get("nominal")
         label = "variable"
     else:
         subset_id = _normalize_marginal_subset_id(subset)
@@ -304,7 +305,7 @@ def _extract_eig_values(eig_data, step_str, eig_kind, subset=None):
         if eigs_raw is None:
             raise ValueError(f"`eigs_avg` missing under {step_str}/marginal/{subset_id}")
         std_raw = block.get("eigs_std")
-        nominal_raw = (block.get("nominal") or {}).get("eigs_avg")
+        legacy_nominal = block.get("nominal")
         label = f"marginal({subset_id})"
 
     eigs_avg = np.asarray(eigs_raw, dtype=float).reshape(-1)
@@ -319,9 +320,7 @@ def _extract_eig_values(eig_data, step_str, eig_kind, subset=None):
         if eigs_std.shape != eigs_avg.shape:
             raise ValueError("eigs_std shape does not match eigs_avg")
 
-    if isinstance(nominal_raw, list):
-        nominal_raw = nominal_raw[0] if nominal_raw else None
-    nominal_eig = float(nominal_raw) if nominal_raw is not None else None
+    nominal_eig = nominal_value(eig_data, block, legacy_nominal)
 
     return designs, eigs_avg, eigs_std, nominal_eig, label
 
@@ -604,6 +603,7 @@ class BasePlotter:
         eig_std_values=None,
         eig_labels=None,
         nominal_eig=None,
+        nominal_index=None,
         grid_eig_values=None,
         grid_eig_std_values=None,
         nominal_grid_eig=None,
@@ -632,11 +632,14 @@ class BasePlotter:
             eig_values (np.ndarray or list[np.ndarray]): EIG values per design.
             input_designs (np.ndarray): Design array with shape (n_designs, n_design_dims).
             design_labels (list): Labels for each design dimension.
-            nominal_design (np.ndarray): Nominal design values.
+            nominal_design (np.ndarray or None): Nominal design values; None when the
+                experiment has none (the design heatmap then shows raw values).
             eig_std_values (np.ndarray or list[np.ndarray], optional): EIG std per design.
             eig_labels (list[str], optional): Labels for each EIG curve. Required when
                 eig_values is a list, ignored otherwise.
             nominal_eig (float, optional): Nominal EIG value.
+            nominal_index (int, optional): Row of ``input_designs`` that is the nominal
+                design; it is marked at its place in the ranking.
             grid_eig_values (np.ndarray, optional): Grid EIG values.
             grid_eig_std_values (np.ndarray, optional): Grid EIG std values.
             nominal_grid_eig (float, optional): Nominal grid EIG value.
@@ -675,7 +678,8 @@ class BasePlotter:
         multi_curve = len(eig_list) > 1
 
         input_designs = np.asarray(input_designs)
-        nominal_design = np.asarray(nominal_design)
+        if nominal_design is not None:
+            nominal_design = np.asarray(nominal_design)
 
         # Primary curve is always the last entry (used for sorting / optimal marker)
         primary_eigs = eig_list[-1]
@@ -717,15 +721,10 @@ class BasePlotter:
         # Check if designs are 1D or multi-dimensional
         is_1d_design = (sorted_designs.shape[1] == 1)
 
-        # Find nominal design position
+        # Position of the nominal design in the (sorted) ranking
         nominal_sorted_pos = None
-        try:
-            nominal_idx = int(np.argmin(np.linalg.norm(input_designs - nominal_design, axis=1)))
-            matches = np.where(sorted_idx == nominal_idx)[0]
-            if matches.size > 0:
-                nominal_sorted_pos = int(matches[0])
-        except:
-            pass
+        if include_nominal and nominal_index is not None:
+            nominal_sorted_pos = int(np.flatnonzero(sorted_idx == nominal_index)[0])
 
         # Create figure with subplots
         if is_1d_design and not sort:
@@ -805,6 +804,10 @@ class BasePlotter:
                 zorder=10,
             )
 
+        if nominal_sorted_pos is not None:
+            ax0.plot(x_vals[nominal_sorted_pos], sorted_eigs[nominal_sorted_pos], 's',
+                     color='tab:blue', markersize=8, zorder=9, label='Nominal Design')
+
         # Plot optimal design
         optimal_idx = np.argmax(sorted_eigs)
         optimal_x = x_vals[optimal_idx]
@@ -840,7 +843,7 @@ class BasePlotter:
                 cbar.set_label('Design Value', labelpad=10, fontsize=12, weight='bold')
             else:
                 # Multi-dimensional designs - use ratio to nominal
-                if np.any(nominal_design == 0):
+                if nominal_design is None or np.any(nominal_design == 0):
                     plot_data = sorted_designs.T
                     cmap = 'viridis'
                     im = ax1.imshow(plot_data, aspect='auto', cmap=cmap)
@@ -1081,13 +1084,10 @@ class BasePlotter:
                 artifacts_dir, eval_step=eval_step, eig_kind='variable'
             )
             _, step_str = resolve_eig_step(eig_data, eval_step)
-            nominal_data = eig_data.get(step_str, {}).get('nominal', {})
-            val = nominal_data.get('prior_entropy_avg')
-            if val is None:
-                return None
-            if isinstance(val, list):
-                val = val[0] if len(val) > 0 else None
-            return float(val) if val is not None else None
+            step_data = eig_data.get(step_str, {})
+            return nominal_value(
+                eig_data, step_data.get('variable'), step_data.get('nominal'), 'prior_entropy_avg'
+            )
         except ValueError:
             return None
 
@@ -2771,7 +2771,6 @@ class RunPlotter(BasePlotter):
         
         step_data = eig_data[step_str]
         variable_data = step_data.get('variable', {})
-        nominal_data = step_data.get('nominal', {})
         
         # Get designs and EIGs
         input_designs = np.array(eig_data.get('input_designs', []))
@@ -2787,11 +2786,7 @@ class RunPlotter(BasePlotter):
         optimal_design = input_designs[optimal_idx]
         optimal_eig = float(eig_values[optimal_idx])
         
-        # Get nominal EIG
-        nominal_eig = nominal_data.get('eigs_avg')
-        if isinstance(nominal_eig, list):
-            nominal_eig = nominal_eig[0] if len(nominal_eig) > 0 else None
-        nominal_eig = float(nominal_eig) if nominal_eig is not None else None
+        nominal_eig = nominal_value(eig_data, variable_data, step_data.get('nominal'))
         
         # Initialize experiment to get design labels and nominal design
         experiment = self.get_experiment()
@@ -2999,7 +2994,6 @@ class RunPlotter(BasePlotter):
 
         step_data = eig_data[step_str]
         variable_data = step_data.get('variable', {})
-        nominal_data = step_data.get('nominal', {})
 
         input_designs = np.array(eig_data.get('input_designs', []))
         if input_designs.size == 0:
@@ -3012,18 +3006,10 @@ class RunPlotter(BasePlotter):
         grid_eig_std_values = np.array(grid_data.get('eigs_std', [])) if grid_data else None
 
         nominal_eig = None
-        nominal_grid_eig = None
+        nominal_grid = None
         if include_nominal:
-            nominal_eig = nominal_data.get('eigs_avg')
-            if isinstance(nominal_eig, list):
-                nominal_eig = nominal_eig[0] if len(nominal_eig) > 0 else None
-            nominal_eig = float(nominal_eig) if nominal_eig is not None else None
-            nominal_grid_data = nominal_data.get('grid', {})
-            if isinstance(nominal_grid_data, dict) and 'eigs_avg' in nominal_grid_data:
-                nominal_grid_eig = nominal_grid_data.get('eigs_avg')
-                if isinstance(nominal_grid_eig, list):
-                    nominal_grid_eig = nominal_grid_eig[0] if len(nominal_grid_eig) > 0 else None
-                nominal_grid_eig = float(nominal_grid_eig) if nominal_grid_eig is not None else None
+            nominal_eig = nominal_value(eig_data, variable_data, step_data.get('nominal'))
+            nominal_grid = nominal_grid_eig(eig_data, step_str)
 
         experiment = self.get_experiment()
 
@@ -3034,12 +3020,13 @@ class RunPlotter(BasePlotter):
             eig_values=eig_values,
             input_designs=input_designs,
             design_labels=experiment.design_labels,
-            nominal_design=experiment.nominal_design.cpu().numpy(),
+            nominal_design=eig_data.get('nominal_design'),
             eig_std_values=eig_std_values,
             nominal_eig=nominal_eig,
+            nominal_index=eig_data.get('nominal_index'),
             grid_eig_values=grid_eig_values,
             grid_eig_std_values=grid_eig_std_values,
-            nominal_grid_eig=nominal_grid_eig,
+            nominal_grid_eig=nominal_grid,
             include_nominal=include_nominal,
             title=title
         )
@@ -3128,8 +3115,7 @@ class RunPlotter(BasePlotter):
 
         nominal_eig = None
         if include_nominal:
-            nom = marginal.get('nominal', {}).get('eigs_avg')
-            nominal_eig = float(nom) if nom is not None else None
+            nominal_eig = nominal_value(eig_data, marginal, marginal.get('nominal'))
 
         experiment = self.get_experiment()
         labels = ", ".join(marginal.get('params', subset))
@@ -3140,8 +3126,9 @@ class RunPlotter(BasePlotter):
             eig_std_values=np.array(marginal.get('eigs_std', []), dtype=float),
             input_designs=input_designs,
             design_labels=experiment.design_labels,
-            nominal_design=experiment.nominal_design.cpu().numpy(),
+            nominal_design=eig_data.get('nominal_design'),
             nominal_eig=nominal_eig,
+            nominal_index=eig_data.get('nominal_index'),
             include_nominal=include_nominal,
             sort=sort,
             title=title,
@@ -3987,9 +3974,7 @@ class ComparisonPlotter(BasePlotter):
                 continue
             step_payload = data[step_key_name]
             
-            # Access nested structure: step_payload['variable'] and step_payload['nominal']
             variable_data = step_payload.get('variable', {})
-            nominal_data = step_payload.get('nominal', {})
 
             # Get designs from top-level input_designs
             designs_root = data.get('input_designs')
@@ -4027,10 +4012,7 @@ class ComparisonPlotter(BasePlotter):
                 print(f"Warning: No EIG data found for {run_id}, skipping...")
                 continue
 
-            # Get nominal_eig from nominal subdict (scalar value from eigs_avg)
-            nominal_eig = nominal_data.get('eigs_avg')
-            if nominal_eig is not None and isinstance(nominal_eig, list):
-                nominal_eig = nominal_eig[0] if len(nominal_eig) > 0 else None
+            nominal_eig = nominal_value(data, variable_data, step_payload.get('nominal'))
             optimal_eig = variable_data.get('optimal_eig')
             optimal_design = variable_data.get('optimal_design')
 
@@ -6529,9 +6511,8 @@ def _load_increasing_design_runs(mlflow_exp, run_ids, excluded_runs, cosmo_exp, 
             
             step_data = data[step_str]
             
-            # Access nested structure
             variable_data = step_data.get('variable', {})
-            nominal_data = step_data.get('nominal', {})
+            legacy_nominal = step_data.get('nominal')
                 
             # Extract optimal design and EIG from variable subdict
             if 'optimal_design' in variable_data and 'optimal_eig' in variable_data:
@@ -6546,20 +6527,9 @@ def _load_increasing_design_runs(mlflow_exp, run_ids, excluded_runs, cosmo_exp, 
                 found_run_ids.append(run_id)
                 
                 # The first run's nominal-design EIG (a reference run is a single run).
-                nominal_eig_val = nominal_data.get('eigs_avg')
-                if nominal_eig_val is not None:
-                    if isinstance(nominal_eig_val, list) and len(nominal_eig_val) > 0:
-                        nominal_eig_val = nominal_eig_val[0]
-                    if isinstance(nominal_eig_val, (int, float)):
-                        if nominal_eig is None:
-                            nominal_eig = nominal_eig_val
-                nominal_eig_std_val = nominal_data.get('eigs_std')
-                if nominal_eig_std_val is not None:
-                    if isinstance(nominal_eig_std_val, list) and len(nominal_eig_std_val) > 0:
-                        nominal_eig_std_val = nominal_eig_std_val[0]
-                    if isinstance(nominal_eig_std_val, (int, float)):
-                        if nominal_eig_std is None:
-                            nominal_eig_std = nominal_eig_std_val
+                if nominal_eig is None:
+                    nominal_eig = nominal_value(data, variable_data, legacy_nominal)
+                    nominal_eig_std = nominal_value(data, variable_data, legacy_nominal, 'eigs_std')
             else:
                 print(f"Warning: No optimal_design data found in {json_path} for {step_str}, skipping...")
                 continue

@@ -96,7 +96,7 @@ from bedcosmo.artifacts import (  # noqa: F401 — public re-exports for star-im
     resolve_design_args_input_path,
     snapshot_design_args_config,
 )
-from bedcosmo.artifacts import resolve_eig_step, parse_eig_for_posterior, nominal_grid_eig
+from bedcosmo.artifacts import resolve_eig_step, parse_eig_for_posterior, nominal_grid_eig, nominal_value
 
 
 def get_experiments_dir() -> Path:
@@ -1250,7 +1250,7 @@ def nf_posterior_entries(
             marginal = eig_data[step_str].get("marginal", {}).get("+".join(params))
             if marginal is not None:
                 eig_values = np.asarray(marginal["eigs_avg"], dtype=float)
-                nominal_eig = float(marginal["nominal"]["eigs_avg"])
+                nominal_eig = nominal_value(eig_data, marginal, marginal.get("nominal"))
                 eig_label = "Marginal EIG"
     elif "optimal" in display:
         raise ValueError("eig_data is required to pick the optimal design")
@@ -1355,7 +1355,7 @@ def _eig_design_kwds_from_merged_eig(
     """Build ``eig_designs`` kwargs from merged eig_data using a local experiment instance."""
     step_data = combined[step_key]
     variable_data = step_data.get("variable", {})
-    nominal_data = step_data.get("nominal", {})
+    legacy_nominal = step_data.get("nominal", {})
     input_designs = np.asarray(combined.get("input_designs", []))
     if input_designs.size == 0:
         raise ValueError("No input designs in merged eig_data")
@@ -1373,18 +1373,10 @@ def _eig_design_kwds_from_merged_eig(
         np.asarray(grid_data["eigs_std"]) if grid_data and "eigs_std" in grid_data else None
     )
     nominal_eig = None
-    nominal_grid_eig = None
+    nominal_grid = None
     if include_nominal:
-        nominal_eig = nominal_data.get("eigs_avg")
-        if isinstance(nominal_eig, list):
-            nominal_eig = nominal_eig[0] if len(nominal_eig) > 0 else None
-        nominal_eig = float(nominal_eig) if nominal_eig is not None else None
-        nominal_grid_data = nominal_data.get("grid", {})
-        if isinstance(nominal_grid_data, dict) and "eigs_avg" in nominal_grid_data:
-            nominal_grid_eig = nominal_grid_data.get("eigs_avg")
-            if isinstance(nominal_grid_eig, list):
-                nominal_grid_eig = nominal_grid_eig[0] if len(nominal_grid_eig) > 0 else None
-            nominal_grid_eig = float(nominal_grid_eig) if nominal_grid_eig is not None else None
+        nominal_eig = nominal_value(combined, variable_data, legacy_nominal)
+        nominal_grid = nominal_grid_eig(combined, step_key)
     return dict(
         eig_values=eig_values,
         eig_std_values=eig_std_values,
@@ -1392,9 +1384,10 @@ def _eig_design_kwds_from_merged_eig(
         grid_eig_std_values=grid_eig_std_values,
         input_designs=input_designs,
         design_labels=experiment.design_labels,
-        nominal_design=experiment.nominal_design.detach().cpu().numpy(),
+        nominal_design=combined.get("nominal_design"),
         nominal_eig=nominal_eig,
-        nominal_grid_eig=nominal_grid_eig,
+        nominal_index=combined.get("nominal_index"),
+        nominal_grid_eig=nominal_grid,
         include_nominal=include_nominal,
         title="EIG per design (NF vs grid)",
     )
@@ -2537,8 +2530,26 @@ def _merge_sibling_eig_data(own_eig_data, other_eig_data, step_key):
 
     The two sides write into disjoint keys within step_key: NF fills
     step_key/variable/eigs_avg etc.; grid fills step_key/variable/grid/*.
-    Top-level and section collisions favor own_eig_data.
+    Top-level and section collisions favor own_eig_data. The legacy 'nominal'
+    section is merged too, for files written before nominal joined the pool.
+
+    Both sides' per-design arrays and ``nominal_index`` must describe the same
+    design pool, so a mismatch (e.g. one side ran with --exclude-nominal, or
+    predates nominal joining the pool) raises instead of misaligning overlays.
     """
+    if isinstance(own_eig_data, dict) and isinstance(other_eig_data, dict):
+        own_designs = own_eig_data.get('input_designs')
+        other_designs = other_eig_data.get('input_designs')
+        if own_designs is not None and other_designs is not None and (
+            len(own_designs) != len(other_designs)
+            or own_eig_data.get('nominal_index') != other_eig_data.get('nominal_index')
+        ):
+            raise ValueError(
+                f"NF and grid eig_data describe different design pools "
+                f"({len(own_designs)} designs, nominal_index={own_eig_data.get('nominal_index')} "
+                f"vs {len(other_designs)} designs, nominal_index={other_eig_data.get('nominal_index')}). "
+                f"Re-run one side with the same design_args and --exclude-nominal setting."
+            )
     combined = {}
     if isinstance(other_eig_data, dict):
         combined.update({k: v for k, v in other_eig_data.items() if k != step_key})

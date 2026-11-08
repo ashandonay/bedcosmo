@@ -144,6 +144,8 @@ The `run_id` is the MLflow run ID printed when training starts (or find it in th
 ./submit.sh eval num_visits <run_id> --marginal --marginal-eig-subsets '[["log_c_scale","z"]]'
 ```
 
+The nominal design is part of the evaluated design pool. When the experiment defines one and the pool doesn't already contain it, eval appends it, so it gets its EIG from the same pass as every other design. It is marked at its place in the EIG ranking, and the optimal design can be the nominal one. `eig_data` stores its row as the top-level `nominal_index`, so the nominal EIG is `step_{N}["variable"]["eigs_avg"][nominal_index]`; the same index applies to the grid and marginal arrays. The top-level `nominal_eig`/`nominal_eig_std` repeat it for the eval step. `--exclude-nominal` leaves the pool as configured and sets `nominal_index` to null. Grid EIG takes the same flag, and an NF/grid pair must use the same setting, because their overlay checks that both describe the same pool. Older `eig_data` files that store the nominal EIG in a separate `step_{N}["nominal"]` block still plot.
+
 ## Experiments
 
 ### num_tracers
@@ -374,6 +376,7 @@ Key CLI flags:
 | `--param-dense-range NAME:LO,HI` | Dense sub-region for a parameter axis (e.g. `--param-dense-range z:0.5,1.5`) |
 | `--feature-dense-fraction` | Fraction of feature grid points in the dense region (default 0.6) |
 | `--param-dense-fraction` | Fraction of parameter grid points in the dense region (default 0.6) |
+| `--exclude-nominal` | Leave the nominal design out of the design grid (by default it is added, as in eval) |
 | `--no-plots` | Skip plot generation |
 | `--out-dir` | Existing output directory (`submit.sh` sets it). Not with `--run-id` |
 

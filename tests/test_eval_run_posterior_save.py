@@ -385,7 +385,8 @@ def _make_evaluator(tmp_path, experiment, eig_data):
     ev.levels = [0.68]
     ev.plot_prior = False
     ev.sort = True
-    ev.include_nominal = False
+    ev.exclude_nominal = False
+    ev.nominal_index = 0
     ev.step_diagnostics = False
     ev.marginal_eig_subsets = []
     ev.other_eig_data = None
@@ -410,9 +411,7 @@ def test_run_plots_sampled_entries_and_saves_npz(tmp_path):
     theta_nom = rng.normal(size=(n_guide, n_params))
     theta_opt = rng.normal(size=(n_guide, n_params))
     ev = _make_evaluator(tmp_path, _entries_experiment(), _eig_data_with_marginal())
-    ev.get_eig = MagicMock(
-        side_effect=[(0.5, 0.01), (np.array([0.1, 0.9, 0.5]), np.zeros(3))]
-    )
+    ev.get_eig = MagicMock(return_value=(np.array([0.1, 0.9, 0.5]), np.zeros(3)))
     ev.plotter.plot_posterior_full_range.side_effect = lambda **kw: plt.figure()
 
     mcsamples = [
@@ -455,9 +454,7 @@ def test_run_plots_sampled_entries_and_saves_npz(tmp_path):
 def test_run_saves_npz_before_plotting(tmp_path):
     """A failing posterior plot must not lose the sampled NPZ."""
     ev = _make_evaluator(tmp_path, _entries_experiment(), _eig_data_with_marginal())
-    ev.get_eig = MagicMock(
-        side_effect=[(0.5, 0.01), (np.array([0.1, 0.9, 0.5]), np.zeros(3))]
-    )
+    ev.get_eig = MagicMock(return_value=(np.array([0.1, 0.9, 0.5]), np.zeros(3)))
     ev.plotter.plot_posterior.side_effect = RuntimeError("plot failed")
     samples = _make_mcsamples(np.zeros((20, 2)), ["p0", "p1"])
     with patch("bedcosmo.evaluate.render_overlay"), \
@@ -528,9 +525,7 @@ def test_run_skips_full_range_posterior_outside_physical_space(tmp_path):
     """Prior bounds are physical-space only, so no full-range plot otherwise."""
     ev = _make_evaluator(tmp_path, _entries_experiment(), _eig_data_with_marginal())
     ev.param_space = "unconstrained"
-    ev.get_eig = MagicMock(
-        side_effect=[(0.5, 0.01), (np.array([0.1, 0.9, 0.5]), np.zeros(3))]
-    )
+    ev.get_eig = MagicMock(return_value=(np.array([0.1, 0.9, 0.5]), np.zeros(3)))
     samples = _make_mcsamples(np.zeros((20, 2)), ["p0", "p1"])
     with patch("bedcosmo.evaluate.render_overlay"), \
          patch("bedcosmo.evaluate.load_model", return_value=(MagicMock(name="flow"), 100)), \
