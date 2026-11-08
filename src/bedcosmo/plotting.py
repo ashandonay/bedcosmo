@@ -609,6 +609,7 @@ class BasePlotter:
         nominal_grid_eig=None,
         sort=True,
         include_nominal=True,
+        scatter=False,
         title=None,
         color="tab:green",
         experiment_id=None,
@@ -645,6 +646,10 @@ class BasePlotter:
             nominal_grid_eig (float, optional): Nominal grid EIG value.
             sort (bool): Whether to sort designs by EIG (default: True).
             include_nominal (bool): Whether to include the nominal EIG in the plot (default: True).
+            scatter (bool): Draw each design as a marker with its std as an error bar
+                instead of a line with a std band (default: False). Suits small pools,
+                where a line implies a continuity between neighbouring designs that
+                isn't there.
             title (str, optional): Custom title for the plot.
             color (str, optional): Color of the plot.
 
@@ -766,13 +771,22 @@ class BasePlotter:
             s_eigs = ev[sorted_idx]
             s_std = sv[sorted_idx]
             is_primary = (i == len(eig_list) - 1)
+            if scatter:
+                ax0.errorbar(x_vals, s_eigs, yerr=s_std, fmt='o', color=cc, label=lbl,
+                             markersize=4 if is_primary else 3, elinewidth=1, capsize=2,
+                             alpha=1.0 if is_primary else 0.6, zorder=5 + i)
+                continue
             lw = 2.5 if is_primary else 1.5
             ax0.fill_between(x_vals, s_eigs - s_std, s_eigs + s_std,
                              color=to_rgba(cc, alpha=0.2 if is_primary else 0.12),
                              zorder=1 + i)
             ax0.plot(x_vals, s_eigs, label=lbl, color=cc, linewidth=lw, zorder=5 + i)
 
-        if has_grid:
+        if has_grid and scatter:
+            ax0.errorbar(x_vals, sorted_grid_eigs, yerr=sorted_grid_eigs_std, fmt='D',
+                         color='tab:green', label='Grid-based EIG', markersize=4,
+                         elinewidth=1, capsize=2, zorder=6)
+        elif has_grid:
             ax0.fill_between(
                 x_vals,
                 sorted_grid_eigs - sorted_grid_eigs_std,

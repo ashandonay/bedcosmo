@@ -58,7 +58,7 @@ class Evaluator:
             self, run_id, guide_samples=1000, design_chunk_size=None, seed=1, cosmo_exp='num_tracers',
             levels=[0.68, 0.95], global_rank=0, n_evals=10, n_particles=1000,
             param_space='physical', display_run=False, verbose=False, device="cuda:0", profile=False,
-            sort=True, exclude_nominal=False, plot_prior=False, batch_size=1, particle_batch_size=None,
+            sort=True, exclude_nominal=False, eigs_scatter=None, plot_prior=False, batch_size=1, particle_batch_size=None,
             design_args_path=None,
             experiment_args=None, nf_eig_data=None, grid_eig_data=None,
             marginal_eig_subsets=None, marginal_outer_y=8, marginal_inner_samples=200,
@@ -170,6 +170,9 @@ class Evaluator:
             checkpoint=eval_checkpoint,
             **self.experiment_args
         )
+        # Small pools plot EIG per design as scatter points; judged on the configured
+        # pool, before nominal is added. None means decide by size.
+        self.eigs_scatter = len(self.experiment.designs) < 50 if eigs_scatter is None else eigs_scatter
         if self.eig_file_path is not None and 'input_designs' in self.eig_data:
             self.input_designs = torch.tensor(self.eig_data['input_designs'], device=self.device, dtype=torch.float64)
             # Cached per-design arrays are indexed by the file's pool, so its index is
@@ -2054,7 +2057,7 @@ class Evaluator:
                     eval_step=eval_step,
                     subset=subset,
                     sort=self.sort,
-                    include_nominal=not self.exclude_nominal,
+                    include_nominal=not self.exclude_nominal, scatter=self.eigs_scatter,
                 )
                 self._update_runtime()
             except Exception as e:
@@ -2072,7 +2075,7 @@ class Evaluator:
             traceback.print_exc()
         
         try:
-            self.plotter.eig_designs(eval_step=eval_step, sort=self.sort, include_nominal=not self.exclude_nominal)
+            self.plotter.eig_designs(eval_step=eval_step, sort=self.sort, include_nominal=not self.exclude_nominal, scatter=self.eigs_scatter)
             self._update_runtime()
         except Exception as e:
             print(f"Warning: eig_designs failed: {e}")
@@ -2100,7 +2103,7 @@ class Evaluator:
                 self.compute_eig_steps(steps=eig_steps_to_compute, n_evals=1)
                 # Plot EIG across training steps (intermediate + final eval_step)
                 all_eig_steps = eig_steps_to_compute + [eval_step]
-                self.plotter.eig_designs(eval_step=all_eig_steps, sort=self.sort, include_nominal=not self.exclude_nominal, filename="eig_designs_steps")
+                self.plotter.eig_designs(eval_step=all_eig_steps, sort=self.sort, include_nominal=not self.exclude_nominal, scatter=self.eigs_scatter, filename="eig_designs_steps")
                 self._update_runtime()
             except Exception as e:
                 print(f"Warning: eig_designs (multi-step) failed: {e}")
@@ -2115,7 +2118,7 @@ class Evaluator:
                 eval_step=eval_step,
                 levels=self.levels,
                 transform_output=self.nf_transform_output,
-                include_nominal=not self.exclude_nominal,
+                include_nominal=not self.exclude_nominal, scatter=self.eigs_scatter,
                 sort=self.sort,
                 plot_prior=self.plot_prior,
             )
@@ -2184,7 +2187,7 @@ class Evaluator:
                     eval_step=eval_step,
                     subset=subset,
                     sort=self.sort,
-                    include_nominal=not self.exclude_nominal,
+                    include_nominal=not self.exclude_nominal, scatter=self.eigs_scatter,
                 )
                 self._update_runtime()
             except Exception as e:
@@ -2211,6 +2214,7 @@ if __name__ == "__main__":
     parser.add_argument('--profile', action='store_true', help='Enable profiling of methods')
     parser.add_argument('--verbose', action='store_true', help='Enable verbose output')
     parser.add_argument('--no-sort', dest='sort', action='store_false', help='Disable sorting of designs by EIG (default: sorting enabled)')
+    parser.add_argument('--eigs-scatter', choices=['true', 'false'], default=None, help='Draw the EIG-per-design plots as scatter points with error bars (true) or a line with a std band (false). Default: scatter when the configured design pool, before nominal is added, has fewer than 50 designs.')
     parser.add_argument('--exclude-nominal', action='store_true', default=False, help='Leave the nominal design out of the evaluation design pool (default: it is added when the experiment has one, so it gets an EIG and is marked on plots)')
     parser.add_argument('--plot-prior', action='store_true', default=False, help='Include prior contours on posterior triangle plots (default: False)')
     parser.add_argument('--batch-size', type=int, default=1, help='Batch size for sample_posterior to reduce memory usage (default: 1)')
@@ -2239,6 +2243,8 @@ if __name__ == "__main__":
     valid_params = [k for k in valid_params if k != 'self']
     eval_args = {k: v for k, v in vars(args).items() if k in valid_params}
     eval_args['experiment_args'] = experiment_args
+    if args.eigs_scatter is not None:
+        eval_args['eigs_scatter'] = args.eigs_scatter == 'true'
     if args.posterior_samples_path:
         eval_args['reuse_posterior_samples'] = True
 

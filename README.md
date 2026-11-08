@@ -146,6 +146,8 @@ The `run_id` is the MLflow run ID printed when training starts (or find it in th
 
 The nominal design is part of the evaluated design pool. When the experiment defines one and the pool doesn't already contain it, eval appends it, so it gets its EIG from the same pass as every other design. It is marked at its place in the EIG ranking, and the optimal design can be the nominal one. `eig_data` stores its row as the top-level `nominal_index`, so the nominal EIG is `step_{N}["variable"]["eigs_avg"][nominal_index]`; the same index applies to the grid and marginal arrays. The top-level `nominal_eig`/`nominal_eig_std` repeat it for the eval step. `--exclude-nominal` leaves the pool as configured and sets `nominal_index` to null. Grid EIG takes the same flag, and an NF/grid pair must use the same setting, because their overlay checks that both describe the same pool. Older `eig_data` files that store the nominal EIG in a separate `step_{N}["nominal"]` block still plot.
 
+The EIG-per-design plots draw each design as a point with its eval std as an error bar when the configured pool has fewer than 50 designs, before nominal is added. Larger pools get a line with a std band. `--eigs-scatter true` or `--eigs-scatter false` overrides this on the command line. In `eval_args.yaml`, `eigs_scatter: true` works, but `submit.sh` drops `false` values, so a YAML `false` falls back to the size rule.
+
 ## Experiments
 
 ### num_tracers

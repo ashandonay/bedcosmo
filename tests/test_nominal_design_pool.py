@@ -13,6 +13,7 @@ matplotlib.use("Agg")
 import numpy as np
 import pytest
 import torch
+from matplotlib.collections import PolyCollection
 
 from bedcosmo.artifacts import nominal_grid_eig, nominal_value
 from bedcosmo.base import BaseExperiment, find_nominal_index
@@ -166,3 +167,25 @@ def test_eig_designs_marks_nominal_by_index(tmp_path, nominal_design):
 
     labels = ax0.get_legend_handles_labels()[1]
     assert "Nominal Design" in labels
+
+
+@pytest.mark.parametrize("scatter", [True, False])
+def test_eig_designs_scatter_draws_error_bars_instead_of_band(tmp_path, scatter):
+    plotter = BasePlotter(cosmo_exp="num_visits")
+
+    fig, (ax0, _) = plotter.eig_designs(
+        eig_values=np.array([1.0, 2.0, 3.0]),
+        eig_std_values=np.array([0.1, 0.2, 0.3]),
+        input_designs=np.array([[1.0, 3.0], [2.0, 2.0], [3.0, 1.0]]),
+        design_labels=["a", "b"],
+        nominal_design=[2.0, 2.0],
+        nominal_index=1,
+        scatter=scatter,
+        save_dir=str(tmp_path),
+        filename="eig_designs",
+    )
+
+    # errorbar() adds an ErrorbarContainer; the curve style fills a std band.
+    bands = [c for c in ax0.collections if isinstance(c, PolyCollection)]
+    assert (len(ax0.containers) == 1) is scatter
+    assert (len(bands) == 0) is scatter

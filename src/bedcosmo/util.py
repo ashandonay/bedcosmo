@@ -2589,6 +2589,7 @@ def render_overlay(
     transform_output=True,
     include_nominal=False,
     sort=True,
+    scatter=False,
     plot_prior=False,
     overlay_save_dir=None,
     device=None,
@@ -2613,6 +2614,7 @@ def render_overlay(
         transform_output: Whether to transform samples to physical space.
         include_nominal: Passed to eig_designs.
         sort: Passed to eig_designs.
+        scatter: Passed to eig_designs (markers with error bars instead of a curve).
         plot_prior: Passed to plot_posterior overlay figures.
         overlay_save_dir: If set, figures are written here instead of the default
             MLflow artifacts path (used by standalone ``grid_calc`` overlays).
@@ -2763,6 +2765,7 @@ def render_overlay(
             plotter.eig_designs(
                 eval_step=eval_step,
                 sort=sort,
+                scatter=scatter,
                 include_nominal=include_nominal,
                 eig_data=combined,
                 color='black',
@@ -2775,6 +2778,7 @@ def render_overlay(
             )
             plotter.eig_designs(
                 sort=sort,
+                scatter=scatter,
                 color='black',
                 filename='eig_designs_overlay',
                 **eig_kwargs,
