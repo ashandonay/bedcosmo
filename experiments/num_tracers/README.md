@@ -75,6 +75,7 @@ python -m bedcosmo.num_tracers.design pool \
 | `--sum-lower/--sum-upper` | Budget range spanned by the pool |
 | `--step/--lower/--upper` | Per-class grid, 4 values each in `[BGS, LRG, ELG, QSO]` order |
 | `--include-scales` | Force-add uniformly scaled nominal designs as within-pool reference points (they fall between grid nodes) |
+| `--include BGS LRG ELG QSO` | Force-add one arbitrary design (repeatable), e.g. a previous run's optimum. It need not lie on the grid or inside `--lower`/`--upper`; only the sum range applies. The plot draws pinned designs in red and the build prints any that fall outside the grid |
 | `--n-target`, `--seed` | Cap pool size by seeded random subsample; pinned rows always survive |
 | `--name` | Names the design directory `<name>/`. Omit for a date-stamped default |
 
