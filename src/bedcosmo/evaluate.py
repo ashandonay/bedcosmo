@@ -1106,8 +1106,8 @@ class Evaluator:
     def _log_entropy_summary(self, eig_bits, eig_std_bits, prior_bits, prior_std, post_bits, post_std):
         """Print the across-design mean entropies, then the nominal design's row.
 
-        All arguments are per-design arrays in bits; the stds are the across-eval
-        spread (zeros for a single eval).
+        All arguments are per-design arrays in bits; the stds are each design's
+        spread across evals, averaged over designs on the first line.
         """
         print(
             f"  Mean entropy (bits): H_prior={float(np.mean(prior_bits)):.3f}"
@@ -1529,6 +1529,14 @@ class Evaluator:
                             all_prior_entropy_eval,
                             all_posterior_entropy_eval,
                         )
+                        self._log_entropy_summary(
+                            result,
+                            result_std,
+                            np.mean(np.array(all_prior_entropy_eval), axis=0),
+                            np.std(np.array(all_prior_entropy_eval), axis=0),
+                            np.mean(np.array(all_posterior_entropy_eval), axis=0),
+                            np.std(np.array(all_posterior_entropy_eval), axis=0),
+                        )
                     timestamp = getattr(self, 'timestamp', None) or datetime.now().strftime('%Y%m%d_%H%M')
                     self.eig_data['status'] = 'incomplete'  # Mark as incomplete during evaluation
                     eig_data_save_path = self._eig_data_save_path(timestamp)
@@ -1617,9 +1625,12 @@ class Evaluator:
                 all_prior_entropy_eval,
                 all_posterior_entropy_eval,
             )
-            zeros = np.zeros(num_designs)
-            self._log_entropy_summary(
-                full_eigs, zeros, full_prior_entropy, zeros, full_posterior_entropy, zeros
+            # This eval alone: mean over the pool, ± its spread across designs.
+            print(
+                f"  Eval {eval_idx + 1}/{target_n_evals} (mean±std over {num_designs} designs, bits): "
+                f"H_prior={np.mean(full_prior_entropy):.3f}±{np.std(full_prior_entropy):.3f}, "
+                f"H_post={np.mean(full_posterior_entropy):.3f}±{np.std(full_posterior_entropy):.3f}, "
+                f"EIG={np.mean(full_eigs):.3f}±{np.std(full_eigs):.3f}"
             )
 
             # Save EIG data to file
