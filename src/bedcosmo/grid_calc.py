@@ -1341,11 +1341,24 @@ class GridCalculation:
         fig.tight_layout()
         return fig, ax
 
+    def eig_by_design(self, eig) -> np.ndarray:
+        """Grid EIG (any shape, in the grid's cell order) as one value per
+        ``experiment.designs`` row, matched by design coordinates."""
+        grid_designs = self.experiment._designs_from_grid(self.design_grid).cpu().numpy()
+        row_of = {tuple(d): i for i, d in enumerate(grid_designs)}
+        pool = self.experiment.designs.detach().cpu().numpy()
+        missing = [d for d in map(tuple, pool) if d not in row_of]
+        if missing:
+            raise ValueError(f"{len(missing)} pool designs are not cells of the design grid, e.g. {missing[0]}.")
+        return np.asarray(eig, dtype=float).reshape(-1)[[row_of[d] for d in map(tuple, pool)]]
+
     def _nominal_design_index(self) -> int:
-        """Flat design index of the experiment's nominal design, which must be in the pool."""
+        """Index of the nominal design among the grid's cells (designer.EIG order)."""
         if self.experiment.nominal_design is None:
             raise ValueError("Experiment has no nominal design.")
-        index = find_nominal_index(self.experiment.designs, self.experiment.nominal_design)
+        index = find_nominal_index(
+            self.experiment._designs_from_grid(self.design_grid), self.experiment.nominal_design
+        )
         if index is None:
             raise ValueError(
                 "Nominal design is not in the design pool; run without --exclude-nominal."
@@ -1431,8 +1444,7 @@ def _run_merge_into_run(
     print(f"Computed prior PMF with shape {prior_pmf.shape}")
 
     result = gc_obj.run(prior=prior_pmf)
-    eig = np.asarray(result["eig"], dtype=float)
-    eig_flat = eig.reshape(-1)
+    eig_flat = gc_obj.eig_by_design(result["eig"])
     max_idx = int(np.argmax(eig_flat))
     optimal_eig = float(eig_flat[max_idx])
 
@@ -1893,8 +1905,7 @@ def main():
 
     result = gc.run()
 
-    eig = np.asarray(result["eig"], dtype=float)
-    eig_flat = eig.reshape(-1)
+    eig_flat = gc.eig_by_design(result["eig"])
     best_idx = int(np.argmax(eig_flat))
     payload = {
         "cosmo_exp": args.cosmo_exp,

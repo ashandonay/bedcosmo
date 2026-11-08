@@ -10,6 +10,8 @@ import matplotlib
 
 matplotlib.use("Agg")
 
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 import torch
@@ -17,6 +19,7 @@ from matplotlib.collections import PolyCollection
 
 from bedcosmo.artifacts import nominal_grid_eig, nominal_value
 from bedcosmo.base import BaseExperiment, find_nominal_index
+from bedcosmo.grid_calc import GridCalculation
 from bedcosmo.plotting import BasePlotter
 from bedcosmo.util import _merge_sibling_eig_data
 
@@ -60,7 +63,7 @@ def _budget_axes():
     return axes, budget
 
 
-def test_off_tick_nominal_grows_budget_pool_by_exactly_one():
+def test_off_tick_nominal_is_appended_and_grid_grows_by_exactly_one():
     # 37 and 16 are not ticks. Inserting them into the axes would let the budget
     # admit other new combinations (e.g. 37+16+37); the pool must grow by one.
     axes, budget = _budget_axes()
@@ -69,12 +72,34 @@ def test_off_tick_nominal_grows_budget_pool_by_exactly_one():
 
     index = exp.add_nominal_to_designs()
 
-    assert exp.designs.shape[0] == before.shape[0] + 1
+    assert index == len(before)
+    torch.testing.assert_close(exp.designs[:index], before)
     torch.testing.assert_close(exp.designs[index], exp.nominal_design)
-    rest = torch.cat([exp.designs[:index], exp.designs[index + 1 :]])
-    torch.testing.assert_close(rest, before)
-    # designs keeps the grid's flat order, which grid EIG arrays are indexed by.
-    torch.testing.assert_close(exp._designs_from_grid(exp.designs_grid), exp.designs)
+    grid_designs = exp._designs_from_grid(exp.designs_grid)
+    assert {tuple(d) for d in grid_designs.tolist()} == {tuple(d) for d in exp.designs.tolist()}
+
+
+def test_unsorted_pool_keeps_its_order():
+    pts = [[3.0, 1.0], [1.0, 3.0], [2.0, 2.0]]
+    exp = _PoolExperiment([1.5, 2.5], design_pts=pts)
+    exp.designs_grid = exp._build_design_grid(design_pts=exp.designs, labels=["a", "b"])
+
+    assert exp.add_nominal_to_designs() == 3
+    torch.testing.assert_close(exp.designs[:3], torch.tensor(pts, dtype=torch.float64))
+
+
+def test_grid_eig_is_mapped_onto_pool_rows():
+    """Grid EIG comes out in the grid's sorted cell order; eig_by_design reorders it."""
+    pts = [[3.0, 1.0], [1.0, 3.0], [2.0, 2.0]]
+    exp = _PoolExperiment(None, design_pts=pts)
+    grid = exp._build_design_grid(design_pts=exp.designs, labels=["a", "b"])
+    calc = SimpleNamespace(experiment=exp, design_grid=grid)
+    # Grid cells are sorted: (1,3), (2,2), (3,1). EIG per cell = first coordinate.
+    eig_in_grid_order = exp._designs_from_grid(grid)[:, 0].numpy()
+
+    eig = GridCalculation.eig_by_design(calc, eig_in_grid_order)
+
+    np.testing.assert_array_equal(eig, [3.0, 1.0, 2.0])
 
 
 def test_nominal_already_in_pool_is_left_alone():

@@ -170,13 +170,12 @@ class BaseExperiment(ABC):
     def add_nominal_to_designs(self):
         """Make the nominal design a member of ``self.designs``; return its row index.
 
-        Returns None when the experiment has no nominal design. Otherwise the nominal
-        row is appended if missing and ``designs_grid`` is rebuilt from the explicit
-        points, so its ``idx`` constraint admits exactly the old pool plus nominal: an
-        off-tick nominal coordinate adds no other cells, which inserting a tick into an
-        axis-product grid would (a sum budget admits many new combinations). The pool
-        is then read back from the grid so ``designs`` keeps the grid's flat order,
-        which grid EIG arrays are indexed by.
+        Returns None when the experiment has no nominal design. A missing nominal is
+        appended as the last row, so the configured pool keeps its order. A
+        ``designs_grid`` is rebuilt from the explicit points: its ``idx`` constraint
+        admits exactly the pool, so an off-tick nominal adds no other cells (a new tick
+        in an axis-product grid would, e.g. many new combinations under a sum budget).
+        The grid enumerates cells in its own order; grid EIG maps them back by design.
         """
         if self.nominal_design is None:
             return None
@@ -186,16 +185,12 @@ class BaseExperiment(ABC):
         nominal_row = torch.as_tensor(
             self.nominal_design, dtype=self.designs.dtype, device=self.designs.device
         ).reshape(1, -1)
-        designs = torch.cat([self.designs, nominal_row], dim=0)
+        self.designs = torch.cat([self.designs, nominal_row], dim=0)
         if self.designs_grid is not None:
             self.designs_grid = self._build_design_grid(
-                design_pts=designs, labels=list(self.designs_grid.names)
+                design_pts=self.designs, labels=list(self.designs_grid.names)
             )
-            designs = self._designs_from_grid(
-                self.designs_grid, device=self.designs.device, dtype=self.designs.dtype
-            )
-        self.designs = designs
-        return find_nominal_index(self.designs, self.nominal_design)
+        return len(self.designs) - 1
 
     def _build_design_grid(
         self,
