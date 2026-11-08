@@ -819,7 +819,7 @@ class BasePlotter:
             )
 
         if nominal_sorted_pos is not None:
-            ax0.plot(x_vals[nominal_sorted_pos], sorted_eigs[nominal_sorted_pos], 's',
+            ax0.plot(x_vals[nominal_sorted_pos], sorted_eigs[nominal_sorted_pos], 'o',
                      color='tab:blue', markersize=8, zorder=9, label='Nominal Design')
 
         # Plot optimal design
