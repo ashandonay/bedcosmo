@@ -25,6 +25,7 @@ from bedcosmo.artifacts import (
     parse_eig_for_posterior,
     nominal_grid_eig,
     nominal_value,
+    added_nominal_row,
     _eig_data_has_variable_eigs,
     _eig_data_has_marginal_eigs,
 )
@@ -270,7 +271,8 @@ def _extract_eig_values(eig_data, step_str, eig_kind, subset=None):
     Returns:
         tuple: ``(designs, eigs_avg, eigs_std, nominal_eig, label)`` with designs shape
         ``(n, d)``; ``nominal_eig`` is the nominal design's EIG (joint or the subset's
-        marginal), or None when the eig_data has none.
+        marginal), or None when the eig_data has none. The row eval added for nominal,
+        if any, is left out so the pool matches the configured one.
     """
     if eig_kind not in ("variable", "marginal"):
         raise ValueError(f"eig_kind must be 'variable' or 'marginal', got {eig_kind!r}")
@@ -321,6 +323,10 @@ def _extract_eig_values(eig_data, step_str, eig_kind, subset=None):
             raise ValueError("eigs_std shape does not match eigs_avg")
 
     nominal_eig = nominal_value(eig_data, block, legacy_nominal)
+    # Line up with evals of the configured pool, which these comparisons pair by row.
+    added = added_nominal_row(eig_data)
+    if added is not None:
+        designs, eigs_avg, eigs_std = (np.delete(a, added, axis=0) for a in (designs, eigs_avg, eigs_std))
 
     return designs, eigs_avg, eigs_std, nominal_eig, label
 
@@ -3997,6 +4003,11 @@ class ComparisonPlotter(BasePlotter):
 
             # input_designs is now always an array, not a dict with sorted/unsorted keys
             designs_arr = np.array(designs_root)
+            # Runs are paired design by design, so drop the row eval added for nominal
+            # (nominal still shows as its EIG line) to line up with configured pools.
+            added = added_nominal_row(data)
+            if added is not None:
+                designs_arr = np.delete(designs_arr, added, axis=0)
 
             if designs_arr.ndim == 1:
                 designs_arr = designs_arr.reshape(-1, 1)
@@ -4027,6 +4038,9 @@ class ComparisonPlotter(BasePlotter):
                 continue
 
             nominal_eig = nominal_value(data, variable_data, step_payload.get('nominal'))
+            if added is not None:
+                eig_values = np.delete(eig_values, added)
+                eig_std_values = np.delete(eig_std_values, added)
             optimal_eig = variable_data.get('optimal_eig')
             optimal_design = variable_data.get('optimal_design')
 

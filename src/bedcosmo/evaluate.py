@@ -182,11 +182,15 @@ class Evaluator:
         else:
             # The nominal design is an ordinary pool member: one EIG pass covers it and
             # its EIG is eigs_avg[nominal_index]. None without a nominal or when excluded.
+            n_configured = len(self.experiment.designs)
             self.nominal_index = None if exclude_nominal else self.experiment.add_nominal_to_designs()
             self.input_designs = self.experiment.designs
             # save to eig_data object
             self.eig_data['input_designs'] = self.input_designs.cpu().numpy().tolist()
             self.eig_data['nominal_index'] = self.nominal_index
+            # True when the configured pool lacked nominal; cross-run comparisons drop
+            # that row so this eval lines up with evals of the configured pool.
+            self.eig_data['nominal_added'] = len(self.input_designs) > n_configured
             self.eig_data['nominal_design'] = (
                 None if self.nominal_index is None
                 else self.experiment.nominal_design.cpu().numpy().tolist()

@@ -295,6 +295,15 @@ def nominal_value(eig_data, block, legacy_block, key="eigs_avg"):
     return None if val is None else float(val)
 
 
+def added_nominal_row(eig_data):
+    """Row eval added to the configured pool for the nominal design, or None.
+
+    Cross-run comparisons delete it so evals line up with evals of the configured
+    pool (older files, --exclude-nominal); nominal still shows as its EIG value.
+    """
+    return eig_data["nominal_index"] if eig_data.get("nominal_added") else None
+
+
 def parse_eig_for_posterior(eig_data, eval_step=None, params=None):
     """Extract EIG and entropy summaries from eig_data for posterior sampling/plots."""
     _, step_str = resolve_eig_step(eig_data, eval_step)
