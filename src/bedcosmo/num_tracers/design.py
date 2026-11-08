@@ -47,8 +47,10 @@ from bedcosmo.artifacts import DESIGN_PLOT_FILENAME, write_design_dir
 LABELS = ["BGS", "LRG", "ELG", "QSO"]
 # Mirror NumTracers: DESI CSVs live under $HOME/data/desi/bao_<dataset>/
 _DATA_ROOT = os.path.join(os.environ.get("HOME", ""), "data", "desi")
-# Default per-class grid from design_args_dr1.yaml (hand-set caps, not target-availability
-# limits -- the physical target caps are ~10^6 tracers and never bind at these budgets).
+# Default per-class grid from design_args_dr1.yaml. The BGS, LRG and QSO upper bounds are
+# target availability: each class's summed `targets` in desi_tracers.csv over
+# NumTracers.nominal_total_obs, the bound NumTracers uses when `upper` is unset. ELG's 0.5 is
+# hand-set; its availability is ~1.17.
 DEFAULT_STEP = [0.01, 0.02, 0.02, 0.01]
 DEFAULT_LOWER = [0.02, 0.1, 0.1, 0.1]
 DEFAULT_UPPER = [0.0585, 0.3820, 0.5, 0.3291]
