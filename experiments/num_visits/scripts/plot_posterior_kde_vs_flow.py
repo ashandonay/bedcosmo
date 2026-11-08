@@ -68,6 +68,8 @@ def main():
         seed=args.seed, marginal_eig_subsets=[[args.param]],
         marginal_outer_y=args.n_y, marginal_inner_samples=args.n_samples,
         marginal_knn_k=3, n_evals=1, verbose=False,
+        # Rows must line up with the training pool (and older eig_data), so no nominal row.
+        exclude_nominal=True,
     )
     exp = evaluator.experiment
     device = torch.device(args.device)
