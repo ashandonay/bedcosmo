@@ -1622,11 +1622,11 @@ class TestCompareEigs:
         """An eval that added nominal to the pool lines up with an older eval of the configured pool."""
         designs = [[0.0], [1.0], [2.0]]
         old = _make_eig_data(designs, variable_eigs=[5.0, 6.0, 7.0], design_labels=["d"], nominal_eig=5.0)
-        # Same configured pool, with nominal (0.5) added at its sorted row and scored in the pool.
+        # Same configured pool, with nominal (0.5) appended as the last row and scored in the pool.
         new = _make_eig_data(
-            [[0.0], [0.5], [1.0], [2.0]], variable_eigs=[2.0, 1.5, 3.5, 4.0], design_labels=["d"]
+            [[0.0], [1.0], [2.0], [0.5]], variable_eigs=[2.0, 3.5, 4.0, 1.5], design_labels=["d"]
         )
-        new.update(nominal_index=1, nominal_added=True)
+        new.update(nominal_index=3, nominal_added=True)
         plotter = ComparisonPlotter(
             cosmo_exp="test_exp", run_ids=["run_aaaa", "run_bbbb"], run_labels=["A", "B"],
             colors=["#ff0000", "#0000ff"],
