@@ -25,6 +25,19 @@ from bedcosmo.util import (
 )
 
 
+def find_nominal_index(designs, nominal, atol=1e-5):
+    """Row of ``designs`` (n_designs, design_dim) equal to ``nominal`` within ``atol``, or None."""
+    designs = np.asarray(torch.as_tensor(designs).detach().cpu(), dtype=np.float64)
+    nominal = np.asarray(torch.as_tensor(nominal).detach().cpu(), dtype=np.float64).reshape(-1)
+    if designs.shape[1] != nominal.shape[0]:
+        raise ValueError(
+            f"Nominal design has {nominal.shape[0]} dimensions but the design pool has "
+            f"{designs.shape[1]}."
+        )
+    matches = np.flatnonzero(np.all(np.abs(designs - nominal) <= atol, axis=1))
+    return int(matches[0]) if matches.size else None
+
+
 class BaseExperiment(ABC):
     """
     Abstract base class for all bedcosmo experiments.
@@ -66,7 +79,14 @@ class BaseExperiment(ABC):
           values used for synthetic data (via central_val) and posterior plot markers,
           in reported units (``{name}_multiplier`` applied, like posterior samples)
         - central_val: tensor of central feature / observation values in context space
+
+    Optional attributes:
+        - nominal_design: (design_dim,) reference design, or None for an experiment
+          without one. Evaluation folds it into the design pool via
+          ``add_nominal_to_designs``.
     """
+
+    nominal_design = None
 
     @abstractmethod
     def __init__(self, **kwargs):
@@ -146,6 +166,31 @@ class BaseExperiment(ABC):
     def _name(self):
         """Experiment name."""
         return getattr(self, "name", self.__class__.__name__.lower())
+
+    def add_nominal_to_designs(self):
+        """Make the nominal design a member of ``self.designs``; return its row index.
+
+        Returns None when the experiment has no nominal design. A missing nominal is
+        appended as the last row, so the configured pool keeps its order. A
+        ``designs_grid`` is rebuilt from the explicit points: its ``idx`` constraint
+        admits exactly the pool, so an off-tick nominal adds no other cells (a new tick
+        in an axis-product grid would, e.g. many new combinations under a sum budget).
+        The grid enumerates cells in its own order; grid EIG maps them back by design.
+        """
+        if self.nominal_design is None:
+            return None
+        nominal_index = find_nominal_index(self.designs, self.nominal_design)
+        if nominal_index is not None:
+            return nominal_index
+        nominal_row = torch.as_tensor(
+            self.nominal_design, dtype=self.designs.dtype, device=self.designs.device
+        ).reshape(1, -1)
+        self.designs = torch.cat([self.designs, nominal_row], dim=0)
+        if self.designs_grid is not None:
+            self.designs_grid = self._build_design_grid(
+                design_pts=self.designs, labels=list(self.designs_grid.names)
+            )
+        return len(self.designs) - 1
 
     def _build_design_grid(
         self,

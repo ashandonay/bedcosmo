@@ -954,13 +954,13 @@ class NumVisits(BaseExperiment, CosmologyMixin):
                 if sum_lower is None:
                     sum_lower = (
                         float(self.nominal_design.sum())
-                        if hasattr(self, "nominal_design")
+                        if self.nominal_design is not None
                         else None
                     )
                 if sum_upper is None:
                     sum_upper = (
                         float(self.nominal_design.sum())
-                        if hasattr(self, "nominal_design")
+                        if self.nominal_design is not None
                         else None
                     )
 

@@ -1618,6 +1618,41 @@ class TestCompareEigs:
         assert "bits" in ax_line.get_ylabel()
         plt.close(fig)
 
+    def test_compare_eigs_mixes_old_and_new_evals(self, mock_scratch_env, tmp_path):
+        """An eval that added nominal to the pool lines up with an older eval of the configured pool."""
+        designs = [[0.0], [1.0], [2.0]]
+        old = _make_eig_data(designs, variable_eigs=[5.0, 6.0, 7.0], design_labels=["d"], nominal_eig=5.0)
+        # Same configured pool, with nominal (0.5) appended as the last row and scored in the pool.
+        new = _make_eig_data(
+            [[0.0], [1.0], [2.0], [0.5]], variable_eigs=[2.0, 3.5, 4.0, 1.5], design_labels=["d"]
+        )
+        new.update(nominal_index=3, nominal_added=True)
+        plotter = ComparisonPlotter(
+            cosmo_exp="test_exp", run_ids=["run_aaaa", "run_bbbb"], run_labels=["A", "B"],
+            colors=["#ff0000", "#0000ff"],
+        )
+        with patch.object(plotter, "_get_run_data_list") as mock_runs, \
+             patch.object(plotter, "load_eig_data_file") as mock_load, \
+             patch.object(plotter, "save_figure"):
+            mock_runs.return_value = (
+                [
+                    {"run_id": "run_aaaa", "exp_id": "exp_1", "params": {}, "run_obj": None},
+                    {"run_id": "run_bbbb", "exp_id": "exp_1", "params": {}, "run_obj": None},
+                ],
+                "exp_1",
+                "test_exp",
+            )
+            mock_load.side_effect = [("/fake/a.json", old), ("/fake/b.json", new)]
+            fig, (ax_line, _) = plotter.compare_eigs(
+                sort=False, normalize="bits", design_labels=["d"],
+                show_ratio_to_nominal=False, save_dir=str(tmp_path / "plots"), dpi=80,
+            )
+        markers = {c.get_label(): c.lines[0] for c in ax_line.containers}
+        np.testing.assert_allclose(markers["A"].get_ydata(), [0.0, 1.0, 2.0])
+        # B's nominal EIG comes from its pool row (1.5); that row is not a compared design.
+        np.testing.assert_allclose(markers["B"].get_ydata(), [0.5, 2.0, 2.5])
+        plt.close(fig)
+
     def test_compare_eigs_rejects_unknown_normalize(self, mock_scratch_env):
         data = _make_eig_data([[0.0], [1.0]], variable_eigs=[1.0, 2.0], design_labels=["d"], nominal_eig=1.0)
         plotter = ComparisonPlotter(cosmo_exp="test_exp", run_ids=["run_aaaa"], run_labels=["A"])

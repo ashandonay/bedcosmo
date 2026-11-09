@@ -35,11 +35,12 @@ from bedcosmo.util import (
     auto_seed, init_experiment, load_model, get_run,
     parse_float_or_list,
     parse_param_subsets,
-    get_rng_state, parse_extra_args, render_overlay,
+    get_rng_state, restore_rng_state, parse_extra_args, render_overlay,
     get_checkpoint, get_contour_area, nf_posterior_entries,
 )
 from bedcosmo.artifacts import (
     load_eig_data_file,
+    nominal_value,
     load_posterior_samples_file,
     make_posterior_samples_path,
     save_posterior_samples,
@@ -57,7 +58,7 @@ class Evaluator:
             self, run_id, guide_samples=1000, design_chunk_size=None, seed=1, cosmo_exp='num_tracers',
             levels=[0.68, 0.95], global_rank=0, n_evals=10, n_particles=1000,
             param_space='physical', display_run=False, verbose=False, device="cuda:0", profile=False,
-            sort=True, include_nominal=False, plot_prior=False, batch_size=1, particle_batch_size=None,
+            sort=True, exclude_nominal=False, eigs_scatter=None, plot_prior=False, batch_size=1, particle_batch_size=None,
             design_args_path=None,
             experiment_args=None, nf_eig_data=None, grid_eig_data=None,
             marginal_eig_subsets=None, marginal_outer_y=8, marginal_inner_samples=200,
@@ -110,7 +111,7 @@ class Evaluator:
         self.profile = profile
         self.design_chunk_size = design_chunk_size  # Number of designs per chunk (None = use all)
         self.sort = sort
-        self.include_nominal = include_nominal
+        self.exclude_nominal = exclude_nominal
         self.plot_prior = plot_prior
         self.batch_size = batch_size  # Batch size for sample_posterior to reduce memory usage
         self.other_eig_data = grid_eig_data
@@ -169,13 +170,31 @@ class Evaluator:
             checkpoint=eval_checkpoint,
             **self.experiment_args
         )
+        # Small pools plot EIG per design as scatter points; judged on the configured
+        # pool, before nominal is added. None means decide by size.
+        self.eigs_scatter = len(self.experiment.designs) < 50 if eigs_scatter is None else eigs_scatter
         if self.eig_file_path is not None and 'input_designs' in self.eig_data:
             self.input_designs = torch.tensor(self.eig_data['input_designs'], device=self.device, dtype=torch.float64)
+            # Cached per-design arrays are indexed by the file's pool, so its index is
+            # authoritative. Files from before nominal joined the pool have none; their
+            # nominal EIG stays in the legacy step block that plotting still reads.
+            self.nominal_index = self.eig_data.get('nominal_index')
         else:
+            # The nominal design is an ordinary pool member: one EIG pass covers it and
+            # its EIG is eigs_avg[nominal_index]. None without a nominal or when excluded.
+            n_configured = len(self.experiment.designs)
+            self.nominal_index = None if exclude_nominal else self.experiment.add_nominal_to_designs()
             self.input_designs = self.experiment.designs
             # save to eig_data object
             self.eig_data['input_designs'] = self.input_designs.cpu().numpy().tolist()
-            self.eig_data['nominal_design'] = self.experiment.nominal_design.cpu().numpy().tolist()
+            self.eig_data['nominal_index'] = self.nominal_index
+            # True when the configured pool lacked nominal; cross-run comparisons drop
+            # that row so this eval lines up with evals of the configured pool.
+            self.eig_data['nominal_added'] = len(self.input_designs) > n_configured
+            self.eig_data['nominal_design'] = (
+                None if self.nominal_index is None
+                else self.experiment.nominal_design.cpu().numpy().tolist()
+            )
 
         # Validate marginal-EIG subsets against the experiment's parameter names.
         self.marginal_eig_subsets = self._normalize_marginal_subsets(self._raw_marginal_eig_subsets)
@@ -334,11 +353,11 @@ class Evaluator:
                     design = self.input_designs[np.argmax(eigs)]
                 else:
                     # Fall back to calculating EIG
-                    eigs, _ = self.get_eig(selected_step, nominal_design=False)
+                    eigs, _ = self.get_eig(selected_step)
                     design = self.input_designs[np.argmax(eigs)]
             else:
                 # No cached data, calculate EIG
-                eigs, _ = self.get_eig(selected_step, nominal_design=False)
+                eigs, _ = self.get_eig(selected_step)
                 design = self.input_designs[np.argmax(eigs)]
 
         # Generate samples
@@ -439,7 +458,7 @@ class Evaluator:
             step = selected_step
 
             # Get optimal design based on EIGs
-            eigs, _ = self.get_eig(step, nominal_design=False)
+            eigs, _ = self.get_eig(step)
             optimal_idx = int(np.argmax(eigs))
             optimal_design = self.input_designs[optimal_idx]
 
@@ -694,16 +713,13 @@ class Evaluator:
             "num_data_samples": num_data_samples,
         }
 
-    def _compute_eig(self, flow_model, nominal_design=False, designs=None, timers=None):
+    def _compute_eig(self, flow_model, designs=None, timers=None):
         """
         Helper function that evaluates the EIG of a single flow model.
 
         Args:
-            rank (int): Global rank number
-            step (int): Step for reference
             flow_model (torch.nn.Module): The flow model to evaluate.
-            nominal_design (bool): Whether to evaluate the nominal design.
-            designs: Tensor of designs to evaluate. If None, determines from nominal_design or self.input_designs.
+            designs: Tensor of designs to evaluate. Defaults to self.input_designs.
         Returns:
             tuple (eigs, entropy_terms) where eigs is per-design EIG in BITS and
             entropy_terms maps prior_entropy / posterior_entropy (also bits), as
@@ -712,12 +728,8 @@ class Evaluator:
         """
         device_obj = torch.device(self.device)
         
-        # Determine which designs to use
         if designs is None:
-            if nominal_design:
-                designs = self.experiment.nominal_design.unsqueeze(0)
-            else:
-                designs = self.input_designs
+            designs = self.input_designs
         
         # Ensure designs are on the correct device
         designs = designs.to(device_obj)
@@ -1073,72 +1085,48 @@ class Evaluator:
         n_total = int(coords.shape[0])
         return coords[row_ok], int(n_total - row_ok.sum()), n_total
 
-    def _find_nominal_design_index(self, designs=None, atol=1e-5):
-        """Index of nominal design in ``designs``, or None if not present."""
-        if designs is None:
-            designs = self.input_designs
-        nominal = self.experiment.nominal_design.detach().cpu().numpy()
-        for i, row in enumerate(designs.detach().cpu().numpy()):
-            if np.allclose(row, nominal, rtol=0.0, atol=atol):
-                return i
-        return None
+    def _store_eig_summary(self, step_data, result, result_std):
+        """Write per-design mean/std EIG (bits) and the optimal design into step_data."""
+        optimal_idx = int(np.argmax(result))
+        step_data['eigs_avg'] = result.tolist()
+        step_data['eigs_std'] = result_std.tolist()
+        step_data['optimal_eig'] = float(result[optimal_idx])
+        step_data['optimal_eig_std'] = float(result_std[optimal_idx])
+        step_data['optimal_design'] = self.input_designs[optimal_idx].detach().cpu().numpy().tolist()
 
-    def _store_entropy_eval_results(
-        self, step_data, all_prior_eval, all_post_eval, nominal_design
-    ):
-        """Persist per-eval and mean/std entropy arrays into step_data (bits)."""
+    def _store_entropy_eval_results(self, step_data, all_prior_eval, all_post_eval):
+        """Persist per-eval and per-design mean/std entropy arrays into step_data (bits)."""
         step_data["prior_entropies"] = [
             r.tolist() if isinstance(r, np.ndarray) else r for r in all_prior_eval
         ]
         step_data["posterior_entropies"] = [
             r.tolist() if isinstance(r, np.ndarray) else r for r in all_post_eval
         ]
-        prior_mean = np.mean(np.array(all_prior_eval), axis=0)
-        prior_std = np.std(np.array(all_prior_eval), axis=0)
-        post_mean = np.mean(np.array(all_post_eval), axis=0)
-        post_std = np.std(np.array(all_post_eval), axis=0)
-        if nominal_design:
-            step_data["prior_entropy_avg"] = float(prior_mean.reshape(-1)[0])
-            step_data["prior_entropy_std"] = float(prior_std.reshape(-1)[0])
-            step_data["posterior_entropy_avg"] = float(post_mean.reshape(-1)[0])
-            step_data["posterior_entropy_std"] = float(post_std.reshape(-1)[0])
-        else:
-            step_data["prior_entropy_avg"] = np.atleast_1d(prior_mean).tolist()
-            step_data["prior_entropy_std"] = np.atleast_1d(prior_std).tolist()
-            step_data["posterior_entropy_avg"] = np.atleast_1d(post_mean).tolist()
-            step_data["posterior_entropy_std"] = np.atleast_1d(post_std).tolist()
+        step_data["prior_entropy_avg"] = np.atleast_1d(np.mean(np.array(all_prior_eval), axis=0)).tolist()
+        step_data["prior_entropy_std"] = np.atleast_1d(np.std(np.array(all_prior_eval), axis=0)).tolist()
+        step_data["posterior_entropy_avg"] = np.atleast_1d(np.mean(np.array(all_post_eval), axis=0)).tolist()
+        step_data["posterior_entropy_std"] = np.atleast_1d(np.std(np.array(all_post_eval), axis=0)).tolist()
 
-    @staticmethod
-    def _first_scalar(x):
-        """First element of ``x`` as a float, whether it is a scalar or an array.
+    def _log_entropy_summary(self, eig_bits, eig_std_bits, prior_bits, prior_std, post_bits, post_std):
+        """Print the across-design mean entropies, then the nominal design's row.
 
-        The nominal-design callers are inconsistent: one passes 0-d values
-        (``full_eigs[0]``), another passes shape-``(1,)`` means over evals
-        (``np.mean(..., axis=0)`` with a single design). Bare ``float()`` on the
-        latter is a NumPy DeprecationWarning today and an error in a future
-        release, so normalize instead of relying on the caller.
+        All arguments are per-design arrays in bits; the stds are each design's
+        spread across evals, averaged over designs on the first line.
         """
-        return float(np.ravel(x)[0])
-
-    def _log_entropy_summary(
-        self, eig_bits, eig_std_bits, prior_bits, prior_std, post_bits, post_std, nominal_design
-    ):
-        if nominal_design:
-            s = self._first_scalar
+        print(
+            f"  Mean entropy (bits): H_prior={float(np.mean(prior_bits)):.3f}"
+            f"±{float(np.mean(prior_std)):.3f}, "
+            f"H_post={float(np.mean(post_bits)):.3f}"
+            f"±{float(np.mean(post_std)):.3f}, "
+            f"mean EIG={float(np.mean(eig_bits)):.3f}"
+            f"±{float(np.mean(eig_std_bits)):.3f}"
+        )
+        i = self.nominal_index
+        if i is not None:
             print(
-                f"  Entropy (bits): H_prior={s(prior_bits):.3f}"
-                f"±{s(prior_std):.3f}, "
-                f"H_post={s(post_bits):.3f}±{s(post_std):.3f}, "
-                f"EIG={s(eig_bits):.3f}±{s(eig_std_bits):.3f}"
-            )
-        else:
-            print(
-                f"  Mean entropy (bits): H_prior={float(np.mean(prior_bits)):.3f}"
-                f"±{float(np.mean(prior_std)):.3f}, "
-                f"H_post={float(np.mean(post_bits)):.3f}"
-                f"±{float(np.mean(post_std)):.3f}, "
-                f"mean EIG={float(np.mean(eig_bits)):.3f}"
-                f"±{float(np.mean(eig_std_bits)):.3f}"
+                f"  Nominal design (index {i}): H_prior={prior_bits[i]:.3f}±{prior_std[i]:.3f}, "
+                f"H_post={post_bits[i]:.3f}±{post_std[i]:.3f}, "
+                f"EIG={eig_bits[i]:.3f}±{eig_std_bits[i]:.3f}"
             )
 
     @profile_loop("per-design flow sample", total_from="n_designs")
@@ -1297,7 +1285,6 @@ class Evaluator:
         cosmo_params = self.experiment.cosmo_params
         all_subset_ids = [self._subset_id(s) for s in subsets]
         n_designs = len(self.input_designs)
-        nominal_idx = self._find_nominal_design_index()
 
         # Reuse any complete per-subset marginal results already present for this
         # step (e.g. loaded via --nf-eig-data), recomputing only the missing
@@ -1337,7 +1324,6 @@ class Evaluator:
 
             prior_H_acc = {sid: [] for sid in subset_ids}
             var_eig_acc = {sid: [] for sid in subset_ids}
-            nom_eig_acc = {sid: [] for sid in subset_ids}
 
             for eval_idx in range(int(n_evals)):
                 if self.verbose:
@@ -1346,27 +1332,14 @@ class Evaluator:
                 var_post_H = self._marginal_posterior_entropy(
                     flow_model, self.input_designs, subset_ids, subset_idx
                 )
-                if nominal_idx is not None:
-                    nom_post_H = {
-                        sid: np.array([var_post_H[sid][nominal_idx]]) for sid in subset_ids
-                    }
-                else:
-                    nom_post_H = self._marginal_posterior_entropy(
-                        flow_model,
-                        self.experiment.nominal_design.unsqueeze(0),
-                        subset_ids,
-                        subset_idx,
-                    )
                 for sid in subset_ids:
                     prior_H_acc[sid].append(prior_H[sid])
                     var_eig_acc[sid].append(prior_H[sid] - var_post_H[sid])
-                    nom_eig_acc[sid].append(prior_H[sid] - nom_post_H[sid][0])
 
             for sid, subset in zip(subset_ids, subsets_to_compute):
                 var = np.array(var_eig_acc[sid])  # (n_evals, n_designs)
                 eigs_avg = var.mean(axis=0)
                 eigs_std = var.std(axis=0)
-                nom = np.array(nom_eig_acc[sid])  # (n_evals,)
                 optimal_idx = int(np.argmax(eigs_avg)) if n_designs > 0 else 0
                 optimal_design = self.input_designs[optimal_idx].detach().cpu().numpy().tolist()
                 marginal[sid] = {
@@ -1374,13 +1347,16 @@ class Evaluator:
                     "prior_entropy": float(np.mean(prior_H_acc[sid])),
                     "eigs_avg": eigs_avg.tolist(),
                     "eigs_std": eigs_std.tolist(),
-                    "nominal": {"eigs_avg": float(nom.mean()), "eigs_std": float(nom.std())},
                     "optimal_eig": float(eigs_avg[optimal_idx]),
                     "optimal_eig_std": float(eigs_std[optimal_idx]),
                     "optimal_design": optimal_design,
                 }
+                nominal_note = (
+                    "" if self.nominal_index is None
+                    else f"nominal {eigs_avg[self.nominal_index]:.3f} bits, "
+                )
                 print(
-                    f"  Marginal EIG [{sid}]: nominal {marginal[sid]['nominal']['eigs_avg']:.3f} bits, "
+                    f"  Marginal EIG [{sid}]: {nominal_note}"
                     f"optimal {marginal[sid]['optimal_eig']:.3f} bits"
                 )
         else:
@@ -1403,25 +1379,24 @@ class Evaluator:
         return marginal, selected_step
 
     @profile_method
-    def get_eig(self, step, nominal_design=False, n_evals=None):
+    def get_eig(self, step, n_evals=None):
         """
-        Calculates EIG for the specified rank.
+        Calculates EIG for every design in ``self.input_designs``.
         Uses caching to avoid redundant calculations.
+
+        The nominal design is a member of the pool, so its EIG is
+        ``result[self.nominal_index]``; there is no separate nominal pass.
 
         Args:
             step (int): Step for caching key and to load the model.
-            nominal_design (bool): If True, calculate EIG for nominal design only.
-                                 If False, calculate EIGs for all designs in self.experiment.designs.
             n_evals (int, optional): Number of evaluations to average over. If None, uses self.n_evals.
 
         Returns:
-            tuple: (result, result_std)
-                - result: If nominal_design=True, float; else np.ndarray (mean over n_evals)
-                - result_std: If nominal_design=True, float; else np.ndarray (std over n_evals)
+            tuple: (result, result_std), np.ndarray of shape (n_designs,): mean and std over n_evals
         """
         if n_evals is None:
             n_evals = self.n_evals
-        cache_key = f"step_{step}_particles_{self.n_particles}_nominal_{nominal_design}_evals_{n_evals}"
+        cache_key = f"step_{step}_particles_{self.n_particles}_evals_{n_evals}"
         
         # Check for cached result
         if cache_key in self._eig_cache:
@@ -1434,11 +1409,7 @@ class Evaluator:
                 if isinstance(cached_result[1], dict):
                     # Old format: (result, individual_ranks) - add empty std
                     result = cached_result[0]
-                    if nominal_design:
-                        result_std = 0.0
-                    else:
-                        result_std = np.zeros_like(result)
-                    return (result, result_std)
+                    return (result, np.zeros_like(result))
                 else:
                     # New format: (result, result_std)
                     return cached_result
@@ -1458,26 +1429,16 @@ class Evaluator:
         
         # Check if we have precomputed EIG data for this step
         if step_key in self.eig_data:
-            step_dict = self.eig_data[step_key]
-            if nominal_design:
-                step_data = step_dict.get('nominal', {})
-                if 'eigs_avg' in step_data and step_data['eigs_avg'] is not None:
-                    print(f"Using pre-calculated nominal EIG for {step_key}")
-                    result = float(step_data['eigs_avg'])
-                    result_std = float(step_data.get('eigs_std', 0.0))
-                    self._eig_cache[cache_key] = (result, result_std)
-                    return (result, result_std)
-            else:
-                step_data = step_dict.get('variable', {})
-                if 'eigs_avg' in step_data and step_data['eigs_avg'] is not None:
-                    print(f"Using pre-calculated EIG values for {step_key}")
-                    result = np.array(step_data['eigs_avg'], dtype=float)
-                    if 'eigs_std' in step_data and step_data['eigs_std'] is not None:
-                        result_std = np.array(step_data['eigs_std'], dtype=float)
-                    else:
-                        result_std = np.zeros_like(result)
-                    self._eig_cache[cache_key] = (result, result_std)
-                    return (result, result_std)
+            step_data = self.eig_data[step_key].get('variable', {})
+            if 'eigs_avg' in step_data and step_data['eigs_avg'] is not None:
+                print(f"Using pre-calculated EIG values for {step_key}")
+                result = np.array(step_data['eigs_avg'], dtype=float)
+                if 'eigs_std' in step_data and step_data['eigs_std'] is not None:
+                    result_std = np.array(step_data['eigs_std'], dtype=float)
+                else:
+                    result_std = np.zeros_like(result)
+                self._eig_cache[cache_key] = (result, result_std)
+                return (result, result_std)
         
         flow_model = flow_model.to(self.device)
         flow_model.eval()  # Ensure model is in eval mode
@@ -1488,13 +1449,8 @@ class Evaluator:
             torch.cuda.synchronize()
         gc.collect()
         
-        # Determine which designs to evaluate
-        if nominal_design:
-            all_designs = self.experiment.nominal_design.unsqueeze(0)
-            num_designs = 1
-        else:
-            all_designs = self.input_designs
-            num_designs = len(all_designs)
+        all_designs = self.input_designs
+        num_designs = len(all_designs)
         
         # Chunk design space if chunk size is specified (for memory constraints)
         # Chunking is implied by design_chunk_size: None means no chunking, otherwise chunk
@@ -1515,12 +1471,7 @@ class Evaluator:
             print(f"  Evaluating {num_designs} design(s) in {len(design_chunks)} chunk(s) with {target_n_evals} evaluation(s)")
         
         # Persist results in eig_data for future reuse
-        # Use nested structure: step_key -> 'nominal' or 'optimal' -> data
-        step_dict = self.eig_data.setdefault(step_key, {})
-        if nominal_design:
-            step_data = step_dict.setdefault('nominal', {})
-        else:
-            step_data = step_dict.setdefault('variable', {})
+        step_data = self.eig_data.setdefault(step_key, {}).setdefault('variable', {})
         
         # Check if we have existing partial results to resume from
         all_eval_results = []
@@ -1533,15 +1484,14 @@ class Evaluator:
                 # Convert to numpy arrays (JSON loads as lists, but we need arrays for computation)
                 # Handle both list-of-lists (from JSON) and list-of-arrays (in-memory) cases
                 all_eval_results = []
-                expected_len = 1 if nominal_design else num_designs
+                expected_len = num_designs
                 for idx, r in enumerate(existing_results):
                     if isinstance(r, np.ndarray):
                         arr = r
                     elif isinstance(r, list):
                         arr = np.array(r)
                     else:
-                        # Single scalar case - for nominal design, this is expected
-                        # Convert scalar to array of length 1
+                        # Single scalar case (a one-design pool)
                         arr = np.array([r])
                     
                     # Validate that each entry has the correct length
@@ -1575,42 +1525,22 @@ class Evaluator:
                     # Recompute averages and return
                     result = np.mean(np.array(all_eval_results), axis=0)
                     result_std = np.std(np.array(all_eval_results), axis=0)
-                    if nominal_design:
-                        result = result[0]
-                        result_std = result_std[0]
                     self._eig_cache[cache_key] = (result, result_std)
-                    if nominal_design:
-                        step_data['eigs_avg'] = float(result)
-                        step_data['eigs_std'] = float(result_std)
-                    else:
-                        result_array = np.atleast_1d(np.array(result, dtype=float))
-                        result_std_array = np.atleast_1d(np.array(result_std, dtype=float))
-                        sorted_idx = np.argsort(result_array)[::-1]
-                        eigs_avg = result_array.tolist()
-                        eigs_std = result_std_array.tolist()
-                        optimal_idx = int(sorted_idx[0]) if len(sorted_idx) > 0 else 0
-                        designs_source = self.input_designs
-                        optimal_design = designs_source[optimal_idx].detach().cpu().numpy().tolist()
-                        step_data['eigs_avg'] = eigs_avg
-                        step_data['eigs_std'] = eigs_std
-                        step_data['optimal_eig'] = float(result_array[optimal_idx])
-                        step_data['optimal_eig_std'] = float(result_std_array[optimal_idx]) if len(result_std_array) > optimal_idx else 0.0
-                        step_data['optimal_design'] = optimal_design
+                    self._store_eig_summary(step_data, result, result_std)
                     if all_prior_entropy_eval and all_posterior_entropy_eval:
                         self._store_entropy_eval_results(
                             step_data,
                             all_prior_entropy_eval,
                             all_posterior_entropy_eval,
-                            nominal_design,
                         )
-                        prior_mean = np.mean(np.array(all_prior_entropy_eval), axis=0)
-                        prior_std = np.std(np.array(all_prior_entropy_eval), axis=0)
-                        post_mean = np.mean(np.array(all_posterior_entropy_eval), axis=0)
-                        post_std = np.std(np.array(all_posterior_entropy_eval), axis=0)
-                        if nominal_design:
-                            self._log_entropy_summary(
-                                result, result_std, prior_mean, prior_std, post_mean, post_std, True
-                            )
+                        self._log_entropy_summary(
+                            result,
+                            result_std,
+                            np.mean(np.array(all_prior_entropy_eval), axis=0),
+                            np.std(np.array(all_prior_entropy_eval), axis=0),
+                            np.mean(np.array(all_posterior_entropy_eval), axis=0),
+                            np.std(np.array(all_posterior_entropy_eval), axis=0),
+                        )
                     timestamp = getattr(self, 'timestamp', None) or datetime.now().strftime('%Y%m%d_%H%M')
                     self.eig_data['status'] = 'incomplete'  # Mark as incomplete during evaluation
                     eig_data_save_path = self._eig_data_save_path(timestamp)
@@ -1660,7 +1590,6 @@ class Evaluator:
                 # Evaluate this chunk
                 eig_result, entropy_terms = self._compute_eig(
                     flow_model,
-                    nominal_design=nominal_design,
                     designs=chunk_designs,
                     timers=eig_timers,
                 )
@@ -1669,7 +1598,7 @@ class Evaluator:
                 eig_array = eig_result
                 if len(design_indices) == 1:
                     # Single design case
-                    if nominal_design or num_designs == 1:
+                    if num_designs == 1:
                         full_eigs[design_indices[0]] = eig_array.item()
                     else:
                         full_eigs[design_indices[0]] = eig_array if isinstance(eig_array, (int, float, np.number)) else eig_array[0]
@@ -1699,34 +1628,14 @@ class Evaluator:
                 step_data,
                 all_prior_entropy_eval,
                 all_posterior_entropy_eval,
-                nominal_design,
             )
-            eval_prior_mean = np.mean(full_prior_entropy)
-            eval_prior_std = np.std(full_prior_entropy) if num_designs > 1 else 0.0
-            eval_post_mean = np.mean(full_posterior_entropy)
-            eval_post_std = np.std(full_posterior_entropy) if num_designs > 1 else 0.0
-            eval_eig_mean = float(np.mean(full_eigs))
-            eval_eig_std = float(np.std(full_eigs)) if num_designs > 1 else 0.0
-            if nominal_design:
-                self._log_entropy_summary(
-                    full_eigs[0],
-                    eval_eig_std,
-                    full_prior_entropy[0],
-                    eval_prior_std,
-                    full_posterior_entropy[0],
-                    eval_post_std,
-                    True,
-                )
-            else:
-                self._log_entropy_summary(
-                    eval_eig_mean,
-                    eval_eig_std,
-                    eval_prior_mean,
-                    eval_prior_std,
-                    eval_post_mean,
-                    eval_post_std,
-                    False,
-                )
+            # This eval alone: mean over the pool, ± its spread across designs.
+            print(
+                f"  Eval {eval_idx + 1}/{target_n_evals} (mean±std over {num_designs} designs, bits): "
+                f"H_prior={np.mean(full_prior_entropy):.3f}±{np.std(full_prior_entropy):.3f}, "
+                f"H_post={np.mean(full_posterior_entropy):.3f}±{np.std(full_posterior_entropy):.3f}, "
+                f"EIG={np.mean(full_eigs):.3f}±{np.std(full_eigs):.3f}"
+            )
 
             # Save EIG data to file
             timestamp = getattr(self, 'timestamp', None) or datetime.now().strftime('%Y%m%d_%H%M')
@@ -1749,50 +1658,24 @@ class Evaluator:
         all_eval_results = np.array(all_eval_results)
         result = np.mean(all_eval_results, axis=0)  # Shape: (num_designs,)
         result_std = np.std(all_eval_results, axis=0)  # Shape: (num_designs,)
-        
-        # Handle scalar case for nominal design
-        if nominal_design:
-            result = result[0]  # Scalar
-            result_std = result_std[0]  # Scalar
-        
+
         # Cache result and std
         self._eig_cache[cache_key] = (result, result_std)
-
-        if nominal_design:
-            step_data['eigs_avg'] = float(result)
-            step_data['eigs_std'] = float(result_std)
-        else:
-            result_array = np.atleast_1d(np.array(result, dtype=float))
-            result_std_array = np.atleast_1d(np.array(result_std, dtype=float))
-            sorted_idx = np.argsort(result_array)[::-1]
-            eigs_avg = result_array.tolist()
-            eigs_std = result_std_array.tolist()
-            optimal_idx = int(sorted_idx[0]) if len(sorted_idx) > 0 else 0
-
-            designs_source = self.input_designs
-            optimal_design = designs_source[optimal_idx].detach().cpu().numpy().tolist()
-
-            step_data['eigs_avg'] = eigs_avg
-            step_data['eigs_std'] = eigs_std
-            step_data['optimal_eig'] = float(result_array[optimal_idx])
-            step_data['optimal_eig_std'] = float(result_std_array[optimal_idx]) if len(result_std_array) > optimal_idx else 0.0
-            step_data['optimal_design'] = optimal_design
+        self._store_eig_summary(step_data, result, result_std)
 
         if all_prior_entropy_eval and all_posterior_entropy_eval:
             self._store_entropy_eval_results(
                 step_data,
                 all_prior_entropy_eval,
                 all_posterior_entropy_eval,
-                nominal_design,
             )
-            prior_mean = np.mean(np.array(all_prior_entropy_eval), axis=0)
-            prior_std = np.std(np.array(all_prior_entropy_eval), axis=0)
-            post_mean = np.mean(np.array(all_posterior_entropy_eval), axis=0)
-            post_std = np.std(np.array(all_posterior_entropy_eval), axis=0)
-            eig_bits = result if nominal_design else np.atleast_1d(result)
-            eig_std_bits = result_std if nominal_design else np.atleast_1d(result_std)
             self._log_entropy_summary(
-                eig_bits, eig_std_bits, prior_mean, prior_std, post_mean, post_std, nominal_design
+                result,
+                result_std,
+                np.mean(np.array(all_prior_entropy_eval), axis=0),
+                np.std(np.array(all_prior_entropy_eval), axis=0),
+                np.mean(np.array(all_posterior_entropy_eval), axis=0),
+                np.std(np.array(all_posterior_entropy_eval), axis=0),
             )
 
         timestamp = getattr(self, 'timestamp', None) or datetime.now().strftime('%Y%m%d_%H%M')
@@ -1821,7 +1704,7 @@ class Evaluator:
             return
 
         # Get EIGs, nominal EIG, and optimal design (handles all ranks internally)
-        eigs, _ = self.get_eig(step, nominal_design=False)
+        eigs, _ = self.get_eig(step)
         optimal_design_tensor = self.input_designs[np.argmax(eigs)]
         optimal_design = optimal_design_tensor.cpu().numpy()
         
@@ -1968,7 +1851,7 @@ class Evaluator:
                 continue
 
             print(f"  Step {selected_step}: computing EIG (n_evals={n_evals})...")
-            self.get_eig(step=selected_step, nominal_design=False, n_evals=n_evals)
+            self.get_eig(step=selected_step, n_evals=n_evals)
 
         # Save updated eig_data (restore 'complete' status since get_eig marks it 'incomplete' during evaluation)
         self.eig_data['status'] = 'complete'
@@ -2080,8 +1963,7 @@ class Evaluator:
         else:
             print(f"Computing EIG input designs at step {eval_step}...")
 
-        nominal_eig, nominal_eig_std = self.get_eig(step=eval_step, nominal_design=True)
-        eigs, eigs_std = self.get_eig(step=eval_step, nominal_design=False)
+        eigs, eigs_std = self.get_eig(step=eval_step)
         # Determine label based on whether we have multiple designs or a single input design
         has_multiple_designs = len(self.input_designs) > 1
         eig_label = 'Optimal' if has_multiple_designs else 'Input'
@@ -2102,12 +1984,18 @@ class Evaluator:
                 optimal_design_tensor = self.input_designs[0].cpu().numpy()
             optimal_design = optimal_design_tensor.tolist()
 
+        # Nominal is searched with everything else, so it can itself be the optimal design.
+        # A resumed pre-nominal_index file still carries it in its legacy step block.
+        step_dict = self.eig_data[step_key]
+        nominal_eig = nominal_value(self.eig_data, step_dict['variable'], step_dict.get('nominal'))
+        nominal_eig_std = nominal_value(
+            self.eig_data, step_dict['variable'], step_dict.get('nominal'), 'eigs_std'
+        )
         print(f"Nominal EIG: {nominal_eig}, {eig_label} EIG: {optimal_eig_value}, {eig_label} Design: {optimal_design}")
 
         self.eig_data["eval_step"] = int(eval_step)
-        self.eig_data["nominal_eig"] = float(nominal_eig)
-        self.eig_data["nominal_eig_std"] = float(nominal_eig_std) if isinstance(nominal_eig_std, (int, float, np.number)) else 0.0
-        self.eig_data["nominal_design"] = self.experiment.nominal_design.cpu().numpy().tolist()
+        self.eig_data["nominal_eig"] = nominal_eig
+        self.eig_data["nominal_eig_std"] = nominal_eig_std
         self.eig_data["optimal_eig"] = optimal_eig_value
         self.eig_data["optimal_eig_std"] = optimal_eig_std_value
         self.eig_data["optimal_design"] = optimal_design
@@ -2184,7 +2072,7 @@ class Evaluator:
                     eval_step=eval_step,
                     subset=subset,
                     sort=self.sort,
-                    include_nominal=self.include_nominal,
+                    include_nominal=not self.exclude_nominal, scatter=self.eigs_scatter,
                 )
                 self._update_runtime()
             except Exception as e:
@@ -2202,7 +2090,7 @@ class Evaluator:
             traceback.print_exc()
         
         try:
-            self.plotter.eig_designs(eval_step=eval_step, sort=self.sort, include_nominal=self.include_nominal)
+            self.plotter.eig_designs(eval_step=eval_step, sort=self.sort, include_nominal=not self.exclude_nominal, scatter=self.eigs_scatter)
             self._update_runtime()
         except Exception as e:
             print(f"Warning: eig_designs failed: {e}")
@@ -2230,7 +2118,7 @@ class Evaluator:
                 self.compute_eig_steps(steps=eig_steps_to_compute, n_evals=1)
                 # Plot EIG across training steps (intermediate + final eval_step)
                 all_eig_steps = eig_steps_to_compute + [eval_step]
-                self.plotter.eig_designs(eval_step=all_eig_steps, sort=self.sort, include_nominal=self.include_nominal, filename="eig_designs_steps")
+                self.plotter.eig_designs(eval_step=all_eig_steps, sort=self.sort, include_nominal=not self.exclude_nominal, scatter=self.eigs_scatter, filename="eig_designs_steps")
                 self._update_runtime()
             except Exception as e:
                 print(f"Warning: eig_designs (multi-step) failed: {e}")
@@ -2245,7 +2133,7 @@ class Evaluator:
                 eval_step=eval_step,
                 levels=self.levels,
                 transform_output=self.nf_transform_output,
-                include_nominal=self.include_nominal,
+                include_nominal=not self.exclude_nominal, scatter=self.eigs_scatter,
                 sort=self.sort,
                 plot_prior=self.plot_prior,
             )
@@ -2314,7 +2202,7 @@ class Evaluator:
                     eval_step=eval_step,
                     subset=subset,
                     sort=self.sort,
-                    include_nominal=self.include_nominal,
+                    include_nominal=not self.exclude_nominal, scatter=self.eigs_scatter,
                 )
                 self._update_runtime()
             except Exception as e:
@@ -2341,7 +2229,8 @@ if __name__ == "__main__":
     parser.add_argument('--profile', action='store_true', help='Enable profiling of methods')
     parser.add_argument('--verbose', action='store_true', help='Enable verbose output')
     parser.add_argument('--no-sort', dest='sort', action='store_false', help='Disable sorting of designs by EIG (default: sorting enabled)')
-    parser.add_argument('--include-nominal', action='store_true', default=False, help='Include nominal EIG in eig_designs plot (default: False)')
+    parser.add_argument('--eigs-scatter', choices=['true', 'false'], default=None, help='Draw the EIG-per-design plots as scatter points with error bars (true) or a line with a std band (false). Default: scatter when the configured design pool, before nominal is added, has fewer than 50 designs.')
+    parser.add_argument('--exclude-nominal', action='store_true', default=False, help='Leave the nominal design out of the evaluation design pool (default: it is added when the experiment has one, so it gets an EIG and is marked on plots)')
     parser.add_argument('--plot-prior', action='store_true', default=False, help='Include prior contours on posterior triangle plots (default: False)')
     parser.add_argument('--batch-size', type=int, default=1, help='Batch size for sample_posterior to reduce memory usage (default: 1)')
     parser.add_argument('--particle-batch-size', type=int, default=None, help='Batch size for processing particles in LikelihoodDataset to reduce memory usage (default: None to use all particles)')
@@ -2369,6 +2258,8 @@ if __name__ == "__main__":
     valid_params = [k for k in valid_params if k != 'self']
     eval_args = {k: v for k, v in vars(args).items() if k in valid_params}
     eval_args['experiment_args'] = experiment_args
+    if args.eigs_scatter is not None:
+        eval_args['eigs_scatter'] = args.eigs_scatter == 'true'
     if args.posterior_samples_path:
         eval_args['reuse_posterior_samples'] = True
 
