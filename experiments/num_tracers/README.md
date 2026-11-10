@@ -15,7 +15,7 @@ DESI measures BAO distances in redshift bins, each dominated by a different targ
 | LRG3 + ELG1 | LRG, ELG     | Blended bin fed by *both* classes |
 | ELG2        | ELG          | Emission-line galaxies |
 | QSO         | QSO          | Quasars |
-| Lya QSO     | QSO          | Lyman-alpha forest, highest z |
+| Lya QSO     | — (fixed)    | Lyman-alpha forest, highest z; not a design choice |
 
 Observing more of a class shrinks the BAO error in its bins, but the total number of fibers is finite, so gains in one class are paid for elsewhere. The design problem has three components:
 
@@ -25,8 +25,15 @@ Observing more of a class shrinks the BAO error in its bins, but the total numbe
 
 Two facts drive everything downstream:
 
-- **A design's *sum* is the total-observation budget.** The four entries are fractions of the nominal total (dr1: 8,151,393 observations; dr2: 18,605,668), so a design summing to 1.0 spends the nominal budget and one summing to 1.2 spends 20% more. Budget is therefore a *design axis*, not a separate setting.
+- **A design's *sum* is the total-observation budget.** The four entries are fractions of the nominal observations outside Lya QSO (dr1: 7,089,170; dr2: 16,708,794), so a design summing to 1.0 spends the nominal budget and one summing to 1.2 spends 20% more. Budget is therefore a *design axis*, not a separate setting.
+- **Lya QSO is outside the design budget.** See [below](#lya-qso-is-outside-the-design-budget).
 - **Observed != passed.** The emulator and the noise model both want redshift-confirmed (*passed*) counts, obtained as `observed x efficiency` per tracer. `calc_passed` does this conversion, correctly blending the LRG3+ELG1 bin from both parent classes.
+
+### Lya QSO is outside the design budget
+
+The Lya QSO bin keeps the dataset's own counts (dr1: 1,062,223 observed) in every design, and its error stays at the nominal value in both likelihood modes. The QSO class therefore covers only the QSO bin (z 0.8–2.1), and the nominal design is each class's share of the remaining fibers: dr1 `[0.0428, 0.3044, 0.4719, 0.1809]`. The target-availability upper bounds are taken over the same budget: dr1 BGS 0.0673, LRG 0.4393, QSO 0.2070 (ELG's 0.575 is hand-set).
+
+`lya_in_budget: true` restores the accounting runs were trained with before the option existed: Lya fibers inside the QSO class (nominal QSO 0.2876 = 0.1573 QSO bin + 0.1303 Lya), split between the two bins in proportion, with the Lya error still held nominal. A design that cut QSO there freed Lya's fibers for the other classes at no cost to the Lya measurement, which favored low QSO. `init_experiment` loads a run logged without the parameter that way.
 
 ## Design Space (`design_args_*.yaml`)
 
@@ -45,11 +52,11 @@ Two facts drive everything downstream:
 
 | File | Budget (sum) | Designs | Purpose |
 |------|--------------|---------|---------|
-| `design_args_dr1.yaml` | 1.0 (pinned) | 287 | Default dr1 grid; split-only optimization |
-| `design_args_dr2.yaml` | 1.0 (pinned) | 209 | Same for dr2 bounds |
+| `design_args_dr1.yaml` | 1.0 (pinned) | 266 | Default dr1 grid; split-only optimization |
+| `design_args_dr2.yaml` | 1.0 (pinned) | 215 | Same for dr2 bounds |
 | `design_args_nominal.yaml` | 1.0 | 1 | The DESI nominal split, computed internally |
 | `design_args_unconstrained.yaml` | 1.0 (pinned) | 560 | Coarse step, bounds opened to 1.0 |
-| `design_args_dr1_budget.yaml` | [1.0, 1.2] | 2447 | Budget as an axis inside one flow |
+| `design_args_dr1_budget.yaml` | [1.0, 1.2] | 2678 | Budget as an axis inside one flow |
 | `design_args_dr1.yaml` + `--design-input-path …/nominal_scaled_pNN` | 1.05 … 1.30 | 1 each | Uniformly scaled nominal, one design directory per budget (see [`scaled`](#scaled--one-single-design-pool-per-budget)) |
 
 ## Creating design spaces
@@ -79,7 +86,7 @@ python -m bedcosmo.num_tracers.design pool \
 | `--n-target`, `--seed` | Cap pool size by seeded random subsample; pinned rows always survive |
 | `--name` | Names the design directory `<name>/`. Omit for a date-stamped default |
 
-The generator reproduces the experiment's own grid exactly: the defaults give **287** designs at sum 1.0 and **2447** over [1.0, 1.2], matching `design_args_dr1.yaml` and `design_args_dr1_budget.yaml`.
+The generator reproduces the experiment's own grid exactly: the defaults give **266** designs at sum 1.0 and **2678** over [1.0, 1.2], matching `design_args_dr1.yaml` and `design_args_dr1_budget.yaml`.
 
 ### `scaled` — one single-design pool per budget
 
@@ -109,15 +116,15 @@ Same design, bit-identical prior entropy — the 0.198 bit gap is entirely poste
 
 ### Watch the budget skew
 
-The per-class `upper` values cap the reachable sum. With the `design_args_dr1.yaml` bounds the maximum is **1.23**, and the grid is heavily bottom-weighted:
+The per-class `upper` values cap the reachable sum. With the `design_args_dr1.yaml` bounds the maximum is **1.24**, and the grid is heavily bottom-weighted:
 
 | Budget bin | Designs |
 |------------|---------|
-| [1.00, 1.05) | 1217 |
-| [1.05, 1.10) | 729 |
-| [1.10, 1.15) | 387 |
-| [1.15, 1.20) | 129 |
-| [1.20, 1.25) | 16 |
+| [1.00, 1.05) | 1173 |
+| [1.05, 1.10) | 822 |
+| [1.10, 1.15) | 484 |
+| [1.15, 1.20) | 185 |
+| [1.20, 1.25) | 14 |
 
 A pool built this way is well-fit at low budget and underfit at high budget, which mimics saturation that isn't physical. Raise `--upper` alongside `--sum-upper` (e.g. `--upper 0.07 0.42 0.58 0.40` lifts the ceiling to 1.42 and puts ~9% of designs above 1.20), then use `--n-target` to bring the size back down. Note this widens the design space beyond `design_args_dr1.yaml`, so results are not directly comparable to runs on the default grid.
 
@@ -196,7 +203,7 @@ factor_i = sqrt(nominal_passed_ratio_i / passed_ratio_i)
 
 `passed_ratio` already carries both the split and the budget (`calc_passed` is linear in the design), so a uniform scale `s` gives `sigma -> 1/sqrt(s)`. Do **not** divide by the design sum again — that double-counts the budget and yields `1/s`. It is a no-op at sum 1.0, so it only ever affected free-budget designs. Regression tests: `tests/test_num_tracers_sigma_scaling.py`.
 
-With `vary_lya_qso: false` (default) the Lya QSO rows are pinned at their nominal error.
+The Lya QSO rows stay at their nominal error (see [Lya QSO is outside the design budget](#lya-qso-is-outside-the-design-budget)).
 
 The reference covariance is `ref_cov` (default `desi_cov.npy`): the published DESI 2024 BAO result, built on the **v1.2** clustering catalogs. The DR1 `full-shape-bao-clustering` VAC also ships per-tracer BAO likelihoods for the **v1.5** catalogs (DESI's default, used in DR1 full-shape), which differ by up to ±11% per row. `scripts/num_tracers/generate_ref_cov_vac.py --catalog {v1.5,v1.2}` (repo root) builds a drop-in `ref_cov` from them: the VAC's fractional (q_iso or q_∥, q_⊥) covariance placed on the `desi_data.csv` rows, Lya QSO kept from `desi_cov.npy`. `experiments/num_tracers/scripts/generate_ref_cov.py` builds one from the emulators instead. No v1.5 BAO-only DESI posterior exists, so the reference samples (`mcmc_samples/`) stay v1.2.
 
@@ -239,7 +246,7 @@ Both are listed under `shapefit: <dataset>: <cosmo_model>: {mean, covar}` in `em
 - **Prior** (`prior_args_shapefit.yaml`) follows the emulators' training box, except ω_b, which is N(0.021976, 0.000534): the Schöneberg 2024 BBN (ω_b, N_eff) Gaussian conditioned on N_eff = 3.044, as DESI's DR1 full-shape chains apply it (the emulators were trained on N(0.02218, 0.00055), 0.37σ away). The `omega_m_domain` constraint redraws samples until `(omega_cdm + omega_b + omega_nu)/h^2` lies in [0.01, 0.99], the emulators' domain. Nuisance parameters are marginalized inside the emulators, so they are not sampled.
 - **`emulator_covariance`** chooses the cosmology the covar emulators see, as for BAO (see `likelihood_mode: emulator` above). With `fiducial`, every design's covariance is the covar emulators at the DESI template fiducial and that design's N_tracers; a dict moves that point.
 - **Nominal data** (`central_val`, the flow's nominal context) is DESI DR1's measured ShapeFit-alone data vector (DESI 2024 V App. A, via tracer-forecast-emulator's `desi_reference`), as BAO uses DESI's measured distances. Each tracer's (D_V/r_d, D_H/D_M, fσ_s8, m+n) becomes (q_iso, q_ap, f_σr, m): distance ratios over their Table 11 fiducials, fσ_s8 as a fraction of the fiducial (the mean emulator's f_σr labels are in DESI's own m-dependent convention, so no m-correction applies), and m directly. It affects posterior plots, not EIG.
-- **Not applicable**: `likelihood_mode` must be `emulator`. `vary_z_eff`, `apply_desi_syst` and `emulator_sqrtn_ref` are rejected, and `emulator_space`, `include_D_M`, `include_D_V` and `vary_lya_qso` are unused.
+- **Not applicable**: `likelihood_mode` must be `emulator`. `vary_z_eff`, `apply_desi_syst` and `emulator_sqrtn_ref` are rejected, and `emulator_space`, `include_D_M` and `include_D_V` are unused.
 - **DESI reference posterior**: `load_nominal_samples` reads DESI's DR1 ShapeFit-alone chain (`desi-shapefit-all-nolya` with the BBN and ns10 priors, the same tracers and priors as this forecast) from `~/data/desi/shapefit_dr1/mcmc_samples/base.npy`, converted from the public DR1 full-shape VAC as recorded in `PROVENANCE.md` beside it. It is DESI's posterior for the real data, so it is centred on the measured cosmology, not the fiducial.
 
 ## Cosmology Models (`models.yaml`)
