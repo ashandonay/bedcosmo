@@ -70,7 +70,7 @@ class NumTracers(BaseExperiment, CosmologyMixin):
         likelihood_mode="scaling",
         apply_desi_syst=False,
         vary_z_eff=False,
-        vary_lya_qso=False,
+        lya_in_budget=False,
         ref_cov=None,
         emulator_sqrtn_ref=None,
         emulator_space=None,
@@ -118,12 +118,19 @@ class NumTracers(BaseExperiment, CosmologyMixin):
         self.DH_idx = np.where(self.desi_data["quantity"] == "DH_over_rs")[0]
         self.DM_idx = np.where(self.desi_data["quantity"] == "DM_over_rs")[0]
         self.DV_idx = np.where(self.desi_data["quantity"] == "DV_over_rs")[0]
-        # By default the Lya QSO error is held fixed at its nominal value in scaling
-        # mode (design-independent), mirroring how the emulator mode leaves Lya_QSO
-        # at ref_cov instead of scaling it. Set vary_lya_qso=True to instead let it
-        # scale with the design like the other tracers.
-        self.vary_lya_qso = vary_lya_qso
+        # Lya QSO is not a design choice: its error is held at the nominal value in both
+        # likelihood modes. By default (lya_in_budget=False) its fibers are outside the
+        # design budget too: its counts stay at the dataset's in every design, the QSO
+        # class covers only the QSO bin, and the design fractions divide the remaining
+        # fibers. lya_in_budget=True is the accounting runs were trained with before the
+        # option existed: Lya fibers inside the QSO class, so a design that cut QSO also
+        # cut them while their error stayed nominal.
+        self.lya_in_budget = bool(lya_in_budget)
         self._lya_qso_rows = np.where(self.desi_data["tracer"] == "Lya QSO")[0]
+        self._budget_tracers = (
+            self.desi_tracers if self.lya_in_budget
+            else self.desi_tracers.loc[self.desi_tracers["tracer"] != "Lya QSO"]
+        )
         self.cosmo_model = cosmo_model
         self.flow_type = flow_type
         self.device = device
@@ -155,9 +162,11 @@ class NumTracers(BaseExperiment, CosmologyMixin):
         )
         self.central_val = torch.tensor(self.desi_data["value_at_z"].tolist(), device=self.device)
         self.tracer_bins = self.desi_data.drop_duplicates(subset=["tracer"])["tracer"].tolist()
-        self.nominal_total_obs = int(
-            self.desi_data.drop_duplicates(subset=["tracer"])["observed"].sum()
-        )
+        # The observed fibers the design fractions divide (the design budget at sum 1).
+        bins = self.desi_data.drop_duplicates(subset=["tracer"])
+        if not self.lya_in_budget:
+            bins = bins.loc[bins["tracer"] != "Lya QSO"]
+        self.nominal_total_obs = int(bins["observed"].sum())
         self.nominal_passed_ratio = (
             torch.tensor(self.desi_data["passed"].tolist(), device=self.device)
             / self.nominal_total_obs
@@ -169,14 +178,14 @@ class NumTracers(BaseExperiment, CosmologyMixin):
         else:
             self.design_labels = ["BGS", "LRG", "ELG", "QSO"]
         self.num_targets = (
-            self.desi_tracers.groupby("class").sum()["targets"].reindex(self.design_labels)
+            self._budget_tracers.groupby("class").sum()["targets"].reindex(self.design_labels)
         )
         if nominal_design is None:
+            # desi_tracers' observed column is a fraction of all observed fibers; renormalize
+            # over the budget so the nominal design sums to 1.
+            observed = self._budget_tracers.groupby("class").sum()["observed"]
             self.nominal_design = torch.tensor(
-                self.desi_tracers.groupby("class")
-                .sum()["observed"]
-                .reindex(self.design_labels)
-                .values,
+                (observed / observed.sum()).reindex(self.design_labels).values,
                 device=self.device,
             )
         else:
@@ -725,11 +734,11 @@ class NumTracers(BaseExperiment, CosmologyMixin):
 
         """
         factor = torch.sqrt(self.nominal_passed_ratio[index] / passed_ratio[..., index])
-        if not self.vary_lya_qso and self._lya_qso_rows.size:
-            # By default the Lya QSO error is held fixed. `index` is a positional array
-            # into desi_data rows; entries that are Lya QSO rows keep the nominal sigma
-            # (factor = 1), making that error design-independent. torch.where keeps this
-            # autograd-safe. Set vary_lya_qso=True to let it scale like the other tracers.
+        if self._lya_qso_rows.size:
+            # The Lya QSO error is design-independent. With Lya outside the budget its count
+            # never moves, so the factor is already 1; with lya_in_budget it would follow the
+            # QSO class, and is pinned to 1 here. `index` is a positional array into
+            # desi_data rows; torch.where keeps this autograd-safe.
             fixed = torch.as_tensor(
                 np.isin(np.asarray(index), self._lya_qso_rows), device=factor.device
             )
@@ -802,16 +811,19 @@ class NumTracers(BaseExperiment, CosmologyMixin):
                 ..., 1
             ].unsqueeze(-1)
 
-            QSOs = self.desi_tracers.loc[self.desi_tracers["class"] == "QSO"]["observed"]
+            QSOs = self._budget_tracers.loc[self._budget_tracers["class"] == "QSO"]["observed"]
             QSO_dist = class_ratio[..., idx_QSO].unsqueeze(-1) * torch.tensor(
                 (QSOs / QSOs.sum()).values, device=self.device
             ).unsqueeze(0)
             obs_ratio[..., np.where(self.desi_data["tracer"] == "QSO")[0]] = QSO_dist[
                 ..., 0
             ].unsqueeze(-1)
-            obs_ratio[..., np.where(self.desi_data["tracer"] == "Lya QSO")[0]] = QSO_dist[
-                ..., 1
-            ].unsqueeze(-1)
+            if self.lya_in_budget:
+                obs_ratio[..., self._lya_qso_rows] = QSO_dist[..., 1].unsqueeze(-1)
+            elif self._lya_qso_rows.size:
+                # Outside the budget: the dataset's own observed count, whatever the design.
+                lya_obs = float(self.desi_data["observed"].iloc[self._lya_qso_rows[0]])
+                obs_ratio[..., self._lya_qso_rows] = lya_obs / self.nominal_total_obs
 
             efficiency = torch.zeros(
                 (*class_ratio.shape[:-1], len(self.desi_data)),
@@ -884,7 +896,7 @@ class NumTracers(BaseExperiment, CosmologyMixin):
                     ].values[0],
                     device=self.device,
                 )
-                .expand_as(QSO_dist[..., 1])
+                .expand_as(QSO_dist[..., 0])
                 .unsqueeze(-1)
             )
 
@@ -907,7 +919,7 @@ class NumTracers(BaseExperiment, CosmologyMixin):
             obs_ratio[..., 2] = LRG_dist[..., 2] + ELG_dist[..., 0]
             obs_ratio[..., 3] = ELG_dist[..., 1]
 
-            QSOs = self.desi_tracers.loc[self.desi_tracers["class"] == "QSO"]["observed"]
+            QSOs = self._budget_tracers.loc[self._budget_tracers["class"] == "QSO"]["observed"]
             QSO_axis = _grid_axis(class_ratio, "QSO")
             QSO_dist = (QSO_axis * np.array((QSOs / QSOs.sum()).values)).squeeze()
             obs_ratio[..., 4] = QSO_dist[..., 0]
@@ -2299,7 +2311,8 @@ class NumTracers(BaseExperiment, CosmologyMixin):
 
         self.shapefit_bins = tracers_for("shapefit")
         tracers = self.desi_tracers.set_index("tracer")
-        class_observed = tracers.groupby("class")["observed"].sum()
+        # Split each class over the tracers in the design budget, as calc_passed does.
+        class_observed = self._budget_tracers.groupby("class")["observed"].sum()
         weights = torch.zeros(len(self.shapefit_bins), len(self.design_labels), dtype=torch.float64)
         for i, tracer_bin in enumerate(self.shapefit_bins):
             cfg = get_tracer_config(tracer_bin, analysis="shapefit", data_release=self.dataset)

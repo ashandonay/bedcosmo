@@ -47,26 +47,30 @@ from bedcosmo.artifacts import DESIGN_PLOT_FILENAME, write_design_dir
 LABELS = ["BGS", "LRG", "ELG", "QSO"]
 # Mirror NumTracers: DESI CSVs live under $HOME/data/desi/bao_<dataset>/
 _DATA_ROOT = os.path.join(os.environ.get("HOME", ""), "data", "desi")
-# Default per-class grid from design_args_dr1.yaml. The BGS, LRG and QSO upper bounds are
-# target availability: each class's summed `targets` in desi_tracers.csv over
-# NumTracers.nominal_total_obs, the bound NumTracers uses when `upper` is unset. ELG's 0.5 is
-# hand-set; its availability is ~1.17.
+# Default per-class grid from design_args_dr1.yaml. Design fractions divide the observed fibers
+# outside Lya QSO (NumTracers.nominal_total_obs), which keeps its own counts in every design.
+# The BGS, LRG and QSO upper bounds are target availability: each class's summed `targets` in
+# desi_tracers.csv over that budget, the bound NumTracers uses when `upper` is unset. ELG's
+# 0.575 is hand-set (its availability is ~1.34): the fiber count a 0.5 bound allowed when Lya
+# was counted in the budget.
 DEFAULT_STEP = [0.01, 0.02, 0.02, 0.01]
 DEFAULT_LOWER = [0.02, 0.1, 0.1, 0.1]
-DEFAULT_UPPER = [0.0585, 0.3820, 0.5, 0.3291]
+DEFAULT_UPPER = [0.0673, 0.4393, 0.575, 0.2070]
 TOL = 1e-9
 
 
 def nominal_vector(dataset: str = "dr1") -> np.ndarray:
-    """Per-class nominal design vector (sums to 1.0), reproducing ``NumTracers.__init__``."""
+    """Per-class nominal design vector (sums to 1.0), reproducing ``NumTracers.__init__``:
+    each class's observed share of the fibers outside Lya QSO."""
     import pandas as pd
 
     csv = os.path.join(_DATA_ROOT, f"bao_{dataset}", "desi_tracers.csv")
     if not os.path.exists(csv):
         raise FileNotFoundError(f"DESI tracer table not found: {csv}")
     df = pd.read_csv(csv)
-    v0 = df.groupby("class").sum(numeric_only=True)["observed"].reindex(LABELS).values
-    return np.asarray(v0, dtype=np.float64)
+    df = df.loc[df["tracer"] != "Lya QSO"]
+    observed = df.groupby("class").sum(numeric_only=True)["observed"]
+    return np.asarray((observed / observed.sum()).reindex(LABELS).values, dtype=np.float64)
 
 
 def scale_tag(s: float) -> str:
@@ -95,8 +99,8 @@ def budget_pool(
 
     Reproduces the grid ``NumTracers`` builds internally from ``step``/``lower``/``upper``
     plus the sum constraint, but materializes it so the pool can be inspected, plotted and
-    pinned to a file. Verified against the experiment's own grid: the defaults give 287
-    designs at sum == 1.0 and 2447 over [1.0, 1.2], matching ``design_args_dr1.yaml`` and
+    pinned to a file. Verified against the experiment's own grid: the defaults give 266
+    designs at sum == 1.0 and 2678 over [1.0, 1.2], matching ``design_args_dr1.yaml`` and
     ``design_args_dr1_budget.yaml`` respectively.
 
     ``include_nominal_scales`` force-adds the uniformly scaled nominal designs (which

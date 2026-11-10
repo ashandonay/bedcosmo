@@ -763,6 +763,10 @@ def init_experiment(
     if run_obj is not None and run_args is not None:
 
         cosmo_exp = run_args.get("cosmo_exp")
+        if cosmo_exp == "num_tracers":
+            # A run logged without lya_in_budget was trained with Lya QSO fibers inside the
+            # QSO class; load it that way so its designs mean what they meant.
+            run_args.setdefault("lya_in_budget", True)
 
         artifact_uri = run_obj.info.artifact_uri
         if artifact_uri.startswith("file://"):

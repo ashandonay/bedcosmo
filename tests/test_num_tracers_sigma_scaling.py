@@ -106,8 +106,8 @@ def test_factor_depends_only_on_passed_ratio(exp):
 def test_per_bin_shot_noise_for_nonuniform_design(exp):
     """For an arbitrary (non-uniform) design, factor_i == sqrt(N_nominal_i / N_i) per bin.
 
-    Lya QSO rows are excluded: with vary_lya_qso=False (the default) that error is held fixed at
-    its nominal value, so those rows are pinned to 1.0 -- covered by the test below.
+    Lya QSO rows are excluded: that error is held fixed at its nominal value, so those rows are
+    pinned to 1.0 -- covered by the test below.
     """
     import numpy as np
 
@@ -125,7 +125,7 @@ def test_per_bin_shot_noise_for_nonuniform_design(exp):
 
 
 def test_lya_qso_rows_are_design_independent(exp):
-    """With vary_lya_qso=False, Lya QSO sigma stays nominal (factor 1) at any design sum."""
+    """Lya QSO sigma stays nominal (factor 1) at any design sum."""
     import numpy as np
 
     if not exp._lya_qso_rows.size:
