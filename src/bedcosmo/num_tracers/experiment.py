@@ -14,7 +14,6 @@ from astropy import constants
 import torch
 from torch import trapezoid
 from bed.grid import GridStack
-from bed.grid import Grid
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
 import contextlib
@@ -190,6 +189,10 @@ class NumTracers(BaseExperiment, CosmologyMixin):
             )
         else:
             self.nominal_design = nominal_design
+        # calc_passed's map from the design to each desi_data row's passed fraction; a row's
+        # tracer may combine sub-tracers ("LRG3+ELG1").
+        self._passed_weights, self._passed_offset = self._passed_map(
+            [tracer.split("+") for tracer in self.desi_data["tracer"]])
 
         # Initialize emulator-based likelihood mode
         self.likelihood_mode = likelihood_mode
@@ -745,222 +748,64 @@ class NumTracers(BaseExperiment, CosmologyMixin):
             factor = torch.where(fixed, torch.ones_like(factor), factor)
         return factor
 
+    def _passed_map(self, bins):
+        """The affine map from a design to the passed fraction of each bin.
+
+        ``bins`` lists each bin's sub-tracers (``desi_tracers`` names). Returns ``(W, b)``,
+        float64 tensors of shape (n_bins, n_design_labels) and (n_bins,), such that
+
+            passed_ratio = class_ratio @ W.T + b,   passed N = passed_ratio * nominal_total_obs
+
+        A design fraction is shared among its class's tracers in the design budget in
+        proportion to their observed counts, and each tracer's share is scaled by its
+        redshift efficiency:
+
+            W[bin, class_t] += observed_t / observed_{class_t} * efficiency_t
+
+        with observed_{class} summed over the budget tracers of that class. A tracer outside
+        the budget (Lya QSO unless ``lya_in_budget``) keeps the dataset's count whatever the
+        design: b[bin] += observed_t * efficiency_t / nominal_total_obs.
+
+        BAO's desi_data rows and ShapeFit's bins both come from here, so both analyses
+        share one definition of the split.
+        """
+        tracers = self.desi_tracers.set_index("tracer")
+        budget = set(self._budget_tracers["tracer"])
+        class_observed = self._budget_tracers.groupby("class")["observed"].sum()
+        # desi_tracers' observed column is a fraction; desi_data carries the counts.
+        observed_count = self.desi_data.drop_duplicates("tracer").set_index("tracer")["observed"]
+        labels = [str(label) for label in self.design_labels]
+        W = torch.zeros(len(bins), len(labels), dtype=torch.float64)
+        b = torch.zeros(len(bins), dtype=torch.float64)
+        for i, components in enumerate(bins):
+            for tracer in components:
+                row = tracers.loc[tracer]
+                if tracer in budget:
+                    if row["class"] not in labels:
+                        raise ValueError(
+                            f"Tracer {tracer!r} is in class {row['class']!r}, which is not a "
+                            f"design label (design_labels={labels}).")
+                    W[i, labels.index(row["class"])] += (
+                        row["observed"] / class_observed[row["class"]] * row["efficiency"])
+                else:
+                    b[i] += observed_count[tracer] * row["efficiency"] / self.nominal_total_obs
+        return W.to(self.device), b.to(self.device)
+
     @profile_method
     def calc_passed(self, class_ratio):
-        label_to_index = {str(label): i for i, label in enumerate(self.design_labels)}
+        """Passed fraction of each desi_data row for designs ``class_ratio`` (..., n_labels).
 
-        def _label_index(label):
-            label_str = str(label)
-            if label_str not in label_to_index:
-                raise ValueError(
-                    f"Required design label '{label_str}' not found in design_labels={list(self.design_labels)}."
-                )
-            return label_to_index[label_str]
-
-        def _grid_axis(grid, label):
-            label_str = str(label)
-            if label_str not in grid.names:
-                raise ValueError(
-                    f"Could not find design axis '{label_str}'. "
-                    f"Available names={list(grid.names)}."
-                )
-            return np.asarray(getattr(grid, label_str), dtype=np.float64)
-
-        if type(class_ratio) == torch.Tensor:
-            assert class_ratio.shape[-1] == len(
-                self.design_labels
-            ), f"class_ratio should have {len(self.design_labels)} columns"
-            obs_ratio = torch.zeros(
-                (*class_ratio.shape[:-1], len(self.desi_data)),
-                device=self.device,
-            )
-            idx_BGS = _label_index("BGS")
-            idx_LRG = _label_index("LRG")
-            idx_ELG = _label_index("ELG")
-            idx_QSO = _label_index("QSO")
-
-            # multiply each class ratio by the observed fraction in each tracer bin
-            BGSs = self.desi_tracers.loc[self.desi_tracers["class"] == "BGS"]["observed"]
-            BGS_dist = class_ratio[..., idx_BGS].unsqueeze(-1) * torch.tensor(
-                (BGSs / BGSs.sum()).values, device=self.device
-            ).unsqueeze(0)
-            obs_ratio[..., np.where(self.desi_data["tracer"] == "BGS")[0]] = BGS_dist[
-                ..., 0
-            ].unsqueeze(-1)
-
-            LRGs = self.desi_tracers.loc[self.desi_tracers["class"] == "LRG"]["observed"]
-            LRG_dist = class_ratio[..., idx_LRG].unsqueeze(-1) * torch.tensor(
-                (LRGs / LRGs.sum()).values, device=self.device
-            ).unsqueeze(0)
-            obs_ratio[..., np.where(self.desi_data["tracer"] == "LRG1")[0]] = LRG_dist[
-                ..., 0
-            ].unsqueeze(-1)
-            obs_ratio[..., np.where(self.desi_data["tracer"] == "LRG2")[0]] = LRG_dist[
-                ..., 1
-            ].unsqueeze(-1)
-
-            ELGs = self.desi_tracers.loc[self.desi_tracers["class"] == "ELG"]["observed"]
-            ELG_dist = class_ratio[..., idx_ELG].unsqueeze(-1) * torch.tensor(
-                (ELGs / ELGs.sum()).values, device=self.device
-            ).unsqueeze(0)
-            # add the last value in LRG_dist to the first value in ELG_dist to get LRG3+ELG1
-            obs_ratio[..., np.where(self.desi_data["tracer"] == "LRG3+ELG1")[0]] = (
-                LRG_dist[..., 2] + ELG_dist[..., 0]
-            ).unsqueeze(-1)
-            obs_ratio[..., np.where(self.desi_data["tracer"] == "ELG2")[0]] = ELG_dist[
-                ..., 1
-            ].unsqueeze(-1)
-
-            QSOs = self._budget_tracers.loc[self._budget_tracers["class"] == "QSO"]["observed"]
-            QSO_dist = class_ratio[..., idx_QSO].unsqueeze(-1) * torch.tensor(
-                (QSOs / QSOs.sum()).values, device=self.device
-            ).unsqueeze(0)
-            obs_ratio[..., np.where(self.desi_data["tracer"] == "QSO")[0]] = QSO_dist[
-                ..., 0
-            ].unsqueeze(-1)
-            if self.lya_in_budget:
-                obs_ratio[..., self._lya_qso_rows] = QSO_dist[..., 1].unsqueeze(-1)
-            elif self._lya_qso_rows.size:
-                # Outside the budget: the dataset's own observed count, whatever the design.
-                lya_obs = float(self.desi_data["observed"].iloc[self._lya_qso_rows[0]])
-                obs_ratio[..., self._lya_qso_rows] = lya_obs / self.nominal_total_obs
-
-            efficiency = torch.zeros(
-                (*class_ratio.shape[:-1], len(self.desi_data)),
-                device=self.device,
-            )
-            efficiency[..., np.where(self.desi_data["tracer"] == "BGS")[0]] = (
-                torch.tensor(
-                    self.desi_tracers.loc[
-                        self.desi_tracers["tracer"] == "BGS", "efficiency"
-                    ].values[0],
-                    device=self.device,
-                )
-                .expand_as(BGS_dist[..., 0])
-                .unsqueeze(-1)
-            )
-            efficiency[..., np.where(self.desi_data["tracer"] == "LRG1")[0]] = (
-                torch.tensor(
-                    self.desi_tracers.loc[
-                        self.desi_tracers["tracer"] == "LRG1", "efficiency"
-                    ].values[0],
-                    device=self.device,
-                )
-                .expand_as(LRG_dist[..., 0])
-                .unsqueeze(-1)
-            )
-            efficiency[..., np.where(self.desi_data["tracer"] == "LRG2")[0]] = (
-                torch.tensor(
-                    self.desi_tracers.loc[
-                        self.desi_tracers["tracer"] == "LRG2", "efficiency"
-                    ].values[0],
-                    device=self.device,
-                )
-                .expand_as(LRG_dist[..., 1])
-                .unsqueeze(-1)
-            )
-            efficiency[..., np.where(self.desi_data["tracer"] == "LRG3+ELG1")[0]] = (
-                (LRG_dist[..., 2] / (LRG_dist[..., 2] + ELG_dist[..., 0]))
-                * self.desi_tracers.loc[self.desi_tracers["tracer"] == "LRG3", "efficiency"].values[
-                    0
-                ]
-                + (ELG_dist[..., 0] / (LRG_dist[..., 2] + ELG_dist[..., 0]))
-                * self.desi_tracers.loc[self.desi_tracers["tracer"] == "ELG1", "efficiency"].values[
-                    0
-                ]
-            ).unsqueeze(-1)
-            efficiency[..., np.where(self.desi_data["tracer"] == "ELG2")[0]] = (
-                torch.tensor(
-                    self.desi_tracers.loc[
-                        self.desi_tracers["tracer"] == "ELG2", "efficiency"
-                    ].values[0],
-                    device=self.device,
-                )
-                .expand_as(ELG_dist[..., 1])
-                .unsqueeze(-1)
-            )
-            efficiency[..., np.where(self.desi_data["tracer"] == "QSO")[0]] = (
-                torch.tensor(
-                    self.desi_tracers.loc[
-                        self.desi_tracers["tracer"] == "QSO", "efficiency"
-                    ].values[0],
-                    device=self.device,
-                )
-                .expand_as(QSO_dist[..., 0])
-                .unsqueeze(-1)
-            )
-            efficiency[..., np.where(self.desi_data["tracer"] == "Lya QSO")[0]] = (
-                torch.tensor(
-                    self.desi_tracers.loc[
-                        self.desi_tracers["tracer"] == "Lya QSO", "efficiency"
-                    ].values[0],
-                    device=self.device,
-                )
-                .expand_as(QSO_dist[..., 0])
-                .unsqueeze(-1)
-            )
-
-            # scale obs_ratio by efficiency to get the number of passed objects
-            passed_ratio = obs_ratio * efficiency
-
-            return passed_ratio
-        elif type(class_ratio) == Grid:
-            obs_ratio = np.zeros((5,) + len(class_ratio.shape) * (1,))
-
-            LRGs = self.desi_tracers.loc[self.desi_tracers["class"] == "LRG"]["observed"]
-            LRG_axis = _grid_axis(class_ratio, "LRG")
-            LRG_dist = (LRG_axis * np.array((LRGs / LRGs.sum()).values)).squeeze()
-
-            obs_ratio[0:2, ...] = LRG_dist[0:2]
-
-            ELGs = self.desi_tracers.loc[self.desi_tracers["class"] == "ELG"]["observed"]
-            ELG_axis = _grid_axis(class_ratio, "ELG")
-            ELG_dist = (ELG_axis * np.array((ELGs / ELGs.sum()).values)).squeeze()
-            obs_ratio[..., 2] = LRG_dist[..., 2] + ELG_dist[..., 0]
-            obs_ratio[..., 3] = ELG_dist[..., 1]
-
-            QSOs = self._budget_tracers.loc[self._budget_tracers["class"] == "QSO"]["observed"]
-            QSO_axis = _grid_axis(class_ratio, "QSO")
-            QSO_dist = (QSO_axis * np.array((QSOs / QSOs.sum()).values)).squeeze()
-            obs_ratio[..., 4] = QSO_dist[..., 0]
-
-            efficiency = np.stack(
-                [
-                    np.array(
-                        self.desi_tracers.loc[
-                            self.desi_tracers["tracer"] == "LRG1", "efficiency"
-                        ].values[0]
-                    ),
-                    np.array(
-                        self.desi_tracers.loc[
-                            self.desi_tracers["tracer"] == "LRG2", "efficiency"
-                        ].values[0]
-                    ),
-                    (LRG_dist[..., 2] / (LRG_dist[..., 2] + ELG_dist[..., 0]))
-                    * self.desi_tracers.loc[
-                        self.desi_tracers["tracer"] == "LRG3", "efficiency"
-                    ].values[0]
-                    + (ELG_dist[..., 0] / (LRG_dist[..., 2] + ELG_dist[..., 0]))
-                    * self.desi_tracers.loc[
-                        self.desi_tracers["tracer"] == "ELG1", "efficiency"
-                    ].values[0],
-                    np.array(
-                        self.desi_tracers.loc[
-                            self.desi_tracers["tracer"] == "ELG2", "efficiency"
-                        ].values[0]
-                    ),
-                    np.array(
-                        self.desi_tracers.loc[
-                            self.desi_tracers["tracer"] == "Lya QSO", "efficiency"
-                        ].values[0]
-                    ),
-                ],
-                axis=-1,
-            )
-
-            passed_ratio = obs_ratio * efficiency
-
-            return passed_ratio
+        Returns (..., n_desi_rows) in the default dtype; times ``nominal_total_obs`` it is the
+        passed count. Affine in the design (see ``_passed_map``), so autograd-safe.
+        """
+        if not isinstance(class_ratio, torch.Tensor):
+            raise TypeError(f"class_ratio must be a torch.Tensor; got {type(class_ratio).__name__}.")
+        if class_ratio.shape[-1] != len(self.design_labels):
+            raise ValueError(
+                f"class_ratio should have {len(self.design_labels)} columns; "
+                f"got shape {tuple(class_ratio.shape)}.")
+        passed = class_ratio.to(torch.float64) @ self._passed_weights.T + self._passed_offset
+        return passed.to(torch.get_default_dtype())
 
     # Note: _E_of_z, D_H_func, D_M_func, D_V_func are inherited from CosmologyMixin
 
@@ -2299,28 +2144,19 @@ class NumTracers(BaseExperiment, CosmologyMixin):
         Bins are tracer-forecast-emulator's ``tracers_for("shapefit")``: the 0.8-1.1 bin is
         LRG3 alone, not BAO's LRG3+ELG1 (ELG1 is excluded from full shape, DESI 2024 V
         Sec 2). A bin's passed count sums its ``components`` (default: the bin itself)
-        in desi_tracers.csv, as ``util.ntracers`` does:
-
-            N_b = sum_c design[class_c] * observed_c / observed_{class_c} * efficiency_c
-                  * nominal_total_obs
-
-        which is ``calc_passed``'s split and efficiency per sub-sample, stored as one
-        (n_bins, n_design_labels) matrix so ``_shapefit_n_tracers`` is a matmul.
+        in desi_tracers.csv, as ``util.ntracers`` does, through ``_passed_map``: the same
+        split and efficiencies ``calc_passed`` uses, scaled to counts so
+        ``_shapefit_n_tracers`` is one matmul.
         """
         from tracer_forecast_emulator.util import get_tracer_config, tracers_for
 
         self.shapefit_bins = tracers_for("shapefit")
-        tracers = self.desi_tracers.set_index("tracer")
-        # Split each class over the tracers in the design budget, as calc_passed does.
-        class_observed = self._budget_tracers.groupby("class")["observed"].sum()
-        weights = torch.zeros(len(self.shapefit_bins), len(self.design_labels), dtype=torch.float64)
-        for i, tracer_bin in enumerate(self.shapefit_bins):
-            cfg = get_tracer_config(tracer_bin, analysis="shapefit", data_release=self.dataset)
-            for comp in cfg.get("components", [tracer_bin]):
-                row = tracers.loc[comp]
-                j = list(self.design_labels).index(row["class"])
-                weights[i, j] += row["observed"] / class_observed[row["class"]] * row["efficiency"]
-        self._shapefit_n_weights = (weights * self.nominal_total_obs).to(self.device)
+        weights, offset = self._passed_map([
+            get_tracer_config(tracer_bin, analysis="shapefit", data_release=self.dataset)
+            .get("components", [tracer_bin])
+            for tracer_bin in self.shapefit_bins])
+        self._shapefit_n_weights = weights * self.nominal_total_obs
+        self._shapefit_n_offset = offset * self.nominal_total_obs
 
         self._shapefit_emulators = {}
         for quantity in self._SHAPEFIT_QUANTITIES:
@@ -2412,7 +2248,7 @@ class NumTracers(BaseExperiment, CosmologyMixin):
 
     def _shapefit_n_tracers(self, tracer_ratio):
         """Passed N_tracers per shapefit bin, shape (..., n_bins) in ``shapefit_bins`` order."""
-        return tracer_ratio.to(torch.float64) @ self._shapefit_n_weights.T
+        return tracer_ratio.to(torch.float64) @ self._shapefit_n_weights.T + self._shapefit_n_offset
 
     def _shapefit_parameters(self, values):
         """``sample_parameters``-shaped (1,) tensors for a {name: value} cosmology."""
