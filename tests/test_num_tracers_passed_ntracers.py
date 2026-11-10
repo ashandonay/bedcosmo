@@ -203,3 +203,24 @@ def test_runs_logged_without_the_option_load_with_lya_in_budget(tmp_path):
     exp = init_experiment(run_obj=run_obj, run_args=dict(run_args, lya_in_budget=False),
                           design_args=load(DESIGN_ARGS["dr1"]), prior_args=load("prior_args_hrdrag.yaml"))
     assert exp.lya_in_budget is False
+
+
+@pytest.mark.parametrize("ds", DATASETS)
+def test_passed_map_is_additive_over_sub_tracers(ds):
+    """A combined bin is the sum of its sub-tracers' maps, so BAO's LRG3+ELG1 row and
+    ShapeFit's LRG3-only bin come from one split."""
+    if not _has_dataset(ds):
+        pytest.skip(f"desi data for {ds} not available")
+    exp = _make_exp(ds)
+    W, b = exp._passed_map([["LRG3", "ELG1"], ["LRG3"], ["ELG1"]])
+    torch.testing.assert_close(W[0], W[1] + W[2])
+    torch.testing.assert_close(b[0], b[1] + b[2])
+    row = list(exp.desi_data["tracer"]).index("LRG3+ELG1")
+    torch.testing.assert_close(exp._passed_weights[row], W[0].to(exp._passed_weights))
+
+
+def test_calc_passed_rejects_non_tensor():
+    if not _has_dataset("dr1"):
+        pytest.skip("desi data for dr1 not available")
+    with pytest.raises(TypeError):
+        _make_exp("dr1").calc_passed([0.1, 0.3, 0.4, 0.2])
