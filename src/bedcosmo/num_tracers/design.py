@@ -239,7 +239,8 @@ def plot_designs(
     color so they stand apart from the grid.
 
     Handles a single-row ``designs`` (one plot per scaled design), in which case the
-    budget colorbar is dropped and each class is annotated with its ratio to nominal.
+    budget colorbar is dropped and each class is annotated with its fraction and its
+    ratio to nominal.
     """
     import matplotlib
 
@@ -249,16 +250,16 @@ def plot_designs(
     n_designs, n_dims = designs.shape
     x = np.arange(n_dims)
 
-    # Normalize per class by nominal, so y reads directly as "x nominal" and all four
-    # classes sit on comparable footing. A uniformly scaled design is then a flat line
-    # at its budget -- the shape shows how a design departs from the nominal split.
+    # y is each class's fraction of the fiber budget, so designs compare in the units
+    # the budget is spent in. A ratio to nominal would inflate the classes with a small
+    # nominal share (BGS's 0.04 reaches 10x at 0.4 of the budget). The nominal split is
+    # drawn as its own line.
     v0 = None
     try:
         v0 = nominal_vector()
     except FileNotFoundError:
         pass
-    ref = v0 if v0 is not None else designs.mean(axis=0)
-    norm = designs / ref[None, :]
+    frac = designs
 
     fig, ax = plt.subplots(figsize=(10, 6))
 
@@ -286,25 +287,25 @@ def plot_designs(
         pinned = np.zeros(n_designs, dtype=bool)
     for i in np.flatnonzero(~pinned):
         ax.plot(
-            x, norm[i], color=colors[i], alpha=alpha, linewidth=lw,
+            x, frac[i], color=colors[i], alpha=alpha, linewidth=lw,
             marker="o", markersize=msize, zorder=1,
         )
     for k, i in enumerate(np.flatnonzero(pinned)):
         ax.plot(
-            x, norm[i], color="tab:red", alpha=0.95, linewidth=1.8,
+            x, frac[i], color="tab:red", alpha=0.95, linewidth=1.8,
             marker="D", markersize=5, zorder=2,
             label=f"Pinned designs ({int(pinned.sum())})" if k == 0 else None,
         )
 
     if v0 is not None:
-        ax.axhline(
-            1.0, color="black", linewidth=2.0, linestyle="--",
-            label="Nominal split (1.0x)", zorder=3,
+        ax.plot(
+            x, v0, color="black", linewidth=2.0, linestyle="--", marker="s",
+            markersize=5, label="Nominal split", zorder=3,
         )
 
     ax.set_xticks(x)
     ax.set_xticklabels(LABELS, fontsize=13)
-    ax.set_ylabel("class fraction / nominal", fontsize=12)
+    ax.set_ylabel("fraction of fiber budget", fontsize=12)
     for xi in range(n_dims):
         ax.axvline(xi, color="0.85", linewidth=0.8, zorder=0)
 
@@ -324,12 +325,15 @@ def plot_designs(
     if n_designs == 1:
         # Single design: annotate each class's ratio, and pad the y-range so a flat line
         # is not drawn on top of the axis.
-        lo, hi = min(1.0, norm.min()), max(1.0, norm.max())
-        pad = max(0.05, 0.35 * (hi - lo))
-        ax.set_ylim(lo - pad, hi + pad)
+        lo, hi = frac.min(), frac.max()
+        if v0 is not None:
+            lo, hi = min(lo, v0.min()), max(hi, v0.max())
+        pad = max(0.02, 0.15 * (hi - lo))
+        ax.set_ylim(max(0.0, lo - pad), hi + pad)
         for xi in range(n_dims):
+            ratio = f" ({frac[0, xi] / v0[xi]:.2f}x)" if v0 is not None else ""
             ax.annotate(
-                f"{norm[0, xi]:.3f}x", (xi, norm[0, xi]), textcoords="offset points",
+                f"{frac[0, xi]:.3f}{ratio}", (xi, frac[0, xi]), textcoords="offset points",
                 xytext=(0, 9), ha="center", fontsize=9, color="0.25",
             )
 
