@@ -1,3 +1,4 @@
+import math
 import os
 import sys
 import yaml
@@ -1508,19 +1509,28 @@ class NumTracers(BaseExperiment, CosmologyMixin):
         model = load_model(ckpt).to(self.device)
         model.requires_grad_(False)
 
-        # Recover the trained N_tracers box from the input standardization
-        # stats: N was drawn uniform[a, b], so mu = (a+b)/2 and
-        # sigma = (b-a)/sqrt(12)  =>  [a, b] = mu -+ sqrt(3)*sigma. Used only
-        # to warn (not clamp) on gross N-extrapolation, which signals a
-        # wiring bug rather than a valid design excursion.
+        # The trained N_tracers box. Checkpoints that record it (x_train_min /
+        # x_train_max) give it exactly, and N below its floor is clamped to the
+        # floor in _emulator_predict: σ there is the floor's σ, which carries
+        # ~1e-4 of DR1's information at a 0.01x floor, so the clamp stands in for
+        # "no information" without extrapolating the net. Older checkpoints only
+        # have the standardization stats, from which the box is estimated for a
+        # uniform draw (mu -+ sqrt(3)*sigma, in log space for a log input); they
+        # are never clamped and only warn on gross extrapolation.
         pnames = list(ckpt["param_names"])
-        n_train_lo = n_train_hi = None
-        if "N_tracers" in pnames:
-            i_n = pnames.index("N_tracers")
-            xmu = ckpt["x_mu"].reshape(-1)[i_n].item()
-            xsg = ckpt["x_sigma"].reshape(-1)[i_n].item()
-            half = (3.0 ** 0.5) * xsg
+        log_inputs = list(ckpt.get("log_inputs") or [])
+        n_index = pnames.index("N_tracers") if "N_tracers" in pnames else None
+        n_train_lo = n_train_hi = n_floor = None
+        if n_index is not None and ckpt.get("x_train_min") is not None:
+            n_train_lo = float(ckpt["x_train_min"].reshape(-1)[n_index])
+            n_train_hi = float(ckpt["x_train_max"].reshape(-1)[n_index])
+            n_floor = n_train_lo
+        elif n_index is not None:
+            xmu = ckpt["x_mu"].reshape(-1)[n_index].item()
+            half = (3.0 ** 0.5) * ckpt["x_sigma"].reshape(-1)[n_index].item()
             n_train_lo, n_train_hi = xmu - half, xmu + half
+            if "N_tracers" in log_inputs:
+                n_train_lo, n_train_hi = math.exp(n_train_lo), math.exp(n_train_hi)
 
         # scale_data.py recipe recorded by train.py. Empty = unscaled (legacy).
         # Must be passed to decode_and_unscale or σ comes back still multiplied
@@ -1531,6 +1541,9 @@ class NumTracers(BaseExperiment, CosmologyMixin):
             "model": model,
             "n_train_lo": n_train_lo,
             "n_train_hi": n_train_hi,
+            "n_index": n_index,
+            "n_floor": n_floor,
+            "log_inputs": log_inputs,
             "param_names": list(ckpt["param_names"]),
             "target_names": list(ckpt["target_names"]),
             "x_mu": ckpt["x_mu"].to(self.device),
@@ -1572,6 +1585,10 @@ class NumTracers(BaseExperiment, CosmologyMixin):
         for tb, emu in emulators.items():
             n_lo, n_hi = emu.get("n_train_lo"), emu.get("n_train_hi")
             nbox = (f"N[{n_lo:.3g}, {n_hi:.3g}]" if n_lo is not None else "N box unknown")
+            if "N_tracers" in emu.get("log_inputs", []):
+                nbox += " log-N"
+            if emu.get("n_floor") is not None:
+                nbox += " (clamped below)"
             print(f"  {tb:<{w}}  {emu['arch']} ({emu['n_params']:,} params)  "
                   f"{'symlog' if emu['log_normalize'] else 'raw'}  {nbox}")
             print(f"  {'':<{w}}  {emu['ckpt_path']}")
@@ -1596,17 +1613,22 @@ class NumTracers(BaseExperiment, CosmologyMixin):
             Tensor of shape (..., n_targets) in physical units (σ ≥ sigma_floor;
             ρ from tanh decode). Target order matches the checkpoint's
             ``target_names``. Checkpoints trained on scale_data.py-rewritten
-            labels are unscaled here via ``decode_and_unscale``.
+            labels are unscaled here via ``decode_and_unscale``. N_tracers below
+            a recorded training floor is evaluated at the floor (see
+            ``_load_emulator``), so a class with no fibers is finite under a
+            log-N input.
         """
-        from tracer_forecast_emulator.util import decode_and_unscale
+        from tracer_forecast_emulator.util import decode_and_unscale, standardize_emulator_inputs
 
         model_dtype = next(emu["model"].parameters()).dtype
         x = emulator_input.to(model_dtype)
-        x_mu = emu["x_mu"].to(model_dtype)
-        x_sigma = emu["x_sigma"].to(model_dtype)
+        if emu.get("n_floor") is not None:
+            i = emu["n_index"]
+            x = torch.cat([x[..., :i], x[..., i:i + 1].clamp(min=emu["n_floor"]),
+                           x[..., i + 1:]], dim=-1)
         y_mu = emu["y_mu"].to(model_dtype)
         y_sigma = emu["y_sigma"].to(model_dtype)
-        x_norm = (x - x_mu) / x_sigma
+        x_norm = standardize_emulator_inputs(x, emu)
         y_norm = emu["model"](x_norm)
         # Numerical guard on non-detection / out-of-domain extrapolation: cap
         # sigma to a finite ceiling (inf/nan -> ceiling; encodes "no info") and
@@ -1630,11 +1652,10 @@ class NumTracers(BaseExperiment, CosmologyMixin):
         )
 
     # How far outside the trained N_tracers box counts as "gross" extrapolation
-    # worth warning about. A valid design only reaches ~0.70-1.05x the trained
-    # box (verified for dr1), where the emulator stays accurate (~0.6%); values
-    # far beyond this (e.g. raw counts, a bad hrdrag_multiplier) indicate a
-    # wiring bug, so we warn -- but never clamp, to avoid silently biasing the
-    # small, benign excursions the design legitimately makes.
+    # worth warning about. Values far beyond the box (e.g. raw counts, a bad
+    # hrdrag_multiplier) indicate a wiring bug, so we warn. Only a checkpoint
+    # that records its training box is clamped, and only at the floor (see
+    # _load_emulator); one without it keeps its small excursions unbiased.
     _N_EXTRAP_LO = 0.5   # warn below 0.5 x trained low
     _N_EXTRAP_HI = 2.0   # warn above 2.0 x trained high
 
@@ -1648,7 +1669,9 @@ class NumTracers(BaseExperiment, CosmologyMixin):
         with torch.no_grad():
             nmin = float(torch.as_tensor(n_values).min())
             nmax = float(torch.as_tensor(n_values).max())
-        if nmin < self._N_EXTRAP_LO * lo or nmax > self._N_EXTRAP_HI * hi:
+        # Below a recorded floor, N is clamped, which is the defined behavior.
+        too_low = emu.get("n_floor") is None and nmin < self._N_EXTRAP_LO * lo
+        if too_low or nmax > self._N_EXTRAP_HI * hi:
             self._n_extrap_warned.add(emu["ckpt_path"])
             import warnings
             warnings.warn(
