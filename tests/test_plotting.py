@@ -3,6 +3,7 @@
 import os
 import re
 import json
+import yaml
 import pytest
 from unittest.mock import Mock, patch, MagicMock
 from datetime import datetime
@@ -1999,6 +2000,134 @@ class TestCompareEigCorrelation:
         assert stats["per_dim"][0]["label"] == "u"
         assert stats["per_dim"][0]["rho"] > stats["per_dim"][1]["rho"]
         assert fig is not None and ax is not None
+
+
+class TestCompareEigByDesignDim:
+    """ComparisonPlotter.compare_eig_by_design_dim: runs on different design pools."""
+
+    @pytest.fixture
+    def mock_scratch_env(self, monkeypatch):
+        monkeypatch.setenv("SCRATCH", "/mock/scratch")
+
+    def _run(self, tmp_path, name, designs, eigs, nominal_eig, labels=("A", "B"),
+             nominal_design=(0.5, 0.5)):
+        artifacts = tmp_path / name / "artifacts"
+        artifacts.mkdir(parents=True)
+        data = _make_eig_data(designs, variable_eigs=eigs, nominal_eig=nominal_eig)
+        if nominal_design is not None:
+            data["nominal_design"] = list(nominal_design)
+        path = artifacts / "eig_data_20260101_1200.json"
+        path.write_text(json.dumps(data))
+        (artifacts / "design_args.yaml").write_text(yaml.safe_dump({"labels": list(labels)}))
+        return str(path)
+
+    def _plot(self, tmp_path, runs, **kwargs):
+        plotter = ComparisonPlotter(cosmo_exp="test_exp", run_ids=["aaaaaaaa", "bbbbbbbb"])
+        kwargs.setdefault("show_target_limits", False)
+        with patch.object(plotter, "_get_run_data_list") as mock_runs:
+            mock_runs.return_value = ([], "exp_1", "test_exp")
+            return plotter.compare_eig_by_design_dim(
+                runs=runs, save_dir=str(tmp_path / "plots"), dpi=60, **kwargs)
+
+    @staticmethod
+    def _xs(ax):
+        """x values of each errorbar series on an axis, in plotting order."""
+        return [line.get_xdata().tolist() for line in ax.lines
+                if line.get_marker() == "o"]
+
+    def test_runs_on_different_pools(self, mock_scratch_env, tmp_path):
+        """Pools need not match; each run's best is reported relative to its own nominal."""
+        old = self._run(tmp_path, "old", [[0.4, 0.6], [0.5, 0.5], [0.6, 0.4]],
+                        [1.0, 2.0, 2.2], nominal_eig=2.0)
+        new = self._run(tmp_path, "new", [[0.6, 0.4], [0.8, 0.2]], [4.4, 4.8], nominal_eig=4.0)
+        fig, axs, best = self._plot(tmp_path, [
+            {"eig_kind": "variable", "eig_data_path": old, "label": "old"},
+            {"eig_kind": "variable", "eig_data_path": new, "label": "new"},
+        ])
+        assert [b["label"] for b in best] == ["old", "new"]
+        assert best[0]["design"] == [0.6, 0.4] and best[0]["value"] == pytest.approx(0.2)
+        assert best[1]["design"] == [0.8, 0.2] and best[1]["value"] == pytest.approx(0.8)
+        assert [ax.get_title() for ax in axs.flat] == ["A", "B"]
+        assert fig is not None
+
+    def test_relative_x_divides_by_each_runs_nominal(self, mock_scratch_env, tmp_path):
+        """x='relative' uses each run's own nominal_design, so different budgets line up."""
+        a = self._run(tmp_path, "a", [[0.4, 0.6]], [1.0], nominal_eig=1.0,
+                      nominal_design=(0.2, 0.8))
+        b = self._run(tmp_path, "b", [[0.4, 0.6]], [1.0], nominal_eig=1.0,
+                      nominal_design=(0.4, 0.6))
+        runs = [{"eig_kind": "variable", "eig_data_path": a},
+                {"eig_kind": "variable", "eig_data_path": b}]
+        _, axs, _ = self._plot(tmp_path, runs)
+        assert self._xs(axs.flat[0]) == [pytest.approx([2.0]), pytest.approx([1.0])]
+        assert self._xs(axs.flat[1]) == [pytest.approx([0.75]), pytest.approx([1.0])]
+        _, axs, _ = self._plot(tmp_path, runs, x="fraction")
+        assert self._xs(axs.flat[0]) == [pytest.approx([0.4]), pytest.approx([0.4])]
+
+    def test_relative_x_needs_nominal_design(self, mock_scratch_env, tmp_path):
+        path = self._run(tmp_path, "run", [[0.4, 0.6]], [1.0], nominal_eig=1.0,
+                         nominal_design=None)
+        with pytest.raises(ValueError, match="x='fraction'"):
+            self._plot(tmp_path, [{"eig_kind": "variable", "eig_data_path": path}])
+
+    def test_y_scales(self, mock_scratch_env, tmp_path):
+        path = self._run(tmp_path, "run", [[0.4, 0.6], [0.6, 0.4]], [1.0, 3.0], nominal_eig=2.0)
+        runs = [{"eig_kind": "variable", "eig_data_path": path}]
+        assert self._plot(tmp_path, runs)[2][0]["value"] == pytest.approx(1.0)
+        assert self._plot(tmp_path, runs, y="percent")[2][0]["value"] == pytest.approx(50.0)
+        assert self._plot(tmp_path, runs, y="raw")[2][0]["value"] == pytest.approx(3.0)
+        with pytest.raises(ValueError, match="y must be"):
+            self._plot(tmp_path, runs, y="bits")
+
+    def test_raw_eig_without_nominal(self, mock_scratch_env, tmp_path):
+        path = self._run(tmp_path, "run", [[0.4, 0.6], [0.6, 0.4]], [1.0, 3.0], nominal_eig=None)
+        with pytest.raises(ValueError, match="y='raw'"):
+            self._plot(tmp_path, [{"eig_kind": "variable", "eig_data_path": path}])
+        _, _, best = self._plot(tmp_path, [{"eig_kind": "variable", "eig_data_path": path}],
+                                y="raw")
+        assert best[0]["value"] == pytest.approx(3.0)
+
+    def test_target_limits(self, mock_scratch_env, tmp_path, monkeypatch):
+        """Per class: summed targets over summed comp * targets; non-classes get none."""
+        import bedcosmo.plotting as plotting_module
+
+        data_dir = tmp_path / "home" / "data" / "desi" / "bao_dr1"
+        data_dir.mkdir(parents=True)
+        (data_dir / "desi_tracers.csv").write_text(
+            "tracer,class,comp,targets\n"
+            "A1,A,0.5,100\n"
+            "A2,A,0.25,100\n"
+            "B,B,0.8,50\n")
+        monkeypatch.setattr(plotting_module, "home_dir", str(tmp_path / "home"))
+        path = self._run(tmp_path, "run", [[0.4, 0.6]], [1.0], nominal_eig=1.0,
+                         labels=("A", "C"))
+        runs = [{"eig_kind": "variable", "eig_data_path": path}]
+        limits = ComparisonPlotter._target_limits(["A", "B", "C"], [], dataset="dr1")
+        assert limits[:2] == pytest.approx([200 / 75, 1 / 0.8]) and np.isnan(limits[2])
+
+        def dashed(ax):
+            return [line.get_xdata()[0] for line in ax.lines if line.get_linestyle() == "--"]
+
+        _, axs, _ = self._plot(tmp_path, runs, show_target_limits=True, dataset="dr1")
+        assert dashed(axs.flat[0]) == [pytest.approx(200 / 75)] and dashed(axs.flat[1]) == []
+        # In stored fractions the limit sits at ratio x nominal fraction.
+        _, axs, _ = self._plot(tmp_path, runs, show_target_limits=True, dataset="dr1",
+                               x="fraction")
+        assert dashed(axs.flat[0]) == [pytest.approx(0.5 * 200 / 75)]
+        # A dataset without a table is skipped with a warning, not an error.
+        with pytest.warns(UserWarning, match="not found"):
+            _, axs, _ = self._plot(tmp_path, runs, show_target_limits=True, dataset="dr9")
+        assert dashed(axs.flat[0]) == []
+
+    def test_design_dimensions_must_match(self, mock_scratch_env, tmp_path):
+        a = self._run(tmp_path, "a", [[0.4, 0.6], [0.6, 0.4]], [1.0, 2.0], nominal_eig=1.0)
+        b_dir = tmp_path / "b" / "artifacts"
+        b_dir.mkdir(parents=True)
+        b = b_dir / "eig_data_20260101_1200.json"
+        b.write_text(json.dumps(_make_eig_data([[0.2, 0.3, 0.5]], variable_eigs=[1.0], nominal_eig=1.0)))
+        with pytest.raises(ValueError, match="different design dimensions"):
+            self._plot(tmp_path, [{"eig_kind": "variable", "eig_data_path": a},
+                                  {"eig_kind": "variable", "eig_data_path": str(b)}])
 
 
 class TestCompareTraining:
