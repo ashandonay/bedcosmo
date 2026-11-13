@@ -5036,7 +5036,226 @@ class ComparisonPlotter(BasePlotter):
             "label_y": axis_y["label"],
         }
         return fig, ax, stats
-    
+
+    def compare_eig_by_design_dim(
+        self,
+        runs=None,
+        x="relative",
+        y="difference",
+        design_labels=None,
+        colors=None,
+        show_errorbars=True,
+        show_nominal=True,
+        show_target_limits=True,
+        dataset=None,
+        ncols=4,
+        figsize=None,
+        title=None,
+        filename=None,
+        save_dir=None,
+        dpi=400,
+    ):
+        """Per-design EIG against each design dimension, one panel per dimension.
+
+        Unlike :meth:`compare_eig_correlation`, the runs need not share a design pool:
+        each run's designs are scattered at their own coordinates, so pools of different
+        extent show where each one sits along every dimension and where its best design
+        is (★).
+
+        Args:
+            runs (list, optional): Axis dicts as in :meth:`compare_eig_correlation`
+                (``eig_kind``, ``subset``, ``run_id``, ``eig_data_path``, ``eval_step``,
+                ``label``). Default: the joint EIG of every run in ``run_ids``.
+            x (str): ``"relative"`` plots each design dimension divided by the run's own
+                ``nominal_design`` (for num_tracers, fibers relative to the nominal
+                survey), which stays comparable across runs whose fractions divide
+                different budgets. ``"fraction"`` plots the design values as stored.
+            y (str): ``"difference"`` plots ``EIG - EIG_nominal`` in bits, ``"percent"``
+                plots ``100 * (EIG - EIG_nominal) / EIG_nominal``, both against each run's
+                own nominal EIG; ``"raw"`` plots EIG.
+            design_labels (list, optional): One name per design dimension, used as the
+                panel titles. Default: resolved from the runs (eig_data metadata, then
+                ``design_args.yaml`` ``labels``).
+            show_nominal (bool): Dotted line at the nominal design (1 when
+                ``x="relative"``, else the first run's ``nominal_design``).
+            show_target_limits (bool): Dashed line where every target of a class is
+                observed: per class, summed ``targets`` over summed ``comp * targets`` in the
+                dataset's ``desi_tracers.csv``. Panels whose label is not a class there get
+                none. Skipped with a warning when the dataset's table can't be found.
+            dataset (str, optional): The DESI dataset for ``show_target_limits``. Default:
+                the first run's ``dataset`` parameter.
+
+        Returns:
+            tuple: ``(fig, axes, best)``; ``best`` has one dict per run with ``label``,
+            ``design`` (as stored) and ``value`` (on the plotted y scale) of its
+            highest-EIG design.
+        """
+        if x not in ("relative", "fraction"):
+            raise ValueError(f"x must be 'relative' or 'fraction'; got {x!r}")
+        if y not in ("difference", "percent", "raw"):
+            raise ValueError(f"y must be 'difference', 'percent' or 'raw'; got {y!r}")
+        run_ids = self.run_ids or []
+        if runs is None:
+            if not run_ids:
+                raise ValueError("runs is required unless the plotter has run_ids")
+            runs = [{**self._default_eig_axis_spec(), "run_id": rid} for rid in run_ids]
+        elif isinstance(runs, dict):
+            runs = [runs]
+        axes_data = [self._resolve_eig_axis(spec, axis_name=f"runs[{k}]")
+                     for k, spec in enumerate(runs)]
+        n_dims = {a["designs"].shape[1] for a in axes_data}
+        if len(n_dims) != 1:
+            raise ValueError(f"runs have different design dimensions: {sorted(n_dims)}")
+        n_dim = n_dims.pop()
+        if colors is not None and len(colors) != len(axes_data):
+            raise ValueError(f"colors has {len(colors)} entries for {len(axes_data)} runs")
+        labels = self._resolve_design_labels(
+            n_dim, design_labels,
+            metadata_label_sources=[a["design_labels"] for a in axes_data],
+            artifacts_dirs=[a["artifacts_dir"] for a in axes_data],
+        )
+
+        def nominal_design_of(axis):
+            if axis["eig_data_path"] is None:
+                return None
+            with open(axis["eig_data_path"], "r") as f:
+                design = json.load(f).get("nominal_design")
+            if design is None or len(design) != n_dim:
+                return None
+            return np.asarray(design, dtype=float)
+
+        def x_values(axis):
+            if x == "fraction":
+                return axis["designs"]
+            nominal = nominal_design_of(axis)
+            if nominal is None or np.any(nominal <= 0):
+                raise ValueError(
+                    f"{axis['label']}: x='relative' needs a positive nominal_design in its "
+                    f"eig_data (got {None if nominal is None else nominal.tolist()}); pass "
+                    "x='fraction' to plot the stored design values")
+            return axis["designs"] / nominal
+
+        def y_values(axis):
+            if y == "raw":
+                return axis["eigs"], axis["eigs_std"]
+            nominal = axis["nominal_eig"]
+            if nominal is None or (y == "percent" and nominal == 0):
+                raise ValueError(
+                    f"{axis['label']}: y={y!r} needs a nominal EIG in its eig_data (got "
+                    f"{nominal!r}); pass y='raw' to plot EIG itself")
+            if y == "difference":
+                return axis["eigs"] - nominal, axis["eigs_std"]
+            return 100.0 * (axis["eigs"] - nominal) / nominal, 100.0 * axis["eigs_std"] / abs(nominal)
+
+        first_nominal = next(
+            (d for d in (nominal_design_of(a) for a in axes_data) if d is not None), None)
+        limits = self._target_limits(labels, axes_data, dataset) if show_target_limits else None
+        if limits is not None and x == "fraction":
+            limits = None if first_nominal is None else limits * first_nominal
+
+        ncols = min(ncols, n_dim)
+        nrows = int(np.ceil(n_dim / ncols))
+        if figsize is None:
+            figsize = (4.2 * ncols, 3.6 * nrows + 0.6)
+        fig, axs = plt.subplots(nrows, ncols, figsize=figsize, squeeze=False, sharey=True,
+                                layout="constrained")
+        cycle = plt.rcParams["axes.prop_cycle"].by_key()["color"]
+        series = []
+        for k, axis in enumerate(axes_data):
+            vals, std = y_values(axis)
+            color = colors[k] if colors is not None else cycle[k % len(cycle)]
+            series.append((axis, x_values(axis), vals, std, color, int(np.argmax(vals))))
+
+        for j, ax in enumerate(axs.flat):
+            if j >= n_dim:
+                ax.set_visible(False)
+                continue
+            for axis, xs, vals, std, color, b in series:
+                if show_errorbars:
+                    ax.errorbar(xs[:, j], vals, yerr=std, fmt="o", ms=4.5, lw=0.8, color=color,
+                                alpha=0.85, mec="white", mew=0.5, label=axis["label"], zorder=2)
+                else:
+                    ax.scatter(xs[:, j], vals, s=24, color=color, alpha=0.85, edgecolor="white",
+                               linewidth=0.5, label=axis["label"], zorder=2)
+                ax.plot(xs[b, j], vals[b], marker="*", ms=15, color=color, mec="black", mew=0.7,
+                        ls="", zorder=4)
+            if show_nominal:
+                at = 1.0 if x == "relative" else (None if first_nominal is None else first_nominal[j])
+                if at is not None:
+                    ax.axvline(at, color="0.2", ls=":", lw=1.1, zorder=1, label="nominal")
+            if limits is not None and np.isfinite(limits[j]):
+                ax.axvline(limits[j], color="tab:red", ls="--", lw=1.1, zorder=1,
+                           label="all targets observed")
+            if y != "raw":
+                ax.axhline(0, color="0.75", lw=0.8, zorder=0)
+            ax.set_title(labels[j])
+            ax.set_xlabel("design / nominal" if x == "relative" else "design fraction")
+            if j % ncols == 0:
+                ax.set_ylabel({"difference": "EIG − nominal EIG [bits]",
+                               "percent": "EIG vs nominal [%]", "raw": "EIG [bits]"}[y])
+            ax.grid(color="0.93")
+            ax.set_axisbelow(True)
+
+        handles, legend_labels = [], []
+        for ax in axs.flat[:n_dim]:
+            for h, l in zip(*ax.get_legend_handles_labels()):
+                if l not in legend_labels:
+                    handles.append(h)
+                    legend_labels.append(l)
+        handles.append(Line2D([], [], marker="*", ls="", ms=12, color="0.75", mec="black"))
+        legend_labels.append("best design in each run")
+        fig.legend(handles, legend_labels, loc="outside upper center",
+                   ncol=min(len(handles), 3), fontsize=9, frameon=False)
+        if title is not None:
+            fig.suptitle(title, fontsize=11)
+
+        if filename is None:
+            filename = "compare_eig_by_design_dim"
+        _, experiment_id, _ = self._get_run_data_list(parse_params=False)
+        if save_dir is None and experiment_id is not None:
+            save_dir = self.get_save_dir(experiment_id=experiment_id, subdir="plots")
+        self.save_figure(fig, filename=filename, save_dir=save_dir, dpi=dpi)
+        best = [{"label": axis["label"], "design": axis["designs"][b].tolist(),
+                 "value": float(vals[b])} for axis, _, vals, _, _, b in series]
+        return fig, axs, best
+
+    @staticmethod
+    def _target_limits(labels, axes_data, dataset=None):
+        """Per-label ``targets / observed`` ratio from ``desi_tracers.csv``, or None.
+
+        Each class's summed ``targets`` over its summed ``comp * targets`` (observed =
+        completeness x targets), i.e. how far above nominal a class can go before every
+        target has a fiber. NaN for labels that aren't a class in the table.
+        """
+        import pandas as pd
+
+        if dataset is None:
+            for axis in axes_data:
+                if axis["artifacts_dir"] is None:
+                    continue
+                param = os.path.join(os.path.dirname(axis["artifacts_dir"].rstrip("/")),
+                                     "params", "dataset")
+                if os.path.exists(param):
+                    with open(param, "r") as f:
+                        dataset = f.read().strip()
+                    break
+        if dataset is None:
+            warnings.warn("show_target_limits: no dataset given or recorded by the runs; "
+                          "skipping the target limits")
+            return None
+        csv = os.path.join(home_dir, "data", "desi", f"bao_{dataset}", "desi_tracers.csv")
+        if not os.path.exists(csv):
+            warnings.warn(f"show_target_limits: {csv} not found; skipping the target limits")
+            return None
+        table = pd.read_csv(csv)
+        table["observed_count"] = table["comp"] * table["targets"]
+        by_class = table.groupby("class")[["targets", "observed_count"]].sum()
+        return np.array([
+            by_class.loc[label, "targets"] / by_class.loc[label, "observed_count"]
+            if label in by_class.index else np.nan
+            for label in labels
+        ])
+
     def compare_optimal_designs(
         self,
         eval_step=None,
