@@ -15,7 +15,7 @@ DESI measures BAO distances in redshift bins, each dominated by a different targ
 | LRG3 + ELG1 | LRG, ELG     | Blended bin fed by *both* classes |
 | ELG2        | ELG          | Emission-line galaxies |
 | QSO         | QSO          | Quasars |
-| Lya QSO     | — (fixed)    | Lyman-alpha forest, highest z; not a design choice |
+| Lya QSO     | QSO (see `lya_accounting`) | Lyman-alpha forest, highest z |
 
 Observing more of a class shrinks the BAO error in its bins, but the total number of fibers is finite, so gains in one class are paid for elsewhere. The design problem has three components:
 
@@ -25,15 +25,31 @@ Observing more of a class shrinks the BAO error in its bins, but the total numbe
 
 Two facts drive everything downstream:
 
-- **A design's *sum* is the total-observation budget.** The four entries are fractions of the nominal observations outside Lya QSO (dr1: 7,089,170; dr2: 16,708,794), so a design summing to 1.0 spends the nominal budget and one summing to 1.2 spends 20% more. Budget is therefore a *design axis*, not a separate setting.
-- **Lya QSO is outside the design budget.** See [below](#lya-qso-is-outside-the-design-budget).
+- **A design's *sum* is the total-observation budget.** The four entries are fractions of the nominal observations in the budget (under the default `lya_accounting: outside`, all but Lya QSO's: dr1 7,089,170; dr2 16,708,794), so a design summing to 1.0 spends the nominal budget and one summing to 1.2 spends 20% more. Budget is therefore a *design axis*, not a separate setting.
+- **Lya QSO's place in the budget is `lya_accounting`.** See [below](#lya-qso-accounting).
 - **Observed != passed.** The emulator and the noise model both want redshift-confirmed (*passed*) counts, obtained as `observed x efficiency` per tracer. `calc_passed` does this conversion, correctly blending the LRG3+ELG1 bin from both parent classes.
 
-### Lya QSO is outside the design budget
+### Lya QSO accounting
+
+Tracer QSOs and Lya QSOs come from one QSO target selection, and which side of z = 2.1 a target lands on is known only after its spectrum. `lya_accounting` sets how the Lya QSO bin enters the design (`src/bedcosmo/num_tracers/lya.py`):
+
+| `lya_accounting` | Lya fibers in the budget | Lya count | Lya error |
+|---|---|---|---|
+| `outside` (default; legacy `lya_in_budget: false`) | none | dataset's, every design | nominal |
+| `in_budget_fixed` (legacy `lya_in_budget: true`; runs logged without either option) | full `observed` row, in the QSO class | follows the QSO class | nominal |
+| `qso_coupled` | forest quasars only, in the QSO class | follows the QSO class | nominal block rescaled by `lya_sigma_scaling` |
+
+The `Lya QSO` row's `passed` count (dr1 709,565; dr2 1,289,874) is DESI's Lya x QSO *tracer* sample, quasar positions at z > 1.77 (DESI 2024 IV Table 1; DESI DR2 Lya BAO, Sec 2). It overlaps the QSO bin over 1.77 < z < 2.1, so its `observed` column double counts those fibers. `qso_coupled` puts only the quasars with a Lya forest in the budget (dr1 531,000, Lya region A in DESI 2024 IV Table 1; dr2 824,989 at z > 2.09), and scales the Lya count by the design's QSO fraction relative to nominal, so the nominal design reproduces 709,565. dr1's nominal design there is `[0.0385, 0.2737, 0.4243, 0.2635]` over 7,884,080 fibers. A design pool for it must be built with `python -m bedcosmo.num_tracers.design --lya-accounting qso_coupled ...`: the same fractions mean a different allocation in each accounting, and the default `--upper` is for `outside`.
+
+`lya_sigma_scaling` names the law for sigma_Lya(N) / sigma_Lya(N_nominal), applied to the nominal DESI block in both likelihood modes (the emulator path's null-checkpoint fallback too). `noise_power` (default) is sigma ∝ 1 + P_N/P_F with P_N ∝ 1/N, i.e. sigma(r)/sigma(1) = (1 + 1/(r x)) / (1 + 1/x) for r = N/N_nominal, from the per-mode BAO information (n̄P/(1+n̄P))^2. x = P_F/P_N at nominal is `LYA_NOISE_POWER_X` = 0.22, the forest's effective n̄P at z ~ 2.5, k = 0.14 h/Mpc, mu = 0.6 in the DESI forecast of Font-Ribera et al. 2014 (arXiv:1308.4164, Sec. 4). Its local slope d ln sigma / d ln N = -1/(1 + r x) is close to -1 at DESI's density and flattens as N grows. `inverse_n` (sigma ∝ N^-1, the sparse limit) and `inverse_sqrt_n` (sigma ∝ N^-1/2, the slope at n̄P = 1) are its limits, kept for comparison. The law is one scalar per design: it keeps the block's D_M/D_H shape and correlation, does not vary x with cosmology, and evaluates P_N/P_F at one k.
+
+#### `outside`
 
 The Lya QSO bin keeps the dataset's own counts (dr1: 1,062,223 observed) in every design, and its error stays at the nominal value in both likelihood modes. The QSO class therefore covers only the QSO bin (z 0.8–2.1), and the nominal design is each class's share of the remaining fibers: dr1 `[0.0428, 0.3044, 0.4719, 0.1809]`. The target-availability upper bounds are taken over the same budget: dr1 BGS 0.0673, LRG 0.4393, QSO 0.2070 (ELG's 0.575 is hand-set).
 
-`lya_in_budget: true` restores the accounting runs were trained with before the option existed: Lya fibers inside the QSO class (nominal QSO 0.2876 = 0.1573 QSO bin + 0.1303 Lya), split between the two bins in proportion, with the Lya error still held nominal. A design that cut QSO there freed Lya's fibers for the other classes at no cost to the Lya measurement, which favored low QSO. `init_experiment` loads a run logged without the parameter that way.
+#### `in_budget_fixed`
+
+`lya_accounting: in_budget_fixed` (legacy `lya_in_budget: true`) restores the accounting runs were trained with before the option existed: Lya fibers inside the QSO class (nominal QSO 0.2876 = 0.1573 QSO bin + 0.1303 Lya), split between the two bins in proportion, with the Lya error still held nominal. A design that cut QSO there freed Lya's fibers for the other classes at no cost to the Lya measurement, which favored low QSO. `init_experiment` loads a run logged with neither parameter that way.
 
 ## Design Space (`design_args_*.yaml`)
 
@@ -203,7 +219,7 @@ factor_i = sqrt(nominal_passed_ratio_i / passed_ratio_i)
 
 `passed_ratio` already carries both the split and the budget (`calc_passed` is linear in the design), so a uniform scale `s` gives `sigma -> 1/sqrt(s)`. Do **not** divide by the design sum again — that double-counts the budget and yields `1/s`. It is a no-op at sum 1.0, so it only ever affected free-budget designs. Regression tests: `tests/test_num_tracers_sigma_scaling.py`.
 
-The Lya QSO rows stay at their nominal error (see [Lya QSO is outside the design budget](#lya-qso-is-outside-the-design-budget)).
+The Lya QSO rows follow `lya_accounting` (see [Lya QSO accounting](#lya-qso-accounting)): nominal error, or rescaled by `lya_sigma_scaling` under `qso_coupled`.
 
 The reference covariance is `ref_cov` (default `desi_cov.npy`): the published DESI 2024 BAO result, built on the **v1.2** clustering catalogs. The DR1 `full-shape-bao-clustering` VAC also ships per-tracer BAO likelihoods for the **v1.5** catalogs (DESI's default, used in DR1 full-shape), which differ by up to ±11% per row. `scripts/num_tracers/generate_ref_cov_vac.py --catalog {v1.5,v1.2}` (repo root) builds a drop-in `ref_cov` from them: the VAC's fractional (q_iso or q_∥, q_⊥) covariance placed on the `desi_data.csv` rows, Lya QSO kept from `desi_cov.npy`. `experiments/num_tracers/scripts/generate_ref_cov.py` builds one from the emulators instead. No v1.5 BAO-only DESI posterior exists, so the reference samples (`mcmc_samples/`) stay v1.2.
 
@@ -224,7 +240,7 @@ The reference covariance is `ref_cov` (default `desi_cov.npy`): the published DE
 - **`cosmology`** evaluates them at the sampled cosmology, so the covariance's own cosmology dependence becomes information in the likelihood. Every sampled parameter must then be an emulator input; NumTracers raises otherwise, which rules it out for the extended models until they have their own emulators (see below). A Gaussian likelihood with a θ-dependent covariance double-counts that information (Carron 2013), and here it rides on the emulators' derivatives. It is the constructor default because runs from before this option don't record it and were trained this way.
 - `emulator_sqrtn_ref: sampled` needs `cosmology`, because it evaluates the reference covariance at the sampled cosmology.
 
-Emulator bins map to data rows as `BGS, LRG1, LRG2, LRG3_ELG1 -> "LRG3+ELG1", ELG2, QSO, Lya_QSO`. A `null` checkpoint falls back to the fixed nominal covariance.
+Emulator bins map to data rows as `BGS, LRG1, LRG2, LRG3_ELG1 -> "LRG3+ELG1", ELG2, QSO, Lya_QSO`. A `null` checkpoint falls back to the nominal covariance, rescaled for Lya QSO under `lya_accounting: qso_coupled`.
 
 `emulators.yaml` is keyed `<analysis>: <dataset>: <cosmo_model>: <quantity>: <tracer_bin>`, mirroring `$SCRATCH/bedcosmo/num_tracers/emulator/{analysis}/models/{dataset}/{cosmo_model}/`. For bao, `<quantity>` is the forecast space (`config` | `fourier`) and `emulator_space` picks one per run. At submission the checkpoints are copied into the run's `artifacts/emulators/<tracer_bin>.pt`.
 
