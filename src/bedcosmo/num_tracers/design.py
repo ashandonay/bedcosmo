@@ -43,6 +43,7 @@ from typing import Iterable, Sequence
 import numpy as np
 
 from bedcosmo.artifacts import DESIGN_PLOT_FILENAME, write_design_dir
+from bedcosmo.num_tracers.lya import LYA_ACCOUNTINGS
 
 LABELS = ["BGS", "LRG", "ELG", "QSO"]
 # Mirror NumTracers: DESI CSVs live under $HOME/data/desi/bao_<dataset>/
@@ -59,16 +60,18 @@ DEFAULT_UPPER = [0.0673, 0.4393, 0.575, 0.2070]
 TOL = 1e-9
 
 
-def nominal_vector(dataset: str = "dr1") -> np.ndarray:
+def nominal_vector(dataset: str = "dr1", lya_accounting: str = "outside") -> np.ndarray:
     """Per-class nominal design vector (sums to 1.0), reproducing ``NumTracers.__init__``:
-    each class's observed share of the fibers outside Lya QSO."""
+    each class's observed share of the fibers in the design budget, which
+    ``lya_accounting`` sets (num_tracers/lya.py; "outside": all but Lya QSO's)."""
     import pandas as pd
+
+    from bedcosmo.num_tracers.lya import budget_tracers
 
     csv = os.path.join(_DATA_ROOT, f"bao_{dataset}", "desi_tracers.csv")
     if not os.path.exists(csv):
         raise FileNotFoundError(f"DESI tracer table not found: {csv}")
-    df = pd.read_csv(csv)
-    df = df.loc[df["tracer"] != "Lya QSO"]
+    df = budget_tracers(pd.read_csv(csv), dataset, lya_accounting)
     observed = df.groupby("class").sum(numeric_only=True)["observed"]
     return np.asarray((observed / observed.sum()).reindex(LABELS).values, dtype=np.float64)
 
@@ -94,6 +97,7 @@ def budget_pool(
     include: Iterable[Sequence[float]] | None = None,
     n_target: int | None = None,
     seed: int = 0,
+    lya_accounting: str = "outside",
 ) -> np.ndarray:
     """Cartesian per-class grid keeping rows whose sum lies in ``[sum_lower, sum_upper]``.
 
@@ -135,7 +139,7 @@ def budget_pool(
     keep = (total >= sum_lower - TOL) & (total <= sum_upper + TOL)
     pool = flat[keep]
 
-    pinned = pinned_designs(include_nominal_scales, include, dataset)
+    pinned = pinned_designs(include_nominal_scales, include, dataset, lya_accounting)
     pool = np.vstack([pool, pinned])
 
     # Stable, de-duplicated ordering so a rebuild is reproducible.
@@ -152,11 +156,12 @@ def pinned_designs(
     include_nominal_scales: Iterable[float] | None,
     include: Iterable[Sequence[float]] | None,
     dataset: str = "dr1",
+    lya_accounting: str = "outside",
 ) -> np.ndarray:
     """The rows ``budget_pool`` force-adds, rounded as they appear in the pool: (n, 4)."""
     rows = []
     if include_nominal_scales:
-        v0 = nominal_vector(dataset)
+        v0 = nominal_vector(dataset, lya_accounting)
         rows += [uniform_scaled(v0, s) for s in include_nominal_scales]
     for design in include or ():
         if len(design) != len(LABELS):
@@ -231,6 +236,8 @@ def plot_designs(
     cmap: str = "viridis",
     title: str = "",
     pinned: np.ndarray | None = None,
+    dataset: str = "dr1",
+    lya_accounting: str = "outside",
 ) -> None:
     """Parallel-coordinates view of the design pool, colored by total budget.
 
@@ -256,7 +263,7 @@ def plot_designs(
     # drawn as its own line.
     v0 = None
     try:
-        v0 = nominal_vector()
+        v0 = nominal_vector(dataset, lya_accounting)
     except FileNotFoundError:
         pass
     frac = designs
@@ -361,8 +368,8 @@ def _timestamp(when: datetime | None = None) -> str:
 
 
 def _cmd_scaled(args: argparse.Namespace) -> np.ndarray:
-    v0 = nominal_vector(args.dataset)
-    print(f"dataset={args.dataset}  labels={LABELS}")
+    v0 = nominal_vector(args.dataset, args.lya_accounting)
+    print(f"dataset={args.dataset}  lya_accounting={args.lya_accounting}  labels={LABELS}")
     print(f"nominal v0={np.round(v0, 4).tolist()}  sum={v0.sum():.4f}\n")
 
     rows = []
@@ -394,8 +401,10 @@ def _cmd_pool(args: argparse.Namespace) -> np.ndarray:
         include=args.include,
         n_target=args.n_target,
         seed=args.seed,
+        lya_accounting=args.lya_accounting,
     )
-    pinned = is_pinned(pool, pinned_designs(scales, args.include, args.dataset))
+    pinned = is_pinned(
+        pool, pinned_designs(scales, args.include, args.dataset, args.lya_accounting))
     # Date-stamp the default so repeated builds accumulate instead of overwriting
     # (mirrors bedcosmo.num_visits.design). An explicit --name opts out.
     if args.name:
@@ -445,6 +454,12 @@ def main(argv: list[str] | None = None) -> np.ndarray:
         help="Parent dir for the <name>/ design dirs (default: $SCRATCH/bedcosmo/num_tracers/designs)",
     )
     parser.add_argument("--no-plot", action="store_true", help="Skip the design-space plot")
+    parser.add_argument(
+        "--lya-accounting", default="outside", choices=LYA_ACCOUNTINGS,
+        help="Which fibers the design fractions divide; must match the training run's "
+             "lya_accounting (num_tracers/lya.py). The default --upper is for 'outside'. "
+             "(default: outside)",
+    )
     sub = parser.add_subparsers(dest="mode", required=True)
 
     p_scaled = sub.add_parser("scaled", help="One single-design pool per uniform scale factor")
@@ -514,7 +529,8 @@ def main(argv: list[str] | None = None) -> np.ndarray:
     if not args.no_plot:
         for design_dir, arr, title, pinned in args._plots:
             plot_path = os.path.join(design_dir, DESIGN_PLOT_FILENAME)
-            plot_designs(arr, plot_path, title=title, pinned=pinned)
+            plot_designs(arr, plot_path, title=title, pinned=pinned,
+                         dataset=args.dataset, lya_accounting=args.lya_accounting)
             print(f"wrote design plot -> {plot_path}")
     return designs
 

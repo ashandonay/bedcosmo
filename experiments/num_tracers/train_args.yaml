@@ -47,7 +47,8 @@ base:
   include_D_M: true
   likelihood_mode: emulator
   vary_z_eff: false
-  lya_in_budget: false
+  lya_accounting: outside
+  lya_sigma_scaling: noise_power
   emulator_sqrtn_ref: null
   ref_cov: null
 
@@ -91,7 +92,8 @@ base_omegak:
   include_D_M: true
   likelihood_mode: scaling
   vary_z_eff: false
-  lya_in_budget: false
+  lya_accounting: outside
+  lya_sigma_scaling: noise_power
   emulator_sqrtn_ref: null
   ref_cov: null
 
@@ -135,7 +137,8 @@ base_w:
   include_D_M: true
   likelihood_mode: scaling
   vary_z_eff: false
-  lya_in_budget: false
+  lya_accounting: outside
+  lya_sigma_scaling: noise_power
   emulator_sqrtn_ref: null
   ref_cov: null
 
@@ -179,7 +182,8 @@ base_w_wa:
   include_D_M: true
   likelihood_mode: scaling
   vary_z_eff: false
-  lya_in_budget: false
+  lya_accounting: outside
+  lya_sigma_scaling: noise_power
   emulator_sqrtn_ref: null
   ref_cov: null
 
@@ -225,7 +229,8 @@ base_omegak_w_wa:
   include_D_M: true
   likelihood_mode: emulator
   vary_z_eff: false
-  lya_in_budget: false
+  lya_accounting: outside
+  lya_sigma_scaling: noise_power
   emulator_sqrtn_ref: null
   ref_cov: null
 

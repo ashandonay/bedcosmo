@@ -764,9 +764,12 @@ def init_experiment(
 
         cosmo_exp = run_args.get("cosmo_exp")
         if cosmo_exp == "num_tracers":
-            # A run logged without lya_in_budget was trained with Lya QSO fibers inside the
-            # QSO class; load it that way so its designs mean what they meant.
-            run_args.setdefault("lya_in_budget", True)
+            # A run logged with neither lya_accounting nor lya_in_budget was trained with Lya
+            # QSO fibers inside the QSO class and its error nominal; load it that way so its
+            # designs mean what they meant. lya_sigma_scaling's default is only read under
+            # lya_accounting="qso_coupled", which such runs never used.
+            if "lya_accounting" not in run_args:
+                run_args.setdefault("lya_in_budget", True)
 
         artifact_uri = run_obj.info.artifact_uri
         if artifact_uri.startswith("file://"):

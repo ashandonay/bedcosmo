@@ -24,6 +24,12 @@ import math
 import inspect
 from bedcosmo.profiling import profile_method
 from bedcosmo.artifacts import resolve_design_input_path
+from bedcosmo.num_tracers.lya import (
+    LYA_FOREST_FRACTION,
+    LYA_SIGMA_SCALINGS,
+    budget_tracers,
+    resolve_lya_accounting,
+)
 from bedcosmo.util import (
     load_prior_flow_from_file,
     auto_seed,
@@ -70,7 +76,9 @@ class NumTracers(BaseExperiment, CosmologyMixin):
         likelihood_mode="scaling",
         apply_desi_syst=False,
         vary_z_eff=False,
-        lya_in_budget=False,
+        lya_in_budget=None,
+        lya_accounting=None,
+        lya_sigma_scaling="noise_power",
         ref_cov=None,
         emulator_sqrtn_ref=None,
         emulator_space=None,
@@ -118,19 +126,21 @@ class NumTracers(BaseExperiment, CosmologyMixin):
         self.DH_idx = np.where(self.desi_data["quantity"] == "DH_over_rs")[0]
         self.DM_idx = np.where(self.desi_data["quantity"] == "DM_over_rs")[0]
         self.DV_idx = np.where(self.desi_data["quantity"] == "DV_over_rs")[0]
-        # Lya QSO is not a design choice: its error is held at the nominal value in both
-        # likelihood modes. By default (lya_in_budget=False) its fibers are outside the
-        # design budget too: its counts stay at the dataset's in every design, the QSO
-        # class covers only the QSO bin, and the design fractions divide the remaining
-        # fibers. lya_in_budget=True is the accounting runs were trained with before the
-        # option existed: Lya fibers inside the QSO class, so a design that cut QSO also
-        # cut them while their error stayed nominal.
-        self.lya_in_budget = bool(lya_in_budget)
+        # How Lya QSO enters the design (num_tracers/lya.py). "outside" (the default, and
+        # lya_in_budget=False): its fibers are outside the budget and its count and error
+        # stay nominal. "in_budget_fixed" (lya_in_budget=True, runs logged before the
+        # option existed): its fibers sit in the QSO class while its error stays nominal.
+        # "qso_coupled": its forest fibers sit in the QSO class, its count follows the
+        # QSO class and its nominal DESI block is rescaled by lya_sigma_scaling.
+        self.lya_accounting = resolve_lya_accounting(lya_accounting, lya_in_budget)
+        self.lya_in_budget = self.lya_accounting != "outside"
+        if lya_sigma_scaling not in LYA_SIGMA_SCALINGS:
+            raise ValueError(
+                f"lya_sigma_scaling must be one of {sorted(LYA_SIGMA_SCALINGS)}; "
+                f"got {lya_sigma_scaling!r}.")
+        self.lya_sigma_scaling = lya_sigma_scaling
         self._lya_qso_rows = np.where(self.desi_data["tracer"] == "Lya QSO")[0]
-        self._budget_tracers = (
-            self.desi_tracers if self.lya_in_budget
-            else self.desi_tracers.loc[self.desi_tracers["tracer"] != "Lya QSO"]
-        )
+        self._budget_tracers = budget_tracers(self.desi_tracers, self.dataset, self.lya_accounting)
         self.cosmo_model = cosmo_model
         self.flow_type = flow_type
         self.device = device
@@ -162,11 +172,13 @@ class NumTracers(BaseExperiment, CosmologyMixin):
         )
         self.central_val = torch.tensor(self.desi_data["value_at_z"].tolist(), device=self.device)
         self.tracer_bins = self.desi_data.drop_duplicates(subset=["tracer"])["tracer"].tolist()
-        # The observed fibers the design fractions divide (the design budget at sum 1).
-        bins = self.desi_data.drop_duplicates(subset=["tracer"])
-        if not self.lya_in_budget:
-            bins = bins.loc[bins["tracer"] != "Lya QSO"]
-        self.nominal_total_obs = int(bins["observed"].sum())
+        # The observed fibers the design fractions divide (the design budget at sum 1):
+        # desi_data's counts, Lya QSO's weighted by the share of its fibers in the budget.
+        bins = self.desi_data.drop_duplicates(subset=["tracer"]).set_index("tracer")["observed"]
+        lya_share = {"outside": 0.0, "in_budget_fixed": 1.0,
+                     "qso_coupled": LYA_FOREST_FRACTION.get(self.dataset)}[self.lya_accounting]
+        self.nominal_total_obs = int(
+            bins.drop("Lya QSO", errors="ignore").sum() + lya_share * bins.get("Lya QSO", 0.0))
         self.nominal_passed_ratio = (
             torch.tensor(self.desi_data["passed"].tolist(), device=self.device)
             / self.nominal_total_obs
@@ -739,15 +751,24 @@ class NumTracers(BaseExperiment, CosmologyMixin):
         """
         factor = torch.sqrt(self.nominal_passed_ratio[index] / passed_ratio[..., index])
         if self._lya_qso_rows.size:
-            # The Lya QSO error is design-independent. With Lya outside the budget its count
-            # never moves, so the factor is already 1; with lya_in_budget it would follow the
-            # QSO class, and is pinned to 1 here. `index` is a positional array into
-            # desi_data rows; torch.where keeps this autograd-safe.
-            fixed = torch.as_tensor(
+            # Lya QSO rows follow lya_accounting: rescaled by lya_sigma_scaling under
+            # "qso_coupled", held at the nominal error otherwise (under "in_budget_fixed"
+            # their count moves with the QSO class but the error is pinned here). `index`
+            # is a positional array into desi_data rows; torch.where keeps this
+            # autograd-safe.
+            is_lya = torch.as_tensor(
                 np.isin(np.asarray(index), self._lya_qso_rows), device=factor.device
             )
-            factor = torch.where(fixed, torch.ones_like(factor), factor)
+            lya_factor = (self._lya_sigma_factor(
+                              passed_ratio[..., index] / self.nominal_passed_ratio[index])
+                          if self.lya_accounting == "qso_coupled" else torch.ones_like(factor))
+            factor = torch.where(is_lya, lya_factor, factor)
         return factor
+
+    def _lya_sigma_factor(self, n_ratio):
+        """sigma_Lya(N) / sigma_Lya(N_nominal) at ``n_ratio = N / N_nominal``, by the
+        ``lya_sigma_scaling`` law (num_tracers/lya.py)."""
+        return LYA_SIGMA_SCALINGS[self.lya_sigma_scaling](n_ratio)
 
     def _passed_map(self, bins):
         """The affine map from a design to the passed fraction of each bin.
@@ -763,9 +784,13 @@ class NumTracers(BaseExperiment, CosmologyMixin):
 
             W[bin, class_t] += observed_t / observed_{class_t} * efficiency_t
 
-        with observed_{class} summed over the budget tracers of that class. A tracer outside
-        the budget (Lya QSO unless ``lya_in_budget``) keeps the dataset's count whatever the
-        design: b[bin] += observed_t * efficiency_t / nominal_total_obs.
+        with observed_t the tracer's full count and observed_{class} its class's fibers in
+        the budget (``_budget_tracers``). The two differ only for Lya QSO under
+        ``lya_accounting="qso_coupled"``, whose tracer count overlaps the QSO bin and
+        only its forest fibers are in the budget: its count then scales with the QSO
+        class and equals the dataset's at the nominal design. A tracer outside the
+        budget (Lya QSO under "outside") keeps the dataset's count whatever the design:
+        b[bin] += observed_t * efficiency_t / nominal_total_obs.
 
         BAO's desi_data rows and ShapeFit's bins both come from here, so both analyses
         share one definition of the split.
@@ -1826,10 +1851,9 @@ class NumTracers(BaseExperiment, CosmologyMixin):
 
         # Per-data-row factor g[row] = sqrt(N_ref[bin] / N[bin]) for the owning tracer bin,
         # so cov_ref * g g^T scales each block by N_ref/N (rho intact). Only bins with a
-        # real emulator are scaled; null-checkpoint fallback bins (e.g. Lya_QSO in base)
-        # keep g=1 so their block stays at the fixed reference value, matching both the
-        # normal emulator path (_fill_emulator_blocks copies ref_cov unscaled) and scaling
-        # mode's default (Lya QSO held fixed) -- they are not meant to be design dependent.
+        # real emulator are scaled this way. Null-checkpoint fallback bins (e.g. Lya_QSO in
+        # base) take the normal path's factor (_fallback_variance_scale: fixed, or
+        # lya_sigma_scaling's law under lya_accounting="qso_coupled"), as scaling mode does.
         cov_size = len(self.desi_data)
         g = torch.ones(batch_shape + (cov_size,), device=self.device, dtype=torch.float64)
         for tracer_bin in self._emulators:
@@ -1838,6 +1862,16 @@ class NumTracers(BaseExperiment, CosmologyMixin):
             if not rows:
                 continue
             factor = torch.sqrt(n_ref[tracer_bin] / n_tracers[tracer_bin])
+            for r in rows:
+                g[..., r] = factor
+        for tracer_bin in self._emulator_fallback_bins:
+            rows = self.desi_data.index[
+                self.desi_data["tracer"] == self._EMULATOR_TRACER_TO_DESI.get(tracer_bin)].tolist()
+            if not rows:
+                continue
+            factor = torch.sqrt(torch.as_tensor(
+                self._fallback_variance_scale(tracer_bin, n_tracers), dtype=torch.float64,
+                device=self.device))
             for r in rows:
                 g[..., r] = factor
         covariance = cov_ref * g.unsqueeze(-1) * g.unsqueeze(-2)
@@ -1913,11 +1947,13 @@ class NumTracers(BaseExperiment, CosmologyMixin):
                 continue
             quantities = self.desi_data.loc[rows, "quantity"].tolist()
 
-            # Null checkpoint -> fixed reference covariance within-tracer block.
+            # Null checkpoint -> the reference covariance's within-tracer block, rescaled
+            # with N for Lya QSO under lya_accounting="qso_coupled" (fixed otherwise).
             if tracer_bin in self._emulator_fallback_bins:
+                scale = self._fallback_variance_scale(tracer_bin, n_tracers)
                 for i in rows:
                     for j in rows:
-                        covariance[..., i, j] = ref_cov[i, j]
+                        covariance[..., i, j] = ref_cov[i, j] * scale
                 continue
 
             sig = _predict_sigmas(tracer_bin)
@@ -1960,6 +1996,18 @@ class NumTracers(BaseExperiment, CosmologyMixin):
                 )
 
         return covariance
+
+    def _fallback_variance_scale(self, tracer_bin, n_tracers):
+        """Variance factor on a null-checkpoint bin's reference block.
+
+        1 except for Lya QSO under ``lya_accounting="qso_coupled"``, where it is
+        ``_lya_sigma_factor(N / N_nominal)**2`` with N_nominal the dataset's passed count.
+        """
+        if tracer_bin != "Lya_QSO" or self.lya_accounting != "qso_coupled":
+            return 1.0
+        n_nominal = float(self.desi_data.loc[self._lya_qso_rows[0], "passed"])
+        return self._lya_sigma_factor(
+            n_tracers[tracer_bin].to(torch.float64) / n_nominal) ** 2
 
     def _sqrtn_nominal_n_tracers(self):
         """Per-bin N_tracers at the nominal DESI design, cached.
