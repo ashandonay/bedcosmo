@@ -94,9 +94,7 @@ def _required_template_rest_range(
         raise ValueError("transmission must have shape (n_filters, n_wavelengths)")
     peaks = np.max(transmission, axis=1)
     nonempty = peaks > 0
-    active = np.any(
-        transmission[nonempty] >= response_floor * peaks[nonempty, None], axis=0
-    )
+    active = np.any(transmission[nonempty] >= response_floor * peaks[nonempty, None], axis=0)
     if not np.any(active):
         raise ValueError("filter transmission has no active wavelengths")
     if z_min < 0 or z_max < z_min:
@@ -122,9 +120,7 @@ def _required_template_rest_range(
         raise ValueError("transmission must have shape (n_filters, n_wavelengths)")
     peaks = np.max(transmission, axis=1)
     nonempty = peaks > 0
-    active = np.any(
-        transmission[nonempty] >= response_floor * peaks[nonempty, None], axis=0
-    )
+    active = np.any(transmission[nonempty] >= response_floor * peaks[nonempty, None], axis=0)
     if not np.any(active):
         raise ValueError("filter transmission has no active wavelengths")
     if z_min < 0 or z_max < z_min:
@@ -261,6 +257,11 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         # model still samples the full parameter vector (nuisances marginalized
         # by simulation).
         self._init_target_params(target_params)
+        if self.prior_args.get("density_type") == "joint_pattern_flow":
+            if self.transform_input or self.n_targets != len(self.cosmo_params):
+                raise ValueError(
+                    "joint_pattern_flow requires all target parameters and transform_input=False; the posterior Gaussianizes each face internally"
+                )
 
         self._init_param_bijector(
             bijector_state=bijector_state,
@@ -399,7 +400,11 @@ class NumVisits(BaseExperiment, CosmologyMixin):
 
         defaults = {"z": 1.0}
         if self.cosmo_model == "empirical":
-            defaults = mode_central_params_from_artifact(self.sed_prior_artifact)
+            if self._prior_parameterization == "weights":
+                representative = self.prior_pool.pool[0].detach().cpu().tolist()
+                defaults = dict(zip(self.prior_feature_names, representative))
+            else:
+                defaults = mode_central_params_from_artifact(self.sed_prior_artifact)
             if self.global_rank == 0 and self.verbose:
                 n_train = len(self.sed_prior_artifact.get("training_x", []))
                 print(
@@ -758,12 +763,20 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         if self.global_rank == 0 and self.verbose:
             print(f"Loading empirical prior from {prior_root}")
             print(f"  density_type={density_type}; pool n={prior_pool_size}")
-        self.sed_prior = EmpiricalSedPrior.from_kde_path(
-            kde_path,
-            pool_size=int(prior_pool_size),
-            pool_seed=int(prior_pool_seed),
-            device=self.device,
-        )
+        if normalize_prior_source(density_type) == "joint_pattern_flow":
+            self.sed_prior = EmpiricalSedPrior.from_joint_path(
+                prior_root / "joint_prior_flow.pt",
+                pool_size=int(prior_pool_size),
+                pool_seed=int(prior_pool_seed),
+                device=self.device,
+            )
+        else:
+            self.sed_prior = EmpiricalSedPrior.from_kde_path(
+                kde_path,
+                pool_size=int(prior_pool_size),
+                pool_seed=int(prior_pool_seed),
+                device=self.device,
+            )
         self.prior_kde_path = self.sed_prior.path
         self._prior_parameterization = self.sed_prior.parameterization
         self._n_eazy_templates = self.sed_prior.n_templates
@@ -1294,7 +1307,9 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         K = int(self._n_eazy_templates)
         flat = sample_shape if sample_shape else (rows.shape[0],)
 
-        if parameterization == PARAMETERIZATION_ILR:
+        if parameterization == "weights":
+            a, log_s, z = rows[:, :K], rows[:, K], rows[:, K + 1]
+        elif parameterization == PARAMETERIZATION_ILR:
             ilr = rows[:, : K - 1]
             a = ilr_to_weights_torch(ilr)
             log_s = rows[:, K - 1]
@@ -1321,7 +1336,15 @@ class NumVisits(BaseExperiment, CosmologyMixin):
         parameterization = self._require_parameterization()
         K = int(self._n_eazy_templates)
 
-        if parameterization == PARAMETERIZATION_ILR:
+        if parameterization == "weights":
+            a = torch.tensor(
+                [[float(central[f"a{k}"]) for k in range(1, K + 1)]],
+                device=self.device,
+                dtype=torch.float64,
+            )
+            if torch.any(a < 0) or not torch.allclose(a.sum(-1), a.new_ones(1)):
+                raise ValueError("Central template fractions must form a simplex")
+        elif parameterization == PARAMETERIZATION_ILR:
             ilr = torch.tensor(
                 [[float(central.get(f"f{k}", 0.0)) for k in range(1, K)]],
                 device=self.device,

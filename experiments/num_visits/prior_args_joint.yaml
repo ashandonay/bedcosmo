@@ -1,0 +1,72 @@
+# Pattern-preserving NF prior; use flow_type=PatternNSF and transform_input=false.
+template_source: null
+density_type: joint_pattern_flow
+prior_dir: /home/ashandonay/scratch/bedcosmo/num_visits/empirical_prior/desi8_full_redshift_joint_v2
+template_param: desi8.param
+template_norm_min: 3600.0
+template_norm_max: 4200.0
+flux_unit_scale: 1.0e-17
+prior_pool_size: 65536
+prior_pool_seed: 7
+parameters:
+  a1:
+    distribution:
+      type: empirical
+    plot:
+      lower: 0.0
+      upper: 1.0
+  a2:
+    distribution:
+      type: empirical
+    plot:
+      lower: 0.0
+      upper: 1.0
+  a3:
+    distribution:
+      type: empirical
+    plot:
+      lower: 0.0
+      upper: 1.0
+  a4:
+    distribution:
+      type: empirical
+    plot:
+      lower: 0.0
+      upper: 1.0
+  a5:
+    distribution:
+      type: empirical
+    plot:
+      lower: 0.0
+      upper: 1.0
+  a6:
+    distribution:
+      type: empirical
+    plot:
+      lower: 0.0
+      upper: 1.0
+  a7:
+    distribution:
+      type: empirical
+    plot:
+      lower: 0.0
+      upper: 1.0
+  a8:
+    distribution:
+      type: empirical
+    plot:
+      lower: 0.0
+      upper: 1.0
+  log_c_scale:
+    distribution:
+      type: empirical
+    plot:
+      lower: 2.5
+      upper: 10.5
+  z:
+    distribution:
+      type: empirical
+    plot:
+      lower: 0.0
+      upper: 1.75
+constraints: {}
