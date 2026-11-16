@@ -305,12 +305,14 @@ class NumTracers(BaseExperiment, CosmologyMixin):
         if self.analysis == "shapefit":
             self._init_shapefit(emu_dir)
         elif self.likelihood_mode == "emulator":
-            # Bins without a .pt in the artifacts are treated as fallback (null) bins.
+            # Bins with neither a .pt nor a .npz (table) in the artifacts are treated as
+            # fallback (null) bins.
             if emu_dir is not None and os.path.isdir(emu_dir):
                 checkpoints = {}
                 for tracer_bin in self._EMULATOR_TRACER_TO_DESI:
-                    ckpt_path = os.path.join(emu_dir, f"{tracer_bin}.pt")
-                    checkpoints[tracer_bin] = ckpt_path if os.path.exists(ckpt_path) else None
+                    found = [os.path.join(emu_dir, f"{tracer_bin}{ext}") for ext in (".pt", ".npz")]
+                    found = [f for f in found if os.path.exists(f)]
+                    checkpoints[tracer_bin] = found[0] if found else None
             else:
                 checkpoints = self.resolve_emulator_checkpoints(
                     self.analysis, self.cosmo_model, self.dataset, self.emulator_space,
@@ -1500,18 +1502,28 @@ class NumTracers(BaseExperiment, CosmologyMixin):
 
         Tracer bins whose checkpoint is null (None) are skipped and recorded in
         ``self._emulator_fallback_bins``; their covariance blocks fall back to the
-        fixed DESI nominal covariance in ``_build_emulator_covariance``.
+        fixed DESI nominal covariance in ``_build_emulator_covariance``. A ``.npz``
+        path is a table (``_load_emulator_table``), held in ``self._emulator_tables``.
         """
         self._emulators = {}
+        self._emulator_tables = {}
         self._emulator_fallback_bins = []
         for tracer_bin, ckpt_path in self._emulator_checkpoints.items():
             if ckpt_path is None:
                 self._emulator_fallback_bins.append(tracer_bin)
                 continue
+            if ckpt_path.endswith(".npz"):
+                self._emulator_tables[tracer_bin] = self._load_emulator_table(tracer_bin, ckpt_path)
+                continue
             self._emulators[tracer_bin] = self._load_emulator(ckpt_path)
 
         if self.global_rank == 0:
             self._print_emulator_summary(self._emulators)
+            for tb, tab in self._emulator_tables.items():
+                print(f"  {tb}  table, output {tab['output']}, n_ratio "
+                      f"[{np.exp(tab['log_r'][0].item()):.3g}, {np.exp(tab['log_r'][-1].item()):.3g}]"
+                      f"{'' if self.lya_accounting == 'qso_coupled' else ' (held nominal: lya_accounting=' + self.lya_accounting + ')'}")
+                print(f"     {tab['path']}  | {tab['provenance']}")
             if self._emulator_fallback_bins:
                 print(
                     f"No emulator checkpoint for tracer bins {self._emulator_fallback_bins}; "
@@ -1531,6 +1543,11 @@ class NumTracers(BaseExperiment, CosmologyMixin):
         self._sigma_ceiling = self._SIGMA_CEILING
 
         ckpt = torch.load(ckpt_path, map_location=self.device, weights_only=False)
+        # A trained network predicts absolute sigmas; a checkpoint that says otherwise
+        # was written for a consumer this method is not.
+        if ckpt.get("output", "absolute") != "absolute":
+            raise ValueError(f"{ckpt_path}: emulator checkpoints must have output='absolute'; "
+                             f"got {ckpt.get('output')!r}")
         model = load_model(ckpt).to(self.device)
         model.requires_grad_(False)
 
@@ -1590,6 +1607,95 @@ class NumTracers(BaseExperiment, CosmologyMixin):
             "n_params": sum(p_.numel() for p_ in model.parameters()),
             "git_commit": str(ckpt.get("git_commit", "") or ""),
         }
+
+    _TABLE_RATIO_TARGETS = ("ratio_sigma_DH_over_rd", "ratio_sigma_DM_over_rd", "delta_rho")
+
+    def _load_emulator_table(self, tracer_bin, path):
+        """Load a self-describing table (tracer-forecast-emulator bao/lya.py) for one bin.
+
+        The file declares how it is applied: ``kind`` must be "table" and ``output``
+        "ratio_to_nominal" -- sigma_DH and sigma_DM of the bin's reference (DESI nominal)
+        block are multiplied by the tabulated ratios and its correlation shifted by
+        delta_rho, as functions of n_ratio = N / ``n_nominal``. ``n_nominal`` must equal
+        the dataset's passed count, so a table built for one release cannot be applied
+        to another.
+        """
+        t = np.load(path, allow_pickle=False)
+        kind, output = str(t["kind"]), str(t["output"])
+        if kind != "table":
+            raise ValueError(f"{path}: unknown emulator file kind {kind!r}; expected 'table'")
+        if output != "ratio_to_nominal":
+            raise ValueError(f"{path}: table output {output!r} is not supported; "
+                             "expected 'ratio_to_nominal'")
+        if list(t["param_names"]) != ["N_tracers"]:
+            raise ValueError(f"{path}: table inputs {list(t['param_names'])}; expected ['N_tracers']")
+        if tuple(t["target_names"]) != self._TABLE_RATIO_TARGETS:
+            raise ValueError(f"{path}: table targets {list(t['target_names'])}; "
+                             f"expected {list(self._TABLE_RATIO_TARGETS)}")
+        if str(t["tracer_bin"]) != tracer_bin:
+            raise ValueError(f"{path}: table is for {str(t['tracer_bin'])!r}, slot is {tracer_bin!r}")
+        desi_name = self._EMULATOR_TRACER_TO_DESI[tracer_bin]
+        passed = float(self.desi_data.loc[self.desi_data["tracer"] == desi_name, "passed"].iloc[0])
+        if not np.isclose(float(t["n_nominal"]), passed, rtol=1e-9):
+            raise ValueError(f"{path}: table n_nominal {float(t['n_nominal']):,.0f} != "
+                             f"{self.dataset} passed count {passed:,.0f} for {desi_name}")
+        log_r = np.asarray(t["log_n_ratio"], float)
+        if np.any(np.diff(log_r) <= 0):
+            raise ValueError(f"{path}: log_n_ratio is not increasing")
+        as_t = lambda a: torch.as_tensor(np.asarray(a, float), device=self.device, dtype=torch.float64)
+        return dict(path=path, output=output, n_nominal=passed, log_r=as_t(log_r),
+                    values=as_t(t["values"]), provenance=str(t.get("provenance", "")))
+
+    def _table_ratios(self, tracer_bin, n_tracers):
+        """(ratio_DH, ratio_DM, delta_rho) at the design's N, linear in log(n_ratio).
+
+        Held at (1, 1, 0) unless lya_accounting is "qso_coupled": the other accountings
+        pin the Lya error at nominal. N outside the table's grid is clamped to its edge
+        with a one-time warning.
+        """
+        tab = self._emulator_tables[tracer_bin]
+        n = torch.as_tensor(n_tracers[tracer_bin], dtype=torch.float64, device=self.device)
+        if tracer_bin != "Lya_QSO" or self.lya_accounting != "qso_coupled":
+            one = torch.ones_like(n)
+            return one, one, torch.zeros_like(n)
+        x = torch.log(n / tab["n_nominal"])
+        lo, hi = tab["log_r"][0], tab["log_r"][-1]
+        if ((x < lo) | (x > hi)).any() and tab["path"] not in self._n_extrap_warned:
+            self._n_extrap_warned.add(tab["path"])
+            print(f"Warning: {tracer_bin} n_ratio outside the table's "
+                  f"[{torch.exp(lo).item():.3g}, {torch.exp(hi).item():.3g}]; clamped to its edge.")
+        x = x.clamp(lo, hi)
+        i = torch.searchsorted(tab["log_r"], x.contiguous()).clamp(1, len(tab["log_r"]) - 1)
+        x0, x1 = tab["log_r"][i - 1], tab["log_r"][i]
+        w = ((x - x0) / (x1 - x0)).unsqueeze(-1)
+        v = tab["values"][i - 1] * (1 - w) + tab["values"][i] * w
+        return v[..., 0], v[..., 1], v[..., 2]
+
+    def _fill_table_block(self, covariance, tracer_bin, n_tracers, ref_cov):
+        """Write a table bin's block: its reference block, rescaled per the table."""
+        desi_name = self._EMULATOR_TRACER_TO_DESI.get(tracer_bin)
+        rows = self.desi_data.index[self.desi_data["tracer"] == desi_name].tolist()
+        if not rows:
+            return
+        quantities = self.desi_data.loc[rows, "quantity"].tolist()
+        if set(quantities) != {"DM_over_rs", "DH_over_rs"}:
+            raise ValueError(f"table bin '{tracer_bin}' needs a (DH, DM) block; got {quantities}")
+        dh, dm = rows[quantities.index("DH_over_rs")], rows[quantities.index("DM_over_rs")]
+        if tracer_bin != "Lya_QSO" or self.lya_accounting != "qso_coupled":
+            for i in rows:
+                for j in rows:
+                    covariance[..., i, j] = ref_cov[i, j]
+            return
+        r_dh, r_dm, d_rho = self._table_ratios(tracer_bin, n_tracers)
+        s_dh, s_dm = torch.sqrt(ref_cov[dh, dh]), torch.sqrt(ref_cov[dm, dm])
+        rho = (ref_cov[dh, dm] / (s_dh * s_dm) + d_rho).clamp(-1 + 1e-6, 1 - 1e-6)
+        from tracer_forecast_emulator.util import cov_block_from_marginals
+
+        c11, c12, c22 = cov_block_from_marginals(s_dh * r_dh, s_dm * r_dm, rho)
+        covariance[..., dh, dh] = c11
+        covariance[..., dm, dm] = c22
+        covariance[..., dh, dm] = c12
+        covariance[..., dm, dh] = c12
 
     def _print_emulator_summary(self, emulators):
         """Log WHICH emulators were loaded and their defining properties.
@@ -1875,6 +1981,10 @@ class NumTracers(BaseExperiment, CosmologyMixin):
             for r in rows:
                 g[..., r] = factor
         covariance = cov_ref * g.unsqueeze(-1) * g.unsqueeze(-2)
+        # Table bins take the normal path's block at the design N, as fallback bins do.
+        ref_cov = torch.as_tensor(self.ref_cov, device=self.device, dtype=torch.float64)
+        for tracer_bin in self._emulator_tables:
+            self._fill_table_block(covariance, tracer_bin, n_tracers, ref_cov)
         return self._maybe_apply_desi_syst(covariance)
 
     def _fill_emulator_blocks(self, n_tracers, Om, Ok, w0, wa, hrdrag_phys, batch_shape):
@@ -1946,6 +2056,12 @@ class NumTracers(BaseExperiment, CosmologyMixin):
                 # Tracer not present in this dataset's data vector — skip.
                 continue
             quantities = self.desi_data.loc[rows, "quantity"].tolist()
+
+            # Table bin -> the reference block rescaled by the table (Lya QSO under
+            # lya_accounting="qso_coupled"; held at the reference block otherwise).
+            if tracer_bin in self._emulator_tables:
+                self._fill_table_block(covariance, tracer_bin, n_tracers, ref_cov)
+                continue
 
             # Null checkpoint -> the reference covariance's within-tracer block, rescaled
             # with N for Lya QSO under lya_accounting="qso_coupled" (fixed otherwise).

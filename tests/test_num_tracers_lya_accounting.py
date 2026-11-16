@@ -177,7 +177,7 @@ def test_runs_logged_with_lya_accounting_keep_it(tmp_path):
 def test_emulator_fallback_lya_block_follows_the_law(law, halved_variance, sqrtn_ref):
     exp = _make_exp("dr1", likelihood_mode="emulator", lya_sigma_scaling=law,
                     emulator_covariance="fiducial", emulator_sqrtn_ref=sqrtn_ref)
-    assert "Lya_QSO" in exp._emulator_fallback_bins
+    _as_fallback(exp)
     rows = exp._lya_qso_rows
     block = np.ix_(rows, rows)
     nominal, halved = _halve_qso(exp)
@@ -195,3 +195,149 @@ def test_design_tool_nominal_matches_the_experiment(accounting):
 
     exp = _make_exp("dr1", lya_accounting=accounting)
     np.testing.assert_allclose(nominal_vector("dr1", accounting), exp.nominal_design.numpy(), rtol=1e-12)
+
+
+# ---------------------------------------------------------------- Lya_QSO tables
+_TABLE_PATH = os.path.join(
+    os.environ.get("SCRATCH", ""), "bedcosmo", "num_tracers", "emulator", "bao", "models",
+    "dr1", "base", "lya", "v1_ratio_to_nominal", "Lya_QSO.npz")
+
+
+def _as_fallback(exp):
+    """Make Lya_QSO a null-checkpoint bin, whatever emulators.yaml gives it."""
+    exp._emulator_tables.pop("Lya_QSO", None)
+    if "Lya_QSO" not in exp._emulator_fallback_bins:
+        exp._emulator_fallback_bins.append("Lya_QSO")
+
+
+def _write_table(path, **over):
+    fields = dict(kind="table", output="ratio_to_nominal", tracer_bin="Lya_QSO",
+                  param_names=np.array(["N_tracers"]),
+                  target_names=np.array(["ratio_sigma_DH_over_rd", "ratio_sigma_DM_over_rd", "delta_rho"]),
+                  n_nominal=709_565.0, log_n_ratio=np.array([-1.0, 0.0, 1.0]),
+                  values=np.array([[2.0, 3.0, 0.1], [1.0, 1.0, 0.0], [0.5, 0.4, -0.05]]),
+                  provenance="test")
+    fields.update(over)
+    np.savez(path, **fields)
+    return path
+
+
+def _with_table(exp, path):
+    exp._emulator_fallback_bins = [b for b in exp._emulator_fallback_bins if b != "Lya_QSO"]
+    exp._emulator_tables["Lya_QSO"] = exp._load_emulator_table("Lya_QSO", str(path))
+    return exp
+
+
+def _lya_block(exp, n_lya):
+    rows = exp._lya_qso_rows
+    q = exp.desi_data.loc[rows, "quantity"].tolist()
+    dh, dm = rows[q.index("DH_over_rs")], rows[q.index("DM_over_rs")]
+    cov = torch.zeros(len(exp.desi_data), len(exp.desi_data), dtype=torch.float64)
+    ref = torch.as_tensor(exp.ref_cov, dtype=torch.float64)
+    exp._fill_table_block(cov, "Lya_QSO", {"Lya_QSO": torch.tensor(float(n_lya))}, ref)
+    s_dh, s_dm = cov[dh, dh].sqrt(), cov[dm, dm].sqrt()
+    r_dh, r_dm = ref[dh, dh].sqrt(), ref[dm, dm].sqrt()
+    return (float(s_dh / r_dh), float(s_dm / r_dm),
+            float(cov[dh, dm] / (s_dh * s_dm) - ref[dh, dm] / (r_dh * r_dm)))
+
+
+@pytest.mark.skipif(not os.path.isdir(_CKPT_DIR),
+                    reason="bao dr1/base fourier emulator checkpoints not available")
+def test_table_rescales_the_reference_block_per_component(tmp_path):
+    exp = _with_table(_make_exp("dr1", likelihood_mode="emulator", emulator_covariance="fiducial"),
+                      _write_table(tmp_path / "t.npz"))
+    assert _lya_block(exp, 709_565) == pytest.approx((1.0, 1.0, 0.0), abs=1e-12)
+    # halfway between the first two rows in log(n_ratio)
+    got = _lya_block(exp, 709_565 * np.exp(-0.5))
+    assert got == pytest.approx((1.5, 2.0, 0.05), rel=1e-9)
+    # outside the grid: clamped to the edge
+    assert _lya_block(exp, 709_565 * np.exp(-3)) == pytest.approx((2.0, 3.0, 0.1), rel=1e-9)
+
+
+@pytest.mark.skipif(not os.path.isdir(_CKPT_DIR),
+                    reason="bao dr1/base fourier emulator checkpoints not available")
+@pytest.mark.parametrize("accounting", ["outside", "in_budget_fixed"])
+def test_table_is_held_nominal_outside_qso_coupled(accounting, tmp_path):
+    exp = _with_table(_make_exp("dr1", likelihood_mode="emulator", emulator_covariance="fiducial",
+                                lya_accounting=accounting), _write_table(tmp_path / "t.npz"))
+    assert _lya_block(exp, 709_565 * np.exp(-0.5)) == (1.0, 1.0, 0.0)
+
+
+@pytest.mark.skipif(not os.path.isdir(_CKPT_DIR),
+                    reason="bao dr1/base fourier emulator checkpoints not available")
+@pytest.mark.parametrize("bad, match", [
+    (dict(kind="network"), "unknown emulator file kind"),
+    (dict(output="absolute"), "not supported"),
+    (dict(n_nominal=1_289_874.0), "n_nominal"),
+    (dict(tracer_bin="QSO"), "slot is"),
+])
+def test_table_metadata_is_enforced(bad, match, tmp_path):
+    exp = _make_exp("dr1", likelihood_mode="emulator", emulator_covariance="fiducial")
+    with pytest.raises(ValueError, match=match):
+        exp._load_emulator_table("Lya_QSO", str(_write_table(tmp_path / "t.npz", **bad)))
+
+
+@pytest.mark.skipif(not os.path.isdir(_CKPT_DIR),
+                    reason="bao dr1/base fourier emulator checkpoints not available")
+def test_checkpoint_declaring_a_non_absolute_output_is_refused(tmp_path):
+    exp = _make_exp("dr1", likelihood_mode="emulator", emulator_covariance="fiducial")
+    path = tmp_path / "x.pt"
+    torch.save({"output": "ratio_to_nominal"}, path)
+    with pytest.raises(ValueError, match="output='absolute'"):
+        exp._load_emulator(str(path))
+
+
+@pytest.mark.skipif(not (os.path.isdir(_CKPT_DIR) and os.path.exists(_TABLE_PATH)),
+                    reason="bao dr1/base emulators or the deployed Lya_QSO table not available")
+def test_deployed_table_is_loaded_and_halving_qso_follows_it():
+    exp = _make_exp("dr1", likelihood_mode="emulator", emulator_covariance="fiducial")
+    assert "Lya_QSO" in exp._emulator_tables and "Lya_QSO" not in exp._emulator_fallback_bins
+    nominal, halved = _halve_qso(exp)
+    rows = exp._lya_qso_rows
+    block = np.ix_(rows, rows)
+    cov_nom = exp._build_emulator_covariance(exp.calc_passed(nominal), {})[0].numpy()
+    # float32 design arithmetic puts nominal N at 709,565 (1 +- 1e-7), as for the law test
+    np.testing.assert_allclose(cov_nom[block], exp.ref_cov[block], rtol=1e-6)
+    t = np.load(_TABLE_PATH)
+    i = int(np.argmin(np.abs(t["log_n_ratio"] - np.log(0.5))))
+    r_dh, r_dm, _ = _lya_block(exp, _lya_n(exp, halved))
+    # the grid is 0.05 dex, so n_ratio = 0.5 sits between points: tolerance of one step
+    assert r_dh == pytest.approx(t["values"][i, 0], rel=0.03)
+    assert r_dm == pytest.approx(t["values"][i, 1], rel=0.03)
+    assert r_dm > r_dh > 1.0
+
+
+@pytest.mark.skipif(not (os.path.isdir(_CKPT_DIR) and os.path.exists(_TABLE_PATH)),
+                    reason="bao dr1/base emulators or the deployed Lya_QSO table not available")
+def test_run_snapshot_keeps_the_table_and_a_reload_finds_it(tmp_path):
+    """create_run snapshots Lya_QSO as a .npz (not renamed .pt) and NumTracers reloads it."""
+    import importlib.util
+    from types import SimpleNamespace
+
+    import yaml
+
+    from bedcosmo.util import get_experiment_config_path
+
+    spec = importlib.util.spec_from_file_location(
+        "create_run", os.path.join(os.path.dirname(__file__), "..", "scripts", "create_run.py"))
+    create_run = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(create_run)
+    args = SimpleNamespace(cosmo_exp="num_tracers", likelihood_mode="emulator", analysis="bao",
+                           cosmo_model="base", dataset="dr1", emulator_space="fourier")
+    create_run._snapshot_emulators(args, str(tmp_path))
+    assert (tmp_path / "emulators" / "Lya_QSO.npz").exists()
+    assert not (tmp_path / "emulators" / "Lya_QSO.pt").exists()
+
+    def load(name):
+        with open(get_experiment_config_path("num_tracers", name)) as f:
+            return yaml.safe_load(f)
+
+    run_obj = SimpleNamespace(info=SimpleNamespace(artifact_uri=f"file://{tmp_path}"))
+    run_args = dict(cosmo_exp="num_tracers", dataset="dr1", analysis="bao", cosmo_model="base",
+                    likelihood_mode="emulator", emulator_space="fourier",
+                    emulator_covariance="fiducial", device="cpu", mode="eval",
+                    lya_accounting="qso_coupled")
+    exp = init_experiment(run_obj=run_obj, run_args=run_args, design_args=load(DESIGN_ARGS["dr1"]),
+                          prior_args=load("prior_args_hrdrag.yaml"))
+    assert "Lya_QSO" in exp._emulator_tables
+    assert exp._emulator_tables["Lya_QSO"]["path"].startswith(str(tmp_path))

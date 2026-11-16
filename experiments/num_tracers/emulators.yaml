@@ -5,6 +5,10 @@
 #   shapefit: mean and covar (both loaded; tracer bins are tracers_for("shapefit"), LRG3 not LRG3_ELG1)
 # Relative paths resolve against it; absolute paths are used verbatim; null means "no checkpoint -> fall back to the
 # fixed DESI nominal covariance" (bao only; every shapefit bin needs both checkpoints).
+# A .npz path is a table, not a network (tracer-forecast-emulator bao/lya.py): the file declares
+# kind: table and output: ratio_to_nominal, i.e. it rescales the DESI nominal block with N. The
+# Lya_QSO table is frame-independent (fiducial cosmology), so one file serves every bao space; it
+# only acts under lya_accounting=qso_coupled (the other accountings hold Lya at nominal).
 bao:
   dr1:
     base:
@@ -18,7 +22,7 @@ bao:
         LRG3_ELG1: config/v6_sigma_hrdrag_scaled/LRG3_ELG1.pt
         ELG2: config/v6_sigma_hrdrag_scaled/ELG2.pt
         QSO: config/v6_sigma_hrdrag_scaled/QSO.pt
-        Lya_QSO: null
+        Lya_QSO: lya/v1_ratio_to_nominal/Lya_QSO.npz
       fourier:
         BGS: fourier/v3_sigma_hrdrag_scaled/BGS.pt
         LRG1: fourier/v3_sigma_hrdrag_scaled/LRG1.pt
@@ -26,7 +30,7 @@ bao:
         LRG3_ELG1: fourier/v3_sigma_hrdrag_scaled/LRG3_ELG1.pt
         ELG2: fourier/v3_sigma_hrdrag_scaled/ELG2.pt
         QSO: fourier/v3_sigma_hrdrag_scaled/QSO.pt
-        Lya_QSO: null
+        Lya_QSO: lya/v1_ratio_to_nominal/Lya_QSO.npz
       fourier_fidcoords:
         BGS: fourier_fidcoords/v1_sigma_hrdrag_scaled/BGS.pt
         LRG1: fourier_fidcoords/v1_sigma_hrdrag_scaled/LRG1.pt
@@ -34,7 +38,7 @@ bao:
         LRG3_ELG1: fourier_fidcoords/v1_sigma_hrdrag_scaled/LRG3_ELG1.pt
         ELG2: fourier_fidcoords/v1_sigma_hrdrag_scaled/ELG2.pt
         QSO: fourier_fidcoords/v1_sigma_hrdrag_scaled/QSO.pt
-        Lya_QSO: null
+        Lya_QSO: lya/v1_ratio_to_nominal/Lya_QSO.npz
     # The extended models reuse base's checkpoints, which take (N_tracers, Om, hrdrag). That is exact under
     # emulator_covariance 'fiducial' (or a dict that moves only Om/hrdrag): the covariance is then fixed at a
     # flat-LCDM point, as DESI fixes its BAO covariance whatever model it fits, so Ok/w0/wa never reach the
@@ -48,7 +52,7 @@ bao:
         LRG3_ELG1: ../base/config/v6_sigma_hrdrag_scaled/LRG3_ELG1.pt
         ELG2: ../base/config/v6_sigma_hrdrag_scaled/ELG2.pt
         QSO: ../base/config/v6_sigma_hrdrag_scaled/QSO.pt
-        Lya_QSO: null
+        Lya_QSO: ../base/lya/v1_ratio_to_nominal/Lya_QSO.npz
       fourier:
         BGS: ../base/fourier/v3_sigma_hrdrag_scaled/BGS.pt
         LRG1: ../base/fourier/v3_sigma_hrdrag_scaled/LRG1.pt
@@ -56,7 +60,7 @@ bao:
         LRG3_ELG1: ../base/fourier/v3_sigma_hrdrag_scaled/LRG3_ELG1.pt
         ELG2: ../base/fourier/v3_sigma_hrdrag_scaled/ELG2.pt
         QSO: ../base/fourier/v3_sigma_hrdrag_scaled/QSO.pt
-        Lya_QSO: null
+        Lya_QSO: ../base/lya/v1_ratio_to_nominal/Lya_QSO.npz
     base_w:
       config:
         BGS: ../base/config/v6_sigma_hrdrag_scaled/BGS.pt
@@ -65,7 +69,7 @@ bao:
         LRG3_ELG1: ../base/config/v6_sigma_hrdrag_scaled/LRG3_ELG1.pt
         ELG2: ../base/config/v6_sigma_hrdrag_scaled/ELG2.pt
         QSO: ../base/config/v6_sigma_hrdrag_scaled/QSO.pt
-        Lya_QSO: null
+        Lya_QSO: ../base/lya/v1_ratio_to_nominal/Lya_QSO.npz
       fourier:
         BGS: ../base/fourier/v3_sigma_hrdrag_scaled/BGS.pt
         LRG1: ../base/fourier/v3_sigma_hrdrag_scaled/LRG1.pt
@@ -73,7 +77,7 @@ bao:
         LRG3_ELG1: ../base/fourier/v3_sigma_hrdrag_scaled/LRG3_ELG1.pt
         ELG2: ../base/fourier/v3_sigma_hrdrag_scaled/ELG2.pt
         QSO: ../base/fourier/v3_sigma_hrdrag_scaled/QSO.pt
-        Lya_QSO: null
+        Lya_QSO: ../base/lya/v1_ratio_to_nominal/Lya_QSO.npz
     base_w_wa:
       config:
         BGS: ../base/config/v6_sigma_hrdrag_scaled/BGS.pt
@@ -82,7 +86,7 @@ bao:
         LRG3_ELG1: ../base/config/v6_sigma_hrdrag_scaled/LRG3_ELG1.pt
         ELG2: ../base/config/v6_sigma_hrdrag_scaled/ELG2.pt
         QSO: ../base/config/v6_sigma_hrdrag_scaled/QSO.pt
-        Lya_QSO: null
+        Lya_QSO: ../base/lya/v1_ratio_to_nominal/Lya_QSO.npz
       fourier:
         BGS: ../base/fourier/v3_sigma_hrdrag_scaled/BGS.pt
         LRG1: ../base/fourier/v3_sigma_hrdrag_scaled/LRG1.pt
@@ -90,7 +94,7 @@ bao:
         LRG3_ELG1: ../base/fourier/v3_sigma_hrdrag_scaled/LRG3_ELG1.pt
         ELG2: ../base/fourier/v3_sigma_hrdrag_scaled/ELG2.pt
         QSO: ../base/fourier/v3_sigma_hrdrag_scaled/QSO.pt
-        Lya_QSO: null
+        Lya_QSO: ../base/lya/v1_ratio_to_nominal/Lya_QSO.npz
     base_omegak_w_wa:
       config:
         BGS: ../base/config/v6_sigma_hrdrag_scaled/BGS.pt
@@ -99,7 +103,7 @@ bao:
         LRG3_ELG1: ../base/config/v6_sigma_hrdrag_scaled/LRG3_ELG1.pt
         ELG2: ../base/config/v6_sigma_hrdrag_scaled/ELG2.pt
         QSO: ../base/config/v6_sigma_hrdrag_scaled/QSO.pt
-        Lya_QSO: null
+        Lya_QSO: ../base/lya/v1_ratio_to_nominal/Lya_QSO.npz
       fourier:
         BGS: ../base/fourier/v3_sigma_hrdrag_scaled/BGS.pt
         LRG1: ../base/fourier/v3_sigma_hrdrag_scaled/LRG1.pt
@@ -107,7 +111,7 @@ bao:
         LRG3_ELG1: ../base/fourier/v3_sigma_hrdrag_scaled/LRG3_ELG1.pt
         ELG2: ../base/fourier/v3_sigma_hrdrag_scaled/ELG2.pt
         QSO: ../base/fourier/v3_sigma_hrdrag_scaled/QSO.pt
-        Lya_QSO: null
+        Lya_QSO: ../base/lya/v1_ratio_to_nominal/Lya_QSO.npz
       # Native extended-model emulator: Fourier labels in DESI's fiducial coordinates, trained on
       # (N_tracers, Om, Ok, w0, wa, hrdrag), so it follows the sampled Ok/w0/wa under
       # emulator_covariance 'cosmology' too.
@@ -118,7 +122,7 @@ bao:
         LRG3_ELG1: fourier_fidcoords/v1_sigma_hrdrag_scaled/LRG3_ELG1.pt
         ELG2: fourier_fidcoords/v1_sigma_hrdrag_scaled/ELG2.pt
         QSO: fourier_fidcoords/v1_sigma_hrdrag_scaled/QSO.pt
-        Lya_QSO: null
+        Lya_QSO: ../base/lya/v1_ratio_to_nominal/Lya_QSO.npz
 shapefit:
   dr1:
     base:
