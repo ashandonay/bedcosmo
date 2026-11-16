@@ -7,11 +7,14 @@ A design can therefore move the Lya sample only together with the QSO class.
 The ``Lya QSO`` row of desi_data.csv / desi_tracers.csv carries DESI's Lya x QSO
 *tracer* count: quasar positions at z > 1.77 (DR1 709,565, DESI 2024 IV Table 1;
 DR2 1,289,874, DESI DR2 Lya BAO paper Sec 2). That sample overlaps the QSO bin over
-1.77 < z < 2.1, so its ``observed`` column double counts those fibers. Only quasars
-with a Lya forest (z > ~2.1) are fibers the QSO bin does not already hold:
-DR1 531,000 (DESI 2024 IV Table 1, Lya region A), DR2 824,989 (z > 2.09, DR2 Lya BAO
-paper Sec 2). ``LYA_FOREST_FRACTION`` is that ratio; it is survey design (a catalog
-count), not a fitted number.
+1.77 < z < 2.1, so its ``observed`` column double counts those fibers. Only the
+quasars beyond the QSO bin (z > 2.1) are fibers it does not already hold:
+DR1 448,995 (the DR1 Lya quasar catalog, VAC zlya v1.0, whose z > 1.77 count
+reproduces Table 1's 709,565), DR2 824,989 (z > 2.09, DR2 Lya BAO paper Sec 2).
+DESI 2024 IV Table 1's 531,000 "Lya region A" is NOT this count: it is the z > 1.988
+quasars (every quasar whose region A reaches the 3600 A limit), which includes the
+1.99 < z < 2.1 quasars already in the QSO bin. ``LYA_FOREST_FRACTION`` is that ratio;
+it is survey design (a catalog count), not a fitted number.
 
 Accountings (``NumTracers(lya_accounting=...)``):
 
@@ -27,10 +30,10 @@ Accountings (``NumTracers(lya_accounting=...)``):
 
 LYA_ACCOUNTINGS = ("outside", "in_budget_fixed", "qso_coupled")
 
-# Fraction of the Lya QSO row's tracer count (z > 1.77) that has a Lya forest
-# (z > ~2.1): the part not already counted in the QSO bin.
+# Fraction of the Lya QSO row's tracer count (z > 1.77) beyond the QSO bin
+# (z > 2.1): the part not already counted in it.
 LYA_FOREST_FRACTION = {
-    "dr1": 531_000 / 709_565,
+    "dr1": 448_995 / 709_565,
     "dr2": 824_989 / 1_289_874,
 }
 
