@@ -177,7 +177,9 @@ def _snapshot_emulators(args, artifacts_dir):
                 raise FileNotFoundError(
                     f"Emulator checkpoint for '{tracer_bin}' not found: {ckpt_path}"
                 )
-            shutil.copy2(ckpt_path, os.path.join(emu_dir, subdir, f"{tracer_bin}.pt"))
+            # Keep the extension: a .npz is a table, which NumTracers loads differently.
+            ext = os.path.splitext(ckpt_path)[1] or ".pt"
+            shutil.copy2(ckpt_path, os.path.join(emu_dir, subdir, f"{tracer_bin}{ext}"))
             copied.append(os.path.join(subdir, tracer_bin))
     print(f"Snapshotted emulator checkpoints: {copied}", file=sys.stderr)
 
