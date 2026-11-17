@@ -341,3 +341,49 @@ def test_run_snapshot_keeps_the_table_and_a_reload_finds_it(tmp_path):
                           prior_args=load("prior_args_hrdrag.yaml"))
     assert "Lya_QSO" in exp._emulator_tables
     assert exp._emulator_tables["Lya_QSO"]["path"].startswith(str(tmp_path))
+
+
+# ---------------------------------------------------------------- design-tool bounds
+def test_design_default_bounds_outside_are_unchanged():
+    from bedcosmo.num_tracers import design
+
+    lower, upper = design.default_bounds("dr1", "outside")
+    assert lower == design.DEFAULT_LOWER and upper == design.DEFAULT_UPPER
+
+
+@pytest.mark.parametrize("accounting", ["qso_coupled", "in_budget_fixed"])
+def test_design_default_bounds_keep_each_class_relative_to_nominal(accounting):
+    """Converted bounds sit at the same multiple of nominal; the caps stay availability."""
+    _skip_without("dr1")
+    from bedcosmo.num_tracers import design
+
+    lower, upper = map(np.asarray, design.default_bounds("dr1", accounting))
+    nom_out = design.nominal_vector("dr1", "outside")
+    nom = design.nominal_vector("dr1", accounting)
+    np.testing.assert_allclose(upper / nom, np.asarray(design.DEFAULT_UPPER) / nom_out, rtol=1e-12)
+    keep = [0, 1, 3]   # ELG's lower is snapped onto the sum lattice
+    np.testing.assert_allclose((lower / nom)[keep], (np.asarray(design.DEFAULT_LOWER) / nom_out)[keep],
+                               rtol=1e-12)
+    elg = design.LABELS.index("ELG")
+    assert 0 <= design.DEFAULT_LOWER[elg] * nom[elg] / nom_out[elg] - lower[elg] < 0.01
+    # sum 1 on the lattice: (1 - sum(lower)) is a whole number of 0.01 steps
+    gap = (1 - lower.sum()) / 0.01
+    assert gap == pytest.approx(round(gap), abs=1e-9)
+    # the availability caps are NumTracers' own (num_targets over the budget)
+    exp = _make_exp("dr1", lya_accounting=accounting)
+    avail = (exp.num_targets / exp.nominal_total_obs).values
+    i = [design.LABELS.index(c) for c in ("BGS", "LRG", "QSO")]
+    np.testing.assert_allclose(upper[i], avail[i], rtol=2e-3)   # DEFAULT_UPPER is rounded to 4 d.p.
+
+
+def test_design_coupled_pool_reaches_past_nominal_qso():
+    _skip_without("dr1")
+    from bedcosmo.num_tracers import design
+
+    pool = design.budget_pool(sum_lower=1.0, sum_upper=1.0, dataset="dr1",
+                              lya_accounting="qso_coupled", include_nominal_scales=[1.0])
+    nom = design.nominal_vector("dr1", "qso_coupled")
+    qso = design.LABELS.index("QSO")
+    assert pool.shape[0] > 50
+    assert pool[:, qso].max() > nom[qso]
+    np.testing.assert_allclose(pool.sum(1), 1.0, atol=1e-9)

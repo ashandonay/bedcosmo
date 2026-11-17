@@ -48,12 +48,12 @@ from bedcosmo.num_tracers.lya import LYA_ACCOUNTINGS
 LABELS = ["BGS", "LRG", "ELG", "QSO"]
 # Mirror NumTracers: DESI CSVs live under $HOME/data/desi/bao_<dataset>/
 _DATA_ROOT = os.path.join(os.environ.get("HOME", ""), "data", "desi")
-# Default per-class grid from design_args_dr1.yaml. Design fractions divide the observed fibers
-# outside Lya QSO (NumTracers.nominal_total_obs), which keeps its own counts in every design.
-# The BGS, LRG and QSO upper bounds are target availability: each class's summed `targets` in
-# desi_tracers.csv over that budget, the bound NumTracers uses when `upper` is unset. ELG's
-# 0.575 is hand-set (its availability is ~1.34): the fiber count a 0.5 bound allowed when Lya
-# was counted in the budget.
+# Default per-class grid from design_args_dr1.yaml, in lya_accounting="outside" units: fractions
+# of the observed fibers outside Lya QSO (NumTracers.nominal_total_obs). The BGS, LRG and QSO upper
+# bounds are target availability: each class's summed `targets` in desi_tracers.csv over that
+# budget, the bound NumTracers uses when `upper` is unset. ELG's 0.575 is hand-set (its
+# availability is ~1.34): the fiber count a 0.5 bound allowed when Lya was counted in the budget.
+# Other accountings divide a different budget; `default_bounds` converts these to it.
 DEFAULT_STEP = [0.01, 0.02, 0.02, 0.01]
 DEFAULT_LOWER = [0.02, 0.1, 0.1, 0.1]
 DEFAULT_UPPER = [0.0673, 0.4393, 0.575, 0.2070]
@@ -76,6 +76,33 @@ def nominal_vector(dataset: str = "dr1", lya_accounting: str = "outside") -> np.
     return np.asarray((observed / observed.sum()).reindex(LABELS).values, dtype=np.float64)
 
 
+def default_bounds(dataset: str = "dr1", lya_accounting: str = "outside",
+                   step: Sequence[float] = DEFAULT_STEP) -> tuple[list[float], list[float]]:
+    """Default (lower, upper) per class, in ``lya_accounting``'s budget units.
+
+    ``DEFAULT_LOWER``/``DEFAULT_UPPER`` are fractions of the "outside" budget. Another
+    accounting divides a different budget (and under "qso_coupled" the QSO class also
+    holds the Lya forest fibers), so each bound is carried over at the same multiple of
+    its class's nominal share. The target-availability caps stay exact: bound / nominal
+    is the same in every accounting.
+
+    A design pool keeps rows whose sum is the budget, and grid sums move in steps of the
+    steps' common unit, so sum(lower) must sit on that lattice relative to 1. Converted
+    bounds generally do not; ELG's lower bound (the widest axis) is lowered by less than
+    one unit to put it there.
+    """
+    lower = np.asarray(DEFAULT_LOWER, dtype=np.float64)
+    upper = np.asarray(DEFAULT_UPPER, dtype=np.float64)
+    if lya_accounting == "outside":
+        return lower.tolist(), upper.tolist()
+    k = nominal_vector(dataset, lya_accounting) / nominal_vector(dataset, "outside")
+    lower, upper = lower * k, upper * k
+    unit = np.gcd.reduce(np.round(np.asarray(step) * 1e6).astype(np.int64)) / 1e6
+    gap = (1.0 - lower.sum()) / unit
+    lower[LABELS.index("ELG")] -= (np.ceil(gap - 1e-9) - gap) * unit
+    return lower.tolist(), upper.tolist()
+
+
 def scale_tag(s: float) -> str:
     """1.05 -> '05', 1.10 -> '10', 1.00 -> '00', 1.5 -> '50'."""
     return f"{round((s - 1.0) * 100):02d}"
@@ -90,8 +117,8 @@ def budget_pool(
     sum_lower: float = 1.0,
     sum_upper: float = 1.2,
     step: Sequence[float] = DEFAULT_STEP,
-    lower: Sequence[float] = DEFAULT_LOWER,
-    upper: Sequence[float] = DEFAULT_UPPER,
+    lower: Sequence[float] | None = None,
+    upper: Sequence[float] | None = None,
     dataset: str = "dr1",
     include_nominal_scales: Iterable[float] | None = None,
     include: Iterable[Sequence[float]] | None = None,
@@ -121,7 +148,12 @@ def budget_pool(
 
     Note ``np.arange`` excludes the endpoint, so ``upper`` is exclusive -- matching
     ``NumTracers``, which builds its axes the same way.
+
+    ``lower``/``upper`` default to ``default_bounds(dataset, lya_accounting, step)``.
     """
+    d_lower, d_upper = default_bounds(dataset, lya_accounting, step)
+    lower = d_lower if lower is None else lower
+    upper = d_upper if upper is None else upper
     _validate_axis_spec(step, lower, upper)
     axes = [
         np.arange(lower[i], upper[i], step[i])
@@ -390,6 +422,10 @@ def _cmd_scaled(args: argparse.Namespace) -> np.ndarray:
 
 def _cmd_pool(args: argparse.Namespace) -> np.ndarray:
     scales = args.include_scales if args.include_scales else None
+    d_lower, d_upper = default_bounds(args.dataset, args.lya_accounting, args.step)
+    args.lower = d_lower if args.lower is None else args.lower
+    args.upper = d_upper if args.upper is None else args.upper
+    args._provenance["args"].update(lower=args.lower, upper=args.upper)
     pool = budget_pool(
         sum_lower=args.sum_lower,
         sum_upper=args.sum_upper,
@@ -457,8 +493,8 @@ def main(argv: list[str] | None = None) -> np.ndarray:
     parser.add_argument(
         "--lya-accounting", default="outside", choices=LYA_ACCOUNTINGS,
         help="Which fibers the design fractions divide; must match the training run's "
-             "lya_accounting (num_tracers/lya.py). The default --upper is for 'outside'. "
-             "(default: outside)",
+             "lya_accounting (num_tracers/lya.py). The default --lower/--upper are converted "
+             "to it (default_bounds). (default: outside)",
     )
     sub = parser.add_subparsers(dest="mode", required=True)
 
@@ -495,14 +531,16 @@ def main(argv: list[str] | None = None) -> np.ndarray:
         help=f"Per-class grid step (default: {DEFAULT_STEP})",
     )
     p_pool.add_argument(
-        "--lower", type=float, nargs=4, default=DEFAULT_LOWER,
+        "--lower", type=float, nargs=4, default=None,
         metavar=tuple(LABELS),
-        help=f"Per-class lower bound, inclusive (default: {DEFAULT_LOWER})",
+        help=f"Per-class lower bound, inclusive (default: {DEFAULT_LOWER} in 'outside' units, "
+             "converted to --lya-accounting's)",
     )
     p_pool.add_argument(
-        "--upper", type=float, nargs=4, default=DEFAULT_UPPER,
+        "--upper", type=float, nargs=4, default=None,
         metavar=tuple(LABELS),
-        help=f"Per-class upper bound, EXCLUSIVE (default: {DEFAULT_UPPER})",
+        help=f"Per-class upper bound, EXCLUSIVE (default: {DEFAULT_UPPER} in 'outside' units "
+             "-- target availability for BGS, LRG, QSO -- converted to --lya-accounting's)",
     )
     p_pool.add_argument(
         "--n-target", type=int, default=None,
