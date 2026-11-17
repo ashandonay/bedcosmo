@@ -234,7 +234,7 @@ def _subsample(
     """Randomly thin ``pool`` to ``n_target`` rows, always keeping ``pinned`` rows."""
     mask = is_pinned(pool, pinned)
     keep_rows = pool[mask]
-    if keep_rows.shape[0] >= n_target:
+    if keep_rows.shape[0] > n_target:
         raise ValueError(
             f"n_target ({n_target}) is below the {keep_rows.shape[0]} pinned designs; "
             "raise n_target or pin fewer designs"
