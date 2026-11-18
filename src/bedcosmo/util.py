@@ -766,10 +766,19 @@ def init_experiment(
         if cosmo_exp == "num_tracers":
             # A run logged with neither lya_accounting nor lya_in_budget was trained with Lya
             # QSO fibers inside the QSO class and its error nominal; load it that way so its
-            # designs mean what they meant. lya_sigma_scaling's default is only read under
-            # lya_accounting="qso_coupled", which such runs never used.
+            # designs mean what they meant.
             if "lya_accounting" not in run_args:
                 run_args.setdefault("lya_in_budget", True)
+            # Runs logged with lya_sigma_scaling chose a law for the Lya QSO error under
+            # lya_accounting="qso_coupled" wherever no Lya table was loaded (scaling mode, and
+            # emulator runs from before the table). That error now scales as 1/sqrt(N) like
+            # every other row; a run trained under another law reloads with it.
+            law = run_args.pop("lya_sigma_scaling", None)
+            if (law not in (None, "inverse_sqrt_n")
+                    and run_args.get("lya_accounting") == "qso_coupled"):
+                warnings.warn(
+                    f"run trained with lya_sigma_scaling={law!r}; where no Lya table is loaded "
+                    "it reloads with the Lya QSO error scaled as 1/sqrt(N), unlike training.")
 
         artifact_uri = run_obj.info.artifact_uri
         if artifact_uri.startswith("file://"):
