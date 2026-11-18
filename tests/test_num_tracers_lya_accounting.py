@@ -1,23 +1,21 @@
 """NumTracers ``lya_accounting="qso_coupled"``: Lya QSO follows the design's QSO class.
 
 Tracer and Lya QSOs share one target selection, so Lya's count scales with the QSO class
-fraction and its nominal DESI covariance block is rescaled by ``lya_sigma_scaling``. These
-tests pin the nominal identity (nominal design -> nominal Lya count and block), the
-scaling of a halved QSO class under each law, and the budget (Lya's forest fibers only).
+fraction. Without a Lya table its nominal DESI covariance block scales as 1/sqrt(N), like
+every other row. These tests pin the nominal identity (nominal design -> nominal Lya count
+and block), the scaling of a halved QSO class, and the budget (Lya's forest fibers only).
 """
 import os
+import warnings
 
 import numpy as np
 import pytest
 import torch
 
-from bedcosmo.num_tracers.lya import (
-    LYA_FOREST_FRACTION, LYA_NOISE_POWER_X, LYA_SIGMA_SCALINGS, resolve_lya_accounting)
+from bedcosmo.num_tracers.lya import LYA_FOREST_FRACTION, resolve_lya_accounting
 from bedcosmo.util import init_experiment
 
 DATASETS = ["dr1", "dr2"]
-# sigma ratio of a halved Lya count under the default noise-power law.
-_NP_HALVED = (1 + 2 / LYA_NOISE_POWER_X) / (1 + 1 / LYA_NOISE_POWER_X)
 DESIGN_ARGS = {"dr1": "design_args_dr1.yaml", "dr2": "design_args_dr2.yaml"}
 _DATA_ROOT = os.path.join(os.environ.get("HOME", ""), "data", "desi")
 _CKPT_DIR = os.path.join(
@@ -85,18 +83,16 @@ def test_nominal_design_gives_nominal_counts_and_halving_qso_halves_them(ds):
 
 
 @pytest.mark.parametrize("ds", DATASETS)
-@pytest.mark.parametrize("law, halved_factor", [
-    ("noise_power", _NP_HALVED), ("inverse_sqrt_n", np.sqrt(2.0)), ("inverse_n", 2.0)])
-def test_scaling_mode_lya_sigma_follows_the_law(ds, law, halved_factor):
+def test_scaling_mode_lya_sigma_scales_as_inverse_sqrt_n(ds):
     _skip_without(ds)
-    exp = _make_exp(ds, lya_sigma_scaling=law)
+    exp = _make_exp(ds)
     nominal, halved = _halve_qso(exp)
     rows = exp._lya_qso_rows
     at_nominal = exp.sigma_scaling_factor(exp.calc_passed(nominal), rows)
     assert torch.allclose(at_nominal, torch.ones_like(at_nominal))
     at_halved = exp.sigma_scaling_factor(exp.calc_passed(halved), rows)
-    assert torch.allclose(at_halved, torch.full_like(at_halved, halved_factor))
-    # The tracer QSO bin keeps scaling mode's 1/sqrt(N) whatever the Lya law.
+    assert torch.allclose(at_halved, torch.full_like(at_halved, np.sqrt(2.0)))
+    # The tracer QSO bin scales the same way.
     qso_row = np.where(exp.desi_data["tracer"] == "QSO")[0]
     qso = exp.sigma_scaling_factor(exp.calc_passed(halved), qso_row)
     assert torch.allclose(qso, torch.full_like(qso, np.sqrt(2.0)))
@@ -111,24 +107,6 @@ def test_other_accountings_hold_the_lya_error_nominal(accounting):
     assert torch.allclose(factor, torch.ones_like(factor))
 
 
-def test_noise_power_law_limits():
-    """1 at nominal; local slope -1/(1+x); 1/N when sparse; flat when signal dominated."""
-    law = LYA_SIGMA_SCALINGS["noise_power"]
-    assert law(1.0) == pytest.approx(1.0)
-    eps = 1e-6
-    slope = (np.log(law(1 + eps)) - np.log(law(1 - eps))) / (2 * eps)
-    assert slope == pytest.approx(-1 / (1 + LYA_NOISE_POWER_X), rel=1e-6)
-    assert law(1e-4, x=1e-3) / law(2e-4, x=1e-3) == pytest.approx(2.0, rel=1e-3)
-    assert law(1e4, x=1.0) / law(2e4, x=1.0) == pytest.approx(1.0, abs=1e-3)
-    got = law(torch.tensor([0.5, 2.0], dtype=torch.float64))
-    assert torch.allclose(got, torch.tensor([law(0.5), law(2.0)], dtype=torch.float64))
-
-
-def test_default_law_is_noise_power():
-    _skip_without("dr1")
-    assert _make_exp("dr1").lya_sigma_scaling == "noise_power"
-
-
 def test_legacy_flag_maps_onto_the_accountings():
     assert resolve_lya_accounting(None, None) == "outside"
     assert resolve_lya_accounting(None, False) == "outside"
@@ -138,12 +116,6 @@ def test_legacy_flag_maps_onto_the_accountings():
         resolve_lya_accounting("qso_coupled", False)
     with pytest.raises(ValueError, match="must be one of"):
         resolve_lya_accounting("coupled", None)
-
-
-def test_unknown_scaling_law_is_rejected():
-    _skip_without("dr1")
-    with pytest.raises(ValueError, match="lya_sigma_scaling"):
-        _make_exp("dr1", lya_sigma_scaling="inverse_cube")
 
 
 def test_runs_logged_with_lya_accounting_keep_it(tmp_path):
@@ -162,20 +134,47 @@ def test_runs_logged_with_lya_accounting_keep_it(tmp_path):
     run_obj = SimpleNamespace(info=SimpleNamespace(artifact_uri=f"file://{tmp_path}"))
     run_args = dict(cosmo_exp="num_tracers", dataset="dr1", analysis="bao", cosmo_model="base",
                     likelihood_mode="scaling", device="cpu", mode="eval",
-                    lya_accounting="qso_coupled", lya_sigma_scaling="inverse_n")
+                    lya_accounting="qso_coupled")
     exp = init_experiment(run_obj=run_obj, run_args=run_args, design_args=load(DESIGN_ARGS["dr1"]),
                           prior_args=load("prior_args_hrdrag.yaml"))
     assert exp.lya_accounting == "qso_coupled"
-    assert exp.lya_sigma_scaling == "inverse_n"
+
+
+def test_runs_logged_with_a_lya_law_still_load(tmp_path):
+    """A run logged with the removed lya_sigma_scaling reloads (key dropped), warning when its
+    law was not 1/sqrt(N)."""
+    _skip_without("dr1")
+    from types import SimpleNamespace
+
+    import yaml
+
+    from bedcosmo.util import get_experiment_config_path
+
+    def load(name):
+        with open(get_experiment_config_path("num_tracers", name)) as f:
+            return yaml.safe_load(f)
+
+    run_obj = SimpleNamespace(info=SimpleNamespace(artifact_uri=f"file://{tmp_path}"))
+    for law, warns in (("noise_power", True), ("inverse_sqrt_n", False)):
+        run_args = dict(cosmo_exp="num_tracers", dataset="dr1", analysis="bao",
+                        cosmo_model="base", likelihood_mode="scaling", device="cpu", mode="eval",
+                        lya_accounting="qso_coupled", lya_sigma_scaling=law)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            exp = init_experiment(run_obj=run_obj, run_args=run_args,
+                                  design_args=load(DESIGN_ARGS["dr1"]),
+                                  prior_args=load("prior_args_hrdrag.yaml"))
+        assert exp.lya_accounting == "qso_coupled"
+        assert not hasattr(exp, "lya_sigma_scaling")
+        assert any("lya_sigma_scaling" in str(w.message) for w in caught) == warns
 
 
 @pytest.mark.skipif(not os.path.isdir(_CKPT_DIR),
                     reason="bao dr1/base fourier emulator checkpoints not available")
-@pytest.mark.parametrize("law, halved_variance", [
-    ("noise_power", _NP_HALVED ** 2), ("inverse_sqrt_n", 2.0), ("inverse_n", 4.0)])
 @pytest.mark.parametrize("sqrtn_ref", [None, "fiducial"])
-def test_emulator_fallback_lya_block_follows_the_law(law, halved_variance, sqrtn_ref):
-    exp = _make_exp("dr1", likelihood_mode="emulator", lya_sigma_scaling=law,
+def test_emulator_fallback_lya_block_scales_as_inverse_sqrt_n(sqrtn_ref):
+    halved_variance = 2.0
+    exp = _make_exp("dr1", likelihood_mode="emulator",
                     emulator_covariance="fiducial", emulator_sqrtn_ref=sqrtn_ref)
     _as_fallback(exp)
     rows = exp._lya_qso_rows

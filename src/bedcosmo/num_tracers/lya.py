@@ -24,8 +24,10 @@ Accountings (``NumTracers(lya_accounting=...)``):
   moves with it, but its error is held nominal (the accounting of runs logged before
   the option existed).
 - ``"qso_coupled"``: Lya's forest-only fibers sit in the QSO class; Lya's tracer
-  count follows the QSO class, ``N_Lya = N_Lya,nominal * f_QSO / f_QSO,nominal``, and
-  its nominal DESI covariance block is rescaled by the law ``lya_sigma_scaling`` names.
+  count follows the QSO class, ``N_Lya = N_Lya,nominal * f_QSO / f_QSO,nominal``. In
+  emulator mode its block comes from the Lya table (tracer-forecast-emulator's
+  first-principles Lya forecast); in scaling mode its nominal DESI block is rescaled
+  as sigma ∝ 1/sqrt(N), like every other row.
 """
 
 LYA_ACCOUNTINGS = ("outside", "in_budget_fixed", "qso_coupled")
@@ -35,43 +37,6 @@ LYA_ACCOUNTINGS = ("outside", "in_budget_fixed", "qso_coupled")
 LYA_FOREST_FRACTION = {
     "dr1": 448_995 / 709_565,
     "dr2": 824_989 / 1_289_874,
-}
-
-
-# Effective signal-to-noise per mode of the Lya forest at BAO scales, x = P_F / P_N
-# (an effective n̄P): ~0.22 at z ~ 2.5, k = 0.14 h/Mpc, mu = 0.6 for DESI (Font-Ribera,
-# McDonald, Mostek et al. 2014, JCAP 05, 023, arXiv:1308.4164, Sec. 4, "scaling from the
-# Lya forest BAO errors gives ~0.22 for the Lya forest"). It is a forecast for the full
-# survey, not a fit to a DESI measurement.
-LYA_NOISE_POWER_X = 0.22
-
-
-def _inverse_sqrt_n(n_ratio):
-    """sigma ∝ N^-1/2: the local slope of the noise-power law where n̄P = 1."""
-    return n_ratio ** -0.5
-
-
-def _inverse_n(n_ratio):
-    """sigma ∝ N^-1: the noise-dominated (n̄P << 1) limit of the noise-power law."""
-    return n_ratio ** -1.0
-
-
-def _noise_power(n_ratio, x=LYA_NOISE_POWER_X):
-    """sigma ∝ 1 + P_N/P_F with P_N ∝ 1/N, normalized to 1 at nominal.
-
-    The per-mode BAO Fisher information goes as (n̄P / (1 + n̄P))^2, so sigma ∝
-    (1 + 1/(r x)) with r = N / N_nominal and x = n̄P at nominal. Its local slope
-    d ln sigma / d ln N = -1 / (1 + r x) runs from -1 (sparse) toward 0 (cosmic-variance
-    limited); 1/sqrt(N) is the slope at r x = 1 only.
-    """
-    return (1.0 + 1.0 / (n_ratio * x)) / (1.0 + 1.0 / x)
-
-
-# sigma(N) / sigma(N_nominal) as a function of n_ratio = N / N_nominal.
-LYA_SIGMA_SCALINGS = {
-    "noise_power": _noise_power,
-    "inverse_sqrt_n": _inverse_sqrt_n,
-    "inverse_n": _inverse_n,
 }
 
 
