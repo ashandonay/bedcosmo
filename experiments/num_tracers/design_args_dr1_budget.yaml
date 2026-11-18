@@ -11,13 +11,14 @@
 #   ./submit.sh train num_tracers base \
 #       --design-args-path design_args_dr1_budget.yaml --n-particles-per-device 12
 #
-# Per-bin bounds are unchanged from design_args_dr1.yaml; their sum caps the reachable
-# budget at 1.24, so 1.2 is inside the feasible region.
+# Per-bin bounds are design_args_dr1.yaml's; their sum caps the reachable budget at 1.28,
+# so 1.2 is inside the feasible region.
+# Bounds are fractions of the lya_accounting="qso_coupled" budget (design.default_bounds).
 labels: ["BGS", "LRG", "ELG", "QSO"]
 input_type: variable # variable or nominal
 input_path: null
 step: [0.01, 0.02, 0.02, 0.01]
-lower: [0.02, 0.1, 0.1, 0.1]
-upper: [0.0673, 0.4393, 0.575, 0.2070]
+lower: [0.018267953498846617, 0.09133976749423309, 0.09117881378470297, 0.13921346522221734]
+upper: [0.06147166352361886, 0.401255598602166, 0.5252036630918401, 0.28817187300998987]
 sum_lower: 1.0
 sum_upper: 1.2

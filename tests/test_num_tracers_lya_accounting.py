@@ -28,6 +28,18 @@ def _skip_without(ds):
         pytest.skip(f"desi dataset bao_{ds} not available")
 
 
+def _design_args(ds, accounting="qso_coupled"):
+    """The dataset's design_args. Its pool is built for qso_coupled; another accounting
+    gets the grid instead, since the pool guard refuses a pool built for another one."""
+    import yaml
+
+    from bedcosmo.util import get_experiment_config_path
+
+    with open(get_experiment_config_path("num_tracers", DESIGN_ARGS[ds])) as f:
+        args = yaml.safe_load(f)
+    return args if accounting == "qso_coupled" else dict(args, input_path=None)
+
+
 def _make_exp(ds, likelihood_mode="scaling", **overrides):
     kwargs = dict(lya_accounting="qso_coupled")
     kwargs.update(overrides)
@@ -35,8 +47,8 @@ def _make_exp(ds, likelihood_mode="scaling", **overrides):
         kwargs.setdefault("emulator_space", "fourier")
     return init_experiment(
         cosmo_exp="num_tracers", prior_args_path="prior_args_hrdrag.yaml",
-        design_args_path=DESIGN_ARGS[ds], dataset=ds, analysis="bao", cosmo_model="base",
-        likelihood_mode=likelihood_mode, device="cpu", mode="eval", **kwargs)
+        design_args=_design_args(ds, kwargs["lya_accounting"]), dataset=ds, analysis="bao",
+        cosmo_model="base", likelihood_mode=likelihood_mode, device="cpu", mode="eval", **kwargs)
 
 
 def _halve_qso(exp):
@@ -108,7 +120,7 @@ def test_other_accountings_hold_the_lya_error_nominal(accounting):
 
 
 def test_legacy_flag_maps_onto_the_accountings():
-    assert resolve_lya_accounting(None, None) == "outside"
+    assert resolve_lya_accounting(None, None) == "qso_coupled"
     assert resolve_lya_accounting(None, False) == "outside"
     assert resolve_lya_accounting(None, True) == "in_budget_fixed"
     assert resolve_lya_accounting("qso_coupled", None) == "qso_coupled"

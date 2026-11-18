@@ -405,6 +405,7 @@ class NumTracers(BaseExperiment, CosmologyMixin):
             self.init_designs(**design_args)
         else:
             self.init_designs()
+        self._report_emulator_coverage()
 
     @profile_method
     def init_designs(
@@ -450,6 +451,7 @@ class NumTracers(BaseExperiment, CosmologyMixin):
             if input_path is not None:
                 if not os.path.exists(input_path):
                     raise FileNotFoundError(f"input_path not found: {input_path}")
+                self._check_pool_accounting(input_path)
 
                 input_designs_array = np.load(input_path)
                 # Convert to tensor
@@ -542,6 +544,26 @@ class NumTracers(BaseExperiment, CosmologyMixin):
                 self.designs_grid, device=self.device, dtype=torch.float64
             )
         self.designs = design_pts.to(self.device)
+
+    def _check_pool_accounting(self, input_path):
+        """Refuse a design pool built for another lya_accounting.
+
+        The same fractions mean a different allocation in each accounting, and nothing
+        downstream would notice. Pools written by ``bedcosmo.num_tracers.design`` record
+        theirs in ``provenance.json`` beside ``designs.npy``; a pool without one is
+        accepted as it always was.
+        """
+        prov = os.path.join(os.path.dirname(input_path), "provenance.json")
+        if not os.path.exists(prov):
+            return
+        with open(prov) as f:
+            pool_accounting = (json.load(f).get("args") or {}).get("lya_accounting")
+        if pool_accounting is not None and pool_accounting != self.lya_accounting:
+            raise ValueError(
+                f"design pool {os.path.dirname(input_path)} was built for "
+                f"lya_accounting={pool_accounting!r}, but this run uses "
+                f"{self.lya_accounting!r}; rebuild it with "
+                f"`python -m bedcosmo.num_tracers.design --lya-accounting {self.lya_accounting}`.")
 
     @profile_method
     def init_prior(self, parameters, constraints=None, prior_flow_path=None, **kwargs):
@@ -1774,6 +1796,70 @@ class NumTracers(BaseExperiment, CosmologyMixin):
     # _load_emulator); one without it keeps its small excursions unbiased.
     _N_EXTRAP_LO = 0.5   # warn below 0.5 x trained low
     _N_EXTRAP_HI = 2.0   # warn above 2.0 x trained high
+
+    def _report_emulator_coverage(self):
+        """Compare each emulator's trained N box with the N the designs feed it.
+
+        Prints one line per network on rank 0, in tracer counts and, for a bin fed by a
+        single class, in that class's fraction of the budget, and warns when any design
+        asks for N above the trained top: the net is extrapolated there. N below the
+        trained floor is clamped (``_load_emulator``), so only the top is checked.
+        Covers the BAO networks and both ShapeFit networks (mean, covar) per bin.
+        """
+        designs = getattr(self, "designs", None)
+        if designs is None or designs.numel() == 0:
+            return
+        x = designs.to(torch.float64)
+        # (name, emulator, per-class N weights in tracer counts, N offset)
+        nets = []
+        for tracer_bin, emu in (getattr(self, "_emulators", None) or {}).items():
+            desi_name = self._EMULATOR_TRACER_TO_DESI.get(tracer_bin)
+            rows = self.desi_data.index[self.desi_data["tracer"] == desi_name].tolist()
+            if rows:
+                nets.append((tracer_bin, emu,
+                             self._passed_weights[rows[0]] * self.nominal_total_obs,
+                             float(self._passed_offset[rows[0]]) * self.nominal_total_obs))
+        for quantity, by_bin in (getattr(self, "_shapefit_emulators", None) or {}).items():
+            for i, tracer_bin in enumerate(self.shapefit_bins):
+                nets.append((f"{tracer_bin} {quantity}", by_bin[tracer_bin],
+                             self._shapefit_n_weights[i], float(self._shapefit_n_offset[i])))
+        if not nets:
+            return
+        labels = [str(label) for label in self.design_labels]
+        short, lines = [], []
+        w = max(len(name) for name, *_ in nets)
+        for name, emu, weights, offset in nets:
+            n_hi = emu.get("n_train_hi")
+            if n_hi is None:
+                continue
+            weights = weights.to(torch.float64)
+            n = x @ weights + offset
+            n_max = float(n.max())
+            above = int((n > n_hi).sum())
+            feeding = [j for j in range(len(labels)) if float(weights[j]) > 0.0]
+            line = f"  {name:<{w}}  trained N <= {n_hi:.3g}"
+            if len(feeding) == 1 and offset == 0.0:
+                j = feeding[0]
+                line += (f" ({labels[j]} f <= {n_hi / float(weights[j]):.3g} of the budget); "
+                         f"designs reach {n_max:.3g} (f = {float(x[:, j].max()):.3g})")
+            else:
+                line += f"; designs reach {n_max:.3g}"
+            if above:
+                line += f": {above}/{x.shape[0]} designs above"
+                short.append(f"{name} ({above}/{x.shape[0]} designs)")
+            lines.append(line)
+        if self.global_rank == 0 and lines:
+            print("Emulator N coverage of the design pool:")
+            for line in lines:
+                print(line)
+        if short:
+            import warnings
+            warnings.warn(
+                "Designs ask emulators for N above their trained box, where the net is "
+                f"extrapolated: {', '.join(short)}. Retrain those bins over the design "
+                "budget (tracer_forecast_emulator util.ntracers_range) or narrow the pool.",
+                RuntimeWarning,
+            )
 
     def _warn_n_extrapolation(self, tracer_bin, emu, n_values):
         """Warn once per emulator if fed N_tracers grossly outside training."""

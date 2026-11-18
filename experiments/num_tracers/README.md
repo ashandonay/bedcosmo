@@ -25,7 +25,7 @@ Observing more of a class shrinks the BAO error in its bins, but the total numbe
 
 Two facts drive everything downstream:
 
-- **A design's *sum* is the total-observation budget.** The four entries are fractions of the nominal observations in the budget (under the default `lya_accounting: outside`, all but Lya QSO's: dr1 7,089,170; dr2 16,708,794), so a design summing to 1.0 spends the nominal budget and one summing to 1.2 spends 20% more. Budget is therefore a *design axis*, not a separate setting.
+- **A design's *sum* is the total-observation budget.** The four entries are fractions of the nominal observations in the budget (under the default `lya_accounting: qso_coupled`, every class's fibers plus the Lya forest quasars beyond the QSO bin: dr1 7,761,318; under `outside`, all but Lya QSO's: dr1 7,089,170; dr2 16,708,794), so a design summing to 1.0 spends the nominal budget and one summing to 1.2 spends 20% more. Budget is therefore a *design axis*, not a separate setting.
 - **Lya QSO's place in the budget is `lya_accounting`.** See [below](#lya-qso-accounting).
 - **Observed != passed.** The emulator and the noise model both want redshift-confirmed (*passed*) counts, obtained as `observed x efficiency` per tracer. `calc_passed` does this conversion, correctly blending the LRG3+ELG1 bin from both parent classes.
 
@@ -35,9 +35,9 @@ Tracer QSOs and Lya QSOs come from one QSO target selection, and which side of z
 
 | `lya_accounting` | Lya fibers in the budget | Lya count | Lya error |
 |---|---|---|---|
-| `outside` (default; legacy `lya_in_budget: false`) | none | dataset's, every design | nominal |
+| `outside` (legacy `lya_in_budget: false`) | none | dataset's, every design | nominal |
 | `in_budget_fixed` (legacy `lya_in_budget: true`; runs logged without either option) | full `observed` row, in the QSO class | follows the QSO class | nominal |
-| `qso_coupled` | quasars beyond the QSO bin (z > 2.1), in the QSO class | follows the QSO class | nominal block rescaled: by the `Lya_QSO` table in emulator mode, as 1/sqrt(N) otherwise |
+| `qso_coupled` (default) | quasars beyond the QSO bin (z > 2.1), in the QSO class | follows the QSO class | nominal block rescaled: by the `Lya_QSO` table in emulator mode, as 1/sqrt(N) otherwise |
 
 The `Lya QSO` row's `passed` count (dr1 709,565; dr2 1,289,874) is DESI's Lya x QSO *tracer* sample, quasar positions at z > 1.77 (DESI 2024 IV Table 1; DESI DR2 Lya BAO, Sec 2). It overlaps the QSO bin over 1.77 < z < 2.1, so its `observed` column double counts those fibers. `qso_coupled` puts only the quasars beyond the QSO bin (z > 2.1) in the budget (dr1 448,995, from the DR1 Lya quasar catalog, VAC zlya v1.0; dr2 824,989 at z > 2.09), and scales the Lya count by the design's QSO fraction relative to nominal, so the nominal design reproduces 709,565. DESI 2024 IV Table 1's 531,000 "Lya region A" is the z > 1.988 count and includes quasars already in the QSO bin, so it is not used. dr1's nominal design there is `[0.0391, 0.2781, 0.4310, 0.2518]` over 7,761,318 fibers. A design pool for it must be built with `python -m bedcosmo.num_tracers.design --lya-accounting qso_coupled ...`: the same fractions mean a different allocation in each accounting. The tool's default `--lower`/`--upper` are written in `outside` units and converted to the chosen accounting at the same multiple of each class's nominal share (`design.default_bounds`), so the target-availability caps carry over: dr1 `qso_coupled` caps BGS 0.0615, LRG 0.4013, QSO 0.2882 (ELG's hand-set 0.525).
 
@@ -70,11 +70,11 @@ The Lya QSO bin keeps the dataset's own counts (dr1: 1,062,223 observed) in ever
 
 | File | Budget (sum) | Designs | Purpose |
 |------|--------------|---------|---------|
-| `design_args_dr1.yaml` | 1.0 (pinned) | 266 | Default dr1 grid; split-only optimization |
-| `design_args_dr2.yaml` | 1.0 (pinned) | 215 | Same for dr2 bounds |
+| `design_args_dr1.yaml` | 1.0 (pinned) | 50 (pool `dr1_coupled_caps_50_b449k`; its grid without `input_path` is 323) | Default dr1 designs; split-only optimization |
+| `design_args_dr2.yaml` | 1.0 (pinned) | 276 | Same for dr2 bounds |
 | `design_args_nominal.yaml` | 1.0 | 1 | The DESI nominal split, computed internally |
 | `design_args_unconstrained.yaml` | 1.0 (pinned) | 560 | Coarse step, bounds opened to 1.0 |
-| `design_args_dr1_budget.yaml` | [1.0, 1.2] | 2678 | Budget as an axis inside one flow |
+| `design_args_dr1_budget.yaml` | [1.0, 1.2] | 3044 | Budget as an axis inside one flow |
 | `design_args_dr1.yaml` + `--design-input-path …/nominal_scaled_pNN` | 1.05 … 1.30 | 1 each | Uniformly scaled nominal, one design directory per budget (see [`scaled`](#scaled--one-single-design-pool-per-budget)) |
 
 ## Creating design spaces
@@ -104,7 +104,7 @@ python -m bedcosmo.num_tracers.design pool \
 | `--n-target`, `--seed` | Cap pool size by seeded random subsample; pinned rows always survive |
 | `--name` | Names the design directory `<name>/`. Omit for a date-stamped default |
 
-The generator reproduces the experiment's own grid exactly: the defaults give **266** designs at sum 1.0 and **2678** over [1.0, 1.2], matching `design_args_dr1.yaml` and `design_args_dr1_budget.yaml`.
+The generator reproduces the experiment's own grid exactly: `design_args_dr1.yaml`'s bounds give **323** designs at sum 1.0 and `design_args_dr1_budget.yaml`'s **3044** over [1.0, 1.2]. Every design_args file gives its bounds in `qso_coupled` units (`design.convert_bounds` of the `outside`-unit originals).
 
 ### `scaled` — one single-design pool per budget
 
@@ -134,13 +134,13 @@ Same design, bit-identical prior entropy — the 0.198 bit gap is entirely poste
 
 ### Watch the budget skew
 
-The per-class `upper` values cap the reachable sum. With the `design_args_dr1.yaml` bounds the maximum is **1.24**, and the grid is heavily bottom-weighted:
+The per-class `upper` values cap the reachable sum. With the `design_args_dr1.yaml` bounds the maximum is **1.28**, and the grid is heavily bottom-weighted:
 
 | Budget bin | Designs |
 |------------|---------|
-| [1.00, 1.05) | 1173 |
-| [1.05, 1.10) | 822 |
-| [1.10, 1.15) | 484 |
+| [1.00, 1.05) | 1430 |
+| [1.05, 1.10) | 949 |
+| [1.10, 1.15) | 432 |
 | [1.15, 1.20) | 185 |
 | [1.20, 1.25) | 14 |
 
@@ -243,6 +243,8 @@ The reference covariance is `ref_cov` (default `desi_cov.npy`): the published DE
 - `emulator_sqrtn_ref: sampled` needs `cosmology`, because it evaluates the reference covariance at the sampled cosmology.
 
 Emulator bins map to data rows as `BGS, LRG1, LRG2, LRG3_ELG1 -> "LRG3+ELG1", ELG2, QSO, Lya_QSO`. A `null` checkpoint falls back to the nominal covariance, rescaled for Lya QSO under `lya_accounting: qso_coupled`.
+
+Each network covers the N_tracers box it was trained on (`x_train_min`/`x_train_max` in the checkpoint). Below it, N is clamped to the floor; above it, the net extrapolates. After the designs are built, NumTracers prints each bin's trained top against the largest N the design pool feeds it, as tracer counts and, for a bin fed by one class, as that class's fraction of the budget (e.g. `BGS trained N <= 3e+06 (BGS f <= 0.39 of the budget); designs reach 7.6e+06 (f = 0.99): 35/121 designs above`), and warns when any design is above the box. tracer-forecast-emulator's `util.ntracers_range` sizes new training boxes to cover the whole design budget.
 
 `emulators.yaml` is keyed `<analysis>: <dataset>: <cosmo_model>: <quantity>: <tracer_bin>`, mirroring `$SCRATCH/bedcosmo/num_tracers/emulator/{analysis}/models/{dataset}/{cosmo_model}/`. For bao, `<quantity>` is the forecast space (`config` | `fourier`) and `emulator_space` picks one per run. At submission the checkpoints are copied into the run's `artifacts/emulators/<tracer_bin>.pt`.
 

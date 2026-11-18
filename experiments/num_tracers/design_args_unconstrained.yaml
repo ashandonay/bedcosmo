@@ -1,9 +1,11 @@
 # Design arguments for num_tracers experiment
+# Lower bounds are fractions of the lya_accounting="qso_coupled" budget: the outside-unit
+# [0.05, 0.1, 0.1, 0.1] through design.convert_bounds.
 labels: ["BGS", "LRG", "ELG", "QSO"]
 input_type: variable # variable or nominal
 input_path: null
 step: [0.05, 0.05, 0.05, 0.05]
-lower: [0.05, 0.1, 0.1, 0.1]
+lower: [0.045669883747116544, 0.09133976749423309, 0.07377688353643301, 0.13921346522221734]
 upper: [1.0, 1.0, 1.0, 1.0]
 sum_lower: 1.0
 sum_upper: 1.0
