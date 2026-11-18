@@ -48,7 +48,8 @@ from bedcosmo.num_tracers.lya import LYA_ACCOUNTINGS
 LABELS = ["BGS", "LRG", "ELG", "QSO"]
 # Mirror NumTracers: DESI CSVs live under $HOME/data/desi/bao_<dataset>/
 _DATA_ROOT = os.path.join(os.environ.get("HOME", ""), "data", "desi")
-# Default per-class grid from design_args_dr1.yaml, in lya_accounting="outside" units: fractions
+# Default per-class grid, in lya_accounting="outside" units (design_args_dr1.yaml carries it
+# converted to "qso_coupled" by `default_bounds`): fractions
 # of the observed fibers outside Lya QSO (NumTracers.nominal_total_obs). The BGS, LRG and QSO upper
 # bounds are target availability: each class's summed `targets` in desi_tracers.csv over that
 # budget, the bound NumTracers uses when `upper` is unset. ELG's 0.575 is hand-set (its
@@ -76,31 +77,39 @@ def nominal_vector(dataset: str = "dr1", lya_accounting: str = "outside") -> np.
     return np.asarray((observed / observed.sum()).reindex(LABELS).values, dtype=np.float64)
 
 
-def default_bounds(dataset: str = "dr1", lya_accounting: str = "outside",
+def convert_bounds(lower: Sequence[float], upper: Sequence[float], dataset: str = "dr1",
+                   lya_accounting: str = "qso_coupled",
                    step: Sequence[float] = DEFAULT_STEP) -> tuple[list[float], list[float]]:
-    """Default (lower, upper) per class, in ``lya_accounting``'s budget units.
+    """Per-class (lower, upper) given in "outside" units, in ``lya_accounting``'s units.
 
-    ``DEFAULT_LOWER``/``DEFAULT_UPPER`` are fractions of the "outside" budget. Another
-    accounting divides a different budget (and under "qso_coupled" the QSO class also
-    holds the Lya forest fibers), so each bound is carried over at the same multiple of
-    its class's nominal share. The target-availability caps stay exact: bound / nominal
-    is the same in every accounting.
+    Another accounting divides a different budget (and under "qso_coupled" the QSO class
+    also holds the Lya forest fibers), so each bound is carried over at the same multiple
+    of its class's nominal share; a target-availability cap stays exact, since
+    bound / nominal is the same in every accounting. An upper bound is capped at 1.
 
     A design pool keeps rows whose sum is the budget, and grid sums move in steps of the
     steps' common unit, so sum(lower) must sit on that lattice relative to 1. Converted
     bounds generally do not; ELG's lower bound (the widest axis) is lowered by less than
     one unit to put it there.
     """
-    lower = np.asarray(DEFAULT_LOWER, dtype=np.float64)
-    upper = np.asarray(DEFAULT_UPPER, dtype=np.float64)
+    lower = np.asarray(lower, dtype=np.float64)
+    upper = np.asarray(upper, dtype=np.float64)
     if lya_accounting == "outside":
         return lower.tolist(), upper.tolist()
     k = nominal_vector(dataset, lya_accounting) / nominal_vector(dataset, "outside")
-    lower, upper = lower * k, upper * k
+    lower, upper = lower * k, np.minimum(upper * k, 1.0)
     unit = np.gcd.reduce(np.round(np.asarray(step) * 1e6).astype(np.int64)) / 1e6
     gap = (1.0 - lower.sum()) / unit
     lower[LABELS.index("ELG")] -= (np.ceil(gap - 1e-9) - gap) * unit
     return lower.tolist(), upper.tolist()
+
+
+def default_bounds(dataset: str = "dr1", lya_accounting: str = "outside",
+                   step: Sequence[float] = DEFAULT_STEP) -> tuple[list[float], list[float]]:
+    """Default (lower, upper) per class, in ``lya_accounting``'s budget units:
+    ``DEFAULT_LOWER``/``DEFAULT_UPPER`` (fractions of the "outside" budget) through
+    ``convert_bounds``."""
+    return convert_bounds(DEFAULT_LOWER, DEFAULT_UPPER, dataset, lya_accounting, step)
 
 
 def scale_tag(s: float) -> str:
@@ -130,9 +139,9 @@ def budget_pool(
 
     Reproduces the grid ``NumTracers`` builds internally from ``step``/``lower``/``upper``
     plus the sum constraint, but materializes it so the pool can be inspected, plotted and
-    pinned to a file. Verified against the experiment's own grid: the defaults give 266
-    designs at sum == 1.0 and 2678 over [1.0, 1.2], matching ``design_args_dr1.yaml`` and
-    ``design_args_dr1_budget.yaml`` respectively.
+    pinned to a file. Verified against the experiment's own grid: ``design_args_dr1.yaml``'s
+    bounds give 323 designs at sum == 1.0 and ``design_args_dr1_budget.yaml``'s 3044 over
+    [1.0, 1.2] (both in qso_coupled units).
 
     ``include_nominal_scales`` force-adds the uniformly scaled nominal designs (which
     generally fall between grid nodes) so the pool contains the exact points the ``scaled``
@@ -491,10 +500,10 @@ def main(argv: list[str] | None = None) -> np.ndarray:
     )
     parser.add_argument("--no-plot", action="store_true", help="Skip the design-space plot")
     parser.add_argument(
-        "--lya-accounting", default="outside", choices=LYA_ACCOUNTINGS,
+        "--lya-accounting", default="qso_coupled", choices=LYA_ACCOUNTINGS,
         help="Which fibers the design fractions divide; must match the training run's "
              "lya_accounting (num_tracers/lya.py). The default --lower/--upper are converted "
-             "to it (default_bounds). (default: outside)",
+             "to it (default_bounds). (default: qso_coupled)",
     )
     sub = parser.add_subparsers(dest="mode", required=True)
 

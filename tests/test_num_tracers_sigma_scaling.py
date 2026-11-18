@@ -124,9 +124,22 @@ def test_per_bin_shot_noise_for_nonuniform_design(exp):
     assert torch.allclose(got.double()[free], expected[free], rtol=1e-6)
 
 
-def test_lya_qso_rows_are_design_independent(exp):
-    """Lya QSO sigma stays nominal (factor 1) at any design sum."""
+def test_lya_qso_rows_are_design_independent():
+    """Under lya_accounting="outside", Lya QSO sigma stays nominal (factor 1) at any design sum."""
     import numpy as np
+    import yaml
+
+    from bedcosmo.util import get_experiment_config_path
+
+    if not _has_dataset("dr1"):
+        pytest.skip("desi dataset bao_dr1 not available")
+    with open(get_experiment_config_path("num_tracers", "design_args_dr1.yaml")) as f:
+        design_args = dict(yaml.safe_load(f), input_path=None)
+    exp = init_experiment(
+        cosmo_exp="num_tracers", prior_args_path="prior_args_hrdrag.yaml",
+        design_args=design_args, dataset="dr1", analysis="bao", cosmo_model="base",
+        likelihood_mode="scaling", lya_accounting="outside", include_D_M=True,
+        include_D_V=True, device="cpu", mode="eval")
 
     if not exp._lya_qso_rows.size:
         pytest.skip("dataset has no Lya QSO rows")

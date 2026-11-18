@@ -45,8 +45,11 @@ def resolve_lya_accounting(lya_accounting, lya_in_budget):
 
     ``lya_in_budget`` is the older spelling: False -> "outside", True ->
     "in_budget_fixed". Given together, they must agree on whether Lya is in the budget.
+    With neither, the accounting is "qso_coupled".
     """
     if lya_accounting is None:
+        if lya_in_budget is None:
+            return "qso_coupled"
         return "in_budget_fixed" if lya_in_budget else "outside"
     if lya_accounting not in LYA_ACCOUNTINGS:
         raise ValueError(

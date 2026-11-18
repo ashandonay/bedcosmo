@@ -38,11 +38,24 @@ def _passed_n_tracers(exp, class_ratio):
     return exp._passed_ratio_to_n_tracers(exp.calc_passed(class_ratio))
 
 
-def _make_exp(ds):
+def _design_args(ds, accounting="qso_coupled"):
+    """The dataset's design_args. Its pool is built for qso_coupled; another accounting
+    gets the grid instead, since the pool guard refuses a pool built for another one."""
+    import yaml
+
+    from bedcosmo.util import get_experiment_config_path
+
+    with open(get_experiment_config_path("num_tracers", DESIGN_ARGS[ds])) as f:
+        args = yaml.safe_load(f)
+    return args if accounting == "qso_coupled" else dict(args, input_path=None)
+
+
+def _make_exp(ds, lya_accounting="qso_coupled"):
     return init_experiment(
         cosmo_exp="num_tracers",
         prior_args_path="prior_args_hrdrag.yaml",
-        design_args_path=DESIGN_ARGS[ds],
+        design_args=_design_args(ds, lya_accounting),
+        lya_accounting=lya_accounting,
         dataset=ds,
         analysis="bao",
         cosmo_model="base",
@@ -128,7 +141,7 @@ def test_lya_counts_are_fixed_outside_the_budget(ds):
     """Lya QSO keeps the dataset's passed count whatever the design, low QSO and budget > 1 included."""
     if not _has_dataset(ds):
         pytest.skip(f"desi dataset bao_{ds} not available")
-    exp = _make_exp(ds)
+    exp = _make_exp(ds, lya_accounting="outside")
     rows = exp.desi_data.index[exp.desi_data["tracer"] == "Lya QSO"].tolist()
     if not rows:
         pytest.skip("no Lya QSO rows")
@@ -147,7 +160,7 @@ def test_qso_class_is_the_qso_bin(ds):
     """The design's whole QSO fraction goes to the QSO bin; the budget excludes Lya fibers."""
     if not _has_dataset(ds):
         pytest.skip(f"desi dataset bao_{ds} not available")
-    exp = _make_exp(ds)
+    exp = _make_exp(ds, lya_accounting="outside")
     bins = exp.desi_data.drop_duplicates(subset=["tracer"])
     assert exp.nominal_total_obs == int(bins.loc[bins["tracer"] != "Lya QSO", "observed"].sum())
     assert float(exp.nominal_design.sum()) == pytest.approx(1.0)
@@ -163,8 +176,8 @@ def test_lya_in_budget_restores_the_earlier_accounting():
         pytest.skip("desi dataset bao_dr1 not available")
     exp = init_experiment(
         cosmo_exp="num_tracers", prior_args_path="prior_args_hrdrag.yaml",
-        design_args_path=DESIGN_ARGS["dr1"], dataset="dr1", analysis="bao", cosmo_model="base",
-        likelihood_mode="scaling", device="cpu", mode="eval", lya_in_budget=True,
+        design_args=_design_args("dr1", "in_budget_fixed"), dataset="dr1", analysis="bao",
+        cosmo_model="base", likelihood_mode="scaling", device="cpu", mode="eval", lya_in_budget=True,
     )
     dt = exp.desi_tracers
     qso_share = float(dt.loc[dt["class"] == "QSO", "observed"].sum())  # QSO bin + Lya
@@ -198,10 +211,12 @@ def test_runs_logged_without_the_option_load_with_lya_in_budget(tmp_path):
     run_args = dict(cosmo_exp="num_tracers", dataset="dr1", analysis="bao", cosmo_model="base",
                     likelihood_mode="scaling", device="cpu", mode="eval")
     exp = init_experiment(run_obj=run_obj, run_args=dict(run_args),
-                          design_args=load(DESIGN_ARGS["dr1"]), prior_args=load("prior_args_hrdrag.yaml"))
+                          design_args=_design_args("dr1", "in_budget_fixed"),
+                          prior_args=load("prior_args_hrdrag.yaml"))
     assert exp.lya_in_budget is True
     exp = init_experiment(run_obj=run_obj, run_args=dict(run_args, lya_in_budget=False),
-                          design_args=load(DESIGN_ARGS["dr1"]), prior_args=load("prior_args_hrdrag.yaml"))
+                          design_args=_design_args("dr1", "outside"),
+                          prior_args=load("prior_args_hrdrag.yaml"))
     assert exp.lya_in_budget is False
 
 
