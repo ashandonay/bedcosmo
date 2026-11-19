@@ -5601,6 +5601,7 @@ class ComparisonPlotter(BasePlotter):
         nominal_design=None,
         var=None,
         show_eigs=True,
+        heatmap_color="ratio",
         filename=None,
         save_dir=None,
         dpi=400
@@ -5629,6 +5630,12 @@ class ComparisonPlotter(BasePlotter):
                 Defaults to ``self.var`` from ``__init__`` when omitted.
             show_eigs (bool): For top_n>1, draw each top design's EIG ± std in a panel above the
                 heatmap (default: True).
+            heatmap_color (str): For top_n>1, what the cell colors encode: ``"ratio"`` (default)
+                the design value over the nominal design on a diverging map centered at 1,
+                when a nominal is available; ``"value"`` the design value itself on ``cmap``,
+                from 0 when every value is nonnegative (fractions). Ratios stop reading
+                well on wide pools, where a class goes from far below nominal to many
+                times it; values stay comparable across classes.
         
         Returns:
             fig, ax: Matplotlib figure and axes objects
@@ -6094,10 +6101,12 @@ class ComparisonPlotter(BasePlotter):
             elif experiment_nominal_design is not None:
                 nominal_design = experiment_nominal_design
 
-            # Compute ratios relative to nominal if available
+            if heatmap_color not in ("ratio", "value"):
+                raise ValueError(f"heatmap_color must be 'ratio' or 'value'; got {heatmap_color!r}")
+            # Compute ratios relative to nominal if available (and asked for)
             plot_data = combined_designs.copy()
             use_relative_colors = False
-            if nominal_design is not None:
+            if nominal_design is not None and heatmap_color == "ratio":
                 if len(nominal_design) != combined_designs.shape[1]:
                     raise ValueError(f"nominal_design length ({len(nominal_design)}) must match number of design dimensions ({combined_designs.shape[1]})")
 
@@ -6144,14 +6153,17 @@ class ComparisonPlotter(BasePlotter):
                 norm = TwoSlopeNorm(vmin=vmin, vcenter=1.0, vmax=vmax)
                 im = ax.imshow(plot_data.T, aspect='auto', cmap=cmap, norm=norm)
             else:
-                im = ax.imshow(plot_data.T, aspect='auto', cmap=cmap)
+                vmin = 0.0 if np.all(plot_data >= 0) else None
+                im = ax.imshow(plot_data.T, aspect='auto', cmap=cmap, vmin=vmin)
             
             # Each cell shows its design value; dark cells get light text
             for col, design in enumerate(combined_designs):
                 for row, value in enumerate(design):
                     shade = im.norm(plot_data[col, row])
+                    # Diverging maps are dark at both ends; sequential ones (viridis) at the low end.
+                    dark = abs(shade - 0.5) > 0.3 if use_relative_colors else shade < 0.45
                     ax.text(col, row, f'{value:.3g}', ha='center', va='center', fontsize=9,
-                            color='white' if abs(shade - 0.5) > 0.3 else 'black')
+                            color='white' if dark else 'black')
             
             # Add vertical lines to separate runs
             for start_idx, end_idx in run_boundaries:

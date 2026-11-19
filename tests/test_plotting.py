@@ -2670,6 +2670,25 @@ class TestCompareBestDesigns:
         assert ax.get_title() == "Top 2 Designs Comparison Across Runs"
         plt.close(fig)
 
+    def test_heatmap_color_ratio_or_value(self, tmp_path, monkeypatch):
+        """heatmap_color='ratio' (default) colors design / nominal; 'value' the design itself."""
+        plotter, (get_runs, init_exp, save) = self._two_pools(tmp_path, monkeypatch)
+        with get_runs, init_exp, save:
+            fig, ax = plotter.compare_optimal_designs(top_n=2)
+            img = ax.get_images()[0]
+            assert img.get_array()[0, 0] == pytest.approx(0.04 / 0.04)       # BGS ratio
+            assert fig.axes[-1].get_ylabel() == "Ratio to Nominal Design"
+            plt.close(fig)
+            fig, ax = plotter.compare_optimal_designs(top_n=2, heatmap_color="value")
+            img = ax.get_images()[0]
+            assert img.get_array()[0, 0] == pytest.approx(0.04)              # BGS fraction
+            assert img.norm.vmin == 0.0
+            assert fig.axes[-1].get_ylabel() == "Design Value"
+            assert [t.get_text() for t in ax.texts][:4] == ["0.04", "0.38", "0.48", "0.1"]
+            plt.close(fig)
+            with pytest.raises(ValueError, match="heatmap_color must be"):
+                plotter.compare_optimal_designs(top_n=2, heatmap_color="log")
+
 
 # ============================================================================
 # Design Plotting Functions Tests
