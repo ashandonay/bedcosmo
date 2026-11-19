@@ -3101,3 +3101,16 @@ class TestComparePriors:
         b.cosmo_params = ["a", "c"]
         with pytest.raises(ValueError, match="different parameters"):
             self._plot(tmp_path, [a, b])
+
+
+def test_distinct_nominals_collapses_shared_nominal():
+    """Runs on one pool share a nominal design: one gray 'Nominal' bar, not one per run."""
+    from bedcosmo.plotting import _distinct_nominals
+
+    same = [[0.1, 0.9], [0.1, 0.9 + 1e-12]]
+    designs, labels = _distinct_nominals(same, ["aaaaaaaa11", "bbbbbbbb22"])
+    assert len(designs) == 1 and labels == ["Nominal"]
+    designs, labels = _distinct_nominals([[0.1, 0.9], None, [0.2, 0.8]],
+                                         ["aaaaaaaa11", "cccccccc33", "bbbbbbbb22"])
+    assert labels == ["Nominal (aaaaaaaa)", "Nominal (bbbbbbbb)"]
+    assert _distinct_nominals([None], ["x"]) == ([], [])

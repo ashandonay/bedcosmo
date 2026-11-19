@@ -444,6 +444,30 @@ def _eig_correlation_stats(eigs_x, eigs_y):
     }
 
 
+# Nominal-design bars are gray, so they never take a run's color.
+NOMINAL_BAR_COLOR = "0.55"
+
+
+def _distinct_nominals(nominal_designs, run_ids):
+    """``(designs, labels)`` for the nominal bars: one per distinct nominal design.
+
+    Runs sharing a nominal design (the usual case for runs on one pool) get a single
+    "Nominal" bar; when the runs' nominals differ, each distinct one is labelled with the
+    first run it belongs to.
+    """
+    distinct, owners = [], []
+    for nominal, run_id in zip(nominal_designs, run_ids):
+        if nominal is None:
+            continue
+        nominal = np.asarray(nominal, dtype=float).reshape(-1)
+        if not any(d.shape == nominal.shape and np.allclose(d, nominal) for d in distinct):
+            distinct.append(nominal)
+            owners.append(run_id)
+    if len(distinct) == 1:
+        return distinct, ["Nominal"]
+    return distinct, [f"Nominal ({run_id[:8]})" for run_id in owners]
+
+
 def _feasible_range(designs):
     """``(0, T)`` when every design sums to the same total ``T`` (a mixture), else None.
 
@@ -5851,17 +5875,12 @@ class ComparisonPlotter(BasePlotter):
                 plot_colors = list(colors) if colors else [plt.rcParams['axes.prop_cycle'].by_key()['color'][i % len(plt.rcParams['axes.prop_cycle'].by_key()['color'])] for i in range(len(optimal_designs))]
                 
                 if include_nominal:
-                    nominal_values = []
-                    nominal_labels = []
-                    for i, nominal_design in enumerate(nominal_designs):
-                        if nominal_design is not None:
-                            nominal_values.append(nominal_design[0])
-                            nominal_labels.append(f'Nominal ({found_run_ids[i][:8]})')
-                    if nominal_values:
-                        design_values = nominal_values + design_values
+                    nominal_plot_designs, nominal_labels = _distinct_nominals(
+                        nominal_designs, found_run_ids)
+                    if nominal_plot_designs:
+                        design_values = [d[0] for d in nominal_plot_designs] + design_values
                         plot_labels = nominal_labels + plot_labels
-                        nominal_colors = ['tab:blue'] * len(nominal_values)
-                        plot_colors = nominal_colors + plot_colors
+                        plot_colors = [NOMINAL_BAR_COLOR] * len(nominal_plot_designs) + plot_colors
                 
                 x_pos = np.arange(len(design_values))
                 bars = ax.bar(x_pos, design_values, color=plot_colors, alpha=0.7, linewidth=1.5)
@@ -5885,17 +5904,12 @@ class ComparisonPlotter(BasePlotter):
                 plot_colors = list(colors) if colors else [plt.rcParams['axes.prop_cycle'].by_key()['color'][i % len(plt.rcParams['axes.prop_cycle'].by_key()['color'])] for i in range(len(optimal_designs))]
                 
                 if include_nominal:
-                    nominal_plot_designs = []
-                    nominal_plot_labels = []
-                    for i, nominal_design in enumerate(nominal_designs):
-                        if nominal_design is not None:
-                            nominal_plot_designs.append(nominal_design)
-                            nominal_plot_labels.append(f'Nominal ({found_run_ids[i][:8]})')
+                    nominal_plot_designs, nominal_plot_labels = _distinct_nominals(
+                        nominal_designs, found_run_ids)
                     if nominal_plot_designs:
                         plot_designs = nominal_plot_designs + plot_designs
                         plot_labels = nominal_plot_labels + plot_labels
-                        nominal_colors = ['tab:blue'] * len(nominal_plot_designs)
-                        plot_colors = nominal_colors + plot_colors
+                        plot_colors = [NOMINAL_BAR_COLOR] * len(nominal_plot_designs) + plot_colors
                 
                 n_designs_to_plot = len(plot_designs)
                 width = 0.8 / n_designs_to_plot
