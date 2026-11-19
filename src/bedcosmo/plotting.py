@@ -17,6 +17,7 @@ from bedcosmo.util import (
     GETDIST_SETTINGS, restrict_mcsamples, sample_nf, ReferenceChain, GETDIST_CHAIN_SETTINGS,
     getdist_settings_for,
     nf_posterior_entries, validate_display, NF_SERIES_COLORS, NF_SERIES_LABELS,
+    NF_SERIES_LINE_STYLES,
 )
 from bedcosmo.artifacts import (
     load_eig_data_file,
@@ -3537,7 +3538,10 @@ class ComparisonPlotter(BasePlotter):
             colors (list, optional): List of colors to use for each group.
             filter_string (str, optional): Override filter_string from __init__.
             transform_output (bool): Transform NF samples to physical space (default True).
-            display (tuple or str): 'nominal' and/or 'optimal' (default both).
+            display (tuple or str): 'nominal' and/or 'optimal' (default both). With both,
+                each run's contours share its color and the series differ by line style
+                (``NF_SERIES_LINE_STYLES``: optimal solid, nominal dashed). The DESI
+                reference, the measured result at the nominal survey, is dashed black.
             eval_step (str or int, optional): EIG eval step for optimal design; latest if None.
             plot_prior (bool): If True, overlay each group's prior as a faint contour
                 (alpha=0.4). Uses black when all groups share the same prior_args,
@@ -3702,7 +3706,11 @@ class ComparisonPlotter(BasePlotter):
                         all_samples.append(entry['samples'])
                         all_colors.append(group_color)
                         all_alphas.append(entry.get('alpha', 1.0))
-                        all_line_styles.append(entry.get('line_style', '-'))
+                        # Every series of a run shares the run's color, so with more than
+                        # one series the line style is what tells them apart.
+                        all_line_styles.append(
+                            NF_SERIES_LINE_STYLES.get(entry.get('name'), '-')
+                            if len(display) > 1 else entry.get('line_style', '-'))
                         all_fenced.append(True)
                         if run_idx == 0 and rank_idx == 0:
                             label = entry.get('label', group_label)

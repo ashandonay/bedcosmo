@@ -1216,6 +1216,12 @@ NF_SERIES_LABELS = {
     "nominal": "Nominal Design (NF)",
     "optimal": "Optimal Design (NF)",
 }
+# Comparison plots color by run, so the series are told apart by line style instead:
+# the design result solid (every experiment has one), the nominal dashed.
+NF_SERIES_LINE_STYLES = {
+    "nominal": "--",
+    "optimal": "-",
+}
 
 
 def entropy_legend_suffix(prior_entropy=None, posterior_entropy=None, *, include_prior=True):
