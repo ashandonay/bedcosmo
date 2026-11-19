@@ -443,6 +443,60 @@ def _eig_correlation_stats(eigs_x, eigs_y):
     }
 
 
+def _feasible_range(designs):
+    """``(0, T)`` when every design sums to the same total ``T`` (a mixture), else None.
+
+    In a mixture each dimension is a nonnegative share of ``T``, so no design can lie
+    outside ``[0, T]`` along any one dimension. Other design spaces carry no such bound.
+    """
+    from bedcosmo.response_surface import is_mixture
+
+    designs = np.asarray(designs, dtype=float)
+    if designs.ndim != 2 or len(designs) == 0 or not is_mixture(designs):
+        return None
+    if np.any(designs < 0):
+        return None
+    return 0.0, float(designs.sum(axis=1).mean())
+
+
+def _shade_outside(ax, lo, hi, color="0.88"):
+    """Gray out the parts of ``ax``'s x range below ``lo`` and above ``hi``, keeping its limits.
+
+    Call after everything else is drawn, so the limits already cover the data and lines.
+    """
+    x0, x1 = ax.get_xlim()
+    pad = 0.03 * (x1 - x0)
+    x0, x1 = min(x0, lo - pad), max(x1, hi + pad)
+    ax.axvspan(x0, lo, color=color, lw=0, zorder=0, gid="infeasible")
+    ax.axvspan(hi, x1, color=color, lw=0, zorder=0, gid="infeasible")
+    ax.set_xlim(x0, x1)
+
+
+def _eig_trend(x, values, stat="median", min_per_group=2, n_bins=8):
+    """``(x, stat of values)`` per group of designs along one design dimension.
+
+    Designs sharing an x value (to 6 significant digits) form a group, kept when it has at
+    least ``min_per_group`` designs. When fewer than 3 such groups exist (a continuous or
+    random pool), the designs are split into ``n_bins`` equal-count quantile bins instead,
+    each placed at its median x. Returns empty arrays when neither gives 2 points.
+    """
+    agg = np.median if stat == "median" else np.mean
+    x = np.asarray(x, dtype=float)
+    values = np.asarray(values, dtype=float)
+    keys = np.array([float(f"{v:.6g}") for v in x])
+    levels, counts = np.unique(keys, return_counts=True)
+    levels = levels[counts >= min_per_group]
+    if len(levels) >= 3:
+        return levels, np.array([agg(values[keys == lv]) for lv in levels])
+    n_bins = min(n_bins, len(x) // max(min_per_group, 1))
+    if n_bins < 2:
+        return np.array([]), np.array([])
+    order = np.argsort(x, kind="stable")
+    groups = [g for g in np.array_split(order, n_bins) if len(g)]
+    return (np.array([np.median(x[g]) for g in groups]),
+            np.array([agg(values[g]) for g in groups]))
+
+
 # ============================================================================
 # Base Plotter Class
 # ============================================================================
@@ -5048,6 +5102,8 @@ class ComparisonPlotter(BasePlotter):
         show_nominal=True,
         show_target_limits=True,
         dataset=None,
+        trend=None,
+        shade_infeasible=True,
         ncols=4,
         figsize=None,
         title=None,
@@ -5084,6 +5140,17 @@ class ComparisonPlotter(BasePlotter):
                 none. Skipped with a warning when the dataset's table can't be found.
             dataset (str, optional): The DESI dataset for ``show_target_limits``. Default:
                 the first run's ``dataset`` parameter.
+            trend (str or None): ``"median"`` or ``"mean"`` draws a line per run through
+                that statistic of the designs at each value of the dimension; ``None``
+                (default) draws none. Designs sharing a value (a grid pool) are grouped by
+                it; a pool with too few repeated values is grouped into quantile bins
+                instead (:func:`_eig_trend`). Each point averages over whatever the other
+                dimensions do at that value, so it mixes their effects; for one
+                dimension's own effect see :meth:`compare_eig_response_traces`.
+            shade_infeasible (bool): Gray out x values no design can take. Only for
+                mixture pools (every design sums to the same total T), where each
+                dimension lies in [0, T], or [0, T / nominal] for ``x="relative"``
+                (:func:`_feasible_range`).
 
         Returns:
             tuple: ``(fig, axes, best)``; ``best`` has one dict per run with ``label``,
@@ -5094,6 +5161,8 @@ class ComparisonPlotter(BasePlotter):
             raise ValueError(f"x must be 'relative' or 'fraction'; got {x!r}")
         if y not in ("difference", "percent", "raw"):
             raise ValueError(f"y must be 'difference', 'percent' or 'raw'; got {y!r}")
+        if trend not in ("median", "mean", None):
+            raise ValueError(f"trend must be 'median', 'mean' or None; got {trend!r}")
         run_ids = self.run_ids or []
         if runs is None:
             if not run_ids:
@@ -5116,13 +5185,7 @@ class ComparisonPlotter(BasePlotter):
         )
 
         def nominal_design_of(axis):
-            if axis["eig_data_path"] is None:
-                return None
-            with open(axis["eig_data_path"], "r") as f:
-                design = json.load(f).get("nominal_design")
-            if design is None or len(design) != n_dim:
-                return None
-            return np.asarray(design, dtype=float)
+            return self._axis_nominal_design(axis, n_dim)
 
         def x_values(axis):
             if x == "fraction":
@@ -5152,6 +5215,7 @@ class ComparisonPlotter(BasePlotter):
         limits = self._target_limits(labels, axes_data, dataset) if show_target_limits else None
         if limits is not None and x == "fraction":
             limits = None if first_nominal is None else limits * first_nominal
+        feasible = _feasible_range(axes_data[0]["designs"]) if shade_infeasible else None
 
         ncols = min(ncols, n_dim)
         nrows = int(np.ceil(n_dim / ncols))
@@ -5179,6 +5243,10 @@ class ComparisonPlotter(BasePlotter):
                                linewidth=0.5, label=axis["label"], zorder=2)
                 ax.plot(xs[b, j], vals[b], marker="*", ms=15, color=color, mec="black", mew=0.7,
                         ls="", zorder=4)
+                if trend is not None:
+                    tx, ty = _eig_trend(xs[:, j], vals, trend)
+                    if len(tx) >= 2:
+                        ax.plot(tx, ty, ls="-", lw=2.0, color=color, zorder=3, gid="trend")
             if show_nominal:
                 at = 1.0 if x == "relative" else (None if first_nominal is None else first_nominal[j])
                 if at is not None:
@@ -5188,6 +5256,11 @@ class ComparisonPlotter(BasePlotter):
                            label="all targets observed")
             if y != "raw":
                 ax.axhline(0, color="0.75", lw=0.8, zorder=0)
+            if feasible is not None:
+                scale = 1.0 if x == "fraction" else (
+                    None if first_nominal is None or first_nominal[j] <= 0 else 1.0 / first_nominal[j])
+                if scale is not None:
+                    _shade_outside(ax, feasible[0] * scale, feasible[1] * scale)
             ax.set_title(labels[j])
             ax.set_xlabel("design / nominal" if x == "relative" else "design fraction")
             if j % ncols == 0:
@@ -5204,6 +5277,9 @@ class ComparisonPlotter(BasePlotter):
                     legend_labels.append(l)
         handles.append(Line2D([], [], marker="*", ls="", ms=12, color="0.75", mec="black"))
         legend_labels.append("best design in each run")
+        if trend is not None:
+            handles.append(Line2D([], [], ls="-", lw=2.0, color="0.45"))
+            legend_labels.append(f"{trend} over designs at each value")
         fig.legend(handles, legend_labels, loc="outside upper center",
                    ncol=min(len(handles), 3), fontsize=9, frameon=False)
         if title is not None:
@@ -5218,6 +5294,256 @@ class ComparisonPlotter(BasePlotter):
         best = [{"label": axis["label"], "design": axis["designs"][b].tolist(),
                  "value": float(vals[b])} for axis, _, vals, _, _, b in series]
         return fig, axs, best
+
+    @staticmethod
+    def _axis_nominal_design(axis, n_dim):
+        """The ``nominal_design`` recorded in an axis's eig_data file, or None."""
+        if axis["eig_data_path"] is None:
+            return None
+        with open(axis["eig_data_path"], "r") as f:
+            design = json.load(f).get("nominal_design")
+        if design is None or len(design) != n_dim:
+            return None
+        return np.asarray(design, dtype=float)
+
+    def compare_eig_response_traces(
+        self,
+        runs=None,
+        order="quadratic",
+        reference="nominal",
+        y="difference",
+        design_labels=None,
+        colors=None,
+        n_boot=200,
+        band=68,
+        band_orders=None,
+        show_nominal=True,
+        show_target_limits=True,
+        dataset=None,
+        shade_infeasible=True,
+        ncols=4,
+        figsize=None,
+        title=None,
+        filename=None,
+        save_dir=None,
+        dpi=400,
+    ):
+        """How EIG responds to each design dimension alone, from a surface fit per run.
+
+        Each run's (design, EIG) pool is fit with a polynomial response surface
+        (:class:`bedcosmo.response_surface.ResponseSurface`), and each panel evaluates it
+        along one dimension's effect path through ``reference``. Pools whose designs sum
+        to a constant (fractions of a fixed budget) get a Scheffe mixture fit and a Cox
+        path: the dimension moves while the others keep their reference proportions to
+        each other. Other design spaces get an ordinary polynomial and the others held at
+        the reference. Paths span each dimension's pooled range.
+
+        Where :meth:`compare_eig_by_design_dim` plots the designs themselves (each value
+        of a dimension mixes whatever the others do there), this isolates one dimension
+        at a time, at the cost of being a model of the pool, not the pool itself; check
+        each run's fit quality in the returned ``fits`` (and the legend).
+
+        Args:
+            runs (list, optional): Axis dicts as in :meth:`compare_eig_by_design_dim`.
+            order (str): ``"linear"``, ``"quadratic"`` (default) or ``"cubic"``.
+            reference (str or array): ``"nominal"`` (each run's ``nominal_design``),
+                ``"best"`` (its highest-EIG design), ``"mean"`` (the pool's mean design),
+                or an explicit design.
+            y (str): ``"difference"`` plots the fit minus its value at the reference
+                (every trace passes 0 there); ``"raw"`` plots the fitted EIG.
+            n_boot (int): Residual-bootstrap refits per order in ``band_orders``; 0 uses
+                each order's point fit only.
+            band (float): Central percentage of each order's bootstrap traces; the shaded
+                band is the envelope of these over ``band_orders``, so it carries both the
+                fit's statistical spread and how much the curve depends on the
+                polynomial's form.
+            band_orders (list, optional): Orders whose fits make the band. Default:
+                ``order`` and the next higher one (quadratic -> quadratic and cubic); an
+                order the pool is too small for is skipped with a warning.
+            show_nominal, show_target_limits, dataset, shade_infeasible: As in
+                :meth:`compare_eig_by_design_dim`, in stored design units.
+
+        Each path's peak (●) gets a horizontal bar: the central ``band`` percent of where
+        the peak falls across every refit in the band.
+
+        Returns:
+            tuple: ``(fig, axes, fits)``; one dict per run with ``label``, ``mixture``,
+            ``order``, ``band_orders``, ``r2``, ``rmse``, ``loo_rmse``, ``reference`` and
+            ``peaks`` (per dimension, the path's ``x`` and ``value`` at its maximum, and
+            ``x_lo``/``x_hi`` of the peak's range when there is a band).
+        """
+        from bedcosmo.response_surface import ResponseSurface
+
+        if y not in ("difference", "raw"):
+            raise ValueError(f"y must be 'difference' or 'raw'; got {y!r}")
+        run_ids = self.run_ids or []
+        if runs is None:
+            if not run_ids:
+                raise ValueError("runs is required unless the plotter has run_ids")
+            runs = [{**self._default_eig_axis_spec(), "run_id": rid} for rid in run_ids]
+        elif isinstance(runs, dict):
+            runs = [runs]
+        axes_data = [self._resolve_eig_axis(spec, axis_name=f"runs[{k}]")
+                     for k, spec in enumerate(runs)]
+        n_dims = {a["designs"].shape[1] for a in axes_data}
+        if len(n_dims) != 1:
+            raise ValueError(f"runs have different design dimensions: {sorted(n_dims)}")
+        n_dim = n_dims.pop()
+        if colors is not None and len(colors) != len(axes_data):
+            raise ValueError(f"colors has {len(colors)} entries for {len(axes_data)} runs")
+        labels = self._resolve_design_labels(
+            n_dim, design_labels,
+            metadata_label_sources=[a["design_labels"] for a in axes_data],
+            artifacts_dirs=[a["artifacts_dir"] for a in axes_data],
+        )
+
+        def reference_of(axis):
+            designs = np.asarray(axis["designs"], dtype=float)
+            if isinstance(reference, str):
+                if reference == "nominal":
+                    ref = self._axis_nominal_design(axis, n_dim)
+                    if ref is None:
+                        raise ValueError(
+                            f"{axis['label']}: reference='nominal' needs a nominal_design "
+                            "in its eig_data; pass reference='best', 'mean' or a design")
+                    return ref
+                if reference == "best":
+                    return designs[int(np.argmax(axis["eigs"]))]
+                if reference == "mean":
+                    return designs.mean(axis=0)
+                raise ValueError(
+                    f"reference must be 'nominal', 'best', 'mean' or a design; got {reference!r}")
+            ref = np.asarray(reference, dtype=float)
+            if ref.shape != (n_dim,):
+                raise ValueError(f"reference has shape {ref.shape}; expected ({n_dim},)")
+            return ref
+
+        first_nominal = next(
+            (d for d in (self._axis_nominal_design(a, n_dim) for a in axes_data) if d is not None),
+            None)
+        limits = self._target_limits(labels, axes_data, dataset) if show_target_limits else None
+        if limits is not None:
+            limits = None if first_nominal is None else limits * first_nominal
+
+        ncols = min(ncols, n_dim)
+        nrows = int(np.ceil(n_dim / ncols))
+        if figsize is None:
+            figsize = (4.2 * ncols, 3.6 * nrows + 0.6)
+        fig, axs = plt.subplots(nrows, ncols, figsize=figsize, squeeze=False, sharey=True,
+                                layout="constrained")
+        cycle = plt.rcParams["axes.prop_cycle"].by_key()["color"]
+        from bedcosmo.response_surface import ORDERS
+
+        if band_orders is None:
+            band_orders = [order] + ([ORDERS[ORDERS.index(order) + 1]]
+                                     if ORDERS.index(order) + 1 < len(ORDERS) else [])
+        band_orders = list(dict.fromkeys(band_orders))
+        lo_q, hi_q = 50 - band / 2, 50 + band / 2
+
+        fits = []
+        for k, axis in enumerate(axes_data):
+            color = colors[k] if colors is not None else cycle[k % len(cycle)]
+            surface = ResponseSurface(axis["designs"], axis["eigs"], order=order)
+            ref = reference_of(axis)
+            # The band: each order in band_orders, refit on residual-bootstrap draws.
+            members = []
+            for o in band_orders:
+                try:
+                    s = surface if o == order else ResponseSurface(
+                        axis["designs"], axis["eigs"], order=o)
+                except ValueError as err:
+                    warnings.warn(f"{axis['label']}: no {o} fit for the band ({err})")
+                    continue
+                coefs = s.bootstrap_coefs(n_boot) if n_boot else s.coef[None]
+                members.append((s, coefs))
+            name = (f"{axis['label']} ({'Scheffé ' if surface.mixture else ''}{order}, "
+                    f"R² {surface.r2:.2f}, LOO {surface.loo_rmse:.2g})")
+            peaks = []
+            for j, ax in enumerate(axs.flat[:n_dim]):
+                t, path = surface.trace(j, ref)
+                offset = surface.predict(ref[None])[0] if y == "difference" else 0.0
+                vals = surface.predict(path) - offset
+                m = int(np.argmax(vals))
+                peak = {"x": float(t[m]), "value": float(vals[m])}
+                spread = len(members) > 1 or n_boot
+                if members and spread:
+                    lows, highs, argmaxes = [], [], []
+                    for s, coefs in members:
+                        curves = np.array([
+                            s.predict(path, c)
+                            - (s.predict(ref[None], c)[0] if y == "difference" else 0.0)
+                            for c in coefs])
+                        lows.append(np.percentile(curves, lo_q, axis=0))
+                        highs.append(np.percentile(curves, hi_q, axis=0))
+                        argmaxes.append(t[np.argmax(curves, axis=1)])
+                    lo_band, hi_band = np.min(lows, axis=0), np.max(highs, axis=0)
+                    ax.fill_between(t, lo_band, hi_band, color=color, alpha=0.25, lw=0, zorder=1)
+                    x_lo, x_hi = np.percentile(np.concatenate(argmaxes), [lo_q, hi_q])
+                    peak.update(x_lo=float(min(x_lo, peak["x"])), x_hi=float(max(x_hi, peak["x"])))
+                    ax.errorbar(peak["x"], peak["value"],
+                                xerr=[[peak["x"] - peak["x_lo"]], [peak["x_hi"] - peak["x"]]],
+                                fmt="none", ecolor=color, elinewidth=1.6, capsize=4, capthick=1.6,
+                                zorder=4, gid="peak_range")
+                ax.plot(t, vals, color=color, lw=2.0, label=name, zorder=3)
+                ax.plot(t[m], vals[m], marker="o", ms=7, color=color, mec="black", mew=0.7,
+                        ls="", zorder=5)
+                peaks.append(peak)
+            fits.append({"label": axis["label"], "mixture": surface.mixture, "order": order,
+                         "band_orders": [s.order for s, _ in members],
+                         "r2": surface.r2, "rmse": surface.rmse, "loo_rmse": surface.loo_rmse,
+                         "reference": ref.tolist(), "peaks": peaks})
+
+        path_note = ("others in reference proportions" if fits and fits[0]["mixture"]
+                     else "others at the reference")
+        feasible = _feasible_range(axes_data[0]["designs"]) if shade_infeasible else None
+        for j, ax in enumerate(axs.flat):
+            if j >= n_dim:
+                ax.set_visible(False)
+                continue
+            if show_nominal and first_nominal is not None:
+                ax.axvline(first_nominal[j], color="0.2", ls=":", lw=1.1, zorder=1, label="nominal")
+            if limits is not None and np.isfinite(limits[j]):
+                ax.axvline(limits[j], color="tab:red", ls="--", lw=1.1, zorder=1,
+                           label="all targets observed")
+            if y == "difference":
+                ax.axhline(0, color="0.75", lw=0.8, zorder=0)
+            if feasible is not None:
+                _shade_outside(ax, *feasible)
+            ax.set_title(labels[j])
+            ax.set_xlabel(f"{labels[j]} ({path_note})")
+            if j % ncols == 0:
+                ax.set_ylabel("fitted EIG − reference [bits]" if y == "difference"
+                              else "fitted EIG [bits]")
+            ax.grid(color="0.93")
+            ax.set_axisbelow(True)
+
+        handles, legend_labels = [], []
+        for ax in axs.flat[:n_dim]:
+            for h, l in zip(*ax.get_legend_handles_labels()):
+                if l not in legend_labels:
+                    handles.append(h)
+                    legend_labels.append(l)
+        handles.append(Line2D([], [], marker="o", ls="", ms=7, color="0.75", mec="black"))
+        legend_labels.append("peak of each path")
+        used = sorted({o for f in fits for o in f["band_orders"]}, key=ORDERS.index)
+        if used and (len(used) > 1 or n_boot):
+            what = " + ".join(used) + (" fits, bootstrapped" if n_boot else " fits")
+            handles.append(Patch(color="0.6", alpha=0.35, lw=0))
+            legend_labels.append(f"{band:g}% band ({what})")
+            handles.append(Line2D([], [], color="0.4", lw=1.6, marker="|", ms=8, mew=1.6))
+            legend_labels.append(f"{band:g}% range of the peak")
+        fig.legend(handles, legend_labels, loc="outside upper center",
+                   ncol=min(len(handles), 2), fontsize=9, frameon=False)
+        if title is not None:
+            fig.suptitle(title, fontsize=11)
+
+        if filename is None:
+            filename = "compare_eig_response_traces"
+        _, experiment_id, _ = self._get_run_data_list(parse_params=False)
+        if save_dir is None and experiment_id is not None:
+            save_dir = self.get_save_dir(experiment_id=experiment_id, subdir="plots")
+        self.save_figure(fig, filename=filename, save_dir=save_dir, dpi=dpi)
+        return fig, axs, fits
 
     @staticmethod
     def _target_limits(labels, axes_data, dataset=None):

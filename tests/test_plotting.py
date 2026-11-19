@@ -2129,6 +2129,169 @@ class TestCompareEigByDesignDim:
             self._plot(tmp_path, [{"eig_kind": "variable", "eig_data_path": a},
                                   {"eig_kind": "variable", "eig_data_path": str(b)}])
 
+    @staticmethod
+    def _trend_lines(ax):
+        return [line for line in ax.lines if line.get_gid() == "trend"]
+
+    def test_trend_line_median_mean_none(self, mock_scratch_env, tmp_path):
+        """No line by default; one per run through the per-value median or mean on request."""
+        designs = [[0.2, 0.8]] * 3 + [[0.5, 0.5]] * 3 + [[0.8, 0.2]] * 3
+        eigs = [1.0, 2.0, 9.0, 3.0, 3.0, 6.0, 5.0, 6.0, 7.0]
+        path = self._run(tmp_path, "run", designs, eigs, nominal_eig=0.0)
+        runs = [{"eig_kind": "variable", "eig_data_path": path}]
+        _, axs, _ = self._plot(tmp_path, runs, x="fraction")
+        assert self._trend_lines(axs.flat[0]) == []
+        _, axs, _ = self._plot(tmp_path, runs, x="fraction", trend="median")
+        (line,) = self._trend_lines(axs.flat[0])
+        assert line.get_xdata().tolist() == pytest.approx([0.2, 0.5, 0.8])
+        assert line.get_ydata().tolist() == pytest.approx([2.0, 3.0, 6.0])
+        _, axs, _ = self._plot(tmp_path, runs, x="fraction", trend="mean")
+        (line,) = self._trend_lines(axs.flat[0])
+        assert line.get_ydata().tolist() == pytest.approx([4.0, 4.0, 6.0])
+        with pytest.raises(ValueError, match="trend must be"):
+            self._plot(tmp_path, runs, trend="mode")
+
+    @staticmethod
+    def _shaded(ax):
+        """x extents of the infeasible-region spans on an axis."""
+        spans = [p for p in ax.patches if p.get_gid() == "infeasible"]
+        return sorted((s.get_x(), s.get_x() + s.get_width()) for s in spans)
+
+    def test_shades_outside_a_mixture_range(self, mock_scratch_env, tmp_path):
+        """Mixture pools (rows sum to T) gray out x < 0 and x > T; x='relative' rescales it."""
+        path = self._run(tmp_path, "run", [[0.2, 0.8], [0.5, 0.5]], [1.0, 2.0], nominal_eig=1.0,
+                         nominal_design=(0.25, 0.75))
+        runs = [{"eig_kind": "variable", "eig_data_path": path}]
+        _, axs, _ = self._plot(tmp_path, runs, x="fraction")
+        (below, above) = self._shaded(axs.flat[0])
+        assert below[1] == pytest.approx(0.0) and above[0] == pytest.approx(1.0)
+        assert axs.flat[0].get_xlim()[1] > 1.0
+        _, axs, _ = self._plot(tmp_path, runs)  # relative: [0, 1 / nominal]
+        assert self._shaded(axs.flat[0])[1][0] == pytest.approx(4.0)
+        assert self._shaded(axs.flat[1])[1][0] == pytest.approx(1 / 0.75)
+        _, axs, _ = self._plot(tmp_path, runs, x="fraction", shade_infeasible=False)
+        assert self._shaded(axs.flat[0]) == []
+
+    def test_no_shading_without_a_mixture(self, mock_scratch_env, tmp_path):
+        path = self._run(tmp_path, "run", [[0.2, 0.3], [0.5, 0.9]], [1.0, 2.0], nominal_eig=1.0)
+        _, axs, _ = self._plot(tmp_path, [{"eig_kind": "variable", "eig_data_path": path}],
+                               x="fraction")
+        assert self._shaded(axs.flat[0]) == []
+
+    def test_trend_bins_a_pool_without_repeated_values(self):
+        """A random pool has no shared values, so the trend falls back to quantile bins."""
+        from bedcosmo.plotting import _eig_trend
+
+        rng = np.random.default_rng(0)
+        x = rng.uniform(0, 1, 80)
+        tx, ty = _eig_trend(x, 2 * x, "median", n_bins=8)
+        assert len(tx) == 8 and np.all(np.diff(tx) > 0)
+        assert ty == pytest.approx(2 * tx, abs=0.05)
+        assert [len(a) for a in _eig_trend([0.1, 0.2, 0.3], [1, 2, 3])] == [0, 0]
+
+
+class TestCompareEigResponseTraces:
+    """ComparisonPlotter.compare_eig_response_traces: one dimension's effect from a fit."""
+
+    @pytest.fixture
+    def mock_scratch_env(self, monkeypatch):
+        monkeypatch.setenv("SCRATCH", "/mock/scratch")
+
+    @staticmethod
+    def _simplex(step=0.1):
+        pts = [(a, b, round(1 - a - b, 10)) for a in np.arange(0, 1 + 1e-9, step)
+               for b in np.arange(0, 1 - a + 1e-9, step)]
+        return np.array(pts)
+
+    def _plot(self, tmp_path, designs, eigs, nominal_design, **kwargs):
+        artifacts = tmp_path / "run" / "artifacts"
+        artifacts.mkdir(parents=True, exist_ok=True)
+        data = _make_eig_data(designs.tolist(), variable_eigs=list(eigs), nominal_eig=0.0)
+        data["nominal_design"] = list(nominal_design)
+        path = artifacts / "eig_data_20260101_1200.json"
+        path.write_text(json.dumps(data))
+        (artifacts / "design_args.yaml").write_text(yaml.safe_dump({"labels": ["A", "B", "C"]}))
+        plotter = ComparisonPlotter(cosmo_exp="test_exp", run_ids=["aaaaaaaa"])
+        kwargs.setdefault("show_target_limits", False)
+        kwargs.setdefault("n_boot", 20)
+        with patch.object(plotter, "_get_run_data_list") as mock_runs:
+            mock_runs.return_value = ([], "exp_1", "test_exp")
+            return plotter.compare_eig_response_traces(
+                runs=[{"eig_kind": "variable", "eig_data_path": str(path), "label": "run"}],
+                save_dir=str(tmp_path / "plots"), dpi=60, **kwargs)
+
+    def test_mixture_pool_recovers_a_quadratic_surface(self, mock_scratch_env, tmp_path):
+        """An exact Scheffe quadratic is recovered, and each Cox path peaks where it should."""
+        X = self._simplex()
+        eig = 1.0 * X[:, 0] + 2.0 * X[:, 1] + 0.5 * X[:, 2] + 4.0 * X[:, 0] * X[:, 1]
+        fig, axs, fits = self._plot(tmp_path, X, eig, nominal_design=[1 / 3, 1 / 3, 1 / 3])
+        (fit,) = fits
+        assert fit["mixture"] and fit["r2"] == pytest.approx(1.0) and fit["loo_rmse"] < 1e-8
+        # Along A's Cox path from the centroid, B = C = (1 - a) / 2:
+        # f(a) = a + (1 - a) + 0.25 (1 - a) + 2 a (1 - a), maximized at a = 7/16.
+        assert fits[0]["peaks"][0]["x"] == pytest.approx(7 / 16, abs=0.01)
+        assert [ax.get_title() for ax in axs.flat] == ["A", "B", "C"]
+        spans = sorted(p.get_x() + (p.get_width() if p.get_x() < 0 else 0)
+                       for p in axs.flat[0].patches if p.get_gid() == "infeasible")
+        assert spans == pytest.approx([0.0, 1.0])  # gray below 0 and above the total
+        # Every path passes 0 at the reference (y="difference").
+        for ax in axs.flat:
+            (curve,) = [l for l in ax.lines if l.get_linestyle() == "-" and len(l.get_xdata()) > 2]
+            assert np.interp(1 / 3, curve.get_xdata(), curve.get_ydata()) == pytest.approx(0, abs=1e-3)
+        assert fig is not None
+
+    def test_non_mixture_pool_holds_the_others_at_the_reference(self, mock_scratch_env, tmp_path):
+        rng = np.random.default_rng(1)
+        X = rng.uniform(0, 1, (60, 3))
+        eig = 3 - (X[:, 0] - 0.3) ** 2 + X[:, 1] - 0.5 * X[:, 2]
+        _, _, fits = self._plot(tmp_path, X, eig, nominal_design=[0.5, 0.5, 0.5])
+        (fit,) = fits
+        assert not fit["mixture"] and fit["r2"] == pytest.approx(1.0)
+        assert fit["peaks"][0]["x"] == pytest.approx(0.3, abs=0.02)
+        assert fit["peaks"][1]["x"] == pytest.approx(X[:, 1].max(), abs=1e-9)
+
+    def test_band_spans_model_form_and_peak_range(self, mock_scratch_env, tmp_path):
+        """Default band = quadratic + cubic envelope; peaks get a range that contains them."""
+        X = self._simplex()
+        rng = np.random.default_rng(4)
+        # A cubic truth: the quadratic and cubic fits disagree, so the band is wider than
+        # the quadratic's bootstrap alone.
+        eig = X[:, 0] + 2 * X[:, 1] + 6 * X[:, 0] * X[:, 1] * (X[:, 0] - X[:, 1])
+        eig = eig + 0.01 * rng.normal(size=len(X))
+        _, axs, fits = self._plot(tmp_path, X, eig, nominal_design=[1 / 3, 1 / 3, 1 / 3])
+        assert fits[0]["band_orders"] == ["quadratic", "cubic"]
+        for p in fits[0]["peaks"]:
+            assert p["x_lo"] <= p["x"] <= p["x_hi"]
+        from matplotlib.container import ErrorbarContainer
+        bars = [c for c in axs.flat[0].containers if isinstance(c, ErrorbarContainer)]
+        assert len(bars) == 1  # one peak bar per run per panel
+        _, _, quad_only = self._plot(tmp_path, X, eig, nominal_design=[1 / 3, 1 / 3, 1 / 3],
+                                     band_orders=["quadratic"])
+        width = lambda f: np.mean([p["x_hi"] - p["x_lo"] for p in f[0]["peaks"]])
+        assert width(fits) >= width(quad_only)
+        # No band at all: one order, no bootstrap.
+        _, _, bare = self._plot(tmp_path, X, eig, nominal_design=[1 / 3, 1 / 3, 1 / 3],
+                                band_orders=["quadratic"], n_boot=0)
+        assert "x_lo" not in bare[0]["peaks"][0]
+
+    def test_band_skips_an_order_the_pool_cannot_fit(self, mock_scratch_env, tmp_path):
+        X = self._simplex(step=0.25)  # 15 designs: quadratic (6) fits, cubic (10) fits too
+        X = X[:8]                     # 8 designs: cubic (10 coefficients) does not
+        eig = X[:, 0] + X[:, 1] * X[:, 2]
+        with pytest.warns(UserWarning, match="no cubic fit"):
+            _, _, fits = self._plot(tmp_path, X, eig, nominal_design=[1 / 3, 1 / 3, 1 / 3])
+        assert fits[0]["band_orders"] == ["quadratic"]
+
+    def test_reference_options(self, mock_scratch_env, tmp_path):
+        X = self._simplex()
+        eig = X[:, 0] + X[:, 1] * X[:, 2]
+        _, _, fits = self._plot(tmp_path, X, eig, nominal_design=[0.2, 0.3, 0.5], reference="best")
+        assert fits[0]["reference"] == pytest.approx(X[int(np.argmax(eig))].tolist())
+        with pytest.raises(ValueError, match="reference must be"):
+            self._plot(tmp_path, X, eig, nominal_design=[0.2, 0.3, 0.5], reference="worst")
+        with pytest.raises(ValueError, match="y must be"):
+            self._plot(tmp_path, X, eig, nominal_design=[0.2, 0.3, 0.5], y="percent")
+
 
 class TestCompareTraining:
     """Test cases for ComparisonPlotter.compare_training method."""
