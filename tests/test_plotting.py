@@ -2213,7 +2213,6 @@ class TestCompareEigResponseTraces:
         (artifacts / "design_args.yaml").write_text(yaml.safe_dump({"labels": ["A", "B", "C"]}))
         plotter = ComparisonPlotter(cosmo_exp="test_exp", run_ids=["aaaaaaaa"])
         kwargs.setdefault("show_target_limits", False)
-        kwargs.setdefault("n_boot", 20)
         with patch.object(plotter, "_get_run_data_list") as mock_runs:
             mock_runs.return_value = ([], "exp_1", "test_exp")
             return plotter.compare_eig_response_traces(
@@ -2250,37 +2249,31 @@ class TestCompareEigResponseTraces:
         assert fit["peaks"][0]["x"] == pytest.approx(0.3, abs=0.02)
         assert fit["peaks"][1]["x"] == pytest.approx(X[:, 1].max(), abs=1e-9)
 
-    def test_band_spans_model_form_and_peak_range(self, mock_scratch_env, tmp_path):
-        """Default band = quadratic + cubic envelope; peaks get a range that contains them."""
+    def test_confidence_band_and_peak_range(self, mock_scratch_env, tmp_path):
+        """The shaded band is the fit's confidence band; each peak gets a range bar."""
+        from matplotlib.container import ErrorbarContainer
+        from bedcosmo.response_surface import ResponseSurface
+
         X = self._simplex()
         rng = np.random.default_rng(4)
-        # A cubic truth: the quadratic and cubic fits disagree, so the band is wider than
-        # the quadratic's bootstrap alone.
-        eig = X[:, 0] + 2 * X[:, 1] + 6 * X[:, 0] * X[:, 1] * (X[:, 0] - X[:, 1])
-        eig = eig + 0.01 * rng.normal(size=len(X))
-        _, axs, fits = self._plot(tmp_path, X, eig, nominal_design=[1 / 3, 1 / 3, 1 / 3])
-        assert fits[0]["band_orders"] == ["quadratic", "cubic"]
+        eig = X[:, 0] + 2 * X[:, 1] + 4 * X[:, 0] * X[:, 1] + 0.05 * rng.normal(size=len(X))
+        ref = np.array([1 / 3, 1 / 3, 1 / 3])
+        _, axs, fits = self._plot(tmp_path, X, eig, nominal_design=ref.tolist())
         for p in fits[0]["peaks"]:
             assert p["x_lo"] <= p["x"] <= p["x_hi"]
-        from matplotlib.container import ErrorbarContainer
-        bars = [c for c in axs.flat[0].containers if isinstance(c, ErrorbarContainer)]
-        assert len(bars) == 1  # one peak bar per run per panel
-        _, _, quad_only = self._plot(tmp_path, X, eig, nominal_design=[1 / 3, 1 / 3, 1 / 3],
-                                     band_orders=["quadratic"])
-        width = lambda f: np.mean([p["x_hi"] - p["x_lo"] for p in f[0]["peaks"]])
-        assert width(fits) >= width(quad_only)
-        # No band at all: one order, no bootstrap.
-        _, _, bare = self._plot(tmp_path, X, eig, nominal_design=[1 / 3, 1 / 3, 1 / 3],
-                                band_orders=["quadratic"], n_boot=0)
+        assert len([c for c in axs.flat[0].containers if isinstance(c, ErrorbarContainer)]) == 1
+        # The band drawn on panel A is the surface's 68% band relative to the reference.
+        surf = ResponseSurface(X, eig)
+        t, path = surf.trace(0, ref)
+        fit, half = surf.confidence_band(path, level=68, reference=ref)
+        from matplotlib.collections import PolyCollection
+        (poly,) = [c for c in axs.flat[0].collections if isinstance(c, PolyCollection)]
+        verts = poly.get_paths()[0].vertices
+        assert verts[:, 1].max() == pytest.approx((fit + half).max(), rel=1e-6)
+        # band=0: no band and no peak bars.
+        _, axs, bare = self._plot(tmp_path, X, eig, nominal_design=ref.tolist(), band=0)
         assert "x_lo" not in bare[0]["peaks"][0]
-
-    def test_band_skips_an_order_the_pool_cannot_fit(self, mock_scratch_env, tmp_path):
-        X = self._simplex(step=0.25)  # 15 designs: quadratic (6) fits, cubic (10) fits too
-        X = X[:8]                     # 8 designs: cubic (10 coefficients) does not
-        eig = X[:, 0] + X[:, 1] * X[:, 2]
-        with pytest.warns(UserWarning, match="no cubic fit"):
-            _, _, fits = self._plot(tmp_path, X, eig, nominal_design=[1 / 3, 1 / 3, 1 / 3])
-        assert fits[0]["band_orders"] == ["quadratic"]
+        assert not [c for c in axs.flat[0].containers if isinstance(c, ErrorbarContainer)]
 
     def test_reference_options(self, mock_scratch_env, tmp_path):
         X = self._simplex()

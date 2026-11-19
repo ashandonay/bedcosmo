@@ -59,8 +59,14 @@ def _poly_basis(u, order):
 class ResponseSurface:
     """Least-squares polynomial fit of ``values`` over ``designs``.
 
-    Attributes: ``mixture`` (bool), ``order``, ``coef``, ``r2``, ``rmse`` (in-sample),
-    ``loo_rmse`` (leave-one-out, from the hat matrix), ``n_params``.
+    Attributes: ``mixture`` (bool), ``order``, ``coef``, ``cov`` (the coefficients'
+    covariance, ``s^2 (A^T A)^-1`` with ``s^2`` the residual variance on ``n - p`` degrees
+    of freedom), ``dof``, ``r2``, ``rmse`` (in-sample), ``loo_rmse`` (leave-one-out, from
+    the hat matrix), ``n_params``.
+
+    The covariance treats the residuals as independent noise of one variance. For an EIG
+    pool they are mostly the polynomial's misfit, not measurement noise, so the
+    confidence band reads as "how precisely this pool pins down a surface of this form".
     """
 
     def __init__(self, designs, values, order="quadratic", mixture=None):
@@ -88,9 +94,8 @@ class ResponseSurface:
         self.r2 = float(1.0 - resid.var() / y.var()) if y.var() > 0 else float("nan")
         hat = np.einsum("ij,ji->i", A, np.linalg.pinv(A))
         self.loo_rmse = float(np.sqrt(np.mean((resid / np.clip(1.0 - hat, 1e-12, None)) ** 2)))
-        self._resid = resid
-        self._fitted = A @ self.coef
-        self._A = A
+        self.dof = len(y) - self.n_params
+        self.cov = (resid @ resid / self.dof) * np.linalg.pinv(A.T @ A)
 
     def _basis(self, X):
         X = np.atleast_2d(np.asarray(X, dtype=float))
@@ -101,14 +106,27 @@ class ResponseSurface:
     def predict(self, designs, coef=None):
         return self._basis(designs) @ (self.coef if coef is None else coef)
 
-    def bootstrap_coefs(self, n_boot=200, seed=0):
-        """Residual-bootstrap refits, shape ``(n_boot, n_params)``."""
+    def confidence_band(self, designs, level=68, reference=None):
+        """``(fit, half_width)`` of the two-sided ``level``% confidence band of the fit.
+
+        ``half_width = t * se`` with ``se^2 = a^T cov a``, ``a`` the design's basis row, and
+        ``t`` Student's quantile on ``dof``. With ``reference``, the band is for the fit
+        minus its value at that design (``a`` becomes the difference of the two rows), so
+        it is zero there.
+        """
+        from scipy.stats import t as student_t
+
+        A = self._basis(designs)
+        if reference is not None:
+            A = A - self._basis(np.asarray(reference, dtype=float)[None])
+        fit = A @ self.coef
+        se = np.sqrt(np.clip(np.einsum("ij,jk,ik->i", A, self.cov, A), 0.0, None))
+        return fit, student_t.ppf(0.5 + level / 200.0, self.dof) * se
+
+    def sample_coefs(self, n=1000, seed=0):
+        """Coefficient sets drawn from ``N(coef, cov)``, shape ``(n, n_params)``."""
         rng = np.random.default_rng(seed)
-        out = np.empty((n_boot, self.n_params))
-        for b in range(n_boot):
-            y_b = self._fitted + rng.choice(self._resid, size=len(self._resid), replace=True)
-            out[b], *_ = np.linalg.lstsq(self._A, y_b, rcond=None)
-        return out
+        return rng.multivariate_normal(self.coef, self.cov, size=n, method="svd")
 
     def trace(self, dim, reference, n=200):
         """Designs along dimension ``dim``'s effect path through ``reference``.

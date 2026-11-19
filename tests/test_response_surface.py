@@ -67,9 +67,38 @@ def test_too_few_designs_for_the_order():
         ResponseSurface(X, X[:, 0], order="quartic")
 
 
-def test_bootstrap_spreads_with_noise():
-    X = _simplex()
+def test_confidence_band_matches_simple_regression():
+    """One input, linear fit: the textbook band t * s * sqrt(1/n + (x - xbar)^2 / Sxx)."""
+    from scipy.stats import t as student_t
+
     rng = np.random.default_rng(3)
-    y = X[:, 0] + 0.1 * rng.normal(size=len(X))
-    boots = ResponseSurface(X, y).bootstrap_coefs(n_boot=50)
-    assert boots.shape[0] == 50 and np.all(boots.std(axis=0) > 0)
+    x = rng.uniform(0, 1, 30)
+    y = 1.0 + 2.0 * x + 0.1 * rng.normal(size=30)
+    surf = ResponseSurface(x[:, None], y, order="linear")
+    xs = np.linspace(0, 1, 5)
+    fit, half = surf.confidence_band(xs[:, None], level=95)
+    b1, b0 = np.polyfit(x, y, 1)
+    s = np.sqrt(np.sum((y - b0 - b1 * x) ** 2) / 28)
+    expect = student_t.ppf(0.975, 28) * s * np.sqrt(1 / 30 + (xs - x.mean()) ** 2
+                                                    / np.sum((x - x.mean()) ** 2))
+    assert fit == pytest.approx(b0 + b1 * xs) and half == pytest.approx(expect)
+    assert surf.dof == 28
+
+
+def test_band_relative_to_a_reference_vanishes_there():
+    X = _simplex()
+    y = X[:, 0] * X[:, 1] + 0.05 * np.random.default_rng(4).normal(size=len(X))
+    surf = ResponseSurface(X, y)
+    ref = np.array([0.2, 0.3, 0.5])
+    fit, half = surf.confidence_band(np.vstack([ref, [0.6, 0.2, 0.2]]), reference=ref)
+    assert fit[0] == pytest.approx(0.0, abs=1e-12) and half[0] == pytest.approx(0.0, abs=1e-9)
+    assert half[1] > 0
+
+
+def test_coefficient_draws_follow_the_covariance():
+    X = _simplex()
+    y = X[:, 0] + 0.1 * np.random.default_rng(5).normal(size=len(X))
+    surf = ResponseSurface(X, y)
+    draws = surf.sample_coefs(n=20000)
+    assert draws.mean(axis=0) == pytest.approx(surf.coef, abs=0.02)
+    assert np.cov(draws.T) == pytest.approx(surf.cov, abs=2e-3)
