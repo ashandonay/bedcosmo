@@ -211,7 +211,7 @@ def test_design_tool_nominal_matches_the_experiment(accounting):
 # ---------------------------------------------------------------- Lya_QSO tables
 _TABLE_PATH = os.path.join(
     os.environ.get("SCRATCH", ""), "bedcosmo", "num_tracers", "emulator", "bao", "models",
-    "dr1", "base", "lya", "v1_ratio_to_nominal", "Lya_QSO.npz")
+    "dr1", "base", "lya", "v3_absolute", "Lya_QSO.npz")
 
 
 def _as_fallback(exp):
@@ -278,7 +278,8 @@ def test_table_is_held_nominal_outside_qso_coupled(accounting, tmp_path):
                     reason="bao dr1/base fourier emulator checkpoints not available")
 @pytest.mark.parametrize("bad, match", [
     (dict(kind="network"), "unknown emulator file kind"),
-    (dict(output="absolute"), "not supported"),
+    (dict(output="bogus"), "not supported"),
+    (dict(output="absolute"), "table targets"),
     (dict(n_nominal=1_289_874.0), "n_nominal"),
     (dict(tracer_bin="QSO"), "slot is"),
 ])
@@ -298,30 +299,56 @@ def test_checkpoint_declaring_a_non_absolute_output_is_refused(tmp_path):
         exp._load_emulator(str(path))
 
 
-@pytest.mark.skipif(not (os.path.isdir(_CKPT_DIR) and os.path.exists(_TABLE_PATH)),
-                    reason="bao dr1/base emulators or the deployed Lya_QSO table not available")
-def test_deployed_table_is_loaded_and_halving_qso_follows_it():
-    exp = _make_exp("dr1", likelihood_mode="emulator", emulator_covariance="fiducial")
-    assert "Lya_QSO" in exp._emulator_tables and "Lya_QSO" not in exp._emulator_fallback_bins
-    nominal, halved = _halve_qso(exp)
+_LYA_NET = os.path.join(
+    os.environ.get("SCRATCH", ""), "bedcosmo", "num_tracers", "emulator", "bao", "models",
+    "dr1", "base", "lya", "v1_sigma_hrdrag_scaled", "Lya_QSO.pt")
+
+
+def _lya_block_sigmas(exp, design):
     rows = exp._lya_qso_rows
-    block = np.ix_(rows, rows)
-    cov_nom = exp._build_emulator_covariance(exp.calc_passed(nominal), {})[0].numpy()
-    # float32 design arithmetic puts nominal N at 709,565 (1 +- 1e-7), as for the law test
-    np.testing.assert_allclose(cov_nom[block], exp.ref_cov[block], rtol=1e-6)
+    q = exp.desi_data.loc[rows, "quantity"].tolist()
+    dh, dm = rows[q.index("DH_over_rs")], rows[q.index("DM_over_rs")]
+    cov = exp._build_emulator_covariance(exp.calc_passed(design), {})[0]
+    return float(cov[dh, dh].sqrt()), float(cov[dm, dm].sqrt()), float(cov[dh, dm] / (cov[dh, dh] * cov[dm, dm]).sqrt())
+
+
+@pytest.mark.skipif(not (os.path.isdir(_CKPT_DIR) and os.path.exists(_LYA_NET) and os.path.exists(_TABLE_PATH)),
+                    reason="bao dr1/base emulators, the Lya_QSO network or the fiducial table not available")
+def test_deployed_lya_network_is_loaded_and_halving_qso_follows_it():
+    """emulators.yaml's Lya_QSO is a network; at the fiducial it reproduces the direct
+    forecast (tabulated at the fiducial), and halving the QSO class follows it."""
+    exp = _make_exp("dr1", likelihood_mode="emulator", emulator_covariance="fiducial")
+    assert "Lya_QSO" in exp._emulators and "Lya_QSO" not in exp._emulator_tables
+    nominal, halved = _halve_qso(exp)
     t = np.load(_TABLE_PATH)
+    assert str(t["output"]) == "absolute"
+    i1 = int(np.argmin(np.abs(t["log_n_ratio"])))
     i = int(np.argmin(np.abs(t["log_n_ratio"] - np.log(0.5))))
-    r_dh, r_dm, _ = _lya_block(exp, _lya_n(exp, halved))
+    s_nom, s_half = _lya_block_sigmas(exp, nominal), _lya_block_sigmas(exp, halved)
+    # the table's h r_d and bedcosmo's fiducial agree to ~1e-4; the net to ~1e-3
+    np.testing.assert_allclose(s_nom[:2], t["values"][i1, :2], rtol=3e-3)
+    assert s_nom[2] == pytest.approx(t["values"][i1, 2], abs=1e-3)
+    r_dh, r_dm = s_half[0] / s_nom[0], s_half[1] / s_nom[1]
     # the grid is 0.05 dex, so n_ratio = 0.5 sits between points: tolerance of one step
-    assert r_dh == pytest.approx(t["values"][i, 0], rel=0.03)
-    assert r_dm == pytest.approx(t["values"][i, 1], rel=0.03)
+    assert r_dh == pytest.approx(t["values"][i, 0] / t["values"][i1, 0], rel=0.03)
+    assert r_dm == pytest.approx(t["values"][i, 1] / t["values"][i1, 1], rel=0.03)
     assert r_dm > r_dh > 1.0
 
 
-@pytest.mark.skipif(not (os.path.isdir(_CKPT_DIR) and os.path.exists(_TABLE_PATH)),
-                    reason="bao dr1/base emulators or the deployed Lya_QSO table not available")
-def test_run_snapshot_keeps_the_table_and_a_reload_finds_it(tmp_path):
-    """create_run snapshots Lya_QSO as a .npz (not renamed .pt) and NumTracers reloads it."""
+@pytest.mark.skipif(not (os.path.isdir(_CKPT_DIR) and os.path.exists(_LYA_NET)),
+                    reason="bao dr1/base emulators or the Lya_QSO network not available")
+def test_lya_network_is_held_at_nominal_under_in_budget_fixed():
+    exp = _make_exp("dr1", likelihood_mode="emulator", emulator_covariance="fiducial",
+                    lya_accounting="in_budget_fixed")
+    nominal, halved = _halve_qso(exp)
+    assert _lya_n(exp, halved) < 0.9 * _lya_n(exp, nominal)        # the count does move
+    np.testing.assert_allclose(_lya_block_sigmas(exp, halved), _lya_block_sigmas(exp, nominal), rtol=1e-9)
+
+
+@pytest.mark.skipif(not (os.path.isdir(_CKPT_DIR) and os.path.exists(_LYA_NET)),
+                    reason="bao dr1/base emulators or the Lya_QSO network not available")
+def test_run_snapshot_keeps_the_lya_network_and_a_reload_finds_it(tmp_path):
+    """create_run snapshots Lya_QSO's network with the others, and NumTracers reloads it."""
     import importlib.util
     from types import SimpleNamespace
 
@@ -336,8 +363,7 @@ def test_run_snapshot_keeps_the_table_and_a_reload_finds_it(tmp_path):
     args = SimpleNamespace(cosmo_exp="num_tracers", likelihood_mode="emulator", analysis="bao",
                            cosmo_model="base", dataset="dr1", emulator_space="fourier")
     create_run._snapshot_emulators(args, str(tmp_path))
-    assert (tmp_path / "emulators" / "Lya_QSO.npz").exists()
-    assert not (tmp_path / "emulators" / "Lya_QSO.pt").exists()
+    assert (tmp_path / "emulators" / "Lya_QSO.pt").exists()
 
     def load(name):
         with open(get_experiment_config_path("num_tracers", name)) as f:
@@ -350,8 +376,8 @@ def test_run_snapshot_keeps_the_table_and_a_reload_finds_it(tmp_path):
                     lya_accounting="qso_coupled")
     exp = init_experiment(run_obj=run_obj, run_args=run_args, design_args=load(DESIGN_ARGS["dr1"]),
                           prior_args=load("prior_args_hrdrag.yaml"))
-    assert "Lya_QSO" in exp._emulator_tables
-    assert exp._emulator_tables["Lya_QSO"]["path"].startswith(str(tmp_path))
+    assert "Lya_QSO" in exp._emulators
+    assert exp._emulators["Lya_QSO"]["ckpt_path"].startswith(str(tmp_path))
 
 
 # ---------------------------------------------------------------- design-tool bounds
@@ -398,3 +424,61 @@ def test_design_coupled_pool_reaches_past_nominal_qso():
     assert pool.shape[0] > 50
     assert pool[:, qso].max() > nom[qso]
     np.testing.assert_allclose(pool.sum(1), 1.0, atol=1e-9)
+
+
+def _write_absolute_table(path, **over):
+    fields = dict(kind="table", output="absolute", tracer_bin="Lya_QSO",
+                  param_names=np.array(["N_tracers"]),
+                  target_names=np.array(["sigma_DH_over_rd", "sigma_DM_over_rd", "rho_DH_DM"]),
+                  n_nominal=709_565.0, log_n_ratio=np.array([-1.0, 0.0, 1.0]),
+                  values=np.array([[0.40, 1.60, -0.40], [0.20, 0.80, -0.45], [0.10, 0.40, -0.50]]),
+                  hrdrag=99.0, provenance="test")
+    fields.update(over)
+    np.savez(path, **fields)
+    return path
+
+
+def _abs_block(exp, n_lya, hrdrag_phys=None):
+    rows = exp._lya_qso_rows
+    q = exp.desi_data.loc[rows, "quantity"].tolist()
+    dh, dm = rows[q.index("DH_over_rs")], rows[q.index("DM_over_rs")]
+    cov = torch.zeros(len(exp.desi_data), len(exp.desi_data), dtype=torch.float64)
+    ref = torch.as_tensor(exp.ref_cov, dtype=torch.float64)
+    exp._fill_table_block(cov, "Lya_QSO", {"Lya_QSO": torch.tensor(float(n_lya))}, ref, hrdrag_phys)
+    s_dh, s_dm = cov[dh, dh].sqrt(), cov[dm, dm].sqrt()
+    return float(s_dh), float(s_dm), float(cov[dh, dm] / (s_dh * s_dm))
+
+
+@pytest.mark.skipif(not os.path.isdir(_CKPT_DIR),
+                    reason="bao dr1/base fourier emulator checkpoints not available")
+def test_absolute_table_gives_the_block_itself(tmp_path):
+    exp = _with_table(_make_exp("dr1", likelihood_mode="emulator", emulator_covariance="fiducial"),
+                      _write_absolute_table(tmp_path / "t.npz"))
+    assert _abs_block(exp, 709_565) == pytest.approx((0.20, 0.80, -0.45), rel=1e-9)
+    # halfway between the first two rows in log(n_ratio)
+    assert _abs_block(exp, 709_565 * np.exp(-0.5)) == pytest.approx((0.30, 1.20, -0.425), rel=1e-9)
+    # sigma(D/r_d) scales as 1/(h r_d); rho does not
+    assert _abs_block(exp, 709_565, hrdrag_phys=110.0) == pytest.approx(
+        (0.20 * 99 / 110, 0.80 * 99 / 110, -0.45), rel=1e-9)
+
+
+@pytest.mark.skipif(not os.path.isdir(_CKPT_DIR),
+                    reason="bao dr1/base fourier emulator checkpoints not available")
+@pytest.mark.parametrize("accounting", ["outside", "in_budget_fixed"])
+def test_absolute_table_is_held_at_its_nominal_row_outside_qso_coupled(accounting, tmp_path):
+    exp = _with_table(_make_exp("dr1", likelihood_mode="emulator", emulator_covariance="fiducial",
+                                lya_accounting=accounting), _write_absolute_table(tmp_path / "t.npz"))
+    assert _abs_block(exp, 709_565 * np.exp(-0.5)) == pytest.approx((0.20, 0.80, -0.45), rel=1e-9)
+
+
+@pytest.mark.skipif(not os.path.isdir(_CKPT_DIR),
+                    reason="bao dr1/base fourier emulator checkpoints not available")
+def test_absolute_table_must_record_hrdrag(tmp_path):
+    exp = _make_exp("dr1", likelihood_mode="emulator", emulator_covariance="fiducial")
+    path = _write_absolute_table(tmp_path / "t.npz")
+    d = dict(np.load(path))
+    d.pop("hrdrag")
+    np.savez(path, **d)
+    with pytest.raises(ValueError, match="hrdrag"):
+        exp._load_emulator_table("Lya_QSO", str(path))
+
