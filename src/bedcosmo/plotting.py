@@ -5281,7 +5281,7 @@ class ComparisonPlotter(BasePlotter):
             handles.append(Line2D([], [], ls="-", lw=2.0, color="0.45"))
             legend_labels.append(f"{trend} over designs at each value")
         fig.legend(handles, legend_labels, loc="outside upper center",
-                   ncol=min(len(handles), 3), fontsize=9, frameon=False)
+                   ncol=min(len(handles), 6), fontsize=9, frameon=False)
         if title is not None:
             fig.suptitle(title, fontsize=11)
 
@@ -5504,7 +5504,7 @@ class ComparisonPlotter(BasePlotter):
                 handles.append(Line2D([], [], color="0.4", lw=1.6, marker="|", ms=8, mew=1.6))
                 legend_labels.append(f"{band:g}% range of the peak")
         fig.legend(handles, legend_labels, loc="outside upper center",
-                   ncol=min(len(handles), 2), fontsize=9, frameon=False)
+                   ncol=min(len(handles), 6), fontsize=9, frameon=False)
         if title is not None:
             fig.suptitle(title, fontsize=11)
 
