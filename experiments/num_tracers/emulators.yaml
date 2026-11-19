@@ -26,7 +26,7 @@ bao:
         QSO: config/v6_sigma_hrdrag_scaled/QSO.pt
         Lya_QSO: lya/v1_ratio_to_nominal/Lya_QSO.npz
       fourier:
-        BGS: fourier/v3_sigma_hrdrag_scaled/BGS.pt
+        BGS: fourier/v4_sigma_hrdrag_scaled/BGS.pt
         LRG1: fourier/v3_sigma_hrdrag_scaled/LRG1.pt
         LRG2: fourier/v3_sigma_hrdrag_scaled/LRG2.pt
         LRG3_ELG1: fourier/v3_sigma_hrdrag_scaled/LRG3_ELG1.pt
@@ -48,7 +48,7 @@ bao:
         QSO: ../base/config/v6_sigma_hrdrag_scaled/QSO.pt
         Lya_QSO: ../base/lya/v1_ratio_to_nominal/Lya_QSO.npz
       fourier:
-        BGS: ../base/fourier/v3_sigma_hrdrag_scaled/BGS.pt
+        BGS: ../base/fourier/v4_sigma_hrdrag_scaled/BGS.pt
         LRG1: ../base/fourier/v3_sigma_hrdrag_scaled/LRG1.pt
         LRG2: ../base/fourier/v3_sigma_hrdrag_scaled/LRG2.pt
         LRG3_ELG1: ../base/fourier/v3_sigma_hrdrag_scaled/LRG3_ELG1.pt
@@ -65,7 +65,7 @@ bao:
         QSO: ../base/config/v6_sigma_hrdrag_scaled/QSO.pt
         Lya_QSO: ../base/lya/v1_ratio_to_nominal/Lya_QSO.npz
       fourier:
-        BGS: ../base/fourier/v3_sigma_hrdrag_scaled/BGS.pt
+        BGS: ../base/fourier/v4_sigma_hrdrag_scaled/BGS.pt
         LRG1: ../base/fourier/v3_sigma_hrdrag_scaled/LRG1.pt
         LRG2: ../base/fourier/v3_sigma_hrdrag_scaled/LRG2.pt
         LRG3_ELG1: ../base/fourier/v3_sigma_hrdrag_scaled/LRG3_ELG1.pt
@@ -82,7 +82,7 @@ bao:
         QSO: ../base/config/v6_sigma_hrdrag_scaled/QSO.pt
         Lya_QSO: ../base/lya/v1_ratio_to_nominal/Lya_QSO.npz
       fourier:
-        BGS: ../base/fourier/v3_sigma_hrdrag_scaled/BGS.pt
+        BGS: ../base/fourier/v4_sigma_hrdrag_scaled/BGS.pt
         LRG1: ../base/fourier/v3_sigma_hrdrag_scaled/LRG1.pt
         LRG2: ../base/fourier/v3_sigma_hrdrag_scaled/LRG2.pt
         LRG3_ELG1: ../base/fourier/v3_sigma_hrdrag_scaled/LRG3_ELG1.pt
