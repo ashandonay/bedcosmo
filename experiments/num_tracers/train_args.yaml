@@ -10,7 +10,7 @@ base:
   dataset: dr1
   analysis: bao
   # bao's emulators.yaml entry is keyed by forecast space; pick one.
-  # config = config-space xi (Grieb), fourier = windowed P(k) (thecov).
+  # config = config-space xi (Grieb), fourier = windowed P(k) (thecov) in DESI's fiducial coordinates.
   # Unused with --analysis shapefit, which loads both its mean and covar emulators.
   emulator_space: fourier
   # Covariance emulators at the sampled cosmology (cosmology), fixed at the fiducial as a real
