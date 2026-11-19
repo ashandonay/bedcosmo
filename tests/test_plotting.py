@@ -691,6 +691,33 @@ class TestComparisonPlotter:
                 mock_plot_triangle.assert_called_once()
                 mock_save.assert_called_once()
 
+    @pytest.mark.parametrize("display, expected", [
+        (("nominal", "optimal"), ["--", "-"]),
+        (("optimal",), ["-"]),
+        (("nominal",), ["-"]),     # one series: solid, whichever it is
+    ])
+    def test_compare_posterior_series_line_styles(self, comparison_plotter, mock_run_data_list,
+                                                   tmp_path, display, expected):
+        """Runs are colored by group, so with both series optimal is solid, nominal dashed."""
+        mock_exp = Mock()
+        mock_exp.device = 'cpu'
+        entries = [{"samples": Mock(), "name": n, "label": n, "line_style": "-", "alpha": 1.0}
+                   for n in display]
+        with patch('bedcosmo.plotting.get_runs_data') as mock_get_runs, \
+             patch('bedcosmo.plotting.init_experiment', return_value=mock_exp), \
+             patch.object(ComparisonPlotter, '_run_nf_entries', return_value=(entries, 1000)), \
+             patch.object(ComparisonPlotter, 'plot_triangle') as mock_plot_triangle, \
+             patch.object(comparison_plotter, 'save_figure'), \
+             patch.object(comparison_plotter, 'get_save_dir', return_value=str(tmp_path)), \
+             patch.object(comparison_plotter, 'generate_filename', return_value="t.png"):
+            mock_get_runs.return_value = (mock_run_data_list[:1], 'exp_123', 'test_exp')
+            mock_plot_triangle.return_value = Mock(fig=Mock(legends=[]))
+            with patch('bedcosmo.plotting.os.makedirs'):
+                comparison_plotter.compare_posterior(var='pyro_seed', display=display,
+                                                     plot_prior=False)
+            styles = mock_plot_triangle.call_args.kwargs["line_style"]
+            assert styles[-len(expected):] == expected
+
     def test_compare_posterior_with_colors(self, comparison_plotter, mock_run_data_list):
         """Test compare_posterior with custom colors."""
         mock_sample = Mock()
@@ -2958,7 +2985,7 @@ def test_compare_posterior_draws_desi_reference_behind_runs(tmp_path, monkeypatc
     call = _run_compare(plotter, runs, _fake_experiment(reference))
 
     assert call.args[0][0] is reference                # first plotted = drawn underneath
-    assert call.kwargs["line_style"][0] == "--"
+    assert call.kwargs["line_style"][0] == "--"           # dashed, like the runs' nominal
     assert call.args[1][0] == "black"
     assert len(call.args[0]) == 3
 
