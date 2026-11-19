@@ -5340,7 +5340,7 @@ class ComparisonPlotter(BasePlotter):
         Where :meth:`compare_eig_by_design_dim` plots the designs themselves (each value
         of a dimension mixes whatever the others do there), this isolates one dimension
         at a time, at the cost of being a model of the pool, not the pool itself; check
-        each run's fit quality in the returned ``fits`` (and the legend).
+        each run's fit quality (``r2``, ``loo_rmse``) in the returned ``fits``.
 
         Args:
             runs (list, optional): Axis dicts as in :meth:`compare_eig_by_design_dim`.
@@ -5355,7 +5355,7 @@ class ComparisonPlotter(BasePlotter):
                 to the reference with ``y="difference"``; 0 (default) for none. The band
                 assumes the residuals are independent noise; for an EIG pool they are
                 mostly the polynomial's misfit, so read it as fit precision, not as
-                uncertainty on the response. ``loo_rmse`` is the fit's honest typical error.
+                uncertainty on the response. ``fits[k]["loo_rmse"]`` is the fit's honest typical error.
             n_peak_draws (int): With a ``band``, coefficient sets drawn from the fit's
                 covariance to place each peak's range bar (the central ``band`` percent of
                 where the path's maximum falls); 0 for no bars. Same caveat as ``band``.
@@ -5436,8 +5436,7 @@ class ComparisonPlotter(BasePlotter):
             surface = ResponseSurface(axis["designs"], axis["eigs"], order=order)
             ref = reference_of(axis)
             draws = surface.sample_coefs(n_peak_draws) if n_peak_draws and band else None
-            name = (f"{axis['label']} ({'Scheffé ' if surface.mixture else ''}{order}, "
-                    f"R² {surface.r2:.2f}, LOO {surface.loo_rmse:.2g})")
+            name = f"{axis['label']} ({order} fit)"
             peaks = []
             for j, ax in enumerate(axs.flat[:n_dim]):
                 t, path = surface.trace(j, ref)
