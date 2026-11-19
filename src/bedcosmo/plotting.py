@@ -5314,7 +5314,7 @@ class ComparisonPlotter(BasePlotter):
         y="difference",
         design_labels=None,
         colors=None,
-        band=68,
+        band=0,
         n_peak_draws=1000,
         show_nominal=True,
         show_target_limits=True,
@@ -5352,10 +5352,13 @@ class ComparisonPlotter(BasePlotter):
                 (every trace passes 0 there); ``"raw"`` plots the fitted EIG.
             band (float): Two-sided percentage of the least-squares confidence band
                 shaded around each path (:meth:`ResponseSurface.confidence_band`), relative
-                to the reference with ``y="difference"``; 0 for none.
-            n_peak_draws (int): Coefficient sets drawn from the fit's covariance to place
-                each peak's range bar (the central ``band`` percent of where the path's
-                maximum falls); 0 for no bars.
+                to the reference with ``y="difference"``; 0 (default) for none. The band
+                assumes the residuals are independent noise; for an EIG pool they are
+                mostly the polynomial's misfit, so read it as fit precision, not as
+                uncertainty on the response. ``loo_rmse`` is the fit's honest typical error.
+            n_peak_draws (int): With a ``band``, coefficient sets drawn from the fit's
+                covariance to place each peak's range bar (the central ``band`` percent of
+                where the path's maximum falls); 0 for no bars. Same caveat as ``band``.
             show_nominal, show_target_limits, dataset, shade_infeasible: As in
                 :meth:`compare_eig_by_design_dim`, in stored design units.
 
