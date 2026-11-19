@@ -2250,7 +2250,7 @@ class TestCompareEigResponseTraces:
         assert fit["peaks"][1]["x"] == pytest.approx(X[:, 1].max(), abs=1e-9)
 
     def test_confidence_band_and_peak_range(self, mock_scratch_env, tmp_path):
-        """The shaded band is the fit's confidence band; each peak gets a range bar."""
+        """band=68 shades the fit's confidence band and bars each peak; off by default."""
         from matplotlib.container import ErrorbarContainer
         from bedcosmo.response_surface import ResponseSurface
 
@@ -2258,7 +2258,7 @@ class TestCompareEigResponseTraces:
         rng = np.random.default_rng(4)
         eig = X[:, 0] + 2 * X[:, 1] + 4 * X[:, 0] * X[:, 1] + 0.05 * rng.normal(size=len(X))
         ref = np.array([1 / 3, 1 / 3, 1 / 3])
-        _, axs, fits = self._plot(tmp_path, X, eig, nominal_design=ref.tolist())
+        _, axs, fits = self._plot(tmp_path, X, eig, nominal_design=ref.tolist(), band=68)
         for p in fits[0]["peaks"]:
             assert p["x_lo"] <= p["x"] <= p["x_hi"]
         assert len([c for c in axs.flat[0].containers if isinstance(c, ErrorbarContainer)]) == 1
@@ -2270,8 +2270,8 @@ class TestCompareEigResponseTraces:
         (poly,) = [c for c in axs.flat[0].collections if isinstance(c, PolyCollection)]
         verts = poly.get_paths()[0].vertices
         assert verts[:, 1].max() == pytest.approx((fit + half).max(), rel=1e-6)
-        # band=0: no band and no peak bars.
-        _, axs, bare = self._plot(tmp_path, X, eig, nominal_design=ref.tolist(), band=0)
+        # Default (band=0): no band and no peak bars.
+        _, axs, bare = self._plot(tmp_path, X, eig, nominal_design=ref.tolist())
         assert "x_lo" not in bare[0]["peaks"][0]
         assert not [c for c in axs.flat[0].containers if isinstance(c, ErrorbarContainer)]
 
