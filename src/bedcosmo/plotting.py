@@ -5314,9 +5314,8 @@ class ComparisonPlotter(BasePlotter):
         y="difference",
         design_labels=None,
         colors=None,
-        n_boot=200,
         band=68,
-        band_orders=None,
+        n_peak_draws=1000,
         show_nominal=True,
         show_target_limits=True,
         dataset=None,
@@ -5351,26 +5350,20 @@ class ComparisonPlotter(BasePlotter):
                 or an explicit design.
             y (str): ``"difference"`` plots the fit minus its value at the reference
                 (every trace passes 0 there); ``"raw"`` plots the fitted EIG.
-            n_boot (int): Residual-bootstrap refits per order in ``band_orders``; 0 uses
-                each order's point fit only.
-            band (float): Central percentage of each order's bootstrap traces; the shaded
-                band is the envelope of these over ``band_orders``, so it carries both the
-                fit's statistical spread and how much the curve depends on the
-                polynomial's form.
-            band_orders (list, optional): Orders whose fits make the band. Default:
-                ``order`` and the next higher one (quadratic -> quadratic and cubic); an
-                order the pool is too small for is skipped with a warning.
+            band (float): Two-sided percentage of the least-squares confidence band
+                shaded around each path (:meth:`ResponseSurface.confidence_band`), relative
+                to the reference with ``y="difference"``; 0 for none.
+            n_peak_draws (int): Coefficient sets drawn from the fit's covariance to place
+                each peak's range bar (the central ``band`` percent of where the path's
+                maximum falls); 0 for no bars.
             show_nominal, show_target_limits, dataset, shade_infeasible: As in
                 :meth:`compare_eig_by_design_dim`, in stored design units.
 
-        Each path's peak (●) gets a horizontal bar: the central ``band`` percent of where
-        the peak falls across every refit in the band.
-
         Returns:
             tuple: ``(fig, axes, fits)``; one dict per run with ``label``, ``mixture``,
-            ``order``, ``band_orders``, ``r2``, ``rmse``, ``loo_rmse``, ``reference`` and
-            ``peaks`` (per dimension, the path's ``x`` and ``value`` at its maximum, and
-            ``x_lo``/``x_hi`` of the peak's range when there is a band).
+            ``order``, ``r2``, ``rmse``, ``loo_rmse``, ``reference`` and ``peaks`` (per
+            dimension, the path's ``x`` and ``value`` at its maximum, and ``x_lo``/``x_hi``
+            of the peak's range when there are peak draws).
         """
         from bedcosmo.response_surface import ResponseSurface
 
@@ -5432,12 +5425,6 @@ class ComparisonPlotter(BasePlotter):
         fig, axs = plt.subplots(nrows, ncols, figsize=figsize, squeeze=False, sharey=True,
                                 layout="constrained")
         cycle = plt.rcParams["axes.prop_cycle"].by_key()["color"]
-        from bedcosmo.response_surface import ORDERS
-
-        if band_orders is None:
-            band_orders = [order] + ([ORDERS[ORDERS.index(order) + 1]]
-                                     if ORDERS.index(order) + 1 < len(ORDERS) else [])
-        band_orders = list(dict.fromkeys(band_orders))
         lo_q, hi_q = 50 - band / 2, 50 + band / 2
 
         fits = []
@@ -5445,40 +5432,24 @@ class ComparisonPlotter(BasePlotter):
             color = colors[k] if colors is not None else cycle[k % len(cycle)]
             surface = ResponseSurface(axis["designs"], axis["eigs"], order=order)
             ref = reference_of(axis)
-            # The band: each order in band_orders, refit on residual-bootstrap draws.
-            members = []
-            for o in band_orders:
-                try:
-                    s = surface if o == order else ResponseSurface(
-                        axis["designs"], axis["eigs"], order=o)
-                except ValueError as err:
-                    warnings.warn(f"{axis['label']}: no {o} fit for the band ({err})")
-                    continue
-                coefs = s.bootstrap_coefs(n_boot) if n_boot else s.coef[None]
-                members.append((s, coefs))
+            draws = surface.sample_coefs(n_peak_draws) if n_peak_draws and band else None
             name = (f"{axis['label']} ({'Scheffé ' if surface.mixture else ''}{order}, "
                     f"R² {surface.r2:.2f}, LOO {surface.loo_rmse:.2g})")
             peaks = []
             for j, ax in enumerate(axs.flat[:n_dim]):
                 t, path = surface.trace(j, ref)
-                offset = surface.predict(ref[None])[0] if y == "difference" else 0.0
-                vals = surface.predict(path) - offset
+                vals, half = surface.confidence_band(
+                    path, level=band or 68, reference=ref if y == "difference" else None)
                 m = int(np.argmax(vals))
                 peak = {"x": float(t[m]), "value": float(vals[m])}
-                spread = len(members) > 1 or n_boot
-                if members and spread:
-                    lows, highs, argmaxes = [], [], []
-                    for s, coefs in members:
-                        curves = np.array([
-                            s.predict(path, c)
-                            - (s.predict(ref[None], c)[0] if y == "difference" else 0.0)
-                            for c in coefs])
-                        lows.append(np.percentile(curves, lo_q, axis=0))
-                        highs.append(np.percentile(curves, hi_q, axis=0))
-                        argmaxes.append(t[np.argmax(curves, axis=1)])
-                    lo_band, hi_band = np.min(lows, axis=0), np.max(highs, axis=0)
-                    ax.fill_between(t, lo_band, hi_band, color=color, alpha=0.25, lw=0, zorder=1)
-                    x_lo, x_hi = np.percentile(np.concatenate(argmaxes), [lo_q, hi_q])
+                if band:
+                    ax.fill_between(t, vals - half, vals + half, color=color, alpha=0.25, lw=0,
+                                    zorder=1)
+                if draws is not None:
+                    A = surface._basis(path)
+                    if y == "difference":
+                        A = A - surface._basis(ref[None])
+                    x_lo, x_hi = np.percentile(t[np.argmax(draws @ A.T, axis=1)], [lo_q, hi_q])
                     peak.update(x_lo=float(min(x_lo, peak["x"])), x_hi=float(max(x_hi, peak["x"])))
                     ax.errorbar(peak["x"], peak["value"],
                                 xerr=[[peak["x"] - peak["x_lo"]], [peak["x_hi"] - peak["x"]]],
@@ -5489,7 +5460,6 @@ class ComparisonPlotter(BasePlotter):
                         ls="", zorder=5)
                 peaks.append(peak)
             fits.append({"label": axis["label"], "mixture": surface.mixture, "order": order,
-                         "band_orders": [s.order for s, _ in members],
                          "r2": surface.r2, "rmse": surface.rmse, "loo_rmse": surface.loo_rmse,
                          "reference": ref.tolist(), "peaks": peaks})
 
@@ -5525,13 +5495,12 @@ class ComparisonPlotter(BasePlotter):
                     legend_labels.append(l)
         handles.append(Line2D([], [], marker="o", ls="", ms=7, color="0.75", mec="black"))
         legend_labels.append("peak of each path")
-        used = sorted({o for f in fits for o in f["band_orders"]}, key=ORDERS.index)
-        if used and (len(used) > 1 or n_boot):
-            what = " + ".join(used) + (" fits, bootstrapped" if n_boot else " fits")
+        if band:
             handles.append(Patch(color="0.6", alpha=0.35, lw=0))
-            legend_labels.append(f"{band:g}% band ({what})")
-            handles.append(Line2D([], [], color="0.4", lw=1.6, marker="|", ms=8, mew=1.6))
-            legend_labels.append(f"{band:g}% range of the peak")
+            legend_labels.append(f"{band:g}% confidence band of the fit")
+            if n_peak_draws:
+                handles.append(Line2D([], [], color="0.4", lw=1.6, marker="|", ms=8, mew=1.6))
+                legend_labels.append(f"{band:g}% range of the peak")
         fig.legend(handles, legend_labels, loc="outside upper center",
                    ncol=min(len(handles), 2), fontsize=9, frameon=False)
         if title is not None:
