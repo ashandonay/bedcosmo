@@ -1,7 +1,9 @@
 # Emulator checkpoint paths: <analysis>: <dataset>: <cosmo_model>: <quantity>: <tracer_bin>: <path>
 # Nesting mirrors the storage path $SCRATCH/bedcosmo/num_tracers/emulator/{analysis}/models/{dataset}/{cosmo_model}/
 # <analysis> and <quantity> are tracer-forecast-emulator's --analysis and --quantity:
-#   bao:      config | fourier | fourier_fidcoords (one per run, chosen by emulator_space)
+#   bao:      config | fourier (one per run, chosen by emulator_space). fourier is the windowed P(k)
+#             forecast in DESI's fiducial coordinates; the theta-coordinate networks
+#             (fourier_thetacoords on disk) are kept for comparison and not listed here.
 #   shapefit: mean and covar (both loaded; tracer bins are tracers_for("shapefit"), LRG3 not LRG3_ELG1)
 # Relative paths resolve against it; absolute paths are used verbatim; null means "no checkpoint -> fall back to the
 # fixed DESI nominal covariance" (bao only; every shapefit bin needs both checkpoints).
@@ -12,8 +14,8 @@
 bao:
   dr1:
     base:
-      # bao has several forecast spaces with trained emulators, so this entry carries a space level
-      # (config | fourier | fourier_fidcoords)
+      # bao has two forecast spaces with trained emulators, so this entry carries a space level
+      # (config | fourier)
       # Select with `emulator_space` in train_args.yaml or --emulator-space on the command line.
       config:
         BGS: config/v6_sigma_hrdrag_scaled/BGS.pt
@@ -30,14 +32,6 @@ bao:
         LRG3_ELG1: fourier/v3_sigma_hrdrag_scaled/LRG3_ELG1.pt
         ELG2: fourier/v3_sigma_hrdrag_scaled/ELG2.pt
         QSO: fourier/v3_sigma_hrdrag_scaled/QSO.pt
-        Lya_QSO: lya/v1_ratio_to_nominal/Lya_QSO.npz
-      fourier_fidcoords:
-        BGS: fourier_fidcoords/v3_sigma_hrdrag_scaled/BGS.pt
-        LRG1: fourier_fidcoords/v3_sigma_hrdrag_scaled/LRG1.pt
-        LRG2: fourier_fidcoords/v3_sigma_hrdrag_scaled/LRG2.pt
-        LRG3_ELG1: fourier_fidcoords/v3_sigma_hrdrag_scaled/LRG3_ELG1.pt
-        ELG2: fourier_fidcoords/v3_sigma_hrdrag_scaled/ELG2.pt
-        QSO: fourier_fidcoords/v3_sigma_hrdrag_scaled/QSO.pt
         Lya_QSO: lya/v1_ratio_to_nominal/Lya_QSO.npz
     # The extended models reuse base's checkpoints, which take (N_tracers, Om, hrdrag). That is exact under
     # emulator_covariance 'fiducial' (or a dict that moves only Om/hrdrag): the covariance is then fixed at a
@@ -104,24 +98,15 @@ bao:
         ELG2: ../base/config/v6_sigma_hrdrag_scaled/ELG2.pt
         QSO: ../base/config/v6_sigma_hrdrag_scaled/QSO.pt
         Lya_QSO: ../base/lya/v1_ratio_to_nominal/Lya_QSO.npz
+      # Native extended-model emulator, trained on (N_tracers, Om, Ok, w0, wa, hrdrag), so it
+      # follows the sampled Ok/w0/wa under emulator_covariance 'cosmology' too.
       fourier:
-        BGS: ../base/fourier/v3_sigma_hrdrag_scaled/BGS.pt
-        LRG1: ../base/fourier/v3_sigma_hrdrag_scaled/LRG1.pt
-        LRG2: ../base/fourier/v3_sigma_hrdrag_scaled/LRG2.pt
-        LRG3_ELG1: ../base/fourier/v3_sigma_hrdrag_scaled/LRG3_ELG1.pt
-        ELG2: ../base/fourier/v3_sigma_hrdrag_scaled/ELG2.pt
-        QSO: ../base/fourier/v3_sigma_hrdrag_scaled/QSO.pt
-        Lya_QSO: ../base/lya/v1_ratio_to_nominal/Lya_QSO.npz
-      # Native extended-model emulator: Fourier labels in DESI's fiducial coordinates, trained on
-      # (N_tracers, Om, Ok, w0, wa, hrdrag), so it follows the sampled Ok/w0/wa under
-      # emulator_covariance 'cosmology' too.
-      fourier_fidcoords:
-        BGS: fourier_fidcoords/v3_sigma_hrdrag_scaled/BGS.pt
-        LRG1: fourier_fidcoords/v3_sigma_hrdrag_scaled/LRG1.pt
-        LRG2: fourier_fidcoords/v3_sigma_hrdrag_scaled/LRG2.pt
-        LRG3_ELG1: fourier_fidcoords/v3_sigma_hrdrag_scaled/LRG3_ELG1.pt
-        ELG2: fourier_fidcoords/v3_sigma_hrdrag_scaled/ELG2.pt
-        QSO: fourier_fidcoords/v3_sigma_hrdrag_scaled/QSO.pt
+        BGS: fourier/v3_sigma_hrdrag_scaled/BGS.pt
+        LRG1: fourier/v3_sigma_hrdrag_scaled/LRG1.pt
+        LRG2: fourier/v3_sigma_hrdrag_scaled/LRG2.pt
+        LRG3_ELG1: fourier/v3_sigma_hrdrag_scaled/LRG3_ELG1.pt
+        ELG2: fourier/v3_sigma_hrdrag_scaled/ELG2.pt
+        QSO: fourier/v3_sigma_hrdrag_scaled/QSO.pt
         Lya_QSO: ../base/lya/v1_ratio_to_nominal/Lya_QSO.npz
 shapefit:
   dr1:
