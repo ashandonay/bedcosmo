@@ -5099,6 +5099,7 @@ class ComparisonPlotter(BasePlotter):
         design_labels=None,
         colors=None,
         show_errorbars=True,
+        alpha=0.85,
         show_nominal=True,
         show_target_limits=True,
         dataset=None,
@@ -5140,6 +5141,7 @@ class ComparisonPlotter(BasePlotter):
                 none. Skipped with a warning when the dataset's table can't be found.
             dataset (str, optional): The DESI dataset for ``show_target_limits``. Default:
                 the first run's ``dataset`` parameter.
+            alpha (float): Opacity of the design markers (and their error bars).
             trend (str or None): ``"median"`` or ``"mean"`` draws a line per run through
                 that statistic of the designs at each value of the dimension; ``None``
                 (default) draws none. Designs sharing a value (a grid pool) are grouped by
@@ -5237,9 +5239,9 @@ class ComparisonPlotter(BasePlotter):
             for axis, xs, vals, std, color, b in series:
                 if show_errorbars:
                     ax.errorbar(xs[:, j], vals, yerr=std, fmt="o", ms=4.5, lw=0.8, color=color,
-                                alpha=0.85, mec="white", mew=0.5, label=axis["label"], zorder=2)
+                                alpha=alpha, mec="white", mew=0.5, label=axis["label"], zorder=2)
                 else:
-                    ax.scatter(xs[:, j], vals, s=24, color=color, alpha=0.85, edgecolor="white",
+                    ax.scatter(xs[:, j], vals, s=24, color=color, alpha=alpha, edgecolor="white",
                                linewidth=0.5, label=axis["label"], zorder=2)
                 ax.plot(xs[b, j], vals[b], marker="*", ms=15, color=color, mec="black", mew=0.7,
                         ls="", zorder=4)
