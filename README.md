@@ -144,6 +144,10 @@ The `run_id` is the MLflow run ID printed when training starts (or find it in th
 ./submit.sh eval num_visits <run_id> --marginal --marginal-eig-subsets '[["log_c_scale","z"]]'
 ```
 
+The nominal design is part of the evaluated design pool. When the experiment defines one and the pool doesn't already contain it, eval appends it, so it gets its EIG from the same pass as every other design. It is marked at its place in the EIG ranking, and the optimal design can be the nominal one. `eig_data` stores its row as the top-level `nominal_index`, so the nominal EIG is `step_{N}["variable"]["eigs_avg"][nominal_index]`; the same index applies to the grid and marginal arrays. The top-level `nominal_eig`/`nominal_eig_std` repeat it for the eval step. `--exclude-nominal` leaves the pool as configured and sets `nominal_index` to null. Grid EIG takes the same flag, and an NF/grid pair must use the same setting, because their overlay checks that both describe the same pool. Older `eig_data` files that store the nominal EIG in a separate `step_{N}["nominal"]` block still plot. `nominal_added` records whether eval added nominal to the pool, as opposed to it already being part of the configured pool. Cross-run comparisons (`compare_eigs`, `compare_eig_correlation`) drop an added row, so a new eval lines up with older evals of the same pool, and nominal still appears as its EIG line.
+
+The EIG-per-design plots draw each design as a point with its eval std as an error bar when the configured pool has fewer than 50 designs, before nominal is added. Larger pools get a line with a std band. `--eigs-scatter true` or `--eigs-scatter false` overrides this on the command line. In `eval_args.yaml`, `eigs_scatter: true` works, but `submit.sh` drops `false` values, so a YAML `false` falls back to the size rule.
+
 ## Experiments
 
 ### num_tracers
@@ -270,7 +274,7 @@ Then open `http://localhost:5000` in your browser.
 - `nan_dump/checkpoint_rank_{rank}_{step}.pt`, if training stops on a NaN/Inf loss. The failing step's update is skipped, so this holds the model, optimizer and scheduler state that produced the NaN, plus the rank's batch (`additional_state`: `samples`, `context`, `loss`). Load it like a checkpoint to replay the failure.
 - Hyperparameters
 - EIG evaluation results (JSON)
-- `transform_input=True` runs only: `plots/input_transform.png` and `input_transform/{param}/*` metrics, written once at the start of training (not on resume). They show each marginal CDF table's segment-slope noise and empty segments, and prior draws pushed through the input transform against N(0, 1). Training prints a warning when a table's slope scatter exceeds 10% or it has empty segments: posterior samples mapped back through such a table show stripes and empty slices.
+- `transform_input=True` runs only: `plots/input_transform.png` and `input_transform/{param}/*` metrics, written once at the start of training (not on resume). They show each marginal CDF table's segment-slope noise and empty segments, and prior draws pushed through the input transform against N(0, 1). Training prints a warning when a table's slope scatter exceeds 10% or it has empty segments: posterior samples mapped back through such a table show stripes and empty slices. Tables built from prior draws (every parameter under a prior flow, only the constrained ones otherwise) differ between DDP ranks by Monte Carlo noise. After start-up, every rank switches to rank 0's tables, joint whitening and prior-flow log-acceptance, so all ranks train under the transform the checkpoint saves.
 
 ## Adding a New Experiment
 
@@ -378,6 +382,7 @@ Key CLI flags:
 | `--param-dense-range NAME:LO,HI` | Dense sub-region for a parameter axis (e.g. `--param-dense-range z:0.5,1.5`) |
 | `--feature-dense-fraction` | Fraction of feature grid points in the dense region (default 0.6) |
 | `--param-dense-fraction` | Fraction of parameter grid points in the dense region (default 0.6) |
+| `--exclude-nominal` | Leave the nominal design out of the design grid (by default it is added, as in eval) |
 | `--no-plots` | Skip plot generation |
 | `--out-dir` | Existing output directory (`submit.sh` sets it). Not with `--run-id` |
 

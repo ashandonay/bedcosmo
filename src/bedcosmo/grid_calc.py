@@ -19,6 +19,7 @@ import numpy as np
 import torch
 import yaml
 from bedcosmo.plotting import BasePlotter, RunPlotter
+from bedcosmo.base import find_nominal_index
 from bedcosmo.util import (
     init_experiment,
     get_experiment_config_path,
@@ -1340,13 +1341,29 @@ class GridCalculation:
         fig.tight_layout()
         return fig, ax
 
+    def eig_by_design(self, eig) -> np.ndarray:
+        """Grid EIG (any shape, in the grid's cell order) as one value per
+        ``experiment.designs`` row, matched by design coordinates."""
+        grid_designs = self.experiment._designs_from_grid(self.design_grid).cpu().numpy()
+        row_of = {tuple(d): i for i, d in enumerate(grid_designs)}
+        pool = self.experiment.designs.detach().cpu().numpy()
+        missing = [d for d in map(tuple, pool) if d not in row_of]
+        if missing:
+            raise ValueError(f"{len(missing)} pool designs are not cells of the design grid, e.g. {missing[0]}.")
+        return np.asarray(eig, dtype=float).reshape(-1)[[row_of[d] for d in map(tuple, pool)]]
+
     def _nominal_design_index(self) -> int:
-        """Return the flat design index closest to the experiment's nominal design."""
-        nominal_np = self.experiment.nominal_design.detach().cpu().numpy().reshape(1, -1)
-        designs_np = self.experiment.designs.detach().cpu().numpy().astype(np.float64)
-        return int(
-            np.argmin(np.linalg.norm(designs_np - nominal_np[:, : designs_np.shape[1]], axis=1))
+        """Index of the nominal design among the grid's cells (designer.EIG order)."""
+        if self.experiment.nominal_design is None:
+            raise ValueError("Experiment has no nominal design.")
+        index = find_nominal_index(
+            self.experiment._designs_from_grid(self.design_grid), self.experiment.nominal_design
         )
+        if index is None:
+            raise ValueError(
+                "Nominal design is not in the design pool; run without --exclude-nominal."
+            )
+        return index
 
 
 def _run_merge_into_run(
@@ -1400,6 +1417,8 @@ def _run_merge_into_run(
         global_rank=0,
         **exp_kwargs,
     )
+    # Must match the NF eval's pool: eig arrays of the two sides are overlaid by index.
+    nominal_index = None if args.exclude_nominal else experiment.add_nominal_to_designs()
 
     eig_data = {"status": "incomplete"}
     with open(output_path, "w") as f:
@@ -1425,20 +1444,13 @@ def _run_merge_into_run(
     print(f"Computed prior PMF with shape {prior_pmf.shape}")
 
     result = gc_obj.run(prior=prior_pmf)
-    eig = np.asarray(result["eig"], dtype=float)
-    eig_flat = eig.reshape(-1)
+    eig_flat = gc_obj.eig_by_design(result["eig"])
     max_idx = int(np.argmax(eig_flat))
     optimal_eig = float(eig_flat[max_idx])
 
-    nominal_np = np.asarray(experiment.nominal_design.detach().cpu().numpy(), dtype=float).reshape(
-        1, -1
-    )
     designs_np = np.asarray(experiment.designs.detach().cpu().numpy(), dtype=float)
-    nominal_idx = int(
-        np.argmin(np.linalg.norm(designs_np - nominal_np[:, : designs_np.shape[1]], axis=1))
-    )
 
-    step_dict = {"variable": {}, "nominal": {}}
+    step_dict = {"variable": {}}
     step_dict["variable"]["grid"] = {
         "eigs_avg": eig_flat.tolist(),
         "eigs_std": np.zeros_like(eig_flat).tolist(),
@@ -1449,13 +1461,13 @@ def _run_merge_into_run(
         "feature_grid_shape": list(result["feature_grid_shape"]),
         "parameter_grid_shape": list(result["parameter_grid_shape"]),
     }
-    step_dict["nominal"]["grid"] = {
-        "eigs_avg": float(eig_flat[nominal_idx]),
-        "eigs_std": 0.0,
-    }
     eig_data[step_key] = step_dict
     eig_data["input_designs"] = designs_np.tolist()
-    eig_data["nominal_design"] = nominal_np.reshape(-1).tolist()
+    eig_data["nominal_index"] = nominal_index
+    eig_data["nominal_design"] = (
+        None if nominal_index is None
+        else experiment.nominal_design.detach().cpu().numpy().tolist()
+    )
 
     try:
         posterior = gc_obj.get_posterior(nominal=True)
@@ -1490,9 +1502,8 @@ def _run_merge_into_run(
     with open(output_path, "w") as f:
         json.dump(eig_data, f, indent=2)
     print(f"Saved grid eig_data to {output_path}")
-    print(
-        f"Grid EIG: nominal={step_dict['nominal']['grid']['eigs_avg']:.4f}, optimal={optimal_eig:.4f}"
-    )
+    nominal_eig = None if nominal_index is None else f"{eig_flat[nominal_index]:.4f}"
+    print(f"Grid EIG: nominal={nominal_eig}, optimal={optimal_eig:.4f}")
 
     try:
         render_overlay(
@@ -1569,18 +1580,15 @@ def _standalone_grid_eig_for_overlay(
     eig_flat: np.ndarray,
     result: Dict[str, Any],
     input_designs: np.ndarray,
-    nominal_design: np.ndarray,
+    nominal_design: Optional[np.ndarray],
+    nominal_index: Optional[int],
     grid_samples_path: str,
 ) -> Dict[str, Any]:
     """Build merge-compatible eig_data (grid side) for ``render_overlay``."""
     designs_np = np.asarray(input_designs, dtype=np.float64)
-    nominal_np = np.asarray(nominal_design, dtype=np.float64).reshape(1, -1)
-    nominal_idx = int(
-        np.argmin(np.linalg.norm(designs_np - nominal_np[:, : designs_np.shape[1]], axis=1))
-    )
     eig_flat = np.asarray(eig_flat, dtype=np.float64).reshape(-1)
     optimal_eig = float(np.max(eig_flat))
-    step_dict: Dict[str, Any] = {"variable": {}, "nominal": {}}
+    step_dict: Dict[str, Any] = {"variable": {}}
     step_dict["variable"]["grid"] = {
         "eigs_avg": eig_flat.tolist(),
         "eigs_std": np.zeros_like(eig_flat).tolist(),
@@ -1591,15 +1599,12 @@ def _standalone_grid_eig_for_overlay(
         "feature_grid_shape": list(result["feature_grid_shape"]),
         "parameter_grid_shape": list(result["parameter_grid_shape"]),
     }
-    step_dict["nominal"]["grid"] = {
-        "eigs_avg": float(eig_flat[nominal_idx]),
-        "eigs_std": 0.0,
-    }
     step_dict["grid_samples_path"] = grid_samples_path
     return {
         "status": "complete",
         "input_designs": designs_np.tolist(),
-        "nominal_design": nominal_np.reshape(-1).tolist(),
+        "nominal_index": nominal_index,
+        "nominal_design": None if nominal_design is None else nominal_design.tolist(),
         step_key: step_dict,
     }
 
@@ -1712,6 +1717,12 @@ def main():
         help="Step to tag grid results with (default: run_args['total_steps']).",
     )
     parser.add_argument(
+        "--exclude-nominal",
+        action="store_true",
+        help="Leave the nominal design out of the design grid (default: it is added, so it "
+        "gets a grid EIG). Must match the NF eval's setting for overlays to line up.",
+    )
+    parser.add_argument(
         "--nf-eig-data",
         type=str,
         default=None,
@@ -1821,6 +1832,8 @@ def main():
         verbose=args.verbose,
         **exp_kwargs,
     )
+    # Must match the NF eval's pool: eig arrays of the two sides are overlaid by index.
+    nominal_index = None if args.exclude_nominal else experiment.add_nominal_to_designs()
 
     if args.out_dir:
         out_dir = Path(args.out_dir)
@@ -1892,8 +1905,7 @@ def main():
 
     result = gc.run()
 
-    eig = np.asarray(result["eig"], dtype=float)
-    eig_flat = eig.reshape(-1)
+    eig_flat = gc.eig_by_design(result["eig"])
     best_idx = int(np.argmax(eig_flat))
     payload = {
         "cosmo_exp": args.cosmo_exp,
@@ -1902,6 +1914,7 @@ def main():
         "optimal_eig": float(eig_flat[best_idx]),
         "eigs_avg": eig_flat.tolist(),
         "eigs_std": np.zeros_like(eig_flat).tolist(),
+        "nominal_index": nominal_index,
         "design_grid_shape": list(result["design_grid_shape"]),
         "feature_grid_shape": list(result["feature_grid_shape"]),
         "parameter_grid_shape": list(result["parameter_grid_shape"]),
@@ -1925,9 +1938,10 @@ def main():
     print(f"  Saved: {json_path}")
 
     input_designs = experiment.designs.detach().cpu().numpy()
-    nominal_design = np.asarray(
-        experiment.nominal_design.detach().cpu().numpy(), dtype=np.float64
-    ).reshape(-1)
+    nominal_design = (
+        None if nominal_index is None
+        else experiment.nominal_design.detach().cpu().numpy().astype(np.float64).reshape(-1)
+    )
 
     need_grid_samples = (not args.no_plots) or bool(args.nf_eig_data)
     gc_samples = None
@@ -1943,6 +1957,7 @@ def main():
             input_designs=input_designs,
             design_labels=design_labels,
             nominal_design=nominal_design,
+            nominal_index=nominal_index,
             title="Grid EIG vs Design",
             filename="eig_designs",
             save_dir=gc.plt_save_path,
@@ -1985,6 +2000,7 @@ def main():
                     result=result,
                     input_designs=input_designs,
                     nominal_design=nominal_design,
+                    nominal_index=nominal_index,
                     grid_samples_path=samples_path,
                 )
                 overlay_device = args.device if args.device else "cpu"

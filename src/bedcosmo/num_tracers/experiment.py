@@ -1,3 +1,4 @@
+import math
 import os
 import sys
 import yaml
@@ -14,7 +15,6 @@ from astropy import constants
 import torch
 from torch import trapezoid
 from bed.grid import GridStack
-from bed.grid import Grid
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
 import contextlib
@@ -24,6 +24,11 @@ import math
 import inspect
 from bedcosmo.profiling import profile_method
 from bedcosmo.artifacts import resolve_design_input_path
+from bedcosmo.num_tracers.lya import (
+    LYA_FOREST_FRACTION,
+    budget_tracers,
+    resolve_lya_accounting,
+)
 from bedcosmo.util import (
     load_prior_flow_from_file,
     auto_seed,
@@ -34,6 +39,7 @@ from bedcosmo.util import (
     sample_guide,
 )
 from bedcosmo.transform import Bijector
+from bedcosmo.prior_flow import PriorFlow, is_prior_flow_file
 from bedcosmo.custom_dist import ConstrainedUniform2D, PresampledPrior
 from bedcosmo.base import BaseExperiment
 from bedcosmo.cosmology import CosmologyMixin, FIDUCIAL_PARAMS
@@ -69,7 +75,8 @@ class NumTracers(BaseExperiment, CosmologyMixin):
         likelihood_mode="scaling",
         apply_desi_syst=False,
         vary_z_eff=False,
-        vary_lya_qso=False,
+        lya_in_budget=None,
+        lya_accounting=None,
         ref_cov=None,
         emulator_sqrtn_ref=None,
         emulator_space=None,
@@ -117,12 +124,17 @@ class NumTracers(BaseExperiment, CosmologyMixin):
         self.DH_idx = np.where(self.desi_data["quantity"] == "DH_over_rs")[0]
         self.DM_idx = np.where(self.desi_data["quantity"] == "DM_over_rs")[0]
         self.DV_idx = np.where(self.desi_data["quantity"] == "DV_over_rs")[0]
-        # By default the Lya QSO error is held fixed at its nominal value in scaling
-        # mode (design-independent), mirroring how the emulator mode leaves Lya_QSO
-        # at ref_cov instead of scaling it. Set vary_lya_qso=True to instead let it
-        # scale with the design like the other tracers.
-        self.vary_lya_qso = vary_lya_qso
+        # How Lya QSO enters the design (num_tracers/lya.py). "outside" (the default, and
+        # lya_in_budget=False): its fibers are outside the budget and its count and error
+        # stay nominal. "in_budget_fixed" (lya_in_budget=True, runs logged before the
+        # option existed): its fibers sit in the QSO class while its error stays nominal.
+        # "qso_coupled": its forest fibers sit in the QSO class and its count follows the
+        # QSO class; its block comes from the Lya table in emulator mode and scales as
+        # 1/sqrt(N) in scaling mode, like every other row.
+        self.lya_accounting = resolve_lya_accounting(lya_accounting, lya_in_budget)
+        self.lya_in_budget = self.lya_accounting != "outside"
         self._lya_qso_rows = np.where(self.desi_data["tracer"] == "Lya QSO")[0]
+        self._budget_tracers = budget_tracers(self.desi_tracers, self.dataset, self.lya_accounting)
         self.cosmo_model = cosmo_model
         self.flow_type = flow_type
         self.device = device
@@ -154,9 +166,13 @@ class NumTracers(BaseExperiment, CosmologyMixin):
         )
         self.central_val = torch.tensor(self.desi_data["value_at_z"].tolist(), device=self.device)
         self.tracer_bins = self.desi_data.drop_duplicates(subset=["tracer"])["tracer"].tolist()
+        # The observed fibers the design fractions divide (the design budget at sum 1):
+        # desi_data's counts, Lya QSO's weighted by the share of its fibers in the budget.
+        bins = self.desi_data.drop_duplicates(subset=["tracer"]).set_index("tracer")["observed"]
+        lya_share = {"outside": 0.0, "in_budget_fixed": 1.0,
+                     "qso_coupled": LYA_FOREST_FRACTION.get(self.dataset)}[self.lya_accounting]
         self.nominal_total_obs = int(
-            self.desi_data.drop_duplicates(subset=["tracer"])["observed"].sum()
-        )
+            bins.drop("Lya QSO", errors="ignore").sum() + lya_share * bins.get("Lya QSO", 0.0))
         self.nominal_passed_ratio = (
             torch.tensor(self.desi_data["passed"].tolist(), device=self.device)
             / self.nominal_total_obs
@@ -168,18 +184,22 @@ class NumTracers(BaseExperiment, CosmologyMixin):
         else:
             self.design_labels = ["BGS", "LRG", "ELG", "QSO"]
         self.num_targets = (
-            self.desi_tracers.groupby("class").sum()["targets"].reindex(self.design_labels)
+            self._budget_tracers.groupby("class").sum()["targets"].reindex(self.design_labels)
         )
         if nominal_design is None:
+            # desi_tracers' observed column is a fraction of all observed fibers; renormalize
+            # over the budget so the nominal design sums to 1.
+            observed = self._budget_tracers.groupby("class").sum()["observed"]
             self.nominal_design = torch.tensor(
-                self.desi_tracers.groupby("class")
-                .sum()["observed"]
-                .reindex(self.design_labels)
-                .values,
+                (observed / observed.sum()).reindex(self.design_labels).values,
                 device=self.device,
             )
         else:
             self.nominal_design = nominal_design
+        # calc_passed's map from the design to each desi_data row's passed fraction; a row's
+        # tracer may combine sub-tracers ("LRG3+ELG1").
+        self._passed_weights, self._passed_offset = self._passed_map(
+            [tracer.split("+") for tracer in self.desi_data["tracer"]])
 
         # Initialize emulator-based likelihood mode
         self.likelihood_mode = likelihood_mode
@@ -279,12 +299,14 @@ class NumTracers(BaseExperiment, CosmologyMixin):
         if self.analysis == "shapefit":
             self._init_shapefit(emu_dir)
         elif self.likelihood_mode == "emulator":
-            # Bins without a .pt in the artifacts are treated as fallback (null) bins.
+            # Bins with neither a .pt nor a .npz (table) in the artifacts are treated as
+            # fallback (null) bins.
             if emu_dir is not None and os.path.isdir(emu_dir):
                 checkpoints = {}
                 for tracer_bin in self._EMULATOR_TRACER_TO_DESI:
-                    ckpt_path = os.path.join(emu_dir, f"{tracer_bin}.pt")
-                    checkpoints[tracer_bin] = ckpt_path if os.path.exists(ckpt_path) else None
+                    found = [os.path.join(emu_dir, f"{tracer_bin}{ext}") for ext in (".pt", ".npz")]
+                    found = [f for f in found if os.path.exists(f)]
+                    checkpoints[tracer_bin] = found[0] if found else None
             else:
                 checkpoints = self.resolve_emulator_checkpoints(
                     self.analysis, self.cosmo_model, self.dataset, self.emulator_space,
@@ -323,6 +345,9 @@ class NumTracers(BaseExperiment, CosmologyMixin):
                         f"{self.cosmo_model} emulators.")
         if self.analysis == "shapefit":
             self._omega_m_log_acceptance = self._omega_m_domain_log_acceptance()
+
+        if isinstance(self.prior_flow, PriorFlow):
+            self.prior_flow_metadata["log_acceptance"] = self._prior_flow_log_acceptance()
 
         # Extract prior_flow settings for use in _sample_prior_flow
         if self.prior_flow_metadata is not None:
@@ -380,6 +405,7 @@ class NumTracers(BaseExperiment, CosmologyMixin):
             self.init_designs(**design_args)
         else:
             self.init_designs()
+        self._report_emulator_coverage()
 
     @profile_method
     def init_designs(
@@ -425,6 +451,7 @@ class NumTracers(BaseExperiment, CosmologyMixin):
             if input_path is not None:
                 if not os.path.exists(input_path):
                     raise FileNotFoundError(f"input_path not found: {input_path}")
+                self._check_pool_accounting(input_path)
 
                 input_designs_array = np.load(input_path)
                 # Convert to tensor
@@ -518,6 +545,26 @@ class NumTracers(BaseExperiment, CosmologyMixin):
             )
         self.designs = design_pts.to(self.device)
 
+    def _check_pool_accounting(self, input_path):
+        """Refuse a design pool built for another lya_accounting.
+
+        The same fractions mean a different allocation in each accounting, and nothing
+        downstream would notice. Pools written by ``bedcosmo.num_tracers.design`` record
+        theirs in ``provenance.json`` beside ``designs.npy``; a pool without one is
+        accepted as it always was.
+        """
+        prov = os.path.join(os.path.dirname(input_path), "provenance.json")
+        if not os.path.exists(prov):
+            return
+        with open(prov) as f:
+            pool_accounting = (json.load(f).get("args") or {}).get("lya_accounting")
+        if pool_accounting is not None and pool_accounting != self.lya_accounting:
+            raise ValueError(
+                f"design pool {os.path.dirname(input_path)} was built for "
+                f"lya_accounting={pool_accounting!r}, but this run uses "
+                f"{self.lya_accounting!r}; rebuild it with "
+                f"`python -m bedcosmo.num_tracers.design --lya-accounting {self.lya_accounting}`.")
+
     @profile_method
     def init_prior(self, parameters, constraints=None, prior_flow_path=None, **kwargs):
         """
@@ -535,8 +582,12 @@ class NumTracers(BaseExperiment, CosmologyMixin):
                 - multiplier: optional multiplier for the parameter
             constraints (dict, optional): Dictionary defining parameter constraints.
                 Keys are constraint names, values are dicts with 'affected_parameters' and 'bounds'.
-            prior_flow_path (str, optional): Absolute path to prior flow checkpoint file.
-                Must be an absolute path. Required if using a trained posterior as prior.
+            prior_flow_path (str, optional): Absolute path to a flow used as the prior, with
+                environment variables such as ``$SCRATCH`` expanded:
+                either a conditional bedcosmo posterior checkpoint, evaluated at the
+                nominal context, or an unconditional ``bedcosmo.prior_flow.PriorFlow``
+                over the model's parameters in their raw (pre-multiplier) units. The
+                PriorFlow is truncated to ``parameters`` and ``constraints``.
             **kwargs: Additional arguments (ignored, for compatibility with YAML structure).
 
         Returns:
@@ -556,25 +607,43 @@ class NumTracers(BaseExperiment, CosmologyMixin):
 
         # Load prior flow if specified
         if prior_flow_path:
+            # $SCRATCH and other env vars let a prior_args YAML work on any machine
+            prior_flow_path = os.path.expandvars(prior_flow_path)
+            if "$" in prior_flow_path:
+                raise ValueError(f"prior_flow_path '{prior_flow_path}' references an unset environment variable")
             if not os.path.isabs(prior_flow_path):
                 raise ValueError(
                     f"prior_flow path '{prior_flow_path}' must be an absolute path. "
                     "Relative paths are not supported."
                 )
 
-            prior_flow, prior_flow_metadata = load_prior_flow_from_file(
-                prior_flow_path, self.device, self.global_rank
-            )
-            prior_flow_metadata["nominal_context"] = (
-                self.nominal_context.to(self.device)
-                if prior_flow_metadata["nominal_context"] is None
-                else prior_flow_metadata["nominal_context"]
-            )
-
-            if self.global_rank == 0:
-                print(
-                    "Using trained posterior model as prior for parameter sampling (loaded from prior_args.yaml)"
+            if is_prior_flow_file(prior_flow_path):
+                if self.analysis != "bao":
+                    raise NotImplementedError(
+                        f"An unconditional PriorFlow prior supports analysis='bao' only, got {self.analysis!r}"
+                    )
+                prior_flow = PriorFlow.load(prior_flow_path).to(self.device)
+                prior_flow_metadata = {
+                    "transform_input": False,
+                    "nominal_context": None,
+                    "bijector_state": None,
+                }
+                if self.global_rank == 0:
+                    print(f"Using unconditional prior flow {prior_flow_path} as the prior")
+            else:
+                prior_flow, prior_flow_metadata = load_prior_flow_from_file(
+                    prior_flow_path, self.device, self.global_rank
                 )
+                prior_flow_metadata["nominal_context"] = (
+                    self.nominal_context.to(self.device)
+                    if prior_flow_metadata["nominal_context"] is None
+                    else prior_flow_metadata["nominal_context"]
+                )
+
+                if self.global_rank == 0:
+                    print(
+                        "Using trained posterior model as prior for parameter sampling (loaded from prior_args.yaml)"
+                    )
         else:
             prior_flow = None
             prior_flow_metadata = None
@@ -592,6 +661,11 @@ class NumTracers(BaseExperiment, CosmologyMixin):
 
         model_parameters = cosmo_models[self.analysis][self.cosmo_model]["parameters"]
         latex_labels = cosmo_models[self.analysis][self.cosmo_model]["latex_labels"]
+        if isinstance(prior_flow, PriorFlow) and prior_flow.feature_names != model_parameters:
+            raise ValueError(
+                f"Prior flow {prior_flow_path} models {prior_flow.feature_names}, but "
+                f"cosmo_model {self.cosmo_model!r} samples {model_parameters}"
+            )
 
         # Process constraints if provided
         if constraints is not None:
@@ -694,230 +768,79 @@ class NumTracers(BaseExperiment, CosmologyMixin):
 
         """
         factor = torch.sqrt(self.nominal_passed_ratio[index] / passed_ratio[..., index])
-        if not self.vary_lya_qso and self._lya_qso_rows.size:
-            # By default the Lya QSO error is held fixed. `index` is a positional array
-            # into desi_data rows; entries that are Lya QSO rows keep the nominal sigma
-            # (factor = 1), making that error design-independent. torch.where keeps this
-            # autograd-safe. Set vary_lya_qso=True to let it scale like the other tracers.
-            fixed = torch.as_tensor(
+        if self._lya_qso_rows.size and self.lya_accounting != "qso_coupled":
+            # Lya QSO rows scale as 1/sqrt(N) like every other row under "qso_coupled".
+            # Otherwise their error is held nominal (under "in_budget_fixed" their count
+            # moves with the QSO class but the error is pinned here). `index` is a
+            # positional array into desi_data rows; torch.where keeps this autograd-safe.
+            is_lya = torch.as_tensor(
                 np.isin(np.asarray(index), self._lya_qso_rows), device=factor.device
             )
-            factor = torch.where(fixed, torch.ones_like(factor), factor)
+            factor = torch.where(is_lya, torch.ones_like(factor), factor)
         return factor
+
+    def _passed_map(self, bins):
+        """The affine map from a design to the passed fraction of each bin.
+
+        ``bins`` lists each bin's sub-tracers (``desi_tracers`` names). Returns ``(W, b)``,
+        float64 tensors of shape (n_bins, n_design_labels) and (n_bins,), such that
+
+            passed_ratio = class_ratio @ W.T + b,   passed N = passed_ratio * nominal_total_obs
+
+        A design fraction is shared among its class's tracers in the design budget in
+        proportion to their observed counts, and each tracer's share is scaled by its
+        redshift efficiency:
+
+            W[bin, class_t] += observed_t / observed_{class_t} * efficiency_t
+
+        with observed_t the tracer's full count and observed_{class} its class's fibers in
+        the budget (``_budget_tracers``). The two differ only for Lya QSO under
+        ``lya_accounting="qso_coupled"``, whose tracer count overlaps the QSO bin and
+        only its forest fibers are in the budget: its count then scales with the QSO
+        class and equals the dataset's at the nominal design. A tracer outside the
+        budget (Lya QSO under "outside") keeps the dataset's count whatever the design:
+        b[bin] += observed_t * efficiency_t / nominal_total_obs.
+
+        BAO's desi_data rows and ShapeFit's bins both come from here, so both analyses
+        share one definition of the split.
+        """
+        tracers = self.desi_tracers.set_index("tracer")
+        budget = set(self._budget_tracers["tracer"])
+        class_observed = self._budget_tracers.groupby("class")["observed"].sum()
+        # desi_tracers' observed column is a fraction; desi_data carries the counts.
+        observed_count = self.desi_data.drop_duplicates("tracer").set_index("tracer")["observed"]
+        labels = [str(label) for label in self.design_labels]
+        W = torch.zeros(len(bins), len(labels), dtype=torch.float64)
+        b = torch.zeros(len(bins), dtype=torch.float64)
+        for i, components in enumerate(bins):
+            for tracer in components:
+                row = tracers.loc[tracer]
+                if tracer in budget:
+                    if row["class"] not in labels:
+                        raise ValueError(
+                            f"Tracer {tracer!r} is in class {row['class']!r}, which is not a "
+                            f"design label (design_labels={labels}).")
+                    W[i, labels.index(row["class"])] += (
+                        row["observed"] / class_observed[row["class"]] * row["efficiency"])
+                else:
+                    b[i] += observed_count[tracer] * row["efficiency"] / self.nominal_total_obs
+        return W.to(self.device), b.to(self.device)
 
     @profile_method
     def calc_passed(self, class_ratio):
-        label_to_index = {str(label): i for i, label in enumerate(self.design_labels)}
+        """Passed fraction of each desi_data row for designs ``class_ratio`` (..., n_labels).
 
-        def _label_index(label):
-            label_str = str(label)
-            if label_str not in label_to_index:
-                raise ValueError(
-                    f"Required design label '{label_str}' not found in design_labels={list(self.design_labels)}."
-                )
-            return label_to_index[label_str]
-
-        def _grid_axis(grid, label):
-            label_str = str(label)
-            if label_str not in grid.names:
-                raise ValueError(
-                    f"Could not find design axis '{label_str}'. "
-                    f"Available names={list(grid.names)}."
-                )
-            return np.asarray(getattr(grid, label_str), dtype=np.float64)
-
-        if type(class_ratio) == torch.Tensor:
-            assert class_ratio.shape[-1] == len(
-                self.design_labels
-            ), f"class_ratio should have {len(self.design_labels)} columns"
-            obs_ratio = torch.zeros(
-                (*class_ratio.shape[:-1], len(self.desi_data)),
-                device=self.device,
-            )
-            idx_BGS = _label_index("BGS")
-            idx_LRG = _label_index("LRG")
-            idx_ELG = _label_index("ELG")
-            idx_QSO = _label_index("QSO")
-
-            # multiply each class ratio by the observed fraction in each tracer bin
-            BGSs = self.desi_tracers.loc[self.desi_tracers["class"] == "BGS"]["observed"]
-            BGS_dist = class_ratio[..., idx_BGS].unsqueeze(-1) * torch.tensor(
-                (BGSs / BGSs.sum()).values, device=self.device
-            ).unsqueeze(0)
-            obs_ratio[..., np.where(self.desi_data["tracer"] == "BGS")[0]] = BGS_dist[
-                ..., 0
-            ].unsqueeze(-1)
-
-            LRGs = self.desi_tracers.loc[self.desi_tracers["class"] == "LRG"]["observed"]
-            LRG_dist = class_ratio[..., idx_LRG].unsqueeze(-1) * torch.tensor(
-                (LRGs / LRGs.sum()).values, device=self.device
-            ).unsqueeze(0)
-            obs_ratio[..., np.where(self.desi_data["tracer"] == "LRG1")[0]] = LRG_dist[
-                ..., 0
-            ].unsqueeze(-1)
-            obs_ratio[..., np.where(self.desi_data["tracer"] == "LRG2")[0]] = LRG_dist[
-                ..., 1
-            ].unsqueeze(-1)
-
-            ELGs = self.desi_tracers.loc[self.desi_tracers["class"] == "ELG"]["observed"]
-            ELG_dist = class_ratio[..., idx_ELG].unsqueeze(-1) * torch.tensor(
-                (ELGs / ELGs.sum()).values, device=self.device
-            ).unsqueeze(0)
-            # add the last value in LRG_dist to the first value in ELG_dist to get LRG3+ELG1
-            obs_ratio[..., np.where(self.desi_data["tracer"] == "LRG3+ELG1")[0]] = (
-                LRG_dist[..., 2] + ELG_dist[..., 0]
-            ).unsqueeze(-1)
-            obs_ratio[..., np.where(self.desi_data["tracer"] == "ELG2")[0]] = ELG_dist[
-                ..., 1
-            ].unsqueeze(-1)
-
-            QSOs = self.desi_tracers.loc[self.desi_tracers["class"] == "QSO"]["observed"]
-            QSO_dist = class_ratio[..., idx_QSO].unsqueeze(-1) * torch.tensor(
-                (QSOs / QSOs.sum()).values, device=self.device
-            ).unsqueeze(0)
-            obs_ratio[..., np.where(self.desi_data["tracer"] == "QSO")[0]] = QSO_dist[
-                ..., 0
-            ].unsqueeze(-1)
-            obs_ratio[..., np.where(self.desi_data["tracer"] == "Lya QSO")[0]] = QSO_dist[
-                ..., 1
-            ].unsqueeze(-1)
-
-            efficiency = torch.zeros(
-                (*class_ratio.shape[:-1], len(self.desi_data)),
-                device=self.device,
-            )
-            efficiency[..., np.where(self.desi_data["tracer"] == "BGS")[0]] = (
-                torch.tensor(
-                    self.desi_tracers.loc[
-                        self.desi_tracers["tracer"] == "BGS", "efficiency"
-                    ].values[0],
-                    device=self.device,
-                )
-                .expand_as(BGS_dist[..., 0])
-                .unsqueeze(-1)
-            )
-            efficiency[..., np.where(self.desi_data["tracer"] == "LRG1")[0]] = (
-                torch.tensor(
-                    self.desi_tracers.loc[
-                        self.desi_tracers["tracer"] == "LRG1", "efficiency"
-                    ].values[0],
-                    device=self.device,
-                )
-                .expand_as(LRG_dist[..., 0])
-                .unsqueeze(-1)
-            )
-            efficiency[..., np.where(self.desi_data["tracer"] == "LRG2")[0]] = (
-                torch.tensor(
-                    self.desi_tracers.loc[
-                        self.desi_tracers["tracer"] == "LRG2", "efficiency"
-                    ].values[0],
-                    device=self.device,
-                )
-                .expand_as(LRG_dist[..., 1])
-                .unsqueeze(-1)
-            )
-            efficiency[..., np.where(self.desi_data["tracer"] == "LRG3+ELG1")[0]] = (
-                (LRG_dist[..., 2] / (LRG_dist[..., 2] + ELG_dist[..., 0]))
-                * self.desi_tracers.loc[self.desi_tracers["tracer"] == "LRG3", "efficiency"].values[
-                    0
-                ]
-                + (ELG_dist[..., 0] / (LRG_dist[..., 2] + ELG_dist[..., 0]))
-                * self.desi_tracers.loc[self.desi_tracers["tracer"] == "ELG1", "efficiency"].values[
-                    0
-                ]
-            ).unsqueeze(-1)
-            efficiency[..., np.where(self.desi_data["tracer"] == "ELG2")[0]] = (
-                torch.tensor(
-                    self.desi_tracers.loc[
-                        self.desi_tracers["tracer"] == "ELG2", "efficiency"
-                    ].values[0],
-                    device=self.device,
-                )
-                .expand_as(ELG_dist[..., 1])
-                .unsqueeze(-1)
-            )
-            efficiency[..., np.where(self.desi_data["tracer"] == "QSO")[0]] = (
-                torch.tensor(
-                    self.desi_tracers.loc[
-                        self.desi_tracers["tracer"] == "QSO", "efficiency"
-                    ].values[0],
-                    device=self.device,
-                )
-                .expand_as(QSO_dist[..., 0])
-                .unsqueeze(-1)
-            )
-            efficiency[..., np.where(self.desi_data["tracer"] == "Lya QSO")[0]] = (
-                torch.tensor(
-                    self.desi_tracers.loc[
-                        self.desi_tracers["tracer"] == "Lya QSO", "efficiency"
-                    ].values[0],
-                    device=self.device,
-                )
-                .expand_as(QSO_dist[..., 1])
-                .unsqueeze(-1)
-            )
-
-            # scale obs_ratio by efficiency to get the number of passed objects
-            passed_ratio = obs_ratio * efficiency
-
-            return passed_ratio
-        elif type(class_ratio) == Grid:
-            obs_ratio = np.zeros((5,) + len(class_ratio.shape) * (1,))
-
-            LRGs = self.desi_tracers.loc[self.desi_tracers["class"] == "LRG"]["observed"]
-            LRG_axis = _grid_axis(class_ratio, "LRG")
-            LRG_dist = (LRG_axis * np.array((LRGs / LRGs.sum()).values)).squeeze()
-
-            obs_ratio[0:2, ...] = LRG_dist[0:2]
-
-            ELGs = self.desi_tracers.loc[self.desi_tracers["class"] == "ELG"]["observed"]
-            ELG_axis = _grid_axis(class_ratio, "ELG")
-            ELG_dist = (ELG_axis * np.array((ELGs / ELGs.sum()).values)).squeeze()
-            obs_ratio[..., 2] = LRG_dist[..., 2] + ELG_dist[..., 0]
-            obs_ratio[..., 3] = ELG_dist[..., 1]
-
-            QSOs = self.desi_tracers.loc[self.desi_tracers["class"] == "QSO"]["observed"]
-            QSO_axis = _grid_axis(class_ratio, "QSO")
-            QSO_dist = (QSO_axis * np.array((QSOs / QSOs.sum()).values)).squeeze()
-            obs_ratio[..., 4] = QSO_dist[..., 0]
-
-            efficiency = np.stack(
-                [
-                    np.array(
-                        self.desi_tracers.loc[
-                            self.desi_tracers["tracer"] == "LRG1", "efficiency"
-                        ].values[0]
-                    ),
-                    np.array(
-                        self.desi_tracers.loc[
-                            self.desi_tracers["tracer"] == "LRG2", "efficiency"
-                        ].values[0]
-                    ),
-                    (LRG_dist[..., 2] / (LRG_dist[..., 2] + ELG_dist[..., 0]))
-                    * self.desi_tracers.loc[
-                        self.desi_tracers["tracer"] == "LRG3", "efficiency"
-                    ].values[0]
-                    + (ELG_dist[..., 0] / (LRG_dist[..., 2] + ELG_dist[..., 0]))
-                    * self.desi_tracers.loc[
-                        self.desi_tracers["tracer"] == "ELG1", "efficiency"
-                    ].values[0],
-                    np.array(
-                        self.desi_tracers.loc[
-                            self.desi_tracers["tracer"] == "ELG2", "efficiency"
-                        ].values[0]
-                    ),
-                    np.array(
-                        self.desi_tracers.loc[
-                            self.desi_tracers["tracer"] == "Lya QSO", "efficiency"
-                        ].values[0]
-                    ),
-                ],
-                axis=-1,
-            )
-
-            passed_ratio = obs_ratio * efficiency
-
-            return passed_ratio
+        Returns (..., n_desi_rows) in the default dtype; times ``nominal_total_obs`` it is the
+        passed count. Affine in the design (see ``_passed_map``), so autograd-safe.
+        """
+        if not isinstance(class_ratio, torch.Tensor):
+            raise TypeError(f"class_ratio must be a torch.Tensor; got {type(class_ratio).__name__}.")
+        if class_ratio.shape[-1] != len(self.design_labels):
+            raise ValueError(
+                f"class_ratio should have {len(self.design_labels)} columns; "
+                f"got shape {tuple(class_ratio.shape)}.")
+        passed = class_ratio.to(torch.float64) @ self._passed_weights.T + self._passed_offset
+        return passed.to(torch.get_default_dtype())
 
     # Note: _E_of_z, D_H_func, D_M_func, D_V_func are inherited from CosmologyMixin
 
@@ -1304,6 +1227,57 @@ class NumTracers(BaseExperiment, CosmologyMixin):
         capped = (y.abs() > 1e-2 * self._SIGMA_CEILING).any(-1)
         return {"frac_sigma_ceiling": capped.double().mean().item()}
 
+    def _in_prior_support(self, samples):
+        """Mask of rows inside the uniform bounds and the sum constraints; samples (..., n_params)."""
+        inside = torch.ones(samples.shape[:-1], dtype=torch.bool, device=samples.device)
+        for i, name in enumerate(self.cosmo_params):
+            if isinstance(self.prior[name], dist.Uniform):
+                inside &= (samples[..., i] > self.prior[name].low) & (samples[..., i] < self.prior[name].high)
+        for constraint in self.param_constraints.values():
+            total = sum(samples[..., self.cosmo_params.index(p)] for p in constraint["affected_parameters"])
+            bounds = constraint["bounds"]
+            if "lower" in bounds:
+                inside &= total > bounds["lower"]
+            if "upper" in bounds:
+                inside &= total < bounds["upper"]
+        return inside
+
+    def _prior_flow_log_acceptance(self, n_samples=1_000_000):
+        """Log of the PriorFlow's mass inside the prior support, which normalizes its truncation."""
+        x = self.prior_flow.sample_tensor(n_samples)
+        n_inside = int(self._in_prior_support(x).sum())
+        if n_inside == 0:
+            raise ValueError(
+                "No prior-flow sample lies inside the prior support. Check that the flow was fit "
+                "in the prior_args' raw parameter units."
+            )
+        if self.global_rank == 0:
+            print(f"Prior flow: {n_inside / n_samples:.5f} of its mass lies inside the prior support")
+        return math.log(n_inside / n_samples)
+
+    def _sample_prior_flow(self, total_samples):
+        if not isinstance(self.prior_flow, PriorFlow):
+            return super()._sample_prior_flow(total_samples)
+        # The flow's density spills past the box and constraints; truncate it by rejection.
+        # Each draw covers the shortfall at the known acceptance (10% spare), so the
+        # bijector's 1e7 request does not redraw 1e7 to top up a 0.3% rejection.
+        acceptance = math.exp(self.prior_flow_metadata["log_acceptance"])
+        kept, n_kept = [], 0
+        while n_kept < total_samples:
+            n_draw = math.ceil(1.1 * (total_samples - n_kept) / acceptance)
+            x = self.prior_flow.sample_tensor(max(self.prior_flow_batch_size, n_draw))
+            x = x[self._in_prior_support(x)]
+            kept.append(x)
+            n_kept += len(x)
+        return torch.cat(kept)[:total_samples]
+
+    def prior_flow_log_prob(self, samples):
+        """Log-density of the truncated PriorFlow prior in raw parameter units; samples (..., n_params)."""
+        flat = samples.reshape(-1, samples.shape[-1])
+        log_prob = self.prior_flow.log_prob_tensor(flat) - self.prior_flow_metadata["log_acceptance"]
+        log_prob = torch.where(self._in_prior_support(flat), log_prob, -math.inf)
+        return log_prob.reshape(samples.shape[:-1])
+
     @profile_method
     def sample_parameters(self, sample_shape, prior=None, use_prior_flow=True):
         """
@@ -1535,18 +1509,28 @@ class NumTracers(BaseExperiment, CosmologyMixin):
 
         Tracer bins whose checkpoint is null (None) are skipped and recorded in
         ``self._emulator_fallback_bins``; their covariance blocks fall back to the
-        fixed DESI nominal covariance in ``_build_emulator_covariance``.
+        fixed DESI nominal covariance in ``_build_emulator_covariance``. A ``.npz``
+        path is a table (``_load_emulator_table``), held in ``self._emulator_tables``.
         """
         self._emulators = {}
+        self._emulator_tables = {}
         self._emulator_fallback_bins = []
         for tracer_bin, ckpt_path in self._emulator_checkpoints.items():
             if ckpt_path is None:
                 self._emulator_fallback_bins.append(tracer_bin)
                 continue
+            if ckpt_path.endswith(".npz"):
+                self._emulator_tables[tracer_bin] = self._load_emulator_table(tracer_bin, ckpt_path)
+                continue
             self._emulators[tracer_bin] = self._load_emulator(ckpt_path)
 
         if self.global_rank == 0:
             self._print_emulator_summary(self._emulators)
+            for tb, tab in self._emulator_tables.items():
+                print(f"  {tb}  table, output {tab['output']}, n_ratio "
+                      f"[{np.exp(tab['log_r'][0].item()):.3g}, {np.exp(tab['log_r'][-1].item()):.3g}]"
+                      f"{'' if self.lya_accounting == 'qso_coupled' else ' (held nominal: lya_accounting=' + self.lya_accounting + ')'}")
+                print(f"     {tab['path']}  | {tab['provenance']}")
             if self._emulator_fallback_bins:
                 print(
                     f"No emulator checkpoint for tracer bins {self._emulator_fallback_bins}; "
@@ -1566,22 +1550,36 @@ class NumTracers(BaseExperiment, CosmologyMixin):
         self._sigma_ceiling = self._SIGMA_CEILING
 
         ckpt = torch.load(ckpt_path, map_location=self.device, weights_only=False)
+        # A trained network predicts absolute sigmas; a checkpoint that says otherwise
+        # was written for a consumer this method is not.
+        if ckpt.get("output", "absolute") != "absolute":
+            raise ValueError(f"{ckpt_path}: emulator checkpoints must have output='absolute'; "
+                             f"got {ckpt.get('output')!r}")
         model = load_model(ckpt).to(self.device)
         model.requires_grad_(False)
 
-        # Recover the trained N_tracers box from the input standardization
-        # stats: N was drawn uniform[a, b], so mu = (a+b)/2 and
-        # sigma = (b-a)/sqrt(12)  =>  [a, b] = mu -+ sqrt(3)*sigma. Used only
-        # to warn (not clamp) on gross N-extrapolation, which signals a
-        # wiring bug rather than a valid design excursion.
+        # The trained N_tracers box. Checkpoints that record it (x_train_min /
+        # x_train_max) give it exactly, and N below its floor is clamped to the
+        # floor in _emulator_predict: σ there is the floor's σ, which carries
+        # ~1e-4 of DR1's information at a 0.01x floor, so the clamp stands in for
+        # "no information" without extrapolating the net. Older checkpoints only
+        # have the standardization stats, from which the box is estimated for a
+        # uniform draw (mu -+ sqrt(3)*sigma, in log space for a log input); they
+        # are never clamped and only warn on gross extrapolation.
         pnames = list(ckpt["param_names"])
-        n_train_lo = n_train_hi = None
-        if "N_tracers" in pnames:
-            i_n = pnames.index("N_tracers")
-            xmu = ckpt["x_mu"].reshape(-1)[i_n].item()
-            xsg = ckpt["x_sigma"].reshape(-1)[i_n].item()
-            half = (3.0 ** 0.5) * xsg
+        log_inputs = list(ckpt.get("log_inputs") or [])
+        n_index = pnames.index("N_tracers") if "N_tracers" in pnames else None
+        n_train_lo = n_train_hi = n_floor = None
+        if n_index is not None and ckpt.get("x_train_min") is not None:
+            n_train_lo = float(ckpt["x_train_min"].reshape(-1)[n_index])
+            n_train_hi = float(ckpt["x_train_max"].reshape(-1)[n_index])
+            n_floor = n_train_lo
+        elif n_index is not None:
+            xmu = ckpt["x_mu"].reshape(-1)[n_index].item()
+            half = (3.0 ** 0.5) * ckpt["x_sigma"].reshape(-1)[n_index].item()
             n_train_lo, n_train_hi = xmu - half, xmu + half
+            if "N_tracers" in log_inputs:
+                n_train_lo, n_train_hi = math.exp(n_train_lo), math.exp(n_train_hi)
 
         # scale_data.py recipe recorded by train.py. Empty = unscaled (legacy).
         # Must be passed to decode_and_unscale or σ comes back still multiplied
@@ -1592,6 +1590,9 @@ class NumTracers(BaseExperiment, CosmologyMixin):
             "model": model,
             "n_train_lo": n_train_lo,
             "n_train_hi": n_train_hi,
+            "n_index": n_index,
+            "n_floor": n_floor,
+            "log_inputs": log_inputs,
             "param_names": list(ckpt["param_names"]),
             "target_names": list(ckpt["target_names"]),
             "x_mu": ckpt["x_mu"].to(self.device),
@@ -1614,6 +1615,122 @@ class NumTracers(BaseExperiment, CosmologyMixin):
             "git_commit": str(ckpt.get("git_commit", "") or ""),
         }
 
+    _TABLE_TARGETS = {
+        "absolute": ("sigma_DH_over_rd", "sigma_DM_over_rd", "rho_DH_DM"),
+        "ratio_to_nominal": ("ratio_sigma_DH_over_rd", "ratio_sigma_DM_over_rd", "delta_rho"),
+    }
+
+    def _load_emulator_table(self, tracer_bin, path):
+        """Load a self-describing table (tracer-forecast-emulator bao/lya.py) for one bin.
+
+        The file declares how it is applied: ``kind`` must be "table", and ``output``
+        is either
+
+        - "absolute": the block is the tabulated sigma_DH, sigma_DM and rho, the forecast's
+          own errors, as the networks give for the other bins. They are in units of the
+          table's fiducial ``hrdrag`` (h r_d), and sigma(D/r_d) scales exactly as 1/(h r_d),
+          so at another h r_d they are multiplied by hrdrag / h r_d.
+        - "ratio_to_nominal": sigma_DH and sigma_DM of the bin's reference (DESI nominal)
+          block are multiplied by the tabulated ratios and its correlation shifted by
+          delta_rho.
+
+        Both are functions of n_ratio = N / ``n_nominal``. ``n_nominal`` must equal the
+        dataset's passed count, so a table built for one release cannot be applied to
+        another.
+        """
+        t = np.load(path, allow_pickle=False)
+        kind, output = str(t["kind"]), str(t["output"])
+        if kind != "table":
+            raise ValueError(f"{path}: unknown emulator file kind {kind!r}; expected 'table'")
+        if output not in self._TABLE_TARGETS:
+            raise ValueError(f"{path}: table output {output!r} is not supported; "
+                             f"expected one of {sorted(self._TABLE_TARGETS)}")
+        if list(t["param_names"]) != ["N_tracers"]:
+            raise ValueError(f"{path}: table inputs {list(t['param_names'])}; expected ['N_tracers']")
+        if tuple(t["target_names"]) != self._TABLE_TARGETS[output]:
+            raise ValueError(f"{path}: table targets {list(t['target_names'])}; "
+                             f"expected {list(self._TABLE_TARGETS[output])}")
+        hrdrag = None
+        if output == "absolute":
+            if "hrdrag" not in t.files:
+                raise ValueError(f"{path}: an absolute table must record the hrdrag it is in units of")
+            hrdrag = float(t["hrdrag"])
+        if str(t["tracer_bin"]) != tracer_bin:
+            raise ValueError(f"{path}: table is for {str(t['tracer_bin'])!r}, slot is {tracer_bin!r}")
+        desi_name = self._EMULATOR_TRACER_TO_DESI[tracer_bin]
+        passed = float(self.desi_data.loc[self.desi_data["tracer"] == desi_name, "passed"].iloc[0])
+        if not np.isclose(float(t["n_nominal"]), passed, rtol=1e-9):
+            raise ValueError(f"{path}: table n_nominal {float(t['n_nominal']):,.0f} != "
+                             f"{self.dataset} passed count {passed:,.0f} for {desi_name}")
+        log_r = np.asarray(t["log_n_ratio"], float)
+        if np.any(np.diff(log_r) <= 0):
+            raise ValueError(f"{path}: log_n_ratio is not increasing")
+        as_t = lambda a: torch.as_tensor(np.asarray(a, float), device=self.device, dtype=torch.float64)
+        return dict(path=path, output=output, n_nominal=passed, log_r=as_t(log_r),
+                    values=as_t(t["values"]), hrdrag=hrdrag,
+                    provenance=str(t.get("provenance", "")))
+
+    def _table_values(self, tracer_bin, n_tracers):
+        """The table's three targets at the design's N, linear in log(n_ratio).
+
+        Held at the table's nominal row unless lya_accounting is "qso_coupled": the
+        other accountings pin the Lya error at nominal. N outside the table's grid is
+        clamped to its edge with a one-time warning.
+        """
+        tab = self._emulator_tables[tracer_bin]
+        n = torch.as_tensor(n_tracers[tracer_bin], dtype=torch.float64, device=self.device)
+        if tracer_bin != "Lya_QSO" or self.lya_accounting != "qso_coupled":
+            n = torch.full_like(n, tab["n_nominal"])
+        x = torch.log(n / tab["n_nominal"])
+        lo, hi = tab["log_r"][0], tab["log_r"][-1]
+        if ((x < lo) | (x > hi)).any() and tab["path"] not in self._n_extrap_warned:
+            self._n_extrap_warned.add(tab["path"])
+            print(f"Warning: {tracer_bin} n_ratio outside the table's "
+                  f"[{torch.exp(lo).item():.3g}, {torch.exp(hi).item():.3g}]; clamped to its edge.")
+        x = x.clamp(lo, hi)
+        i = torch.searchsorted(tab["log_r"], x.contiguous()).clamp(1, len(tab["log_r"]) - 1)
+        x0, x1 = tab["log_r"][i - 1], tab["log_r"][i]
+        w = ((x - x0) / (x1 - x0)).unsqueeze(-1)
+        v = tab["values"][i - 1] * (1 - w) + tab["values"][i] * w
+        return v[..., 0], v[..., 1], v[..., 2]
+
+    def _fill_table_block(self, covariance, tracer_bin, n_tracers, ref_cov, hrdrag_phys=None):
+        """Write a table bin's block: the table's own sigmas and rho ("absolute", in units
+        of h r_d = ``hrdrag_phys``, the table's fiducial when None), or the reference
+        block rescaled per the table ("ratio_to_nominal")."""
+        desi_name = self._EMULATOR_TRACER_TO_DESI.get(tracer_bin)
+        rows = self.desi_data.index[self.desi_data["tracer"] == desi_name].tolist()
+        if not rows:
+            return
+        quantities = self.desi_data.loc[rows, "quantity"].tolist()
+        if set(quantities) != {"DM_over_rs", "DH_over_rs"}:
+            raise ValueError(f"table bin '{tracer_bin}' needs a (DH, DM) block; got {quantities}")
+        dh, dm = rows[quantities.index("DH_over_rs")], rows[quantities.index("DM_over_rs")]
+        tab = self._emulator_tables[tracer_bin]
+        from tracer_forecast_emulator.util import cov_block_from_marginals
+
+        if tab["output"] == "absolute":
+            v_dh, v_dm, v_rho = self._table_values(tracer_bin, n_tracers)
+            scale = 1.0 if hrdrag_phys is None else tab["hrdrag"] / torch.as_tensor(
+                hrdrag_phys, dtype=torch.float64, device=self.device)
+            sig_dh, sig_dm = v_dh * scale, v_dm * scale
+            rho = v_rho.clamp(-1 + 1e-6, 1 - 1e-6)
+        else:
+            if tracer_bin != "Lya_QSO" or self.lya_accounting != "qso_coupled":
+                for i in rows:
+                    for j in rows:
+                        covariance[..., i, j] = ref_cov[i, j]
+                return
+            r_dh, r_dm, d_rho = self._table_values(tracer_bin, n_tracers)
+            s_dh, s_dm = torch.sqrt(ref_cov[dh, dh]), torch.sqrt(ref_cov[dm, dm])
+            rho = (ref_cov[dh, dm] / (s_dh * s_dm) + d_rho).clamp(-1 + 1e-6, 1 - 1e-6)
+            sig_dh, sig_dm = s_dh * r_dh, s_dm * r_dm
+        c11, c12, c22 = cov_block_from_marginals(sig_dh, sig_dm, rho)
+        covariance[..., dh, dh] = c11
+        covariance[..., dm, dm] = c22
+        covariance[..., dh, dm] = c12
+        covariance[..., dm, dh] = c12
+
     def _print_emulator_summary(self, emulators):
         """Log WHICH emulators were loaded and their defining properties.
 
@@ -1633,6 +1750,10 @@ class NumTracers(BaseExperiment, CosmologyMixin):
         for tb, emu in emulators.items():
             n_lo, n_hi = emu.get("n_train_lo"), emu.get("n_train_hi")
             nbox = (f"N[{n_lo:.3g}, {n_hi:.3g}]" if n_lo is not None else "N box unknown")
+            if "N_tracers" in emu.get("log_inputs", []):
+                nbox += " log-N"
+            if emu.get("n_floor") is not None:
+                nbox += " (clamped below)"
             print(f"  {tb:<{w}}  {emu['arch']} ({emu['n_params']:,} params)  "
                   f"{'symlog' if emu['log_normalize'] else 'raw'}  {nbox}")
             print(f"  {'':<{w}}  {emu['ckpt_path']}")
@@ -1657,17 +1778,22 @@ class NumTracers(BaseExperiment, CosmologyMixin):
             Tensor of shape (..., n_targets) in physical units (σ ≥ sigma_floor;
             ρ from tanh decode). Target order matches the checkpoint's
             ``target_names``. Checkpoints trained on scale_data.py-rewritten
-            labels are unscaled here via ``decode_and_unscale``.
+            labels are unscaled here via ``decode_and_unscale``. N_tracers below
+            a recorded training floor is evaluated at the floor (see
+            ``_load_emulator``), so a class with no fibers is finite under a
+            log-N input.
         """
-        from tracer_forecast_emulator.util import decode_and_unscale
+        from tracer_forecast_emulator.util import decode_and_unscale, standardize_emulator_inputs
 
         model_dtype = next(emu["model"].parameters()).dtype
         x = emulator_input.to(model_dtype)
-        x_mu = emu["x_mu"].to(model_dtype)
-        x_sigma = emu["x_sigma"].to(model_dtype)
+        if emu.get("n_floor") is not None:
+            i = emu["n_index"]
+            x = torch.cat([x[..., :i], x[..., i:i + 1].clamp(min=emu["n_floor"]),
+                           x[..., i + 1:]], dim=-1)
         y_mu = emu["y_mu"].to(model_dtype)
         y_sigma = emu["y_sigma"].to(model_dtype)
-        x_norm = (x - x_mu) / x_sigma
+        x_norm = standardize_emulator_inputs(x, emu)
         y_norm = emu["model"](x_norm)
         # Numerical guard on non-detection / out-of-domain extrapolation: cap
         # sigma to a finite ceiling (inf/nan -> ceiling; encodes "no info") and
@@ -1691,13 +1817,76 @@ class NumTracers(BaseExperiment, CosmologyMixin):
         )
 
     # How far outside the trained N_tracers box counts as "gross" extrapolation
-    # worth warning about. A valid design only reaches ~0.70-1.05x the trained
-    # box (verified for dr1), where the emulator stays accurate (~0.6%); values
-    # far beyond this (e.g. raw counts, a bad hrdrag_multiplier) indicate a
-    # wiring bug, so we warn -- but never clamp, to avoid silently biasing the
-    # small, benign excursions the design legitimately makes.
+    # worth warning about. Values far beyond the box (e.g. raw counts, a bad
+    # hrdrag_multiplier) indicate a wiring bug, so we warn. Only a checkpoint
+    # that records its training box is clamped, and only at the floor (see
+    # _load_emulator); one without it keeps its small excursions unbiased.
     _N_EXTRAP_LO = 0.5   # warn below 0.5 x trained low
     _N_EXTRAP_HI = 2.0   # warn above 2.0 x trained high
+
+    def _report_emulator_coverage(self):
+        """Compare each emulator's trained N box with the N the designs feed it.
+
+        Prints one line per network on rank 0, in tracer counts and, for a bin fed by a
+        single class, in that class's fraction of the budget, and warns when any design
+        asks for N above the trained top: the net is extrapolated there. N below the
+        trained floor is clamped (``_load_emulator``), so only the top is checked.
+        Covers the BAO networks and both ShapeFit networks (mean, covar) per bin.
+        """
+        designs = getattr(self, "designs", None)
+        if designs is None or designs.numel() == 0:
+            return
+        x = designs.to(torch.float64)
+        # (name, emulator, per-class N weights in tracer counts, N offset)
+        nets = []
+        for tracer_bin, emu in (getattr(self, "_emulators", None) or {}).items():
+            desi_name = self._EMULATOR_TRACER_TO_DESI.get(tracer_bin)
+            rows = self.desi_data.index[self.desi_data["tracer"] == desi_name].tolist()
+            if rows:
+                nets.append((tracer_bin, emu,
+                             self._passed_weights[rows[0]] * self.nominal_total_obs,
+                             float(self._passed_offset[rows[0]]) * self.nominal_total_obs))
+        for quantity, by_bin in (getattr(self, "_shapefit_emulators", None) or {}).items():
+            for i, tracer_bin in enumerate(self.shapefit_bins):
+                nets.append((f"{tracer_bin} {quantity}", by_bin[tracer_bin],
+                             self._shapefit_n_weights[i], float(self._shapefit_n_offset[i])))
+        if not nets:
+            return
+        labels = [str(label) for label in self.design_labels]
+        short, lines = [], []
+        w = max(len(name) for name, *_ in nets)
+        for name, emu, weights, offset in nets:
+            n_hi = emu.get("n_train_hi")
+            if n_hi is None:
+                continue
+            weights = weights.to(torch.float64)
+            n = x @ weights + offset
+            n_max = float(n.max())
+            above = int((n > n_hi).sum())
+            feeding = [j for j in range(len(labels)) if float(weights[j]) > 0.0]
+            line = f"  {name:<{w}}  trained N <= {n_hi:.3g}"
+            if len(feeding) == 1 and offset == 0.0:
+                j = feeding[0]
+                line += (f" ({labels[j]} f <= {n_hi / float(weights[j]):.3g} of the budget); "
+                         f"designs reach {n_max:.3g} (f = {float(x[:, j].max()):.3g})")
+            else:
+                line += f"; designs reach {n_max:.3g}"
+            if above:
+                line += f": {above}/{x.shape[0]} designs above"
+                short.append(f"{name} ({above}/{x.shape[0]} designs)")
+            lines.append(line)
+        if self.global_rank == 0 and lines:
+            print("Emulator N coverage of the design pool:")
+            for line in lines:
+                print(line)
+        if short:
+            import warnings
+            warnings.warn(
+                "Designs ask emulators for N above their trained box, where the net is "
+                f"extrapolated: {', '.join(short)}. Retrain those bins over the design "
+                "budget (tracer_forecast_emulator util.ntracers_range) or narrow the pool.",
+                RuntimeWarning,
+            )
 
     def _warn_n_extrapolation(self, tracer_bin, emu, n_values):
         """Warn once per emulator if fed N_tracers grossly outside training."""
@@ -1709,7 +1898,9 @@ class NumTracers(BaseExperiment, CosmologyMixin):
         with torch.no_grad():
             nmin = float(torch.as_tensor(n_values).min())
             nmax = float(torch.as_tensor(n_values).max())
-        if nmin < self._N_EXTRAP_LO * lo or nmax > self._N_EXTRAP_HI * hi:
+        # Below a recorded floor, N is clamped, which is the defined behavior.
+        too_low = emu.get("n_floor") is None and nmin < self._N_EXTRAP_LO * lo
+        if too_low or nmax > self._N_EXTRAP_HI * hi:
             self._n_extrap_warned.add(emu["ckpt_path"])
             import warnings
             warnings.warn(
@@ -1864,10 +2055,9 @@ class NumTracers(BaseExperiment, CosmologyMixin):
 
         # Per-data-row factor g[row] = sqrt(N_ref[bin] / N[bin]) for the owning tracer bin,
         # so cov_ref * g g^T scales each block by N_ref/N (rho intact). Only bins with a
-        # real emulator are scaled; null-checkpoint fallback bins (e.g. Lya_QSO in base)
-        # keep g=1 so their block stays at the fixed reference value, matching both the
-        # normal emulator path (_fill_emulator_blocks copies ref_cov unscaled) and scaling
-        # mode's default (Lya QSO held fixed) -- they are not meant to be design dependent.
+        # real emulator are scaled this way. Null-checkpoint fallback bins (e.g. Lya_QSO in
+        # base without a Lya table) take the normal path's factor (_fallback_variance_scale:
+        # fixed, or 1/sqrt(N) under lya_accounting="qso_coupled"), as scaling mode does.
         cov_size = len(self.desi_data)
         g = torch.ones(batch_shape + (cov_size,), device=self.device, dtype=torch.float64)
         for tracer_bin in self._emulators:
@@ -1878,7 +2068,21 @@ class NumTracers(BaseExperiment, CosmologyMixin):
             factor = torch.sqrt(n_ref[tracer_bin] / n_tracers[tracer_bin])
             for r in rows:
                 g[..., r] = factor
+        for tracer_bin in self._emulator_fallback_bins:
+            rows = self.desi_data.index[
+                self.desi_data["tracer"] == self._EMULATOR_TRACER_TO_DESI.get(tracer_bin)].tolist()
+            if not rows:
+                continue
+            factor = torch.sqrt(torch.as_tensor(
+                self._fallback_variance_scale(tracer_bin, n_tracers), dtype=torch.float64,
+                device=self.device))
+            for r in rows:
+                g[..., r] = factor
         covariance = cov_ref * g.unsqueeze(-1) * g.unsqueeze(-2)
+        # Table bins take the normal path's block at the design N, as fallback bins do.
+        ref_cov = torch.as_tensor(self.ref_cov, device=self.device, dtype=torch.float64)
+        for tracer_bin in self._emulator_tables:
+            self._fill_table_block(covariance, tracer_bin, n_tracers, ref_cov, hrdrag_phys)
         return self._maybe_apply_desi_syst(covariance)
 
     def _fill_emulator_blocks(self, n_tracers, Om, Ok, w0, wa, hrdrag_phys, batch_shape):
@@ -1905,9 +2109,15 @@ class NumTracers(BaseExperiment, CosmologyMixin):
             # Build emulator inputs in the exact feature order expected by the
             # checkpoint (e.g. current BAO models use ['N_tracers', 'Om', 'hrdrag']).
             emu = self._emulators[tracer_bin]
-            self._warn_n_extrapolation(tracer_bin, emu, n_tracers[tracer_bin])
+            n_bin = n_tracers[tracer_bin]
+            if tracer_bin == "Lya_QSO" and self.lya_accounting != "qso_coupled":
+                # The other accountings hold the Lya error at nominal (as scaling mode and
+                # tables do); under "in_budget_fixed" its count still moves with the QSO class.
+                n_bin = torch.full_like(torch.as_tensor(n_bin, dtype=torch.float64, device=self.device),
+                                        float(self._sqrtn_nominal_n_tracers()["Lya_QSO"]))
+            self._warn_n_extrapolation(tracer_bin, emu, n_bin)
             feature_values = {
-                "N_tracers": n_tracers[tracer_bin],
+                "N_tracers": n_bin,
                 "Om": Om,
                 "Omega_m": Om,  # alias safety
                 "Ok": Ok,
@@ -1951,11 +2161,19 @@ class NumTracers(BaseExperiment, CosmologyMixin):
                 continue
             quantities = self.desi_data.loc[rows, "quantity"].tolist()
 
-            # Null checkpoint -> fixed reference covariance within-tracer block.
+            # Table bin -> the table's block (absolute, or the reference block rescaled);
+            # Lya QSO follows N only under lya_accounting="qso_coupled".
+            if tracer_bin in self._emulator_tables:
+                self._fill_table_block(covariance, tracer_bin, n_tracers, ref_cov, hrdrag_phys)
+                continue
+
+            # Null checkpoint -> the reference covariance's within-tracer block, rescaled
+            # with N for Lya QSO under lya_accounting="qso_coupled" (fixed otherwise).
             if tracer_bin in self._emulator_fallback_bins:
+                scale = self._fallback_variance_scale(tracer_bin, n_tracers)
                 for i in rows:
                     for j in rows:
-                        covariance[..., i, j] = ref_cov[i, j]
+                        covariance[..., i, j] = ref_cov[i, j] * scale
                 continue
 
             sig = _predict_sigmas(tracer_bin)
@@ -1998,6 +2216,18 @@ class NumTracers(BaseExperiment, CosmologyMixin):
                 )
 
         return covariance
+
+    def _fallback_variance_scale(self, tracer_bin, n_tracers):
+        """Variance factor on a null-checkpoint bin's reference block.
+
+        1 except for Lya QSO under ``lya_accounting="qso_coupled"``, where it is
+        ``N_nominal / N`` (sigma ∝ 1/sqrt(N), as in scaling mode) with N_nominal the
+        dataset's passed count.
+        """
+        if tracer_bin != "Lya_QSO" or self.lya_accounting != "qso_coupled":
+            return 1.0
+        n_nominal = float(self.desi_data.loc[self._lya_qso_rows[0], "passed"])
+        return n_nominal / n_tracers[tracer_bin].to(torch.float64)
 
     def _sqrtn_nominal_n_tracers(self):
         """Per-bin N_tracers at the nominal DESI design, cached.
@@ -2205,27 +2435,19 @@ class NumTracers(BaseExperiment, CosmologyMixin):
         Bins are tracer-forecast-emulator's ``tracers_for("shapefit")``: the 0.8-1.1 bin is
         LRG3 alone, not BAO's LRG3+ELG1 (ELG1 is excluded from full shape, DESI 2024 V
         Sec 2). A bin's passed count sums its ``components`` (default: the bin itself)
-        in desi_tracers.csv, as ``util.ntracers`` does:
-
-            N_b = sum_c design[class_c] * observed_c / observed_{class_c} * efficiency_c
-                  * nominal_total_obs
-
-        which is ``calc_passed``'s split and efficiency per sub-sample, stored as one
-        (n_bins, n_design_labels) matrix so ``_shapefit_n_tracers`` is a matmul.
+        in desi_tracers.csv, as ``util.ntracers`` does, through ``_passed_map``: the same
+        split and efficiencies ``calc_passed`` uses, scaled to counts so
+        ``_shapefit_n_tracers`` is one matmul.
         """
         from tracer_forecast_emulator.util import get_tracer_config, tracers_for
 
         self.shapefit_bins = tracers_for("shapefit")
-        tracers = self.desi_tracers.set_index("tracer")
-        class_observed = tracers.groupby("class")["observed"].sum()
-        weights = torch.zeros(len(self.shapefit_bins), len(self.design_labels), dtype=torch.float64)
-        for i, tracer_bin in enumerate(self.shapefit_bins):
-            cfg = get_tracer_config(tracer_bin, analysis="shapefit", data_release=self.dataset)
-            for comp in cfg.get("components", [tracer_bin]):
-                row = tracers.loc[comp]
-                j = list(self.design_labels).index(row["class"])
-                weights[i, j] += row["observed"] / class_observed[row["class"]] * row["efficiency"]
-        self._shapefit_n_weights = (weights * self.nominal_total_obs).to(self.device)
+        weights, offset = self._passed_map([
+            get_tracer_config(tracer_bin, analysis="shapefit", data_release=self.dataset)
+            .get("components", [tracer_bin])
+            for tracer_bin in self.shapefit_bins])
+        self._shapefit_n_weights = weights * self.nominal_total_obs
+        self._shapefit_n_offset = offset * self.nominal_total_obs
 
         self._shapefit_emulators = {}
         for quantity in self._SHAPEFIT_QUANTITIES:
@@ -2317,7 +2539,7 @@ class NumTracers(BaseExperiment, CosmologyMixin):
 
     def _shapefit_n_tracers(self, tracer_ratio):
         """Passed N_tracers per shapefit bin, shape (..., n_bins) in ``shapefit_bins`` order."""
-        return tracer_ratio.to(torch.float64) @ self._shapefit_n_weights.T
+        return tracer_ratio.to(torch.float64) @ self._shapefit_n_weights.T + self._shapefit_n_offset
 
     def _shapefit_parameters(self, values):
         """``sample_parameters``-shaped (1,) tensors for a {name: value} cosmology."""

@@ -1,7 +1,8 @@
 """Config-space ground-truth sigma generator (runs in the `emulator` conda env).
 
 Standalone helper for ``compare_config_space_vs_emulator.py``. It imports the
-tracer-forecast-emulator config-space pipeline (``bao/config_space.py``) and, for each
+tracer-forecast-emulator config-space pipeline
+(``tracer_forecast_emulator.bao.config_space``) and, for each
 requested tracer bin, evaluates the first-principles Grieb/Fisher
 sigma(D_H/rd, D_M/rd, D_V/rd) at the supplied N_tracers and cosmology -- the
 exact quantity the NN covariance emulator was trained to reproduce.
@@ -16,7 +17,11 @@ MPICH_GPU_SUPPORT_ENABLED=0. It talks to the orchestrator over two JSON files:
 
 `hrdrag` is PHYSICAL h*r_d (e.g. 99.08); N_tracers are absolute counts.
 
-Usage:  python _gen_config_space_sigmas.py <request.json> <out.json> [emulator_dir]
+Usage:  python _gen_config_space_sigmas.py <request.json> <out.json> [emulator_checkout]
+
+`emulator_checkout`, if given, is a tracer-forecast-emulator checkout whose
+``src/`` is imported ahead of the installed package; omitted, the installed
+``tracer_forecast_emulator`` is used.
 """
 import json
 import os
@@ -25,17 +30,11 @@ import sys
 
 def main():
     req_path, out_path = sys.argv[1], sys.argv[2]
-    emu_dir = (sys.argv[3] if len(sys.argv) > 3
-               else os.path.expanduser("~/tracer-forecast-emulator"))
+    if len(sys.argv) > 3:
+        sys.path.insert(0, os.path.join(os.path.abspath(sys.argv[3]), "src"))
 
-    bao_dir = os.path.join(emu_dir, "bao")
-    # config_space uses sibling imports (`import core`, `from util import ...`),
-    # so put bao/ and the package root on sys.path like the bao runtime does.
-    for p in (bao_dir, emu_dir):
-        if p not in sys.path:
-            sys.path.insert(0, p)
-
-    import config_space  # noqa: E402  (heavy: desilike + DESI bundles)
+    # heavy: desilike + DESI bundles
+    from tracer_forecast_emulator.bao import config_space
 
     with open(req_path) as f:
         req = json.load(f)

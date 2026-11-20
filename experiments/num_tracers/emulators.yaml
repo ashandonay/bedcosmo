@@ -1,14 +1,22 @@
 # Emulator checkpoint paths: <analysis>: <dataset>: <cosmo_model>: <quantity>: <tracer_bin>: <path>
 # Nesting mirrors the storage path $SCRATCH/bedcosmo/num_tracers/emulator/{analysis}/models/{dataset}/{cosmo_model}/
 # <analysis> and <quantity> are tracer-forecast-emulator's --analysis and --quantity:
-#   bao:      config | fourier (one forecast space per run, chosen by emulator_space)
+#   bao:      config | fourier (one per run, chosen by emulator_space). fourier is the windowed P(k)
+#             forecast in DESI's fiducial coordinates; the theta-coordinate networks
+#             (fourier_thetacoords on disk) are kept for comparison and not listed here.
 #   shapefit: mean and covar (both loaded; tracer bins are tracers_for("shapefit"), LRG3 not LRG3_ELG1)
 # Relative paths resolve against it; absolute paths are used verbatim; null means "no checkpoint -> fall back to the
 # fixed DESI nominal covariance" (bao only; every shapefit bin needs both checkpoints).
+# Lya_QSO is the Lya forest's own forecast (tracer-forecast-emulator bao/lya.py), trained like the other
+# bins on (N_tracers, cosmology) under the `lya` quantity. It has no config/fourier split (its frames
+# agree to 1e-4), so one network serves both spaces. It follows N only under lya_accounting=qso_coupled;
+# the other accountings hold it at nominal N. A .npz path is a table instead: kind: table, output
+# absolute (the bin's sigma_DH, sigma_DM, rho at the fiducial) or ratio_to_nominal (rescales DESI's block).
 bao:
   dr1:
     base:
-      # bao has TWO forecast spaces and both have trained emulators, so this entry carries a space level (config | fourier)
+      # bao has two forecast spaces with trained emulators, so this entry carries a space level
+      # (config | fourier)
       # Select with `emulator_space` in train_args.yaml or --emulator-space on the command line.
       config:
         BGS: config/v6_sigma_hrdrag_scaled/BGS.pt
@@ -17,15 +25,15 @@ bao:
         LRG3_ELG1: config/v6_sigma_hrdrag_scaled/LRG3_ELG1.pt
         ELG2: config/v6_sigma_hrdrag_scaled/ELG2.pt
         QSO: config/v6_sigma_hrdrag_scaled/QSO.pt
-        Lya_QSO: null
+        Lya_QSO: lya/v1_sigma_hrdrag_scaled/Lya_QSO.pt
       fourier:
-        BGS: fourier/v3_sigma_hrdrag_scaled/BGS.pt
+        BGS: fourier/v4_sigma_hrdrag_scaled/BGS.pt
         LRG1: fourier/v3_sigma_hrdrag_scaled/LRG1.pt
         LRG2: fourier/v3_sigma_hrdrag_scaled/LRG2.pt
         LRG3_ELG1: fourier/v3_sigma_hrdrag_scaled/LRG3_ELG1.pt
         ELG2: fourier/v3_sigma_hrdrag_scaled/ELG2.pt
         QSO: fourier/v3_sigma_hrdrag_scaled/QSO.pt
-        Lya_QSO: null
+        Lya_QSO: lya/v1_sigma_hrdrag_scaled/Lya_QSO.pt
     # The extended models reuse base's checkpoints, which take (N_tracers, Om, hrdrag). That is exact under
     # emulator_covariance 'fiducial' (or a dict that moves only Om/hrdrag): the covariance is then fixed at a
     # flat-LCDM point, as DESI fixes its BAO covariance whatever model it fits, so Ok/w0/wa never reach the
@@ -39,15 +47,15 @@ bao:
         LRG3_ELG1: ../base/config/v6_sigma_hrdrag_scaled/LRG3_ELG1.pt
         ELG2: ../base/config/v6_sigma_hrdrag_scaled/ELG2.pt
         QSO: ../base/config/v6_sigma_hrdrag_scaled/QSO.pt
-        Lya_QSO: null
+        Lya_QSO: ../base/lya/v1_sigma_hrdrag_scaled/Lya_QSO.pt
       fourier:
-        BGS: ../base/fourier/v3_sigma_hrdrag_scaled/BGS.pt
+        BGS: ../base/fourier/v4_sigma_hrdrag_scaled/BGS.pt
         LRG1: ../base/fourier/v3_sigma_hrdrag_scaled/LRG1.pt
         LRG2: ../base/fourier/v3_sigma_hrdrag_scaled/LRG2.pt
         LRG3_ELG1: ../base/fourier/v3_sigma_hrdrag_scaled/LRG3_ELG1.pt
         ELG2: ../base/fourier/v3_sigma_hrdrag_scaled/ELG2.pt
         QSO: ../base/fourier/v3_sigma_hrdrag_scaled/QSO.pt
-        Lya_QSO: null
+        Lya_QSO: ../base/lya/v1_sigma_hrdrag_scaled/Lya_QSO.pt
     base_w:
       config:
         BGS: ../base/config/v6_sigma_hrdrag_scaled/BGS.pt
@@ -56,15 +64,15 @@ bao:
         LRG3_ELG1: ../base/config/v6_sigma_hrdrag_scaled/LRG3_ELG1.pt
         ELG2: ../base/config/v6_sigma_hrdrag_scaled/ELG2.pt
         QSO: ../base/config/v6_sigma_hrdrag_scaled/QSO.pt
-        Lya_QSO: null
+        Lya_QSO: ../base/lya/v1_sigma_hrdrag_scaled/Lya_QSO.pt
       fourier:
-        BGS: ../base/fourier/v3_sigma_hrdrag_scaled/BGS.pt
+        BGS: ../base/fourier/v4_sigma_hrdrag_scaled/BGS.pt
         LRG1: ../base/fourier/v3_sigma_hrdrag_scaled/LRG1.pt
         LRG2: ../base/fourier/v3_sigma_hrdrag_scaled/LRG2.pt
         LRG3_ELG1: ../base/fourier/v3_sigma_hrdrag_scaled/LRG3_ELG1.pt
         ELG2: ../base/fourier/v3_sigma_hrdrag_scaled/ELG2.pt
         QSO: ../base/fourier/v3_sigma_hrdrag_scaled/QSO.pt
-        Lya_QSO: null
+        Lya_QSO: ../base/lya/v1_sigma_hrdrag_scaled/Lya_QSO.pt
     base_w_wa:
       config:
         BGS: ../base/config/v6_sigma_hrdrag_scaled/BGS.pt
@@ -73,15 +81,15 @@ bao:
         LRG3_ELG1: ../base/config/v6_sigma_hrdrag_scaled/LRG3_ELG1.pt
         ELG2: ../base/config/v6_sigma_hrdrag_scaled/ELG2.pt
         QSO: ../base/config/v6_sigma_hrdrag_scaled/QSO.pt
-        Lya_QSO: null
+        Lya_QSO: ../base/lya/v1_sigma_hrdrag_scaled/Lya_QSO.pt
       fourier:
-        BGS: ../base/fourier/v3_sigma_hrdrag_scaled/BGS.pt
+        BGS: ../base/fourier/v4_sigma_hrdrag_scaled/BGS.pt
         LRG1: ../base/fourier/v3_sigma_hrdrag_scaled/LRG1.pt
         LRG2: ../base/fourier/v3_sigma_hrdrag_scaled/LRG2.pt
         LRG3_ELG1: ../base/fourier/v3_sigma_hrdrag_scaled/LRG3_ELG1.pt
         ELG2: ../base/fourier/v3_sigma_hrdrag_scaled/ELG2.pt
         QSO: ../base/fourier/v3_sigma_hrdrag_scaled/QSO.pt
-        Lya_QSO: null
+        Lya_QSO: ../base/lya/v1_sigma_hrdrag_scaled/Lya_QSO.pt
     base_omegak_w_wa:
       config:
         BGS: ../base/config/v6_sigma_hrdrag_scaled/BGS.pt
@@ -90,15 +98,17 @@ bao:
         LRG3_ELG1: ../base/config/v6_sigma_hrdrag_scaled/LRG3_ELG1.pt
         ELG2: ../base/config/v6_sigma_hrdrag_scaled/ELG2.pt
         QSO: ../base/config/v6_sigma_hrdrag_scaled/QSO.pt
-        Lya_QSO: null
+        Lya_QSO: ../base/lya/v1_sigma_hrdrag_scaled/Lya_QSO.pt
+      # Native extended-model emulator, trained on (N_tracers, Om, Ok, w0, wa, hrdrag), so it
+      # follows the sampled Ok/w0/wa under emulator_covariance 'cosmology' too.
       fourier:
-        BGS: ../base/fourier/v3_sigma_hrdrag_scaled/BGS.pt
-        LRG1: ../base/fourier/v3_sigma_hrdrag_scaled/LRG1.pt
-        LRG2: ../base/fourier/v3_sigma_hrdrag_scaled/LRG2.pt
-        LRG3_ELG1: ../base/fourier/v3_sigma_hrdrag_scaled/LRG3_ELG1.pt
-        ELG2: ../base/fourier/v3_sigma_hrdrag_scaled/ELG2.pt
-        QSO: ../base/fourier/v3_sigma_hrdrag_scaled/QSO.pt
-        Lya_QSO: null
+        BGS: fourier/v3_sigma_hrdrag_scaled/BGS.pt
+        LRG1: fourier/v3_sigma_hrdrag_scaled/LRG1.pt
+        LRG2: fourier/v3_sigma_hrdrag_scaled/LRG2.pt
+        LRG3_ELG1: fourier/v3_sigma_hrdrag_scaled/LRG3_ELG1.pt
+        ELG2: fourier/v3_sigma_hrdrag_scaled/ELG2.pt
+        QSO: fourier/v3_sigma_hrdrag_scaled/QSO.pt
+        Lya_QSO: lya/v1_sigma_hrdrag_scaled/Lya_QSO.pt
 shapefit:
   dr1:
     base:

@@ -3,9 +3,11 @@
 import os
 import re
 import json
+import yaml
 import pytest
 from unittest.mock import Mock, patch, MagicMock
 from datetime import datetime
+from types import SimpleNamespace
 import numpy as np
 import torch
 
@@ -689,6 +691,33 @@ class TestComparisonPlotter:
                 mock_plot_triangle.assert_called_once()
                 mock_save.assert_called_once()
 
+    @pytest.mark.parametrize("display, expected", [
+        (("nominal", "optimal"), ["--", "-"]),
+        (("optimal",), ["-"]),
+        (("nominal",), ["-"]),     # one series: solid, whichever it is
+    ])
+    def test_compare_posterior_series_line_styles(self, comparison_plotter, mock_run_data_list,
+                                                   tmp_path, display, expected):
+        """Runs are colored by group, so with both series optimal is solid, nominal dashed."""
+        mock_exp = Mock()
+        mock_exp.device = 'cpu'
+        entries = [{"samples": Mock(), "name": n, "label": n, "line_style": "-", "alpha": 1.0}
+                   for n in display]
+        with patch('bedcosmo.plotting.get_runs_data') as mock_get_runs, \
+             patch('bedcosmo.plotting.init_experiment', return_value=mock_exp), \
+             patch.object(ComparisonPlotter, '_run_nf_entries', return_value=(entries, 1000)), \
+             patch.object(ComparisonPlotter, 'plot_triangle') as mock_plot_triangle, \
+             patch.object(comparison_plotter, 'save_figure'), \
+             patch.object(comparison_plotter, 'get_save_dir', return_value=str(tmp_path)), \
+             patch.object(comparison_plotter, 'generate_filename', return_value="t.png"):
+            mock_get_runs.return_value = (mock_run_data_list[:1], 'exp_123', 'test_exp')
+            mock_plot_triangle.return_value = Mock(fig=Mock(legends=[]))
+            with patch('bedcosmo.plotting.os.makedirs'):
+                comparison_plotter.compare_posterior(var='pyro_seed', display=display,
+                                                     plot_prior=False)
+            styles = mock_plot_triangle.call_args.kwargs["line_style"]
+            assert styles[-len(expected):] == expected
+
     def test_compare_posterior_with_colors(self, comparison_plotter, mock_run_data_list):
         """Test compare_posterior with custom colors."""
         mock_sample = Mock()
@@ -1030,11 +1059,13 @@ class TestPlotTriangleFence:
         rng = np.random.default_rng(4)
         return _gd_samples(rng.normal([0.3, 10000.0], [1.5, 3e5], size=(10000, 2)), None)
 
-    def test_fenced_series_mostly_outside_window_raises(self):
-        with pytest.raises(ValueError, match="lie inside the plot window"):
-            BasePlotter(cosmo_exp="test_exp").plot_triangle(
+    def test_fenced_series_mostly_outside_window_is_drawn_unfenced(self):
+        with pytest.warns(UserWarning, match="drawing it unfenced"):
+            g = BasePlotter(cosmo_exp="test_exp").plot_triangle(
                 [self._mostly_outside()], ["tab:blue"], levels=[0.68], ranges=self.RANGES,
             )
+        assert g.subplots[1, 0].get_xlim() == pytest.approx(self.RANGES["Om"])
+        plt.close(g.fig)
 
     def test_unfenced_series_mostly_outside_window_plots(self):
         """The checkpoint diagnostic's call: unfenced NF beside a fenced reference."""
@@ -1561,6 +1592,7 @@ class TestCompareEigs:
             ]
             fig, (ax_line, ax_heat) = plotter.compare_eigs(
                 sort=True,
+                scatter=False,
                 design_labels=["d"],
                 show_ratio_to_nominal=False,
                 save_dir=str(tmp_path / "plots"),
@@ -1582,6 +1614,84 @@ class TestCompareEigs:
         assert ax_heat is not None
         assert "mean EIG" in (ax_heat.get_xlabel() or "")
         plt.close(fig)
+
+    def test_compare_eigs_scatter_bits(self, mock_scratch_env, tmp_path):
+        """normalize='bits' plots EIG - nominal (in bits); scatter draws offset error-bar markers."""
+        designs = [[0.0], [1.0], [2.0]]
+        data_a = _make_eig_data(designs, variable_eigs=[5.0, 6.0, 7.0], design_labels=["d"], nominal_eig=5.0)
+        data_b = _make_eig_data(designs, variable_eigs=[2.0, 3.5, 4.0], design_labels=["d"], nominal_eig=2.0)
+        plotter = ComparisonPlotter(
+            cosmo_exp="test_exp", run_ids=["run_aaaa", "run_bbbb"], run_labels=["A", "B"],
+            colors=["#ff0000", "#0000ff"],
+        )
+        with patch.object(plotter, "_get_run_data_list") as mock_runs, \
+             patch.object(plotter, "load_eig_data_file") as mock_load, \
+             patch.object(plotter, "save_figure"):
+            mock_runs.return_value = (
+                [
+                    {"run_id": "run_aaaa", "exp_id": "exp_1", "params": {}, "run_obj": None},
+                    {"run_id": "run_bbbb", "exp_id": "exp_1", "params": {}, "run_obj": None},
+                ],
+                "exp_1",
+                "test_exp",
+            )
+            mock_load.side_effect = [("/fake/a.json", data_a), ("/fake/b.json", data_b)]
+            fig, (ax_line, _) = plotter.compare_eigs(
+                sort=False, normalize="bits", design_labels=["d"],
+                show_ratio_to_nominal=False, save_dir=str(tmp_path / "plots"), dpi=80,
+            )
+        markers = {c.get_label(): c.lines[0] for c in ax_line.containers}
+        np.testing.assert_allclose(markers["A"].get_ydata(), [0.0, 1.0, 2.0])
+        np.testing.assert_allclose(markers["B"].get_ydata(), [0.0, 1.5, 2.0])
+        assert "bits" in ax_line.get_ylabel()
+        plt.close(fig)
+
+    def test_compare_eigs_mixes_old_and_new_evals(self, mock_scratch_env, tmp_path):
+        """An eval that added nominal to the pool lines up with an older eval of the configured pool."""
+        designs = [[0.0], [1.0], [2.0]]
+        old = _make_eig_data(designs, variable_eigs=[5.0, 6.0, 7.0], design_labels=["d"], nominal_eig=5.0)
+        # Same configured pool, with nominal (0.5) appended as the last row and scored in the pool.
+        new = _make_eig_data(
+            [[0.0], [1.0], [2.0], [0.5]], variable_eigs=[2.0, 3.5, 4.0, 1.5], design_labels=["d"]
+        )
+        new.update(nominal_index=3, nominal_added=True)
+        plotter = ComparisonPlotter(
+            cosmo_exp="test_exp", run_ids=["run_aaaa", "run_bbbb"], run_labels=["A", "B"],
+            colors=["#ff0000", "#0000ff"],
+        )
+        with patch.object(plotter, "_get_run_data_list") as mock_runs, \
+             patch.object(plotter, "load_eig_data_file") as mock_load, \
+             patch.object(plotter, "save_figure"):
+            mock_runs.return_value = (
+                [
+                    {"run_id": "run_aaaa", "exp_id": "exp_1", "params": {}, "run_obj": None},
+                    {"run_id": "run_bbbb", "exp_id": "exp_1", "params": {}, "run_obj": None},
+                ],
+                "exp_1",
+                "test_exp",
+            )
+            mock_load.side_effect = [("/fake/a.json", old), ("/fake/b.json", new)]
+            fig, (ax_line, _) = plotter.compare_eigs(
+                sort=False, normalize="bits", design_labels=["d"],
+                show_ratio_to_nominal=False, save_dir=str(tmp_path / "plots"), dpi=80,
+            )
+        markers = {c.get_label(): c.lines[0] for c in ax_line.containers}
+        np.testing.assert_allclose(markers["A"].get_ydata(), [0.0, 1.0, 2.0])
+        # B's nominal EIG comes from its pool row (1.5); that row is not a compared design.
+        np.testing.assert_allclose(markers["B"].get_ydata(), [0.5, 2.0, 2.5])
+        plt.close(fig)
+
+    def test_compare_eigs_rejects_unknown_normalize(self, mock_scratch_env):
+        data = _make_eig_data([[0.0], [1.0]], variable_eigs=[1.0, 2.0], design_labels=["d"], nominal_eig=1.0)
+        plotter = ComparisonPlotter(cosmo_exp="test_exp", run_ids=["run_aaaa"], run_labels=["A"])
+        with patch.object(plotter, "_get_run_data_list") as mock_runs, \
+             patch.object(plotter, "load_eig_data_file") as mock_load:
+            mock_runs.return_value = (
+                [{"run_id": "run_aaaa", "exp_id": "exp_1", "params": {}, "run_obj": None}], "exp_1", "test_exp",
+            )
+            mock_load.return_value = ("/fake/a.json", data)
+            with pytest.raises(ValueError, match="normalize must be"):
+                plotter.compare_eigs(normalize=True, design_labels=["d"], show_ratio_to_nominal=False)
 
 
 def _make_eig_data(
@@ -1919,6 +2029,290 @@ class TestCompareEigCorrelation:
         assert fig is not None and ax is not None
 
 
+class TestCompareEigByDesignDim:
+    """ComparisonPlotter.compare_eig_by_design_dim: runs on different design pools."""
+
+    @pytest.fixture
+    def mock_scratch_env(self, monkeypatch):
+        monkeypatch.setenv("SCRATCH", "/mock/scratch")
+
+    def _run(self, tmp_path, name, designs, eigs, nominal_eig, labels=("A", "B"),
+             nominal_design=(0.5, 0.5)):
+        artifacts = tmp_path / name / "artifacts"
+        artifacts.mkdir(parents=True)
+        data = _make_eig_data(designs, variable_eigs=eigs, nominal_eig=nominal_eig)
+        if nominal_design is not None:
+            data["nominal_design"] = list(nominal_design)
+        path = artifacts / "eig_data_20260101_1200.json"
+        path.write_text(json.dumps(data))
+        (artifacts / "design_args.yaml").write_text(yaml.safe_dump({"labels": list(labels)}))
+        return str(path)
+
+    def _plot(self, tmp_path, runs, **kwargs):
+        plotter = ComparisonPlotter(cosmo_exp="test_exp", run_ids=["aaaaaaaa", "bbbbbbbb"])
+        kwargs.setdefault("show_target_limits", False)
+        with patch.object(plotter, "_get_run_data_list") as mock_runs:
+            mock_runs.return_value = ([], "exp_1", "test_exp")
+            return plotter.compare_eig_by_design_dim(
+                runs=runs, save_dir=str(tmp_path / "plots"), dpi=60, **kwargs)
+
+    @staticmethod
+    def _xs(ax):
+        """x values of each errorbar series on an axis, in plotting order."""
+        return [line.get_xdata().tolist() for line in ax.lines
+                if line.get_marker() == "o"]
+
+    def test_runs_on_different_pools(self, mock_scratch_env, tmp_path):
+        """Pools need not match; each run's best is reported relative to its own nominal."""
+        old = self._run(tmp_path, "old", [[0.4, 0.6], [0.5, 0.5], [0.6, 0.4]],
+                        [1.0, 2.0, 2.2], nominal_eig=2.0)
+        new = self._run(tmp_path, "new", [[0.6, 0.4], [0.8, 0.2]], [4.4, 4.8], nominal_eig=4.0)
+        fig, axs, best = self._plot(tmp_path, [
+            {"eig_kind": "variable", "eig_data_path": old, "label": "old"},
+            {"eig_kind": "variable", "eig_data_path": new, "label": "new"},
+        ])
+        assert [b["label"] for b in best] == ["old", "new"]
+        assert best[0]["design"] == [0.6, 0.4] and best[0]["value"] == pytest.approx(0.2)
+        assert best[1]["design"] == [0.8, 0.2] and best[1]["value"] == pytest.approx(0.8)
+        assert [ax.get_title() for ax in axs.flat] == ["A", "B"]
+        assert fig is not None
+
+    def test_relative_x_divides_by_each_runs_nominal(self, mock_scratch_env, tmp_path):
+        """x='relative' uses each run's own nominal_design, so different budgets line up."""
+        a = self._run(tmp_path, "a", [[0.4, 0.6]], [1.0], nominal_eig=1.0,
+                      nominal_design=(0.2, 0.8))
+        b = self._run(tmp_path, "b", [[0.4, 0.6]], [1.0], nominal_eig=1.0,
+                      nominal_design=(0.4, 0.6))
+        runs = [{"eig_kind": "variable", "eig_data_path": a},
+                {"eig_kind": "variable", "eig_data_path": b}]
+        _, axs, _ = self._plot(tmp_path, runs)
+        assert self._xs(axs.flat[0]) == [pytest.approx([2.0]), pytest.approx([1.0])]
+        assert self._xs(axs.flat[1]) == [pytest.approx([0.75]), pytest.approx([1.0])]
+        _, axs, _ = self._plot(tmp_path, runs, x="fraction")
+        assert self._xs(axs.flat[0]) == [pytest.approx([0.4]), pytest.approx([0.4])]
+
+    def test_relative_x_needs_nominal_design(self, mock_scratch_env, tmp_path):
+        path = self._run(tmp_path, "run", [[0.4, 0.6]], [1.0], nominal_eig=1.0,
+                         nominal_design=None)
+        with pytest.raises(ValueError, match="x='fraction'"):
+            self._plot(tmp_path, [{"eig_kind": "variable", "eig_data_path": path}])
+
+    def test_y_scales(self, mock_scratch_env, tmp_path):
+        path = self._run(tmp_path, "run", [[0.4, 0.6], [0.6, 0.4]], [1.0, 3.0], nominal_eig=2.0)
+        runs = [{"eig_kind": "variable", "eig_data_path": path}]
+        assert self._plot(tmp_path, runs)[2][0]["value"] == pytest.approx(1.0)
+        assert self._plot(tmp_path, runs, y="percent")[2][0]["value"] == pytest.approx(50.0)
+        assert self._plot(tmp_path, runs, y="raw")[2][0]["value"] == pytest.approx(3.0)
+        with pytest.raises(ValueError, match="y must be"):
+            self._plot(tmp_path, runs, y="bits")
+
+    def test_raw_eig_without_nominal(self, mock_scratch_env, tmp_path):
+        path = self._run(tmp_path, "run", [[0.4, 0.6], [0.6, 0.4]], [1.0, 3.0], nominal_eig=None)
+        with pytest.raises(ValueError, match="y='raw'"):
+            self._plot(tmp_path, [{"eig_kind": "variable", "eig_data_path": path}])
+        _, _, best = self._plot(tmp_path, [{"eig_kind": "variable", "eig_data_path": path}],
+                                y="raw")
+        assert best[0]["value"] == pytest.approx(3.0)
+
+    def test_target_limits(self, mock_scratch_env, tmp_path, monkeypatch):
+        """Per class: summed targets over summed comp * targets; non-classes get none."""
+        import bedcosmo.plotting as plotting_module
+
+        data_dir = tmp_path / "home" / "data" / "desi" / "bao_dr1"
+        data_dir.mkdir(parents=True)
+        (data_dir / "desi_tracers.csv").write_text(
+            "tracer,class,comp,targets\n"
+            "A1,A,0.5,100\n"
+            "A2,A,0.25,100\n"
+            "B,B,0.8,50\n")
+        monkeypatch.setattr(plotting_module, "home_dir", str(tmp_path / "home"))
+        path = self._run(tmp_path, "run", [[0.4, 0.6]], [1.0], nominal_eig=1.0,
+                         labels=("A", "C"))
+        runs = [{"eig_kind": "variable", "eig_data_path": path}]
+        limits = ComparisonPlotter._target_limits(["A", "B", "C"], [], dataset="dr1")
+        assert limits[:2] == pytest.approx([200 / 75, 1 / 0.8]) and np.isnan(limits[2])
+
+        def dashed(ax):
+            return [line.get_xdata()[0] for line in ax.lines if line.get_linestyle() == "--"]
+
+        _, axs, _ = self._plot(tmp_path, runs, show_target_limits=True, dataset="dr1")
+        assert dashed(axs.flat[0]) == [pytest.approx(200 / 75)] and dashed(axs.flat[1]) == []
+        # In stored fractions the limit sits at ratio x nominal fraction.
+        _, axs, _ = self._plot(tmp_path, runs, show_target_limits=True, dataset="dr1",
+                               x="fraction")
+        assert dashed(axs.flat[0]) == [pytest.approx(0.5 * 200 / 75)]
+        # A dataset without a table is skipped with a warning, not an error.
+        with pytest.warns(UserWarning, match="not found"):
+            _, axs, _ = self._plot(tmp_path, runs, show_target_limits=True, dataset="dr9")
+        assert dashed(axs.flat[0]) == []
+
+    def test_design_dimensions_must_match(self, mock_scratch_env, tmp_path):
+        a = self._run(tmp_path, "a", [[0.4, 0.6], [0.6, 0.4]], [1.0, 2.0], nominal_eig=1.0)
+        b_dir = tmp_path / "b" / "artifacts"
+        b_dir.mkdir(parents=True)
+        b = b_dir / "eig_data_20260101_1200.json"
+        b.write_text(json.dumps(_make_eig_data([[0.2, 0.3, 0.5]], variable_eigs=[1.0], nominal_eig=1.0)))
+        with pytest.raises(ValueError, match="different design dimensions"):
+            self._plot(tmp_path, [{"eig_kind": "variable", "eig_data_path": a},
+                                  {"eig_kind": "variable", "eig_data_path": str(b)}])
+
+    @staticmethod
+    def _trend_lines(ax):
+        return [line for line in ax.lines if line.get_gid() == "trend"]
+
+    def test_trend_line_median_mean_none(self, mock_scratch_env, tmp_path):
+        """No line by default; one per run through the per-value median or mean on request."""
+        designs = [[0.2, 0.8]] * 3 + [[0.5, 0.5]] * 3 + [[0.8, 0.2]] * 3
+        eigs = [1.0, 2.0, 9.0, 3.0, 3.0, 6.0, 5.0, 6.0, 7.0]
+        path = self._run(tmp_path, "run", designs, eigs, nominal_eig=0.0)
+        runs = [{"eig_kind": "variable", "eig_data_path": path}]
+        _, axs, _ = self._plot(tmp_path, runs, x="fraction")
+        assert self._trend_lines(axs.flat[0]) == []
+        _, axs, _ = self._plot(tmp_path, runs, x="fraction", trend="median")
+        (line,) = self._trend_lines(axs.flat[0])
+        assert line.get_xdata().tolist() == pytest.approx([0.2, 0.5, 0.8])
+        assert line.get_ydata().tolist() == pytest.approx([2.0, 3.0, 6.0])
+        _, axs, _ = self._plot(tmp_path, runs, x="fraction", trend="mean")
+        (line,) = self._trend_lines(axs.flat[0])
+        assert line.get_ydata().tolist() == pytest.approx([4.0, 4.0, 6.0])
+        with pytest.raises(ValueError, match="trend must be"):
+            self._plot(tmp_path, runs, trend="mode")
+
+    @staticmethod
+    def _shaded(ax):
+        """x extents of the infeasible-region spans on an axis."""
+        spans = [p for p in ax.patches if p.get_gid() == "infeasible"]
+        return sorted((s.get_x(), s.get_x() + s.get_width()) for s in spans)
+
+    def test_shades_outside_a_mixture_range(self, mock_scratch_env, tmp_path):
+        """Mixture pools (rows sum to T) gray out x < 0 and x > T; x='relative' rescales it."""
+        path = self._run(tmp_path, "run", [[0.2, 0.8], [0.5, 0.5]], [1.0, 2.0], nominal_eig=1.0,
+                         nominal_design=(0.25, 0.75))
+        runs = [{"eig_kind": "variable", "eig_data_path": path}]
+        _, axs, _ = self._plot(tmp_path, runs, x="fraction")
+        (below, above) = self._shaded(axs.flat[0])
+        assert below[1] == pytest.approx(0.0) and above[0] == pytest.approx(1.0)
+        assert axs.flat[0].get_xlim()[1] > 1.0
+        _, axs, _ = self._plot(tmp_path, runs)  # relative: [0, 1 / nominal]
+        assert self._shaded(axs.flat[0])[1][0] == pytest.approx(4.0)
+        assert self._shaded(axs.flat[1])[1][0] == pytest.approx(1 / 0.75)
+        _, axs, _ = self._plot(tmp_path, runs, x="fraction", shade_infeasible=False)
+        assert self._shaded(axs.flat[0]) == []
+
+    def test_no_shading_without_a_mixture(self, mock_scratch_env, tmp_path):
+        path = self._run(tmp_path, "run", [[0.2, 0.3], [0.5, 0.9]], [1.0, 2.0], nominal_eig=1.0)
+        _, axs, _ = self._plot(tmp_path, [{"eig_kind": "variable", "eig_data_path": path}],
+                               x="fraction")
+        assert self._shaded(axs.flat[0]) == []
+
+    def test_trend_bins_a_pool_without_repeated_values(self):
+        """A random pool has no shared values, so the trend falls back to quantile bins."""
+        from bedcosmo.plotting import _eig_trend
+
+        rng = np.random.default_rng(0)
+        x = rng.uniform(0, 1, 80)
+        tx, ty = _eig_trend(x, 2 * x, "median", n_bins=8)
+        assert len(tx) == 8 and np.all(np.diff(tx) > 0)
+        assert ty == pytest.approx(2 * tx, abs=0.05)
+        assert [len(a) for a in _eig_trend([0.1, 0.2, 0.3], [1, 2, 3])] == [0, 0]
+
+
+class TestCompareEigResponseTraces:
+    """ComparisonPlotter.compare_eig_response_traces: one dimension's effect from a fit."""
+
+    @pytest.fixture
+    def mock_scratch_env(self, monkeypatch):
+        monkeypatch.setenv("SCRATCH", "/mock/scratch")
+
+    @staticmethod
+    def _simplex(step=0.1):
+        pts = [(a, b, round(1 - a - b, 10)) for a in np.arange(0, 1 + 1e-9, step)
+               for b in np.arange(0, 1 - a + 1e-9, step)]
+        return np.array(pts)
+
+    def _plot(self, tmp_path, designs, eigs, nominal_design, **kwargs):
+        artifacts = tmp_path / "run" / "artifacts"
+        artifacts.mkdir(parents=True, exist_ok=True)
+        data = _make_eig_data(designs.tolist(), variable_eigs=list(eigs), nominal_eig=0.0)
+        data["nominal_design"] = list(nominal_design)
+        path = artifacts / "eig_data_20260101_1200.json"
+        path.write_text(json.dumps(data))
+        (artifacts / "design_args.yaml").write_text(yaml.safe_dump({"labels": ["A", "B", "C"]}))
+        plotter = ComparisonPlotter(cosmo_exp="test_exp", run_ids=["aaaaaaaa"])
+        kwargs.setdefault("show_target_limits", False)
+        with patch.object(plotter, "_get_run_data_list") as mock_runs:
+            mock_runs.return_value = ([], "exp_1", "test_exp")
+            return plotter.compare_eig_response_traces(
+                runs=[{"eig_kind": "variable", "eig_data_path": str(path), "label": "run"}],
+                save_dir=str(tmp_path / "plots"), dpi=60, **kwargs)
+
+    def test_mixture_pool_recovers_a_quadratic_surface(self, mock_scratch_env, tmp_path):
+        """An exact Scheffe quadratic is recovered, and each Cox path peaks where it should."""
+        X = self._simplex()
+        eig = 1.0 * X[:, 0] + 2.0 * X[:, 1] + 0.5 * X[:, 2] + 4.0 * X[:, 0] * X[:, 1]
+        fig, axs, fits = self._plot(tmp_path, X, eig, nominal_design=[1 / 3, 1 / 3, 1 / 3])
+        (fit,) = fits
+        assert fit["mixture"] and fit["r2"] == pytest.approx(1.0) and fit["loo_rmse"] < 1e-8
+        # Along A's Cox path from the centroid, B = C = (1 - a) / 2:
+        # f(a) = a + (1 - a) + 0.25 (1 - a) + 2 a (1 - a), maximized at a = 7/16.
+        assert fits[0]["peaks"][0]["x"] == pytest.approx(7 / 16, abs=0.01)
+        assert [ax.get_title() for ax in axs.flat] == ["A", "B", "C"]
+        spans = sorted(p.get_x() + (p.get_width() if p.get_x() < 0 else 0)
+                       for p in axs.flat[0].patches if p.get_gid() == "infeasible")
+        assert spans == pytest.approx([0.0, 1.0])  # gray below 0 and above the total
+        # Every path passes 0 at the reference (y="difference").
+        for ax in axs.flat:
+            (curve,) = [l for l in ax.lines if l.get_linestyle() == "-" and len(l.get_xdata()) > 2]
+            assert np.interp(1 / 3, curve.get_xdata(), curve.get_ydata()) == pytest.approx(0, abs=1e-3)
+        assert fig is not None
+
+    def test_non_mixture_pool_holds_the_others_at_the_reference(self, mock_scratch_env, tmp_path):
+        rng = np.random.default_rng(1)
+        X = rng.uniform(0, 1, (60, 3))
+        eig = 3 - (X[:, 0] - 0.3) ** 2 + X[:, 1] - 0.5 * X[:, 2]
+        _, _, fits = self._plot(tmp_path, X, eig, nominal_design=[0.5, 0.5, 0.5])
+        (fit,) = fits
+        assert not fit["mixture"] and fit["r2"] == pytest.approx(1.0)
+        assert fit["peaks"][0]["x"] == pytest.approx(0.3, abs=0.02)
+        assert fit["peaks"][1]["x"] == pytest.approx(X[:, 1].max(), abs=1e-9)
+
+    def test_confidence_band_and_peak_range(self, mock_scratch_env, tmp_path):
+        """band=68 shades the fit's confidence band and bars each peak; off by default."""
+        from matplotlib.container import ErrorbarContainer
+        from bedcosmo.response_surface import ResponseSurface
+
+        X = self._simplex()
+        rng = np.random.default_rng(4)
+        eig = X[:, 0] + 2 * X[:, 1] + 4 * X[:, 0] * X[:, 1] + 0.05 * rng.normal(size=len(X))
+        ref = np.array([1 / 3, 1 / 3, 1 / 3])
+        _, axs, fits = self._plot(tmp_path, X, eig, nominal_design=ref.tolist(), band=68)
+        for p in fits[0]["peaks"]:
+            assert p["x_lo"] <= p["x"] <= p["x_hi"]
+        assert len([c for c in axs.flat[0].containers if isinstance(c, ErrorbarContainer)]) == 1
+        # The band drawn on panel A is the surface's 68% band relative to the reference.
+        surf = ResponseSurface(X, eig)
+        t, path = surf.trace(0, ref)
+        fit, half = surf.confidence_band(path, level=68, reference=ref)
+        from matplotlib.collections import PolyCollection
+        (poly,) = [c for c in axs.flat[0].collections if isinstance(c, PolyCollection)]
+        verts = poly.get_paths()[0].vertices
+        assert verts[:, 1].max() == pytest.approx((fit + half).max(), rel=1e-6)
+        # Default (band=0): no band and no peak bars.
+        _, axs, bare = self._plot(tmp_path, X, eig, nominal_design=ref.tolist())
+        assert "x_lo" not in bare[0]["peaks"][0]
+        assert not [c for c in axs.flat[0].containers if isinstance(c, ErrorbarContainer)]
+
+    def test_reference_options(self, mock_scratch_env, tmp_path):
+        X = self._simplex()
+        eig = X[:, 0] + X[:, 1] * X[:, 2]
+        _, _, fits = self._plot(tmp_path, X, eig, nominal_design=[0.2, 0.3, 0.5], reference="best")
+        assert fits[0]["reference"] == pytest.approx(X[int(np.argmax(eig))].tolist())
+        with pytest.raises(ValueError, match="reference must be"):
+            self._plot(tmp_path, X, eig, nominal_design=[0.2, 0.3, 0.5], reference="worst")
+        with pytest.raises(ValueError, match="y must be"):
+            self._plot(tmp_path, X, eig, nominal_design=[0.2, 0.3, 0.5], y="percent")
+
+
 class TestCompareTraining:
     """Test cases for ComparisonPlotter.compare_training method."""
 
@@ -2062,6 +2456,132 @@ class TestCompareIncreasingDesign:
                     include_nominal=True
                 )
 
+    NOMINAL = np.array([0.04, 0.26, 0.41, 0.29])
+
+    def _fake_runs(self, tmp_path, monkeypatch, groups):
+        """eig_data files for ``{group: [(run_id, scale, eig)]}`` under a fake SCRATCH."""
+        monkeypatch.setenv("SCRATCH", str(tmp_path))
+        run_data = {}
+        for runs in groups.values():
+            for run_id, scale, eig in runs:
+                artifacts = tmp_path / "bedcosmo" / "num_tracers" / "mlruns" / "1" / run_id / "artifacts"
+                artifacts.mkdir(parents=True)
+                (artifacts / "eig_data_20261021_0000.json").write_text(json.dumps({
+                    "status": "complete",
+                    "step_150000": {"nominal": {"eigs_avg": [eig - 0.1], "eigs_std": [0.02]}, "variable": {
+                        "eigs_avg": [eig], "optimal_eig": eig, "optimal_eig_std": 0.01,
+                        "optimal_design": (scale * self.NOMINAL).tolist(),
+                    }},
+                }))
+                run_data[run_id] = {"run_id": run_id, "exp_id": "1", "run_obj": None, "params": {}}
+
+        def get_runs_data(run_ids=None, **kwargs):
+            return [run_data[r] for r in run_ids], "1", "exp"
+
+        experiment = SimpleNamespace(nominal_total_obs=1000, design_labels=["BGS", "LRG", "ELG", "QSO"])
+        return (patch("bedcosmo.plotting.get_runs_data", side_effect=get_runs_data),
+                patch("bedcosmo.plotting.init_experiment", return_value=experiment))
+
+    def test_run_groups_one_line_and_fit_per_group(self, tmp_path, monkeypatch):
+        groups = {
+            "Emulator": [("e0", 1.0, 7.00), ("e3", 1.3, 7.16), ("e1", 1.1, 7.06)],
+            "Scaling": [("s0", 1.0, 7.04), ("s1", 1.1, 7.12), ("s3", 1.3, 7.26)],
+        }
+        get_runs, init_exp = self._fake_runs(tmp_path, monkeypatch, groups)
+        with get_runs, init_exp:
+            compare_increasing_design(
+                run_groups={g: [r for r, _, _ in runs] for g, runs in groups.items()},
+                save_path=str(tmp_path / "out.png"), dpi=50,
+            )
+        assert (tmp_path / "out.png").exists() and (tmp_path / "out_scatter.png").exists()
+        ax2 = plt.figure(plt.get_fignums()[-1]).axes[0]  # the EIG figure is drawn last
+        assert [t.get_text() for t in ax2.get_legend().get_texts()] == ["Emulator", "Scaling"]
+        # Each group: a data line through its points sorted by budget, plus a dashed fit.
+        data_lines = [ln for ln in ax2.get_lines() if ln.get_linestyle() == "-"]
+        fits = [ln for ln in ax2.get_lines() if ln.get_linestyle() == "--"]
+        assert len(fits) == 2
+        np.testing.assert_allclose(data_lines[0].get_xdata(), [0.0, 10.0, 30.0], atol=1e-9)
+        np.testing.assert_allclose(data_lines[0].get_ydata(), [7.00, 7.06, 7.16])
+        np.testing.assert_allclose(data_lines[1].get_ydata(), [7.04, 7.12, 7.26])
+        plt.close("all")
+
+    def test_run_groups_bars_use_run_design_snapshot(self, tmp_path, monkeypatch):
+        groups = {"Emulator": [("e0", 1.0, 7.0)], "Scaling": [("s0", 1.0, 7.04)]}
+        get_runs, init_exp = self._fake_runs(tmp_path, monkeypatch, groups)
+        with get_runs, init_exp as init:
+            fig, ax = compare_increasing_design(run_groups={g: [r for r, _, _ in runs] for g, runs in groups.items()})
+        assert "design_args" not in init.call_args.kwargs
+        assert [t.get_text() for t in ax.get_xticklabels()] == ["BGS", "LRG", "ELG", "QSO"]
+        np.testing.assert_allclose([p.get_height() for p in ax.patches], 1000 * self.NOMINAL)
+        plt.close("all")
+
+    def test_ref_ids_draw_one_reference_per_group(self, tmp_path, monkeypatch):
+        groups = {
+            "Emulator": [("e0", 1.0, 7.00), ("e3", 1.3, 7.15)],
+            "Scaling": [("s0", 1.0, 7.00), ("s3", 1.3, 7.30)],
+        }
+        refs = {"refs": [("eref", 1.0, 7.10), ("sref", 1.0, 7.25)]}
+        get_runs, init_exp = self._fake_runs(tmp_path, monkeypatch, {**groups, **refs})
+        with get_runs, init_exp:
+            compare_increasing_design(
+                run_groups={g: [r for r, _, _ in runs] for g, runs in groups.items()},
+                ref_ids={"Emulator": "eref", "Scaling": "sref"},
+            )
+        ax2 = plt.figure(plt.get_fignums()[-1]).axes[0]
+        colors = [ln.get_color() for ln in ax2.get_lines() if ln.get_linestyle() == "--"]
+        refs_drawn = [ln for ln in ax2.get_lines() if ln.get_linestyle() == ":" and ln.get_ydata()[0] == ln.get_ydata()[1]]
+        assert [ln.get_ydata()[0] for ln in refs_drawn] == [7.10, 7.25]
+        assert [ln.get_color() for ln in refs_drawn] == colors
+        # Fits: emulator +0.5 bits per 100%, scaling +1.0 -> reaches its reference at +20% / +25%.
+        assert [t.get_text().strip() for t in ax2.texts] == ["+20.0%", "+25.0%"]
+        # The reference flow's optimal (star) and nominal (square) EIGs are their own points at 0%.
+        stars = [ln for ln in ax2.get_lines() if ln.get_marker() == "*"]
+        squares = [ln for ln in ax2.get_lines() if ln.get_marker() == "s"]
+        assert [(ln.get_xdata()[0], ln.get_ydata()[0]) for ln in stars] == [(0.0, 7.10), (0.0, 7.25)]
+        np.testing.assert_allclose([ln.get_ydata()[0] for ln in squares], [7.00, 7.15])
+        assert [ln.get_color() for ln in stars] == colors
+        # Colors name the groups; the marker key (once, not per group) names the kind of flow.
+        assert [t.get_text() for t in ax2.get_legend().get_texts()] == [
+            "Emulator", "Scaling",
+            "Single Design-space", "Full Design-space: nominal", "Full Design-space: optimal",
+        ]
+        plt.close("all")
+
+    @pytest.mark.parametrize("extra", [{"run_ids": ["a"]}, {"mlflow_exp": "x"}, {"ref_id": "r"}])
+    def test_run_groups_rejects_conflicting_args(self, mock_scratch_env, extra):
+        with pytest.raises(ValueError, match="run_groups replaces"):
+            compare_increasing_design(run_groups={"g": ["a"]}, **extra)
+
+    def test_single_run_set_is_one_group(self, tmp_path, monkeypatch):
+        """run_ids + ref_id draws as one colored group: no per-run color gradient."""
+        runs = [("r0", 1.0, 7.00), ("r1", 1.1, 7.05), ("r2", 1.2, 7.10)]
+        get_runs, init_exp = self._fake_runs(tmp_path, monkeypatch, {"g": runs + [("ref", 1.0, 7.08)]})
+        with get_runs, init_exp:
+            compare_increasing_design(run_ids=["r0", "r1", "r2"], ref_id="ref")
+        ax2 = plt.figure(plt.get_fignums()[-1]).axes[0]
+        data_lines = [ln for ln in ax2.get_lines() if ln.get_linestyle() == "-"]
+        assert len(data_lines) == 1
+        np.testing.assert_allclose(data_lines[0].get_ydata(), [7.00, 7.05, 7.10])
+        color = data_lines[0].get_color()
+        # Reference points are filled in the group's color with a black outline.
+        markers = {ln.get_marker(): ln for ln in ax2.get_lines() if ln.get_marker() in ("s", "*")}
+        assert markers["s"].get_markerfacecolor() == markers["*"].get_markerfacecolor() == color
+        assert markers["s"].get_markeredgecolor() == markers["*"].get_markeredgecolor() == "black"
+        assert [t.get_text().strip() for t in ax2.texts] == ["+16.0%"]
+        # One group: no group entry, and the marker key is drawn in the group's color.
+        legend = ax2.get_legend()
+        assert [t.get_text() for t in legend.get_texts()] == [
+            "Single Design-space", "Full Design-space: nominal", "Full Design-space: optimal",
+        ]
+        assert {h.get_color() for h in legend.legend_handles} == {color}
+        plt.close("all")
+
+    def test_ref_ids_need_matching_run_groups(self, mock_scratch_env):
+        with pytest.raises(ValueError, match="ref_ids needs run_groups"):
+            compare_increasing_design(run_ids=["a"], ref_ids={"g": "r"})
+        with pytest.raises(ValueError, match=r"\['other'\] are not run_groups labels"):
+            compare_increasing_design(run_groups={"g": ["a"]}, ref_ids={"other": "r"})
+
 
 class TestCompareOptimalDesigns:
     """Test cases for ComparisonPlotter.compare_optimal_designs method."""
@@ -2096,6 +2616,78 @@ class TestCompareBestDesigns:
             mock_get_runs.return_value = ([], None, None)
             with pytest.raises(ValueError, match="No runs found"):
                 plotter.compare_optimal_designs(top_n=2)
+
+    def _two_pools(self, tmp_path, monkeypatch):
+        """Two runs with different design pools; returns (plotter, patches)."""
+        monkeypatch.setenv("SCRATCH", str(tmp_path))
+        pools = {  # run_id -> (designs, eigs)
+            "emu": ([[0.04, 0.38, 0.48, 0.10], [0.03, 0.38, 0.46, 0.13], [0.10, 0.30, 0.30, 0.30]],
+                    [7.12, 7.10, 6.90]),
+            "sca": ([[0.05, 0.38, 0.46, 0.11], [0.05, 0.38, 0.42, 0.15]], [7.25, 7.24]),
+        }
+        run_data = []
+        for run_id, (designs, eigs) in pools.items():
+            artifacts = tmp_path / "bedcosmo" / "num_tracers" / "mlruns" / "1" / run_id / "artifacts"
+            artifacts.mkdir(parents=True)
+            (artifacts / "eig_data_20261022_0000.json").write_text(json.dumps({
+                "status": "complete", "input_designs": designs,
+                "step_1000": {"variable": {"eigs_avg": eigs, "eigs_std": [0.01] * len(eigs)}},
+            }))
+            run_data.append({"run_id": run_id, "exp_id": "1", "run_obj": None, "params": {}})
+        experiment = SimpleNamespace(design_labels=["BGS", "LRG", "ELG", "QSO"],
+                                     nominal_design=torch.tensor([0.04, 0.26, 0.41, 0.29]))
+        plotter = ComparisonPlotter(cosmo_exp="num_tracers", run_ids=list(pools),
+                                    colors=["tab:blue", "tab:orange"])
+        return plotter, (patch("bedcosmo.plotting.get_runs_data", return_value=(run_data, "1", None)),
+                         patch("bedcosmo.plotting.init_experiment", return_value=experiment),
+                         patch.object(plotter, "save_figure"))
+
+    def test_heatmap_shows_each_runs_top_eigs_and_design_values(self, tmp_path, monkeypatch):
+        """Each run keeps its own pool; the EIG panel shows its top-N EIGs, best first."""
+        plotter, (get_runs, init_exp, save) = self._two_pools(tmp_path, monkeypatch)
+        with get_runs, init_exp, save:
+            fig, ax = plotter.compare_optimal_designs(top_n=2)
+        ax_eig = fig.axes[0]
+        points = [ln for ln in ax_eig.get_lines() if ln.get_marker() == "o"]
+        assert [list(ln.get_ydata()) for ln in points] == [[7.12, 7.10], [7.25, 7.24]]
+        assert [ln.get_color() for ln in points] == ["tab:blue", "tab:orange"]
+        assert [t.get_text() for t in ax_eig.texts] == ["7.120", "7.100", "7.250", "7.240"]
+        # Heatmap cells carry the design values of those top designs (4 dims x 4 columns).
+        assert [t.get_text() for t in ax.texts][:4] == ["0.04", "0.38", "0.48", "0.1"]
+        assert len(ax.texts) == 16
+        # The colorbar spans the heatmap only.
+        cax = fig.axes[-1]
+        assert cax.get_position().y0 == pytest.approx(ax.get_position().y0)
+        assert cax.get_position().y1 == pytest.approx(ax.get_position().y1)
+        plt.close(fig)
+
+    def test_heatmap_without_eigs(self, tmp_path, monkeypatch):
+        plotter, (get_runs, init_exp, save) = self._two_pools(tmp_path, monkeypatch)
+        with get_runs, init_exp, save:
+            fig, ax = plotter.compare_optimal_designs(top_n=2, show_eigs=False)
+        assert fig.axes == [ax, fig.axes[-1]]  # heatmap + colorbar, no EIG panel
+        assert len(ax.texts) == 16
+        assert ax.get_title() == "Top 2 Designs Comparison Across Runs"
+        plt.close(fig)
+
+    def test_heatmap_color_ratio_or_value(self, tmp_path, monkeypatch):
+        """heatmap_color='ratio' (default) colors design / nominal; 'value' the design itself."""
+        plotter, (get_runs, init_exp, save) = self._two_pools(tmp_path, monkeypatch)
+        with get_runs, init_exp, save:
+            fig, ax = plotter.compare_optimal_designs(top_n=2)
+            img = ax.get_images()[0]
+            assert img.get_array()[0, 0] == pytest.approx(0.04 / 0.04)       # BGS ratio
+            assert fig.axes[-1].get_ylabel() == "Ratio to Nominal Design"
+            plt.close(fig)
+            fig, ax = plotter.compare_optimal_designs(top_n=2, heatmap_color="value")
+            img = ax.get_images()[0]
+            assert img.get_array()[0, 0] == pytest.approx(0.04)              # BGS fraction
+            assert img.norm.vmin == 0.0
+            assert fig.axes[-1].get_ylabel() == "Design Value"
+            assert [t.get_text() for t in ax.texts][:4] == ["0.04", "0.38", "0.48", "0.1"]
+            plt.close(fig)
+            with pytest.raises(ValueError, match="heatmap_color must be"):
+                plotter.compare_optimal_designs(top_n=2, heatmap_color="log")
 
 
 # ============================================================================
@@ -2412,7 +3004,7 @@ def test_compare_posterior_draws_desi_reference_behind_runs(tmp_path, monkeypatc
     call = _run_compare(plotter, runs, _fake_experiment(reference))
 
     assert call.args[0][0] is reference                # first plotted = drawn underneath
-    assert call.kwargs["line_style"][0] == "--"
+    assert call.kwargs["line_style"][0] == "--"           # dashed, like the runs' nominal
     assert call.args[1][0] == "black"
     assert len(call.args[0]) == 3
 
@@ -2483,3 +3075,61 @@ def test_run_plot_posterior_prefers_saved_samples_then_samples_flow(tmp_path, mo
     else:
         mock_load.assert_called_once()
         assert entries == [sampled]
+
+
+class TestComparePriors:
+    """ComparisonPlotter.compare_priors: a triangle of each run's prior."""
+
+    @staticmethod
+    def _stub_experiment(samples, uniform):
+        exp = Mock()
+        exp.cosmo_params = ["a", "b"]
+        exp.latex_labels = ["a", "b"]
+        exp.prior_flow = None if uniform else object()
+        exp.prior = {"a": torch.distributions.Uniform(0.0, 1.0), "b": torch.distributions.Uniform(0.0, 1.0)}
+        exp.get_prior_samples.return_value = Mock(samples=samples)
+        return exp
+
+    def _plot(self, tmp_path, experiments, **kwargs):
+        runs = [{"run_id": f"run_{k}", "exp_id": "exp_1", "params": {}, "run_obj": None} for k in range(len(experiments))]
+        plotter = ComparisonPlotter(cosmo_exp="test_exp", run_ids=[r["run_id"] for r in runs],
+                                    run_labels=[f"P{k}" for k in range(len(runs))])
+        with patch.object(plotter, "_get_run_data_list", return_value=(runs, "exp_1", "test_exp")), \
+             patch("bedcosmo.plotting.init_experiment", side_effect=experiments), \
+             patch.object(plotter, "save_figure"):
+            return plotter.compare_priors(num_samples=5000, show_reference=False, bins=30,
+                                          save_dir=str(tmp_path), **kwargs)
+
+    def test_uniform_and_flow_priors(self, mock_scratch_env, tmp_path):
+        rng = np.random.default_rng(0)
+        box = rng.uniform(0, 1, size=(20_000, 2))
+        peaked = rng.normal([0.5, 0.5], 0.1, size=(20_000, 2))
+        fig, axes = self._plot(tmp_path, [self._stub_experiment(box, True), self._stub_experiment(peaked, False)])
+        assert axes.shape == (2, 2)
+        assert axes[0, 0].get_yscale() == "log" and axes[1, 1].get_yscale() == "log"
+        # The box's diagonal density is ~1 (its height compares across priors); the peaked prior's is higher.
+        box_step, peaked_step = [c for c in axes[0, 0].patches]
+        assert np.nanmedian(box_step.get_data().values) == pytest.approx(1.0, rel=0.15)
+        assert np.nanmax(peaked_step.get_data().values) > 3
+        assert [t.get_text() for t in axes[0, 1].get_legend().get_texts()] == ["P0 (uniform)", "P1"]
+        plt.close(fig)
+
+    def test_runs_with_different_parameters_raise(self, mock_scratch_env, tmp_path):
+        a = self._stub_experiment(np.zeros((10, 2)), True)
+        b = self._stub_experiment(np.zeros((10, 2)), True)
+        b.cosmo_params = ["a", "c"]
+        with pytest.raises(ValueError, match="different parameters"):
+            self._plot(tmp_path, [a, b])
+
+
+def test_distinct_nominals_collapses_shared_nominal():
+    """Runs on one pool share a nominal design: one gray 'Nominal' bar, not one per run."""
+    from bedcosmo.plotting import _distinct_nominals
+
+    same = [[0.1, 0.9], [0.1, 0.9 + 1e-12]]
+    designs, labels = _distinct_nominals(same, ["aaaaaaaa11", "bbbbbbbb22"])
+    assert len(designs) == 1 and labels == ["Nominal"]
+    designs, labels = _distinct_nominals([[0.1, 0.9], None, [0.2, 0.8]],
+                                         ["aaaaaaaa11", "cccccccc33", "bbbbbbbb22"])
+    assert labels == ["Nominal (aaaaaaaa)", "Nominal (bbbbbbbb)"]
+    assert _distinct_nominals([None], ["x"]) == ([], [])

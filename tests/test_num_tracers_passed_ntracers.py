@@ -38,11 +38,24 @@ def _passed_n_tracers(exp, class_ratio):
     return exp._passed_ratio_to_n_tracers(exp.calc_passed(class_ratio))
 
 
-def _make_exp(ds):
+def _design_args(ds, accounting="qso_coupled"):
+    """The dataset's design_args. Its pool is built for qso_coupled; another accounting
+    gets the grid instead, since the pool guard refuses a pool built for another one."""
+    import yaml
+
+    from bedcosmo.util import get_experiment_config_path
+
+    with open(get_experiment_config_path("num_tracers", DESIGN_ARGS[ds])) as f:
+        args = yaml.safe_load(f)
+    return args if accounting == "qso_coupled" else dict(args, input_path=None)
+
+
+def _make_exp(ds, lya_accounting="qso_coupled"):
     return init_experiment(
         cosmo_exp="num_tracers",
         prior_args_path="prior_args_hrdrag.yaml",
-        design_args_path=DESIGN_ARGS[ds],
+        design_args=_design_args(ds, lya_accounting),
+        lya_accounting=lya_accounting,
         dataset=ds,
         analysis="bao",
         cosmo_model="base",
@@ -117,3 +130,112 @@ def test_arbitrary_batch_shapes(shape):
     x = x / x.sum(-1, keepdim=True)
     out = _passed_n_tracers(exp, x)
     assert out["BGS"].shape == shape[:-1]
+
+
+def _lya_passed(exp, class_ratio):
+    return float(_passed_n_tracers(exp, class_ratio)["Lya_QSO"].squeeze())
+
+
+@pytest.mark.parametrize("ds", DATASETS)
+def test_lya_counts_are_fixed_outside_the_budget(ds):
+    """Lya QSO keeps the dataset's passed count whatever the design, low QSO and budget > 1 included."""
+    if not _has_dataset(ds):
+        pytest.skip(f"desi dataset bao_{ds} not available")
+    exp = _make_exp(ds, lya_accounting="outside")
+    rows = exp.desi_data.index[exp.desi_data["tracer"] == "Lya QSO"].tolist()
+    if not rows:
+        pytest.skip("no Lya QSO rows")
+    expected = float(exp.desi_data.loc[rows[0], "passed"])
+    nominal = exp.nominal_design.to(torch.float64)
+    low_qso = nominal.clone()
+    i_qso, i_bgs = exp.design_labels.index("QSO"), exp.design_labels.index("BGS")
+    low_qso[i_bgs] += low_qso[i_qso] - 0.02
+    low_qso[i_qso] = 0.02
+    for design in (nominal, low_qso, 1.2 * nominal):
+        assert _lya_passed(exp, design.view(1, 1, -1)) == pytest.approx(expected, rel=1e-6)
+
+
+@pytest.mark.parametrize("ds", DATASETS)
+def test_qso_class_is_the_qso_bin(ds):
+    """The design's whole QSO fraction goes to the QSO bin; the budget excludes Lya fibers."""
+    if not _has_dataset(ds):
+        pytest.skip(f"desi dataset bao_{ds} not available")
+    exp = _make_exp(ds, lya_accounting="outside")
+    bins = exp.desi_data.drop_duplicates(subset=["tracer"])
+    assert exp.nominal_total_obs == int(bins.loc[bins["tracer"] != "Lya QSO", "observed"].sum())
+    assert float(exp.nominal_design.sum()) == pytest.approx(1.0)
+    eff_qso = float(exp.desi_tracers.loc[exp.desi_tracers["tracer"] == "QSO", "efficiency"].values[0])
+    design = torch.tensor([[[0.05, 0.30, 0.45, 0.20]]], dtype=torch.float64)
+    got = float(_passed_n_tracers(exp, design)["QSO"].squeeze())
+    assert got == pytest.approx(0.20 * eff_qso * exp.nominal_total_obs, rel=1e-6)
+
+
+def test_lya_in_budget_restores_the_earlier_accounting():
+    """lya_in_budget=True: Lya fibers sit in the QSO class and move with it."""
+    if not _has_dataset("dr1"):
+        pytest.skip("desi dataset bao_dr1 not available")
+    exp = init_experiment(
+        cosmo_exp="num_tracers", prior_args_path="prior_args_hrdrag.yaml",
+        design_args=_design_args("dr1", "in_budget_fixed"), dataset="dr1", analysis="bao",
+        cosmo_model="base", likelihood_mode="scaling", device="cpu", mode="eval", lya_in_budget=True,
+    )
+    dt = exp.desi_tracers
+    qso_share = float(dt.loc[dt["class"] == "QSO", "observed"].sum())  # QSO bin + Lya
+    assert float(exp.nominal_design[exp.design_labels.index("QSO")]) == pytest.approx(qso_share)
+    bins = exp.desi_data.drop_duplicates(subset=["tracer"])
+    assert exp.nominal_total_obs == int(bins["observed"].sum())
+    nominal = exp.nominal_design.to(torch.float64)
+    halved = nominal.clone()
+    i_qso, i_elg = exp.design_labels.index("QSO"), exp.design_labels.index("ELG")
+    halved[i_elg] += halved[i_qso] / 2
+    halved[i_qso] /= 2
+    assert _lya_passed(exp, halved.view(1, 1, -1)) == pytest.approx(
+        _lya_passed(exp, nominal.view(1, 1, -1)) / 2, rel=1e-6)
+
+
+def test_runs_logged_without_the_option_load_with_lya_in_budget(tmp_path):
+    """init_experiment reads a run logged before lya_in_budget existed with the old accounting."""
+    if not _has_dataset("dr1"):
+        pytest.skip("desi dataset bao_dr1 not available")
+    from types import SimpleNamespace
+
+    import yaml
+
+    from bedcosmo.util import get_experiment_config_path
+
+    def load(name):
+        with open(get_experiment_config_path("num_tracers", name)) as f:
+            return yaml.safe_load(f)
+
+    run_obj = SimpleNamespace(info=SimpleNamespace(artifact_uri=f"file://{tmp_path}"))
+    run_args = dict(cosmo_exp="num_tracers", dataset="dr1", analysis="bao", cosmo_model="base",
+                    likelihood_mode="scaling", device="cpu", mode="eval")
+    exp = init_experiment(run_obj=run_obj, run_args=dict(run_args),
+                          design_args=_design_args("dr1", "in_budget_fixed"),
+                          prior_args=load("prior_args_hrdrag.yaml"))
+    assert exp.lya_in_budget is True
+    exp = init_experiment(run_obj=run_obj, run_args=dict(run_args, lya_in_budget=False),
+                          design_args=_design_args("dr1", "outside"),
+                          prior_args=load("prior_args_hrdrag.yaml"))
+    assert exp.lya_in_budget is False
+
+
+@pytest.mark.parametrize("ds", DATASETS)
+def test_passed_map_is_additive_over_sub_tracers(ds):
+    """A combined bin is the sum of its sub-tracers' maps, so BAO's LRG3+ELG1 row and
+    ShapeFit's LRG3-only bin come from one split."""
+    if not _has_dataset(ds):
+        pytest.skip(f"desi data for {ds} not available")
+    exp = _make_exp(ds)
+    W, b = exp._passed_map([["LRG3", "ELG1"], ["LRG3"], ["ELG1"]])
+    torch.testing.assert_close(W[0], W[1] + W[2])
+    torch.testing.assert_close(b[0], b[1] + b[2])
+    row = list(exp.desi_data["tracer"]).index("LRG3+ELG1")
+    torch.testing.assert_close(exp._passed_weights[row], W[0].to(exp._passed_weights))
+
+
+def test_calc_passed_rejects_non_tensor():
+    if not _has_dataset("dr1"):
+        pytest.skip("desi data for dr1 not available")
+    with pytest.raises(TypeError):
+        _make_exp("dr1").calc_passed([0.1, 0.3, 0.4, 0.2])

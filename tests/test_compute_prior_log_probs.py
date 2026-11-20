@@ -614,7 +614,7 @@ class _EmpiricalFlowTransformStub(_Stub):
     """Empirical prior_source=flow + transform_input with a gaussianized flow."""
 
     def __init__(self, artifact: dict, rng: np.random.Generator):
-        from bedcosmo.num_visits.empirical.prior_flow import (
+        from bedcosmo.prior_flow import (
             SPACE_GAUSSIANIZED,
             SPACE_NATIVE,
             train_prior_flow,

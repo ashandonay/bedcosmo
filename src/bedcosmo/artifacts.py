@@ -274,33 +274,55 @@ def resolve_eig_step(eig_data, eval_step):
     return available[-1], f"step_{available[-1]}"
 
 
+def nominal_value(eig_data, block, legacy_block, key="eigs_avg"):
+    """The nominal design's entry of the per-design array ``block[key]``, or None.
+
+    ``block`` is any per-design section: ``step['variable']``, its ``grid``
+    sub-block, or ``step['marginal'][subset]``. Current eig_data locate the nominal
+    row of the pool by the top-level ``nominal_index`` (None when the experiment
+    has no nominal or eval ran with --exclude-nominal). Files written before the
+    nominal design joined the pool instead keep a scalar, sometimes a 1-element
+    list, under ``key`` of a sibling ``nominal`` block, passed as ``legacy_block``;
+    this is the one reader of that format.
+    """
+    idx = eig_data.get("nominal_index")
+    if idx is not None:
+        values = (block or {}).get(key)
+        return None if values is None else float(values[idx])
+    val = (legacy_block or {}).get(key)
+    if isinstance(val, list):
+        val = val[0] if val else None
+    return None if val is None else float(val)
+
+
+def added_nominal_row(eig_data):
+    """Row eval added to the configured pool for the nominal design, or None.
+
+    Cross-run comparisons delete it so evals line up with evals of the configured
+    pool (older files, --exclude-nominal); nominal still shows as its EIG value.
+    """
+    return eig_data["nominal_index"] if eig_data.get("nominal_added") else None
+
+
 def parse_eig_for_posterior(eig_data, eval_step=None, params=None):
     """Extract EIG and entropy summaries from eig_data for posterior sampling/plots."""
     _, step_str = resolve_eig_step(eig_data, eval_step)
     step_data = eig_data[step_str]
     variable_data = step_data.get('variable', {})
-    nominal_data = step_data.get('nominal', {})
+    legacy_nominal = step_data.get('nominal')
 
     input_designs = np.array(eig_data.get('input_designs', []))
     if input_designs.size == 0:
         raise ValueError("No input designs found in EIG data")
 
     eig_values = np.array(variable_data.get('eigs_avg', []))
-    nominal_eig = nominal_data.get('eigs_avg')
-    if isinstance(nominal_eig, list):
-        nominal_eig = nominal_eig[0] if len(nominal_eig) > 0 else None
-    nominal_eig = float(nominal_eig) if nominal_eig is not None else None
-
-    def _scalar_entropy(block, key):
-        val = block.get(key)
-        if val is None:
-            return None
-        if isinstance(val, list):
-            val = val[0] if len(val) > 0 else None
-        return float(val) if val is not None else None
-
-    nominal_prior_entropy = _scalar_entropy(nominal_data, "prior_entropy_avg")
-    nominal_posterior_entropy = _scalar_entropy(nominal_data, "posterior_entropy_avg")
+    nominal_eig = nominal_value(eig_data, variable_data, legacy_nominal)
+    nominal_prior_entropy = nominal_value(
+        eig_data, variable_data, legacy_nominal, "prior_entropy_avg"
+    )
+    nominal_posterior_entropy = nominal_value(
+        eig_data, variable_data, legacy_nominal, "posterior_entropy_avg"
+    )
     prior_entropy_by_design = variable_data.get("prior_entropy_avg")
     posterior_entropy_by_design = variable_data.get("posterior_entropy_avg")
     if prior_entropy_by_design is not None:
@@ -314,7 +336,7 @@ def parse_eig_for_posterior(eig_data, eval_step=None, params=None):
         marginal = step_data.get("marginal", {}).get(subset_id)
         if marginal is not None:
             eig_values = np.array(marginal.get("eigs_avg", []), dtype=float)
-            nominal_eig = float(marginal["nominal"]["eigs_avg"])
+            nominal_eig = nominal_value(eig_data, marginal, marginal.get("nominal"))
             nominal_prior_entropy = None
             nominal_posterior_entropy = None
             prior_entropy_by_design = None
@@ -334,10 +356,12 @@ def parse_eig_for_posterior(eig_data, eval_step=None, params=None):
 
 def nominal_grid_eig(eig_data: dict, step_key: str):
     """Nominal-design grid EIG from eig_data (e.g. merged NF+grid), or None if absent."""
-    nominal_grid_eig = eig_data[step_key].get("nominal", {}).get("grid", {}).get("eigs_avg")
-    if isinstance(nominal_grid_eig, list):
-        nominal_grid_eig = nominal_grid_eig[0] if nominal_grid_eig else None
-    return float(nominal_grid_eig) if nominal_grid_eig is not None else None
+    step_data = eig_data[step_key]
+    return nominal_value(
+        eig_data,
+        step_data.get("variable", {}).get("grid"),
+        step_data.get("nominal", {}).get("grid"),
+    )
 
 
 # ---------------------------------------------------------------------------

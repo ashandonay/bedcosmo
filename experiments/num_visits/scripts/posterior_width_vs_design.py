@@ -52,6 +52,7 @@ import torch
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
+from bedcosmo.base import find_nominal_index
 from bedcosmo.evaluate import Evaluator
 from bedcosmo.pyro_oed_src import LikelihoodDataset
 from bedcosmo.util import load_model
@@ -112,7 +113,9 @@ def main():
     if args.max_designs is not None:
         designs = designs[: args.max_designs]
     n_designs = designs.shape[0]
-    nominal_idx = evaluator._find_nominal_design_index(designs=designs)
+    nominal_idx = (
+        None if exp.nominal_design is None else find_nominal_index(designs, exp.nominal_design)
+    )
 
     # Load the trained guide (same call get_marginal_eig uses).
     flow_model, sel_step = load_model(

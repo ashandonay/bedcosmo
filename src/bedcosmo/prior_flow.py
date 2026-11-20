@@ -1,34 +1,19 @@
-"""Train and persist a normalizing flow over the empirical SED prior.
+"""Unconditional normalizing-flow priors fitted to samples, shared across experiments.
 
-This module does one thing: fit an unconditional normalizing flow (zuko NSF) to
-samples drawn from the frozen KDE artifact and save it to disk. It trains in
-either of the two spaces the pipeline uses:
+:func:`train_prior_flow` fits a zuko NSF to prior samples and returns a
+:class:`PriorFlow`: the flow plus the standardization it was fit under, with
+``save``/``load``, ``log_prob`` and ``sample`` in the raw variable's units. Users:
 
-* ``native`` : the native/ILR prior rows straight from ``sample_sed_prior``.
-* ``gaussianized`` : those rows pushed through the production gaussianizer
-  (``matrix_to_gaussian``, ``input_transform_type="joint"``) -- the ``z`` space
-  that ``transform_input=True`` EIG lives in.
+* ``num_visits.empirical.train_sed_prior_flow``: the empirical SED prior, in a ``native``
+  (ILR) or ``gaussianized`` (``transform_input`` ``z``) space.
+* ``num_tracers``: a cosmology prior loaded through ``prior_flow_path``.
 
-The flow is a *product*: a learned density you can reload and score anywhere. It
-is deliberately agnostic to what you do with it. In particular this module does
-**not** compute entropy; a consumer computes ``H = -E[log p]`` by drawing fresh
-prior samples and calling :meth:`PriorFlow.log_prob` on the loaded file::
-
-    pf = PriorFlow.load(path)
-    x = sample_sed_prior(artifact, 100_000, seed=123)   # fresh, not the fit set
-    H_nats = -pf.log_prob(x).mean()
-
-Read-only w.r.t. ``src/bedcosmo`` state: draws prior samples and applies the
-transform, modifies nothing but the output files. NSF training is CPU-heavy --
-run on a compute node or cap threads. Example::
-
-    OMP_NUM_THREADS=8 python -m bedcosmo.num_visits.empirical.prior_flow \\
-        --space both --n 400000 --epochs 250 --transforms 6 --bins 16
+The flow is a density only; it knows nothing about the prior's support. A consumer
+whose prior is bounded truncates it (see ``NumTracers._sample_prior_flow``).
 """
 
 from __future__ import annotations
 
-import argparse
 import math
 from pathlib import Path
 from typing import Any
@@ -38,14 +23,6 @@ import numpy as np
 PRIOR_FLOW_VERSION = "prior_flow_v1"
 SPACE_NATIVE = "native"
 SPACE_GAUSSIANIZED = "gaussianized"
-SED_PRIOR_FLOW_FILENAMES = {
-    SPACE_NATIVE: "sed_prior_flow_native.pt",
-    SPACE_GAUSSIANIZED: "sed_prior_flow_gaussianized.pt",
-}
-SED_PRIOR_FLOW_TRAINING_PLOT_FILENAMES = {
-    SPACE_NATIVE: "prior_flow_training_native.png",
-    SPACE_GAUSSIANIZED: "prior_flow_training_gaussianized.png",
-}
 
 
 def _build_nsf(dim: int, config: dict[str, Any]):
@@ -60,6 +37,14 @@ def _build_nsf(dim: int, config: dict[str, Any]):
         hidden_features=tuple(config["hidden_features"]),
         randperm=bool(config.get("randperm", True)),
     )
+
+
+def is_prior_flow_file(path: str | Path) -> bool:
+    """True when ``path`` holds a saved :class:`PriorFlow`, not e.g. a bedcosmo posterior checkpoint."""
+    import torch
+
+    payload = torch.load(Path(path).expanduser(), map_location="cpu", weights_only=False)
+    return isinstance(payload, dict) and payload.get("version") == PRIOR_FLOW_VERSION
 
 
 class PriorFlow:
@@ -86,30 +71,44 @@ class PriorFlow:
     def dim(self) -> int:
         return int(self.meta["dim"])
 
-    def log_prob(self, x: np.ndarray, *, batch_size: int = 8192) -> np.ndarray:
-        """Log density (nats, raw-variable units) for rows ``x`` of shape ``(N, D)``."""
+    def to(self, device) -> PriorFlow:
+        """Move the flow to ``device``, where :meth:`log_prob_tensor` and :meth:`sample_tensor` run."""
+        self.flow.to(device)
+        return self
+
+    def log_prob_tensor(self, x, *, batch_size: int = 2**17):
+        """Log density (nats, raw-variable units) for rows ``x`` of shape ``(N, D)``.
+
+        Runs on the flow's device; returns float64 ``(N,)`` on ``x``'s device. The
+        default batch is large because GPU throughput keeps rising up to ~1e5 rows.
+        """
         import torch
 
-        x = np.asarray(x, dtype=np.float64)
         if x.ndim != 2 or x.shape[1] != self.dim:
-            raise ValueError(f"expected (N, {self.dim}) rows, got {x.shape}")
-        mu = self.meta["standardize"]["mu"]
-        std = self.meta["standardize"]["std"]
-        log_std_sum = float(np.sum(np.log(std)))
-        z = (x - mu) / std
+            raise ValueError(f"expected (N, {self.dim}) rows, got {tuple(x.shape)}")
+        device = next(self.flow.parameters()).device
+        mu = torch.as_tensor(self.meta["standardize"]["mu"], dtype=torch.float64, device=device)
+        std = torch.as_tensor(self.meta["standardize"]["std"], dtype=torch.float64, device=device)
+        z = ((x.to(device, torch.float64) - mu) / std).to(torch.float32)
         self.flow.eval()
-        out = np.empty(x.shape[0], dtype=np.float64)
         with torch.no_grad():
-            for start in range(0, x.shape[0], batch_size):
-                zt = torch.as_tensor(z[start : start + batch_size], dtype=torch.float32)
-                out[start : start + batch_size] = self.flow().log_prob(zt).cpu().numpy()
-        return out - log_std_sum
+            out = torch.cat(
+                [self.flow().log_prob(zb).to(torch.float64) for zb in z.split(batch_size)]
+            )
+        return (out - torch.log(std).sum()).to(x.device)
 
-    def sample(self, n: int, *, seed: int | None = None, batch_size: int = 8192) -> np.ndarray:
-        """Draw ``n`` rows in raw-variable units; shape ``(n, D)``.
+    def log_prob(self, x: np.ndarray, *, batch_size: int = 8192) -> np.ndarray:
+        """Numpy :meth:`log_prob_tensor`: float64 ``(N,)`` for rows ``x`` of shape ``(N, D)``."""
+        import torch
 
-        Exact inverse of :meth:`log_prob`'s standardization: sample the flow in
-        standardized coordinates, then de-standardize ``x = z*std + mu``. Only a
+        x = torch.as_tensor(np.asarray(x, dtype=np.float64))
+        return self.log_prob_tensor(x, batch_size=batch_size).numpy()
+
+    def sample_tensor(self, n: int, *, seed: int | None = None, batch_size: int = 2**17):
+        """Draw ``n`` rows in raw-variable units: float64 ``(n, D)`` on the flow's device.
+
+        Exact inverse of :meth:`log_prob_tensor`'s standardization: sample the flow
+        in standardized coordinates, then de-standardize ``x = z*std + mu``. Only a
         native-space flow may sample -- a gaussianized flow generates ``y``, and
         recovering physical rows from it needs the (tail-sensitive) bijector
         inverse, which this class deliberately does not perform.
@@ -120,20 +119,20 @@ class PriorFlow:
             raise ValueError(f"sample() requires a {SPACE_NATIVE!r}-space flow, got {self.space!r}")
         if int(n) <= 0:
             raise ValueError("n must be positive")
-        mu = self.meta["standardize"]["mu"]
-        std = self.meta["standardize"]["std"]
+        device = next(self.flow.parameters()).device
+        mu = torch.as_tensor(self.meta["standardize"]["mu"], dtype=torch.float64, device=device)
+        std = torch.as_tensor(self.meta["standardize"]["std"], dtype=torch.float64, device=device)
         if seed is not None:
             torch.manual_seed(int(seed))
         self.flow.eval()
-        out = np.empty((int(n), self.dim), dtype=np.float64)
+        sizes = [min(batch_size, int(n) - start) for start in range(0, int(n), batch_size)]
         with torch.no_grad():
-            filled = 0
-            while filled < n:
-                b = min(batch_size, n - filled)
-                z = self.flow().sample((b,)).cpu().numpy().astype(np.float64)
-                out[filled : filled + b] = z * std + mu
-                filled += b
-        return out
+            z = torch.cat([self.flow().sample((b,)).to(torch.float64) for b in sizes])
+        return z * std + mu
+
+    def sample(self, n: int, *, seed: int | None = None, batch_size: int = 8192) -> np.ndarray:
+        """Numpy :meth:`sample_tensor`: ``n`` rows in raw-variable units, shape ``(n, D)``."""
+        return self.sample_tensor(n, seed=seed, batch_size=batch_size).cpu().numpy()
 
     def save(self, path: str | Path) -> Path:
         import torch
@@ -303,28 +302,6 @@ def train_prior_flow(
     return PriorFlow(flow, meta)
 
 
-def _draw_space_samples(artifact, space: str, n: int, seed: int, whitening: str | None):
-    """Draw ``n`` prior rows in the requested space; returns (rows, whitening_used)."""
-    from bedcosmo.transform import _whitening_to_apply_joint
-
-    from .fit_sed_prior_kde import (
-        get_empirical_gaussianizer,
-        get_gaussianizer_whitening,
-        sample_sed_prior,
-    )
-
-    x = sample_sed_prior(artifact, int(n), seed=int(seed))
-    if space == SPACE_NATIVE:
-        return x, None
-    if space == SPACE_GAUSSIANIZED:
-        gaussianizer = get_empirical_gaussianizer(artifact)
-        if whitening is None:
-            whitening = get_gaussianizer_whitening(artifact)
-        y = gaussianizer.matrix_to_gaussian(x, apply_joint=_whitening_to_apply_joint(whitening))
-        return y.detach().cpu().numpy(), whitening
-    raise ValueError(f"unknown space {space!r}")
-
-
 def plot_training_convergence(flow_path: str | Path, out_path: str | Path) -> Path:
     """Plot held-out eval NLL vs epoch for one trained flow, saved beside its ``.pt``.
 
@@ -375,136 +352,3 @@ def plot_training_convergence(flow_path: str | Path, out_path: str | Path) -> Pa
     fig.savefig(out_path, dpi=130)
     plt.close(fig)
     return out_path
-
-
-def train_and_save_prior_flows_for_kde(
-    kde_path: str | Path,
-    *,
-    spaces: tuple[str, ...] = (SPACE_NATIVE, SPACE_GAUSSIANIZED),
-    out_dir: str | Path | None = None,
-    n_samples: int = 100_000,
-    seed: int = 0,
-    whitening: str | None = None,
-    train_kwargs: dict[str, Any] | None = None,
-) -> dict[str, Path]:
-    """Train and save one flow per requested space beside the KDE artifact."""
-    from .fit_sed_prior_kde import load_sed_prior_kde
-
-    kde_path = Path(kde_path).expanduser()
-    artifact = load_sed_prior_kde(kde_path)
-    names = list(artifact.get("feature_names", []))
-    out_dir = Path(out_dir).expanduser() if out_dir else kde_path.parent
-    train_kwargs = dict(train_kwargs or {})
-
-    out_dir.mkdir(parents=True, exist_ok=True)
-    written: dict[str, Path] = {}
-    for space in spaces:
-        rows, whitening_used = _draw_space_samples(artifact, space, n_samples, seed, whitening)
-        log_path = out_dir / f"{SED_PRIOR_FLOW_FILENAMES[space].removesuffix('.pt')}_train.log"
-        print(f"[train] space={space}  rows={rows.shape}  log={log_path}", flush=True)
-        pf = train_prior_flow(
-            rows,
-            space=space,
-            feature_names=names,
-            whitening=whitening_used,
-            seed=seed,
-            log_path=log_path,
-            **train_kwargs,
-        )
-        pf.meta["source_kde_path"] = str(kde_path)
-        pf.meta["n_samples"] = int(n_samples)
-        dest = out_dir / SED_PRIOR_FLOW_FILENAMES[space]
-        pf.save(dest)
-        written[space] = dest
-        print(
-            f"[save]  {space}: {dest}  (best_eval_nll={pf.meta['train']['best_eval_nll']:.4f})",
-            flush=True,
-        )
-        plot_path = plot_training_convergence(
-            dest, out_dir / SED_PRIOR_FLOW_TRAINING_PLOT_FILENAMES[space]
-        )
-        print(f"[plot]  {space} training convergence: {plot_path}", flush=True)
-    return written
-
-
-def main(argv: list[str] | None = None) -> None:
-    ap = argparse.ArgumentParser(
-        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
-    )
-    ap.add_argument(
-        "--kde-path", default=None, help="Override KDE joblib path (default: production artifact)."
-    )
-    ap.add_argument(
-        "--space",
-        choices=[SPACE_NATIVE, SPACE_GAUSSIANIZED, "both"],
-        default="both",
-        help="Which space(s) to train a flow in.",
-    )
-    ap.add_argument(
-        "--out-dir", default=None, help="Output directory (default: beside the KDE artifact)."
-    )
-    ap.add_argument("--n", type=int, default=400_000, help="Prior rows to draw for training.")
-    ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--epochs", type=int, default=250)
-    ap.add_argument("--hidden", type=int, nargs="+", default=[128, 128])
-    ap.add_argument("--transforms", type=int, default=6)
-    ap.add_argument("--bins", type=int, default=16)
-    ap.add_argument("--batch-size", type=int, default=4096)
-    ap.add_argument("--lr", type=float, default=1e-3)
-    ap.add_argument("--weight-decay", type=float, default=0.0)
-    ap.add_argument("--threads", type=int, default=8)
-    ap.add_argument(
-        "--device",
-        default="cpu",
-        help="Torch device used to fit the flow (for example cpu or cuda:0).",
-    )
-    ap.add_argument(
-        "--whitening",
-        choices=["default", "cholesky", "none"],
-        default="default",
-        help="Gaussianized-space whitening: default = artifact setting (Cholesky); none = marginal only.",
-    )
-    args = ap.parse_args(argv)
-
-    import torch
-
-    torch.set_num_threads(int(args.threads))
-
-    from .paths import get_prior_kde_path
-
-    kde_path = Path(args.kde_path).expanduser() if args.kde_path else get_prior_kde_path()
-    spaces = (SPACE_NATIVE, SPACE_GAUSSIANIZED) if args.space == "both" else (args.space,)
-    whitening = None if args.whitening == "default" else args.whitening
-    train_kwargs = {
-        "epochs": args.epochs,
-        "hidden_features": tuple(args.hidden),
-        "transforms": args.transforms,
-        "bins": args.bins,
-        "batch_size": args.batch_size,
-        "lr": args.lr,
-        "weight_decay": args.weight_decay,
-        "device": args.device,
-    }
-
-    print(f"[load] KDE artifact: {kde_path}", flush=True)
-    written = train_and_save_prior_flows_for_kde(
-        kde_path,
-        spaces=spaces,
-        out_dir=args.out_dir,
-        n_samples=int(args.n),
-        seed=int(args.seed),
-        whitening=whitening,
-        train_kwargs=train_kwargs,
-    )
-    print("\n===== trained prior flows =====", flush=True)
-    for space, dest in written.items():
-        print(f"  {space:14s} -> {dest}")
-    print(
-        "\n  Entropy is computed elsewhere: load a file and score fresh prior draws,\n"
-        "  e.g. H_nats = -PriorFlow.load(path).log_prob(sample_sed_prior(artifact, N)).mean()",
-        flush=True,
-    )
-
-
-if __name__ == "__main__":
-    main()

@@ -3,7 +3,7 @@
 The covariance emulators used by ``NumTracers`` (likelihood_mode='emulator') were
 trained to reproduce the first-principles config-space (xi) Grieb/Fisher
 sigma(D_H/rd, D_M/rd, D_V/rd) produced by ``~/tracer-forecast-emulator``'s
-``bao/config_space.py``. This script checks that the experiment is wired up
+``tracer_forecast_emulator.bao.config_space``. This script checks that the experiment is wired up
 correctly by comparing, at the NOMINAL DESI design + FIDUCIAL cosmology and
 matched N_tracers, the per-bin errors from two independent paths:
 
@@ -42,6 +42,7 @@ HRD_RAW_FID = HRD_PHYS_FID / 100.0
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 EMU_DIR = os.path.expanduser("~/tracer-forecast-emulator")
+EMU_BAO_DIR = os.path.join(EMU_DIR, "src", "tracer_forecast_emulator", "bao")
 QUANTS = ("DH_over_rs", "DM_over_rs", "DV_over_rs")
 
 
@@ -50,7 +51,8 @@ def compute_numtracers_side():
     exp = init_experiment(
         cosmo_exp="num_tracers", prior_args_path="prior_args_hrdrag.yaml",
         design_args_path="design_args_dr1.yaml", dataset="dr1", analysis="bao",
-        cosmo_model="base", likelihood_mode="emulator", include_D_M=True,
+        cosmo_model="base", likelihood_mode="emulator", emulator_space="config",
+        include_D_M=True,
         include_D_V=True, device="cpu", mode="eval",
     )
     dd = exp.desi_data
@@ -117,7 +119,7 @@ def compute_configspace_side(bins, workdir):
     )
     print("Running config-space ground truth in the `emulator` env "
           "(loads desilike + DESI bundles; ~1-2 min)...")
-    res = subprocess.run(["bash", "-lc", bash], cwd=os.path.join(EMU_DIR, "bao"),
+    res = subprocess.run(["bash", "-lc", bash], cwd=EMU_BAO_DIR,
                          capture_output=True, text=True)
     sys.stdout.write(res.stdout)
     if res.returncode != 0 or not os.path.exists(out_path):

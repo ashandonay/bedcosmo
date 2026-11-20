@@ -8,6 +8,7 @@ import math
 from torch.utils.data import Dataset
 from bedcosmo.profiling import profile_method
 from bedcosmo.custom_dist import PresampledPrior
+from bedcosmo.prior_flow import PriorFlow
 
 
 def transform_input_standard_normal_log_prob(experiment, samples: torch.Tensor) -> torch.Tensor:
@@ -834,8 +835,6 @@ class LikelihoodDataset(Dataset):
         space by subtracting log|dT/dtheta|.
         """
         if hasattr(self.experiment, "prior_flow") and self.experiment.prior_flow is not None:
-            nominal_context = self.experiment.prior_flow_metadata["nominal_context"].to(self.device)
-
             batch_shape = samples.shape[:-1]
             flattened_samples = samples.view(-1, samples.shape[-1])
 
@@ -872,20 +871,23 @@ class LikelihoodDataset(Dataset):
                     chunk_samples = flattened_samples[start:end]
 
                     # Step 1: evaluate prior_flow in its native input space.
-                    if prior_transform_input:
-                        pf_input = self.experiment.params_to_unconstrained(
-                            chunk_samples,
-                            bijector_class=prior_flow_bijector,
-                        )
+                    # An unconditional PriorFlow is already a theta-space density.
+                    if isinstance(self.experiment.prior_flow, PriorFlow):
+                        chunk_log_prob = self.experiment.prior_flow_log_prob(chunk_samples)
                     else:
-                        pf_input = chunk_samples
+                        if prior_transform_input:
+                            pf_input = self.experiment.params_to_unconstrained(
+                                chunk_samples,
+                                bijector_class=prior_flow_bijector,
+                            )
+                        else:
+                            pf_input = chunk_samples
 
-                    expanded_context = nominal_context.unsqueeze(0).expand(
-                        end - start,
-                        -1,
-                    )
-                    prior_dist = self.experiment.prior_flow(expanded_context)
-                    chunk_log_prob = prior_dist.log_prob(pf_input)
+                        nominal_context = self.experiment.prior_flow_metadata["nominal_context"]
+                        nominal_context = nominal_context.to(self.device)
+                        expanded_context = nominal_context.unsqueeze(0).expand(end - start, -1)
+                        prior_dist = self.experiment.prior_flow(expanded_context)
+                        chunk_log_prob = prior_dist.log_prob(pf_input)
 
                     # Step 2: convert prior_flow density back to theta-space.
                     if prior_transform_input:
@@ -927,7 +929,7 @@ class LikelihoodDataset(Dataset):
                             "transform_input=True with prior_source=flow requires a "
                             "gaussianized prior flow (sed_prior_flow_gaussianized.pt). "
                             "Train it with `python -m "
-                            "bedcosmo.num_visits.empirical.prior_flow --space both`."
+                            "bedcosmo.num_visits.empirical.train_sed_prior_flow --space both`."
                         )
                     log_joint = sed_prior.log_prob_gaussianized_from_native(
                         samples,

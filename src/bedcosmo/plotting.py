@@ -17,6 +17,7 @@ from bedcosmo.util import (
     GETDIST_SETTINGS, restrict_mcsamples, sample_nf, ReferenceChain, GETDIST_CHAIN_SETTINGS,
     getdist_settings_for,
     nf_posterior_entries, validate_display, NF_SERIES_COLORS, NF_SERIES_LABELS,
+    NF_SERIES_LINE_STYLES,
 )
 from bedcosmo.artifacts import (
     load_eig_data_file,
@@ -24,6 +25,8 @@ from bedcosmo.artifacts import (
     resolve_eig_step,
     parse_eig_for_posterior,
     nominal_grid_eig,
+    nominal_value,
+    added_nominal_row,
     _eig_data_has_variable_eigs,
     _eig_data_has_marginal_eigs,
 )
@@ -31,7 +34,7 @@ import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 from matplotlib.lines import Line2D
 from matplotlib.path import Path
-from matplotlib.patches import Rectangle
+from matplotlib.patches import Patch, Rectangle
 from scipy.spatial import ConvexHull
 from scipy.interpolate import griddata
 import matplotlib.colors
@@ -269,7 +272,8 @@ def _extract_eig_values(eig_data, step_str, eig_kind, subset=None):
     Returns:
         tuple: ``(designs, eigs_avg, eigs_std, nominal_eig, label)`` with designs shape
         ``(n, d)``; ``nominal_eig`` is the nominal design's EIG (joint or the subset's
-        marginal), or None when the eig_data has none.
+        marginal), or None when the eig_data has none. The row eval added for nominal,
+        if any, is left out so the pool matches the configured one.
     """
     if eig_kind not in ("variable", "marginal"):
         raise ValueError(f"eig_kind must be 'variable' or 'marginal', got {eig_kind!r}")
@@ -289,7 +293,7 @@ def _extract_eig_values(eig_data, step_str, eig_kind, subset=None):
         if eigs_raw is None:
             raise ValueError(f"`eigs_avg` missing under {step_str}/variable")
         std_raw = block.get("eigs_std")
-        nominal_raw = (step_payload.get("nominal") or {}).get("eigs_avg")
+        legacy_nominal = step_payload.get("nominal")
         label = "variable"
     else:
         subset_id = _normalize_marginal_subset_id(subset)
@@ -304,7 +308,7 @@ def _extract_eig_values(eig_data, step_str, eig_kind, subset=None):
         if eigs_raw is None:
             raise ValueError(f"`eigs_avg` missing under {step_str}/marginal/{subset_id}")
         std_raw = block.get("eigs_std")
-        nominal_raw = (block.get("nominal") or {}).get("eigs_avg")
+        legacy_nominal = block.get("nominal")
         label = f"marginal({subset_id})"
 
     eigs_avg = np.asarray(eigs_raw, dtype=float).reshape(-1)
@@ -319,9 +323,11 @@ def _extract_eig_values(eig_data, step_str, eig_kind, subset=None):
         if eigs_std.shape != eigs_avg.shape:
             raise ValueError("eigs_std shape does not match eigs_avg")
 
-    if isinstance(nominal_raw, list):
-        nominal_raw = nominal_raw[0] if nominal_raw else None
-    nominal_eig = float(nominal_raw) if nominal_raw is not None else None
+    nominal_eig = nominal_value(eig_data, block, legacy_nominal)
+    # Line up with evals of the configured pool, which these comparisons pair by row.
+    added = added_nominal_row(eig_data)
+    if added is not None:
+        designs, eigs_avg, eigs_std = (np.delete(a, added, axis=0) for a in (designs, eigs_avg, eigs_std))
 
     return designs, eigs_avg, eigs_std, nominal_eig, label
 
@@ -436,6 +442,84 @@ def _eig_correlation_stats(eigs_x, eigs_y):
         "top10_overlap": top10_overlap,
         "n_designs": int(eigs_x.size),
     }
+
+
+# Nominal-design bars are gray, so they never take a run's color.
+NOMINAL_BAR_COLOR = "0.55"
+
+
+def _distinct_nominals(nominal_designs, run_ids):
+    """``(designs, labels)`` for the nominal bars: one per distinct nominal design.
+
+    Runs sharing a nominal design (the usual case for runs on one pool) get a single
+    "Nominal" bar; when the runs' nominals differ, each distinct one is labelled with the
+    first run it belongs to.
+    """
+    distinct, owners = [], []
+    for nominal, run_id in zip(nominal_designs, run_ids):
+        if nominal is None:
+            continue
+        nominal = np.asarray(nominal, dtype=float).reshape(-1)
+        if not any(d.shape == nominal.shape and np.allclose(d, nominal) for d in distinct):
+            distinct.append(nominal)
+            owners.append(run_id)
+    if len(distinct) == 1:
+        return distinct, ["Nominal"]
+    return distinct, [f"Nominal ({run_id[:8]})" for run_id in owners]
+
+
+def _feasible_range(designs):
+    """``(0, T)`` when every design sums to the same total ``T`` (a mixture), else None.
+
+    In a mixture each dimension is a nonnegative share of ``T``, so no design can lie
+    outside ``[0, T]`` along any one dimension. Other design spaces carry no such bound.
+    """
+    from bedcosmo.response_surface import is_mixture
+
+    designs = np.asarray(designs, dtype=float)
+    if designs.ndim != 2 or len(designs) == 0 or not is_mixture(designs):
+        return None
+    if np.any(designs < 0):
+        return None
+    return 0.0, float(designs.sum(axis=1).mean())
+
+
+def _shade_outside(ax, lo, hi, color="0.88"):
+    """Gray out the parts of ``ax``'s x range below ``lo`` and above ``hi``, keeping its limits.
+
+    Call after everything else is drawn, so the limits already cover the data and lines.
+    """
+    x0, x1 = ax.get_xlim()
+    pad = 0.03 * (x1 - x0)
+    x0, x1 = min(x0, lo - pad), max(x1, hi + pad)
+    ax.axvspan(x0, lo, color=color, lw=0, zorder=0, gid="infeasible")
+    ax.axvspan(hi, x1, color=color, lw=0, zorder=0, gid="infeasible")
+    ax.set_xlim(x0, x1)
+
+
+def _eig_trend(x, values, stat="median", min_per_group=2, n_bins=8):
+    """``(x, stat of values)`` per group of designs along one design dimension.
+
+    Designs sharing an x value (to 6 significant digits) form a group, kept when it has at
+    least ``min_per_group`` designs. When fewer than 3 such groups exist (a continuous or
+    random pool), the designs are split into ``n_bins`` equal-count quantile bins instead,
+    each placed at its median x. Returns empty arrays when neither gives 2 points.
+    """
+    agg = np.median if stat == "median" else np.mean
+    x = np.asarray(x, dtype=float)
+    values = np.asarray(values, dtype=float)
+    keys = np.array([float(f"{v:.6g}") for v in x])
+    levels, counts = np.unique(keys, return_counts=True)
+    levels = levels[counts >= min_per_group]
+    if len(levels) >= 3:
+        return levels, np.array([agg(values[keys == lv]) for lv in levels])
+    n_bins = min(n_bins, len(x) // max(min_per_group, 1))
+    if n_bins < 2:
+        return np.array([]), np.array([])
+    order = np.argsort(x, kind="stable")
+    groups = [g for g in np.array_split(order, n_bins) if len(g)]
+    return (np.array([np.median(x[g]) for g in groups]),
+            np.array([agg(values[g]) for g in groups]))
 
 
 # ============================================================================
@@ -604,11 +688,13 @@ class BasePlotter:
         eig_std_values=None,
         eig_labels=None,
         nominal_eig=None,
+        nominal_index=None,
         grid_eig_values=None,
         grid_eig_std_values=None,
         nominal_grid_eig=None,
         sort=True,
         include_nominal=True,
+        scatter=False,
         title=None,
         color="tab:green",
         experiment_id=None,
@@ -632,16 +718,23 @@ class BasePlotter:
             eig_values (np.ndarray or list[np.ndarray]): EIG values per design.
             input_designs (np.ndarray): Design array with shape (n_designs, n_design_dims).
             design_labels (list): Labels for each design dimension.
-            nominal_design (np.ndarray): Nominal design values.
+            nominal_design (np.ndarray or None): Nominal design values; None when the
+                experiment has none (the design heatmap then shows raw values).
             eig_std_values (np.ndarray or list[np.ndarray], optional): EIG std per design.
             eig_labels (list[str], optional): Labels for each EIG curve. Required when
                 eig_values is a list, ignored otherwise.
             nominal_eig (float, optional): Nominal EIG value.
+            nominal_index (int, optional): Row of ``input_designs`` that is the nominal
+                design; it is marked at its place in the ranking.
             grid_eig_values (np.ndarray, optional): Grid EIG values.
             grid_eig_std_values (np.ndarray, optional): Grid EIG std values.
             nominal_grid_eig (float, optional): Nominal grid EIG value.
             sort (bool): Whether to sort designs by EIG (default: True).
             include_nominal (bool): Whether to include the nominal EIG in the plot (default: True).
+            scatter (bool): Draw each design as a marker with its std as an error bar
+                instead of a line with a std band (default: False). Suits small pools,
+                where a line implies a continuity between neighbouring designs that
+                isn't there.
             title (str, optional): Custom title for the plot.
             color (str, optional): Color of the plot.
 
@@ -675,7 +768,8 @@ class BasePlotter:
         multi_curve = len(eig_list) > 1
 
         input_designs = np.asarray(input_designs)
-        nominal_design = np.asarray(nominal_design)
+        if nominal_design is not None:
+            nominal_design = np.asarray(nominal_design)
 
         # Primary curve is always the last entry (used for sorting / optimal marker)
         primary_eigs = eig_list[-1]
@@ -717,15 +811,10 @@ class BasePlotter:
         # Check if designs are 1D or multi-dimensional
         is_1d_design = (sorted_designs.shape[1] == 1)
 
-        # Find nominal design position
+        # Position of the nominal design in the (sorted) ranking
         nominal_sorted_pos = None
-        try:
-            nominal_idx = int(np.argmin(np.linalg.norm(input_designs - nominal_design, axis=1)))
-            matches = np.where(sorted_idx == nominal_idx)[0]
-            if matches.size > 0:
-                nominal_sorted_pos = int(matches[0])
-        except:
-            pass
+        if include_nominal and nominal_index is not None:
+            nominal_sorted_pos = int(np.flatnonzero(sorted_idx == nominal_index)[0])
 
         # Create figure with subplots
         if is_1d_design and not sort:
@@ -767,13 +856,22 @@ class BasePlotter:
             s_eigs = ev[sorted_idx]
             s_std = sv[sorted_idx]
             is_primary = (i == len(eig_list) - 1)
+            if scatter:
+                ax0.errorbar(x_vals, s_eigs, yerr=s_std, fmt='o', color=cc, label=lbl,
+                             markersize=4 if is_primary else 3, elinewidth=1, capsize=2,
+                             alpha=1.0 if is_primary else 0.6, zorder=5 + i)
+                continue
             lw = 2.5 if is_primary else 1.5
             ax0.fill_between(x_vals, s_eigs - s_std, s_eigs + s_std,
                              color=to_rgba(cc, alpha=0.2 if is_primary else 0.12),
                              zorder=1 + i)
             ax0.plot(x_vals, s_eigs, label=lbl, color=cc, linewidth=lw, zorder=5 + i)
 
-        if has_grid:
+        if has_grid and scatter:
+            ax0.errorbar(x_vals, sorted_grid_eigs, yerr=sorted_grid_eigs_std, fmt='D',
+                         color='tab:green', label='Grid-based EIG', markersize=4,
+                         elinewidth=1, capsize=2, zorder=6)
+        elif has_grid:
             ax0.fill_between(
                 x_vals,
                 sorted_grid_eigs - sorted_grid_eigs_std,
@@ -804,6 +902,10 @@ class BasePlotter:
                 linewidth=2,
                 zorder=10,
             )
+
+        if nominal_sorted_pos is not None:
+            ax0.plot(x_vals[nominal_sorted_pos], sorted_eigs[nominal_sorted_pos], 'o',
+                     color='tab:blue', markersize=8, zorder=9, label='Nominal Design')
 
         # Plot optimal design
         optimal_idx = np.argmax(sorted_eigs)
@@ -840,7 +942,7 @@ class BasePlotter:
                 cbar.set_label('Design Value', labelpad=10, fontsize=12, weight='bold')
             else:
                 # Multi-dimensional designs - use ratio to nominal
-                if np.any(nominal_design == 0):
+                if nominal_design is None or np.any(nominal_design == 0):
                     plot_data = sorted_designs.T
                     cmap = 'viridis'
                     im = ax1.imshow(plot_data, aspect='auto', cmap=cmap)
@@ -1081,13 +1183,10 @@ class BasePlotter:
                 artifacts_dir, eval_step=eval_step, eig_kind='variable'
             )
             _, step_str = resolve_eig_step(eig_data, eval_step)
-            nominal_data = eig_data.get(step_str, {}).get('nominal', {})
-            val = nominal_data.get('prior_entropy_avg')
-            if val is None:
-                return None
-            if isinstance(val, list):
-                val = val[0] if len(val) > 0 else None
-            return float(val) if val is not None else None
+            step_data = eig_data.get(step_str, {})
+            return nominal_value(
+                eig_data, step_data.get('variable'), step_data.get('nominal'), 'prior_entropy_avg'
+            )
         except ValueError:
             return None
 
@@ -2771,7 +2870,6 @@ class RunPlotter(BasePlotter):
         
         step_data = eig_data[step_str]
         variable_data = step_data.get('variable', {})
-        nominal_data = step_data.get('nominal', {})
         
         # Get designs and EIGs
         input_designs = np.array(eig_data.get('input_designs', []))
@@ -2787,11 +2885,7 @@ class RunPlotter(BasePlotter):
         optimal_design = input_designs[optimal_idx]
         optimal_eig = float(eig_values[optimal_idx])
         
-        # Get nominal EIG
-        nominal_eig = nominal_data.get('eigs_avg')
-        if isinstance(nominal_eig, list):
-            nominal_eig = nominal_eig[0] if len(nominal_eig) > 0 else None
-        nominal_eig = float(nominal_eig) if nominal_eig is not None else None
+        nominal_eig = nominal_value(eig_data, variable_data, step_data.get('nominal'))
         
         # Initialize experiment to get design labels and nominal design
         experiment = self.get_experiment()
@@ -2999,7 +3093,6 @@ class RunPlotter(BasePlotter):
 
         step_data = eig_data[step_str]
         variable_data = step_data.get('variable', {})
-        nominal_data = step_data.get('nominal', {})
 
         input_designs = np.array(eig_data.get('input_designs', []))
         if input_designs.size == 0:
@@ -3012,18 +3105,10 @@ class RunPlotter(BasePlotter):
         grid_eig_std_values = np.array(grid_data.get('eigs_std', [])) if grid_data else None
 
         nominal_eig = None
-        nominal_grid_eig = None
+        nominal_grid = None
         if include_nominal:
-            nominal_eig = nominal_data.get('eigs_avg')
-            if isinstance(nominal_eig, list):
-                nominal_eig = nominal_eig[0] if len(nominal_eig) > 0 else None
-            nominal_eig = float(nominal_eig) if nominal_eig is not None else None
-            nominal_grid_data = nominal_data.get('grid', {})
-            if isinstance(nominal_grid_data, dict) and 'eigs_avg' in nominal_grid_data:
-                nominal_grid_eig = nominal_grid_data.get('eigs_avg')
-                if isinstance(nominal_grid_eig, list):
-                    nominal_grid_eig = nominal_grid_eig[0] if len(nominal_grid_eig) > 0 else None
-                nominal_grid_eig = float(nominal_grid_eig) if nominal_grid_eig is not None else None
+            nominal_eig = nominal_value(eig_data, variable_data, step_data.get('nominal'))
+            nominal_grid = nominal_grid_eig(eig_data, step_str)
 
         experiment = self.get_experiment()
 
@@ -3034,12 +3119,13 @@ class RunPlotter(BasePlotter):
             eig_values=eig_values,
             input_designs=input_designs,
             design_labels=experiment.design_labels,
-            nominal_design=experiment.nominal_design.cpu().numpy(),
+            nominal_design=eig_data.get('nominal_design'),
             eig_std_values=eig_std_values,
             nominal_eig=nominal_eig,
+            nominal_index=eig_data.get('nominal_index'),
             grid_eig_values=grid_eig_values,
             grid_eig_std_values=grid_eig_std_values,
-            nominal_grid_eig=nominal_grid_eig,
+            nominal_grid_eig=nominal_grid,
             include_nominal=include_nominal,
             title=title
         )
@@ -3128,8 +3214,7 @@ class RunPlotter(BasePlotter):
 
         nominal_eig = None
         if include_nominal:
-            nom = marginal.get('nominal', {}).get('eigs_avg')
-            nominal_eig = float(nom) if nom is not None else None
+            nominal_eig = nominal_value(eig_data, marginal, marginal.get('nominal'))
 
         experiment = self.get_experiment()
         labels = ", ".join(marginal.get('params', subset))
@@ -3140,8 +3225,9 @@ class RunPlotter(BasePlotter):
             eig_std_values=np.array(marginal.get('eigs_std', []), dtype=float),
             input_designs=input_designs,
             design_labels=experiment.design_labels,
-            nominal_design=experiment.nominal_design.cpu().numpy(),
+            nominal_design=eig_data.get('nominal_design'),
             nominal_eig=nominal_eig,
+            nominal_index=eig_data.get('nominal_index'),
             include_nominal=include_nominal,
             sort=sort,
             title=title,
@@ -3476,7 +3562,10 @@ class ComparisonPlotter(BasePlotter):
             colors (list, optional): List of colors to use for each group.
             filter_string (str, optional): Override filter_string from __init__.
             transform_output (bool): Transform NF samples to physical space (default True).
-            display (tuple or str): 'nominal' and/or 'optimal' (default both).
+            display (tuple or str): 'nominal' and/or 'optimal' (default both). With both,
+                each run's contours share its color and the series differ by line style
+                (``NF_SERIES_LINE_STYLES``: optimal solid, nominal dashed). The DESI
+                reference, the measured result at the nominal survey, is dashed black.
             eval_step (str or int, optional): EIG eval step for optimal design; latest if None.
             plot_prior (bool): If True, overlay each group's prior as a faint contour
                 (alpha=0.4). Uses black when all groups share the same prior_args,
@@ -3641,7 +3730,11 @@ class ComparisonPlotter(BasePlotter):
                         all_samples.append(entry['samples'])
                         all_colors.append(group_color)
                         all_alphas.append(entry.get('alpha', 1.0))
-                        all_line_styles.append(entry.get('line_style', '-'))
+                        # Every series of a run shares the run's color, so with more than
+                        # one series the line style is what tells them apart.
+                        all_line_styles.append(
+                            NF_SERIES_LINE_STYLES.get(entry.get('name'), '-')
+                            if len(display) > 1 else entry.get('line_style', '-'))
                         all_fenced.append(True)
                         if run_idx == 0 and rank_idx == 0:
                             label = entry.get('label', group_label)
@@ -3844,6 +3937,7 @@ class ComparisonPlotter(BasePlotter):
         sort_reference=None,
         normalize=False,
         show_errorbars=True,
+        scatter=True,
         design_labels=None,
         show_ratio_to_nominal=True,
         filename=None,
@@ -3873,10 +3967,14 @@ class ComparisonPlotter(BasePlotter):
                 mean EIG across runs (symmetric). Pass ``sort_reference`` to sort by one run instead.
             sort_reference (str, optional): Run ID or label whose EIG defines the sort order.
                 When omitted and ``sort=True``, designs are sorted by the cross-run mean EIG.
-            normalize (bool): If True, plot percent difference vs each run's nominal EIG:
-                                    ``100 * (EIG - EIG_nominal) / EIG_nominal``.
-            show_errorbars (bool): If True, draw the filled std bands for each run.
-                                    Only plots if they match the evaluation designs. Default False.
+            normalize (False, "percent" or "bits"): Plot each run's EIG relative to its
+                nominal EIG, as ``100 * (EIG - EIG_nominal) / EIG_nominal`` ("percent") or
+                ``EIG - EIG_nominal`` ("bits"). "bits" keeps runs with different nominal EIGs
+                (e.g. different priors) on the same scale of gain over nominal.
+            show_errorbars (bool): If True, draw each run's eval std (bands, or error bars
+                                    with ``scatter``).
+            scatter (bool): Draw each run as markers, offset side by side at each design
+                (default). False draws each run as a line with a filled std band.
             design_labels (list, optional): Custom labels for each design dimension. Must be the same length as the number of design dimensions.
                                     If omitted, tries eig_data metadata, then the sort-reference (or first) run's
                                     ``design_args.yaml`` / ``experiment.design_labels``.
@@ -3982,9 +4080,7 @@ class ComparisonPlotter(BasePlotter):
                 continue
             step_payload = data[step_key_name]
             
-            # Access nested structure: step_payload['variable'] and step_payload['nominal']
             variable_data = step_payload.get('variable', {})
-            nominal_data = step_payload.get('nominal', {})
 
             # Get designs from top-level input_designs
             designs_root = data.get('input_designs')
@@ -3993,6 +4089,11 @@ class ComparisonPlotter(BasePlotter):
 
             # input_designs is now always an array, not a dict with sorted/unsorted keys
             designs_arr = np.array(designs_root)
+            # Runs are paired design by design, so drop the row eval added for nominal
+            # (nominal still shows as its EIG line) to line up with configured pools.
+            added = added_nominal_row(data)
+            if added is not None:
+                designs_arr = np.delete(designs_arr, added, axis=0)
 
             if designs_arr.ndim == 1:
                 designs_arr = designs_arr.reshape(-1, 1)
@@ -4022,10 +4123,10 @@ class ComparisonPlotter(BasePlotter):
                 print(f"Warning: No EIG data found for {run_id}, skipping...")
                 continue
 
-            # Get nominal_eig from nominal subdict (scalar value from eigs_avg)
-            nominal_eig = nominal_data.get('eigs_avg')
-            if nominal_eig is not None and isinstance(nominal_eig, list):
-                nominal_eig = nominal_eig[0] if len(nominal_eig) > 0 else None
+            nominal_eig = nominal_value(data, variable_data, step_payload.get('nominal'))
+            if added is not None:
+                eig_values = np.delete(eig_values, added)
+                eig_std_values = np.delete(eig_std_values, added)
             optimal_eig = variable_data.get('optimal_eig')
             optimal_design = variable_data.get('optimal_design')
 
@@ -4050,15 +4151,20 @@ class ComparisonPlotter(BasePlotter):
         is_1d_design = (num_dims == 1)
 
         # Per-run plot values (normalized or raw) for the average line and optional mean sort.
+        if normalize not in (False, "percent", "bits"):
+            raise ValueError(f"normalize must be False, 'percent' or 'bits', got {normalize!r}")
         plot_eigs_per_run = []
         for record in run_records:
             if normalize:
                 nominal_eig = record['nominal_eig']
                 if nominal_eig is None:
-                    raise ValueError(f"normalize=True requires nominal_eig for run {record['run_id']}")
+                    raise ValueError(f"normalize={normalize!r} requires nominal_eig for run {record['run_id']}")
+                if normalize == "bits":
+                    plot_eigs_per_run.append(record['eigs_avg'] - nominal_eig)
+                    continue
                 if nominal_eig == 0:
                     raise ValueError(
-                        f"normalize=True cannot divide by nominal_eig=0 for run {record['run_id']}"
+                        f"normalize='percent' cannot divide by nominal_eig=0 for run {record['run_id']}"
                     )
                 plot_eigs_per_run.append(
                     100.0 * (record['eigs_avg'] - nominal_eig) / nominal_eig
@@ -4230,14 +4336,19 @@ class ComparisonPlotter(BasePlotter):
                     label='Average', zorder=3,
                 )[0]
 
-        for record, plot_eigs in zip(run_records, plot_eigs_per_run):
+        # Side-by-side offsets (in design-index units) for scatter mode.
+        index_axis = not (is_1d_design and not sort)
+        dodge = min(0.25, 0.8 / len(run_records)) if scatter and index_axis else 0.0
+
+        for i_run, (record, plot_eigs) in enumerate(zip(run_records, plot_eigs_per_run)):
             sort_idx = global_sort_idx
 
             eig_std_vals = record['eigs_std'][sort_idx]
             color = record['color']
             eig_vals_plot = plot_eigs[sort_idx]
+            run_x = x_vals + dodge * (i_run - (len(run_records) - 1) / 2)
 
-            if normalize:
+            if normalize == "percent":
                 nominal_eig = record['nominal_eig']
                 eig_std_vals_plot = 100.0 * eig_std_vals / abs(nominal_eig)
             else:
@@ -4245,13 +4356,19 @@ class ComparisonPlotter(BasePlotter):
 
             # Determine if single point or line
             num_points = len(eig_vals_plot)
-            if num_points == 1:
+            if scatter and num_points > 1:
+                yerr = eig_std_vals_plot if show_errorbars and np.any(eig_std_vals_plot > 0) else None
+                line = ax_line.errorbar(
+                    run_x, eig_vals_plot, yerr=yerr, fmt='o', ms=4, color=color,
+                    elinewidth=1, zorder=4, label=record['run_label'],
+                )
+            elif num_points == 1:
                 line = ax_line.scatter(x_vals, eig_vals_plot, color=color, zorder=5, label=record['run_label'])
             else:
                 line = ax_line.plot(x_vals, eig_vals_plot, color=color, linewidth=2, label=record['run_label'])[0]
                 
             handles_for_legend.append(line)
-            if show_errorbars and np.any(eig_std_vals_plot > 0):
+            if not scatter and show_errorbars and np.any(eig_std_vals_plot > 0):
                 if num_points == 1:
                     ax_line.errorbar(x_vals, eig_vals_plot, yerr=eig_std_vals_plot, color=color, zorder=5, fmt='o', capsize=5, label=record['run_label'])
                 else:
@@ -4286,12 +4403,12 @@ class ComparisonPlotter(BasePlotter):
                             break
                     if optimal_idx is not None:
                         sorted_pos = np.where(sort_idx == optimal_idx)[0][0]
-                        point_x = x_vals[sorted_pos]
+                        point_x = run_x[sorted_pos]
                         point_y = eig_vals_plot[sorted_pos]
 
                 if (point_x is None or point_y is None) and is_reference_run:
                     extremum_idx = np.argmax(eig_vals_plot)
-                    point_x = x_vals[extremum_idx]
+                    point_x = run_x[extremum_idx]
                     point_y = eig_vals_plot[extremum_idx]
 
                 if point_x is not None and point_y is not None:
@@ -4305,8 +4422,10 @@ class ComparisonPlotter(BasePlotter):
                     )
 
         y_label = 'Expected Information Gain [bits]'
-        if normalize:
+        if normalize == "percent":
             y_label = r'EIG Difference from Nominal [%]'
+        elif normalize == "bits":
+            y_label = r'EIG $-$ EIG(nominal) [bits]'
         ax_line.set_ylabel(y_label, fontsize=12, weight='bold')
         ax_line.grid(True, alpha=0.3)
         legend_handles = []
@@ -4400,6 +4519,176 @@ class ComparisonPlotter(BasePlotter):
         self.save_figure(fig, filename=filename, save_dir=save_dir, dpi=dpi)
    
         return fig, (ax_line, ax_heat)
+
+    def compare_priors(
+        self,
+        num_samples=200_000,
+        show_reference=True,
+        param_limits=None,
+        bins=80,
+        colors=None,
+        figsize=None,
+        title=None,
+        filename=None,
+        save_dir=None,
+        dpi=200,
+    ):
+        """
+        Triangle plot of the priors the runs trained on, one color per run.
+
+        Each run's experiment is rebuilt from its MLflow run and sampled with
+        ``get_prior_samples``, so the plot shows exactly the prior it trained on
+        (box and constraints, or flow), in physical units. Diagonal panels are
+        normalized marginal densities on a log scale, so a uniform prior is a step
+        whose height compares directly with peaked priors. Off-diagonal panels draw
+        a uniform prior as its filled support (credible contours of a flat density
+        are noise) and any other prior as 68/95% contours smoothed by getdist with
+        the posterior plots' settings (``GETDIST_SETTINGS``; ``GETDIST_CHAIN_SETTINGS``
+        for the reference chain).
+
+        Args:
+            num_samples (int): Prior draws per run.
+            show_reference (bool): Overlay the experiment's reference posterior
+                (``load_nominal_samples``, e.g. DESI DR1 BAO for num_tracers) in black.
+            param_limits (dict, optional): ``{param: (lo, hi)}`` axis ranges. Defaults
+                to the union of every prior's (and the reference's) 0.1-99.9% range.
+            bins (int): Histogram bins per axis.
+            colors (list, optional): One color per run, as in :meth:`compare_eigs`.
+            figsize (tuple, optional): Figure size; default scales with the number of
+                parameters.
+            title (str, optional): Figure title.
+            filename (str, optional): Filename for the plot (default ``compare_priors``).
+            save_dir (str, optional): Directory to save the plot.
+            dpi (int, optional): DPI for the plot.
+
+        Returns:
+            tuple: ``(fig, axes)`` with ``axes`` the (D, D) array; the upper triangle is hidden.
+        """
+        run_data_list, _, _ = self._get_run_data_list(parse_params=True)
+        if not run_data_list:
+            raise ValueError(f"No runs found in experiment {self.cosmo_exp}")
+        run_ids = [run["run_id"] for run in run_data_list]
+        run_labels = self._resolve_run_labels(run_data_list, run_ids)
+        color_map = self._resolve_run_color_map(run_data_list, run_ids, colors=colors)
+
+        priors = []
+        for run, label in zip(run_data_list, run_labels):
+            experiment = init_experiment(
+                run["run_obj"], run["params"].copy(), device="cpu",
+                design_args=None, global_rank=0, verbose=False,
+            )
+            samples_gd = experiment.get_prior_samples(num_samples=num_samples)
+            uniform = experiment.prior_flow is None and all(
+                isinstance(d, torch.distributions.Uniform) for d in experiment.prior.values()
+            )
+            priors.append({
+                "label": label, "color": color_map[run["run_id"]], "uniform": uniform,
+                "names": list(experiment.cosmo_params), "latex": list(experiment.latex_labels),
+                "x": np.asarray(samples_gd.samples, dtype=float),
+            })
+        names, latex = priors[0]["names"], priors[0]["latex"]
+        for prior in priors[1:]:
+            if prior["names"] != names:
+                raise ValueError(f"Runs sample different parameters: {names} vs {prior['names']}")
+
+        reference = None
+        if show_reference:
+            params = run_data_list[0]["params"]
+            ref_samples, ref_names, _ = load_nominal_samples(
+                params["cosmo_exp"], params["cosmo_model"], dataset=params["dataset"],
+                analysis=params.get("analysis", "bao"),
+            )
+            if list(ref_names) != names:
+                raise ValueError(f"Reference samples have {list(ref_names)}, the runs {names}")
+            reference = np.asarray(ref_samples, dtype=float)
+
+        dim = len(names)
+        # (samples, color, uniform, getdist samples for smoothed contours or None)
+        sets = []
+        with contextlib.redirect_stdout(io.StringIO()):
+            for p in priors:
+                gd = None if p["uniform"] else getdist.MCSamples(
+                    samples=p["x"], names=names, labels=latex, settings=GETDIST_SETTINGS)
+                sets.append((p["x"], p["color"], p["uniform"], gd))
+            if reference is not None:
+                sets.append((reference, "black", False, ReferenceChain(
+                    samples=reference, names=names, labels=latex, settings=GETDIST_CHAIN_SETTINGS)))
+        limits = dict(param_limits or {})
+        for i, name in enumerate(names):
+            if name not in limits:
+                lo = min(np.quantile(x[:, i], 0.001) for x, *_ in sets)
+                hi = max(np.quantile(x[:, i], 0.999) for x, *_ in sets)
+                limits[name] = (lo, hi)
+        edges = [np.linspace(*limits[n], bins + 1) for n in names]
+
+        fig, axes = plt.subplots(dim, dim, figsize=figsize or (3.2 * dim + 1, 3.2 * dim + 1), squeeze=False)
+        for i in range(dim):
+            for j in range(dim):
+                ax = axes[i, j]
+                if j > i:
+                    ax.set_visible(False)
+                    continue
+                if i == j:
+                    width = edges[i][1] - edges[i][0]
+                    for x, color, *_ in sets:
+                        counts, _ = np.histogram(x[:, i], bins=edges[i])
+                        # Normalized to all draws, so a zoomed range keeps true densities.
+                        density = counts / (len(x) * width)
+                        ax.stairs(np.where(density > 0, density, np.nan), edges[i], color=color, lw=1.8)
+                    ax.set_yscale("log")
+                    ax.set_ylabel("density" if i == 0 else "")
+                else:
+                    for x, color, uniform, gd in sets:
+                        if uniform:
+                            # Support on bins spanning the prior's own range (a zoomed window would
+                            # leave most bins empty), padded by one empty cell so the 0.5 contour
+                            # falls on the support's edge.
+                            own = [np.linspace(x[:, k].min(), x[:, k].max(), bins + 1) for k in (j, i)]
+                            counts, _, _ = np.histogram2d(x[:, j], x[:, i], bins=own)
+                            centers = []
+                            for e in own:
+                                w = e[1] - e[0]
+                                c = 0.5 * (e[1:] + e[:-1])
+                                centers.append(np.concatenate([[c[0] - w], c, [c[-1] + w]]))
+                            support = np.pad((counts > 0).T.astype(float), 1)
+                            ax.contourf(*centers, support, levels=[0.5, 1.5], colors=[color], alpha=0.2)
+                            ax.contour(*centers, support, levels=[0.5], colors=[color], linewidths=1.2)
+                            continue
+                        with contextlib.redirect_stdout(io.StringIO()):
+                            density = gd.get2DDensityGridData(names[j], names[i], num_plot_contours=2)
+                        levels = np.sort(density.contours)  # 95%, 68%
+                        if color != "black":
+                            ax.contourf(density.x, density.y, density.P, levels=[levels[0], density.P.max() + 1],
+                                        colors=[color], alpha=0.2)
+                        ax.contour(density.x, density.y, density.P, levels=levels, colors=[color],
+                                   linewidths=[1.0, 1.8], linestyles="solid")
+                    ax.set_ylim(*limits[names[i]])
+                ax.set_xlim(*limits[names[j]])
+                ax.set_xlabel(f"${latex[j]}$" if i == dim - 1 else "")
+                if j == 0 and i > 0:
+                    ax.set_ylabel(f"${latex[i]}$")
+                if i < dim - 1:
+                    ax.tick_params(labelbottom=False)
+                if 0 < j < i:
+                    ax.tick_params(labelleft=False)
+
+        handles = [Patch(fc=p["color"], alpha=0.35, ec=p["color"], lw=1.5,
+                         label=p["label"] + (" (uniform)" if p["uniform"] else ""))
+                   for p in priors]
+        if reference is not None:
+            handles.append(Line2D([], [], color="black", lw=2, label="reference posterior"))
+        fig.suptitle(title or "Prior comparison", fontsize=15, weight="bold")
+        fig.tight_layout(rect=(0, 0, 1, 0.96))
+        if dim > 1:
+            # The hidden upper-right panel holds the legend.
+            corner = axes[0, dim - 1]
+            corner.set_visible(True)
+            corner.axis("off")
+            corner.legend(handles=handles, loc="upper right", bbox_to_anchor=(1.0, 1.0), fontsize=9, framealpha=0.9)
+        else:
+            axes[0, 0].legend(handles=handles, fontsize=10)
+        self.save_figure(fig, filename=filename or "compare_priors", save_dir=save_dir, dpi=dpi)
+        return fig, axes
 
     def _default_eig_axis_run_ids(self):
         """Return ``(run_id_x, run_id_y)`` defaults when exactly two run_ids are set."""
@@ -4833,7 +5122,471 @@ class ComparisonPlotter(BasePlotter):
             "label_y": axis_y["label"],
         }
         return fig, ax, stats
-    
+
+    def compare_eig_by_design_dim(
+        self,
+        runs=None,
+        x="relative",
+        y="difference",
+        design_labels=None,
+        colors=None,
+        show_errorbars=True,
+        alpha=0.85,
+        show_nominal=True,
+        show_target_limits=True,
+        dataset=None,
+        trend=None,
+        shade_infeasible=True,
+        ncols=4,
+        figsize=None,
+        title=None,
+        filename=None,
+        save_dir=None,
+        dpi=400,
+    ):
+        """Per-design EIG against each design dimension, one panel per dimension.
+
+        Unlike :meth:`compare_eig_correlation`, the runs need not share a design pool:
+        each run's designs are scattered at their own coordinates, so pools of different
+        extent show where each one sits along every dimension and where its best design
+        is (★).
+
+        Args:
+            runs (list, optional): Axis dicts as in :meth:`compare_eig_correlation`
+                (``eig_kind``, ``subset``, ``run_id``, ``eig_data_path``, ``eval_step``,
+                ``label``). Default: the joint EIG of every run in ``run_ids``.
+            x (str): ``"relative"`` plots each design dimension divided by the run's own
+                ``nominal_design`` (for num_tracers, fibers relative to the nominal
+                survey), which stays comparable across runs whose fractions divide
+                different budgets. ``"fraction"`` plots the design values as stored.
+            y (str): ``"difference"`` plots ``EIG - EIG_nominal`` in bits, ``"percent"``
+                plots ``100 * (EIG - EIG_nominal) / EIG_nominal``, both against each run's
+                own nominal EIG; ``"raw"`` plots EIG.
+            design_labels (list, optional): One name per design dimension, used as the
+                panel titles. Default: resolved from the runs (eig_data metadata, then
+                ``design_args.yaml`` ``labels``).
+            show_nominal (bool): Dotted line at the nominal design (1 when
+                ``x="relative"``, else the first run's ``nominal_design``).
+            show_target_limits (bool): Dashed line where every target of a class is
+                observed: per class, summed ``targets`` over summed ``comp * targets`` in the
+                dataset's ``desi_tracers.csv``. Panels whose label is not a class there get
+                none. Skipped with a warning when the dataset's table can't be found.
+            dataset (str, optional): The DESI dataset for ``show_target_limits``. Default:
+                the first run's ``dataset`` parameter.
+            alpha (float): Opacity of the design markers (and their error bars).
+            trend (str or None): ``"median"`` or ``"mean"`` draws a line per run through
+                that statistic of the designs at each value of the dimension; ``None``
+                (default) draws none. Designs sharing a value (a grid pool) are grouped by
+                it; a pool with too few repeated values is grouped into quantile bins
+                instead (:func:`_eig_trend`). Each point averages over whatever the other
+                dimensions do at that value, so it mixes their effects; for one
+                dimension's own effect see :meth:`compare_eig_response_traces`.
+            shade_infeasible (bool): Gray out x values no design can take. Only for
+                mixture pools (every design sums to the same total T), where each
+                dimension lies in [0, T], or [0, T / nominal] for ``x="relative"``
+                (:func:`_feasible_range`).
+
+        Returns:
+            tuple: ``(fig, axes, best)``; ``best`` has one dict per run with ``label``,
+            ``design`` (as stored) and ``value`` (on the plotted y scale) of its
+            highest-EIG design.
+        """
+        if x not in ("relative", "fraction"):
+            raise ValueError(f"x must be 'relative' or 'fraction'; got {x!r}")
+        if y not in ("difference", "percent", "raw"):
+            raise ValueError(f"y must be 'difference', 'percent' or 'raw'; got {y!r}")
+        if trend not in ("median", "mean", None):
+            raise ValueError(f"trend must be 'median', 'mean' or None; got {trend!r}")
+        run_ids = self.run_ids or []
+        if runs is None:
+            if not run_ids:
+                raise ValueError("runs is required unless the plotter has run_ids")
+            runs = [{**self._default_eig_axis_spec(), "run_id": rid} for rid in run_ids]
+        elif isinstance(runs, dict):
+            runs = [runs]
+        axes_data = [self._resolve_eig_axis(spec, axis_name=f"runs[{k}]")
+                     for k, spec in enumerate(runs)]
+        n_dims = {a["designs"].shape[1] for a in axes_data}
+        if len(n_dims) != 1:
+            raise ValueError(f"runs have different design dimensions: {sorted(n_dims)}")
+        n_dim = n_dims.pop()
+        if colors is not None and len(colors) != len(axes_data):
+            raise ValueError(f"colors has {len(colors)} entries for {len(axes_data)} runs")
+        labels = self._resolve_design_labels(
+            n_dim, design_labels,
+            metadata_label_sources=[a["design_labels"] for a in axes_data],
+            artifacts_dirs=[a["artifacts_dir"] for a in axes_data],
+        )
+
+        def nominal_design_of(axis):
+            return self._axis_nominal_design(axis, n_dim)
+
+        def x_values(axis):
+            if x == "fraction":
+                return axis["designs"]
+            nominal = nominal_design_of(axis)
+            if nominal is None or np.any(nominal <= 0):
+                raise ValueError(
+                    f"{axis['label']}: x='relative' needs a positive nominal_design in its "
+                    f"eig_data (got {None if nominal is None else nominal.tolist()}); pass "
+                    "x='fraction' to plot the stored design values")
+            return axis["designs"] / nominal
+
+        def y_values(axis):
+            if y == "raw":
+                return axis["eigs"], axis["eigs_std"]
+            nominal = axis["nominal_eig"]
+            if nominal is None or (y == "percent" and nominal == 0):
+                raise ValueError(
+                    f"{axis['label']}: y={y!r} needs a nominal EIG in its eig_data (got "
+                    f"{nominal!r}); pass y='raw' to plot EIG itself")
+            if y == "difference":
+                return axis["eigs"] - nominal, axis["eigs_std"]
+            return 100.0 * (axis["eigs"] - nominal) / nominal, 100.0 * axis["eigs_std"] / abs(nominal)
+
+        first_nominal = next(
+            (d for d in (nominal_design_of(a) for a in axes_data) if d is not None), None)
+        limits = self._target_limits(labels, axes_data, dataset) if show_target_limits else None
+        if limits is not None and x == "fraction":
+            limits = None if first_nominal is None else limits * first_nominal
+        feasible = _feasible_range(axes_data[0]["designs"]) if shade_infeasible else None
+
+        ncols = min(ncols, n_dim)
+        nrows = int(np.ceil(n_dim / ncols))
+        if figsize is None:
+            figsize = (4.2 * ncols, 3.6 * nrows + 0.6)
+        fig, axs = plt.subplots(nrows, ncols, figsize=figsize, squeeze=False, sharey=True,
+                                layout="constrained")
+        cycle = plt.rcParams["axes.prop_cycle"].by_key()["color"]
+        series = []
+        for k, axis in enumerate(axes_data):
+            vals, std = y_values(axis)
+            color = colors[k] if colors is not None else cycle[k % len(cycle)]
+            series.append((axis, x_values(axis), vals, std, color, int(np.argmax(vals))))
+
+        for j, ax in enumerate(axs.flat):
+            if j >= n_dim:
+                ax.set_visible(False)
+                continue
+            for axis, xs, vals, std, color, b in series:
+                if show_errorbars:
+                    ax.errorbar(xs[:, j], vals, yerr=std, fmt="o", ms=4.5, lw=0.8, color=color,
+                                alpha=alpha, mec="white", mew=0.5, label=axis["label"], zorder=2)
+                else:
+                    ax.scatter(xs[:, j], vals, s=24, color=color, alpha=alpha, edgecolor="white",
+                               linewidth=0.5, label=axis["label"], zorder=2)
+                ax.plot(xs[b, j], vals[b], marker="*", ms=15, color=color, mec="black", mew=0.7,
+                        ls="", zorder=4)
+                if trend is not None:
+                    tx, ty = _eig_trend(xs[:, j], vals, trend)
+                    if len(tx) >= 2:
+                        ax.plot(tx, ty, ls="-", lw=2.0, color=color, zorder=3, gid="trend")
+            if show_nominal:
+                at = 1.0 if x == "relative" else (None if first_nominal is None else first_nominal[j])
+                if at is not None:
+                    ax.axvline(at, color="0.2", ls=":", lw=1.1, zorder=1, label="nominal")
+            if limits is not None and np.isfinite(limits[j]):
+                ax.axvline(limits[j], color="tab:red", ls="--", lw=1.1, zorder=1,
+                           label="all targets observed")
+            if y != "raw":
+                ax.axhline(0, color="0.75", lw=0.8, zorder=0)
+            if feasible is not None:
+                scale = 1.0 if x == "fraction" else (
+                    None if first_nominal is None or first_nominal[j] <= 0 else 1.0 / first_nominal[j])
+                if scale is not None:
+                    _shade_outside(ax, feasible[0] * scale, feasible[1] * scale)
+            ax.set_title(labels[j])
+            ax.set_xlabel("design / nominal" if x == "relative" else "design fraction")
+            if j % ncols == 0:
+                ax.set_ylabel({"difference": "EIG − nominal EIG [bits]",
+                               "percent": "EIG vs nominal [%]", "raw": "EIG [bits]"}[y])
+            ax.grid(color="0.93")
+            ax.set_axisbelow(True)
+
+        handles, legend_labels = [], []
+        for ax in axs.flat[:n_dim]:
+            for h, l in zip(*ax.get_legend_handles_labels()):
+                if l not in legend_labels:
+                    handles.append(h)
+                    legend_labels.append(l)
+        handles.append(Line2D([], [], marker="*", ls="", ms=12, color="0.75", mec="black"))
+        legend_labels.append("best design in each run")
+        if trend is not None:
+            handles.append(Line2D([], [], ls="-", lw=2.0, color="0.45"))
+            legend_labels.append(f"{trend} over designs at each value")
+        fig.legend(handles, legend_labels, loc="outside upper center",
+                   ncol=min(len(handles), 6), fontsize=9, frameon=False)
+        if title is not None:
+            fig.suptitle(title, fontsize=11)
+
+        if filename is None:
+            filename = "compare_eig_by_design_dim"
+        _, experiment_id, _ = self._get_run_data_list(parse_params=False)
+        if save_dir is None and experiment_id is not None:
+            save_dir = self.get_save_dir(experiment_id=experiment_id, subdir="plots")
+        self.save_figure(fig, filename=filename, save_dir=save_dir, dpi=dpi)
+        best = [{"label": axis["label"], "design": axis["designs"][b].tolist(),
+                 "value": float(vals[b])} for axis, _, vals, _, _, b in series]
+        return fig, axs, best
+
+    @staticmethod
+    def _axis_nominal_design(axis, n_dim):
+        """The ``nominal_design`` recorded in an axis's eig_data file, or None."""
+        if axis["eig_data_path"] is None:
+            return None
+        with open(axis["eig_data_path"], "r") as f:
+            design = json.load(f).get("nominal_design")
+        if design is None or len(design) != n_dim:
+            return None
+        return np.asarray(design, dtype=float)
+
+    def compare_eig_response_traces(
+        self,
+        runs=None,
+        order="quadratic",
+        reference="nominal",
+        y="difference",
+        design_labels=None,
+        colors=None,
+        band=0,
+        n_peak_draws=1000,
+        show_nominal=True,
+        show_target_limits=True,
+        dataset=None,
+        shade_infeasible=True,
+        ncols=4,
+        figsize=None,
+        title=None,
+        filename=None,
+        save_dir=None,
+        dpi=400,
+    ):
+        """How EIG responds to each design dimension alone, from a surface fit per run.
+
+        Each run's (design, EIG) pool is fit with a polynomial response surface
+        (:class:`bedcosmo.response_surface.ResponseSurface`), and each panel evaluates it
+        along one dimension's effect path through ``reference``. Pools whose designs sum
+        to a constant (fractions of a fixed budget) get a Scheffe mixture fit and a Cox
+        path: the dimension moves while the others keep their reference proportions to
+        each other. Other design spaces get an ordinary polynomial and the others held at
+        the reference. Paths span each dimension's pooled range.
+
+        Where :meth:`compare_eig_by_design_dim` plots the designs themselves (each value
+        of a dimension mixes whatever the others do there), this isolates one dimension
+        at a time, at the cost of being a model of the pool, not the pool itself; check
+        each run's fit quality (``r2``, ``loo_rmse``) in the returned ``fits``.
+
+        Args:
+            runs (list, optional): Axis dicts as in :meth:`compare_eig_by_design_dim`.
+            order (str): ``"linear"``, ``"quadratic"`` (default) or ``"cubic"``.
+            reference (str or array): ``"nominal"`` (each run's ``nominal_design``),
+                ``"best"`` (its highest-EIG design), ``"mean"`` (the pool's mean design),
+                or an explicit design.
+            y (str): ``"difference"`` plots the fit minus its value at the reference
+                (every trace passes 0 there); ``"raw"`` plots the fitted EIG.
+            band (float): Two-sided percentage of the least-squares confidence band
+                shaded around each path (:meth:`ResponseSurface.confidence_band`), relative
+                to the reference with ``y="difference"``; 0 (default) for none. The band
+                assumes the residuals are independent noise; for an EIG pool they are
+                mostly the polynomial's misfit, so read it as fit precision, not as
+                uncertainty on the response. ``fits[k]["loo_rmse"]`` is the fit's honest typical error.
+            n_peak_draws (int): With a ``band``, coefficient sets drawn from the fit's
+                covariance to place each peak's range bar (the central ``band`` percent of
+                where the path's maximum falls); 0 for no bars. Same caveat as ``band``.
+            show_nominal, show_target_limits, dataset, shade_infeasible: As in
+                :meth:`compare_eig_by_design_dim`, in stored design units.
+
+        Returns:
+            tuple: ``(fig, axes, fits)``; one dict per run with ``label``, ``mixture``,
+            ``order``, ``r2``, ``rmse``, ``loo_rmse``, ``reference`` and ``peaks`` (per
+            dimension, the path's ``x`` and ``value`` at its maximum, and ``x_lo``/``x_hi``
+            of the peak's range when there are peak draws).
+        """
+        from bedcosmo.response_surface import ResponseSurface
+
+        if y not in ("difference", "raw"):
+            raise ValueError(f"y must be 'difference' or 'raw'; got {y!r}")
+        run_ids = self.run_ids or []
+        if runs is None:
+            if not run_ids:
+                raise ValueError("runs is required unless the plotter has run_ids")
+            runs = [{**self._default_eig_axis_spec(), "run_id": rid} for rid in run_ids]
+        elif isinstance(runs, dict):
+            runs = [runs]
+        axes_data = [self._resolve_eig_axis(spec, axis_name=f"runs[{k}]")
+                     for k, spec in enumerate(runs)]
+        n_dims = {a["designs"].shape[1] for a in axes_data}
+        if len(n_dims) != 1:
+            raise ValueError(f"runs have different design dimensions: {sorted(n_dims)}")
+        n_dim = n_dims.pop()
+        if colors is not None and len(colors) != len(axes_data):
+            raise ValueError(f"colors has {len(colors)} entries for {len(axes_data)} runs")
+        labels = self._resolve_design_labels(
+            n_dim, design_labels,
+            metadata_label_sources=[a["design_labels"] for a in axes_data],
+            artifacts_dirs=[a["artifacts_dir"] for a in axes_data],
+        )
+
+        def reference_of(axis):
+            designs = np.asarray(axis["designs"], dtype=float)
+            if isinstance(reference, str):
+                if reference == "nominal":
+                    ref = self._axis_nominal_design(axis, n_dim)
+                    if ref is None:
+                        raise ValueError(
+                            f"{axis['label']}: reference='nominal' needs a nominal_design "
+                            "in its eig_data; pass reference='best', 'mean' or a design")
+                    return ref
+                if reference == "best":
+                    return designs[int(np.argmax(axis["eigs"]))]
+                if reference == "mean":
+                    return designs.mean(axis=0)
+                raise ValueError(
+                    f"reference must be 'nominal', 'best', 'mean' or a design; got {reference!r}")
+            ref = np.asarray(reference, dtype=float)
+            if ref.shape != (n_dim,):
+                raise ValueError(f"reference has shape {ref.shape}; expected ({n_dim},)")
+            return ref
+
+        first_nominal = next(
+            (d for d in (self._axis_nominal_design(a, n_dim) for a in axes_data) if d is not None),
+            None)
+        limits = self._target_limits(labels, axes_data, dataset) if show_target_limits else None
+        if limits is not None:
+            limits = None if first_nominal is None else limits * first_nominal
+
+        ncols = min(ncols, n_dim)
+        nrows = int(np.ceil(n_dim / ncols))
+        if figsize is None:
+            figsize = (4.2 * ncols, 3.6 * nrows + 0.6)
+        fig, axs = plt.subplots(nrows, ncols, figsize=figsize, squeeze=False, sharey=True,
+                                layout="constrained")
+        cycle = plt.rcParams["axes.prop_cycle"].by_key()["color"]
+        lo_q, hi_q = 50 - band / 2, 50 + band / 2
+
+        fits = []
+        for k, axis in enumerate(axes_data):
+            color = colors[k] if colors is not None else cycle[k % len(cycle)]
+            surface = ResponseSurface(axis["designs"], axis["eigs"], order=order)
+            ref = reference_of(axis)
+            draws = surface.sample_coefs(n_peak_draws) if n_peak_draws and band else None
+            name = f"{axis['label']} ({order} fit)"
+            peaks = []
+            for j, ax in enumerate(axs.flat[:n_dim]):
+                t, path = surface.trace(j, ref)
+                vals, half = surface.confidence_band(
+                    path, level=band or 68, reference=ref if y == "difference" else None)
+                m = int(np.argmax(vals))
+                peak = {"x": float(t[m]), "value": float(vals[m])}
+                if band:
+                    ax.fill_between(t, vals - half, vals + half, color=color, alpha=0.25, lw=0,
+                                    zorder=1)
+                if draws is not None:
+                    A = surface._basis(path)
+                    if y == "difference":
+                        A = A - surface._basis(ref[None])
+                    x_lo, x_hi = np.percentile(t[np.argmax(draws @ A.T, axis=1)], [lo_q, hi_q])
+                    peak.update(x_lo=float(min(x_lo, peak["x"])), x_hi=float(max(x_hi, peak["x"])))
+                    ax.errorbar(peak["x"], peak["value"],
+                                xerr=[[peak["x"] - peak["x_lo"]], [peak["x_hi"] - peak["x"]]],
+                                fmt="none", ecolor=color, elinewidth=1.6, capsize=4, capthick=1.6,
+                                zorder=4, gid="peak_range")
+                ax.plot(t, vals, color=color, lw=2.0, label=name, zorder=3)
+                ax.plot(t[m], vals[m], marker="o", ms=7, color=color, mec="black", mew=0.7,
+                        ls="", zorder=5)
+                peaks.append(peak)
+            fits.append({"label": axis["label"], "mixture": surface.mixture, "order": order,
+                         "r2": surface.r2, "rmse": surface.rmse, "loo_rmse": surface.loo_rmse,
+                         "reference": ref.tolist(), "peaks": peaks})
+
+        path_note = ("others in reference proportions" if fits and fits[0]["mixture"]
+                     else "others at the reference")
+        feasible = _feasible_range(axes_data[0]["designs"]) if shade_infeasible else None
+        for j, ax in enumerate(axs.flat):
+            if j >= n_dim:
+                ax.set_visible(False)
+                continue
+            if show_nominal and first_nominal is not None:
+                ax.axvline(first_nominal[j], color="0.2", ls=":", lw=1.1, zorder=1, label="nominal")
+            if limits is not None and np.isfinite(limits[j]):
+                ax.axvline(limits[j], color="tab:red", ls="--", lw=1.1, zorder=1,
+                           label="all targets observed")
+            if y == "difference":
+                ax.axhline(0, color="0.75", lw=0.8, zorder=0)
+            if feasible is not None:
+                _shade_outside(ax, *feasible)
+            ax.set_title(labels[j])
+            ax.set_xlabel(f"{labels[j]} ({path_note})")
+            if j % ncols == 0:
+                ax.set_ylabel("fitted EIG − reference [bits]" if y == "difference"
+                              else "fitted EIG [bits]")
+            ax.grid(color="0.93")
+            ax.set_axisbelow(True)
+
+        handles, legend_labels = [], []
+        for ax in axs.flat[:n_dim]:
+            for h, l in zip(*ax.get_legend_handles_labels()):
+                if l not in legend_labels:
+                    handles.append(h)
+                    legend_labels.append(l)
+        handles.append(Line2D([], [], marker="o", ls="", ms=7, color="0.75", mec="black"))
+        legend_labels.append("peak of each path")
+        if band:
+            handles.append(Patch(color="0.6", alpha=0.35, lw=0))
+            legend_labels.append(f"{band:g}% confidence band of the fit")
+            if n_peak_draws:
+                handles.append(Line2D([], [], color="0.4", lw=1.6, marker="|", ms=8, mew=1.6))
+                legend_labels.append(f"{band:g}% range of the peak")
+        fig.legend(handles, legend_labels, loc="outside upper center",
+                   ncol=min(len(handles), 6), fontsize=9, frameon=False)
+        if title is not None:
+            fig.suptitle(title, fontsize=11)
+
+        if filename is None:
+            filename = "compare_eig_response_traces"
+        _, experiment_id, _ = self._get_run_data_list(parse_params=False)
+        if save_dir is None and experiment_id is not None:
+            save_dir = self.get_save_dir(experiment_id=experiment_id, subdir="plots")
+        self.save_figure(fig, filename=filename, save_dir=save_dir, dpi=dpi)
+        return fig, axs, fits
+
+    @staticmethod
+    def _target_limits(labels, axes_data, dataset=None):
+        """Per-label ``targets / observed`` ratio from ``desi_tracers.csv``, or None.
+
+        Each class's summed ``targets`` over its summed ``comp * targets`` (observed =
+        completeness x targets), i.e. how far above nominal a class can go before every
+        target has a fiber. NaN for labels that aren't a class in the table.
+        """
+        import pandas as pd
+
+        if dataset is None:
+            for axis in axes_data:
+                if axis["artifacts_dir"] is None:
+                    continue
+                param = os.path.join(os.path.dirname(axis["artifacts_dir"].rstrip("/")),
+                                     "params", "dataset")
+                if os.path.exists(param):
+                    with open(param, "r") as f:
+                        dataset = f.read().strip()
+                    break
+        if dataset is None:
+            warnings.warn("show_target_limits: no dataset given or recorded by the runs; "
+                          "skipping the target limits")
+            return None
+        csv = os.path.join(home_dir, "data", "desi", f"bao_{dataset}", "desi_tracers.csv")
+        if not os.path.exists(csv):
+            warnings.warn(f"show_target_limits: {csv} not found; skipping the target limits")
+            return None
+        table = pd.read_csv(csv)
+        table["observed_count"] = table["comp"] * table["targets"]
+        by_class = table.groupby("class")[["targets", "observed_count"]].sum()
+        return np.array([
+            by_class.loc[label, "targets"] / by_class.loc[label, "observed_count"]
+            if label in by_class.index else np.nan
+            for label in labels
+        ])
+
     def compare_optimal_designs(
         self,
         eval_step=None,
@@ -4847,6 +5600,8 @@ class ComparisonPlotter(BasePlotter):
         cmap='viridis',
         nominal_design=None,
         var=None,
+        show_eigs=True,
+        heatmap_color="ratio",
         filename=None,
         save_dir=None,
         dpi=400
@@ -4855,14 +5610,16 @@ class ComparisonPlotter(BasePlotter):
         Compare optimal designs (or top N best designs) across multiple runs.
         
         When top_n=1 (default), displays optimal designs as bar charts (1D) or grouped bar charts (multi-dimensional).
-        When top_n>1, displays top N designs per run as a heatmap with visual separation between runs.
+        When top_n>1, displays each run's own top N designs as a heatmap (cells labelled with the
+        design values), with visual separation between runs, under a panel of their EIGs ± std
+        (``show_eigs``). Runs need not share a design pool.
         
         Args:
             eval_step (str or int, optional): Which step to use. If None, finds most recent eig_data file
             top_n (int): Number of designs to plot from each run (default: 1). When top_n=1, uses bar chart. When top_n>1, uses heatmap.
             figsize (tuple): Figure size (width, height)
             dpi (int): Resolution for saved figure
-            colors (list, optional): Colors for each run. If None, uses default color cycle (only used for top_n=1)
+            colors (list, optional): Colors for each run (bars for top_n=1, EIG points for top_n>1). If None, uses default color cycle
             title (str, optional): Custom title for the plot. If None, generates default title
             log_scale (bool): Whether to use log scale for y-axis (default: True, only used for top_n=1)
             display_mode (str): How to display design values for top_n=1. Options: 'absolute', 'fractional', or 'ratio' (default: 'absolute')
@@ -4871,6 +5628,14 @@ class ComparisonPlotter(BasePlotter):
             nominal_design (list, optional): Nominal design as a list of floats for top_n>1. If provided, colors will be plotted as ratios relative to this nominal design.
             var (str or list, optional): Parameter(s) from MLflow run params to include in the label.
                 Defaults to ``self.var`` from ``__init__`` when omitted.
+            show_eigs (bool): For top_n>1, draw each top design's EIG ± std in a panel above the
+                heatmap (default: True).
+            heatmap_color (str): For top_n>1, what the cell colors encode: ``"ratio"`` (default)
+                the design value over the nominal design on a diverging map centered at 1,
+                when a nominal is available; ``"value"`` the design value itself on ``cmap``,
+                from 0 when every value is nonnegative (fractions). Ratios stop reading
+                well on wide pools, where a class goes from far below nominal to many
+                times it; values stay comparable across classes.
         
         Returns:
             fig, ax: Matplotlib figure and axes objects
@@ -5117,17 +5882,12 @@ class ComparisonPlotter(BasePlotter):
                 plot_colors = list(colors) if colors else [plt.rcParams['axes.prop_cycle'].by_key()['color'][i % len(plt.rcParams['axes.prop_cycle'].by_key()['color'])] for i in range(len(optimal_designs))]
                 
                 if include_nominal:
-                    nominal_values = []
-                    nominal_labels = []
-                    for i, nominal_design in enumerate(nominal_designs):
-                        if nominal_design is not None:
-                            nominal_values.append(nominal_design[0])
-                            nominal_labels.append(f'Nominal ({found_run_ids[i][:8]})')
-                    if nominal_values:
-                        design_values = nominal_values + design_values
+                    nominal_plot_designs, nominal_labels = _distinct_nominals(
+                        nominal_designs, found_run_ids)
+                    if nominal_plot_designs:
+                        design_values = [d[0] for d in nominal_plot_designs] + design_values
                         plot_labels = nominal_labels + plot_labels
-                        nominal_colors = ['tab:blue'] * len(nominal_values)
-                        plot_colors = nominal_colors + plot_colors
+                        plot_colors = [NOMINAL_BAR_COLOR] * len(nominal_plot_designs) + plot_colors
                 
                 x_pos = np.arange(len(design_values))
                 bars = ax.bar(x_pos, design_values, color=plot_colors, alpha=0.7, linewidth=1.5)
@@ -5151,17 +5911,12 @@ class ComparisonPlotter(BasePlotter):
                 plot_colors = list(colors) if colors else [plt.rcParams['axes.prop_cycle'].by_key()['color'][i % len(plt.rcParams['axes.prop_cycle'].by_key()['color'])] for i in range(len(optimal_designs))]
                 
                 if include_nominal:
-                    nominal_plot_designs = []
-                    nominal_plot_labels = []
-                    for i, nominal_design in enumerate(nominal_designs):
-                        if nominal_design is not None:
-                            nominal_plot_designs.append(nominal_design)
-                            nominal_plot_labels.append(f'Nominal ({found_run_ids[i][:8]})')
+                    nominal_plot_designs, nominal_plot_labels = _distinct_nominals(
+                        nominal_designs, found_run_ids)
                     if nominal_plot_designs:
                         plot_designs = nominal_plot_designs + plot_designs
                         plot_labels = nominal_plot_labels + plot_labels
-                        nominal_colors = ['tab:blue'] * len(nominal_plot_designs)
-                        plot_colors = nominal_colors + plot_colors
+                        plot_colors = [NOMINAL_BAR_COLOR] * len(nominal_plot_designs) + plot_colors
                 
                 n_designs_to_plot = len(plot_designs)
                 width = 0.8 / n_designs_to_plot
@@ -5196,6 +5951,8 @@ class ComparisonPlotter(BasePlotter):
             
             # Find and load JSON files for each run
             all_run_top_designs = []
+            all_run_top_eigs = []
+            all_run_top_eig_stds = []
             found_run_ids = []
             run_boundaries = []
             
@@ -5257,6 +6014,7 @@ class ComparisonPlotter(BasePlotter):
                     
                     designs = np.array(data['input_designs'])
                     eigs = np.array(variable_data['eigs_avg'])
+                    eig_stds = np.array(variable_data.get('eigs_std', np.full(len(eigs), np.nan)))
                     
                     if len(designs) != len(eigs):
                         print(f"Warning: Mismatch - {len(designs)} designs but {len(eigs)} EIG values for run {run_id}")
@@ -5270,6 +6028,8 @@ class ComparisonPlotter(BasePlotter):
                         top_designs = top_designs.reshape(1, -1)
                     
                     all_run_top_designs.append(top_designs)
+                    all_run_top_eigs.append(eigs[top_n_indices])
+                    all_run_top_eig_stds.append(eig_stds[top_n_indices])
                     found_run_ids.append(run_id)
                         
                 except Exception as e:
@@ -5286,6 +6046,9 @@ class ComparisonPlotter(BasePlotter):
                 order = [id_to_idx[rid] for rid in sorted_ids]
                 found_run_ids = [found_run_ids[i] for i in order]
                 all_run_top_designs = [all_run_top_designs[i] for i in order]
+                all_run_top_eigs = [all_run_top_eigs[i] for i in order]
+                all_run_top_eig_stds = [all_run_top_eig_stds[i] for i in order]
+            run_color_map = self._resolve_run_color_map(run_data_list, found_run_ids, colors=colors)
             
             # Combine all designs into a single array
             combined_designs = np.concatenate(all_run_top_designs, axis=0)
@@ -5338,10 +6101,12 @@ class ComparisonPlotter(BasePlotter):
             elif experiment_nominal_design is not None:
                 nominal_design = experiment_nominal_design
 
-            # Compute ratios relative to nominal if available
+            if heatmap_color not in ("ratio", "value"):
+                raise ValueError(f"heatmap_color must be 'ratio' or 'value'; got {heatmap_color!r}")
+            # Compute ratios relative to nominal if available (and asked for)
             plot_data = combined_designs.copy()
             use_relative_colors = False
-            if nominal_design is not None:
+            if nominal_design is not None and heatmap_color == "ratio":
                 if len(nominal_design) != combined_designs.shape[1]:
                     raise ValueError(f"nominal_design length ({len(nominal_design)}) must match number of design dimensions ({combined_designs.shape[1]})")
 
@@ -5352,11 +6117,33 @@ class ComparisonPlotter(BasePlotter):
                 use_relative_colors = True
                 cmap = 'RdBu'
             
-            # Create figure with space for colorbar
+            # The colorbar gets its own column beside the heatmap only. With show_eigs, an EIG
+            # panel sits above the heatmap, sharing its columns, over an empty colorbar slot.
             fig = plt.figure(figsize=figsize)
-            fig.subplots_adjust(left=0.06, right=0.99)
-            
-            ax = fig.add_subplot(111)
+            if show_eigs:
+                grid = fig.add_gridspec(2, 2, height_ratios=[1, 2.2], width_ratios=[1, 0.025],
+                                        hspace=0.06, wspace=0.03)
+                ax_eig = fig.add_subplot(grid[0, 0])
+                ax = fig.add_subplot(grid[1, 0], sharex=ax_eig)
+                cax = fig.add_subplot(grid[1, 1])
+                ax_eig.tick_params(labelbottom=False)
+                for k, (start_idx, end_idx) in enumerate(run_boundaries):
+                    x = np.arange(start_idx, end_idx)
+                    eig, std = all_run_top_eigs[k], all_run_top_eig_stds[k]
+                    ax_eig.errorbar(x, eig, yerr=std, color=run_color_map[found_run_ids[k]], marker='o',
+                                    markersize=7, linestyle='none', capsize=3)
+                    for xi, yi, si in zip(x, eig, std):
+                        ax_eig.annotate(f'{yi:.3f}', (xi, yi + (si if np.isfinite(si) else 0)),
+                                        textcoords='offset points', xytext=(0, 4), ha='center', fontsize=9)
+                    if start_idx > 0:
+                        ax_eig.axvline(start_idx - 0.5, color='gray', linewidth=1, alpha=0.5)
+                ax_eig.set_ylabel('EIG [bits]', fontsize=12, weight='bold')
+                ax_eig.grid(True, axis='y', alpha=0.3)
+                ax_eig.margins(y=0.25)
+            else:
+                grid = fig.add_gridspec(1, 2, width_ratios=[1, 0.025], wspace=0.03)
+                ax = fig.add_subplot(grid[0, 0])
+                cax = fig.add_subplot(grid[0, 1])
             
             # Plot heatmap using imshow
             if use_relative_colors:
@@ -5366,7 +6153,17 @@ class ComparisonPlotter(BasePlotter):
                 norm = TwoSlopeNorm(vmin=vmin, vcenter=1.0, vmax=vmax)
                 im = ax.imshow(plot_data.T, aspect='auto', cmap=cmap, norm=norm)
             else:
-                im = ax.imshow(plot_data.T, aspect='auto', cmap=cmap)
+                vmin = 0.0 if np.all(plot_data >= 0) else None
+                im = ax.imshow(plot_data.T, aspect='auto', cmap=cmap, vmin=vmin)
+            
+            # Each cell shows its design value; dark cells get light text
+            for col, design in enumerate(combined_designs):
+                for row, value in enumerate(design):
+                    shade = im.norm(plot_data[col, row])
+                    # Diverging maps are dark at both ends; sequential ones (viridis) at the low end.
+                    dark = abs(shade - 0.5) > 0.3 if use_relative_colors else shade < 0.45
+                    ax.text(col, row, f'{value:.3g}', ha='center', va='center', fontsize=9,
+                            color='white' if dark else 'black')
             
             # Add vertical lines to separate runs
             for start_idx, end_idx in run_boundaries:
@@ -5390,17 +6187,13 @@ class ComparisonPlotter(BasePlotter):
             ax.set_xticklabels(x_tick_labels)
             ax.set_xlim(-0.5, len(combined_designs) - 0.5)
             
-            # Add colorbar
-            cbar = fig.colorbar(im, ax=ax, fraction=0.03, pad=0.02)
+            cbar = fig.colorbar(im, cax=cax)
             if use_relative_colors:
                 cbar.set_label('Ratio to Nominal Design', labelpad=10, fontsize=12, weight='bold')
             else:
                 cbar.set_label('Design Value', labelpad=10, fontsize=12, weight='bold')
             
             # Configure axis appearance
-            ax.spines['top'].set_visible(False)
-            ax.spines['right'].set_visible(True)
-            ax.spines['left'].set_visible(True)
             ax.tick_params(axis='y', length=0)
             ax.margins(x=0)
             
@@ -5412,9 +6205,10 @@ class ComparisonPlotter(BasePlotter):
                     title = f'Top {top_n} Designs Comparison - {self.mlflow_exp}'
                 else:
                     title = f'Top {top_n} Designs Comparison Across Runs'
-            ax.set_title(title, fontsize=14, weight='bold', pad=20)
+            (ax_eig if show_eigs else ax).set_title(title, fontsize=14, weight='bold', pad=20)
         
-        plt.tight_layout()
+        if top_n == 1:
+            plt.tight_layout()
         
         # Save figure depending on filename/save_dir in kwargs
         if filename is None:
@@ -6211,154 +7005,14 @@ class ComparisonPlotter(BasePlotter):
 # Standalone Plotting Functions (for backward compatibility and utilities)
 # ============================================================================
 
-def compare_increasing_design(
-        mlflow_exp=None,
-        run_ids=None,
-        excluded_runs=[],
-        cosmo_exp='num_tracers',
-        labels=None,
-        eval_step=None,
-        save_path=None,
-        figsize=(14, 8),
-        dpi=400,
-        colors=None,
-        title=None,
-        log_scale=True,
-        use_fractional=False,
-        include_nominal=False,
-        ref_id=None
-    ):
+def _load_increasing_design_runs(mlflow_exp, run_ids, excluded_runs, cosmo_exp, storage_path,
+                                 eval_step):
+    """Optimal design and EIG per run, from each run's latest completed eig_data file.
+
+    Returns a dict with ``run_data_list``, ``found_run_ids``, ``optimal_designs``,
+    ``optimal_eigs``, ``optimal_eig_stds``, ``design_labels`` and the first run's
+    ``nominal_eig`` / ``nominal_eig_std``.
     """
-    Compare increasing quantities for fixed design.
-    
-    Args:
-        mlflow_exp (str, optional): Name of the MLflow experiment. If provided, all runs in this experiment will be used.
-        run_ids (list, optional): List of MLflow run IDs to compare. If provided, mlflow_exp is ignored.
-        excluded_runs (list): List of run IDs to exclude.
-        cosmo_exp (str): Cosmological experiment name (default: 'num_tracers')
-        labels (list, optional): Labels for each run. If None, uses run IDs (first 8 chars)
-        eval_step (str or int, optional): Which step to use. If None, finds most recent eig_data file
-        save_path (str, optional): Path to save the comparison plot. If None, doesn't save
-        figsize (tuple): Figure size (width, height)
-        dpi (int): Resolution for saved figure
-        colors (list, optional): Colors for each run. If None, uses a continuous colormap for increasing designs
-        title (str, optional): Custom title for the plot. If None, generates default title
-        log_scale (bool): Whether to use log scale for y-axis (default: True)
-        use_fractional (bool): Whether to plot fractional values or absolute quantities (default: False)
-        include_nominal (bool): Whether to include nominal design bars on the left (default: False)
-        ref_id (str, optional): Reference run ID to use for nominal design, nominal EIG, and optimal EIG
-    
-    Returns:
-        fig, ax: Matplotlib figure and axes objects
-    """
-    # Set MLflow tracking URI
-    storage_path = os.environ["SCRATCH"] + f"/bedcosmo/{cosmo_exp}"
-    
-    # Load reference run data if ref_id is provided
-    ref_nominal_design = None
-    ref_nominal_eig = None
-    ref_nominal_eig_std = None
-    ref_optimal_eig = None
-    ref_optimal_eig_std = None
-    ref_optimal_design = None
-    ref_run_data_list = []
-    if ref_id is not None:
-        try:
-            # Get reference run's experiment ID
-            ref_run_data_list, _, _ = get_runs_data(
-                run_ids=[ref_id],
-                parse_params=True,
-                cosmo_exp=cosmo_exp
-            )
-            if not ref_run_data_list:
-                print(f"Warning: Reference run {ref_id} not found, skipping reference data...")
-            else:
-                ref_run_data = ref_run_data_list[0]
-                ref_run_id = ref_run_data['run_id']
-                ref_exp_id = ref_run_data['exp_id']
-                ref_artifacts_dir = f"{storage_path}/mlruns/{ref_exp_id}/{ref_run_id}/artifacts"
-                
-                if os.path.exists(ref_artifacts_dir):
-                    # Load completed reference eig_data file
-                    try:
-                        ref_json_path, ref_data = load_eig_data_file(
-                            ref_artifacts_dir, eval_step=None, eig_kind='variable'
-                        )
-                        if ref_data is not None:
-                            print(f"Loaded reference EIG data from {ref_json_path}")
-                            
-                            # Determine which step to use
-                            if eval_step is not None:
-                                step_str = f"step_{eval_step}"
-                            else:
-                                # Find the highest available step key
-                                step_keys = [k for k in ref_data.keys() if k.startswith('step_')]
-                                if step_keys:
-                                    # Extract step numbers and find the highest
-                                    step_numbers = []
-                                    for k in step_keys:
-                                        try:
-                                            step_num = int(k.split('_')[1])
-                                            step_numbers.append((step_num, k))
-                                        except (ValueError, IndexError):
-                                            continue
-                                    if step_numbers:
-                                        step_str = max(step_numbers, key=lambda x: x[0])[1]
-                                    else:
-                                        step_str = step_keys[0]  # Fallback to first if parsing fails
-                                else:
-                                    print(f"Warning: No step data found in reference file {ref_json_path}")
-                                    step_str = None
-                            
-                            if step_str and step_str in ref_data:
-                                step_data = ref_data[step_str]
-                                
-                                # Access nested structure
-                                variable_data = step_data.get('variable', {})
-                                nominal_data = step_data.get('nominal', {})
-                                
-                                # Extract nominal_eig from nominal subdict (scalar value from eigs_avg)
-                                nominal_eig_val = nominal_data.get('eigs_avg')
-                                if nominal_eig_val is not None:
-                                    if isinstance(nominal_eig_val, list) and len(nominal_eig_val) > 0:
-                                        nominal_eig_val = nominal_eig_val[0]
-                                    if isinstance(nominal_eig_val, (int, float)):
-                                        ref_nominal_eig = nominal_eig_val
-                                
-                                nominal_eig_std_val = nominal_data.get('eigs_std')
-                                if nominal_eig_std_val is not None:
-                                    if isinstance(nominal_eig_std_val, list) and len(nominal_eig_std_val) > 0:
-                                        nominal_eig_std_val = nominal_eig_std_val[0]
-                                    if isinstance(nominal_eig_std_val, (int, float)):
-                                        ref_nominal_eig_std = nominal_eig_std_val
-                                
-                                if 'optimal_eig' in variable_data:
-                                    ref_optimal_eig = variable_data['optimal_eig']
-                                
-                                if 'optimal_eig_std' in variable_data and isinstance(variable_data['optimal_eig_std'], (int, float)):
-                                    ref_optimal_eig_std = variable_data['optimal_eig_std']
-                                
-                                if 'optimal_design' in variable_data:
-                                    ref_optimal_design = np.array(variable_data['optimal_design'])
-                                
-                                # Use nominal_design stored in the reference eig_data without initializing an experiment
-                                if include_nominal:
-                                    if 'nominal_design' in ref_data:
-                                        ref_nominal_design = np.array(ref_data['nominal_design'])
-                        else:
-                            print(f"Warning: No completed reference eig_data file found, skipping reference data...")
-                            ref_data = None
-                    except ValueError as e:
-                        print(f"Warning: {e}, skipping reference data...")
-                        ref_data = None
-                else:
-                    print(f"Warning: Artifacts directory not found for reference run {ref_id}")
-        except (ValueError, OSError, KeyError) as e:
-            # Expected "reference data is missing/malformed" cases -> skip the
-            # reference overlay. Programming errors (NameError, TypeError, ...)
-            # deliberately propagate instead of being masked as a warning.
-            print(f"Warning: Error loading reference run {ref_id}: {e}")
-    
     # Get run data - can use either mlflow_exp or run_ids
     run_data_list, experiment_id_for_save_path, actual_mlflow_exp_for_title = get_runs_data(
         mlflow_exp=mlflow_exp,
@@ -6437,9 +7091,8 @@ def compare_increasing_design(
             
             step_data = data[step_str]
             
-            # Access nested structure
             variable_data = step_data.get('variable', {})
-            nominal_data = step_data.get('nominal', {})
+            legacy_nominal = step_data.get('nominal')
                 
             # Extract optimal design and EIG from variable subdict
             if 'optimal_design' in variable_data and 'optimal_eig' in variable_data:
@@ -6453,26 +7106,10 @@ def compare_increasing_design(
                 optimal_eig_stds.append(optimal_eig_std_value)
                 found_run_ids.append(run_id)
                 
-                # Get design labels from experiment (will be initialized later if needed)
-                # For now, we'll get them from the experiment initialization below
-                
-                # Extract nominal_eig from first run's data (for scatter plot in compare_increasing_design)
-                # Only do this in compare_increasing_design - check if include_nominal is in scope
-                if 'include_nominal' in locals() and include_nominal:
-                    nominal_eig_val = nominal_data.get('eigs_avg')
-                    if nominal_eig_val is not None:
-                        if isinstance(nominal_eig_val, list) and len(nominal_eig_val) > 0:
-                            nominal_eig_val = nominal_eig_val[0]
-                        if isinstance(nominal_eig_val, (int, float)):
-                            if nominal_eig is None:
-                                nominal_eig = nominal_eig_val
-                    nominal_eig_std_val = nominal_data.get('eigs_std')
-                    if nominal_eig_std_val is not None:
-                        if isinstance(nominal_eig_std_val, list) and len(nominal_eig_std_val) > 0:
-                            nominal_eig_std_val = nominal_eig_std_val[0]
-                        if isinstance(nominal_eig_std_val, (int, float)):
-                            if nominal_eig_std is None:
-                                nominal_eig_std = nominal_eig_std_val
+                # The first run's nominal-design EIG (a reference run is a single run).
+                if nominal_eig is None:
+                    nominal_eig = nominal_value(data, variable_data, legacy_nominal)
+                    nominal_eig_std = nominal_value(data, variable_data, legacy_nominal, 'eigs_std')
             else:
                 print(f"Warning: No optimal_design data found in {json_path} for {step_str}, skipping...")
                 continue
@@ -6481,6 +7118,170 @@ def compare_increasing_design(
             print(f"Warning: Error loading {json_path}: {e}, skipping...")
             continue
     
+
+    return {
+        "run_data_list": run_data_list, "found_run_ids": found_run_ids,
+        "optimal_designs": optimal_designs, "optimal_eigs": optimal_eigs,
+        "optimal_eig_stds": optimal_eig_stds, "design_labels": design_labels,
+        "nominal_eig": nominal_eig, "nominal_eig_std": nominal_eig_std,
+    }
+
+
+def _plot_increasing_design_groups(groups, refs, figsize, dpi, save_path):
+    """EIG vs % increase in total observations, one line (plus dashed linear fit) per group.
+
+    ``refs`` maps a group to its reference run's loaded data; that run's optimal EIG is a
+    dotted line in the group's color, with the % increase where the group's fit reaches it.
+    """
+    group_colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
+    fig2, ax2 = plt.subplots(figsize=figsize)
+    for k, (group, loaded) in enumerate(groups.items()):
+        if not loaded["optimal_eigs"]:
+            raise ValueError(f"Group {group!r} has no runs with a completed eig_data file")
+        color = group_colors[k % len(group_colors)]
+        pct = np.array([(np.sum(d) - 1.0) * 100.0 for d in loaded["optimal_designs"]])
+        eig = np.array(loaded["optimal_eigs"], dtype=float)
+        std = np.array([s if isinstance(s, (int, float)) else np.nan for s in loaded["optimal_eig_stds"]])
+        order = np.argsort(pct)
+        pct, eig, std = pct[order], eig[order], std[order]
+        ax2.errorbar(pct, eig, yerr=std, color=color, marker='o', markersize=8, linewidth=2,
+                     capsize=4, label=group)
+        slope = None
+        if len(pct) >= 2:
+            slope, intercept = np.polyfit(pct, eig, 1)
+            ax2.plot(pct, slope * pct + intercept, '--', color=color, linewidth=1.2, alpha=0.7)
+        if group in refs:
+            if not refs[group]["optimal_eigs"]:
+                raise ValueError(f"Reference run for {group!r} has no completed eig_data file")
+            ref = refs[group]
+            ref_eig = ref["optimal_eigs"][0]
+            ref_pct = (np.sum(ref["optimal_designs"][0]) - 1.0) * 100.0
+            ax2.axhline(y=ref_eig, color=color, linestyle=':', linewidth=1.5)
+            # The reference flow's own nominal and optimal EIGs, as separate points.
+            if ref["nominal_eig"] is not None:
+                ax2.errorbar(ref_pct, ref["nominal_eig"], yerr=ref["nominal_eig_std"], color=color,
+                             marker='s', markersize=10, markeredgecolor='black', markeredgewidth=1.2,
+                             linestyle='none', capsize=4)
+            ax2.errorbar(ref_pct, ref_eig, yerr=ref["optimal_eig_stds"][0], color=color,
+                         marker='*', markersize=16, markeredgecolor='black', linestyle='none',
+                         capsize=4)
+            if slope:
+                x_cross = (ref_eig - intercept) / slope
+                ax2.axvline(x_cross, color=color, linestyle=':', linewidth=1.0, alpha=0.6)
+                ax2.text(x_cross, ref_eig, f' {x_cross:+.1f}%', color=color, fontsize=13,
+                         fontweight='bold', ha='right', va='bottom',
+                         bbox=dict(facecolor='white', edgecolor='none', alpha=0.7, pad=0.3))
+    # Color names the group; marker shape, shown once, names the kind of flow. With one
+    # group the color says nothing, so the key alone is the legend, in that group's color.
+    handles, legend_labels = ax2.get_legend_handles_labels()
+    if refs:
+        key_color = group_colors[0] if len(groups) == 1 else 'gray'
+        if len(groups) == 1:
+            handles, legend_labels = [], []
+        key = dict(color=key_color, linestyle='none', markeredgecolor='black')
+        handles += [Line2D([], [], marker='o', markersize=8, **key),
+                    Line2D([], [], marker='s', markersize=10, **key),
+                    Line2D([], [], marker='*', markersize=16, **key)]
+        legend_labels += ['Single Design-space', 'Full Design-space: nominal',
+                          'Full Design-space: optimal']
+    ax2.legend(handles, legend_labels, loc='best', fontsize=12, framealpha=0.9)
+    ax2.set_xlabel('Percentage Increase in Total Observations', fontsize=12, weight='bold')
+    ax2.set_ylabel('Expected Information Gain [bits]', fontsize=12, weight='bold')
+    ax2.set_title('EIG of Uniformly Increasing Observations', fontsize=16, weight='bold', pad=20)
+    ax2.grid(True, alpha=0.3)
+    plt.tight_layout()
+    if save_path is not None:
+        scatter_save_path = save_path.replace('.png', '_scatter.png').replace('.pdf', '_scatter.pdf')
+        if scatter_save_path == save_path:
+            scatter_save_path = save_path + '_scatter'
+        os.makedirs(os.path.dirname(scatter_save_path) or '.', exist_ok=True)
+        fig2.savefig(scatter_save_path, dpi=dpi)
+        print(f"Saved scatter plot to {scatter_save_path}")
+
+
+def compare_increasing_design(
+        mlflow_exp=None,
+        run_ids=None,
+        excluded_runs=[],
+        cosmo_exp='num_tracers',
+        labels=None,
+        eval_step=None,
+        save_path=None,
+        figsize=(14, 8),
+        dpi=400,
+        colors=None,
+        title=None,
+        log_scale=True,
+        use_fractional=False,
+        include_nominal=False,
+        ref_id=None,
+        run_groups=None,
+        ref_ids=None
+    ):
+    """
+    Compare increasing quantities for fixed design.
+    
+    Args:
+        mlflow_exp (str, optional): Name of the MLflow experiment. If provided, all runs in this experiment will be used.
+        run_ids (list, optional): List of MLflow run IDs to compare. If provided, mlflow_exp is ignored.
+        excluded_runs (list): List of run IDs to exclude.
+        cosmo_exp (str): Cosmological experiment name (default: 'num_tracers')
+        labels (list, optional): Labels for each run. If None, uses run IDs (first 8 chars)
+        eval_step (str or int, optional): Which step to use. If None, finds most recent eig_data file
+        save_path (str, optional): Path to save the comparison plot. If None, doesn't save
+        figsize (tuple): Figure size (width, height)
+        dpi (int): Resolution for saved figure
+        colors (list, optional): Colors for each run's design bars. If None, uses a continuous colormap
+        title (str, optional): Custom title for the plot. If None, generates default title
+        log_scale (bool): Whether to use log scale for y-axis (default: True)
+        use_fractional (bool): Whether to plot fractional values or absolute quantities (default: False)
+        include_nominal (bool): Whether to include nominal design bars on the left (default: False)
+        ref_id (str, optional): Reference run for ``mlflow_exp``/``run_ids`` (``ref_ids`` for groups):
+            e.g. a flow trained over the full design space at budget 1.0. Its nominal-design EIG
+            (square) and optimal-design EIG (star) are points, and its optimal EIG a dotted line
+            marked with the % increase at which the fit reaches it.
+        run_groups (dict, optional): ``{label: [run_id, ...]}``, e.g. one group per likelihood
+            mode. Replaces ``mlflow_exp``/``run_ids``: the EIG figure draws each group as its own
+            line with a linear fit (a single run set is one such group), and the design bars come
+            from the first group.
+        ref_ids (dict, optional): ``{label: run_id}`` with ``run_groups``: each group's reference
+            run, drawn in the group's color as ``ref_id`` is.
+    
+    Returns:
+        fig, ax: Matplotlib figure and axes objects
+    """
+    if run_groups is not None:
+        if mlflow_exp is not None or run_ids is not None or ref_id is not None:
+            raise ValueError("run_groups replaces mlflow_exp/run_ids and takes ref_ids, not ref_id")
+        if ref_ids is not None and not set(ref_ids) <= set(run_groups):
+            raise ValueError(f"ref_ids keys {sorted(set(ref_ids) - set(run_groups))} are not run_groups labels")
+    elif ref_ids is not None:
+        raise ValueError("ref_ids needs run_groups")
+
+    # Set MLflow tracking URI
+    storage_path = os.environ["SCRATCH"] + f"/bedcosmo/{cosmo_exp}"
+    
+    if run_groups is None:
+        group = mlflow_exp or 'Increasing design'
+        groups = {group: _load_increasing_design_runs(
+            mlflow_exp, run_ids, excluded_runs, cosmo_exp, storage_path, eval_step)}
+        ref_ids = {group: ref_id} if ref_id is not None else {}
+    else:
+        groups = {
+            group: _load_increasing_design_runs(
+                None, ids, excluded_runs, cosmo_exp, storage_path, eval_step)
+            for group, ids in run_groups.items()
+        }
+    refs = {
+        group: _load_increasing_design_runs(None, [rid], excluded_runs, cosmo_exp, storage_path, eval_step)
+        for group, rid in (ref_ids or {}).items()
+    }
+    # Designs (the bar chart) come from the first group; groups share the budget axis.
+    loaded = next(iter(groups.values()))
+    found_run_ids = loaded["found_run_ids"]
+    optimal_designs = loaded["optimal_designs"]
+    design_labels = loaded["design_labels"]
+
     if len(optimal_designs) == 0:
         raise ValueError("No valid optimal design data found to compare")
     
@@ -6513,26 +7314,20 @@ def compare_increasing_design(
     nominal_design = None
     experiment = None
     
-    # Use reference nominal design if ref_id is provided
-    if ref_id is not None and ref_nominal_design is not None:
-        nominal_design = ref_nominal_design
-    
     # Always initialize if use_fractional=False (need nominal_total_obs for conversion), design_labels missing, or include_nominal=True (and we don't have ref data)
     if not use_fractional or design_labels is None or (include_nominal and nominal_design is None):
         try:
-            # Use ref run data if available, otherwise use first run
-            if ref_id is not None and len(ref_run_data_list) > 0:
-                run_data_for_init = ref_run_data_list[0]
-            else:
-                run_data_for_init = run_data_list[0]
+            # The first reference run if any, otherwise the first run
+            first_ref = next(iter(refs.values()), None)
+            run_data_for_init = (first_ref or loaded)["run_data_list"][0]
             
             device = "cuda:0"
-            # We don't need to initialize designs, just need the experiment object
+            # The run's own design_args snapshot: an empty dict builds a default grid,
+            # which fails for num_tracers.
             experiment = init_experiment(
                 run_data_for_init['run_obj'],
                 run_data_for_init['params'],
                 device=device,
-                design_args={},
                 global_rank=0,
                 verbose=False,
             )
@@ -6567,10 +7362,6 @@ def compare_increasing_design(
         is_1d = (n_dims == 1)
     else:
         is_1d = False
-    
-    # Store fractional designs before conversion (needed for scatter plot % increase calculation)
-    fractional_optimal_designs = [np.array(design).copy() for design in optimal_designs]
-    fractional_nominal_design = np.array(nominal_design).copy() if nominal_design is not None else None
     
     # Convert fractional values to absolute quantities if needed
     # Note: nominal_design is stored as fractional (like optimal_designs), so convert it too
@@ -6672,173 +7463,7 @@ def compare_increasing_design(
         fig.savefig(save_path, dpi=dpi)
         print(f"Saved comparison plot to {save_path}")
     
-    # Create second scatter plot: EIG vs % increase
-    # Calculate % increase from fractional designs (sum of fractions - 1)
-    scatter_x = []  # % increase (sum of fractions - 1)
-    scatter_y = []  # EIG values
-    scatter_yerr = []  # EIG std
-    scatter_colors = []
-    scatter_edgecolors = []
-    scatter_labels = []
-    
-    # Use reference EIG values if ref_id is provided, otherwise use values from first run
-    eig_to_use_for_nominal = ref_nominal_eig if (ref_id is not None and ref_nominal_eig is not None) else nominal_eig
-    std_to_use_for_nominal = ref_nominal_eig_std if (ref_id is not None and ref_nominal_eig_std is not None) else nominal_eig_std
-    
-    # Track which points are from bar chart (nominal + increasing designs) for fitted line
-    bar_chart_x = []  # % increase for bar chart points
-    bar_chart_y = []  # EIG for bar chart points
-    
-    # Add nominal design point if requested
-    if include_nominal and fractional_nominal_design is not None and eig_to_use_for_nominal is not None:
-        nominal_sum = np.sum(fractional_nominal_design)
-        nominal_pct_increase = (nominal_sum - 1.0) * 100.0
-        scatter_x.append(nominal_pct_increase)
-        scatter_y.append(eig_to_use_for_nominal)
-        scatter_yerr.append(std_to_use_for_nominal if isinstance(std_to_use_for_nominal, (int, float)) else None)
-        scatter_colors.append('tab:blue')
-        scatter_edgecolors.append('none')
-        scatter_labels.append('Nominal Design')
-        # Track for fitted line
-        bar_chart_x.append(nominal_pct_increase)
-        bar_chart_y.append(eig_to_use_for_nominal)
-    
-    # Add increasing design points (these are the bar chart points)
-    for i, (design, eig, eig_std, color) in enumerate(zip(fractional_optimal_designs, optimal_eigs, optimal_eig_stds, colors)):
-        if eig is not None:  # Only plot if EIG is available
-            design_sum = np.sum(design)
-            pct_increase = (design_sum - 1.0) * 100.0
-            scatter_x.append(pct_increase)
-            scatter_y.append(eig)
-            scatter_yerr.append(eig_std if isinstance(eig_std, (int, float)) else None)
-            scatter_colors.append(color)
-            scatter_edgecolors.append('black')
-            scatter_labels.append(labels[i] if labels else found_run_ids[i][:8])
-            # Track for fitted line
-            bar_chart_x.append(pct_increase)
-            bar_chart_y.append(eig)
-    
-    # Add reference optimal EIG point if ref_id is provided
-    if ref_id is not None and ref_optimal_eig is not None and ref_optimal_design is not None:
-        # Calculate % increase for reference optimal design
-        ref_design_sum = np.sum(ref_optimal_design)
-        ref_pct_increase = (ref_design_sum - 1.0) * 100.0
-        scatter_x.append(ref_pct_increase)
-        scatter_y.append(ref_optimal_eig)
-        scatter_yerr.append(ref_optimal_eig_std if isinstance(ref_optimal_eig_std, (int, float)) else None)
-        scatter_colors.append('tab:orange')  # Different color to distinguish from nominal
-        scatter_edgecolors.append('none')  # No outline for ref optimal
-        scatter_labels.append(f'Optimal Design')
-    
-    # Create scatter plot figure
-    if len(scatter_x) > 0 and any(y is not None for y in scatter_y):
-        fig2, ax2 = plt.subplots(figsize=figsize)
-        
-        # Filter out None values for plotting
-        valid_indices = [i for i, y in enumerate(scatter_y) if y is not None]
-        plot_x = [scatter_x[i] for i in valid_indices]
-        plot_y = [scatter_y[i] for i in valid_indices]
-        plot_yerr = [scatter_yerr[i] for i in valid_indices]
-        plot_colors = [scatter_colors[i] for i in valid_indices]
-        plot_edgecolors = [scatter_edgecolors[i] for i in valid_indices]
-        plot_labels = [scatter_labels[i] for i in valid_indices]
-        
-        # Plot scatter points with same color coding and edge styles as bars
-        legend_handles = {}
-        legend_order = []
-        for x, y, yerr, color, edgecolor, label in zip(plot_x, plot_y, plot_yerr, plot_colors, plot_edgecolors, plot_labels):
-            # Only add label to legend if we haven't seen it before
-            label_to_use = label if label not in legend_handles else ""
-            handle = ax2.scatter(x, y, c=[color], s=100, alpha=0.7, edgecolors=edgecolor, 
-                                 linewidths=1.5, label=label_to_use)
-            if label_to_use:
-                legend_handles[label_to_use] = handle
-                legend_order.append(label_to_use)
-            if yerr is not None and isinstance(yerr, (int, float)) and yerr > 0:
-                ax2.errorbar(x, y, yerr=yerr, fmt='none', ecolor=color, elinewidth=1.2, capsize=4, alpha=0.8)
-        
-        # Add horizontal orange dotted line for ref optimal eig
-        if ref_id is not None and ref_optimal_eig is not None:
-            ax2.axhline(y=ref_optimal_eig, color='tab:orange', linestyle='--', 
-                       linewidth=1.5, alpha=0.7)
-        
-        # Add black dotted fitted line for bar chart points (nominal + increasing designs)
-        coeffs = None
-        if len(bar_chart_x) >= 2 and len(bar_chart_y) >= 2:
-            # Fit a line to the bar chart points
-            bar_chart_x_arr = np.array(bar_chart_x)
-            bar_chart_y_arr = np.array(bar_chart_y)
-            # Fit polynomial (degree 1 = linear fit)
-            coeffs = np.polyfit(bar_chart_x_arr, bar_chart_y_arr, 1)
-            poly = np.poly1d(coeffs)
-            # Generate x values for the line
-            x_line = np.linspace(min(bar_chart_x_arr), max(bar_chart_x_arr), 100)
-            y_line = poly(x_line)
-            ax2.plot(x_line, y_line, 'k--', linewidth=1.5, alpha=0.7)
-        elif len(bar_chart_x) == 1:
-            # If only one point, just draw a horizontal line
-            ax2.axhline(y=bar_chart_y[0], color='black', linestyle='--', 
-                       linewidth=1.5, alpha=0.7)
-        
-        # Add vertical intersection line between ref optimal eig and fitted line when available
-        if (
-            ref_id is not None
-            and ref_optimal_eig is not None
-            and coeffs is not None
-            and len(coeffs) >= 2
-            and coeffs[0] != 0
-        ):
-            x_intersection = (ref_optimal_eig - coeffs[1]) / coeffs[0]
-            if np.isfinite(x_intersection):
-                ax2.axvline(x_intersection, color='gray', linestyle=':', linewidth=1.2, alpha=0.8)
-                x_pct = x_intersection
-                # Place text slightly above the intersection point
-                ax2.text(
-                    x_intersection,
-                    ref_optimal_eig,
-                    f'{x_pct:+.1f}%',
-                    color='red',
-                    fontsize=17,
-                    fontweight='bold',
-                    ha='left',
-                    va='bottom',
-                    bbox=dict(facecolor='white', edgecolor='none', alpha=0.6, pad=0.3)
-                )
-        
-        # Build ordered legend handles (Nominal first, Ref Optimal second)
-        ordered_labels = []
-        if 'Nominal Design' in legend_handles:
-            ordered_labels.append('Nominal Design')
-        for label in legend_order:
-            if label.startswith('Optimal Design') and label not in ordered_labels:
-                ordered_labels.append(label)
-        for label in legend_order:
-            if label not in ordered_labels:
-                ordered_labels.append(label)
-        if ordered_labels:
-            ordered_handles = [legend_handles[label] for label in ordered_labels]
-            ax2.legend(ordered_handles, ordered_labels, loc='best', fontsize=12, framealpha=0.9)
-        
-        ax2.set_xlabel('Percentage Increase in Total Observations', fontsize=12, weight='bold')
-        ax2.set_ylabel('Expected Information Gain [bits]', fontsize=12, weight='bold')
-        ax2.set_title('EIG of Uniformly Increasing Observations', fontsize=16, weight='bold', pad=20)
-        ax2.grid(True, alpha=0.3)
-        
-        plt.tight_layout()
-        
-        # Save scatter plot if save_path provided
-        if save_path is not None:
-            # Modify save path to add _scatter suffix
-            scatter_save_path = save_path.replace('.png', '_scatter.png').replace('.pdf', '_scatter.pdf')
-            if scatter_save_path == save_path:  # If no extension found, just append
-                scatter_save_path = save_path + '_scatter'
-            os.makedirs(os.path.dirname(scatter_save_path) if os.path.dirname(scatter_save_path) else '.', exist_ok=True)
-            fig2.savefig(scatter_save_path, dpi=dpi)
-            print(f"Saved scatter plot to {scatter_save_path}")
-    else:
-        fig2 = None
-        ax2 = None
-    
+    _plot_increasing_design_groups(groups, refs, figsize, dpi, save_path)
     return fig, ax
     
 def compare_contours(

@@ -45,6 +45,7 @@ import matplotlib.pyplot as plt  # noqa: E402
 from scipy.stats import ks_2samp, norm, wasserstein_distance  # noqa: E402
 
 from bedcosmo.entropy import knn_entropy  # noqa: E402
+from bedcosmo.prior_flow import SPACE_GAUSSIANIZED, SPACE_NATIVE, PriorFlow  # noqa: E402
 from bedcosmo.transform import _whitening_to_apply_joint  # noqa: E402
 
 from .fit_sed_prior_kde import (  # noqa: E402
@@ -55,13 +56,7 @@ from .fit_sed_prior_kde import (  # noqa: E402
     sample_sed_prior,
 )
 from .paths import get_prior_kde_path  # noqa: E402
-from .prior_flow import (  # noqa: E402
-    SED_PRIOR_FLOW_FILENAMES,
-    SPACE_GAUSSIANIZED,
-    SPACE_NATIVE,
-    PriorFlow,
-)
-from .sed_prior import score_kde_artifact  # noqa: E402
+from .sed_prior import SED_PRIOR_FLOW_FILENAMES, score_kde_artifact  # noqa: E402
 from .simplex import split_feature_matrix  # noqa: E402
 
 LOG2 = math.log(2.0)
@@ -516,7 +511,7 @@ def main(argv: list[str] | None = None) -> None:
         if nflow is None:
             raise FileNotFoundError(
                 "native flow not found (pass --flow-path or train it with "
-                "python -m bedcosmo.num_visits.empirical.prior_flow --space both)."
+                "python -m bedcosmo.num_visits.empirical.train_sed_prior_flow --space both)."
             )
         _run_native(args, out_dir, artifact, names, param, xk, nflow, gflow, tri_settings)
 

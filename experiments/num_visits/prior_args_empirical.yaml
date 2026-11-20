@@ -32,7 +32,7 @@ reduced_templates: null
 # The flow(s) (sed_prior_flow_native.pt / _gaussianized.pt) must exist in the resolved
 # prior build dir ($SCRATCH/bedcosmo/num_visits/empirical_prior/<variant>/).
 # Train them with:
-#   python -m bedcosmo.num_visits.empirical.prior_flow --space both
+#   python -m bedcosmo.num_visits.empirical.train_sed_prior_flow --space both
 # CLI: --prior-density-type flow|kde
 density_type: flow
 

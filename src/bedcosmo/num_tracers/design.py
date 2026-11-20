@@ -43,28 +43,73 @@ from typing import Iterable, Sequence
 import numpy as np
 
 from bedcosmo.artifacts import DESIGN_PLOT_FILENAME, write_design_dir
+from bedcosmo.num_tracers.lya import LYA_ACCOUNTINGS
 
 LABELS = ["BGS", "LRG", "ELG", "QSO"]
 # Mirror NumTracers: DESI CSVs live under $HOME/data/desi/bao_<dataset>/
 _DATA_ROOT = os.path.join(os.environ.get("HOME", ""), "data", "desi")
-# Default per-class grid from design_args_dr1.yaml (hand-set caps, not target-availability
-# limits -- the physical target caps are ~10^6 tracers and never bind at these budgets).
+# Default per-class grid, in lya_accounting="outside" units (design_args_dr1.yaml carries it
+# converted to "qso_coupled" by `default_bounds`): fractions
+# of the observed fibers outside Lya QSO (NumTracers.nominal_total_obs). The BGS, LRG and QSO upper
+# bounds are target availability: each class's summed `targets` in desi_tracers.csv over that
+# budget, the bound NumTracers uses when `upper` is unset. ELG's 0.575 is hand-set (its
+# availability is ~1.34): the fiber count a 0.5 bound allowed when Lya was counted in the budget.
+# Other accountings divide a different budget; `default_bounds` converts these to it.
 DEFAULT_STEP = [0.01, 0.02, 0.02, 0.01]
 DEFAULT_LOWER = [0.02, 0.1, 0.1, 0.1]
-DEFAULT_UPPER = [0.0585, 0.3820, 0.5, 0.3291]
+DEFAULT_UPPER = [0.0673, 0.4393, 0.575, 0.2070]
 TOL = 1e-9
 
 
-def nominal_vector(dataset: str = "dr1") -> np.ndarray:
-    """Per-class nominal design vector (sums to 1.0), reproducing ``NumTracers.__init__``."""
+def nominal_vector(dataset: str = "dr1", lya_accounting: str = "outside") -> np.ndarray:
+    """Per-class nominal design vector (sums to 1.0), reproducing ``NumTracers.__init__``:
+    each class's observed share of the fibers in the design budget, which
+    ``lya_accounting`` sets (num_tracers/lya.py; "outside": all but Lya QSO's)."""
     import pandas as pd
+
+    from bedcosmo.num_tracers.lya import budget_tracers
 
     csv = os.path.join(_DATA_ROOT, f"bao_{dataset}", "desi_tracers.csv")
     if not os.path.exists(csv):
         raise FileNotFoundError(f"DESI tracer table not found: {csv}")
-    df = pd.read_csv(csv)
-    v0 = df.groupby("class").sum(numeric_only=True)["observed"].reindex(LABELS).values
-    return np.asarray(v0, dtype=np.float64)
+    df = budget_tracers(pd.read_csv(csv), dataset, lya_accounting)
+    observed = df.groupby("class").sum(numeric_only=True)["observed"]
+    return np.asarray((observed / observed.sum()).reindex(LABELS).values, dtype=np.float64)
+
+
+def convert_bounds(lower: Sequence[float], upper: Sequence[float], dataset: str = "dr1",
+                   lya_accounting: str = "qso_coupled",
+                   step: Sequence[float] = DEFAULT_STEP) -> tuple[list[float], list[float]]:
+    """Per-class (lower, upper) given in "outside" units, in ``lya_accounting``'s units.
+
+    Another accounting divides a different budget (and under "qso_coupled" the QSO class
+    also holds the Lya forest fibers), so each bound is carried over at the same multiple
+    of its class's nominal share; a target-availability cap stays exact, since
+    bound / nominal is the same in every accounting. An upper bound is capped at 1.
+
+    A design pool keeps rows whose sum is the budget, and grid sums move in steps of the
+    steps' common unit, so sum(lower) must sit on that lattice relative to 1. Converted
+    bounds generally do not; ELG's lower bound (the widest axis) is lowered by less than
+    one unit to put it there.
+    """
+    lower = np.asarray(lower, dtype=np.float64)
+    upper = np.asarray(upper, dtype=np.float64)
+    if lya_accounting == "outside":
+        return lower.tolist(), upper.tolist()
+    k = nominal_vector(dataset, lya_accounting) / nominal_vector(dataset, "outside")
+    lower, upper = lower * k, np.minimum(upper * k, 1.0)
+    unit = np.gcd.reduce(np.round(np.asarray(step) * 1e6).astype(np.int64)) / 1e6
+    gap = (1.0 - lower.sum()) / unit
+    lower[LABELS.index("ELG")] -= (np.ceil(gap - 1e-9) - gap) * unit
+    return lower.tolist(), upper.tolist()
+
+
+def default_bounds(dataset: str = "dr1", lya_accounting: str = "outside",
+                   step: Sequence[float] = DEFAULT_STEP) -> tuple[list[float], list[float]]:
+    """Default (lower, upper) per class, in ``lya_accounting``'s budget units:
+    ``DEFAULT_LOWER``/``DEFAULT_UPPER`` (fractions of the "outside" budget) through
+    ``convert_bounds``."""
+    return convert_bounds(DEFAULT_LOWER, DEFAULT_UPPER, dataset, lya_accounting, step)
 
 
 def scale_tag(s: float) -> str:
@@ -81,33 +126,43 @@ def budget_pool(
     sum_lower: float = 1.0,
     sum_upper: float = 1.2,
     step: Sequence[float] = DEFAULT_STEP,
-    lower: Sequence[float] = DEFAULT_LOWER,
-    upper: Sequence[float] = DEFAULT_UPPER,
+    lower: Sequence[float] | None = None,
+    upper: Sequence[float] | None = None,
     dataset: str = "dr1",
     include_nominal_scales: Iterable[float] | None = None,
+    include: Iterable[Sequence[float]] | None = None,
     n_target: int | None = None,
     seed: int = 0,
+    lya_accounting: str = "outside",
 ) -> np.ndarray:
     """Cartesian per-class grid keeping rows whose sum lies in ``[sum_lower, sum_upper]``.
 
     Reproduces the grid ``NumTracers`` builds internally from ``step``/``lower``/``upper``
     plus the sum constraint, but materializes it so the pool can be inspected, plotted and
-    pinned to a file. Verified against the experiment's own grid: the defaults give 287
-    designs at sum == 1.0 and 2447 over [1.0, 1.2], matching ``design_args_dr1.yaml`` and
-    ``design_args_dr1_budget.yaml`` respectively.
+    pinned to a file. Verified against the experiment's own grid: ``design_args_dr1.yaml``'s
+    bounds give 323 designs at sum == 1.0 and ``design_args_dr1_budget.yaml``'s 3044 over
+    [1.0, 1.2] (both in qso_coupled units).
 
     ``include_nominal_scales`` force-adds the uniformly scaled nominal designs (which
     generally fall between grid nodes) so the pool contains the exact points the ``scaled``
-    mode would have produced -- useful as within-pool reference designs.
+    mode would have produced -- useful as within-pool reference designs. ``include``
+    force-adds arbitrary designs ``[BGS, LRG, ELG, QSO]`` (e.g. a previous run's optimum),
+    which need not lie on the grid or inside ``lower``/``upper``; only the sum constraint
+    applies to them.
 
     ``n_target`` caps the pool size by random subsample. Since the training batch is
     ``n_particles_per_device * n_designs``, pool size sets the memory/data footprint;
     this is the lever for hitting a target footprint without coarsening ``step``. Pinned
-    rows (nominal and any ``include_nominal_scales``) always survive the subsample.
+    rows (``include_nominal_scales`` and ``include``) always survive the subsample.
 
     Note ``np.arange`` excludes the endpoint, so ``upper`` is exclusive -- matching
     ``NumTracers``, which builds its axes the same way.
+
+    ``lower``/``upper`` default to ``default_bounds(dataset, lya_accounting, step)``.
     """
+    d_lower, d_upper = default_bounds(dataset, lya_accounting, step)
+    lower = d_lower if lower is None else lower
+    upper = d_upper if upper is None else upper
     _validate_axis_spec(step, lower, upper)
     axes = [
         np.arange(lower[i], upper[i], step[i])
@@ -125,20 +180,44 @@ def budget_pool(
     keep = (total >= sum_lower - TOL) & (total <= sum_upper + TOL)
     pool = flat[keep]
 
-    pinned = np.empty((0, len(LABELS)), dtype=np.float64)
-    if include_nominal_scales:
-        v0 = nominal_vector(dataset)
-        pinned = np.array([uniform_scaled(v0, s) for s in include_nominal_scales])
-        pool = np.vstack([pool, pinned])
+    pinned = pinned_designs(include_nominal_scales, include, dataset, lya_accounting)
+    pool = np.vstack([pool, pinned])
 
     # Stable, de-duplicated ordering so a rebuild is reproducible.
     pool = np.unique(np.round(pool, 12), axis=0)
 
     if n_target is not None and pool.shape[0] > n_target:
-        pool = _subsample(pool, np.round(pinned, 12), n_target, seed)
+        pool = _subsample(pool, pinned, n_target, seed)
 
     _validate_pool(pool, sum_lower, sum_upper)
     return pool
+
+
+def pinned_designs(
+    include_nominal_scales: Iterable[float] | None,
+    include: Iterable[Sequence[float]] | None,
+    dataset: str = "dr1",
+    lya_accounting: str = "outside",
+) -> np.ndarray:
+    """The rows ``budget_pool`` force-adds, rounded as they appear in the pool: (n, 4)."""
+    rows = []
+    if include_nominal_scales:
+        v0 = nominal_vector(dataset, lya_accounting)
+        rows += [uniform_scaled(v0, s) for s in include_nominal_scales]
+    for design in include or ():
+        if len(design) != len(LABELS):
+            raise ValueError(
+                f"included design must have {len(LABELS)} entries ({LABELS}), got {len(design)}"
+            )
+        rows.append(np.asarray(design, dtype=np.float64))
+    return np.round(np.array(rows, dtype=np.float64).reshape(-1, len(LABELS)), 12)
+
+
+def is_pinned(pool: np.ndarray, pinned: np.ndarray) -> np.ndarray:
+    """Boolean mask over ``pool`` rows that are in ``pinned``."""
+    if not pinned.size:
+        return np.zeros(pool.shape[0], dtype=bool)
+    return (pool[:, None, :] == pinned[None, :, :]).all(-1).any(1)
 
 
 def _validate_axis_spec(
@@ -162,17 +241,14 @@ def _subsample(
     pool: np.ndarray, pinned: np.ndarray, n_target: int, seed: int
 ) -> np.ndarray:
     """Randomly thin ``pool`` to ``n_target`` rows, always keeping ``pinned`` rows."""
-    if pinned.size:
-        is_pinned = (pool[:, None, :] == pinned[None, :, :]).all(-1).any(1)
-    else:
-        is_pinned = np.zeros(pool.shape[0], dtype=bool)
-    keep_rows = pool[is_pinned]
-    if keep_rows.shape[0] >= n_target:
+    mask = is_pinned(pool, pinned)
+    keep_rows = pool[mask]
+    if keep_rows.shape[0] > n_target:
         raise ValueError(
             f"n_target ({n_target}) is below the {keep_rows.shape[0]} pinned designs; "
-            "raise n_target or drop some include_nominal_scales"
+            "raise n_target or pin fewer designs"
         )
-    other = pool[~is_pinned]
+    other = pool[~mask]
     rng = np.random.default_rng(seed)
     pick = rng.choice(other.shape[0], size=n_target - keep_rows.shape[0], replace=False)
     out = np.vstack([keep_rows, other[pick]])
@@ -196,12 +272,23 @@ def _validate_pool(pool: np.ndarray, sum_lower: float, sum_upper: float) -> None
 
 
 def plot_designs(
-    designs: np.ndarray, out_path: str, cmap: str = "viridis", title: str = ""
+    designs: np.ndarray,
+    out_path: str,
+    cmap: str = "viridis",
+    title: str = "",
+    pinned: np.ndarray | None = None,
+    dataset: str = "dr1",
+    lya_accounting: str = "outside",
 ) -> None:
     """Parallel-coordinates view of the design pool, colored by total budget.
 
+    ``pinned`` is a boolean mask over ``designs``; those rows (forced-in reference designs,
+    which may sit off the grid or outside its bounds) are drawn on top in a contrasting
+    color so they stand apart from the grid.
+
     Handles a single-row ``designs`` (one plot per scaled design), in which case the
-    budget colorbar is dropped and each class is annotated with its ratio to nominal.
+    budget colorbar is dropped and each class is annotated with its fraction and its
+    ratio to nominal.
     """
     import matplotlib
 
@@ -211,16 +298,16 @@ def plot_designs(
     n_designs, n_dims = designs.shape
     x = np.arange(n_dims)
 
-    # Normalize per class by nominal, so y reads directly as "x nominal" and all four
-    # classes sit on comparable footing. A uniformly scaled design is then a flat line
-    # at its budget -- the shape shows how a design departs from the nominal split.
+    # y is each class's fraction of the fiber budget, so designs compare in the units
+    # the budget is spent in. A ratio to nominal would inflate the classes with a small
+    # nominal share (BGS's 0.04 reaches 10x at 0.4 of the budget). The nominal split is
+    # drawn as its own line.
     v0 = None
     try:
-        v0 = nominal_vector()
+        v0 = nominal_vector(dataset, lya_accounting)
     except FileNotFoundError:
         pass
-    ref = v0 if v0 is not None else designs.mean(axis=0)
-    norm = designs / ref[None, :]
+    frac = designs
 
     fig, ax = plt.subplots(figsize=(10, 6))
 
@@ -244,21 +331,29 @@ def plot_designs(
     else:
         msize, lw, alpha = 1.5, 0.8, 0.35
 
-    for i in range(n_designs):
+    if pinned is None:
+        pinned = np.zeros(n_designs, dtype=bool)
+    for i in np.flatnonzero(~pinned):
         ax.plot(
-            x, norm[i], color=colors[i], alpha=alpha, linewidth=lw,
+            x, frac[i], color=colors[i], alpha=alpha, linewidth=lw,
             marker="o", markersize=msize, zorder=1,
+        )
+    for k, i in enumerate(np.flatnonzero(pinned)):
+        ax.plot(
+            x, frac[i], color="tab:red", alpha=0.95, linewidth=1.8,
+            marker="D", markersize=5, zorder=2,
+            label=f"Pinned designs ({int(pinned.sum())})" if k == 0 else None,
         )
 
     if v0 is not None:
-        ax.axhline(
-            1.0, color="black", linewidth=2.0, linestyle="--",
-            label="Nominal split (1.0x)", zorder=3,
+        ax.plot(
+            x, v0, color="black", linewidth=2.0, linestyle="--", marker="s",
+            markersize=5, label="Nominal split", zorder=3,
         )
 
     ax.set_xticks(x)
     ax.set_xticklabels(LABELS, fontsize=13)
-    ax.set_ylabel("class fraction / nominal", fontsize=12)
+    ax.set_ylabel("fraction of fiber budget", fontsize=12)
     for xi in range(n_dims):
         ax.axvline(xi, color="0.85", linewidth=0.8, zorder=0)
 
@@ -269,23 +364,28 @@ def plot_designs(
             fontsize=13,
         )
     else:
-        # Single design (or one shared budget): annotate the value instead of a range,
-        # and pad the y-range so a flat line is not drawn on top of the axis.
+        # One shared budget: give the value instead of a range.
         ax.set_title(
             f"{title or 'NumTracers design'}: {n_designs} design"
             f"{'s' if n_designs != 1 else ''}, budget {cmin:.3f}x nominal",
             fontsize=13,
         )
-        lo, hi = min(1.0, norm.min()), max(1.0, norm.max())
-        pad = max(0.05, 0.35 * (hi - lo))
-        ax.set_ylim(lo - pad, hi + pad)
+    if n_designs == 1:
+        # Single design: annotate each class's ratio, and pad the y-range so a flat line
+        # is not drawn on top of the axis.
+        lo, hi = frac.min(), frac.max()
+        if v0 is not None:
+            lo, hi = min(lo, v0.min()), max(hi, v0.max())
+        pad = max(0.02, 0.15 * (hi - lo))
+        ax.set_ylim(max(0.0, lo - pad), hi + pad)
         for xi in range(n_dims):
+            ratio = f" ({frac[0, xi] / v0[xi]:.2f}x)" if v0 is not None else ""
             ax.annotate(
-                f"{norm[0, xi]:.3f}x", (xi, norm[0, xi]), textcoords="offset points",
+                f"{frac[0, xi]:.3f}{ratio}", (xi, frac[0, xi]), textcoords="offset points",
                 xytext=(0, 9), ha="center", fontsize=9, color="0.25",
             )
 
-    if v0 is not None:
+    if v0 is not None or pinned.any():
         ax.legend(loc="upper right", fontsize=10)
 
     if spread > 1e-12:
@@ -309,8 +409,8 @@ def _timestamp(when: datetime | None = None) -> str:
 
 
 def _cmd_scaled(args: argparse.Namespace) -> np.ndarray:
-    v0 = nominal_vector(args.dataset)
-    print(f"dataset={args.dataset}  labels={LABELS}")
+    v0 = nominal_vector(args.dataset, args.lya_accounting)
+    print(f"dataset={args.dataset}  lya_accounting={args.lya_accounting}  labels={LABELS}")
     print(f"nominal v0={np.round(v0, 4).tolist()}  sum={v0.sum():.4f}\n")
 
     rows = []
@@ -325,12 +425,16 @@ def _cmd_scaled(args: argparse.Namespace) -> np.ndarray:
               f"design={np.round(design, 4).tolist()}")
         print(f"           wrote {design_dir}")
         # One plot per design, in its own design dir.
-        args._plots.append((design_dir, design.reshape(1, -1), f"Nominal x{s:g}"))
+        args._plots.append((design_dir, design.reshape(1, -1), f"Nominal x{s:g}", None))
     return np.array(rows)
 
 
 def _cmd_pool(args: argparse.Namespace) -> np.ndarray:
     scales = args.include_scales if args.include_scales else None
+    d_lower, d_upper = default_bounds(args.dataset, args.lya_accounting, args.step)
+    args.lower = d_lower if args.lower is None else args.lower
+    args.upper = d_upper if args.upper is None else args.upper
+    args._provenance["args"].update(lower=args.lower, upper=args.upper)
     pool = budget_pool(
         sum_lower=args.sum_lower,
         sum_upper=args.sum_upper,
@@ -339,9 +443,13 @@ def _cmd_pool(args: argparse.Namespace) -> np.ndarray:
         upper=args.upper,
         dataset=args.dataset,
         include_nominal_scales=scales,
+        include=args.include,
         n_target=args.n_target,
         seed=args.seed,
+        lya_accounting=args.lya_accounting,
     )
+    pinned = is_pinned(
+        pool, pinned_designs(scales, args.include, args.dataset, args.lya_accounting))
     # Date-stamp the default so repeated builds accumulate instead of overwriting
     # (mirrors bedcosmo.num_visits.design). An explicit --name opts out.
     if args.name:
@@ -362,12 +470,21 @@ def _cmd_pool(args: argparse.Namespace) -> np.ndarray:
     print("per-class max:", np.round(pool.max(0), 4).tolist())
     if scales:
         print(f"forced nominal scales present: {list(scales)}")
+    if pinned.any():
+        grid_rows = pool[~pinned]
+        lo, hi = grid_rows.min(0), grid_rows.max(0)
+        print(f"pinned designs: {int(pinned.sum())} (grid spans {np.round(lo, 4).tolist()} "
+              f"to {np.round(hi, 4).tolist()})")
+        for row in pool[pinned]:
+            outside = [LABELS[i] for i in range(len(LABELS)) if not lo[i] <= row[i] <= hi[i]]
+            note = f"  outside the grid in {', '.join(outside)}" if outside else ""
+            print(f"  {np.round(row, 4).tolist()}{note}")
     # Training batch = n_particles_per_device * n_designs; match a proven footprint.
     print(
         f"\nsizing: batch = npd x {pool.shape[0]}; for the 28,700/device footprint "
         f"use --n-particles-per-device {max(1, round(28700 / pool.shape[0]))}"
     )
-    args._plots.append((design_dir, pool, ""))
+    args._plots.append((design_dir, pool, "", pinned))
     return pool
 
 
@@ -382,6 +499,12 @@ def main(argv: list[str] | None = None) -> np.ndarray:
         help="Parent dir for the <name>/ design dirs (default: $SCRATCH/bedcosmo/num_tracers/designs)",
     )
     parser.add_argument("--no-plot", action="store_true", help="Skip the design-space plot")
+    parser.add_argument(
+        "--lya-accounting", default="qso_coupled", choices=LYA_ACCOUNTINGS,
+        help="Which fibers the design fractions divide; must match the training run's "
+             "lya_accounting (num_tracers/lya.py). The default --lower/--upper are converted "
+             "to it (default_bounds). (default: qso_coupled)",
+    )
     sub = parser.add_subparsers(dest="mode", required=True)
 
     p_scaled = sub.add_parser("scaled", help="One single-design pool per uniform scale factor")
@@ -406,19 +529,27 @@ def main(argv: list[str] | None = None) -> np.ndarray:
         help="Force-add uniformly scaled nominal designs as within-pool reference points",
     )
     p_pool.add_argument(
+        "--include", type=float, nargs=4, action="append", default=None,
+        metavar=tuple(LABELS),
+        help="Force-add one design [BGS LRG ELG QSO] (repeatable). It need not lie on the "
+             "grid or inside --lower/--upper; only the sum range applies",
+    )
+    p_pool.add_argument(
         "--step", type=float, nargs=4, default=DEFAULT_STEP,
         metavar=tuple(LABELS),
         help=f"Per-class grid step (default: {DEFAULT_STEP})",
     )
     p_pool.add_argument(
-        "--lower", type=float, nargs=4, default=DEFAULT_LOWER,
+        "--lower", type=float, nargs=4, default=None,
         metavar=tuple(LABELS),
-        help=f"Per-class lower bound, inclusive (default: {DEFAULT_LOWER})",
+        help=f"Per-class lower bound, inclusive (default: {DEFAULT_LOWER} in 'outside' units, "
+             "converted to --lya-accounting's)",
     )
     p_pool.add_argument(
-        "--upper", type=float, nargs=4, default=DEFAULT_UPPER,
+        "--upper", type=float, nargs=4, default=None,
         metavar=tuple(LABELS),
-        help=f"Per-class upper bound, EXCLUSIVE (default: {DEFAULT_UPPER})",
+        help=f"Per-class upper bound, EXCLUSIVE (default: {DEFAULT_UPPER} in 'outside' units "
+             "-- target availability for BGS, LRG, QSO -- converted to --lya-accounting's)",
     )
     p_pool.add_argument(
         "--n-target", type=int, default=None,
@@ -438,14 +569,15 @@ def main(argv: list[str] | None = None) -> np.ndarray:
     if args.designs_dir is None:
         args.designs_dir = _designs_dir()
 
-    args._plots: list[tuple[str, np.ndarray, str]] = []
+    args._plots: list[tuple[str, np.ndarray, str, np.ndarray | None]] = []
     designs = args.func(args)
 
     # Render a design plot into each design dir (as num_visits.design does), unless suppressed.
     if not args.no_plot:
-        for design_dir, arr, title in args._plots:
+        for design_dir, arr, title, pinned in args._plots:
             plot_path = os.path.join(design_dir, DESIGN_PLOT_FILENAME)
-            plot_designs(arr, plot_path, title=title)
+            plot_designs(arr, plot_path, title=title, pinned=pinned,
+                         dataset=args.dataset, lya_accounting=args.lya_accounting)
             print(f"wrote design plot -> {plot_path}")
     return designs
 

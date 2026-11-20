@@ -85,24 +85,47 @@ def test_covariance_fiducials_figure(tmp_path):
 
 
 _EXTENDED = ["base_omegak", "base_w", "base_w_wa", "base_omegak_w_wa"]
+# Extended models that borrow base's Fourier emulators; base_omegak_w_wa has its own.
+_BORROWS_FOURIER = ["base_omegak", "base_w", "base_w_wa"]
 
 
 @pytest.mark.parametrize("cosmo_model", _EXTENDED)
+def test_extended_models_use_base_config_emulators(cosmo_model):
+    from bedcosmo.num_tracers.experiment import NumTracers
+
+    assert (NumTracers.resolve_emulator_checkpoints("bao", cosmo_model, "dr1", "config")
+            == NumTracers.resolve_emulator_checkpoints("bao", "base", "dr1", "config"))
+
+
+@pytest.mark.parametrize("cosmo_model", _BORROWS_FOURIER)
 def test_extended_models_use_base_emulators_at_the_fiducial(cosmo_model):
     from bedcosmo.num_tracers.experiment import NumTracers
 
     base = _make_exp(emulator_covariance="fiducial")
     ext = _make_exp(cosmo_model=cosmo_model, emulator_covariance="fiducial")
-    for space in ("config", "fourier"):
-        assert (NumTracers.resolve_emulator_checkpoints("bao", cosmo_model, "dr1", space)
-                == NumTracers.resolve_emulator_checkpoints("bao", "base", "dr1", space))
+    assert (NumTracers.resolve_emulator_checkpoints("bao", cosmo_model, "dr1", "fourier")
+            == NumTracers.resolve_emulator_checkpoints("bao", "base", "dr1", "fourier"))
     designs = base.designs[:2].double().unsqueeze(0)
     passed = base.calc_passed(designs)
     torch.testing.assert_close(ext._build_emulator_covariance(passed, {}),
                                base._build_emulator_covariance(passed, {}))
 
 
-@pytest.mark.parametrize("cosmo_model", _EXTENDED)
+@pytest.mark.parametrize("cosmo_model", _BORROWS_FOURIER)
 def test_cosmology_covariance_needs_every_sampled_parameter(cosmo_model):
     with pytest.raises(ValueError, match="would ignore them"):
         _make_exp(cosmo_model=cosmo_model, emulator_covariance="cosmology")
+
+
+def test_omegak_w_wa_has_its_own_fourier_emulators():
+    """base_omegak_w_wa's Fourier networks take Ok, w0 and wa, so 'cosmology' is allowed."""
+    from bedcosmo.num_tracers.experiment import NumTracers
+
+    own = NumTracers.resolve_emulator_checkpoints("bao", "base_omegak_w_wa", "dr1", "fourier")
+    base = NumTracers.resolve_emulator_checkpoints("bao", "base", "dr1", "fourier")
+    nets = {b: p for b, p in own.items() if p and p.endswith(".pt")}
+    assert nets and all(nets[b] != base[b] for b in nets)
+    for path in nets.values():
+        names = torch.load(path, map_location="cpu", weights_only=False)["param_names"]
+        assert {"Ok", "w0", "wa"} <= set(names), (path, names)
+    _make_exp(cosmo_model="base_omegak_w_wa", emulator_covariance="cosmology")

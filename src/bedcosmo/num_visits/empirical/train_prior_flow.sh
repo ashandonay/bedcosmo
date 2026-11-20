@@ -57,7 +57,7 @@ fi
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-}"
 export JAX_PLATFORMS="${JAX_PLATFORMS:-cpu}"
 
-MOD="bedcosmo.num_visits.empirical.prior_flow"
+MOD="bedcosmo.num_visits.empirical.train_sed_prior_flow"
 THREADS=8
 SPACE="both"
 BASE_ARGS=()  # PASS_ARGS minus --space/--threads (re-added explicitly per process)

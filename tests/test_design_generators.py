@@ -71,6 +71,35 @@ def test_num_tracers_pool_writes_design_dir(tmp_path):
     assert provenance["labels"] == tracers_design.LABELS
 
 
+def test_num_tracers_pool_include_pins_off_grid_designs(tmp_path):
+    designs_dir = tmp_path / "designs"
+    anchors = [[0.05, 0.36, 0.44, 0.15], [0.0585, 0.382, 0.4595, 0.10]]
+
+    pool = tracers_design.main([
+        "--designs-dir", str(designs_dir),
+        "pool", "--sum-lower", "1.0", "--sum-upper", "1.0", "--n-target", "5",
+        *[a for row in anchors for a in ["--include", *map(str, row)]],
+        "--name", "pool_include",
+    ])
+
+    assert pool.shape == (5, 4)
+    for row in anchors:
+        assert (np.isclose(pool, row).all(1)).sum() == 1
+    provenance = json.loads((designs_dir / "pool_include" / "provenance.json").read_text())
+    assert provenance["args"]["include"] == anchors
+    assert (designs_dir / "pool_include" / "designs.png").exists()
+
+
+def test_num_tracers_pool_include_respects_the_sum_range():
+    with pytest.raises(AssertionError, match="escape"):
+        tracers_design.budget_pool(sum_lower=1.0, sum_upper=1.0, include=[[0.1, 0.4, 0.4, 0.2]])
+
+
+def test_num_tracers_pool_include_needs_four_classes():
+    with pytest.raises(ValueError, match="4 entries"):
+        tracers_design.budget_pool(sum_lower=1.0, sum_upper=1.0, include=[[0.5, 0.5]])
+
+
 def test_num_tracers_scaled_writes_one_design_dir_per_scale(tmp_path):
     designs_dir = tmp_path / "designs"
 

@@ -107,6 +107,8 @@ def main():
         marginal_knn_k=args.knn_k,
         n_evals=args.n_evals,
         verbose=False,
+        # Rows must line up with the training pool (and older eig_data), so no nominal row.
+        exclude_nominal=True,
     )
     exp = evaluator.experiment
     device = torch.device(args.device)

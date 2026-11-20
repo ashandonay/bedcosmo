@@ -75,6 +75,8 @@ def main():
         marginal_outer_y=args.outer_y,
         marginal_inner_samples=args.inner_k,
         verbose=False,
+        # Rows must line up with the training pool (and older eig_data), so no nominal row.
+        exclude_nominal=True,
     )
     exp = evaluator.experiment
     p_idx = list(exp.cosmo_params).index(args.param)
