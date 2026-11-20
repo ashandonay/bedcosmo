@@ -14,9 +14,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 from build_joint_empirical_prior import build
 
 from bedcosmo.num_visits.empirical.joint_prior_flow import JointPriorFlow
+from bedcosmo.num_visits.empirical.sed_prior import EmpiricalSedPrior
 
 
-def test_complete_joint_build_from_fitted_population(tmp_path):
+@pytest.mark.parametrize("direct_steps", [0, 1])
+def test_complete_joint_build_from_fitted_population(tmp_path, direct_steps):
     source, out = tmp_path / "source", tmp_path / "joint"
     (source / "templates").mkdir(parents=True)
     rng = np.random.default_rng(11)
@@ -52,22 +54,42 @@ def test_complete_joint_build_from_fitted_population(tmp_path):
     (source / "build_provenance.json").write_text(json.dumps(provenance))
     before = {str(p.relative_to(source)): p.read_bytes() for p in source.rglob("*") if p.is_file()}
     report = build(
-        source, out, n_samples=1000, epochs=2, validation_samples=1000, plot_samples=80, threads=1
+        source,
+        out,
+        n_samples=1000,
+        epochs=2,
+        validation_samples=1000,
+        plot_samples=80,
+        threads=1,
+        direct_multiscale_steps=direct_steps,
     )
     assert report["status"] == "complete"
     assert report["runtime"]["bed_supported"] is True
-    assert report["diagnostics"]["training_aux_boundary_rows_excluded_from_gaussian_plots"] == 4
+    assert report["nf"]["training_source"] == ("observed_rows" if direct_steps else "kde_draws")
     for name, contents in before.items():
         assert (source / name).read_bytes() == contents
         assert report["source_sha256"][name] == hashlib.sha256(contents).hexdigest()
     for name, expected in report["outputs"].items():
         assert hashlib.sha256((out / name).read_bytes()).hexdigest() == expected
     with np.load(out / "joint_kde_fit.npz") as fitted:
-        np.testing.assert_allclose(fitted["training_rows"], rows)
+        if direct_steps:
+            with np.load(out / "direct_fit_split.npz") as split:
+                assert len(split["validation"]) == 40
+                assert not np.intersect1d(split["fit"], split["validation"]).size
+                np.testing.assert_allclose(fitted["training_rows"], rows[split["fit"]])
+            assert report["multiscale_training"]["steps"] == direct_steps
+        else:
+            np.testing.assert_allclose(fitted["training_rows"], rows)
+            assert (
+                report["diagnostics"]["training_aux_boundary_rows_excluded_from_gaussian_plots"]
+                == 4
+            )
         assert fitted["bandwidth"] == 0.1
     loaded = JointPriorFlow.load(out / "joint_prior_flow.pt")
     assert loaded.metadata["build_provenance"]["status"] == "complete"
     assert np.isfinite(loaded.log_prob(loaded.sample(100, seed=6))).all()
+    runtime = EmpiricalSedPrior.from_joint_path(out / "joint_prior_flow.pt", pool_size=256)
+    assert runtime.sample_batch(12).shape == (12, 5)
     for name in [
         "build.log",
         "README.md",

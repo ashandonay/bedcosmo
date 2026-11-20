@@ -280,6 +280,91 @@ class JointPriorFlow:
         return cls(metadata, groups)
 
 
+def _sample_validation_score(training, validation, mu, std, lower, upper, seed):
+    """Set up a fixed-draw sliced Wasserstein score in physical coordinates."""
+    import torch
+
+    rng = np.random.default_rng(seed)
+    masks = training[rng.integers(len(training), size=2048), :-2] > 0
+    context = torch.as_tensor(masks, dtype=torch.float32)
+    base = torch.as_tensor(rng.normal(size=(len(masks), len(mu))), dtype=torch.float32)
+    directions = rng.normal(size=(training.shape[1], 64))
+    scale = training.std(axis=0)
+    scale[scale == 0] = 1
+    projection = directions / (np.linalg.norm(directions, axis=0) * scale[:, None])
+    quantiles = np.linspace(0.001, 0.999, 201)
+    reference = np.quantile(validation @ projection, quantiles, axis=0)
+
+    def score(flow):
+        with torch.no_grad():
+            x = flow(context).transform.inv(base).numpy()
+        generated = decode_rows(x * std + mu, masks, lower, upper)
+        return float(
+            np.abs(np.quantile(generated @ projection, quantiles, axis=0) - reference).mean()
+        )
+
+    return score
+
+
+def _prior_structure(target, config, seed, *, pad_bounds):
+    lower, upper = target.lower[-2:].copy(), target.upper[-2:].copy()
+    if pad_bounds:
+        # Use the same training-only domain for both fits, with room for observed
+        # extrema. The KDE itself still reflects at its original training bounds.
+        padding = 0.05 * (upper - lower)
+        lower -= padding
+        upper += padding
+        lower[1] = max(0, lower[1])
+    atomic = target.counts == 1
+    if np.all(atomic):
+        raise ValueError("No continuous patterns to train a flow")
+    atomic_rows = np.zeros((len(target.patterns), target.rows.shape[1]))
+    for i, members in enumerate(target.members):
+        if atomic[i]:
+            atomic_rows[i] = target.rows[members[0]]
+            atomic_rows[i, :-2] /= atomic_rows[i, :-2].sum()
+        elif np.any(target.rows[members].std(axis=0)[np.r_[target.patterns[i], True, True]] == 0):
+            raise ValueError(
+                "Non-singleton degenerate pattern requires explicit lower-dimensional modeling"
+            )
+    metadata = {
+        "patterns": target.patterns,
+        "counts": target.counts,
+        "atomic": atomic,
+        "atomic_rows": atomic_rows,
+        "lower": lower,
+        "upper": upper,
+        "bandwidth": target.bandwidth,
+        "flow_config": config,
+        "seed": seed,
+        "measure": "Counting over patterns; first m-1 active fractions plus log scale and redshift for continuous faces; singleton point masses otherwise.",
+    }
+    return JointPriorFlow(metadata, {})
+
+
+def initialize_direct_prior(target, *, seed, hidden=64, transforms=3, bins=8):
+    """Initialize mask masses, face coordinates, and an unfitted direct prior."""
+    import torch
+
+    config = {"hidden": [hidden, hidden], "transforms": transforms, "bins": bins}
+    model = _prior_structure(target, config, seed, pad_bounds=True)
+    model.metadata.update(training_source="observed_rows", n_samples=len(target.rows))
+    ids = np.array([model.lookup[tuple(row[:-2] > 0)] for row in target.rows])
+    continuous = ~model.metadata["atomic"][ids]
+    counts = (target.rows[:, :-2] > 0).sum(axis=1)
+    for m in np.unique(counts[continuous]):
+        rows = target.rows[continuous & (counts == m)]
+        encoded, _ = encode_rows(rows, model.metadata["lower"], model.metadata["upper"])
+        std = encoded.std(axis=0)
+        if len(rows) < 2 or np.any(std <= 0):
+            raise ValueError(f"Cannot initialize standardization for the {m}-active group")
+        torch.manual_seed(seed + int(m))
+        flow = build_flow(int(m) + 1, model.patterns.shape[1], config)
+        flow.eval()
+        model.groups[int(m)] = {"flow": flow, "mu": encoded.mean(axis=0), "std": std, "history": []}
+    return model
+
+
 def train(
     target,
     *,
@@ -292,50 +377,47 @@ def train(
     patience=25,
     seed=23,
     output_dir=None,
+    direct=False,
+    validation_rows=None,
+    select_by_samples=False,
 ):
+    """Fit from KDE draws or directly from the observed rows."""
     import torch
 
     if n_samples < 100 or min(epochs, batch_size, hidden, transforms, bins, patience) < 1:
         raise ValueError("Training counts/configuration must be positive; use at least 100 samples")
-    atomic = target.counts == 1
-    if np.all(atomic):
-        raise ValueError("No continuous patterns to train a flow")
-    atomic_rows = np.zeros((len(target.patterns), target.rows.shape[1]))
-    for i, members in enumerate(target.members):
-        if atomic[i]:
-            atomic_rows[i] = target.rows[members[0]]
-            atomic_rows[i, :-2] /= atomic_rows[i, :-2].sum()
-        elif np.any(target.widths[i, -2:] == 0) or (
-            target.patterns[i].sum() > 1 and np.any(target.widths[i, :-2][target.patterns[i]] == 0)
-        ):
-            raise ValueError(
-                "Non-singleton degenerate pattern requires explicit lower-dimensional modeling"
-            )
+    if (direct or select_by_samples) and validation_rows is None:
+        raise ValueError(
+            "Direct training or sample selection requires separate observed validation rows"
+        )
     config = {"hidden": [hidden, hidden], "transforms": transforms, "bins": bins}
-    metadata = {
-        "patterns": target.patterns,
-        "counts": target.counts,
-        "atomic": atomic,
-        "atomic_rows": atomic_rows,
-        "lower": target.lower[-2:],
-        "upper": target.upper[-2:],
-        "bandwidth": target.bandwidth,
-        "flow_config": config,
-        "seed": seed,
-        "n_samples": n_samples,
-        "epochs_requested": epochs,
-        "measure": "Counting over patterns; first m-1 active fractions plus log scale and redshift for continuous faces; singleton point masses otherwise.",
-    }
-    model = JointPriorFlow(metadata, {})
-    training = target.sample(n_samples, seed=seed)
-    validation = target.sample(max(20000, n_samples // 5), seed=seed + 1)
+    model = _prior_structure(target, config, seed, pad_bounds=validation_rows is not None)
+    metadata = model.metadata
+    metadata.update(
+        training_source="observed_rows" if direct else "kde_draws",
+        n_samples=len(target.rows) if direct else n_samples,
+        epochs_requested=epochs,
+        checkpoint_selection="sample_distance" if select_by_samples else "likelihood",
+    )
+    atomic = metadata["atomic"]
+    lower, upper = metadata["lower"], metadata["upper"]
+    training = target.rows if direct else target.sample(n_samples, seed=seed)
+    validation = (
+        target.sample(max(20000, n_samples // 5), seed=seed + 1)
+        if validation_rows is None
+        else np.asarray(validation_rows, dtype=float)
+    )
     train_ids = np.array([model.lookup[tuple(row[:-2] > 0)] for row in training])
-    val_ids = np.array([model.lookup[tuple(row[:-2] > 0)] for row in validation])
+    val_ids = np.array([model.lookup.get(tuple(row[:-2] > 0), -1) for row in validation])
+    eligible_val = np.zeros(len(validation), dtype=bool)
+    known = val_ids >= 0
+    eligible_val[known] = ~atomic[val_ids[known]]
+    eligible_val &= ((validation[:, -2:] > lower) & (validation[:, -2:] < upper)).all(axis=1)
     for m in np.unique(target.patterns[~atomic].sum(axis=1)):
         tr_idx = (~atomic[train_ids]) & ((training[:, :-2] > 0).sum(axis=1) == m)
-        ev_idx = (~atomic[val_ids]) & ((validation[:, :-2] > 0).sum(axis=1) == m)
-        if min(tr_idx.sum(), ev_idx.sum()) < 2:
-            raise ValueError(f"Insufficient KDE draws for {m}-active group")
+        ev_idx = eligible_val & ((validation[:, :-2] > 0).sum(axis=1) == m)
+        if tr_idx.sum() < 2 or not ev_idx.any():
+            raise ValueError(f"Insufficient training or validation rows for {m}-active group")
         tr, _ = encode_rows(training[tr_idx], metadata["lower"], metadata["upper"])
         ev, _ = encode_rows(validation[ev_idx], metadata["lower"], metadata["upper"])
         mu, std = tr.mean(axis=0), tr.std(axis=0)
@@ -349,6 +431,15 @@ def train(
         flow = build_flow(int(m) + 1, target.patterns.shape[1], config)
         opt = torch.optim.Adam(flow.parameters(), lr=1e-3)
         best, best_state, history, stale = np.inf, None, [], 0
+        best_epoch = None
+        sample_score = None
+        sample_history = []
+        best_sample_score, best_sample_state, best_sample_epoch = np.inf, None, None
+        # A handful of validation rows cannot support a distributional score.
+        if select_by_samples and len(ev) >= 30:
+            sample_score = _sample_validation_score(
+                training[tr_idx], validation[ev_idx], mu, std, lower, upper, seed + 1000 + int(m)
+            )
         started = time.perf_counter()
         for epoch in range(epochs):
             flow.train()
@@ -368,7 +459,15 @@ def train(
             if not np.isfinite(nll):
                 raise ValueError("Nonfinite validation NLL")
             history.append(nll)
+            if sample_score is not None and (epoch % 5 == 0 or nll < best):
+                distance = sample_score(flow)
+                sample_history.append([epoch + 1, distance])
+                if distance < best_sample_score:
+                    best_sample_score = distance
+                    best_sample_state = copy.deepcopy(flow.state_dict())
+                    best_sample_epoch = epoch + 1
             if nll < best:
+                best_epoch = epoch + 1
                 best, best_state, stale = nll, copy.deepcopy(flow.state_dict()), 0
             else:
                 stale += 1
@@ -379,13 +478,16 @@ def train(
                 )
             if stale >= patience:
                 break
-        flow.load_state_dict(best_state)
+        flow.load_state_dict(best_sample_state if sample_score is not None else best_state)
         flow.eval()
         model.groups[int(m)] = {"flow": flow, "mu": mu, "std": std, "history": history}
         metadata.setdefault("training_groups", {})[int(m)] = {
             "n_train": len(tr),
             "n_validation": len(ev),
             "best_nll": best,
+            "best_nll_epoch": best_epoch,
+            "selected_epoch": best_sample_epoch if sample_score is not None else best_epoch,
+            "sample_distance_history": sample_history,
             "epochs": len(history),
             "seconds": time.perf_counter() - started,
         }

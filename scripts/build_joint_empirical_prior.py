@@ -18,6 +18,7 @@ import yaml
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from audit_multiscale_joint_prior_flow import make_mask_scales, optimize
 from prototype_joint_empirical_mixture import JointPatternMixture, lsst_magnitudes
 from validate_joint_empirical_prior_flow import validate
 
@@ -25,6 +26,20 @@ from bedcosmo.num_visits.empirical.eazy.fit_eazy_weights_to_desi import save_tri
 from bedcosmo.num_visits.empirical.fit_sed_prior_kde import load_prior_training_table
 from bedcosmo.num_visits.empirical.joint_prior_flow import JointPriorFlow, train
 from bedcosmo.num_visits.empirical.templates import load_two_column_template, read_template_param
+
+
+def direct_split(rows, seed):
+    """Reserve validation rows while retaining every observed activation mask."""
+    _, ids, counts = np.unique(rows[:, :-2] > 0, axis=0, return_inverse=True, return_counts=True)
+    rng = np.random.default_rng(seed)
+    validation = []
+    for pattern, count in enumerate(counts):
+        if count >= 3:
+            members = rng.permutation(np.flatnonzero(ids == pattern))
+            validation.extend(members[: max(1, count // 5)])
+    validation = np.sort(np.asarray(validation, dtype=int))
+    fit = np.setdiff1d(np.arange(len(rows)), validation)
+    return fit, validation
 
 
 def build(
@@ -38,6 +53,7 @@ def build(
     plot_samples=2000,
     threads=2,
     seed=23,
+    direct_multiscale_steps=0,
 ):
     """Reuse the measured spectral fits; rebuild every statistical prior stage."""
     prior_dir, out = Path(prior_dir).resolve(), Path(output_dir).resolve()
@@ -49,6 +65,7 @@ def build(
         or min(n_samples, validation_samples) < 100
         or min(epochs, threads) < 1
         or plot_samples < 3
+        or direct_multiscale_steps < 0
     ):
         raise ValueError("Use positive settings, at least 100 training/validation and 3 plot draws")
     source_provenance = json.loads((prior_dir / "build_provenance.json").read_text())
@@ -78,6 +95,7 @@ def build(
         "plot_samples": plot_samples,
         "threads": threads,
         "seed": seed,
+        "direct_multiscale_steps": direct_multiscale_steps,
     }
     source_files = [
         prior_dir / name
@@ -145,6 +163,11 @@ def build(
         names = [f"a{i+1}" for i in range(len(bank))] + ["log_c_scale", "z"]
         rows = table[names].to_numpy()
         table.to_csv(out / "prior_training_table.csv", index=False)
+        if direct_multiscale_steps:
+            fit_idx, val_idx = direct_split(rows, seed)
+            np.savez_compressed(out / "direct_fit_split.npz", fit=fit_idx, validation=val_idx)
+            validation_rows = rows[val_idx]
+            rows = rows[fit_idx]
         target = JointPatternMixture(rows, bandwidth=bandwidth)
         np.savez_compressed(
             out / "joint_kde_fit.npz", training_rows=rows, bandwidth=bandwidth, feature_names=names
@@ -162,7 +185,38 @@ def build(
                 indent=2,
             )
         )
-        model = train(target, n_samples=n_samples, epochs=epochs, seed=seed, output_dir=out)
+        if direct_multiscale_steps:
+            model = train(
+                target,
+                direct=True,
+                validation_rows=validation_rows,
+                hidden=96,
+                transforms=5,
+                bins=12,
+                batch_size=256,
+                patience=18,
+                epochs=epochs,
+                seed=seed,
+                output_dir=out,
+            )
+            scale = rows.std(axis=0)
+            if np.any(scale <= 0):
+                raise ValueError("Direct fit requires nonzero spread in the physical coordinates")
+            model = optimize(
+                model,
+                target,
+                validation_rows,
+                scale,
+                make_mask_scales(rows, target, scale),
+                seed=seed + 38,
+                device=torch.device("cpu"),
+                steps=direct_multiscale_steps,
+                batch_size=2048,
+                weight=4,
+            )
+            provenance["multiscale_training"] = model.metadata["multiscale_training"]
+        else:
+            model = train(target, n_samples=n_samples, epochs=epochs, seed=seed, output_dir=out)
         model.metadata.update(
             {"feature_names": names, "source_sha256": source_hashes, "build_provenance": provenance}
         )
@@ -273,6 +327,7 @@ def build(
         provenance["status"] = "complete"
         provenance["completed_at_utc"] = datetime.now(timezone.utc).isoformat()
         provenance["nf"] = {
+            "training_source": model.metadata["training_source"],
             "groups": model.metadata["training_groups"],
             "flow_config": model.metadata["flow_config"],
         }
@@ -327,5 +382,11 @@ if __name__ == "__main__":
     parser.add_argument("--plot-samples", type=int, default=2000)
     parser.add_argument("--threads", type=int, default=2)
     parser.add_argument("--seed", type=int, default=23)
+    parser.add_argument(
+        "--direct-multiscale-steps",
+        type=int,
+        default=0,
+        help="Fit a large spline on DESI rows and fine-tune for this many multiscale updates.",
+    )
     result = build(**vars(parser.parse_args()))
     print(f"Completed: {result['arguments']['output_dir']}")

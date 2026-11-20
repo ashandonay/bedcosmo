@@ -161,3 +161,59 @@ def test_gaussian_coordinates_with_interleaved_counts_masks_and_atoms():
     )
     with pytest.raises(ValueError, match="invalid shape"):
         model.degaussianize(ids, {**groups, 2: np.zeros((1, 3))})
+
+
+def test_direct_training_uses_observed_rows_and_keeps_extrema_inside_bounds():
+    torch.set_num_threads(1)
+    a = np.linspace(0.15, 0.85, 32)
+    rows = np.column_stack([a, 1 - a, np.zeros_like(a), 2 + a, 0.15 + a**2])
+    atomic = np.array([[0, 0, 1, 2.5, 0.21]])
+    target = JointPatternMixture(np.vstack([rows, atomic]), bandwidth=0.1)
+    validation = np.array([[0.3, 0.7, 0, 2.3, 0.21], [0, 1, 0, 2.5, 0.3], atomic[0]])
+    model = train(
+        target,
+        direct=True,
+        validation_rows=validation,
+        epochs=2,
+        batch_size=16,
+        hidden=8,
+        transforms=1,
+        bins=4,
+        patience=2,
+    )
+    assert model.metadata["training_source"] == "observed_rows"
+    assert model.metadata["training_groups"][2]["n_train"] == len(rows)
+    assert model.metadata["training_groups"][2]["n_validation"] == 1
+    group = model.groups[2]
+    encoded, _ = encode_rows(rows, model.metadata["lower"], model.metadata["upper"])
+    np.testing.assert_allclose(group["mu"], encoded.mean(axis=0))
+    np.testing.assert_allclose(group["std"], encoded.std(axis=0))
+    assert np.isfinite(model.log_prob(rows)).all()
+    assert model.log_prob(atomic)[0] == pytest.approx(-np.log(len(target.rows)))
+
+
+def test_sample_selection_preserves_training_and_chooses_minimum_validation_distance():
+    torch.set_num_threads(1)
+    rng = np.random.default_rng(15)
+    a = rng.uniform(0.1, 0.9, 190)
+    rows = np.column_stack([a, 1 - a, 2 + rng.random(len(a)), 0.1 + rng.random(len(a))])
+    target = JointPatternMixture(rows[:130], bandwidth=0.1)
+    kwargs = {
+        "direct": True,
+        "validation_rows": rows[130:],
+        "epochs": 6,
+        "batch_size": 32,
+        "patience": 6,
+        "hidden": 8,
+        "transforms": 1,
+        "bins": 4,
+    }
+    likelihood = train(target, **kwargs)
+    generated = train(target, select_by_samples=True, **kwargs)
+    np.testing.assert_array_equal(likelihood.groups[2]["history"], generated.groups[2]["history"])
+    group = generated.metadata["training_groups"][2]
+    history = group["sample_distance_history"]
+    assert len(history) >= 2
+    assert group["selected_epoch"] == min(history, key=lambda candidate: candidate[1])[0]
+    assert group["best_nll_epoch"] == likelihood.metadata["training_groups"][2]["selected_epoch"]
+    assert np.isfinite(generated.log_prob(generated.sample(100, seed=1))).all()
