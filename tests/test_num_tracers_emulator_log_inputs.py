@@ -1,4 +1,4 @@
-"""NumTracers emulator inputs: log-N checkpoints and the N_tracers floor clamp.
+"""NumTracers emulator inputs: log-N checkpoints, the N_tracers floor clamp and the cosmology box clamp.
 
 A checkpoint trained with ``train.py --log-inputs N_tracers`` must be fed log N,
 standardized with its own stats; feeding it linear N returns wrong σ without
@@ -134,3 +134,56 @@ def test_gradient_through_n_is_finite_above_and_zero_below_floor(tmp_path, stub)
     stub._emulator_predict(emu, x).sum().backward()
     assert torch.isfinite(x.grad).all()
     assert x.grad[0, 0] != 0 and x.grad[1, 0] == 0
+
+
+# ---- cosmology inputs: clipped into the recorded training box -----------------------
+
+def _xc(om, hrdrag, n=3.0e4):
+    return torch.tensor([[n, om, hrdrag]], dtype=torch.float32)
+
+
+def test_cosmology_outside_the_box_is_evaluated_at_its_edge(tmp_path, stub):
+    """A prior draw below the trained Om floor gets the floor's covariance, finite."""
+    path, _, _ = _ckpt(tmp_path, log_n=True, record_box=True)
+    emu = stub._load_emulator(path)
+    with torch.no_grad():
+        edge = stub._emulator_predict(emu, _xc(0.1, 100.0))
+        for om in (0.05, 0.01, -1.0):
+            out = stub._emulator_predict(emu, _xc(om, 100.0))
+            assert torch.isfinite(out).all()
+            torch.testing.assert_close(out, edge)
+        inside = stub._emulator_predict(emu, _xc(0.3, 100.0))
+        assert not torch.allclose(inside, edge)
+        torch.testing.assert_close(stub._emulator_predict(emu, _xc(0.95, 100.0)),
+                                   stub._emulator_predict(emu, _xc(0.9, 100.0)))
+
+
+def test_exact_hrdrag_scaling_uses_the_draws_own_hrdrag(tmp_path, stub):
+    """Above the hrdrag box the net sees the edge, and sigma ~ 1/hrdrag uses the true value."""
+    path, _, ckpt = _ckpt(tmp_path, log_n=True, record_box=True)
+    ckpt["y_mu"] = torch.tensor([[50.0, 50.0, 0.0]])  # scaled sigma labels well above the floor
+    torch.save(ckpt, path)
+    emu = stub._load_emulator(path)
+    with torch.no_grad():
+        at_edge = stub._emulator_predict(emu, _xc(0.3, 120.0))
+        beyond = stub._emulator_predict(emu, _xc(0.3, 240.0))
+    torch.testing.assert_close(beyond[0, :2], at_edge[0, :2] * 120.0 / 240.0)  # sigmas
+    torch.testing.assert_close(beyond[0, 2], at_edge[0, 2])                     # rho
+
+
+def test_checkpoint_without_box_does_not_clamp_cosmology(tmp_path, stub):
+    path, _, _ = _ckpt(tmp_path, log_n=False, record_box=False)
+    emu = stub._load_emulator(path)
+    assert emu["theta_lo"] is None
+    with torch.no_grad():
+        assert not torch.allclose(stub._emulator_predict(emu, _xc(0.05, 100.0, n=LO)),
+                                  stub._emulator_predict(emu, _xc(0.1, 100.0, n=LO)))
+
+
+def test_gradient_through_om_is_zero_outside_the_box(tmp_path, stub):
+    path, _, _ = _ckpt(tmp_path, log_n=True, record_box=True)
+    emu = stub._load_emulator(path)
+    x = torch.tensor([[3.0e4, 0.3, 100.0], [3.0e4, 0.05, 100.0]], requires_grad=True)
+    stub._emulator_predict(emu, x).sum().backward()
+    assert torch.isfinite(x.grad).all()
+    assert x.grad[0, 1] != 0 and x.grad[1, 1] == 0

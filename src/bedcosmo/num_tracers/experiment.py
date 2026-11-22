@@ -1581,6 +1581,22 @@ class NumTracers(BaseExperiment, CosmologyMixin):
             if "N_tracers" in log_inputs:
                 n_train_lo, n_train_hi = math.exp(n_train_lo), math.exp(n_train_hi)
 
+        # The trained box of every other input (the cosmology): the net is evaluated
+        # with each one clipped into it (_emulator_predict). Outside it the net
+        # extrapolates, and a tempered prior can reach there: base_omegak_w_wa's
+        # reaches Om = 0.01 against a trained floor of 0.051 (below ~0.05 the
+        # cosmology is unphysical anyway, omega_cdm < 0), where the extrapolated
+        # sigma hit _SIGMA_CEILING, the simulated data reached ~1e8 and the flow's
+        # loss overflowed. Only a checkpoint that records its box is clamped;
+        # N_tracers keeps its floor-only clamp above.
+        theta_lo = theta_hi = None
+        if ckpt.get("x_train_min") is not None:
+            theta_lo = ckpt["x_train_min"].reshape(-1).to(self.device).clone()
+            theta_hi = ckpt["x_train_max"].reshape(-1).to(self.device).clone()
+            if n_index is not None:
+                theta_lo[n_index] = -math.inf
+                theta_hi[n_index] = math.inf
+
         # scale_data.py recipe recorded by train.py. Empty = unscaled (legacy).
         # Must be passed to decode_and_unscale or σ comes back still multiplied
         # by the scale factor (e.g. hrdrag ~ 100) and hits _SIGMA_CEILING.
@@ -1592,6 +1608,8 @@ class NumTracers(BaseExperiment, CosmologyMixin):
             "n_train_hi": n_train_hi,
             "n_index": n_index,
             "n_floor": n_floor,
+            "theta_lo": theta_lo,
+            "theta_hi": theta_hi,
             "log_inputs": log_inputs,
             "param_names": list(ckpt["param_names"]),
             "target_names": list(ckpt["target_names"]),
@@ -1781,7 +1799,12 @@ class NumTracers(BaseExperiment, CosmologyMixin):
             labels are unscaled here via ``decode_and_unscale``. N_tracers below
             a recorded training floor is evaluated at the floor (see
             ``_load_emulator``), so a class with no fibers is finite under a
-            log-N input.
+            log-N input. The other inputs (the cosmology) are clipped into the
+            recorded training box before the net sees them, so a prior draw
+            outside it gets the box edge's covariance, not an extrapolation.
+            The scale-expression unscaling (e.g. ``sigma_*:hrdrag``) still uses
+            the draw's own values: those scalings are exact, so the clipped net
+            output times the true factor is the right sigma.
         """
         from tracer_forecast_emulator.util import decode_and_unscale, standardize_emulator_inputs
 
@@ -1791,9 +1814,13 @@ class NumTracers(BaseExperiment, CosmologyMixin):
             i = emu["n_index"]
             x = torch.cat([x[..., :i], x[..., i:i + 1].clamp(min=emu["n_floor"]),
                            x[..., i + 1:]], dim=-1)
+        x_net = x
+        if emu.get("theta_lo") is not None:
+            x_net = torch.clamp(x, min=emu["theta_lo"].to(model_dtype),
+                                max=emu["theta_hi"].to(model_dtype))
         y_mu = emu["y_mu"].to(model_dtype)
         y_sigma = emu["y_sigma"].to(model_dtype)
-        x_norm = standardize_emulator_inputs(x, emu)
+        x_norm = standardize_emulator_inputs(x_net, emu)
         y_norm = emu["model"](x_norm)
         # Numerical guard on non-detection / out-of-domain extrapolation: cap
         # sigma to a finite ceiling (inf/nan -> ceiling; encodes "no info") and
