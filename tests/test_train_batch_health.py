@@ -127,6 +127,7 @@ def test_nan_stops_every_rank_and_only_the_failing_one_dumps(tmp_path, capsys):
 def test_num_tracers_flags_sigma_ceiling_draws():
     exp = SimpleNamespace(likelihood_mode="emulator", nominal_design=torch.zeros(2))
     exp._SIGMA_CEILING = NumTracers._SIGMA_CEILING
+    exp._input_clamp_stats = lambda: 0.0
     # Two design columns, then observations: one in-domain row, one at the ceiling.
     context = torch.tensor(
         [
@@ -137,7 +138,8 @@ def test_num_tracers_flags_sigma_ceiling_draws():
         ],
         dtype=torch.float64,
     )
-    assert NumTracers.training_batch_stats(exp, context) == {"frac_sigma_ceiling": 0.5}
+    assert NumTracers.training_batch_stats(exp, context) == {
+        "frac_sigma_ceiling": 0.5, "frac_emulator_inputs_clamped": 0.0}
 
     exp.likelihood_mode = "scaling"
     assert NumTracers.training_batch_stats(exp, context) == {}

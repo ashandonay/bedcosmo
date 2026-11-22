@@ -187,3 +187,35 @@ def test_gradient_through_om_is_zero_outside_the_box(tmp_path, stub):
     stub._emulator_predict(emu, x).sum().backward()
     assert torch.isfinite(x.grad).all()
     assert x.grad[0, 1] != 0 and x.grad[1, 1] == 0
+
+
+def test_clamped_inputs_are_counted_logged_and_warned_once(tmp_path, stub):
+    """frac_emulator_inputs_clamped is the clipped share of evaluations since the last read;
+    the first read that sees any warns once for that network, naming the parameter."""
+    path, _, _ = _ckpt(tmp_path, log_n=True, record_box=True)
+    emu = stub._load_emulator(path)
+    stub._emulators = {"QSO": emu}
+    x = torch.tensor([[3.0e4, 0.3, 100.0], [3.0e4, 0.05, 100.0],
+                      [3.0e4, 0.3, 240.0], [3.0e4, 0.3, 100.0]])
+    with torch.no_grad():
+        stub._emulator_predict(emu, x)
+    with pytest.warns(RuntimeWarning, match=r"Om below 0\.1 \(1\).*hrdrag above 120 \(1\)"):
+        assert stub._input_clamp_stats() == pytest.approx(2 / 4)
+    # Counters reset on read; nothing evaluated since -> 0.0, and no second warning.
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        assert stub._input_clamp_stats() == 0.0
+        with torch.no_grad():
+            stub._emulator_predict(emu, x)
+        assert stub._input_clamp_stats() == pytest.approx(0.5)
+
+
+def test_clamp_metric_is_always_reported_in_emulator_mode(tmp_path, stub):
+    """The trainer averages batch stats over ranks by name, so the key must always be there."""
+    path, _, _ = _ckpt(tmp_path, log_n=True, record_box=True)
+    stub._emulators = {"QSO": stub._load_emulator(path)}
+    stub.likelihood_mode = "emulator"
+    stub.nominal_design = torch.zeros(4)
+    stats = stub.training_batch_stats(torch.zeros(2, 10))
+    assert stats["frac_emulator_inputs_clamped"] == 0.0 and "frac_sigma_ceiling" in stats
