@@ -1225,7 +1225,64 @@ class NumTracers(BaseExperiment, CosmologyMixin):
         # when every observation's noise is below 0.01 sigma.
         y = context[..., self.nominal_design.shape[-1]:]
         capped = (y.abs() > 1e-2 * self._SIGMA_CEILING).any(-1)
-        return {"frac_sigma_ceiling": capped.double().mean().item()}
+        # Always present in emulator mode: the trainer averages these over ranks by name.
+        return {"frac_sigma_ceiling": capped.double().mean().item(),
+                "frac_emulator_inputs_clamped": self._input_clamp_stats()}
+
+    def _input_clamp_stats(self):
+        """Fraction of emulator evaluations since the last call whose cosmology input was clipped
+        into its network's trained box (_emulator_predict), and warn once per network that does it.
+
+        The counts accumulate on the device inside _emulator_predict, so the per-call cost is
+        a few elementwise ops and no host sync; they are read and reset here, once per logged
+        training step. 0.0 when nothing was evaluated.
+        """
+        rows = total = 0
+        warned = self.__dict__.setdefault("_input_clamp_warned", set())
+        for tracer_bin, emu in (getattr(self, "_emulators", None) or {}).items():
+            counts = emu.get("_clamp_counts")
+            if counts is None or not counts["total"]:
+                continue
+            n = int(counts["rows"])
+            rows += n
+            total += counts["total"]
+            if n and emu["ckpt_path"] not in warned:
+                warned.add(emu["ckpt_path"])
+                below, above = counts["below"].tolist(), counts["above"].tolist()
+                parts = [f"{p} below {emu['theta_lo'][i].item():.4g} ({below[i]})"
+                         for i, p in enumerate(emu["param_names"]) if below[i]]
+                parts += [f"{p} above {emu['theta_hi'][i].item():.4g} ({above[i]})"
+                          for i, p in enumerate(emu["param_names"]) if above[i]]
+                import warnings
+                warnings.warn(
+                    f"[{tracer_bin}] emulator inputs outside the trained box were clipped to its "
+                    f"edge: {', '.join(parts)} of {counts['total']} evaluations so far. Logged per "
+                    "step as frac_emulator_inputs_clamped; warned once per network.",
+                    RuntimeWarning,
+                )
+            counts["rows"].zero_()
+            counts["below"].zero_()
+            counts["above"].zero_()
+            counts["total"] = 0
+        return rows / total if total else 0.0
+
+    @staticmethod
+    def _count_input_clamps(emu, x, lo, hi):
+        """Accumulate, on x's device and without a host sync, how many evaluations had an input
+        clipped into the trained box: per parameter below/above, and per row."""
+        with torch.no_grad():
+            flat = x.reshape(-1, x.shape[-1])
+            below, above = flat < lo, flat > hi
+            counts = emu.get("_clamp_counts")
+            if counts is None:
+                zeros = torch.zeros(flat.shape[-1], dtype=torch.long, device=flat.device)
+                counts = emu["_clamp_counts"] = {
+                    "below": zeros, "above": zeros.clone(),
+                    "rows": torch.zeros((), dtype=torch.long, device=flat.device), "total": 0}
+            counts["below"] += below.sum(0)
+            counts["above"] += above.sum(0)
+            counts["rows"] += (below | above).any(-1).sum()
+            counts["total"] += flat.shape[0]
 
     def _in_prior_support(self, samples):
         """Mask of rows inside the uniform bounds and the sum constraints; samples (..., n_params)."""
@@ -1816,8 +1873,9 @@ class NumTracers(BaseExperiment, CosmologyMixin):
                            x[..., i + 1:]], dim=-1)
         x_net = x
         if emu.get("theta_lo") is not None:
-            x_net = torch.clamp(x, min=emu["theta_lo"].to(model_dtype),
-                                max=emu["theta_hi"].to(model_dtype))
+            lo, hi = emu["theta_lo"].to(model_dtype), emu["theta_hi"].to(model_dtype)
+            self._count_input_clamps(emu, x, lo, hi)
+            x_net = torch.clamp(x, min=lo, max=hi)
         y_mu = emu["y_mu"].to(model_dtype)
         y_sigma = emu["y_sigma"].to(model_dtype)
         x_norm = standardize_emulator_inputs(x_net, emu)
