@@ -1956,7 +1956,8 @@ class TestCompareEigCorrelation:
         )
         with patch.object(plotter, "_get_run_data_list", return_value=runs):
             fig, ax, stats = plotter.compare_eig_correlation(
-                colors=["tab:blue", "tab:green"], save_dir=str(tmp_path / "plots"), dpi=60)
+                normalize="percent", colors=["tab:blue", "tab:green"],
+                save_dir=str(tmp_path / "plots"), dpi=60)
         # y defaults to every run after run_ids[0], in order.
         assert [s["label_y"] for s in stats] == ["variable [up]", "variable [down]"]
         # Plotted values are % from each run's own nominal: "down" is a pure rescale, so it
@@ -1967,6 +1968,44 @@ class TestCompareEigCorrelation:
         assert all(s["rho_pearson"] == pytest.approx(1.0) for s in stats)
         assert stats[1]["mean_offset"] == pytest.approx(0.0, abs=1e-9)
         assert "r = 1.000" in ax.get_legend().get_texts()[0].get_text()
+
+    def test_bits_is_the_default_scale(self, mock_scratch_env, tmp_path):
+        ref = np.array([7.0, 7.1, 6.9, 7.2])
+        plotter, runs = self._runs_with_nominal(
+            tmp_path, {"ref": ref, "up": ref + 0.8}, {"ref": 7.0, "up": 7.8})
+        with patch.object(plotter, "_get_run_data_list", return_value=runs):
+            fig, ax, stats = plotter.compare_eig_correlation(save_dir=str(tmp_path / "plots"), dpi=60)
+        # A constant shift in bits lands exactly on 1:1 (percent would shrink it by 7.8 vs 7.0).
+        np.testing.assert_allclose(ax.collections[0].get_offsets()[:, 0], ref - 7.0)
+        np.testing.assert_allclose(ax.collections[0].get_offsets()[:, 1], ref - 7.0)
+        assert stats[0]["mean_offset"] == pytest.approx(0.0, abs=1e-12)
+        assert "[bits]" in ax.get_ylabel()
+
+    def test_bits_per_param_divides_by_each_runs_count(self, mock_scratch_env, tmp_path):
+        ref = np.array([7.0, 7.4, 6.6, 8.0])
+        plotter, runs = self._runs_with_nominal(
+            tmp_path, {"ref": ref, "big": 7.0 + 2.5 * (ref - 7.0)}, {"ref": 7.0, "big": 7.0})
+        # "big" counts its parameters from its checkpoint; "ref" is given n_params.
+        ckpt = tmp_path / "mlruns" / "exp_1" / "big" / "artifacts" / "checkpoints"
+        ckpt.mkdir(parents=True)
+        torch.save({"target_params": ["Om", "Ok", "w0", "wa", "hrdrag"]}, ckpt / "checkpoint_rank_0_50000.pt")
+        with patch.object(plotter, "_get_run_data_list", return_value=runs):
+            fig, ax, stats = plotter.compare_eig_correlation(
+                x={"eig_kind": "variable", "run_id": "ref", "label": "ref", "n_params": 2},
+                y={"eig_kind": "variable", "run_id": "big", "label": "big"},
+                normalize="bits_per_param", save_dir=str(tmp_path / "plots"), dpi=60)
+        np.testing.assert_allclose(ax.collections[0].get_offsets()[:, 0], (ref - 7.0) / 2)
+        np.testing.assert_allclose(ax.collections[0].get_offsets()[:, 1], 2.5 * (ref - 7.0) / 5)
+        assert stats[0]["label_x"] == "ref (2 params)" and stats[0]["label_y"] == "big (5 params)"
+
+    def test_bits_per_param_without_a_count_raises(self, mock_scratch_env, tmp_path):
+        plotter, runs = self._runs_with_nominal(
+            tmp_path, {"ref": [1.0, 2.0], "other": [1.5, 2.5]}, {"ref": 1.5, "other": 2.0})
+        with patch.object(plotter, "_get_run_data_list", return_value=runs):
+            with pytest.raises(ValueError, match="needs n_params"):
+                plotter.compare_eig_correlation(normalize="bits_per_param", save_dir=str(tmp_path / "plots"))
+            with pytest.raises(ValueError, match="normalize must be"):
+                plotter.compare_eig_correlation(normalize=True, save_dir=str(tmp_path / "plots"))
 
     def test_normalize_needs_nominal(self, mock_scratch_env, tmp_path):
         plotter, runs = self._runs_with_nominal(

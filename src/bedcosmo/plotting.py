@@ -4793,6 +4793,32 @@ class ComparisonPlotter(BasePlotter):
         }
 
     @staticmethod
+    def _eig_axis_n_params(axis, spec):
+        """Number of inferred parameters behind one EIG axis, for per-parameter scaling.
+
+        The axis spec's ``n_params`` wins; a marginal axis counts its subset; otherwise
+        the ``target_params`` of the run's checkpoint at the evaluated step (the
+        parameters the guide learned the posterior of).
+        """
+        if spec.get("n_params") is not None:
+            return int(spec["n_params"])
+        if axis["eig_kind"] == "marginal":
+            return len(_normalize_marginal_subset_id(spec.get("subset")).split("+"))
+        step = axis["step_str"].split("_", 1)[-1]
+        ckpt = None
+        if axis.get("artifacts_dir") is not None:
+            ckpt = os.path.join(axis["artifacts_dir"], "checkpoints", f"checkpoint_rank_0_{step}.pt")
+        if ckpt is None or not os.path.isfile(ckpt):
+            raise ValueError(
+                f"{axis['label']}: normalize='bits_per_param' needs n_params on the axis "
+                f"(no checkpoint found at {ckpt})")
+        targets = torch.load(ckpt, map_location="cpu", weights_only=False).get("target_params")
+        if not targets:
+            raise ValueError(
+                f"{axis['label']}: checkpoint {ckpt} records no target_params; pass n_params on the axis")
+        return len(targets)
+
+    @staticmethod
     def _default_eig_axis_spec():
         """Default axis dict: joint/variable EIG (no subset)."""
         return {"eig_kind": "variable"}
@@ -4901,7 +4927,7 @@ class ComparisonPlotter(BasePlotter):
         self,
         x=None,
         y=None,
-        normalize=True,
+        normalize="bits",
         colors=None,
         figsize=(7.2, 7.2),
         title=None,
@@ -4922,16 +4948,25 @@ class ComparisonPlotter(BasePlotter):
           ``run_ids[k + 1]``. With ``y`` omitted, every other run is plotted against ``x``.
         - ``eig_data_path``: optional pinned ``eig_data_*.json`` (skips latest-file lookup)
         - ``eval_step`` / ``label``: optional overrides
+        - ``n_params``: optional, for ``normalize="bits_per_param"`` (see below)
 
         ``y`` is one axis dict or a list of them, all drawn on one panel against the 1:1
         line, each labelled with its Pearson r against ``x``.
 
         Args:
-            normalize (bool): Plot each run's ``100 * (EIG - EIG_nominal) / EIG_nominal``,
-                as :meth:`compare_eigs` does, so runs whose EIG differs by a constant
-                offset share axes. Pearson r is the same either way; this is the scale on
-                which the 1:1 line means "same gain over nominal". Needs each axis's
-                nominal EIG (joint, or the subset's marginal) in its eig_data.
+            normalize (False, "bits", "bits_per_param" or "percent"): The plotted scale.
+                ``"bits"`` (default) is each run's ``EIG - EIG_nominal``: log2 of how much
+                smaller the design's posterior volume is than the nominal design's, in the
+                same units for any model, so the 1:1 line means "same information gained
+                over nominal". ``"bits_per_param"`` divides that by the number of inferred
+                parameters (the average per-axis shrinkage), for comparing models with
+                different parameter counts; the count is the axis's ``n_params``, else the
+                marginal subset's size, else the ``target_params`` of the run's checkpoint
+                at the evaluated step. ``"percent"`` is ``100 * (EIG - EIG_nominal) /
+                EIG_nominal`` as in :meth:`compare_eigs`; the nominal EIG depends on the
+                prior's width and dimension, so it is only comparable within one model.
+                ``False`` plots raw EIG. Every scale but ``False`` needs each axis's nominal
+                EIG (joint, or the subset's marginal) in its eig_data.
             colors (list, optional): One color per ``y`` axis (default: matplotlib cycle).
             show_errorbars (bool): Draw each design's eval std as error bars.
 
@@ -4963,20 +4998,33 @@ class ComparisonPlotter(BasePlotter):
         if colors is not None and len(colors) != len(axes_y):
             raise ValueError(f"colors has {len(colors)} entries for {len(axes_y)} y axes")
 
+        if normalize not in (False, "bits", "bits_per_param", "percent"):
+            raise ValueError(
+                f"normalize must be False, 'bits', 'bits_per_param' or 'percent', got {normalize!r}")
+        if normalize == "bits_per_param":
+            for axis, spec in zip([axis_x, *axes_y], [x, *y]):
+                axis["n_params"] = self._eig_axis_n_params(axis, spec)
+                axis["label"] = f"{axis['label']} ({axis['n_params']} params)"
+
         def plotted(axis):
             """(values, std) on the plotted scale."""
             if not normalize:
                 return axis["eigs"], axis["eigs_std"]
             nominal = axis["nominal_eig"]
-            if nominal is None or nominal == 0:
+            if nominal is None or (normalize == "percent" and nominal == 0):
                 raise ValueError(
-                    f"{axis['label']}: normalize=True needs a nonzero nominal EIG in its "
+                    f"{axis['label']}: normalize={normalize!r} needs a nonzero nominal EIG in its "
                     f"eig_data (got {nominal!r}); pass normalize=False to plot raw EIG")
-            return 100.0 * (axis["eigs"] - nominal) / nominal, 100.0 * axis["eigs_std"] / abs(nominal)
+            if normalize == "percent":
+                return 100.0 * (axis["eigs"] - nominal) / nominal, 100.0 * axis["eigs_std"] / abs(nominal)
+            scale = axis["n_params"] if normalize == "bits_per_param" else 1
+            return (axis["eigs"] - nominal) / scale, axis["eigs_std"] / scale
 
         vals_x, std_x = plotted(axis_x)
         series = [(axis, *plotted(axis)) for axis in axes_y]
-        unit = "EIG vs nominal [%]" if normalize else "EIG [bits]"
+        unit = {False: "EIG [bits]", "bits": "EIG \u2212 nominal [bits]",
+                "bits_per_param": "(EIG \u2212 nominal) / parameters [bits]",
+                "percent": "EIG vs nominal [%]"}[normalize]
         x_label = xlabel if xlabel is not None else axis_x["label"]
 
         fig, ax = plt.subplots(figsize=figsize, constrained_layout=True)
@@ -5014,6 +5062,8 @@ class ComparisonPlotter(BasePlotter):
         if title is None:
             title = (f"Per-design EIG relative to each run's nominal ({len(vals_x)} designs)" if normalize
                      else f"Per-design EIG ({len(vals_x)} designs)")
+            if normalize == "bits_per_param":
+                title = f"Per-design EIG over nominal, per parameter ({len(vals_x)} designs)"
         ax.set_title(title, fontsize=11)
 
         if filename is None:
