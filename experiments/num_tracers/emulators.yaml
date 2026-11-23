@@ -27,7 +27,7 @@ bao:
         QSO: config/v6_sigma_hrdrag_scaled/QSO.pt
         Lya_QSO: lya/v1_sigma_hrdrag_scaled/Lya_QSO.pt
       fourier:
-        BGS: fourier/v4_sigma_hrdrag_scaled/BGS.pt
+        BGS: fourier/v3_sigma_hrdrag_scaled/BGS.pt
         LRG1: fourier/v3_sigma_hrdrag_scaled/LRG1.pt
         LRG2: fourier/v3_sigma_hrdrag_scaled/LRG2.pt
         LRG3_ELG1: fourier/v3_sigma_hrdrag_scaled/LRG3_ELG1.pt
@@ -49,7 +49,7 @@ bao:
         QSO: ../base/config/v6_sigma_hrdrag_scaled/QSO.pt
         Lya_QSO: ../base/lya/v1_sigma_hrdrag_scaled/Lya_QSO.pt
       fourier:
-        BGS: ../base/fourier/v4_sigma_hrdrag_scaled/BGS.pt
+        BGS: ../base/fourier/v3_sigma_hrdrag_scaled/BGS.pt
         LRG1: ../base/fourier/v3_sigma_hrdrag_scaled/LRG1.pt
         LRG2: ../base/fourier/v3_sigma_hrdrag_scaled/LRG2.pt
         LRG3_ELG1: ../base/fourier/v3_sigma_hrdrag_scaled/LRG3_ELG1.pt
@@ -66,7 +66,7 @@ bao:
         QSO: ../base/config/v6_sigma_hrdrag_scaled/QSO.pt
         Lya_QSO: ../base/lya/v1_sigma_hrdrag_scaled/Lya_QSO.pt
       fourier:
-        BGS: ../base/fourier/v4_sigma_hrdrag_scaled/BGS.pt
+        BGS: ../base/fourier/v3_sigma_hrdrag_scaled/BGS.pt
         LRG1: ../base/fourier/v3_sigma_hrdrag_scaled/LRG1.pt
         LRG2: ../base/fourier/v3_sigma_hrdrag_scaled/LRG2.pt
         LRG3_ELG1: ../base/fourier/v3_sigma_hrdrag_scaled/LRG3_ELG1.pt
@@ -83,7 +83,7 @@ bao:
         QSO: ../base/config/v6_sigma_hrdrag_scaled/QSO.pt
         Lya_QSO: ../base/lya/v1_sigma_hrdrag_scaled/Lya_QSO.pt
       fourier:
-        BGS: ../base/fourier/v4_sigma_hrdrag_scaled/BGS.pt
+        BGS: ../base/fourier/v3_sigma_hrdrag_scaled/BGS.pt
         LRG1: ../base/fourier/v3_sigma_hrdrag_scaled/LRG1.pt
         LRG2: ../base/fourier/v3_sigma_hrdrag_scaled/LRG2.pt
         LRG3_ELG1: ../base/fourier/v3_sigma_hrdrag_scaled/LRG3_ELG1.pt
@@ -102,12 +102,12 @@ bao:
       # Native extended-model emulator, trained on (N_tracers, Om, Ok, w0, wa, hrdrag), so it
       # follows the sampled Ok/w0/wa under emulator_covariance 'cosmology' too.
       fourier:
-        BGS: fourier/v3_sigma_hrdrag_scaled/BGS.pt
-        LRG1: fourier/v3_sigma_hrdrag_scaled/LRG1.pt
-        LRG2: fourier/v3_sigma_hrdrag_scaled/LRG2.pt
-        LRG3_ELG1: fourier/v3_sigma_hrdrag_scaled/LRG3_ELG1.pt
-        ELG2: fourier/v3_sigma_hrdrag_scaled/ELG2.pt
-        QSO: fourier/v3_sigma_hrdrag_scaled/QSO.pt
+        BGS: fourier/v4_sigma_hrdrag_scaled_cap100/BGS.pt
+        LRG1: fourier/v4_sigma_hrdrag_scaled_cap100/LRG1.pt
+        LRG2: fourier/v4_sigma_hrdrag_scaled_cap100/LRG2.pt
+        LRG3_ELG1: fourier/v4_sigma_hrdrag_scaled_cap100/LRG3_ELG1.pt
+        ELG2: fourier/v4_sigma_hrdrag_scaled_cap100/ELG2.pt
+        QSO: fourier/v4_sigma_hrdrag_scaled_cap100/QSO.pt
         Lya_QSO: lya/v1_sigma_hrdrag_scaled/Lya_QSO.pt
 shapefit:
   dr1:
