@@ -236,10 +236,11 @@ $SCRATCH/bedcosmo/
     mlruns/              # MLflow runs; checkpoints, config snapshots and job logs (logs/) are in each run's artifacts/
     grid_calc/           # grid EIG outputs, one directory per timestamp (job log in logs/)
     jobs.log             # every job's queue/start/end entries (see Job logs)
-  num_tracers/emulator/  # BAO emulator checkpoints
   num_visits/empirical_prior/  # empirical SED prior builds (see src/bedcosmo/num_visits/empirical/README.md)
   desi/, eazy/           # shared DESI spectra and EAZY templates for the SED prior
 ```
+
+Emulator checkpoints are tracer-forecast-emulator's, under `$SCRATCH/tracer-forecast-emulator/`.
 
 Runs and prior builds can take hours to regenerate, so don't delete or change them by hand.
 
