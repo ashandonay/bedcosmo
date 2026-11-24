@@ -1511,8 +1511,9 @@ class NumTracers(BaseExperiment, CosmologyMixin):
         models/{dataset}/{cosmo_model}/{quantity}/. ``quantity`` is tracer-forecast-emulator's
         ``--quantity``: the forecast space for bao (config | fourier, one per run, set by
         ``emulator_space``), and mean or covar for shapefit (both loaded together).
-        Relative paths resolve against
-        $SCRATCH/bedcosmo/num_tracers/emulator/{analysis}/models/{dataset}/{cosmo_model}/;
+        Relative paths resolve against tracer-forecast-emulator's data root
+        (``util.data_root``: $SCRATCH/tracer-forecast-emulator, or $TFE_DATA_ROOT),
+        at {root}/{analysis}/models/{dataset}/{cosmo_model}/;
         absolute paths are used verbatim; null -> fall back to fixed DESI nominal covariance
         (bao only).
 
@@ -1554,8 +1555,9 @@ class NumTracers(BaseExperiment, CosmologyMixin):
             )
         entry = by_quantity[quantity]
 
+        from tracer_forecast_emulator.util import data_root
         base_dir = os.path.join(
-            storage_path, "emulator", analysis, "models", dataset, cosmo_model)
+            str(data_root(analysis)), "models", dataset, cosmo_model)
         return {
             tb: (None if p is None else (p if os.path.isabs(p) else os.path.normpath(os.path.join(base_dir, p))))
             for tb, p in entry.items()

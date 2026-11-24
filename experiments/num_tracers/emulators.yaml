@@ -1,5 +1,5 @@
 # Emulator checkpoint paths: <analysis>: <dataset>: <cosmo_model>: <quantity>: <tracer_bin>: <path>
-# Nesting mirrors the storage path $SCRATCH/bedcosmo/num_tracers/emulator/{analysis}/models/{dataset}/{cosmo_model}/
+# Nesting mirrors the storage path $SCRATCH/tracer-forecast-emulator/{analysis}/models/{dataset}/{cosmo_model}/
 # <analysis> and <quantity> are tracer-forecast-emulator's --analysis and --quantity:
 #   bao:      config | fourier (one per run, chosen by emulator_space). fourier is the windowed P(k)
 #             forecast in DESI's fiducial coordinates; the theta-coordinate networks
