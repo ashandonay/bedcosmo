@@ -172,6 +172,7 @@ def train_prior_flow(
     bins: int = 8,
     hidden_features: tuple[int, ...] = (128, 128),
     epochs: int = 400,
+    patience: int | None = None,
     lr: float = 1e-3,
     batch_size: int = 4096,
     weight_decay: float = 0.0,
@@ -183,9 +184,11 @@ def train_prior_flow(
     """Fit a zuko NSF on ``samples`` and return a :class:`PriorFlow`.
 
     Inputs are standardized on a train split; the flow is scored each epoch on a
-    disjoint eval split and the best-eval checkpoint is kept (early stopping so it
-    does not overfit its own fit points). The returned flow scores any external
-    rows via :meth:`PriorFlow.log_prob`; entropy is left to the caller.
+    disjoint eval split and the best-eval checkpoint is kept, so the flow does not
+    overfit its own fit points. With ``patience``, training stops once that many
+    epochs pass without a new best eval NLL; ``epochs`` is then a ceiling. Without
+    it every epoch runs. The returned flow scores any external rows via
+    :meth:`PriorFlow.log_prob`; entropy is left to the caller.
 
     If ``log_path`` is given, the full per-epoch eval-NLL history and hyperparameters
     are written there (one file per call, so concurrent per-space training does not
@@ -215,6 +218,8 @@ def train_prior_flow(
         n_train = n // 2
     if not (0 < n_train < n):
         raise ValueError("n_train must split the sample set")
+    if patience is not None and patience < 1:
+        raise ValueError(f"patience must be a positive number of epochs, got {patience}")
 
     rng = np.random.default_rng(seed)
     perm = rng.permutation(n)
@@ -241,14 +246,16 @@ def train_prior_flow(
     opt = torch.optim.Adam(flow.parameters(), lr=lr, weight_decay=weight_decay)
 
     best_eval = math.inf
+    best_epoch = -1
     best_state = None
+    stopped_epoch = None
     history: list[float] = []
     n_tr = xt.shape[0]
     try:
         _emit(
             f"[prior-flow] space={space} dim={d} n_train={n_train} n_eval={n - n_train} "
             f"transforms={transforms} bins={bins} hidden={tuple(hidden_features)} "
-            f"epochs={epochs} lr={lr} batch_size={batch_size} seed={seed}"
+            f"epochs={epochs} patience={patience} lr={lr} batch_size={batch_size} seed={seed}"
         )
         for epoch in range(epochs):
             flow.train()
@@ -265,13 +272,25 @@ def train_prior_flow(
             history.append(eval_nll)
             if eval_nll < best_eval:
                 best_eval = eval_nll
+                best_epoch = epoch
                 best_state = {k: v.detach().clone() for k, v in flow.state_dict().items()}
+            stop = patience is not None and epoch - best_epoch >= patience
             # Every epoch to the log file; every 50th (and last) to stdout.
             _emit(
                 f"  [{space}] epoch {epoch:4d}  eval_nll={eval_nll:.4f}  best={best_eval:.4f}",
-                stdout=(epoch % 50 == 0 or epoch == epochs - 1),
+                stdout=(epoch % 50 == 0 or epoch == epochs - 1 or stop),
             )
-        _emit(f"[prior-flow] done space={space}  best_eval_nll={best_eval:.4f}")
+            if stop:
+                stopped_epoch = epoch
+                _emit(
+                    f"[prior-flow] stopping: no improvement in {patience} epochs "
+                    f"(best epoch {best_epoch})"
+                )
+                break
+        _emit(
+            f"[prior-flow] done space={space}  best_eval_nll={best_eval:.4f}  "
+            f"best_epoch={best_epoch}"
+        )
     finally:
         if log_fh is not None:
             log_fh.close()
@@ -289,6 +308,9 @@ def train_prior_flow(
         "standardize": {"mu": mu, "std": std},
         "train": {
             "epochs": epochs,
+            "patience": patience,
+            "best_epoch": best_epoch,
+            "stopped_epoch": stopped_epoch,
             "n_train": int(n_train),
             "n_eval": int(n - n_train),
             "batch_size": batch_size,
