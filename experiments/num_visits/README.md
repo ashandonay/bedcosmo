@@ -250,6 +250,38 @@ are fit to the DESI/EAZY template weights by `src/bedcosmo/num_visits/empirical/
 
 Either way, training draws from a GPU-resident pool of prior samples (drawn from the flow, or KDE samples) and integrates the template SEDs on the GPU. See [`empirical/README.md`](../../src/bedcosmo/num_visits/empirical/README.md).
 
+### Joint-pattern empirical alternative
+
+`prior_args_joint.yaml` selects the full-redshift joint-pattern NF build using
+`density_type: joint_pattern_flow`. Its public parameters are the physical
+fractions `a1..a8`, `log_c_scale`, and `z`; exact inactive zeros and singleton
+atoms are preserved. This backend requires `flow_type: PatternNSF`, all target
+parameters, and `transform_input: false`:
+
+```bash
+./submit.sh train num_visits empirical \
+  --prior-args-path prior_args_joint.yaml \
+  --flow-type PatternNSF --transform-input false \
+  --total-steps 88000 --n-particles-per-device 25
+```
+
+The posterior learns a categorical activation-pattern distribution conditioned
+on photometry and visits, plus conditional spline flows within each continuous
+face. Those flows use the saved prior's Gaussian coordinates internally; the
+external `transform_input` switch stays off to avoid applying an ILR transform.
+Singleton-pattern posterior probabilities are categorical masses at their exact
+saved points. Prior and posterior physical scores use the same pattern/face/atom
+measure and Jacobians for joint EIG. Both frozen prior and learned posterior
+weights, masks, bounds and normalization constants are embedded in checkpoints.
+The run also snapshots the source prior, KDE inputs, build provenance and bank
+under `artifacts/empirical/`.
+
+This is an alternative backend; the existing ILR configuration remains the
+default. Its mixed categorical/continuous posterior architecture differs from
+the ordinary ILR flow. The older continuous k-NN marginal-EIG estimator is not
+applicable to this backend's atoms and simplex faces. Use joint EIG for these
+initial comparisons.
+
 ## Marginal EIG over parameter subsets (`eval_args.yaml`)
 
 In addition to the joint EIG over all cosmological parameters, evaluation can
@@ -306,3 +338,36 @@ per-design `eigs_avg`/`eigs_std` (the nominal design's value is
 `eigs_avg[nominal_index]`) and the marginal prior entropy. Evaluation also produces `eig_designs_marginal_<subset_id>` (EIG
 vs design for the subset, over all input designs) and
 `posterior_marginal_<subset_id>` (triangle plot restricted to the subset).
+
+### Build and run the direct multiscale DESI spline
+
+Start with a local DESI8 source build containing
+`desi_eazy_empirical_weights.csv`, `templates/`, `prior_args.yaml`, and
+`build_provenance.json`. Set `SOURCE` to that directory. The builder
+reuses those coefficients and the extrapolated templates.
+
+```bash
+export SCRATCH="${SCRATCH:-$HOME/scratch}"
+SOURCE="$SCRATCH/bedcosmo/num_visits/empirical_prior/desi8_full_redshift"
+PRIOR="$SCRATCH/bedcosmo/num_visits/empirical_prior/desi8_full_redshift_direct_multiscale"
+python scripts/build_joint_empirical_prior.py \
+  --prior-dir "$SOURCE" --output-dir "$PRIOR" \
+  --epochs 100 --direct-multiscale-steps 1000 --seed 197
+
+./submit.sh train num_visits empirical --local --gpus 1 --debug \
+  --prior-args-path prior_args_joint.yaml --prior-prior-dir "$PRIOR" \
+  --flow-type PatternNSF --transform-input false \
+  --total-steps 20 --n-particles-per-device 25
+```
+
+The build reserves roughly 20% of rows per sufficiently populated exact
+mask for checkpoint selection, fits a 96-wide, five-transform, 12-bin
+spline directly on the remaining rows, then applies the same multiscale
+objective as the large-spline audit. It emits a complete prior directory,
+including `joint_prior_flow.pt`, validation diagnostics, and the saved
+split. The KDE artifact is built from the fit partition and used for
+diagnostics. This fresh build can produce a different checkpoint from the
+offline two-split audit. The BED run snapshots the build selected by
+`--prior-prior-dir` and populates its prior pool from that NF.
+For a longer run, remove `--debug` and set the step budget and execution
+mode appropriate to the destination GPU or scheduler.
