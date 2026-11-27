@@ -144,7 +144,13 @@ def main(argv=None):
         default=0.1,
         help="Share of the fit samples train_prior_flow keeps for early stopping.",
     )
-    ap.add_argument("--epochs", type=int, default=300)
+    ap.add_argument("--epochs", type=int, default=300, help="Ceiling on training epochs.")
+    ap.add_argument(
+        "--patience",
+        type=int,
+        default=30,
+        help="Stop after this many epochs without a better early-stop NLL (0 runs every epoch).",
+    )
     ap.add_argument("--transforms", type=int, default=6)
     ap.add_argument("--bins", type=int, default=16)
     ap.add_argument("--hidden", type=int, nargs="+", default=[128, 128])
@@ -177,6 +183,7 @@ def main(argv=None):
         space=SPACE_NATIVE,
         feature_names=names,
         epochs=args.epochs,
+        patience=args.patience or None,
         transforms=args.transforms,
         bins=args.bins,
         hidden_features=tuple(args.hidden),
